@@ -40,6 +40,7 @@ pub const RenderedRow = struct {
     collapsed_targets: [16]View.Collapsed = undefined,
     collapsed_count: usize = 0,
     message_key: ?[36]u8 = null,
+    queue_terminal: bool = false,
 };
 
 pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ChatInfo.Edit) anyerror!bool;
@@ -227,6 +228,8 @@ pub const Job = struct {
         at_end: bool = false,
         new_rows: usize = 0,
         queued: protocol.Queued = .{},
+        queue_cutoff: ?u64 = null,
+        page_host: ?[16]u8 = null,
         queued_line: ?queued_line.Shown = null,
         live: View.Live = .{},
         latest_ending: ?LatestEnding = null,
@@ -501,7 +504,9 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         .page => |page| page,
         .failure => |failure| return requests.failRead(failure),
     };
+    job.result.page_host = page.facts.work.read_version.instance;
     if (plan.kinds == .all) {
+        job.result.queue_cutoff = @import("queue_horizon.zig").pageCutoff(page.facts.end, plan.direction == .forward, page.facts.more, if (page.facts.count == 0) null else page.facts.items[page.facts.count - 1].position);
         job.result.work = page.facts.work;
         const line_stale = Line.stale(job.line_read, &page.facts);
         if (job.open_status or job.watch_status or line_stale) {
@@ -541,7 +546,18 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             else => {},
         }
         const pending = item.value == .admission and item.value.admission.state == .queued;
-        var row: RenderedRow = .{ .key = key, .offset = offset, .length = 0, .tight = false, .provisional = pending };
+        var row: RenderedRow = .{
+            .key = key,
+            .offset = offset,
+            .length = 0,
+            .tight = false,
+            .provisional = pending,
+            .queue_terminal = switch (item.value) {
+                .user => |message| message.sender == null and message.source_action == null and message.state == .applied,
+                .stop => true,
+                else => false,
+            },
+        };
         if (toggled != null and toggled.?.key.order(key) != .eq) continue;
         const open = if (toggled) |one| one.open else job.opened.has(key);
         var capture: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .cap_target = switch (item.value) {

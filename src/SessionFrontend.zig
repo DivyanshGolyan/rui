@@ -60,6 +60,7 @@ const slash_commands = slash_commands_shared.conversation;
 const model_capability = @import("model_capability.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
+const QueueHorizon = @import("queue_horizon.zig");
 const status_page = @import("status_page.zig");
 const ChatInfo = @import("chat_info.zig");
 const info_save = @import("chat_info_save.zig");
@@ -137,6 +138,7 @@ inspection: struct {
 admission: struct {
     sent: u64 = 0,
 } = .{},
+queue_horizon: QueueHorizon = .{},
 live: struct {
     view: View.Live = .{},
     latest_ending: ?reads.LatestEnding = null,
@@ -191,10 +193,18 @@ test "a read freezes its viewport width method for live and historical answers" 
     }
 }
 
+fn queueLineForRead(self: *const Self) u64 {
+    if (self.reading.opening) return 0;
+    if (self.lender.host_instance) |read| if (read(self.lender.context)) |host| {
+        if (!self.queue_horizon.matches(host)) return 0;
+    };
+    return if (self.live.queued_line) |shown| shown.admission else 0;
+}
+
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
 
-    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .unicode_script = self.app_caps.unicode, .width_method = self.screen.vx.caps.unicode, .command = self.command, .configure = self.app_hooks.configure, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread, .opened = self.screen.feed.opened };
+    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .unicode_script = self.app_caps.unicode, .width_method = self.screen.vx.caps.unicode, .command = self.command, .configure = self.app_hooks.configure, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = self.queueLineForRead(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread, .opened = self.screen.feed.opened };
 
     const job = &self.job;
     job.latest_ending = self.live.latest_ending;
@@ -320,6 +330,7 @@ pub const Lender = struct {
 
     upgrade: *const fn (context: *anyopaque) session_upgrade.Upgrade,
     archive_state: ?*const fn (*anyopaque) ChatInfo.SaveState = null,
+    host_instance: ?*const fn (*anyopaque) ?[16]u8 = null,
     models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
 
     pub const Said = struct {
@@ -3032,6 +3043,13 @@ fn heldFailure(self: *const Self) ?@TypeOf(self.failure.?) {
 
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
+    if (end == .complete and (self.reading.phase == .activity or self.reading.phase == .fill or self.reading.phase == .permission)) {
+        if (self.job.result.page_host) |host| if (!self.comparableHost(host)) {
+            self.poll_at = 0;
+            self.dirty = true;
+            return;
+        };
+    }
     const fenced = if (self.reading.pending_diagnostic) |pending|
         pending.failure.status == 503 and std.mem.eql(u8, pending.failure.diagnostic.code.slice(), "dispatch_fenced")
     else
@@ -3098,7 +3116,17 @@ fn readInspection(self: *const Self) reader_policy.Inspection {
     };
 }
 
+fn comparableHost(self: *const Self, host: [16]u8) bool {
+    if (self.lender.host_instance) |read| if (read(self.lender.context)) |current| {
+        return std.mem.eql(u8, &current, &host);
+    };
+    return true;
+}
+
 pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
+    if (self.lender.host_instance) |read| if (read(self.lender.context)) |host| {
+        if (!self.queue_horizon.matches(host)) return null;
+    };
     const queued = self.live.queued;
     const count = queued.count;
     if (count == 0) return null;
@@ -3116,12 +3144,16 @@ fn showStaged(self: *Self) !void {
     const edge = if (read == .fill_above) window.low else window.high;
     if (!FeedPolicy.applies(read, page.started_from, page.replace_from, edge, provisional)) return;
     const result = &self.job.result;
+    if (result.page_host) |host| if (!self.comparableHost(host)) return;
     if (read == .scan) {
         const scan = FeedPolicy.applyScan(window.high, page.started_from, page.replace_from, provisional, result.new_rows);
         if (!self.screen.anchor.following()) self.new_below += result.new_rows;
         if (scan.rows == .count_only) return;
     }
     if (read == .opening) {
+        self.queue_horizon = .{};
+        self.live.queued = .{};
+        self.live.queued_line = null;
         window.trim(window.count, 0);
         self.screen.anchor.follow();
         self.new_below = 0;
@@ -3151,6 +3183,13 @@ fn showStaged(self: *Self) !void {
             break;
         }
         if (entry.message_key) |key| self.submission.observeMessage(key);
+        if (row.queue_terminal) if (result.page_host) |host| {
+            const changed_host = self.queue_horizon.host != null and !self.queue_horizon.matches(host);
+            if (self.queue_horizon.attach(host, row.key.position)) {
+                self.live.queued = .{};
+                if (changed_host) self.live.queued_line = null;
+            }
+        };
         inserted += 1;
     }
     if (!complete and inserted == 0) self.reading.fills = self.reading.fills.failed(read, page);
@@ -3350,8 +3389,16 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             const result = &self.job.result;
             observed = .{ .snapshot = .{ .read_version = result.work.read_version, .work = result.work.work, .last_line = result.work.last_line }, .opening = read == .opening };
             self.live.work = .fromCore(result.work.work);
-            self.live.queued = result.queued;
-            if (result.queued_line) |shown| self.live.queued_line = shown;
+            if (result.page_host) |host| if (result.queue_cutoff) |cutoff| {
+                if (self.comparableHost(host)) {
+                    const changed_host = self.queue_horizon.host != null and !self.queue_horizon.matches(host);
+                    if (self.queue_horizon.adopt(host, cutoff)) {
+                        if (changed_host) self.live.queued_line = null;
+                        self.live.queued = result.queued;
+                        if (result.queued_line) |shown| self.live.queued_line = shown;
+                    }
+                }
+            };
             if (self.job.open_status or self.job.watch_status) try self.applyStatus();
             if (result.line) |*line| self.line = line.*;
             if (result.hint) |*hint| self.hint = hint.*;
@@ -7217,7 +7264,7 @@ test "SessionFrontend failed historical fills retain the edge while scans approv
 const FeedFixture = struct {
     held: *HeldFrontend,
     file: std.Io.File,
-    const Row = struct { key: u64, text: []const u8, provisional: bool = false, target: ?View.Collapsed = null, message_key: ?[36]u8 = null };
+    const Row = struct { key: u64, text: []const u8, provisional: bool = false, target: ?View.Collapsed = null, message_key: ?[36]u8 = null, queue_terminal: bool = false };
 
     fn create() !FeedFixture {
         return createWithDrafts("unused", null);
@@ -7244,11 +7291,13 @@ const FeedFixture = struct {
         frontend.job.result.at_end = end;
         frontend.job.result.low = if (rows.len == 0) null else .{ .position = rows[0].key };
         frontend.job.result.high = if (rows.len == 0) frontend.screen.feed.high else .{ .position = rows[rows.len - 1].key, .ordinal = if (end) std.math.maxInt(u64) else 0 };
+        frontend.job.result.page_host = @splat(1);
+        if (read == .opening or read == .scan) frontend.job.result.queue_cutoff = if (frontend.job.result.high) |high| high.position else 0;
         if (frontend.job.result.high) |high| frontend.job.result.cursor = .{ .position = high.position, .ordinal = if (high.ordinal == std.math.maxInt(u64)) null else high.ordinal };
         var offset: u64 = 0;
         for (rows, 0..) |row, i| {
             try self.file.writePositionalAll(std.testing.io, row.text, offset);
-            frontend.job.result.rows[i] = .{ .key = .{ .position = row.key }, .offset = offset, .length = row.text.len, .tight = false, .provisional = row.provisional, .message_key = row.message_key };
+            frontend.job.result.rows[i] = .{ .key = .{ .position = row.key }, .offset = offset, .length = row.text.len, .tight = false, .provisional = row.provisional, .message_key = row.message_key, .queue_terminal = row.queue_terminal };
             if (row.target) |target| {
                 frontend.job.result.rows[i].collapsed_targets[0] = target;
                 frontend.job.result.rows[i].collapsed_count = 1;
@@ -7277,6 +7326,102 @@ fn firstRows(text: []const u8, count: usize) []const u8 {
     var end: usize = 0;
     for (0..count) |_| end = 1 + (std.mem.indexOfScalarPos(u8, text, end, '\n') orelse return text);
     return text[0..end];
+}
+
+test "SUI-140 attached terminal rows fence older queue aggregates without losing newer ones" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const host: [16]u8 = @splat(1);
+    try fixture.page(.opening, &.{.{ .key = 24, .text = "earlier\n" }}, true, false);
+    try std.testing.expect(self.queue_horizon.adopt(host, 24));
+    self.live.queued = .{ .count = 20, .oldest_position = 5, .newest_admission = 21, .newest_position = 24 };
+    self.live.queued_line = .{ .admission = 21, .line = .{} };
+    try self.live.queued_line.?.line.set("queued-19");
+    try std.testing.expect(self.queuedRow() != null);
+    try fixture.page(.fill_below, &.{.{ .key = 45, .text = "› queued-19\n", .queue_terminal = true }}, false, true);
+    try std.testing.expect(self.queuedRow() == null);
+    try std.testing.expect(std.mem.indexOf(u8, try fixture.held.shown(), "queued-19") != null);
+    self.reading.phase = .activity;
+    self.reading.feed_read = .scan;
+    self.job.feed_page = FeedPolicy.request(.scan, self.feedState());
+    self.job.result.page_host = host;
+    self.job.result.queue_cutoff = 24;
+    self.job.result.queued = .{ .count = 20, .oldest_position = 5, .newest_admission = 21, .newest_position = 24 };
+    self.job.result.queued_line = .{ .admission = 21, .line = .{} };
+    try self.job.result.queued_line.?.line.set("queued-19");
+    try self.applyReader(.complete);
+    try std.testing.expect(self.queuedRow() == null);
+    self.job.result.queue_cutoff = 50;
+    self.job.result.queued = .{ .count = 2, .oldest_position = 48, .newest_admission = 23, .newest_position = 50 };
+    self.job.result.queued_line = .{ .admission = 23, .line = .{} };
+    try self.job.result.queued_line.?.line.set("newer queued Message");
+    try self.applyReader(.complete);
+    const newer = self.queuedRow().?;
+    try std.testing.expectEqual(@as(u64, 2), newer.waiting.count);
+    try std.testing.expectEqualStrings("newer queued Message", newer.waiting.line);
+}
+
+test "SUI-140 a newer aggregate reuses its unchanged queued preview after another Message is taken" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const host: [16]u8 = @splat(1);
+    try fixture.page(.opening, &.{.{ .key = 24, .text = "earlier\n" }}, true, false);
+    try std.testing.expect(self.queue_horizon.adopt(host, 24));
+    self.live.queued = .{ .count = 2, .oldest_position = 5, .newest_admission = 22, .newest_position = 24 };
+    self.live.queued_line = .{ .admission = 22, .line = .{} };
+    try self.live.queued_line.?.line.set("still waiting");
+    try fixture.page(.fill_below, &.{.{ .key = 45, .text = "› taken earlier\n", .queue_terminal = true }}, false, true);
+    try std.testing.expect(self.queuedRow() == null);
+    try std.testing.expectEqual(@as(u64, 22), self.live.queued_line.?.admission);
+    self.reading.phase = .activity;
+    self.reading.feed_read = .scan;
+    self.job.feed_page = FeedPolicy.request(.scan, self.feedState());
+    self.job.result.page_host = host;
+    self.job.result.queue_cutoff = 50;
+    self.job.result.queued = .{ .count = 1, .oldest_position = 24, .newest_admission = 22, .newest_position = 24 };
+    self.job.result.queued_line = null;
+    try self.applyReader(.complete);
+    const waiting = self.queuedRow().?;
+    try std.testing.expectEqual(@as(u64, 1), waiting.waiting.count);
+    try std.testing.expectEqualStrings("still waiting", waiting.waiting.line);
+}
+
+test "SUI-140 a page from an older Host cannot advance the current window" {
+    const Host = struct {
+        fn instance(_: *anyopaque) ?[16]u8 {
+            return @splat(2);
+        }
+        fn complete(_: *anyopaque, _: *Task) !void {}
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.lender.host_instance = Host.instance;
+    self.reading.opening = true;
+    self.live.work.state = .{ .working = .{ .since = 1 } };
+    self.live.scan.cursor = .{ .position = 42 };
+    const previous = self.live.scan;
+    try std.testing.expect(self.queue_horizon.adopt(@splat(2), 70));
+    self.live.queued = .{ .count = 1, .oldest_position = 60, .newest_admission = 9, .newest_position = 60 };
+    self.live.queued_line = .{ .admission = 9, .line = .{} };
+    try self.live.queued_line.?.line.set("current queue");
+    const job = self.freeze(.activity);
+    self.reading.feed_read = .opening;
+    job.feed_page = FeedPolicy.request(.opening, self.feedState());
+    job.result.page_host = @splat(1);
+    job.result.queue_cutoff = 100;
+    job.result.cursor = .{ .position = 100 };
+    job.result.work.work.state = .{ .stopped = .{ .since = 2, .cause = .stop } };
+    self.poll_at = 123;
+    try self.launch(job, Host.complete);
+    try self.settleReader();
+    try std.testing.expect(self.reading.opening);
+    try std.testing.expectEqualDeep(previous, self.live.scan);
+    try std.testing.expect(self.live.work.state == .working);
+    try std.testing.expectEqual(@as(i96, 0), self.poll_at);
+    try std.testing.expectEqualStrings("current queue", self.queuedRow().?.waiting.line);
 }
 
 test "SUI-17 SessionFrontend draws queued and taken Messages once across work" {
@@ -7856,6 +8001,8 @@ test "failed reply newer Message accepted before retry completion supersedes the
         .latest_ending = ending,
         .work = .{ .work = .{ .state = .{ .pending = .{ .since = 2 } }, .turn = 1 } },
         .queued = .{ .count = 1, .oldest_position = 4, .newest_admission = 37, .newest_position = 4, .newest_content = .{ .text = .{ .length = 1, .digest = @splat(1) } } },
+        .page_host = @splat(0),
+        .queue_cutoff = 4,
     };
     try self.applyReader(.complete);
     try std.testing.expect(self.retryable() == null);

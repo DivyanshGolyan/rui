@@ -1,6 +1,7 @@
 from terminal_screen import VERTICAL_DIVIDER
 import json
 import os
+import re
 import select
 import shutil
 import subprocess
@@ -115,8 +116,11 @@ class Chrome:
     def open(self, session, ready, *, columns=80, height=ROWS):
         master, slave = open_pty(columns, height)
         self.descriptors += [master, slave]
-        caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
-            env={**os.environ, "HOME": str(self.home)}, cwd=str(self.workspace),
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in ("RUI_STORE", "RUI_ADDRESS", "RUI_SENDER_HANDLE")}
+        environment["HOME"] = str(self.home)
+        caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(self.store), "--", session],
+            env=environment, cwd=str(self.workspace),
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         self.callers.append(caller)
         screen = self.frame(master, b"", lambda screen: ready(screen) and composing(screen, "") and "Opening…" not in screen)
@@ -542,7 +546,119 @@ def opening_case():
     print("session chrome: a reopened Session shows ◌ 2 · the newest waiting Message under the running call; Ctrl-O selects the lowest tool or Message, and reopening keeps tools folded", flush=True)
 
 
+
+def private_chrome_command(chrome, *arguments, input=None):
+    assert "--store" in arguments, ("private Store must be explicit", arguments)
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ("RUI_STORE", "RUI_ADDRESS", "RUI_SENDER_HANDLE")}
+    environment["HOME"] = str(chrome.home)
+    result = subprocess.run([str(fixture.RUI), *map(str, arguments)], env=environment,
+                            cwd=chrome.workspace, capture_output=True, text=True, input=input, timeout=20)
+    assert result.returncode == 0, (arguments, result.stdout, result.stderr)
+    return result.stdout
+
+
+def verify_private_chrome(chrome):
+    expected_endpoint = f"providers.codex.endpoint=http://127.0.0.1:{chrome.endpoint.server_port}/responses"
+    assert chrome.host.poll() is None and expected_endpoint in chrome.host.args, chrome.host.args
+    assert "providers.codex.unauthenticated=true" in chrome.host.args, chrome.host.args
+    status = json.loads(private_chrome_command(chrome, "host", "status", "--store", chrome.store))
+    assert status["store"] == str(chrome.store), status
+    assert len(chrome.endpoint.requests) == 0
+
+
+def stale_queue_horizon_case():
+    # SUI-140: a frozen catch-up roster cannot repaint a taken Message as queued.
+    first = threading.Event()
+    second = threading.Event()
+    third = threading.Event()
+    initial_page = threading.Event()
+    partial_page = threading.Event()
+    old_tail = threading.Event()
+    release_initial = threading.Event()
+    release_partial = threading.Event()
+    release_old = threading.Event()
+    applied_frame = threading.Event()
+    newer_frame = threading.Event()
+    old_end = [None]
+    target = [None]
+    frames = []
+    responses = [
+        (fixture.sse_answer("first", "r1", "m1", "FIRST DONE")[0], first),
+        (fixture.sse_answer("second", "r2", "m2", "SECOND DONE")[0], second),
+        (fixture.sse_answer("third", "r3", "m3", "THIRD DONE")[0], third),
+    ]
+    with Chrome("rui-chrome-stale-queue.", responses) as chrome:
+        verify_private_chrome(chrome)
+        session = json.loads(private_chrome_command(chrome, "session", "configure", "--store", chrome.store, "--workspace", chrome.workspace,
+                                 "--provider", "codex", "--model", "gpt-6.1-terra",
+                                 "--reasoning-effort", "high"))["answer"]["session"]
+        private_chrome_command(chrome, "session", "send", "--store", chrome.store, "--session", session, input="busy")
+        fixture.wait_for(lambda: len(chrome.endpoint.requests) == 1, "first gated provider request")
+        master, caller, _ = chrome.open(session, lambda frame: "Thinking" in frame, columns=100, height=24)
+        capture = terminal_capture(master)
+        def record(frame, _x, _y):
+            if "queued-19" in frame:
+                frames.append(frame)
+                if "› queued-19" in frame:
+                    applied_frame.set()
+                if "◌ 2 · newer queued 2" in frame:
+                    newer_frame.set()
+        capture.listener = record
+        def gate(response):
+            page = json.loads(response.split(b"\r\n\r\n", 1)[1])
+            if not initial_page.is_set():
+                initial_page.set()
+                assert release_initial.wait(20), "initial Activity gate"
+            elif page.get("more") and not partial_page.is_set():
+                old_end[0] = page["end"]
+                partial_page.set()
+                assert release_partial.wait(20), "partial Activity gate"
+            elif (target[0] is not None and page.get("end") == old_end[0] and not page.get("more")
+                  and page.get("queued", {}).get("newest_admission") == target[0] and not old_tail.is_set()):
+                old_tail.set()
+                assert release_old.wait(20), "old roster gate"
+            return response
+        proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/activity-page", gate)
+        try:
+            assert initial_page.wait(10), "initial Activity page was not gated"
+            for index in range(20):
+                private_chrome_command(chrome, "session", "send", "--store", chrome.store, "--session", session, input=f"queued-{index:02d}")
+            release_initial.set()
+            assert partial_page.wait(10), "partial Activity page was not gated"
+            first.set()
+            fixture.wait_for(lambda: len(chrome.endpoint.requests) >= 2, "queued Messages taken")
+            full = json.loads(private_chrome_command(chrome, "session", "inspect", "--store", chrome.store, "--session", session, "--profile", "full"))
+            original = next(message for message in full["full"]["messages"] if message["content"].get("text") == "queued-19")
+            assert original["application"] == "applied", original
+            taken = [message for message in full["full"]["messages"]
+                     if message["content"].get("text", "").startswith("queued-")]
+            assert len(taken) == 20 and all(message["application"] == "applied" for message in taken), taken
+            target[0] = original["admission"]
+            private_chrome_command(chrome, "session", "send", "--store", chrome.store, "--session", session, input="newer queued 1")
+            private_chrome_command(chrome, "session", "send", "--store", chrome.store, "--session", session, input="newer queued 2")
+            release_partial.set()
+            fixture.wait_for(applied_frame.is_set, "taken Message frame", timeout=20)
+            assert old_tail.wait(10), "old catch-up roster was not gated"
+            release_old.set()
+            fixture.wait_for(newer_frame.is_set, "newer queued Message frame", timeout=20)
+            assert frames and all(not re.search(r"◌(?: \d+ ·)? queued-\d+", frame) for frame in frames), frames
+            final = frames[-1]
+            assert "› queued-19" in final and "◌ 2 · newer queued 2" in final, final
+            chrome.leave(master, caller)
+        finally:
+            first.set()
+            second.set()
+            third.set()
+            release_initial.set()
+            release_partial.set()
+            release_old.set()
+            capture.listener = None
+            proxy.close()
+    print("session chrome: stale catch-up roster cannot repaint a taken Message, and a newer queue remains visible", flush=True)
+
 def main():
+    stale_queue_horizon_case()
     send_recovery_case()
     activity_case()
     thinking_queue_case()

@@ -133,6 +133,7 @@ const cores = .{
     .{ "provider_name.zig", @import("provider_name.zig") },
     .{ "provider_route.zig", @import("provider_route.zig") },
     .{ "provider_selection.zig", @import("provider_selection.zig") },
+    .{ "queue_horizon.zig", @import("queue_horizon.zig") },
     .{ "queued_line.zig", @import("queued_line.zig") },
     .{ "read_image_arguments.zig", @import("read_image_arguments.zig") },
     .{ "replay_binding.zig", @import("replay_binding.zig") },

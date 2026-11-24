@@ -725,7 +725,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     }
     const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .details = opened[3], .actions = opened[4..6].*, .parts = opened[6] };
     const frontend = try self.init.gpa.create(SessionFrontend);
-    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
+    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .host_instance = hostInstance, .models = modelsSnapshot };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
     const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .startable = hostStartable, .start = requestHostStart, .notice = hostNotice } }, self.caps);
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
@@ -1697,6 +1697,11 @@ fn modelsSnapshot(raw: *anyopaque) @import("model_choice.zig").Snapshot {
     const self: *Self = @ptrCast(@alignCast(raw));
     const state = &self.state;
     return .{ .menu = if (state.menu_read == .read or state.menu.entries.len > 0) &state.menu else null, .revision = state.menu_revision, .ready = state.modelsReady() };
+}
+
+fn hostInstance(raw: *anyopaque) ?[16]u8 {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.state.read_instance;
 }
 
 fn archiveState(raw: *anyopaque) @import("chat_info.zig").SaveState {
