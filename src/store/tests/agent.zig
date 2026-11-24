@@ -1091,6 +1091,7 @@ fn expectAppLane(storage: *Store, session: []const u8, lane: []const u8) !void {
 fn childCreation(key: []const u8, parent: []const u8) !wire_request.ConfigureCommand {
     var command: wire_request.ConfigureCommand = .{};
     try command.key.set(key);
+    command.configuration = try shared_fixtures.testingAgentSpec(&.{}, "bypass");
     command.configuration.parent.state = .value;
     try command.configuration.parent.value.set(parent);
     command.configuration.model.state = .value;
