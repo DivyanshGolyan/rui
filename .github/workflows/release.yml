@@ -139,7 +139,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          # The tag exists from publication: a policy check started since then reads it.
+          # The tag exists from publication: an admission check started since then reads it.
           RELEASE_PUBLISHED_AT=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION" --jq .published_at)
           export RELEASE_PUBLISHED_AT
           python3 -B tests/ci/recheck_wire_prs.py
