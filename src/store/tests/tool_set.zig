@@ -2108,15 +2108,9 @@ test "SH-176 settlement classifies a call by its frozen offer's owner, and a Hos
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code='failed'", .{binding.operation_id}));
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NULL", .{binding.operation_id}));
 
-                // At admission: the Host tool is already in the set, so the request offers it, and the app tool it shadows is not offered.
-                var shadowed_create = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh176-shadowed-{s}", .{tag}), "", workspace, "model-a");
-                declareAppTools(&shadowed_create.configuration, two_app_tools);
-                if (narrowed) shadowed_create.configuration.tools = try .of(&.{ "ask", "find_tools" });
-                const shadowed_reply = try storage.configure(&shadowed_create, .{});
-                try expectAccepted("shadowed root", shadowed_reply);
-                var shadowed_buffer: [128]u8 = undefined;
-                const shadowed_root = copyRef(&shadowed_buffer, shadowed_reply.accepted.session.slice());
-                const second = try admitMessage(&storage, &tmp, try std.fmt.bufPrint(&key_buffer, "sh176-second-{s}", .{tag}), shadowed_root);
+                // At admission: the root was declared before the Host tool came, and now the Host tool is in the set, so the next request
+                // offers the Host tool for the name and no app tool of that name.
+                const second = try admitMessage(&storage, &tmp, try std.fmt.bufPrint(&key_buffer, "sh176-second-{s}", .{tag}), root);
                 var offered: Offered = undefined;
                 try offerOf(&storage, second, &offered);
                 if (narrowed) {
