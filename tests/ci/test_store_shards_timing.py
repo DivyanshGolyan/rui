@@ -22,11 +22,23 @@ class StoreTimingReportTest(unittest.TestCase):
             "Store shard 1/4 slow test: 1.000s observed; test-e",
         ])
         self.assertEqual(errors.getvalue(), "")
+        for records, expected in (([], []),
+                                  ([("skipped", 10.0, "SKIP")], []),
+                                  ([("second", 1.0, "OK"), ("first", 2.0, "OK")],
+                                   ["first", "second"])):
+            with self.subTest(records=records):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    store_shards.report(store_shards.Result("shard", 0, 3.0, records, ""))
+                lines = output.getvalue().splitlines()[1:]
+                self.assertEqual([line.rsplit("; ", 1)[1] for line in lines], expected)
         output, errors = io.StringIO(), io.StringIO()
         with redirect_stdout(output), redirect_stderr(errors):
-            store_shards.report(store_shards.Result("failed shard", 1, 2.0, tests, "broken", ["unit-test"]))
+            store_shards.report(store_shards.Result("failed shard", 1, 2.0, tests, "broken", ["unit-test"],
+                                                    [("test-d", "failed")]))
         self.assertNotIn("slow test", output.getvalue())
         self.assertIn("broken", errors.getvalue())
+        self.assertIn("error: 'test-d' failed", errors.getvalue())
         self.assertIn("failed command: unit-test", errors.getvalue())
 
 
