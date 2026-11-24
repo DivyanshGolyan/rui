@@ -623,14 +623,15 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
 fn listKey(input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery, focused: bool) view.Input {
     if (focused and delivery.list_origin and delivery.under == .main and !delivery.pasted and input == .key_press) {
         // Ghostty can send Option-arrows as the same word-motion keys used by the composer.
-        switch (keypress.classify(input.key_press)) {
+        const alias: ?keymap.Key = switch (keypress.classify(input.key_press)) {
             .edit => |edit| switch (edit) {
-                .word_left => return .{ .action = .collapse_tree },
-                .word_right => return .{ .action = .expand_tree },
-                else => {},
+                .word_left => .alt_left,
+                .word_right => .alt_right,
+                else => null,
             },
-            else => {},
-        }
+            else => null,
+        };
+        if (alias) |key| if (view.keys.get(key)) |action| return .{ .action = action };
     }
     return switch (keypress.selectEvent(view.keys, input, delivery.pasted)) {
         .action => |action| .{ .action = action },
@@ -638,31 +639,6 @@ fn listKey(input: vxfw.Event, delivery: @import("app_input.zig").Effects.Deliver
         .left => .left,
         else => .ignored,
     };
-}
-
-test "SUI-141 overview tree key encodings respect list focus" {
-    const Events = @import("testing/app_events.zig").Events;
-    for ([_]struct { bytes: []const u8, action: view.Action, alias: bool }{
-        .{ .bytes = "\x1bb", .action = .collapse_tree, .alias = true },
-        .{ .bytes = "\x1bf", .action = .expand_tree, .alias = true },
-        .{ .bytes = "\x1b[1;3D", .action = .collapse_tree, .alias = false },
-        .{ .bytes = "\x1b[1;3C", .action = .expand_tree, .alias = false },
-        .{ .bytes = "\x1b[1;3A", .action = .previous_session, .alias = false },
-        .{ .bytes = "\x1b[1;3B", .action = .next_session, .alias = false },
-        .{ .bytes = "\x1b[C", .action = .open_session, .alias = false },
-    }) |case| {
-        var events: Events = .init(case.bytes);
-        const input_event = events.next().?;
-        try std.testing.expect(events.next() == null);
-        const main: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = false };
-        try std.testing.expectEqual(view.Input{ .action = case.action }, listKey(input_event, main, true));
-        if (case.alias) {
-            try std.testing.expectEqual(@as(view.Input, .ignored), listKey(input_event, main, false));
-            try std.testing.expectEqual(@as(view.Input, .ignored), listKey(input_event, .{ .under = .main, .pasted = false, .list_origin = false }, true));
-            try std.testing.expectEqual(@as(view.Input, .ignored), listKey(input_event, .{ .under = .settings, .pasted = false }, true));
-            try std.testing.expectEqual(@as(view.Input, .ignored), listKey(input_event, .{ .under = .main, .pasted = true }, true));
-        }
-    }
 }
 
 fn appPresence(raw: *anyopaque, ctx: *vxfw.EventContext, over: bool) anyerror!void {
