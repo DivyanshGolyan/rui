@@ -607,6 +607,9 @@ STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py
 DEEP_MODULES = ("src/*", "build.zig", "build.zig.zon", "build/deep_modules.zig", "tests/ci/deep_modules/*",
                 "tests/ci/deep_modules.allow")
 DEEP_MODULES_TEST = ("build/deep_modules.zig", "tests/ci/deep_modules/*")
+# The growth ratchet (tests/ci/deep_modules_allowance.py) reads the allow file against trusted main; its own tests run with it.
+DEEP_MODULES_ALLOWANCE_INPUTS = ("tests/ci/deep_modules.allow", "tests/ci/deep_modules_allowance.py",
+                                 "tests/ci/test_deep_modules_allowance.py")
 
 CHECK_COVERS = {
     "test", "test-native", "test-store", "test-h2", "test-pg", "admission-integration", "dispatch-integration",

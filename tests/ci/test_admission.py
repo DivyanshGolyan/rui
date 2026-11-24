@@ -398,15 +398,16 @@ class AdmissionTest(unittest.TestCase):
     def test_every_policy_check_runs_after_another_fails_and_any_failure_fails_the_suite(self):
         # CI-76: checks.sh over its fake tools, with no check, each check's last call, or every check failing.
         calls = ['python3 -B tests/ci/caller_errors.py', 'python3 -B tests/ci/flake_sources.py',
-                 'python3 -B tests/ci/client_locality.py',
+                 'python3 -B tests/ci/client_locality.py', 'python3 -B tests/ci/deep_modules_allowance.py',
                  'python3 -B tests/ci/policy_suite.py --skips ["test_unchanged"]',
                  'python3 -B tests/ci/rsql_table.py fingerprint', 'python3 -B tests/ci/link_table.py fingerprint',
                  'python3 -m ruff check --select F821 tests', 'npm ci --ignore-scripts --no-audit --no-fund',
                  'npm run check', 'npm test', 'actionlint -shellcheck= .github/workflows/check.yml']
-        last_of_each_check = [calls[index] for index in (0, 1, 2, 3, 4, 5, 6, 9, 10)]
+        last_of_each_check = [calls[index] for index in (0, 1, 2, 3, 4, 5, 6, 7, 10, 11)]
         names = ['Check caller error coverage and shrink-only pending causes',
                  'Check flake sources and shrink-only allowances',
                  'Check client locality and shrink-only exceptions',
+                 'Check the deep-modules allowance does not grow past trusted main',
                  'Run tests/ci, less self-checks whose inputs are unchanged',
                  'Check the Store statement table was generated from the current inputs',
                  "Check the build's link table was generated from the current build inputs",

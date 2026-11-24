@@ -1,6 +1,6 @@
 //! The deep-modules command. This file is the only one that does I/O: it reads the production
-//! sources and the allow file from the current directory, asks git for the trusted base, prints
-//! the report and sets the exit status. It decides no lint.
+//! sources and the allow file from the current directory, prints the report and sets the exit
+//! status. It decides no lint.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -13,7 +13,7 @@ const Allow = @import("Allow.zig");
 
 const default_root = "src/cli.zig";
 const max_file_bytes = 64 * 1024 * 1024;
-const usage_line = "usage: deep-modules [--root PATH] [--module NAME=PATH]... [--allow PATH [--trusted REF] | --update-allow PATH] [--all] [SCOPE]";
+const usage_line = "usage: deep-modules [--root PATH] [--module NAME=PATH]... [--allow PATH | --update-allow PATH] [--all] [SCOPE]";
 
 /// What one run was asked to do. Absent fields keep their defaults.
 pub const Options = struct {
@@ -25,8 +25,6 @@ pub const Options = struct {
     allow: ?[]const u8 = null,
     /// Rewrites this file from the current diagnostics, and exits 0. Wins over `allow`.
     update_allow: ?[]const u8 = null,
-    /// A git ref whose merge base with HEAD holds the allow file the growth check compares against.
-    trusted: ?[]const u8 = null,
     /// Also prints the diagnostics the allow file covers.
     all: bool = false,
     /// Reports only what concerns this module display path (and the modules below it).
@@ -56,8 +54,6 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8, usage: *Usage) Pars
             options.allow = try value(arena, args, &index, usage, arg);
         } else if (std.mem.eql(u8, arg, "--update-allow")) {
             options.update_allow = try value(arena, args, &index, usage, arg);
-        } else if (std.mem.eql(u8, arg, "--trusted")) {
-            options.trusted = try value(arena, args, &index, usage, arg);
         } else if (std.mem.startsWith(u8, arg, "--")) {
             return refuse(arena, usage, "unknown option {s}", .{arg});
         } else if (options.scope != null) {
@@ -69,8 +65,6 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8, usage: *Usage) Pars
     options.modules = try modules.toOwnedSlice(arena);
     if (options.update_allow != null and options.scope != null)
         return refuse(arena, usage, "--update-allow rewrites the whole allow file, so it cannot take a scope", .{});
-    if (options.trusted != null and options.allow == null and options.update_allow == null)
-        return refuse(arena, usage, "--trusted needs --allow", .{});
     return options;
 }
 
@@ -119,29 +113,6 @@ const Run = struct {
         return std.Io.Dir.cwd().readFileAlloc(self.io, path, self.arena, .limited(max_file_bytes)) catch |err|
             return self.fail("cannot read {s}: {s}", .{ path, @errorName(err) });
     }
-
-    /// The trimmed standard output of a git command; a failed command is a fault that says `what`.
-    fn git(self: *Run, argv: []const []const u8, what: []const u8) Error![]const u8 {
-        const result = std.process.run(self.arena, self.io, .{ .argv = argv }) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return self.fail("cannot run git: {s}", .{@errorName(err)}),
-        };
-        if (result.term != .exited or result.term.exited != 0)
-            return self.fail("{s}: {s}", .{ what, std.mem.trim(u8, result.stderr, " \r\n") });
-        return std.mem.trim(u8, result.stdout, " \r\n");
-    }
-
-    /// The allow file at `base`, or null when it is absent there (the bootstrap run).
-    fn trustedAllowance(self: *Run, path: []const u8, reference: []const u8) Error!?Allow.AllowList {
-        const base = try self.git(&.{ "git", "merge-base", "HEAD", reference }, try std.fmt.allocPrint(self.arena, "cannot find the merge base of HEAD and {s}; the full history is required (fetch with full depth)", .{reference}));
-        const present = try self.git(&.{ "git", "ls-tree", "--name-only", base, "--", path }, try std.fmt.allocPrint(self.arena, "cannot list {s} at {s}", .{ path, base }));
-        if (present.len == 0) return null;
-        const text = try self.git(&.{ "git", "show", try std.fmt.allocPrint(self.arena, "{s}:{s}", .{ base, path }) }, try std.fmt.allocPrint(self.arena, "cannot read {s} at {s}", .{ path, base }));
-        return switch (try Allow.parse(self.arena, text)) {
-            .entries => |list| list,
-            .invalid => |line| self.fail("{s} at {s}:{d}: expected `<lint> <key>`", .{ path, base, line }),
-        };
-    }
 };
 
 fn findNode(sources: *const Sources, display: []const u8) ?Sources.NodeId {
@@ -158,7 +129,7 @@ fn isListed(list: []const Diagnostic.Diagnostic, d: Diagnostic.Diagnostic) bool 
     return false;
 }
 
-/// Runs the lints and judges them, prints, and returns the exit status: 0 clean, 1 findings, stale or grown.
+/// Runs the lints and judges them, prints, and returns the exit status: 0 clean, 1 new findings or stale entries.
 fn check(run: *Run, options: Options, out: *std.Io.Writer) Error!u8 {
     const arena = run.arena;
     var failure: Sources.Failure = .{};
@@ -188,11 +159,7 @@ fn check(run: *Run, options: Options, out: *std.Io.Writer) Error!u8 {
             .invalid => |line| return run.fail("{s}:{d}: expected `<lint> <key>`", .{ path, line }),
         };
     }
-    const trusted: ?Allow.AllowList = if (options.trusted) |reference|
-        try run.trustedAllowance(options.allow.?, reference)
-    else
-        null;
-    const verdict = try Allow.judge(arena, diagnostics, allowed, trusted);
+    const verdict = try Allow.judge(arena, diagnostics, allowed);
     // A scoped run sees only its own diagnostics, so entries for other modules would look stale.
     const stale: []const Allow.Entry = if (scope == null) verdict.stale else &.{};
 
@@ -203,11 +170,10 @@ fn check(run: *Run, options: Options, out: *std.Io.Writer) Error!u8 {
         try Report.render(out, d);
         printed += 1;
     }
-    if (printed > 0 and (stale.len > 0 or verdict.grown.len > 0)) try out.writeAll("\n");
+    if (printed > 0 and stale.len > 0) try out.writeAll("\n");
     for (stale) |entry| try out.print("remove stale allowance: {s} {s}\n", .{ entry.lint.name(), entry.key });
-    for (verdict.grown) |entry| try out.print("allowance grew beyond the trusted base: {s} {s}\n", .{ entry.lint.name(), entry.key });
     try Report.summary(out, verdict.new.len, diagnostics.len - verdict.new.len, stale.len);
-    const clean = verdict.new.len == 0 and stale.len == 0 and verdict.grown.len == 0;
+    const clean = verdict.new.len == 0 and stale.len == 0;
     return if (clean) 0 else 1;
 }
 
@@ -256,7 +222,6 @@ fn expectOptions(want: Options, got: Options) !void {
     }
     try expectOptional(want.allow, got.allow);
     try expectOptional(want.update_allow, got.update_allow);
-    try expectOptional(want.trusted, got.trusted);
     try testing.expectEqual(want.all, got.all);
     try expectOptional(want.scope, got.scope);
 }
@@ -277,10 +242,7 @@ test "parseArgs: the defaults and each option" {
         .{ .args = &.{}, .want = .{} },
         .{ .args = &.{ "--all", "store" }, .want = .{ .all = true, .scope = "store" } },
         .{ .args = &.{ "--root", "src/openapi_main.zig" }, .want = .{ .root = "src/openapi_main.zig" } },
-        .{
-            .args = &.{ "--allow", "tests/ci/deep_modules.allow", "--trusted", "origin/main" },
-            .want = .{ .allow = "tests/ci/deep_modules.allow", .trusted = "origin/main" },
-        },
+        .{ .args = &.{ "--allow", "tests/ci/deep_modules.allow" }, .want = .{ .allow = "tests/ci/deep_modules.allow" } },
         .{
             .args = &.{ "--module", "os=src/os/os.zig", "--module", "tls_client=src/tls_client/tls_client.zig" },
             .want = .{ .modules = &.{ .{ .name = "os", .path = "src/os/os.zig" }, .{ .name = "tls_client", .path = "src/tls_client/tls_client.zig" } } },
@@ -291,7 +253,6 @@ test "parseArgs: the defaults and each option" {
             .want = .{ .allow = "b.allow", .update_allow = "a.allow" },
         },
         .{ .args = &.{ "--allow", "a.allow", "--allow", "b.allow" }, .want = .{ .allow = "b.allow" } },
-        .{ .args = &.{ "--update-allow", "a.allow", "--trusted", "origin/main" }, .want = .{ .update_allow = "a.allow", .trusted = "origin/main" } },
     };
     for (cases) |case| {
         var usage: Usage = .{};
@@ -313,8 +274,6 @@ test "parseArgs: refused lists say why" {
         .{ .args = &.{"--bogus"}, .reason = "unknown option --bogus" },
         .{ .args = &.{ "store", "wire" }, .reason = "only one scope may be given, not store and wire" },
         .{ .args = &.{ "--update-allow", "a.allow", "store" }, .reason = "--update-allow rewrites the whole allow file, so it cannot take a scope" },
-        .{ .args = &.{"--trusted"}, .reason = "--trusted needs a value" },
-        .{ .args = &.{ "--trusted", "origin/main" }, .reason = "--trusted needs --allow" },
     };
     for (cases) |case| {
         var usage: Usage = .{};

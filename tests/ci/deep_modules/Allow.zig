@@ -1,5 +1,5 @@
 //! The allow file: diagnostics a tree keeps for now, and the rules that judge a run against it.
-//! Pure: it reads no file and runs no git. The caller passes the text and the trusted base in.
+//! Pure: it reads no file and runs no git. The caller passes the text in.
 
 const std = @import("std");
 const dg = @import("Diagnostic.zig");
@@ -60,13 +60,11 @@ pub const Verdict = struct {
     new: []const Diagnostic,
     /// Entries that cover no current diagnostic.
     stale: []const Entry,
-    /// Entries that the trusted base does not cover: the file grew.
-    grown: []const Entry,
 };
 
-/// Judges `current` against `allowed`. `trusted` is the allow file at the merge base, or null when the file
-/// is absent there (the bootstrap run), which skips the growth check.
-pub fn judge(a: Allocator, current: []const Diagnostic, allowed: AllowList, trusted: ?AllowList) Allocator.Error!Verdict {
+/// Judges `current` against `allowed`. Growth of the allow file is not judged here: a rename changes keys
+/// without growing it, so the policy ratchet (tests/ci/deep_modules_allowance.py) compares sizes instead.
+pub fn judge(a: Allocator, current: []const Diagnostic, allowed: AllowList) Allocator.Error!Verdict {
     var new: std.ArrayList(Diagnostic) = .empty;
     for (current) |d| {
         if (!anyEntryAllows(allowed.entries, d.lint, d.key)) try new.append(a, d);
@@ -75,16 +73,9 @@ pub fn judge(a: Allocator, current: []const Diagnostic, allowed: AllowList, trus
     for (allowed.entries) |entry| {
         if (!anyDiagnosticAllowed(entry, current)) try stale.append(a, entry);
     }
-    var grown: std.ArrayList(Entry) = .empty;
-    if (trusted) |base| {
-        for (allowed.entries) |entry| {
-            if (!anyEntryAllows(base.entries, entry.lint, entry.key)) try grown.append(a, entry);
-        }
-    }
     return .{
         .new = try new.toOwnedSlice(a),
         .stale = try stale.toOwnedSlice(a),
-        .grown = try grown.toOwnedSlice(a),
     };
 }
 
@@ -104,8 +95,9 @@ pub fn write(a: Allocator, current: []const Diagnostic) Allocator.Error![]const 
 
 const header =
     \\# Existing deep-modules diagnostics this tree allows. Regenerate with:
-    \\#   zig build deep-modules -- --update-allow
+    \\#   zig build deep-modules -- --update-allow tests/ci/deep_modules.allow
     \\# An entry whose diagnostic is gone is stale and fails; a diagnostic not listed here fails.
+    \\# The policy ratchet tests/ci/deep_modules_allowance.py fails any growth past trusted main.
     \\
 ;
 
@@ -222,35 +214,30 @@ test "covers: a circle covers its subsets, other lints need the same key" {
     }
 }
 
-test "judge: new, stale, grown, and the bootstrap run" {
+test "judge: new and stale findings; a renamed finding is new and stale, a shrunk circle is neither" {
     const Row = struct {
         allowed: []const u8,
-        trusted: ?[]const u8,
         current: []const Entry,
         new: usize,
         stale: usize,
-        grown: usize,
     };
     const rows = [_]Row{
-        .{ .allowed = "", .trusted = null, .current = &.{.{ .lint = .tangle, .key = "a,b" }}, .new = 1, .stale = 0, .grown = 0 },
-        .{ .allowed = "tangle a,b", .trusted = null, .current = &.{}, .new = 0, .stale = 1, .grown = 0 },
-        .{ .allowed = "tangle a,b", .trusted = null, .current = &.{.{ .lint = .tangle, .key = "a,b" }}, .new = 0, .stale = 0, .grown = 0 },
-        .{ .allowed = "tangle a,b,c", .trusted = "tangle a,b,c", .current = &.{.{ .lint = .tangle, .key = "a,b" }}, .new = 0, .stale = 0, .grown = 0 },
-        .{ .allowed = "tangle a,b", .trusted = "tangle a,b,c", .current = &.{.{ .lint = .tangle, .key = "a,b" }}, .new = 0, .stale = 0, .grown = 0 },
-        .{ .allowed = "tangle a,b,c", .trusted = "tangle a,b", .current = &.{.{ .lint = .tangle, .key = "a,b,c" }}, .new = 0, .stale = 0, .grown = 1 },
-        .{ .allowed = "tangle a,b,c", .trusted = "tangle a,b", .current = &.{.{ .lint = .tangle, .key = "a,b,c,d" }}, .new = 1, .stale = 1, .grown = 1 },
+        .{ .allowed = "", .current = &.{.{ .lint = .tangle, .key = "a,b" }}, .new = 1, .stale = 0 },
+        .{ .allowed = "tangle a,b", .current = &.{}, .new = 0, .stale = 1 },
+        .{ .allowed = "tangle a,b", .current = &.{.{ .lint = .tangle, .key = "a,b" }}, .new = 0, .stale = 0 },
+        .{ .allowed = "tangle a,b,c", .current = &.{.{ .lint = .tangle, .key = "a,b" }}, .new = 0, .stale = 0 },
+        .{ .allowed = "tangle a,b,c", .current = &.{.{ .lint = .tangle, .key = "a,b,c,d" }}, .new = 1, .stale = 1 },
+        .{ .allowed = "tangle a,b,c", .current = &.{.{ .lint = .tangle, .key = "a,b,x" }}, .new = 1, .stale = 1 },
     };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     for (rows) |row| {
-        const trusted = if (row.trusted) |text| try mustParse(a, text) else null;
         const diagnostics = try a.alloc(Diagnostic, row.current.len);
         for (row.current, diagnostics) |entry, *d| d.* = diag(entry.lint, entry.key);
-        const verdict = try judge(a, diagnostics, try mustParse(a, row.allowed), trusted);
+        const verdict = try judge(a, diagnostics, try mustParse(a, row.allowed));
         try std.testing.expectEqual(row.new, verdict.new.len);
         try std.testing.expectEqual(row.stale, verdict.stale.len);
-        try std.testing.expectEqual(row.grown, verdict.grown.len);
     }
 }
 

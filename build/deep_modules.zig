@@ -17,14 +17,14 @@ pub fn add(b: *std.Build, product: *std.Build.Module) *std.Build.Step {
             .optimize = .Debug,
         }),
     });
-    // The tool reads the sources and git history, which no build input names.
+    // The tool reads the production sources, which no build input names.
     const run = b.addRunArtifact(tool);
     run.has_side_effects = true;
     run.setCwd(b.path("."));
-    run.addArgs(&.{ "--allow", "tests/ci/deep_modules.allow", "--trusted", "origin/main" });
+    run.addArgs(&.{ "--allow", "tests/ci/deep_modules.allow" });
     for (modules) |module| run.addArgs(&.{ "--module", b.fmt("{s}={s}", .{ module.name, module.path }) });
     run.addPassthruArgs();
-    const lint = b.step("deep-modules", "Fail on a deep-modules finding that the allow file does not cover, a stale allowance, or an allowance that grew past origin/main");
+    const lint = b.step("deep-modules", "Fail on a deep-modules finding that the allow file does not cover, or a stale allowance");
     lint.dependOn(&run.step);
 
     const tests = b.addTest(.{

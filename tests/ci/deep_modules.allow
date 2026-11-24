@@ -1,6 +1,7 @@
 # Existing deep-modules diagnostics this tree allows. Regenerate with:
-#   zig build deep-modules -- --update-allow
+#   zig build deep-modules -- --update-allow tests/ci/deep_modules.allow
 # An entry whose diagnostic is gone is stale and fails; a diagnostic not listed here fails.
+# The policy ratchet tests/ci/deep_modules_allowance.py fails any growth past trusted main.
 module-cycle InputCapture,activity_facts,activity_read,call_classification,command_input,command_reply,configuration_admission,configuration_defaults,content_custody,core_tools,excerpt,host_endpoint,host_settings,host_settings_file,mcp,message_agent_arguments,message_observation,mysql_url_value,platform,preset_value,protocol,server_mcp_settings,session_list,session_list_reply,session_report,session_report_reply,session_work,store,testing,tool_presentation,tool_record
 module-cycle h2/Connection,h2/Engine
 module-cycle session_history,session_reads
