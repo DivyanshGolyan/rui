@@ -1837,7 +1837,8 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
         state.listing_wanted = true;
         state.next_list_ms = now_ms + list_interval_ms;
         state.walk_since = state.token != null;
-        effects.add(.{ .list = .{ .since = state.token, .archive = if (state.token == null) .active else .all } });
+        // Active deltas still carry archived change seeds, while their creator rollups follow active membership.
+        effects.add(.{ .list = .{ .since = state.token, .archive = .active } });
         if (state.menu.loading()) askModels(state, effects);
     }
 }
@@ -5570,7 +5571,7 @@ test "merging list pages keeps each Session once" {
     var nine: [9]Listed = undefined;
     for (&nine, 0..) |*row, n| row.* = session(&[6]u8{ 'e', 'e', 'e', 'e', 'e', '0' + @as(u8, @intCast(n)) }, .{ .idle = ago(n) }, .{ .label = "E" });
     var asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
-    try expectEffects(&.{.{ .list = .{ .since = testToken(2), .archive = .all } }}, asked);
+    try expectEffects(&.{.{ .list = .{ .since = testToken(2), .archive = .active } }}, asked);
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = nine[0..8], .answer = null } } });
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc", "dddddd" });
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{ a, b, c, nine[0] }, .restarts = true, .answer = null } } });
@@ -5582,7 +5583,7 @@ test "merging list pages keeps each Session once" {
     try std.testing.expectEqual(testToken(6), state.token.?);
 
     asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
-    try expectEffects(&.{.{ .list = .{ .since = testToken(6), .archive = .all } }}, asked);
+    try expectEffects(&.{.{ .list = .{ .since = testToken(6), .archive = .active } }}, asked);
     _ = try respond(&state, .not_modified, testToken(6), &.{});
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc", "eeeee0", "eeeee8" });
 
@@ -5609,7 +5610,7 @@ test "a Session listed twice keeps its later row, whatever the order" {
 
     var rows: [10]Listed = undefined;
     for (&rows, 0..) |*row, n| row.* = session(&[6]u8{ 'r', 'r', 'r', 'r', 'r', '0' + @as(u8, @intCast(n)) }, .{ .idle = ago(n) }, .{ .label = "R" });
-    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, try step(&state, .{ .tick = state.now_ms + list_interval_ms }));
+    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .active } }}, try step(&state, .{ .tick = state.now_ms + list_interval_ms }));
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = rows[0..8], .answer = null } } });
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = rows[0..8], .answer = null } } });
     const restart = try step(&state, .{ .list = .{ .page = .{ .rows = rows[8..], .answer = .{ .delta = .full, .since = testToken(2) } } } });
@@ -5648,10 +5649,10 @@ test "the overview lists once a second, one listing at a time" {
     try expectEffects(&.{.{ .list = .{ .since = null, .archive = .active } }}, try step(&state, .{ .tick = start }));
     try expectEffects(&.{}, try step(&state, .{ .tick = start + 2 * list_interval_ms }));
     _ = try respond(&state, .full, testToken(1), &mixed);
-    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, try step(&state, .{ .tick = start + 2 * list_interval_ms }));
+    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .active } }}, try step(&state, .{ .tick = start + 2 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .tick = start + 2 * list_interval_ms + 500 }));
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
-    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, try step(&state, .{ .tick = start + 3 * list_interval_ms }));
+    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .active } }}, try step(&state, .{ .tick = start + 3 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
     try expectScreenLine(&state, 0, " + New chat");
     var screen = try Frame.of(&state, 80, 24, .{}, 0);
@@ -6894,7 +6895,7 @@ test "a since walk answered full re-walks only live Sessions" {
     var state = try opened(&.{live});
     defer state.deinit();
     const asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
-    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, asked);
+    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .active } }}, asked);
 
     // The Host answers the since walk in full, with an archived row in its page. The walk is dropped unrouted.
     const walked = try answerWalk(&state, .full, testToken(2), &.{archived});
@@ -7584,7 +7585,7 @@ test "shared model reads are admitted by core openings and deduplicated across f
         try expectEffects(&.{ show, .list_models }, try openModelConsumer(&state, opening));
         try expectEffects(&.{show}, try openModelConsumer(&state, opening));
         try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .pending }}) } }));
-        try expectEffects(&.{ .{ .list = .{ .since = testToken(1), .archive = .all } }, .list_models }, try step(&state, .{ .tick = state.next_list_ms }));
+        try expectEffects(&.{ .{ .list = .{ .since = testToken(1), .archive = .active } }, .list_models }, try step(&state, .{ .tick = state.next_list_ms }));
         try expectEffects(&.{show}, try openModelConsumer(&state, opening));
         try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "model-a\n" } } }}) } }));
         try std.testing.expect(!state.asking_models and !state.menu.loading());
@@ -7618,7 +7619,7 @@ test "shared model reads respect every Upgrade hold for opening and loading retr
         try std.testing.expectEqual(wanted, state.asking_models);
         try expectEffects(&.{.open_settings}, try step(&state, .{ .clicked = .{ .target = .settings } }));
         const ticked = try step(&state, .{ .tick = state.next_list_ms });
-        try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, ticked);
+        try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .active } }}, ticked);
         if (hold == .reobserving) {
             _ = try respond(&state, .full, testToken(2), &.{});
             try std.testing.expect(!state.holdsHost());
