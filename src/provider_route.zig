@@ -125,10 +125,11 @@ pub const built_in_names = blk: {
 };
 
 /// The label a name is shown under: the served entry's label, else the
-/// built-in provider's own, else the name itself. The one display lookup by name.
-pub fn shownOf(served: *const Served, name: connection.Name) []const u8 {
+/// built-in provider's own, else the name itself. The result borrows from
+/// `served` or `name`, or points to a built-in label.
+pub fn shownOf(served: *const Served, name: *const connection.Name) []const u8 {
     if (served.of(name.slice())) |entry| return entry.label.slice();
-    if (builtInOf(name)) |provider| return provider.shown();
+    if (builtInOf(name.*)) |provider| return provider.shown();
     return name.slice();
 }
 
@@ -186,11 +187,22 @@ test "built-in entries carry each provider's codec and web_search" {
 
 test "a name's display label and login come from its served entry or built-in facts" {
     var served: Served = .{};
-    try served.put(builtIn(.codex, .endpoint));
+    var codex_entry = builtIn(.codex, .endpoint);
+    codex_entry.label = Label.parse("Device route").?;
+    try served.put(codex_entry);
     try served.put(.{ .name = connection.Name.parse("alpha").?, .label = Label.parse("Alpha Gateway").?, .route = .key_file, .codec = .@"openai-responses/3", .web_search = false });
-    try std.testing.expectEqualStrings("Alpha Gateway", shownOf(&served, connection.Name.parse("alpha").?));
-    try std.testing.expectEqualStrings("ChatGPT (device code)", shownOf(&served, connection.Name.parse("codex").?));
-    try std.testing.expectEqualStrings("beta", shownOf(&served, connection.Name.parse("beta").?));
+    const alpha = connection.Name.parse("alpha").?;
+    const codex = connection.Name.parse("codex").?;
+    const openai = connection.Name.parse("openai").?;
+    var beta = connection.Name.parse("beta").?;
+    try std.testing.expectEqualStrings("Alpha Gateway", shownOf(&served, &alpha));
+    try std.testing.expectEqualStrings("Device route", shownOf(&served, &codex));
+    try std.testing.expectEqualStrings("OpenAI", shownOf(&served, &openai));
+    const fallback = shownOf(&served, &beta);
+    try std.testing.expectEqualStrings("beta", fallback);
+    try std.testing.expectEqual(@intFromPtr(beta.slice().ptr), @intFromPtr(fallback.ptr));
+    beta.bytes[0] = 'B';
+    try std.testing.expectEqualStrings("Beta", fallback);
     try std.testing.expectEqualStrings("rui auth login chatgpt --device-code", loginOf(connection.Name.parse("codex").?).?);
     try std.testing.expectEqual(@as(?[]const u8, null), loginOf(connection.Name.parse("alpha").?));
 }
