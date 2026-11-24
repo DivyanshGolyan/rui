@@ -58,7 +58,7 @@ def documentation_env():
     return dict(CHANGE_KIND='documentation', POLICY_RESULT='skipped', MACOS_RESULT='skipped',
                 NATIVE='false', TARGETS='[]', NATIVE_TARGETS='[]',
                 LINUX_MATRIX='{"include": []}', MACOS_MATRIX='{"include": []}',
-                LINUX_SPLIT='false', MACOS_SPLIT='false', LINUX_MEMORY='false')
+                LINUX_SPLIT='false', LINUX_MEMORY='false')
 
 
 @cache
@@ -161,18 +161,20 @@ class AdmissionTest(unittest.TestCase):
         release = RELEASE_BUILD.read_text()
         self.assertGreaterEqual(budget(job(text, 'linux_build')), budget(job(release, 'build')))
         self.assertGreaterEqual(budget(job(text, 'macos_build')), budget(job(release, 'build')))
+        # The qualification compile already builds every part in one job, so its budget is unchanged.
         qualify = job((ROOT / '.github/workflows/qualify-macos.yml').read_text(), 'compile')
-        self.assertIn("    timeout-minutes: ${{ needs.plan.outputs.platform == 'linux' && 15 || %d }}"
-                      % budget(job(text, 'macos_build')), qualify)
-        for name, step in (('linux_suites', 'Run selected targets'), ('macos_suites', 'Run required native targets')):
-            self.assertIn('    timeout-minutes: ${{ inputs.promotion && 300 || 35 }}', job(text, name))
-            self.assertEqual(step_budget(job(text, name), step), 35)
+        self.assertIn("    timeout-minutes: ${{ needs.plan.outputs.platform == 'linux' && 15 || 60 }}", qualify)
+        self.assertIn('    timeout-minutes: ${{ inputs.promotion && 300 || 35 }}', job(text, 'linux_suites'))
+        self.assertEqual(step_budget(job(text, 'linux_suites'), 'Run selected targets'), 35)
+        # One macOS job runs every native suite back to back (about 22 min measured).
+        self.assertIn('    timeout-minutes: ${{ inputs.promotion && 300 || 60 }}', job(text, 'macos_suites'))
+        self.assertEqual(step_budget(job(text, 'macos_suites'), 'Run required native targets'), 45)
         upgrade = job(UPGRADE.read_text(), 'upgrade')
         self.assertIn("    timeout-minutes: ${{ inputs.batch-base && 300 || 45 }}", upgrade)
         self.assertEqual(step_budget(upgrade, 'Start detached, then install, save real work, reinstall and '
                                      'restart the same Store'), 45)
         self.assertEqual(budget(job(text, 'linux_build_unit')), 15)
-        self.assertEqual(budget(job(text, 'macos_build_unit')), budget(job(text, 'macos_build')))
+        self.assertNotIn('macos_build_unit', text)
 
     def test_main_ruleset_requires_admission_and_prs_with_only_an_admin_pr_bypass(self):
         ruleset = json.loads((ROOT / '.github/main-ruleset.json').read_text())
@@ -488,19 +490,14 @@ class AdmissionTest(unittest.TestCase):
 
     def test_native_aggregate_requires_real_producers_and_every_suite(self):
         script = step_script(job(CHECK.read_text(), 'macos'), 'Require every selected Apple Silicon part')
-        baseline = dict(PLAN_RESULT='success', BUILD_RESULT='success', UNIT_RESULT='skipped',
-                        SPLIT='false', NATIVE_RESULT='success')
-        for split in ('false', 'true'):
-            env = dict(baseline, SPLIT=split, UNIT_RESULT='success' if split == 'true' else 'skipped')
-            self.assertEqual(subprocess.run(['bash', '-euc', script], env=env).returncode, 0)
-            for key in ('PLAN_RESULT', 'BUILD_RESULT', 'NATIVE_RESULT', 'UNIT_RESULT'):
-                for result in ('failure', 'cancelled', 'in_progress', ''):
-                    with self.subTest(split=split, key=key, result=result):
-                        self.assertNotEqual(subprocess.run(['bash', '-euc', script],
-                            env=dict(env, **{key: result})).returncode, 0)
-            if split == 'true':
-                self.assertNotEqual(subprocess.run(['bash', '-euc', script],
-                    env=dict(env, UNIT_RESULT='skipped')).returncode, 0)
+        self.assertNotIn('UNIT', script)
+        env = dict(PLAN_RESULT='success', BUILD_RESULT='success', NATIVE_RESULT='success')
+        self.assertEqual(subprocess.run(['bash', '-euc', script], env=env).returncode, 0)
+        for key in ('PLAN_RESULT', 'BUILD_RESULT', 'NATIVE_RESULT'):
+            for result in ('failure', 'cancelled', 'in_progress', '', 'skipped'):
+                with self.subTest(key=key, result=result):
+                    self.assertNotEqual(subprocess.run(['bash', '-euc', script],
+                        env=dict(env, **{key: result})).returncode, 0)
 
     def test_all_selected_checkouts_use_the_immutable_candidate(self):
         text = CHECK.read_text()
@@ -618,7 +615,7 @@ class CandidatePlanTest(unittest.TestCase):
             self.assertEqual(output[key], '[]', key)
         for key in ('linux_matrix', 'macos_matrix'):
             self.assertEqual(output[key], '{"include": []}', key)
-        for key in ('native', 'retry', 'linux_split', 'macos_split',
+        for key in ('native', 'retry', 'linux_split',
                     'linux_memory', 'cache_execution', 'typecheck_macos'):
             self.assertEqual(output[key], 'false', key)
 
@@ -1125,7 +1122,7 @@ class JobGraphTest(unittest.TestCase):
 
     def test_a_pull_request_push_runs_only_the_linux_part_and_admission(self):
         # Ready, draft and documentation pushes; mac_runner, macOS and the linux summary never run.
-        macos = {'mac_runner', 'macos_build', 'macos_build_unit', 'macos_suites', 'macos', 'linux'}
+        macos = {'mac_runner', 'macos_build', 'macos_suites', 'macos', 'linux'}
         with PlanFixture() as fixture:
             fixture.write('build.zig', plan_sources()['build.zig'] + '\n// fixture change\n')
             candidate = fixture.commit()

@@ -179,8 +179,9 @@ C/shared dependencies took 658.7 s using LLVM (659.7 s producer, 5.69 GiB
 aggregate peak), versus the earlier two-root **exploratory** 425.3 s / 5.48 GiB
 layout with the Mac DWARF policy. That layout lacked five lazily discovered
 word-search tests; its coverage is not the final proof. No further LLVM timing
-was started after the user's scope cut. The real `macos_build_unit` producer is
-the authoritative next performance measurement.
+was started after the user's scope cut. The next performance measurement is the
+combined macOS producer (`macos_build` in check.yml), which now compiles both
+partitions in one job.
 
 After fetching/rebasing onto `50f450cb` (which includes newer wire changes),
 baseline and split are rebuilt for correctness only, without new timing runs.
