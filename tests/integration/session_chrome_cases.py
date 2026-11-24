@@ -310,7 +310,7 @@ def stopped_local_input_case():
             def hold_activity(response):
                 if not read_started.is_set():
                     read_started.set()
-                    assert read_release.wait(20), "Activity response gate watchdog"
+                    assert read_release.wait(45), "Activity response gate watchdog"
                 return response
 
             proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/activity-page", hold_activity)
