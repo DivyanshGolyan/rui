@@ -594,10 +594,11 @@ def configure_refresh_case():
                 expected_effort = "medium" if field == "effort" else "high"
                 assert statuses[0]["session"]["model"] == expected_model, statuses
                 assert statuses[0]["session"]["reasoning_effort"] == expected_effort, statuses
-                shown = chrome.frame(master, b"config probe\r", lambda frame:
-                                     "config probe" in frame and "Updating" in frame)
-                assert "gpt-6.1-terra · high" not in footer(shown), shown
+                os.write(master, b"config probe\r")
                 fixture.wait_for(lambda: len(chrome.endpoint.requests) == 1, "configured provider request")
+                shown = chrome.frame(master, b"", lambda frame: "config probe" in frame)
+                assert "gpt-6.1-terra · high" not in footer(shown), ("stale configured footer", shown)
+                assert "Updating" in footer(shown), shown
                 request = json.loads(chrome.endpoint.requests[0])
                 assert request["model"] == expected_model and request["reasoning"]["effort"] == expected_effort, request
             finally:
