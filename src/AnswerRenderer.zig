@@ -1834,6 +1834,7 @@ test "SUI-132 unresolved citation markers in prose use an unlinked fallback" {
         .{ .input = "*Before `" ++ marker ++ "` after.*", .expected = "Before " ++ marker ++ " after." },
         .{ .input = "| Head |\n| --- |\n| " ++ marker ++ " |\n", .expected = "  Head\n  [source unavailable]\n" },
         .{ .input = "Before " ++ marker ++ " [label](https://example.test/a)", .expected = "Before [source unavailable] label" },
+        .{ .input = "[Read " ++ marker ++ "](https://example.test/a)", .expected = "Read " ++ marker },
         .{ .input = "```\n" ++ marker ++ "\n```\n", .expected = "  " ++ marker ++ "\n" },
     };
     for (cases) |case| for (0..case.input.len + 1) |split| {
