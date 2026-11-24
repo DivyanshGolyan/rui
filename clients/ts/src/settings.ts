@@ -12,7 +12,8 @@ type Input<T> = T extends { value: string } ? T | string
 /** The generated Host document, with pipe-only secret strings and byte-array paths. */
 export type HostSettings = Omit<Input<components["schemas"]["HostSettings"]>, "presets"> & {
 	/** Uses the same friendly Session spec and writer as sessions.create. */
-	presets?: Record<string, AgentSpec>;
+	/** Connect-time presets take every agent setting but `appTools`: a lane root declares app tools on create or configure. */
+	presets?: Record<string, Omit<AgentSpec, "appTools">>;
 };
 
 interface Kind {

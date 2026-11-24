@@ -36,13 +36,13 @@ A supplied `--session ID` selects only an existing canonical ID.
 Unknown IDs reject as `unknown_session`, presented as `no session k7m2qx in this Store`, without creating a Session or admitting Message work.
 Noncanonical references, including old UUID and NUL-bearing references, reject rather than normalize.
 
-Configure, creating Messages, `start_agent` and connect-time presets use one plain camelCase agent spec: `workspace`, `provider`, `model`, `instructions`, `tools`, `loadedTools`, `permissionMode`, `outputSchema`, `compactAt`, `outputReservation`, `effort` and `label`.
+Configure, creating Messages, `start_agent` and connect-time presets use one plain camelCase agent spec: `workspace`, `provider`, `model`, `instructions`, `tools`, `loadedTools`, `permissionMode`, `outputSchema`, `compactAt`, `outputReservation`, `effort`, `label` and `appTools`.
 An absent member keeps the current value on an update; on creation the Host resolves omitted settings. A direct value sets the setting; explicit null requests the Host default for effort and compactAt and clears other nullable settings.
 Token policies are JSON integers and tool lists normalize into byte order with no duplicate names.
 `instructions` is a text string; `outputSchema` is a JSON object or `null`, as in the shipped `start_agent` and presets.
 Ingress streams instructions and schema objects to sealed content files rather than retaining their bodies in metadata; schemas have the content bound, not the smaller metadata bound.
 Every schema object is a schema, including an object with keys such as `state`, `value`, `bytes` or `sha256`; no object is interpreted as a content reference.
-Only the parser's internal metadata uses an empty array as the out-of-band schema-custody marker; an array is not a schema object and is refused on the wire.
+Only the parser's internal metadata uses an empty array as the out-of-band schema-custody marker. `appTools` is the one array document on the wire: a JSON array of tool records that `tool_record.app_tools` validates whole (SH-143), streamed to a sealed content file like a schema; any other array is refused on the wire. Only a lane root may carry `appTools`; a child refuses it `app_tools_on_child` ([App lane](sessions.md#app-lane)).
 The CLI refuses a malformed schema file before capture publication, since malformed JSON cannot be an object in the plain spec.
 Schema bytes are compact JSON with normalized string escapes, preserving member order and number spelling as the shipped object serializer did; configuration identity hashes these parsed bytes, not the request's whitespace or spelling of string escapes.
 A creation configuration requires an exact nonempty model; null or an empty model is invalid. The supplied model remains the binding. The Host resolves omitted effort, `compactAt`, tools, loaded tools and Permission Mode using the product defaults and model capabilities. An explicit empty tools list means no tools.

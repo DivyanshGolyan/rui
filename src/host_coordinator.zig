@@ -1,6 +1,7 @@
 const std = @import("std");
 const HostLifecycle = @import("HostLifecycle.zig");
 const restart_all = @import("host_restart_all.zig");
+const host_restart_report = @import("host_restart_report.zig");
 const release = @import("release_candidate.zig");
 const stderr = @import("stderr.zig");
 
@@ -9,12 +10,13 @@ const event_limit = input_limit;
 const Task = struct {
     home: []const u8,
     target: ?restart_all.Target = null,
+    scope: restart_all.Scope = .all,
     report: enum { lines, events },
 };
 const Event = union(enum) {
     progress: HostLifecycle.Stage,
     version: release.Version,
-    entry: restart_all.Entry,
+    entry: host_restart_report.Entry,
     /// Only the live typed refusal line crosses the private pipe, never the
     /// unused backing bytes of Failure.message.
     refused: struct {
@@ -31,7 +33,7 @@ const Event = union(enum) {
     done,
 };
 
-fn submit(init: std.process.Init, task: Task, stdout: std.process.SpawnOptions.StdIo) !std.process.Child {
+fn submit(init: std.process.Init, task: Task, stdout: std.process.SpawnOptions.StdIo, stderr_policy: std.process.SpawnOptions.StdIo) !std.process.Child {
     // The coordinator speaks this build's private pipe, so it must be this
     // build even after the upgrade published another one (self_executable).
     const executable = try @import("self_executable.zig").path(init.io);
@@ -40,6 +42,7 @@ fn submit(init: std.process.Init, task: Task, stdout: std.process.SpawnOptions.S
         .environ_map = init.environ_map,
         .stdin = .pipe,
         .stdout = stdout,
+        .stderr = stderr_policy,
     });
     errdefer child.kill(init.io);
     var buffer: [2048]u8 = undefined;
@@ -52,40 +55,67 @@ fn submit(init: std.process.Init, task: Task, stdout: std.process.SpawnOptions.S
 }
 
 pub fn restartAll(init: std.process.Init) !void {
-    var child = try submit(init, .{ .home = init.environ_map.get("HOME") orelse return error.HomeNotFound, .report = .lines }, .inherit);
-    const term = try child.wait(init.io);
-    if (!term.success()) return error.HostRestartFailed;
+    var child = try submit(init, .{ .home = init.environ_map.get("HOME") orelse return error.HomeNotFound, .report = .lines }, .inherit, .inherit);
+    const term = try waitResult(child.wait(init.io));
+    lineResult(term) catch |err| {
+        if (err == error.HostRestartUnconfirmed) switch (term) {
+            .exited => |code| if (code != @backingInt(@import("caller_exit.zig").Status.unconfirmed)) stderr.diagnostic("Host coordinator exited with status {d}; Host state is unconfirmed.\n", .{code}),
+            else => stderr.diagnostic("Host coordinator terminated unexpectedly; Host state is unconfirmed.\n", .{}),
+        };
+        return err;
+    };
 }
 
-pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: restart_all.Options) !restart_all.Batch {
+fn waitResult(result: anyerror!std.process.Child.Term) !std.process.Child.Term {
+    return result catch |err| {
+        stderr.diagnostic("Host coordinator wait failed ({s}); Host state is unconfirmed.\n", .{@errorName(err)});
+        return error.HostRestartUnconfirmed;
+    };
+}
+
+fn lineResult(term: std.process.Child.Term) !void {
+    switch (term) {
+        .exited => |code| switch (code) {
+            0 => return,
+            @backingInt(@import("caller_exit.zig").Status.environment) => return error.HostRestartFailed,
+            else => return error.HostRestartUnconfirmed,
+        },
+        else => return error.HostRestartUnconfirmed,
+    }
+}
+
+/// `stderr` is the coordinator's stderr policy: `.ignore` where the caller owns the terminal.
+pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: restart_all.Options, stderr_policy: std.process.SpawnOptions.StdIo) !host_restart_report.Batch {
     try @import("upgrade_process.zig").check(options.cancellation);
     var child = try submit(init, .{
         .home = options.home,
         .target = if (options.target) |target| target.* else null,
+        .scope = options.scope,
         .report = .events,
-    }, .pipe);
+    }, .pipe, stderr_policy);
     const received = readEvents(init.io, allocator, child.stdout.?, options.progress);
     child.stdout.?.close(init.io);
     child.stdout = null;
     var batch = received catch |err| {
-        _ = try child.wait(init.io);
-        return err;
+        _ = waitResult(child.wait(init.io)) catch {};
+        stderr.diagnostic("Host coordinator result could not be read ({s}); Host state is unconfirmed.\n", .{@errorName(err)});
+        return error.HostRestartUnconfirmed;
     };
     errdefer batch.deinit(allocator);
-    const term = try child.wait(init.io);
-    if (!term.success()) batch.failure = error.HostRestartFailed;
+    const term = try waitResult(child.wait(init.io));
+    if (!term.success()) batch.failure = error.HostRestartUnconfirmed;
     return batch;
 }
 
-fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progress: ?HostLifecycle.Progress) !restart_all.Batch {
+fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progress: ?HostLifecycle.Progress) !host_restart_report.Batch {
     var buffer: [event_limit]u8 = undefined;
     var output = file.readerStreaming(io, &buffer);
-    var entries: std.ArrayList(restart_all.Entry) = .empty;
+    var entries: std.ArrayList(host_restart_report.Entry) = .empty;
     errdefer {
         for (entries.items) |entry| entry.deinit(allocator);
         entries.deinit(allocator);
     }
-    var result: restart_all.Batch = .{};
+    var result: host_restart_report.Batch = .{};
     while (try output.interface.takeDelimiter('\n')) |line| {
         const parsed = try std.json.parseFromSlice(Event, allocator, line, .{});
         defer parsed.deinit();
@@ -94,7 +124,7 @@ fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progr
             .version => |version| result.version = version,
             .failure => |failure| result.failure = switch (failure) {
                 .cancelled => error.Cancelled,
-                .unconfirmed => error.HostRestartFailed,
+                .unconfirmed => error.HostRestartUnconfirmed,
             },
             .entry => |entry| {
                 if (entry.state == .observed or (entry.state == .outcome and entry.state.outcome == .refused)) return error.InvalidCoordinatorEvent;
@@ -116,20 +146,17 @@ fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progr
             },
         }
     }
-    return error.HostRestartFailed;
+    return error.HostRestartUnconfirmed;
 }
 
-fn receiveEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(restart_all.Entry), entry: restart_all.Entry) !void {
+fn receiveEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(host_restart_report.Entry), entry: host_restart_report.Entry) !void {
     const socket = if (entry.socket) |path| try allocator.dupe(u8, path) else null;
     errdefer if (socket) |path| allocator.free(path);
     const directory = if (entry.directory) |path| try allocator.dupe(u8, path) else null;
     errdefer if (directory) |path| allocator.free(path);
     const store = if (entry.store) |path| try allocator.dupe(u8, path) else null;
     errdefer if (store) |path| allocator.free(path);
-    var state = entry.state;
-    if (state == .failed) state.failed.cause = try allocator.dupe(u8, state.failed.cause);
-    errdefer if (state == .failed) allocator.free(state.failed.cause);
-    try entries.append(allocator, .{ .socket = socket, .directory = directory, .pid = entry.pid, .store = store, .state = state });
+    try entries.append(allocator, .{ .socket = socket, .directory = directory, .pid = entry.pid, .store = store, .state = entry.state });
 }
 
 // std.json preserves OS-byte slices: valid UTF-8 is text; other bytes are
@@ -171,6 +198,12 @@ fn progressEvent(raw: *anyopaque, stage: HostLifecycle.Stage) void {
 }
 
 pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
+    return runWith(init, allocator, restart_all.restart);
+}
+
+/// The detached worker. `restart` is the Store or all-Host restart it runs; production passes
+/// `restart_all.restart`, and the custody test passes an injected barrier.
+pub fn runWith(init: std.process.Init, allocator: std.mem.Allocator, restart_step: *const fn (std.process.Init, std.mem.Allocator, restart_all.Options) anyerror!host_restart_report.Batch) !void {
     if (std.c.setsid() < 0) return error.HostRestartFailed;
     var buffer: [2048]u8 = undefined;
     var input = std.Io.File.stdin().readerStreaming(init.io, &buffer);
@@ -181,11 +214,12 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
     const task = parsed.value;
     if (task.report == .lines) return restart_all.run(init, allocator);
     var process_init = init;
-    var batch = restart_all.restart(init, allocator, .{
+    var batch = restart_step(init, allocator, .{
         .home = task.home,
         .target = if (task.target) |*target| target else null,
+        .scope = task.scope,
         .progress = .{ .context = &process_init, .report = progressEvent },
-    }) catch |err| restart_all.Batch{ .failure = err };
+    }) catch |err| host_restart_report.Batch{ .failure = err };
     defer batch.deinit(allocator);
     if (batch.version) |version| event(init, .{ .version = version });
     for (batch.entries) |entry| event(init, .{ .entry = entry });
@@ -228,8 +262,8 @@ test "coordinator transfers every batch outcome and progress without reduction" 
     try expectRoundTrip(outcomeEvent(.{ .ready = .{ .pid = 123, .instance = @splat(42) } }));
     try expectRoundTrip(outcomeEvent(.{ .already_ready = .{ .pid = 456, .instance = @splat(17) } }));
     try expectRoundTrip(outcomeEvent(.{ .client_incompatible = 789 }));
-    inline for (std.enums.values(restart_all.Stage)) |stage| {
-        try expectRoundTrip(Event{ .entry = .{ .socket = "/socket", .state = .{ .failed = .{ .stage = stage, .cause = "HostSocketStoreMismatch" } } } });
+    inline for (std.enums.values(host_restart_report.Stage)) |stage| {
+        try expectRoundTrip(Event{ .entry = .{ .socket = "/socket", .state = .{ .failed = .of(stage, error.HostSocketStoreMismatch) } } });
     }
     try expectRoundTrip(Event{ .failure = .cancelled });
     try expectRoundTrip(Event{ .failure = .unconfirmed });
@@ -239,6 +273,7 @@ test "coordinator transfers every batch outcome and progress without reduction" 
 test "coordinator task pins only routing target and reporting not an activation plan" {
     inline for (.{ .lines, .events }) |report| {
         try expectRoundTrip(Task{ .home = "/home/雪\n", .report = report });
+        try expectRoundTrip(Task{ .home = "/home/雪\n", .scope = .{ .store = "/store/雪\n" }, .report = report });
         try expectRoundTrip(Task{ .home = "/home/雪\n", .target = .{ .build = "/pinned/build", .version = .{ .schema = 3, .patch = 4 } }, .report = report });
     }
 }
@@ -250,8 +285,8 @@ test "coordinator events keep each failed Host's cause after the line is freed" 
     var lines: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer lines.deinit();
     for ([_]Event{
-        .{ .entry = .{ .socket = "/discovery.sock", .state = .{ .failed = .{ .stage = .discovery, .cause = "HostPeerPidMismatch" } } } },
-        .{ .entry = .{ .socket = "/observed.sock", .directory = "/selected-host", .store = "/store", .state = .{ .failed = .{ .stage = .observation, .cause = "ConnectionRefused" } } } },
+        .{ .entry = .{ .socket = "/discovery.sock", .state = .{ .failed = .of(.discovery, error.HostPeerPidMismatch) } } },
+        .{ .entry = .{ .socket = "/observed.sock", .directory = "/selected-host", .store = "/store", .state = .{ .failed = .of(.observation, error.ConnectionRefused) } } },
         .done,
     }) |value| {
         try writeEvent(value, &lines.writer);
@@ -262,8 +297,8 @@ test "coordinator events keep each failed Host's cause after the line is freed" 
     defer file.close(io);
     var batch = try readEvents(io, std.testing.allocator, file, null);
     defer batch.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("HostPeerPidMismatch", batch.entries[0].state.failed.cause);
-    try std.testing.expectEqualStrings("ConnectionRefused", batch.entries[1].state.failed.cause);
+    try std.testing.expectEqualStrings("HostPeerPidMismatch", batch.entries[0].state.failed.cause.slice());
+    try std.testing.expectEqualStrings("ConnectionRefused", batch.entries[1].state.failed.cause.slice());
     try std.testing.expectEqualStrings("/selected-host", batch.entries[1].directory.?);
     try std.testing.expectEqualStrings("/store", batch.entries[1].store.?);
     var buffer: [1024]u8 = undefined;
@@ -287,7 +322,7 @@ test "coordinator event transport preserves OS routing bytes and typed refusals"
         .state = .{ .outcome = .{ .refused = .{ .stage = .starting, .failure = refusal } } },
     } }, &lines.writer);
     try lines.writer.writeByte('\n');
-    try writeEvent(.{ .entry = .{ .pid = 42, .state = .{ .failed = .{ .stage = .discovery, .cause = "HostServeArgumentsUnreadable" } } } }, &lines.writer);
+    try writeEvent(.{ .entry = .{ .pid = 42, .state = .{ .failed = .of(.discovery, error.HostServeArgumentsUnreadable) } } }, &lines.writer);
     try lines.writer.writeByte('\n');
     try writeEvent(.done, &lines.writer);
     try lines.writer.writeByte('\n');
@@ -332,4 +367,48 @@ test "coordinator refusal envelopes preserve both stages and semantic failure fi
 
 test "coordinator task routing preserves OS bytes through the existing JSON slice codec" {
     try expectRoundTrip(Task{ .home = "/home/\xff", .target = .{ .build = "/target/\xfe", .version = .{ .schema = 75, .patch = 1 } }, .report = .events });
+}
+
+test "SH-138 coordinator round-trips every faulted effect and keeps later Host outcomes" {
+    for (std.meta.tags(@import("host_activation.zig").EffectTag)) |effect| {
+        if (effect == .done) continue;
+        try expectRoundTrip(outcomeEvent(.{ .faulted = .{ .effect = effect, .cause = try .from("OutOfMemory") } }));
+    }
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var lines: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer lines.deinit();
+    for ([_]Event{
+        outcomeEvent(.{ .faulted = .{ .effect = .resolve_target, .cause = try .from("OutOfMemory") } }),
+        outcomeEvent(.{ .faulted = .{ .effect = .await_retirement, .cause = try .from("ConnectionResetByPeer") } }),
+        outcomeEvent(.not_needed),
+        .done,
+    }) |value| {
+        try writeEvent(value, &lines.writer);
+        try lines.writer.writeByte('\n');
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "events", .data = lines.written() });
+    const file = try tmp.dir.openFile(io, "events", .{});
+    defer file.close(io);
+    var batch = try readEvents(io, std.testing.allocator, file, null);
+    defer batch.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), batch.entries.len);
+    try std.testing.expectEqual(.resolve_target, batch.entries[0].state.outcome.faulted.effect);
+    try std.testing.expectEqualStrings("OutOfMemory", batch.entries[0].state.outcome.faulted.cause.slice());
+    try std.testing.expectEqual(.resolve_target, batch.selected("/host/\xff").outcome.faulted.effect);
+    try std.testing.expectEqual(.await_retirement, batch.entries[1].state.outcome.faulted.effect);
+    try std.testing.expectEqualStrings("ConnectionResetByPeer", batch.entries[1].state.outcome.faulted.cause.slice());
+    try std.testing.expectEqual(.not_needed, batch.entries[2].state.outcome);
+    try std.testing.expectError(error.HostRestartUnconfirmed, batch.result());
+}
+
+test "SH-140 coordinator exit preserves certainty across the child boundary" {
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try waitResult(.{ .exited = 0 }));
+    try std.testing.expectError(error.HostRestartUnconfirmed, waitResult(error.AccessDenied));
+    try lineResult(.{ .exited = 0 });
+    try std.testing.expectError(error.HostRestartFailed, lineResult(.{ .exited = @backingInt(@import("caller_exit.zig").Status.environment) }));
+    try std.testing.expectError(error.HostRestartUnconfirmed, lineResult(.{ .exited = @backingInt(@import("caller_exit.zig").Status.unconfirmed) }));
+    try std.testing.expectError(error.HostRestartUnconfirmed, lineResult(.{ .exited = 1 }));
+    try std.testing.expectError(error.HostRestartUnconfirmed, lineResult(.{ .unknown = 0 }));
 }
