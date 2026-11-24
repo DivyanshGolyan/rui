@@ -1223,7 +1223,7 @@ fn startHostForTerminalUsing(init: std.process.Init, selected: []const u8, quiet
 fn startHostRequest(init: std.process.Init, request: host_start.Spawn, quiet: bool, ops: HostLaunchOps) !void {
     var progress: TerminalHostProgress = .{};
     var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
-    host_start.spawn(init, request, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
+    launchWithLegacyHandover(init, request, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
     try reportHostLaunch(init.io, &result, quiet, request.assignments.len != 0 or request.settings_file != null, progress.shown);
 }
 
@@ -1231,7 +1231,24 @@ const launchFailure = host_start.launchFailure;
 
 fn startHost(init: std.process.Init, selected: []const u8, assignments: []const []const u8, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps, progress: ?HostLaunchProgress, result: *HostLaunchResult) void {
     _ = readiness; // Credential defaults belong to the child intake owner.
-    host_start.spawn(init, .{ .dir = selected, .assignments = assignments }, ops, progress, result);
+    launchWithLegacyHandover(init, .{ .dir = selected, .assignments = assignments }, ops, progress, result);
+}
+
+// A normal start only replaces a recognized older foreign Host. The lifecycle
+// owns source admission, exact retirement and replacement verification.
+fn launchWithLegacyHandover(init: std.process.Init, request: host_start.Spawn, ops: HostLaunchOps, progress: ?HostLaunchProgress, result: *HostLaunchResult) void {
+    host_start.spawn(init, request, ops, progress, result);
+    if (result.outcome != .failed or result.outcome.failed.cause.kind != .incompatible or request.frozen != null) return;
+    if (ops.context != null) return;
+    const outcome = @import("host_restart_all.zig").activateOlderHostForStart(init, request.dir) catch return;
+    switch (outcome) {
+        .ready => host_start.spawn(init, request, ops, progress, result),
+        .failed, .unconfirmed => host_start.launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, null),
+        .refused => |refusal| if (refusal.stage == .starting) {
+            host_start.launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, null);
+        },
+        else => {},
+    }
 }
 
 fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, overrides: bool, shown: usize) !void {
@@ -5058,7 +5075,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
     const cases = [_]Case{
         .{ .err = error.HostNotServing, .code = .host_not_serving, .exit = 6, .phrase = "No Host serves this Store." },
         .{ .err = error.HostStopping, .code = .host_stopping, .exit = 5, .phrase = "The Host for this Store is shutting down and no longer accepts requests." },
-        .{ .err = error.IncompatibleHost, .code = .host_incompatible, .exit = 6, .phrase = "Pause it with the Rui version that started it" },
+        .{ .err = error.IncompatibleHost, .code = .host_incompatible, .exit = 6, .phrase = "Run rui host restart --all" },
         .{ .err = error.InvalidStorePath, .code = .store_path_malformed, .exit = 2, .phrase = "Supply --store PATH" },
         .{ .err = error.InvalidStore, .code = .store_path_malformed, .exit = 2, .phrase = "canonical form is at most 492 bytes" },
         .{ .err = error.StoreUnavailable, .code = .store_unavailable, .exit = 6, .phrase = "permissions to 0700" },

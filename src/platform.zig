@@ -477,6 +477,12 @@ pub fn interfaceFor(canonical: []const u8, buffer: []u8) ![]const u8 {
     return std.fmt.bufPrint(buffer, "{s}/{s}", .{ runtime, hash_text });
 }
 
+/// Read-only address used by releases before per-Host interface directories.
+pub fn legacySocketForCanonical(canonical: []const u8, buffer: []u8) ![]const u8 {
+    var interface: [max_interface_directory_bytes]u8 = undefined;
+    return std.fmt.bufPrint(buffer, "{s}.sock", .{try interfaceFor(canonical, &interface)});
+}
+
 fn socketPathForCanonical(canonical: []const u8, buffer: []u8) ![]const u8 {
     var interface: [max_interface_directory_bytes]u8 = undefined;
     return std.fmt.bufPrint(buffer, "{s}/{s}", .{ try interfaceFor(canonical, &interface), hs.socket_name });
@@ -645,6 +651,8 @@ test "socket path uses the first 16 SHA-256 bytes in lowercase hex" {
     var buffer: [max_socket_path_bytes]u8 = undefined;
     const path = try socketPathForCanonical("/tmp/rui-stdlib-hex", &buffer);
     try std.testing.expect(std.mem.endsWith(u8, path, "/043ea4efef72c68973ebffcb0927e537/rui.sock"));
+    const legacy = try legacySocketForCanonical("/tmp/rui-stdlib-hex", &buffer);
+    try std.testing.expect(std.mem.endsWith(u8, legacy, "/043ea4efef72c68973ebffcb0927e537.sock"));
 }
 
 test "absent destination preflight checks components but bounds canonical aliases" {

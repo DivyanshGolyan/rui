@@ -36,6 +36,34 @@ pub const Target = struct {
     }
 };
 
+/// Replace an identified older managed Host on an ordinary detached start.
+pub fn activateOlderHostForStart(init: std.process.Init, directory: []const u8) !HostLifecycle.ActivationOutcome {
+    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+    const allocator = init.gpa;
+    var observation = try HostLifecycle.observe(allocator, init.io, home, directory, null);
+    defer observation.deinit(allocator);
+    if (observation != .managed) return error.UnrecognizedHost;
+    const target = try Target.init(init, allocator, home, null, null);
+    defer target.deinit(allocator);
+    const binary = try std.fmt.allocPrint(allocator, "{s}/bin/rui", .{target.build});
+    defer allocator.free(binary);
+    const actual = try std.Io.Dir.cwd().realPathFileAlloc(init.io, binary, allocator);
+    defer allocator.free(actual);
+    if (!startTargetEligible(observation.managed.observed.foreign, observation.managed.version.order(target.version), actual, try @import("self_executable.zig").path(init.io))) return error.IneligibleStartHandover;
+    return HostLifecycle.activate(init, allocator, &observation, .same, target.build, target.version, null, null);
+}
+
+fn startTargetEligible(foreign: bool, order: std.math.Order, selected: []const u8, running: []const u8) bool {
+    return foreign and order == .lt and std.mem.eql(u8, selected, running);
+}
+
+test "start handover requires an older foreign Host and this selected build" {
+    for ([_]bool{ false, true }) |foreign| for (std.enums.values(std.math.Order)) |order| for ([_]bool{ false, true }) |same| {
+        const running = if (same) "/selected/bin/rui" else "/other/bin/rui";
+        try std.testing.expectEqual(foreign and order == .lt and same, startTargetEligible(foreign, order, "/selected/bin/rui", running));
+    };
+}
+
 const Result = activation.Category;
 const Totals = activation.Counts;
 

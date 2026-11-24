@@ -148,7 +148,7 @@ Codex, OpenAI and the existing required identity/control fields remain required;
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
 Missing credentials do not change readiness.
-An owned Store without a usable listener/reply, or with a valid bounded 503 capacity/fencing error, is **owned but unavailable** (possibly starting, busy or shutting down; not a finer diagnosis); a complete malformed or unknown 503 reply is incompatible, distinct from an access failure.
+When the current endpoint is absent and the Store is owned, discovery also probes the legacy flat socket for that Store. An owned Store without a usable listener/reply at either endpoint, or with a valid bounded 503 capacity/fencing error, is **owned but unavailable** (possibly starting, busy or shutting down; not a finer diagnosis); a complete malformed or unknown 503 reply is incompatible, distinct from an access failure.
 Lease and socket observations may race replacement, so they are not a durable ownership certificate and must not authorize effects.
 After listener closure, only the lease can still establish ownership; without it, completion remains unconfirmed.
 No status registry, separate listener, client SQLite, credential access or Store-lease-based socket reclamation is involved.
@@ -161,6 +161,7 @@ Unavailable and owned-but-unavailable never claim that outstanding effects have 
 #### Detached launch admission
 
 `rui host start [--store PATH]` attaches to a ready Host without changing it.
+When bare `rui` or `host start` encounters an older, incompatible managed Host, it attempts the same authenticated activation as restart-all if the selected managed installation is the running client. It verifies the Host and its sources, checks the target, stops the exact instance and confirms replacement readiness before attaching; an unrecognized or unconfirmed owner is never stopped.
 Otherwise the existing starter retains one pointer-stable, wiping-owned unresolved Settings allocation and its provider intent through launch.
 The admitted allocation determines both local placement and a versioned source-only frame; counting and the complete composed bound are checked before directory creation or child launch.
 The bound includes every typed field, encoding expansion, all independently assigned presets, intent and framing, not merely one input document's limit.

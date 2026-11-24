@@ -699,11 +699,58 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
     return hostStatusAt(io, &paths, deadline);
 }
 
+// A flat socket is only a read-only hint when the current endpoint is absent
+// and the SQLite Store is owned. All lifecycle decisions still authenticate
+// its peer and confirm the Host through the ordinary upgrade observation.
+fn upgradePaths(io: std.Io, paths: *const platform.Paths) platform.Paths {
+    var buffer: [platform.max_socket_path_bytes]u8 = undefined;
+    const legacy = platform.legacySocketForCanonical(paths.host_directory.slice(), &buffer) catch return paths.*;
+    return upgradePathsWithLegacy(io, paths, legacy);
+}
+
+fn upgradePathsWithLegacy(io: std.Io, paths: *const platform.Paths, legacy: []const u8) platform.Paths {
+    var result = paths.*;
+    if (paths.kind != .sqlite or paths.host_directory.len == 0 or lockState(io, paths) != .held) return result;
+    if (std.Io.Dir.cwd().statFile(io, paths.socket.slice(), .{ .follow_symlinks = false })) |_| return result else |err| {
+        if (err != error.FileNotFound) return result;
+    }
+    const stat = std.Io.Dir.cwd().statFile(io, legacy, .{ .follow_symlinks = false }) catch return result;
+    if (stat.kind != .unix_domain_socket) return result;
+    result.socket.set(legacy) catch return paths.*;
+    return result;
+}
+
+test "legacy endpoint routing requires an owned Store and an absent current endpoint" {
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var paths = try platform.resolveClientPaths(io, root);
+    var current_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const current = try tmp.address("current.sock", &current_buffer);
+    try paths.socket.set(current.path);
+    var legacy_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const legacy = try tmp.address("legacy.sock", &legacy_buffer);
+    var listener = try legacy.listen(io, .{});
+    defer listener.deinit(io);
+    try std.testing.expectEqualStrings(current.path, upgradePathsWithLegacy(io, &paths, legacy.path).socket.slice());
+    var lease = try platform.StoreLease.acquire(io, root);
+    defer lease.release();
+    try std.testing.expectEqualStrings(legacy.path, upgradePathsWithLegacy(io, &paths, legacy.path).socket.slice());
+    try tmp.dir.writeFile(io, .{ .sub_path = "current.sock", .data = "not a socket" });
+    try std.testing.expectEqualStrings(current.path, upgradePathsWithLegacy(io, &paths, legacy.path).socket.slice());
+    try tmp.dir.deleteFile(io, "current.sock");
+    try std.testing.expectEqualStrings(current.path, upgradePathsWithLegacy(io, &paths, root).socket.slice());
+}
+
 pub fn hostStatusAt(io: std.Io, paths: *const platform.Paths, deadline: ?i128) protocol_reply.HostStatus {
     if (paths.kind == .mysql) return readHostInfo(io, paths, deadline);
     return switch (lockState(io, paths)) {
         .free => .unavailable,
-        .held => readHostInfo(io, paths, deadline),
+        .held => held: {
+            const selected = upgradePaths(io, paths);
+            break :held readHostInfo(io, &selected, deadline);
+        },
         .failure => .access_failure,
     };
 }
@@ -776,7 +823,8 @@ pub const StatusFacts = struct {
 
 pub fn observeHostForUpgrade(allocator: std.mem.Allocator, io: std.Io, store_path: []const u8, deadline: ?i128) !HostControlObservation {
     const paths = try resolveClientPaths(io, store_path);
-    return observeHostForUpgradeAt(allocator, io, &paths, hostObservationDeadline(io, deadline), .{});
+    const selected = upgradePaths(io, &paths);
+    return observeHostForUpgradeAt(allocator, io, &selected, hostObservationDeadline(io, deadline), .{});
 }
 
 /// `until` is the shared discovery budget for the socket exchange and, after a
@@ -898,7 +946,8 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
 /// or resolving MySQL identity. The caller owns (and must wipe) the snapshot.
 pub fn observeUpgradePeer(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, deadline: ?i128) !@import("host_identity.zig").Snapshot {
     const paths = try platform.resolveClientPaths(io, directory);
-    const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
+    const selected = upgradePaths(io, &paths);
+    const address = try std.Io.net.UnixAddress.init(selected.socket.slice());
     const fd = try connectRequest(.{ .io = io }, address, hostObservationDeadline(io, deadline));
     defer closeSocket(io, fd);
     const identity = @import("host_identity.zig");
