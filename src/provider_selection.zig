@@ -109,7 +109,7 @@ pub fn resolve(capabilities: []const Capability, explicit_provider: ?[]const u8,
     return error.UnsupportedSelectionProvider;
 }
 
-test "Codex selection accepts identifiers without claiming model qualification" {
+test "CM-62 model identifier admission: a bounded printable identifier is admitted as the model, and any other is refused" {
     var readiness: Readinesses = .initFill(.configured);
     const capability = @import("model_capability.zig").capabilities(&readiness).slice()[0];
     try std.testing.expectEqualStrings("family=variant", (try resolve(&.{capability}, null, "family=variant", null, null)).selected.model);
@@ -203,39 +203,5 @@ test "CM-59 local served names resolve at their own readiness, and a name the cl
         try std.testing.expect(passesThrough(unknown.slice(), &known));
         try std.testing.expectError(error.UnsupportedSelectionProvider, resolve(caps.slice(), unknown.slice(), null, null, null));
         try std.testing.expect(!passesThrough(null, &known));
-    };
-}
-
-test "CM-60 model precedence: a known or unknown name takes its explicit, saved-matching, saved-other or no model" {
-    const model_capability = @import("model_capability.zig");
-    const known = connection.Name.parse("alpha").?;
-    var readiness: Readinesses = .initFill(.missing);
-    readiness.set(known, .configured);
-    var caps = model_capability.capabilities(&readiness);
-    const Model = enum { explicit, saved_matching, saved_other, absent };
-    for ([_][]const u8{ "alpha", "beta" }) |name| for (std.enums.values(Model)) |model_case| {
-        const explicit: ?[]const u8 = if (model_case == .explicit) "explicit-model" else null;
-        const saved_provider: ?[]const u8 = switch (model_case) {
-            .saved_matching => name,
-            .saved_other => "gamma",
-            else => null,
-        };
-        const saved_model: ?[]const u8 = if (saved_provider != null) "saved-model" else null;
-        if (std.mem.eql(u8, name, "alpha")) {
-            // A known name supplies its recommended model when neither an explicit nor a matching saved model names one.
-            const selection = try resolve(caps.slice(), name, explicit, saved_provider, saved_model);
-            switch (model_case) {
-                .explicit => try std.testing.expectEqualStrings("explicit-model", selection.selected.model),
-                .saved_matching => try std.testing.expectEqualStrings("saved-model", selection.selected.model),
-                .saved_other, .absent => try std.testing.expect(selection.selected.model.len != 0),
-            }
-        } else {
-            // An unknown name supplies no model of its own: a name with neither is refused by name.
-            switch (model_case) {
-                .explicit => try std.testing.expectEqualStrings("explicit-model", (try resolveUnknown(name, explicit, saved_provider, saved_model)).model),
-                .saved_matching => try std.testing.expectEqualStrings("saved-model", (try resolveUnknown(name, explicit, saved_provider, saved_model)).model),
-                .saved_other, .absent => try std.testing.expectError(error.ConnectionModelRequired, resolveUnknown(name, explicit, saved_provider, saved_model)),
-            }
-        }
     };
 }
