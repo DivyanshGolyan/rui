@@ -23,7 +23,7 @@ import build_files
 ROOT = Path(__file__).resolve().parents[2]
 
 MAC_PATHS = (
-    "src/os/*", "src/cli.zig", "src/client.zig", "src/platform.zig", "src/HostLifecycle.zig",
+    "src/os/*", "src/cli.zig", "src/client.zig", "src/platform.zig", "src/runtime_directory.zig", "src/HostLifecycle.zig",
     "src/host_coordinator.zig", "src/host_endpoint.zig", "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig",
     "src/upgrade.zig", "src/upgrade_process.zig", "src/self_executable.zig",
     # The Python fixtures' platform owner. Fixtures ask it for platform facts

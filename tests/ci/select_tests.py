@@ -473,7 +473,7 @@ RULES = (
     (("src/os/*",), ("codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
      ("codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
      "Platform boundary: the managed transport and credential store it serves on each OS"),
-    (("src/descriptor*", "src/os/descriptor_limit.zig", "src/server*.zig", "src/platform.zig", "src/cli.zig",
+    (("src/descriptor*", "src/os/descriptor_limit.zig", "src/server*.zig", "src/platform.zig", "src/runtime_directory.zig", "src/cli.zig",
       "tests/integration/descriptor*", "tests/integration/host_launch*", "src/product_defaults.zig",
       "tests/integration/product_defaults.py"),
      ("test", "host-launch-integration", "descriptor-capacity-integration", "codex-h2-integration", "transport-h2-integration"),

@@ -12,7 +12,7 @@
 //! it (a starting Host, the upgrade census) may remove a dead endpoint.
 const std = @import("std");
 const c = @import("posix");
-const platform = @import("platform.zig");
+const runtime_directory = @import("runtime_directory.zig");
 const host_settings = @import("host_settings.zig");
 
 pub const socket_name = host_settings.socket_name;
@@ -35,8 +35,8 @@ pub const Interface = union(enum) {
     /// The one classification, shared with `census`: the shape of the path
     /// decides, so a Host and a census never disagree about who owns D.
     pub fn init(directory: []const u8) !Interface {
-        var buffer: [platform.max_runtime_directory_bytes]u8 = undefined;
-        return within(try platform.runtimeDirectory(&buffer), directory);
+        var buffer: [runtime_directory.max_runtime_directory_bytes]u8 = undefined;
+        return within(try runtime_directory.runtimeDirectory(&buffer), directory);
     }
 
     fn within(runtime: []const u8, directory: []const u8) !Interface {
@@ -384,15 +384,15 @@ pub fn occupancy(io: std.Io, directory: []const u8) Occupancy {
 /// caller). Flat sockets of older releases are not endpoints and stay; the
 /// process census finds a live Host there.
 pub fn census(allocator: std.mem.Allocator, io: std.Io) ![][]u8 {
-    var buffer: [platform.max_runtime_directory_bytes]u8 = undefined;
-    return censusIn(allocator, io, try platform.runtimeDirectory(&buffer), null);
+    var buffer: [runtime_directory.max_runtime_directory_bytes]u8 = undefined;
+    return censusIn(allocator, io, try runtime_directory.runtimeDirectory(&buffer), null);
 }
 
 /// Host start, best effort: the census without its report, skipping this
 /// Host's own D, so killed Hosts' endpoints do not pile up between upgrades.
 pub noinline fn sweepNeighbors(allocator: std.mem.Allocator, own: *const Endpoint) void {
-    var buffer: [platform.max_runtime_directory_bytes]u8 = undefined;
-    const runtime = platform.runtimeDirectory(&buffer) catch return;
+    var buffer: [runtime_directory.max_runtime_directory_bytes]u8 = undefined;
+    const runtime = runtime_directory.runtimeDirectory(&buffer) catch return;
     const found = censusIn(allocator, own.io, runtime, own.interface.path()) catch return;
     freeSockets(allocator, found);
 }
