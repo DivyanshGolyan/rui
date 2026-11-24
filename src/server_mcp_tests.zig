@@ -1,4 +1,5 @@
 const std = @import("std");
+const execution_owner = @import("execution_owner.zig");
 const store = @import("store.zig");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
@@ -172,10 +173,12 @@ fn run(case: Case) !void {
     var custody: [2]execution.CustodyRecord = @splat(.{});
     const host = try allocator.create(Host);
     defer allocator.destroy(host);
-    host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .custody = execution.CustodyPool.initialize(custody[0..(if (case == .concurrent) 2 else 1)]), .mcp_servers = .{ .entries = &servers }, .retention = &queue };
+    host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .mcp_servers = .{ .entries = &servers }, .retention = &queue };
     var host_parts: TestParts = undefined;
     host_parts.attach(host, undefined);
-    const parts: action_attempt.Parts = .{ .store = storage, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &host.custody };
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(custody[0..(if (case == .concurrent) 2 else 1)], null, &host_parts.lifecycle, &host.scratch_used, null);
+    const parts: action_attempt.Parts = .{ .store = storage, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &execution_state.custody };
     if (case == .retention_settlement_failure or case == .retention_settlement_unlink_failure) host.probes.arm(.result_before_commit);
     var active: mcp.Calls = .{};
     defer {
@@ -305,7 +308,7 @@ fn run(case: Case) !void {
     if (case == .timeout or case == .stop or case == .shutdown or case == .concurrent) {
         try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), &script.connection_closed, poll.isSet);
     }
-    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    try std.testing.expectEqual(@as(usize, 0), execution_state.custody.occupied());
     if (case == .retention_settlement_failure or case == .retention_settlement_unlink_failure) {
         try std.testing.expect(storage.isFenced());
         try std.testing.expect(!host.lifecycle.launchAllowed());

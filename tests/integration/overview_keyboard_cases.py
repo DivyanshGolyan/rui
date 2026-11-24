@@ -26,6 +26,8 @@ def cases():
     """SUI-120 Right Arrow transfers keyboard input to the selected Session."""
     keyboard_activation()
     creator_gestures()
+    from overview_tree_keys_cases import tree_key_custody
+    tree_key_custody()
 
 
 def keyboard_activation():

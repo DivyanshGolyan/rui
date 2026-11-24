@@ -139,7 +139,7 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('- name: Require PR Shape\n        id: shape', plan)
         self.assertIn('python3 tests/ci/pr_shape.py "$BASE"', plan)
         self.assertEqual(admission.count("if: ${{ needs.plan.outputs.screens_required == 'true' }}"), 1)
-        self.assertIn('sparse-checkout: tests/ci', admission)
+        self.assertIn('sparse-checkout: |\n            tests/ci\n', admission)
         self.assertIn('ref: ${{ needs.plan.outputs.candidate_ref }}', admission)
         self.assertIn('run: python3 tests/ci/pr_shape.py --screens', admission)
         self.assertLess(admission.index('- name: Require screen evidence'),
