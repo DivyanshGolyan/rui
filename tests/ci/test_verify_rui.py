@@ -1506,6 +1506,14 @@ while True:
         self.assertEqual(states["tools-running"]["expect"],
                          ["◝ Build the docs", "Run the slow tests", "ctrl+x stop"])
 
+    def test_default_frames_cover_keys_reference(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        keys = next(state for state in scenario["states"] if state["name"] == "keys")
+        for meaning in ("next focus", "previous focus", "ctrl+o   tool output", "ctrl+c   leave",
+                        "open chat · info actions", "fold / expand tree"):
+            self.assertIn(meaning, keys["expect"])
+        self.assertIn("/help", keys["absent"])
+
     def test_default_frames_cover_inline_tool_folds(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
@@ -1537,14 +1545,6 @@ while True:
         self.assertNotIn("help", states)
         self.assertIn("× Fail with exit 127", states["chat"]["expect"])
         self.assertIn("exit 127", states["chat"]["expect"])
-
-    def test_default_frames_cover_keys_reference(self):
-        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
-        keys = next(state for state in scenario["states"] if state["name"] == "keys")
-        for meaning in ("next focus", "previous focus", "ctrl+o   tool output", "ctrl+c   leave",
-                        "open chat · info actions", "fold / expand tree"):
-            self.assertIn(meaning, keys["expect"])
-        self.assertIn("/help", keys["absent"])
 
     def test_tool_frames_require_adjacent_rows_and_explicit_exit_fields(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))

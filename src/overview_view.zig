@@ -977,6 +977,42 @@ pub const State = struct {
         self.menu_read = .unread;
     }
 
+    fn parentPress(self: *State, candidate: ?Reference, at_ms: ?u64) enum { open, wait, toggle } {
+        const pending = self.parent_click;
+        self.cancelParentClick();
+        const reference = candidate orelse return .open;
+        const now = at_ms orelse return .open;
+        if (pending) |prior| {
+            if (prior.released and now < prior.deadline_ms and std.mem.eql(u8, &prior.reference, &reference)) return .toggle;
+        }
+        self.parent_click = .{ .reference = reference, .deadline_ms = now +| ParentClick.interval_ms };
+        return .wait;
+    }
+
+    fn cancelParentClick(self: *State) void {
+        self.parent_click = null;
+    }
+
+    fn releaseParentClick(self: *State, over: ?Reference) void {
+        if (self.parent_click) |*pending| {
+            if (over != null and std.mem.eql(u8, &over.?, &pending.reference)) {
+                pending.released = true;
+            } else self.cancelParentClick();
+        }
+    }
+
+    fn readyParentClick(self: *State, focused: bool, at_ms: ?u64) ?Reference {
+        if (!focused) {
+            self.cancelParentClick();
+            return null;
+        }
+        const pending = self.parent_click orelse return null;
+        const now = at_ms orelse return null;
+        if (now < pending.deadline_ms) return null;
+        self.cancelParentClick();
+        return pending.reference;
+    }
+
     pub fn deinit(self: *State) void {
         self.menu.deinit(self.gpa);
         for (self.workspaces.items) |bytes| self.gpa.free(bytes);
@@ -1466,7 +1502,7 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
             try listInput(state, input, &effects);
         },
         .viewport => |span| {
-            state.parent_click = null;
+            state.cancelParentClick();
             state.viewport = viewportRows(state, span);
             try archivedReads(state, &effects);
         },
@@ -1477,14 +1513,10 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
             if (was_held and !holding(state)) try releaseOrder(state);
         },
         .list_settled => |frame| {
-            if (!frame.focused) state.parent_click = null;
-            if (state.parent_click) |click| if (frame.click_clock_ms) |now| {
-                if (now >= click.deadline_ms) {
-                    state.parent_click = null;
-                    state.presentation_revision +%= 1;
-                    try clickOpen(state, click.reference, &effects);
-                }
-            };
+            if (state.readyParentClick(frame.focused, frame.click_clock_ms)) |reference| {
+                state.presentation_revision +%= 1;
+                try clickOpen(state, reference, &effects);
+            }
             const pending = state.browse_pending;
             state.browse_pending = false;
             if (pending and frame.wide and frame.focused) {
@@ -1513,24 +1545,27 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
         .clicked => |input| {
             state.launch = .done;
             endCarry(state);
-            const parent_click = state.parent_click;
-            state.parent_click = null;
+            const candidate = if (!state.creating() and input.target == .open) input.target.open else null;
+            const parent = if (candidate) |reference|
+                if (position(state, reference) != null and foldable(state, reference)) reference else null
+            else
+                null;
+            const gesture = state.parentPress(parent, input.at_ms);
             if (!state.creating()) switch (input.target) {
-                .open => |reference| open_row: {
+                .open => |reference| {
                     // Only an admitted press can carry its row: while a chat is being created, clicks are refused.
                     state.carry.pressed = reference;
-                    if (input.at_ms) |now| if (position(state, reference) != null and foldable(state, reference)) {
-                        state.browse_pending = false;
-                        state.selected = .{ .session = reference };
-                        if (parent_click) |click| if (click.released and now < click.deadline_ms and std.mem.eql(u8, &click.reference, &reference)) {
-                            endCarry(state);
-                            try foldSelected(state, !isFolded(state, reference));
-                            break :open_row;
-                        };
-                        state.parent_click = .{ .reference = reference, .deadline_ms = now +| ParentClick.interval_ms };
-                        break :open_row;
-                    };
-                    try clickOpen(state, reference, &effects);
+                    switch (gesture) {
+                        .open => try clickOpen(state, reference, &effects),
+                        .wait, .toggle => {
+                            state.browse_pending = false;
+                            state.selected = .{ .session = reference };
+                            if (gesture == .toggle) {
+                                endCarry(state);
+                                try foldSelected(state, !isFolded(state, reference));
+                            }
+                        },
+                    }
                 },
                 .pin => |request| pinIntent(state, request, &effects),
                 .new_session => {
@@ -2723,7 +2758,7 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         return;
     }
     if (delivery.under or state.creating()) return;
-    state.parent_click = null;
+    state.cancelParentClick();
     const before = state.selected;
     switch (input) {
         .ignored => unreachable,
@@ -2887,18 +2922,17 @@ fn carryPointer(state: *State, pointer: Pointer, effects: *Effects) error{OutOfM
         if (!state.carry.carrying) {
             // A drag still inside the pressed row is a click that wobbled.
             if (pointer.over != null and pointer.over.? == .open and std.mem.eql(u8, &pointer.over.?.open, &pressed)) return;
-            state.parent_click = null;
+            state.cancelParentClick();
             state.carry.carrying = true;
         }
         state.carry.over = pointer.over;
         if (!std.meta.eql(before, state.carry)) state.presentation_revision +%= 1;
         return;
     }
-    if (pointer.phase == .released) if (state.parent_click) |*click| {
-        if (pointer.over != null and pointer.over.? == .open and std.mem.eql(u8, &pointer.over.?.open, &click.reference)) {
-            click.released = true;
-        } else state.parent_click = null;
-    };
+    if (pointer.phase == .released) {
+        const over = if (pointer.over != null and pointer.over.? == .open) pointer.over.?.open else null;
+        state.releaseParentClick(over);
+    }
     const dropped = pointer.phase == .released and state.carry.carrying and blk: {
         state.carry.over = pointer.over;
         break :blk state.carry.dropping(state);
