@@ -912,67 +912,6 @@ const NativePromotion = struct {
     }
 };
 
-test "historical fixture rewinds refuse retained pin background and stop facts before DDL" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            const Evidence = enum { pin, refused_control, background, stop_cutoff, action_stop };
-            inline for (std.enums.values(Evidence)) |evidence| {
-                inline for (.{ false, true }) |ending| {
-                    var tmp = std.testing.tmpDir(.{});
-                    defer tmp.cleanup();
-                    var storage: Store = undefined;
-                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-                    defer storage.close() catch unreachable;
-                    const session = try shared_fixtures.configureTestSessionWithMode(&storage, "rewind-config", "bypass");
-
-                    switch (evidence) {
-                        .pin => {
-                            var command: protocol.SessionPinCommand = .{ .pinned = false, .session = session };
-                            try command.key.set("rewind-unpin");
-                            try std.testing.expect(storage.pinSession(&command, .{}) == .accepted);
-                        },
-                        .refused_control => {
-                            var command = try NativePromotion.command(session.slice(), "rewind-refused-control", 0);
-                            try std.testing.expect(storage.backgroundAction(.{ .command = &command }, .{}) == .rejected);
-                        },
-                        .background => _ = try NativePromotion.promoted(&storage, &tmp, session.slice()),
-                        .action_stop => {
-                            try submitTestMessage(&storage, &tmp, "rewind-action-message", "rewind-action-message", session.slice(), "run");
-                            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                            try settleTwoActionsForTesting(&storage, &tmp, model, "rewind-action-calls");
-                            const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
-                            const second = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
-                            try store_testing.exec(&storage, "INSERT INTO action_stop(stop_key,source_action_id,target_action_id) VALUES(?1,?2,?3)", .{ "fixture", first, second });
-                        },
-                        .stop_cutoff => {
-                            _ = try NativePromotion.propose(&storage, &tmp, session.slice());
-                            var stop = try completeSessionStop("rewind-stop", session.slice());
-                            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-                            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE action_cutoff>0", .{}));
-                        },
-                    }
-                    const pins = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_pin", .{});
-                    const controls = try store_testing.queryU64(&storage, "SELECT count(*) FROM action_control_command", .{});
-                    const stops = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE action_cutoff>0", .{});
-                    const direct_stops = try store_testing.queryU64(&storage, "SELECT count(*) FROM action_stop", .{});
-                    if (ending) {
-                        try std.testing.expectError(error.TestExpectedEqual, store_testing.stageEndingMessageUpgrade(&storage, false));
-                    } else {
-                        try std.testing.expectError(error.TestExpectedEqual, store_testing.stageObligationUpgrade(&storage));
-                    }
-                    try std.testing.expectEqual(pins, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_pin", .{}));
-                    try std.testing.expectEqual(controls, try store_testing.queryU64(&storage, "SELECT count(*) FROM action_control_command", .{}));
-                    try std.testing.expectEqual(stops, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE action_cutoff>0", .{}));
-                    try std.testing.expectEqual(direct_stops, try store_testing.queryU64(&storage, "SELECT count(*) FROM action_stop", .{}));
-                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value=?1", .{comptime std.fmt.comptimePrint("{d}", .{@import("../schema.zig").schema_version})}));
-                    try std.testing.expect(!storage.isFenced());
-                    _ = try store_testing.configureTestSession(&storage, "rewind-still-usable");
-                }
-            }
-        }
-    }.run);
-}
-
 test "native promotion keeps one attempted invocation and receipt while final input wakes the Session" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

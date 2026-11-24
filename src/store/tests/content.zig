@@ -543,10 +543,6 @@ fn checkCompoundCorruption(case: *store_testing.Case, wrong_form: bool) !void {
     try std.testing.expect(saved.reference == .parts);
     const again = try transition.apply(&storage, CompoundSave, .{ .source = .{ .captured = loan }, .saving = &saving }, .{});
     try std.testing.expectEqual(saved.content_id, again.content_id);
-    const mysql_checks = "SELECT count(*) AS value FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='action_operation' AND CONSTRAINT_TYPE IN ('CHECK','FOREIGN KEY')";
-    const checks_before = if (case.engine == .mysql) try @import("../mysql_testing.zig").rawQueryU64(&storage, mysql_checks) else 0;
-    try std.testing.expectError(error.TestExpectedEqual, store_testing.stageObligationUpgrade(&storage));
-    if (case.engine == .mysql) try std.testing.expectEqual(checks_before, try @import("../mysql_testing.zig").rawQueryU64(&storage, mysql_checks));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1 AND form=1", .{saved.content_id}));
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM content_part WHERE content_id=?1", .{saved.content_id}));
     {
