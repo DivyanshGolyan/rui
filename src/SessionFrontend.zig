@@ -327,7 +327,7 @@ pub const Lender = struct {
 
     upgrade: *const fn (context: *anyopaque) session_upgrade.Upgrade,
     archive_state: ?*const fn (*anyopaque) ChatInfo.SaveState = null,
-    configure_keys: ?*const fn (*anyopaque, *[overview_view.max_requests][36]u8) usize = null,
+    configure_keys: ?*const fn (*anyopaque, *[overview_view.max_requests]@import("configure_outcome.zig").Original) usize = null,
     models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
 
     pub const Said = struct {
@@ -593,7 +593,7 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
                 .failed => .failed,
             };
         }
-        fn unconfirmedKey(raw: *anyopaque) ?[36]u8 {
+        fn unconfirmedKey(raw: *anyopaque) ?@import("configure_outcome.zig").Original {
             const frontend = owner(raw);
             const outcome = frontend.info_last orelse return null;
             return if (outcome == .unconfirmed) outcome.unconfirmed else null;
@@ -1777,9 +1777,37 @@ pub fn hasDepartureGuidance(self: *const Self) bool {
         self.inspection.command_running or self.screen.action_view != null;
 }
 
+fn writeConfigureFallback(original: @import("configure_outcome.zig").Original, out: *std.Io.Writer) !void {
+    try out.writeAll("\nrui: Configure in Store ");
+    var safe: TerminalText = .{ .mode = .line };
+    try safe.feed(out, original.store.slice());
+    try safe.finish(out);
+    try out.print(" not confirmed. Original: ~/.config/rui/requests/{s}.json. Inspect it first; rui request recover {s} may apply an older setting.\n", .{ &original.key, &original.key });
+}
+
+test "SUI-135 Configure fallback escapes Store identity within its bound" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    var original: @import("configure_outcome.zig").Original = .{ .key = key, .store = .{} };
+    try original.store.set("/tmp/\u{202e}store");
+    var bytes: [protocol.max_store_bytes * TerminalText.max_bytes_per_byte + 256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try writeConfigureFallback(original, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "\\u202e") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "\u{202e}") == null);
+    const maximum: [protocol.max_store_bytes]u8 = @splat(0x1b);
+    try original.store.set(&maximum);
+    out = .fixed(&bytes);
+    try writeConfigureFallback(original, &out);
+    try std.testing.expectEqual(@as(usize, maximum.len), std.mem.count(u8, out.buffered(), "\\x1b"));
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), &key) != null);
+}
+
 pub fn writeDeparture(self: *Self, result: Departure) void {
     if (self.info_reserved) if (self.info_last) |outcome| if (outcome == .unconfirmed) {
-        stderr.diagnostic("rui: Configure not confirmed. Recover the original with rui request recover {s}.\n", .{&outcome.unconfirmed});
+        var bytes: [protocol.max_store_bytes * TerminalText.max_bytes_per_byte + 256]u8 = undefined;
+        var out = std.Io.Writer.fixed(&bytes);
+        writeConfigureFallback(outcome.unconfirmed, &out) catch unreachable;
+        stderr.diagnosticBytes(out.buffered());
     };
     if (self.reading.pending_diagnostic != null) {
         var bytes: [1024]u8 = undefined;
@@ -3475,10 +3503,10 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             self.inspection.status_requested = true;
             self.poll_at = 0;
         }
-        for (self.job.result.configure_resolved[0..self.job.result.configure_resolved_count]) |key| {
-            _ = try self.lender.step(self.lender.context, self.shownWork(), .{ .configure = .{ .observed = key } });
-            self.app_info.clearUnconfirmed(key);
-            if (self.info_last) |last| if (last == .unconfirmed and std.mem.eql(u8, &last.unconfirmed, &key)) {
+        for (self.job.result.configure_resolved[0..self.job.result.configure_resolved_count]) |original| {
+            _ = try self.lender.step(self.lender.context, self.shownWork(), .{ .configure = .{ .observed = original } });
+            self.app_info.clearUnconfirmed(original);
+            if (self.info_last) |last| if (last == .unconfirmed and std.mem.eql(u8, &last.unconfirmed.key, &original.key) and last.unconfirmed.store.eql(original.store.slice())) {
                 self.info_last = null;
             };
         }
@@ -9797,7 +9825,7 @@ test "SUI-136 Current and Configure receipt stay independent across a later edit
     try held.keys("next draft");
     self.info_reserved = true;
     self.info_effect = .configure;
-    try self.finishConfigure(.{ .unconfirmed = key });
+    try self.finishConfigure(.{ .unconfirmed = .{ .key = key, .store = try .from("/store-a") } });
     try std.testing.expectEqualStrings("Updating…", self.footerFacts().?.model);
     try std.testing.expect(self.info_refresh and self.inspection.status_requested);
     self.job.result.status = true;
@@ -9808,7 +9836,7 @@ test "SUI-136 Current and Configure receipt stay independent across a later edit
     try self.applyStatus();
     try std.testing.expectEqualStrings("gpt-5.5", self.footerFacts().?.model);
     try std.testing.expectEqual(model_capability.ReasoningEffort.medium, self.footerFacts().?.effort.?);
-    try std.testing.expectEqual(key, self.info_last.?.unconfirmed);
+    try std.testing.expectEqual(key, self.info_last.?.unconfirmed.key);
     try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
     const backend = self.infoBackend();
     try backend.configure(backend.context, .{ .effort = .high });

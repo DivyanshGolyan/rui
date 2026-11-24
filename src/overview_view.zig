@@ -53,6 +53,11 @@ pub const mark_column = 1;
 pub const text_column = 3;
 
 pub const max_handle_bytes = 36;
+pub const max_configure_intent_bytes = 1024;
+const configure_departure_prefix = "rui: Configure for {s} in Store ";
+const configure_departure_suffix = " is not confirmed: {s}. Original: ~/.config/rui/requests/{s}.json. Recovery with rui request recover {s} may apply this older setting.\n";
+pub const max_departure_entry_bytes = @max(512, configure_departure_prefix.len + configure_departure_suffix.len + @sizeOf(Reference) + TerminalText.max_bytes_per_byte * @import("store_path.zig").max_bytes + max_configure_intent_bytes + 2 * @max(max_handle_bytes, session_work.max_code_bytes));
+pub const max_departure_bytes = max_requests * max_departure_entry_bytes;
 
 const OrderClass = enum { needs_you, working, done, queued };
 
@@ -508,7 +513,7 @@ pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes
         at -= 1;
         const request = &state.requests[at];
         if (request.status != .unknown) continue;
-        if (request.kind == .configure) return std.fmt.bufPrint(buffer, "! Config unconfirmed · /requests: keys · exit: intent", .{}) catch unreachable;
+        if (request.kind == .configure) return std.fmt.bufPrint(buffer, "! Config unconfirmed · exit for Store and intent", .{}) catch unreachable;
         if (request.kind != .send) continue;
         return switch (request.sent) {
             .saved => |saved| std.fmt.bufPrint(buffer, "! Not confirmed · rui request recover {s}", .{&saved.original.key}),
@@ -583,12 +588,12 @@ pub fn noticeSegments(arena: Allocator, state: *const State, width: u16, caps: C
     return try std.mem.concat(arena, Segment, parts[0..count]);
 }
 
-pub fn unknownConfigureKeys(state: *const State, reference: Reference, out_keys: *[max_requests][36]u8) usize {
+pub fn unknownConfigureKeys(state: *const State, reference: Reference, out_keys: *[max_requests]@import("configure_outcome.zig").Original) usize {
     var count: usize = 0;
     for (state.requests[0..state.request_count]) |*request| {
         if (request.kind != .configure or request.status != .unknown or request.session == null or
             !std.mem.eql(u8, &request.session.?, &reference) or request.text.len != 36) continue;
-        out_keys[count] = request.text.slice()[0..36].*;
+        out_keys[count] = .{ .key = request.text.slice()[0..36].*, .store = request.configure_store };
         count += 1;
     }
     return count;
@@ -626,7 +631,7 @@ pub const ConversationInput = union(enum) {
     configure: union(enum) {
         reserve: []const u8,
         completed: @import("configure_outcome.zig").Outcome,
-        observed: [36]u8,
+        observed: @import("configure_outcome.zig").Original,
     },
 
     cancel_upgrade,
@@ -790,7 +795,8 @@ pub const Request = struct {
     text: Bounded(@max(max_handle_bytes, session_work.max_code_bytes)) = .{},
 
     sent: submission.Recovery = .none,
-    configure_intent: Bounded(1024) = .{},
+    configure_intent: Bounded(max_configure_intent_bytes) = .{},
+    configure_store: Bounded(@import("store_path.zig").max_bytes) = .{},
 };
 
 pub const Notice = struct {
@@ -1618,7 +1624,7 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .pin => |pinned| pinIntent(state, .{ .reference = input.reference, .pinned = pinned }, &effects),
                 .configure => |configure_event| switch (configure_event) {
                     .reserve => |intent| {
-                        if (intent.len <= 1024 and std.unicode.utf8ValidateSlice(intent) and state.pendingAt(.configure, input.reference) == null and state.request(.configure, input.reference)) {
+                        if (intent.len <= max_configure_intent_bytes and std.unicode.utf8ValidateSlice(intent) and state.pendingAt(.configure, input.reference) == null and state.request(.configure, input.reference)) {
                             state.requests[state.request_count - 1].configure_intent.set(intent) catch unreachable;
                             effects.intent_admission = .admitted;
                         }
@@ -1626,13 +1632,17 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                     .completed => |outcome| {
                         if (state.pendingAt(.configure, input.reference)) |at| switch (outcome) {
                             .accepted, .rejected, .not_sent => state.answer(at, .done, ""),
-                            .unconfirmed => |key| state.answer(at, .unknown, &key),
+                            .unconfirmed => |original| {
+                                state.requests[at].configure_store = original.store;
+                                state.answer(at, .unknown, &original.key);
+                            },
                         };
                     },
-                    .observed => |key| {
+                    .observed => |original| {
                         for (state.requests[0..state.request_count], 0..) |*request, at| {
                             if (request.kind != .configure or request.status != .unknown or request.session == null or
-                                !std.mem.eql(u8, &request.session.?, &input.reference) or !request.text.eql(&key)) continue;
+                                !std.mem.eql(u8, &request.session.?, &input.reference) or !request.text.eql(&original.key) or
+                                !request.configure_store.eql(original.store.slice())) continue;
                             state.answer(at, .done, "");
                             break;
                         }
@@ -1889,7 +1899,13 @@ pub fn writeDeparture(state: *const State, _: ?ReasoningEffort, writer: *std.Io.
             .send => try submission.writeGuide(request.sent, writer),
             .configure => switch (request.status) {
                 .pending => try writer.print("rui: Configure for {s} did not finish.\n", .{&request.session.?}),
-                .unknown => try writer.print("rui: Configure for {s} is not confirmed: {s}. Original: ~/.config/rui/requests/{s}.json. Recovery with rui request recover {s} may apply this older setting.\n", .{ &request.session.?, request.configure_intent.slice(), text, text }),
+                .unknown => {
+                    try writer.print(configure_departure_prefix, .{&request.session.?});
+                    var safe: TerminalText = .{ .mode = .line };
+                    try safe.feed(writer, request.configure_store.slice());
+                    try safe.finish(writer);
+                    try writer.print(configure_departure_suffix, .{ request.configure_intent.slice(), text, text });
+                },
                 .done, .failed => {},
             },
         }
@@ -5336,15 +5352,16 @@ test "SUI-135 Configure ledger retains each unknown through later edits and Sess
     const ref = "k7m2qx".*;
     const a: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
     const b: [36]u8 = "01234567-89ab-4cde-8012-0123456789ac".*;
+    const store = try @import("bounded.zig").Bounded(@import("store_path.zig").max_bytes).from("/store-a");
     for ([_]bool{ false, true }) |second_unknown| {
         var state = try opened(&.{session(&ref, .{ .idle = ago(0) }, .{})});
         defer state.deinit();
         const first = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .reserve = "effort medium" } } } });
         try std.testing.expectEqual(IntentAdmission.admitted, first.intent_admission);
-        _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .completed = .{ .unconfirmed = a } } } } });
+        _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .completed = .{ .unconfirmed = .{ .key = a, .store = store } } } } } });
         const next = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .reserve = "effort high" } } } });
         try std.testing.expectEqual(IntentAdmission.admitted, next.intent_admission);
-        const second: @import("configure_outcome.zig").Outcome = if (second_unknown) .{ .unconfirmed = b } else .accepted;
+        const second: @import("configure_outcome.zig").Outcome = if (second_unknown) .{ .unconfirmed = .{ .key = b, .store = store } } else .accepted;
         _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .completed = second } } } });
         _ = try step(&state, .{ .conversation = null });
         _ = try step(&state, .{ .conversation = ref });
@@ -5359,7 +5376,10 @@ test "SUI-135 Configure ledger retains each unknown through later edits and Sess
         try std.testing.expectEqual(second_unknown, std.mem.indexOf(u8, guidance.written(), &b) != null);
         var status: [max_unconfirmed_line_bytes]u8 = undefined;
         try std.testing.expect(unconfirmedLine(&state, &status) != null);
-        _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .observed = a } } } });
+        const other_store = try @import("bounded.zig").Bounded(@import("store_path.zig").max_bytes).from("/store-b");
+        _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .observed = .{ .key = a, .store = other_store } } } } });
+        try std.testing.expectEqual(@as(usize, if (second_unknown) 2 else 1), state.request_count);
+        _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .observed = .{ .key = a, .store = store } } } } });
         try std.testing.expectEqual(@as(usize, @intFromBool(second_unknown)), state.request_count);
         if (second_unknown) try std.testing.expect(state.requests[0].text.eql(&b));
     }
@@ -5370,23 +5390,71 @@ test "SUI-135 Configure ledger capacity is released only by the matching observe
     var state = try opened(&.{session(&ref, .{ .idle = ago(0) }, .{})});
     defer state.deinit();
     var first: [36]u8 = undefined;
+    const store = try @import("bounded.zig").Bounded(@import("store_path.zig").max_bytes).from("/store-a");
     for (0..max_requests) |at| {
         var key: [36]u8 = "01234567-89ab-4cde-8012-0123456789a0".*;
         key[35] = '0' + @as(u8, @intCast(at));
         if (at == 0) first = key;
         const reserved = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .reserve = "effort: high" } } } });
         try std.testing.expectEqual(IntentAdmission.admitted, reserved.intent_admission);
-        _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .completed = .{ .unconfirmed = key } } } } });
+        _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .completed = .{ .unconfirmed = .{ .key = key, .store = store } } } } } });
     }
     const refused = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .reserve = "effort: low" } } } });
     try std.testing.expectEqual(IntentAdmission.refused, refused.intent_admission);
     const unrelated: [36]u8 = "01234567-89ab-4cde-8012-0123456789af".*;
-    _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .observed = unrelated } } } });
+    _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .observed = .{ .key = unrelated, .store = store } } } } });
     try std.testing.expectEqual(@as(usize, max_requests), state.request_count);
-    _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .observed = first } } } });
+    _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .observed = .{ .key = first, .store = store } } } } });
     try std.testing.expectEqual(@as(usize, max_requests - 1), state.request_count);
     const next = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .reserve = "effort: low" } } } });
     try std.testing.expectEqual(IntentAdmission.admitted, next.intent_admission);
+}
+
+test "SUI-135 identical Configure keys in different Stores retire independently" {
+    const ref = "k7m2qx".*;
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const Original = @import("configure_outcome.zig").Original;
+    const a: Original = .{ .key = key, .store = try .from("/store-a") };
+    const b: Original = .{ .key = key, .store = try .from("/store-b") };
+    var state = try opened(&.{session(&ref, .{ .idle = ago(0) }, .{})});
+    defer state.deinit();
+    for ([_]Original{ a, b }) |original| {
+        const reserved = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .reserve = "effort: medium" } } } });
+        try std.testing.expectEqual(IntentAdmission.admitted, reserved.intent_admission);
+        _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .completed = .{ .unconfirmed = original } } } } });
+    }
+    var snapshot: [max_requests]Original = undefined;
+    try std.testing.expectEqual(@as(usize, 2), unknownConfigureKeys(&state, ref, &snapshot));
+    _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .observed = b } } } });
+    try std.testing.expectEqual(@as(usize, 1), state.request_count);
+    try std.testing.expect(state.requests[0].text.eql(&key));
+    try std.testing.expect(state.requests[0].configure_store.eql("/store-a"));
+}
+
+test "SUI-135 maximum Configure departure guidance fits its shared bound" {
+    const ref = "k7m2qx".*;
+    var state = try opened(&.{session(&ref, .{ .idle = ago(0) }, .{})});
+    defer state.deinit();
+    const store: [@import("store_path.zig").max_bytes]u8 = @splat(0x1b);
+    const intent: [max_configure_intent_bytes]u8 = @splat('i');
+    const key: [max_handle_bytes]u8 = @splat('a');
+    for (0..max_requests) |at| {
+        state.requests[at] = .{ .kind = .configure, .session = ref, .status = .unknown };
+        try state.requests[at].text.set(&key);
+        try state.requests[at].configure_store.set(&store);
+        try state.requests[at].configure_intent.set(&intent);
+    }
+    state.request_count = max_requests;
+    var bytes: [max_departure_bytes]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try writeDeparture(&state, null, &out);
+    try std.testing.expectEqual(@as(usize, max_requests), std.mem.count(u8, out.buffered(), "may apply this older setting"));
+    try std.testing.expectEqual(@as(usize, max_requests * store.len), std.mem.count(u8, out.buffered(), "\\x1b"));
+    try state.requests[0].configure_store.set("/tmp/\u{202e}store");
+    out = .fixed(&bytes);
+    try writeDeparture(&state, null, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "\\u202e") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "\u{202e}") == null);
 }
 
 test "an original Esc left unconfirmed is named at once and recovered on departure, until the ledger is full" {

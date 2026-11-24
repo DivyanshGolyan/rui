@@ -821,7 +821,7 @@ fn leaveForUpgrade(self: *Self, ctx: *vxfw.EventContext, outcome: session_upgrad
 }
 
 noinline fn pendingDepartureGuidance(self: *const Self) bool {
-    var bytes: [view.max_requests * 512]u8 = undefined;
+    var bytes: [view.max_departure_bytes]u8 = undefined;
     var text = std.Io.Writer.fixed(&bytes);
     self.departureText(&text);
     if (text.buffered().len != 0) return true;
@@ -908,7 +908,7 @@ fn finishApp(self: *Self, ended: anyerror!void) !?Relaunch {
 }
 
 noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerror!?Next, saved: anyerror!void, kept: anyerror!void, sign_in_ended: anyerror!void, left: ?Left, departure: ?SessionFrontend.Departure) !?Relaunch {
-    var bytes: [view.max_requests * 512]u8 = undefined;
+    var bytes: [view.max_departure_bytes]u8 = undefined;
     var text = std.Io.Writer.fixed(&bytes);
     self.departureText(&text);
     const has_failure = std.meta.isError(ended) or std.meta.isError(answered) or std.meta.isError(saved) or std.meta.isError(kept) or std.meta.isError(sign_in_ended);
@@ -1699,7 +1699,7 @@ fn modelsSnapshot(raw: *anyopaque) @import("model_choice.zig").Snapshot {
     return .{ .menu = if (state.menu_read == .read or state.menu.entries.len > 0) &state.menu else null, .revision = state.menu_revision, .ready = state.modelsReady() };
 }
 
-fn configureKeys(raw: *anyopaque, out_keys: *[view.max_requests][36]u8) usize {
+fn configureKeys(raw: *anyopaque, out_keys: *[view.max_requests]@import("configure_outcome.zig").Original) usize {
     const self: *Self = @ptrCast(@alignCast(raw));
     return view.unknownConfigureKeys(&self.state, self.opened, out_keys);
 }

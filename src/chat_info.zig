@@ -35,7 +35,7 @@ pub const Backend = struct {
     archive: *const fn (*anyopaque) anyerror!view.IntentAdmission,
     copy_last_answer: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     state: *const fn (*anyopaque) SaveState,
-    unconfirmed_key: ?*const fn (*anyopaque) ?[36]u8 = null,
+    unconfirmed_key: ?*const fn (*anyopaque) ?@import("configure_outcome.zig").Original = null,
     models: *const fn (*anyopaque) ModelChoice.Snapshot,
     caps: *const fn (*anyopaque) view.Caps,
     copied: *const fn (*anyopaque) bool,
@@ -57,7 +57,7 @@ panel: Panel = .{ .title = "Chat", .action_gap = 1, .natural_height = true, .top
 fields: [6]Panel.Field = undefined,
 actions: [3][]const u8 = undefined,
 failures: [9]?[]const u8 = @splat(null),
-unconfirmed_keys: [9]?[36]u8 = @splat(null),
+unconfirmed_keys: [9]?@import("configure_outcome.zig").Original = @splat(null),
 pending: ?usize = null,
 effort_labels: [std.enums.values(catalog.ReasoningEffort).len + 1][]const u8 = undefined,
 effort_count: usize = 0,
@@ -69,9 +69,9 @@ rename_bytes: [status.max_label_bytes]u8 = undefined,
 rename_editor: Editor = .initLocked(&.{}, .line_refusals_release),
 pasting: bool = false,
 
-pub fn clearUnconfirmed(self: *Self, key: [36]u8) void {
+pub fn clearUnconfirmed(self: *Self, original: @import("configure_outcome.zig").Original) void {
     for (&self.unconfirmed_keys, &self.failures) |*saved, *failure| {
-        if (saved.*) |value| if (std.mem.eql(u8, &value, &key)) {
+        if (saved.*) |value| if (std.mem.eql(u8, &value.key, &original.key) and value.store.eql(original.store.slice())) {
             saved.* = null;
             failure.* = null;
         };
@@ -1782,17 +1782,26 @@ test "SUI-136 an unconfirmed choice opens a new edit instead of retrying" {
 test "SUI-136 field notices clear only for the observed Configure key" {
     const a: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
     const b: [36]u8 = "01234567-89ab-4cde-8012-0123456789ac".*;
+    const store = try @import("bounded.zig").Bounded(@import("store_path.zig").max_bytes).from("/store-a");
+    const original_a: @import("configure_outcome.zig").Original = .{ .key = a, .store = store };
+    const original_b: @import("configure_outcome.zig").Original = .{ .key = b, .store = store };
+    const other_store = try @import("bounded.zig").Bounded(@import("store_path.zig").max_bytes).from("/store-b");
+    const same_key_other_store: @import("configure_outcome.zig").Original = .{ .key = a, .store = other_store };
     var fixture: Fixture = .{};
     fixture.init();
     var page: Self = .{ .backend = fixture.backend() };
-    page.unconfirmed_keys[0] = a;
-    page.unconfirmed_keys[1] = b;
+    page.unconfirmed_keys[0] = original_a;
+    page.unconfirmed_keys[1] = original_b;
+    page.unconfirmed_keys[2] = same_key_other_store;
+    page.failures[2] = " · not confirmed · /requests";
     page.failures[0] = " · not confirmed · /requests";
     page.failures[1] = " · not confirmed · /requests";
-    page.clearUnconfirmed(a);
+    page.clearUnconfirmed(original_a);
     try std.testing.expect(page.failures[0] == null and page.unconfirmed_keys[0] == null);
-    try std.testing.expectEqual(b, page.unconfirmed_keys[1].?);
+    try std.testing.expectEqual(b, page.unconfirmed_keys[1].?.key);
     try std.testing.expectEqualStrings(" · not confirmed · /requests", page.failures[1].?);
+    try std.testing.expectEqual(a, page.unconfirmed_keys[2].?.key);
+    try std.testing.expect(page.unconfirmed_keys[2].?.store.eql("/store-b"));
 }
 
 test "Chat info standalone failure retry preserves field-only presentation and the actual effort check" {

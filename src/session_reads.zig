@@ -190,7 +190,7 @@ pub const Job = struct {
     configure: ?Configure = null,
     info_edit: ?ChatInfo.Edit = null,
     info_slash: bool = false,
-    configure_keys: [@import("overview_view.zig").max_requests][36]u8 = undefined,
+    configure_keys: [@import("overview_view.zig").max_requests]@import("configure_outcome.zig").Original = undefined,
     configure_count: usize = 0,
     requests: Requests = undefined,
     status: Status = undefined,
@@ -238,7 +238,7 @@ pub const Job = struct {
         rendering: bool = false,
         command_stderr_restored: bool = false,
         info_outcome: ?@import("configure_outcome.zig").Outcome = null,
-        configure_resolved: [@import("overview_view.zig").max_requests][36]u8 = undefined,
+        configure_resolved: [@import("overview_view.zig").max_requests]@import("configure_outcome.zig").Original = undefined,
         configure_resolved_count: usize = 0,
         action: ?u64 = null,
         output_length: u64 = 0,
@@ -972,11 +972,12 @@ fn lastAnswer(requests: client.Requests, store: []const u8, session: []const u8)
 
 const ConfigureObservation = enum { resolved, absent, invalid };
 
-fn configureObservation(reply: protocol_reply.ObservationReply, key: [36]u8, session: []const u8) ConfigureObservation {
+fn configureObservation(reply: protocol_reply.ObservationReply, original: @import("configure_outcome.zig").Original, store: []const u8, session: []const u8) ConfigureObservation {
+    if (!original.store.eql(store)) return .invalid;
     return switch (reply) {
         .observation => |observation| blk: {
             const facts = observation.facts;
-            if (!facts.key.eql(&key)) break :blk .invalid;
+            if (!facts.key.eql(&original.key)) break :blk .invalid;
             if (facts.status == .absent) break :blk .absent;
             if (facts.kind != .configure or facts.target == null or !facts.target.?.eql(session)) break :blk .invalid;
             break :blk .resolved;
@@ -988,6 +989,9 @@ fn configureObservation(reply: protocol_reply.ObservationReply, key: [36]u8, ses
 test "SUI-137 Configure observations settle only the exact saved key and Session" {
     const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
     const other: [36]u8 = "01234567-89ab-4cde-8012-0123456789ac".*;
+    const store = try @import("bounded.zig").Bounded(@import("store_path.zig").max_bytes).from("/store-a");
+    const original: @import("configure_outcome.zig").Original = .{ .key = key, .store = store };
+    const other_original: @import("configure_outcome.zig").Original = .{ .key = other, .store = store };
     var facts: protocol_reply.CommandObservation = .{ .key = .{}, .status = .absent };
     try facts.key.set(&key);
     const reply = struct {
@@ -995,18 +999,66 @@ test "SUI-137 Configure observations settle only the exact saved key and Session
             return .{ .observation = .{ .facts = value, .since = null } };
         }
     }.make;
-    try std.testing.expectEqual(ConfigureObservation.absent, configureObservation(reply(facts), key, "k7m2qx"));
+    try std.testing.expectEqual(ConfigureObservation.absent, configureObservation(reply(facts), original, "/store-a", "k7m2qx"));
     for ([_]@TypeOf(facts.status){ .accepted, .rejected }) |status| {
         facts.status = status;
         facts.kind = .configure;
         facts.target = .{};
         try facts.target.?.set("k7m2qx");
-        try std.testing.expectEqual(ConfigureObservation.resolved, configureObservation(reply(facts), key, "k7m2qx"));
-        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), other, "k7m2qx"));
-        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), key, "a1b2c3"));
+        try std.testing.expectEqual(ConfigureObservation.resolved, configureObservation(reply(facts), original, "/store-a", "k7m2qx"));
+        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), other_original, "/store-a", "k7m2qx"));
+        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), original, "/store-b", "k7m2qx"));
+        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), original, "/store-a", "a1b2c3"));
         facts.kind = .message;
-        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), key, "k7m2qx"));
+        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), original, "/store-a", "k7m2qx"));
     }
+}
+
+test "SUI-137 a retargeted Store cannot reconcile another Store's same key" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const Host = struct {
+        pub fn answer(_: *@This(), fd: std.posix.fd_t) !void {
+            var request_buffer: [8192]u8 = undefined;
+            const request = try fake_host.readRequest(fd, &request_buffer) orelse return;
+            try std.testing.expect(request.is("/v1/observe-command"));
+            const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"" ++ key ++ "\",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"accepted\",\"kind\":\"configure\",\"target\":\"k7m2qx\",\"revision\":\"2\",\"created\":false}}";
+            fake_host.respond(fd, "200 OK", "application/json", "", body);
+        }
+    };
+    const Action = struct {
+        fn listing(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, out: *std.Io.Writer, _: *SavedRequests) !void {
+            try out.writeAll("Local handles\n");
+        }
+        pub fn run(_: *@This(), _: *Host, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            try dir.createDir(io, "other", .fromMode(0o700));
+            try dir.symLink(io, "other", "alias", .{ .is_directory = true });
+            var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias", .{root});
+            const first = try client.resolveClientPaths(io, alias);
+            try dir.deleteFile(io, "alias");
+            try dir.symLink(io, ".", "alias", .{ .is_directory = true });
+            const second = try client.resolveClientPaths(io, alias);
+            try std.testing.expect(!first.store_identity.eql(second.store_identity.slice()));
+            const page = try dir.createFile(io, "inspection", .{ .read = true });
+            defer page.close(io);
+            var job: Job = .{ .store = alias, .session = "k7m2qx", .requests = listing, .files = .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page }, .parts = page } };
+            job.configure_keys[0] = .{ .key = key, .store = first.store_identity };
+            job.configure_keys[1] = .{ .key = key, .store = second.store_identity };
+            job.configure_count = 2;
+            var task: Task = .{ .io = io };
+            try inspectPage(&job, &task);
+            try std.testing.expectEqual(@as(usize, 1), job.result.configure_resolved_count);
+            try std.testing.expectEqual(key, job.result.configure_resolved[0].key);
+            try std.testing.expect(job.result.configure_resolved[0].store.eql(second.store_identity.slice()));
+            var bytes: [1024]u8 = undefined;
+            const count = try page.readPositionalAll(io, &bytes, 0);
+            try std.testing.expect(std.mem.indexOf(u8, bytes[0..count], "keys remain unconfirmed") != null);
+        }
+    };
+    var host: Host = .{};
+    var action: Action = .{};
+    try fake_host.withHost(&host, &action);
 }
 
 pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
@@ -1016,25 +1068,33 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     var buffer: [4096]u8 = undefined;
     var output = job.files.inspection.writerStreaming(task.io, &buffer);
     std.debug.assert(job.inspection_kind == .requests);
-    try job.requests(job.init, task.readContext(), job.store, job.session, &output.interface, &job.result.requests);
+    const paths = if (job.configure_count != 0) try client.resolveClientPaths(task.io, job.store) else null;
+    const store = if (paths) |*selected| selected.selector() else job.store;
+    try job.requests(job.init, task.readContext(), store, job.session, &output.interface, &job.result.requests);
     var unable = false;
-    for (job.configure_keys[0..job.configure_count]) |key| {
+    for (job.configure_keys[0..job.configure_count]) |original| {
+        const selected = &paths.?;
+        if (!original.store.eql(selected.store_identity.slice())) {
+            unable = true;
+            continue;
+        }
         var response_buffer: client.ObservationBuffer = .{};
-        const response = task.requests().observeCommand(job.store, &key, null, &response_buffer) catch |err| {
-            if (@as(anyerror, err) == error.Cancelled or @as(anyerror, err) == error.Canceled) return err;
+        const response = task.requests().observeCommandAt(selected, &original.key, null, &response_buffer, null) catch |err| {
+            if (@as(anyerror, err) == error.Cancelled or @as(anyerror, err) == error.Canceled or @as(anyerror, err) == error.CanonicalStoreFailure) return err;
             unable = true;
             continue;
         };
-        switch (configureObservation(response, key, job.session)) {
+        if (response == .failure and response.failure.err() == error.CanonicalStoreFailure) return task.requests().failRead(response.failure);
+        switch (configureObservation(response, original, selected.store_identity.slice(), job.session)) {
             .resolved => {
-                job.result.configure_resolved[job.result.configure_resolved_count] = key;
+                job.result.configure_resolved[job.result.configure_resolved_count] = original;
                 job.result.configure_resolved_count += 1;
             },
             .absent => {},
             .invalid => unable = true,
         }
     }
-    if (unable) try output.interface.writeAll("Some Configure receipts could not be refreshed; their original keys remain unconfirmed.\n");
+    if (unable) try output.interface.writeAll("Some original Stores differ or receipts could not be checked; their keys remain unconfirmed.\n");
     try writeSubmission(job.inspection_submission, null, &output.interface);
     try output.flush();
 }

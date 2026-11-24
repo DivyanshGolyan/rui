@@ -2393,7 +2393,7 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     } catch |err| {
         if (observed) |outcome| {
             const key: [36]u8 = saved.key.slice()[0..36].*;
-            outcome.* = @import("configure_outcome.zig").failed(key, if (step.*) |where| where.mayHaveReachedHost() else false);
+            outcome.* = @import("configure_outcome.zig").failed(.{ .key = key, .store = saved.store }, if (step.*) |where| where.mayHaveReachedHost() else false);
         }
         if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
@@ -2403,8 +2403,8 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
         outcome.* = if (reply.answer) |answer| switch (answer.result) {
             .accepted => .accepted,
             .rejected => .rejected,
-            .conflict => .{ .unconfirmed = key },
-        } else |_| .{ .unconfirmed = key };
+            .conflict => .{ .unconfirmed = .{ .key = key, .store = saved.store } },
+        } else |_| .{ .unconfirmed = .{ .key = key, .store = saved.store } };
     }
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
     writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .json, replay) catch |err| {
