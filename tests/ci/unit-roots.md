@@ -40,6 +40,8 @@ terminal diagnostics are indented once to prevent duplicate causes; cancelling
 a peer does not blame the test it happened to be running. A failure before any
 test starts is reported as a unit-root gate failure.
 
+Each successful shard logs its five slowest completed tests using the launcher's observed start and end markers. These timings include scheduling and can undercount tests whose markers arrive in the same read; they identify candidates for controlled measurement, not standalone benchmarks.
+
 The generated runner embeds the committed per-test seconds from
 [unit_test_times.json](unit_test_times.json). The partition owner in
 `src/unit_test_partition.zig` assigns the complete owned name list at runtime,

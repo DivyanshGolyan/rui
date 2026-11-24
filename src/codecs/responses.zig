@@ -10,6 +10,12 @@ pub const manifest: codec_abi.Manifest = .{
         .model = "openai-model",
         .alternate_model = "x-openai-model",
         .turn_state = "x-codex-turn-state",
+        .primary_used = "x-codex-primary-used-percent",
+        .primary_minutes = "x-codex-primary-window-minutes",
+        .primary_reset_at = "x-codex-primary-reset-at",
+        .secondary_used = "x-codex-secondary-used-percent",
+        .secondary_minutes = "x-codex-secondary-window-minutes",
+        .secondary_reset_at = "x-codex-secondary-reset-at",
     },
 };
 

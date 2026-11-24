@@ -5,6 +5,7 @@ export const REJECTION_SENTENCES: Readonly<Record<string, string>> = {
 	"archive_pending": "This Session is still settling its archive request.",
 	"background_unavailable": "This saved promotion was refused under an earlier Host policy.",
 	"compact_at_too_large": "The compaction trigger is larger than the model's context window.",
+	"connection_unserved": "This Host does not serve that connection.",
 	"invalid_arguments": "The tool arguments are invalid.",
 	"invalid_compaction_trigger": "The compaction trigger is not a positive token count.",
 	"invalid_label": "The Label is too long or contains a line break or control character.",

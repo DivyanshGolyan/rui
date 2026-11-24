@@ -1,4 +1,5 @@
 const std = @import("std");
+const connection = @import("../connection.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const isBounded = @import("../bounded.zig").isBounded;
 const mysql = @import("wire/mysql.zig");
@@ -129,6 +130,11 @@ fn decodeValue(comptime T: type, kind: Kind, len: ?u32, source: anytype, out: *T
     }
     if (comptime isBounded(T)) {
         out.len = (try readText(len, source, &out.bytes)).len;
+        return;
+    }
+    if (T == connection.Name) {
+        var text: [connection.max_name_bytes]u8 = undefined;
+        out.* = connection.Name.parse(try readText(len, source, &text)) orelse return error.CorruptStore;
         return;
     }
     if (comptime isBlob(T)) {

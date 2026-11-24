@@ -50,7 +50,7 @@
       ]
     }
   },
-  "src/server.zig": {
+  "src/server_reply.zig": {
     "fixed_sleep": {
       "reply delivery interrupted poll consumes the existing inactivity budget": [
         1,

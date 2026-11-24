@@ -274,11 +274,11 @@ pub fn expectModelRevisions(storage: *Store, session: []const u8, phase: []const
             try std.testing.expectEqual(before.revision + 1, reply.accepted.revision);
         } else {
             try std.testing.expect(reply == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_provider, reply.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.provider_is_immutable, reply.rejected.code);
         }
         const after = try storage.inspectSessionForTesting(session);
         try std.testing.expectEqual(before.revision + @as(u64, if (variant != 4) 1 else 0), after.revision);
-        try std.testing.expectEqual(protocol.Provider.codex, after.provider.?);
+        try std.testing.expectEqualStrings("codex", after.provider.?.slice());
         try std.testing.expectEqualStrings(if (update.configuration.model.state == .value) update.configuration.model.value.slice() else before.model.slice(), after.model.slice());
         if (variant == 5) {
             try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND revision=?2 AND field='model'", .{ session, after.revision }));

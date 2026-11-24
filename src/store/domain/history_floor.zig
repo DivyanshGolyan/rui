@@ -1,3 +1,4 @@
+const connection = @import("../../connection.zig");
 const std = @import("std");
 const replay_binding = @import("../../replay_binding.zig");
 const provider_name = @import("../../provider_name.zig");
@@ -94,10 +95,10 @@ const floor_facts = rsql.Read(.{
         first_message: u64,
         output_reservation: u64,
         context_window: u64,
-        provider: provider_name.Provider,
+        provider: connection.Name,
         codec: provider_name.Codec,
         model: Bounded(model_capability.max_model_bytes),
-        base_provider: ?provider_name.Provider,
+        base_provider: ?connection.Name,
         base_codec: ?provider_name.Codec,
         base_model: ?Bounded(model_capability.max_model_bytes),
     },
@@ -159,7 +160,7 @@ const base_floor_read = rsql.Read(.{
         "WHERE base.session_ref=?1 AND base.purpose=1 AND " ++
         store_schema.resolutionIs("base.resolution_code", .compacted) ++ " AND base.admission_position<?2 ORDER BY base.admission_position DESC LIMIT 1",
     .Args = struct { session: []const u8, boundary: u64 },
-    .Row = struct { history_floor: ?rsql.Positive, provider: provider_name.Provider, codec: provider_name.Codec, model: Bounded(model_capability.max_model_bytes) },
+    .Row = struct { history_floor: ?rsql.Positive, provider: connection.Name, codec: provider_name.Codec, model: Bounded(model_capability.max_model_bytes) },
     .cardinality = .optional,
 });
 
@@ -267,7 +268,7 @@ pub const Prepared = struct {
             self.facts.history_floor == facts.history_floor and self.facts.history_level == facts.history_level and
             self.facts.base_floor == facts.base_floor and self.facts.frontier == facts.frontier and
             self.facts.first_message == facts.first_message and self.facts.output_reservation == facts.output_reservation and
-            self.facts.context_window == facts.context_window and self.facts.provider == facts.provider and
+            self.facts.context_window == facts.context_window and self.facts.provider.eql(facts.provider) and
             self.facts.codec == facts.codec and self.facts.model.eql(facts.model.slice()) and
             optionalModelEqual(self.facts.base_model, facts.base_model);
     }
