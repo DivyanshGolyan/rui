@@ -730,9 +730,9 @@ def main():
         prove_accept_pressure(state)
         fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
         execution = 5 + 10
-        clients = 100 * 5 + 3
+        clients = 100 * os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS + 3
         fixed = fixed_host + clients + execution + 0 + 2 + LINE_DESCRIPTORS
-        minimum_required = fixed - clients + 10 * 5 + 3 + 3
+        minimum_required = fixed - clients + 10 * os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS + 3 + 3
         rejected_store = state / "rejected-store"
         rejected = subprocess.run(
             limited_host(
@@ -763,7 +763,7 @@ def main():
         assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
         if fields["inherited"] != 3:
             rejected = subprocess.run(
-                limited_host(required - clients + 10 * 5 + 3 - 1, "host", "serve", "--store", rejected_store,
+                limited_host(required - clients + 10 * os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS + 3 - 1, "host", "serve", "--store", rejected_store,
                     "--set", 'execution.activeCapacity=2',
                         "--set", "providers={}",
                         "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_port}/responses"),
@@ -772,7 +772,7 @@ def main():
             assert rejected.returncode != 0 and "descriptor capacity insufficient" in rejected.stderr, rejected
             assert not rejected.stdout.startswith("ready "), rejected.stdout
             fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
-            assert fields == {**expected, "soft_limit": required - clients + 10 * 5 + 3 - 1}, fields
+            assert fields == {**expected, "soft_limit": required - clients + 10 * os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS + 3 - 1}, fields
             assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
 
         store = state / "adequate-store"

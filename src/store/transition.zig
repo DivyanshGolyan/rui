@@ -171,6 +171,16 @@ fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, com
             return r.get().writer.contentSink(content_id, length);
         }
 
+        pub fn declarationArena(r: *Self) std.mem.Allocator {
+            transacts("reads the declaration arena");
+            return r.get().writer.store.declarationArena();
+        }
+
+        pub fn resetDeclarations(r: *Self) void {
+            transacts("resets the declaration arena");
+            r.get().writer.store.resetDeclarations();
+        }
+
         pub fn configurationReads(r: *Self) @typeInfo(@TypeOf(Store.configurationReads)).@"fn".return_type.? {
             transacts("leases the configure reads");
             return r.get().writer.store.configurationReads();
