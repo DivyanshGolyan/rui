@@ -928,9 +928,12 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
     try self.openFooterChoice(ctx);
 }
 
+/// Alt-V reaches Rui where the terminal keeps Ctrl-V for its own text paste, as Windows Terminal does. macOS has
+/// Cmd-V instead, and its Option-V types a character.
 fn imagePasteKey(key: vaxis.Key) bool {
     return key.matchExact('v', .{ .ctrl = true }) or key.matchExact(0x16, .{}) or
-        (clipboard_image.command_key and key.matchExact('v', .{ .super = true }));
+        (clipboard_image.command_key and key.matchExact('v', .{ .super = true })) or
+        (!clipboard_image.command_key and key.matchExact('v', .{ .alt = true }));
 }
 
 fn clipboardTarget(raw: *anyopaque) ?Input.Insertion {
@@ -1792,7 +1795,10 @@ test "SUI-113 clipboard paste stays in its originating composer until Enter" {
     try std.testing.expect(held.self.input.image() == null);
     try std.testing.expectEqualStrings("caption!", held.self.input.composition().bytes);
     try std.testing.expect(imagePasteKey(.{ .codepoint = 'v', .mods = .{ .ctrl = true } }));
+    try std.testing.expectEqual(!clipboard_image.command_key, imagePasteKey(.{ .codepoint = 'v', .mods = .{ .alt = true } }));
     try std.testing.expect(!imagePasteKey(.{ .codepoint = 'v', .mods = .{ .ctrl = true, .shift = true } }));
+    try std.testing.expect(!imagePasteKey(.{ .codepoint = 'v', .mods = .{ .alt = true, .shift = true } }));
+    try std.testing.expect(!imagePasteKey(.{ .codepoint = 'v', .text = "v" }));
 }
 
 test "SUI-129 Ctrl-D detaches only an empty draft and otherwise deletes text at the caret" {
