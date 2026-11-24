@@ -995,7 +995,7 @@ test "Reactor registers every provider and independent listing subset without en
     };
 }
 
-test "Reactor holds an endpoint for every name of a full served set" {
+test "EXR-102 Reactor holds an endpoint for every name of a full served set" {
     var endpoints: connection_names.NameArray([]const u8) = .{};
     var urls: [connection.max_served][40]u8 = undefined;
     var names: [connection.max_served][8]u8 = undefined;

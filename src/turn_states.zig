@@ -195,7 +195,7 @@ test "owner changes invalidate paused Turns and stale completions" {
     }
 }
 
-test "two connections' Turns keep their values while their different owners launch in turn" {
+test "EXR-103 two connections' Turns keep their values while their different owners launch in turn" {
     const names = [_]connection.Name{ connection.Name.parse("codex").?, connection.Name.parse("openai").?, connection.Name.parse("alpha").? };
     var storage: [2 * names.len]TurnStates.Entry = @splat(.{});
     var states: PerConnection = undefined;

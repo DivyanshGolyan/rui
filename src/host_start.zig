@@ -1665,7 +1665,7 @@ test "a document without connections adds none: OpenAI stays with the built-in s
     try std.testing.expectEqual(@as(usize, 0), connected.len);
 }
 
-test "a connection under a non-built-in name is served at its own URL and key, and one under a built-in name supersedes that provider's entry" {
+test "SH-176 a connection under a non-built-in name is served at its own URL and key, and one under a built-in name supersedes that provider's entry" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
     defer environment.deinit();
