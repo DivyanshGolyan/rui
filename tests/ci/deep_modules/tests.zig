@@ -6,6 +6,8 @@ test {
     _ = @import("Circle.zig");
     _ = @import("Components.zig");
     _ = @import("Diagnostic.zig");
+    _ = @import("FieldLeak.zig");
+    _ = @import("FieldLeakTest.zig");
     _ = @import("Graph.zig");
     _ = @import("Imports.zig");
     _ = @import("ItemSyntax.zig");
@@ -18,6 +20,7 @@ test {
     _ = @import("Wrappers.zig");
     _ = @import("WrappersTest.zig");
     _ = @import("Report.zig");
+    _ = @import("Shallow.zig");
     _ = @import("Sources.zig");
     _ = @import("Tangle.zig");
     _ = @import("Types.zig");

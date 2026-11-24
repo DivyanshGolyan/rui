@@ -30,7 +30,14 @@ pub const stem = Imports.stem;
 /// A literal `@import` outside test declarations, and the file it names.
 pub const Import = struct { literal: []const u8, target: FileId };
 
-pub const File = struct { path: []const u8, ast: Ast, node: NodeId, imports: []const Import };
+pub const File = struct {
+    path: []const u8,
+    ast: Ast,
+    node: NodeId,
+    imports: []const Import,
+    /// The byte offset at which each line starts, the first at 0.
+    line_starts: []const u32,
+};
 
 /// `path` is the display path: relative to the root's directory, without `.zig`.
 /// The root node (index 0) has the empty display path.
@@ -84,6 +91,21 @@ pub fn commonParent(self: *const Sources, a: NodeId, b: NodeId) ?Common {
     }
     return null;
 }
+
+/// The 1-based line and column of `token` in `file`; the column counts bytes.
+pub fn locate(self: *const Sources, file: FileId, token: Ast.TokenIndex) Location {
+    const found = &self.files[@backingInt(file)];
+    const offset = found.ast.tokenStart(token);
+    var low: usize = 0;
+    var high: usize = found.line_starts.len;
+    while (low + 1 < high) {
+        const middle = (low + high) / 2;
+        if (found.line_starts[middle] <= offset) low = middle else high = middle;
+    }
+    return .{ .line = @intCast(low + 1), .column = @intCast(offset - found.line_starts[low] + 1) };
+}
+
+pub const Location = struct { line: u32, column: u32 };
 
 pub fn findFile(self: *const Sources, path: []const u8) ?FileId {
     for (self.files, 0..) |file, i| {
@@ -202,9 +224,19 @@ pub fn load(arena: Allocator, reader: Reader, root: []const u8, modules: []const
         const file = parsed.get(path).?;
         const imports = try arena.alloc(Import, file.imports.len);
         for (file.imports, imports) |import, *slot| slot.* = .{ .literal = import.literal, .target = ids.get(import.path).? };
-        files[i] = .{ .path = path, .ast = file.ast, .node = node, .imports = imports };
+        files[i] = .{ .path = path, .ast = file.ast, .node = node, .imports = imports, .line_starts = try lineStarts(arena, file.ast.source) };
     }
     return .{ .root = root, .files = files, .nodes = try builder.nodes.toOwnedSlice(arena) };
+}
+
+/// The byte offset at which each line of `source` starts.
+fn lineStarts(arena: Allocator, source: []const u8) Allocator.Error![]const u32 {
+    var starts: std.ArrayList(u32) = .empty;
+    try starts.append(arena, 0);
+    for (source, 0..) |byte, offset| {
+        if (byte == '\n') try starts.append(arena, @intCast(offset + 1));
+    }
+    return starts.items;
 }
 
 pub const Memory = Imports.Memory;

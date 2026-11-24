@@ -1,15 +1,16 @@
 //! The deep-modules lints. Each lint is a pure function over the loaded sources, their
-//! declarations and their references; `run` gathers them. `module-cycle` and `tangle` are
-//! ported here; `field-leak` and `shallow-module` are not yet, so `run` reports only those.
+//! declarations and their references; `run` gathers them.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Sources = @import("Sources.zig");
 const Items = @import("Items.zig");
 const Diagnostic = @import("Diagnostic.zig");
+const FieldLeak = @import("FieldLeak.zig");
 const Graph = @import("Graph.zig");
 const ModuleCycle = @import("ModuleCycle.zig");
 const References = @import("References.zig");
+const Shallow = @import("Shallow.zig");
 const Tangle = @import("Tangle.zig");
 const Wrappers = @import("Wrappers.zig");
 
@@ -21,6 +22,8 @@ pub fn run(arena: Allocator, sources: *const Sources, items: *const Items.Items,
     var found: std.ArrayList(Diagnostic.Diagnostic) = .empty;
     try found.appendSlice(arena, try ModuleCycle.check(arena, sources, items, refs, scope));
     try found.appendSlice(arena, try Tangle.check(arena, sources, items, refs, &graph, scope));
+    try found.appendSlice(arena, try FieldLeak.check(arena, sources, items, refs, &graph, scope));
+    try found.appendSlice(arena, try Shallow.check(arena, sources, items, refs, &graph, &wrappers, scope));
     return sorted(arena, found.items);
 }
 

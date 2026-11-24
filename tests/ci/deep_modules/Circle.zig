@@ -204,9 +204,8 @@ pub fn moduleLabel(sources: *const Sources, node: Sources.NodeId) []const u8 {
 
 /// The site of a reference, as an editor links it.
 pub fn siteOf(sources: *const Sources, reference: References.Reference) Location {
-    const file = &sources.files[@backingInt(reference.file)];
-    const at = file.ast.tokenLocation(0, reference.token);
-    return .{ .file = file.path, .line = @intCast(at.line + 1), .column = @intCast(at.column + 1) };
+    const at = sources.locate(reference.file, reference.token);
+    return .{ .file = sources.files[@backingInt(reference.file)].path, .line = at.line, .column = at.column };
 }
 
 /// `a, b, c, +2 more`: at most seven of `names`, as `Diagnostic.listed` writes them.
