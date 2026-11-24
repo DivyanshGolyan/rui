@@ -6,15 +6,16 @@
 //! the connection, the codec and the model), so an item's producer is the revision that
 //! wrote it, never the request's Wire.
 
+const connection = @import("../../connection.zig");
 const std = @import("std");
 const provider_name = @import("../../provider_name.zig");
 const codecs = @import("../../codecs.zig");
 const replay_binding = @import("../../replay_binding.zig");
 
-/// The Wire of a provider and codec. The connection name is the provider's stored text,
-/// which is a static string, so the Wire needs no owner.
-pub fn wireOf(provider: provider_name.Provider, codec: provider_name.Codec) replay_binding.Wire {
-    return .{ .connection = @tagName(provider), .dialect = codecs.dialect(codec) };
+/// The Wire of a provider and codec. The Wire holds a copy of the connection name, so it
+/// outlives the row the name was read from.
+pub fn wireOf(provider: connection.Name, codec: provider_name.Codec) replay_binding.Wire {
+    return .{ .connection = provider, .dialect = codecs.dialect(codec) };
 }
 
 /// The request's Binding: its Wire and the model it asks for.
@@ -24,7 +25,7 @@ pub fn bindingOf(wire: replay_binding.Wire, model: []const u8) replay_binding.Bi
 
 /// A Binding read from optional Store columns (a LEFT JOIN to a base or producer revision).
 /// A missing column in a row that must have one is a corrupt Store.
-pub fn optionalBinding(provider: ?provider_name.Provider, codec: ?provider_name.Codec, model: ?[]const u8) error{CorruptStore}!replay_binding.Binding {
+pub fn optionalBinding(provider: ?connection.Name, codec: ?provider_name.Codec, model: ?[]const u8) error{CorruptStore}!replay_binding.Binding {
     return bindingOf(wireOf(provider orelse return error.CorruptStore, codec orelse return error.CorruptStore), model orelse return error.CorruptStore);
 }
 

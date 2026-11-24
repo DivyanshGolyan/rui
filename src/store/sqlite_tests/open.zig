@@ -48,7 +48,7 @@ test "Store target owns SQLite identity routes and neutral diagnostics" {
     try std.testing.expectEqualStrings("wal", diagnostic.sqlite.journal_mode.?.slice());
     try std.testing.expect(storage.hostTools().set_id != 0);
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT rui_served('openai')"));
-    storage.served.openai = .unserved;
+    storage.servedSet().* = .{};
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT rui_served('openai')"));
 }
 

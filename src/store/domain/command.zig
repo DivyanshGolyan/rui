@@ -1,3 +1,4 @@
+const connection = @import("../../connection.zig");
 const std = @import("std");
 const required_settings = @import("../../required_settings.zig");
 const model_attempt = @import("model_attempt.zig");
@@ -146,7 +147,7 @@ const creation_receipt_read = rsql.Read(.{
         " WHERE r.session_ref=?1 AND r.revision=1 AND r.command_key=?2",
     .Args = struct { session: []const u8, key: []const u8 },
     .Row = struct {
-        provider: provider_name.Provider,
+        provider: connection.Name,
         model: *Bounded(@import("../../model_capability.zig").max_model_bytes),
         reasoning_effort: ?@import("../../model_capability.zig").ReasoningEffort,
         workspace: *Bounded(workspace_path.max_bytes),
@@ -262,7 +263,7 @@ test "creation receipt names reject empty segments and sort valid names" {
 
 fn creationReceipt(row: *const creation_receipt_read.Row, out: *command_reply.CreationConfiguration) !void {
     if (row.tools_invalid or row.loaded_invalid or row.tools_count != row.tools_rows or row.loaded_count != row.loaded_rows) return error.CorruptStore;
-    out.provider = row.provider;
+    out.provider = provider_route.builtInOf(row.provider) orelse return error.CorruptStore;
     out.model = row.model.*;
     out.reasoning_effort = row.reasoning_effort;
     out.workspace = row.workspace.*;
@@ -278,7 +279,7 @@ fn freshReceipt(reads: *const configuration_domain.ConfigurationReads, out: *com
     const next = &reads.next;
     const tools = if (reads.tools) |*selection| selection.names else return error.CorruptStore;
     const loaded = if (reads.loaded_tools) |*selection| selection.names else tools;
-    out.provider = next.provider;
+    out.provider = provider_route.builtInOf(next.provider) orelse return error.CorruptStore;
     out.model = next.model;
     out.reasoning_effort = next.reasoning_effort;
     out.workspace = next.workspace;
@@ -388,7 +389,7 @@ pub const SubmitMessage = struct {
     pub const begin: ?rounds.At = .facts;
     pub const Input = struct {
         io: std.Io,
-        served: provider_route.Routes,
+        served: *const provider_route.Served,
         tools: *const store_core.HostTools,
         selector: []const u8,
         command: *const content_custody.MessageCommand,
@@ -521,7 +522,7 @@ pub const SubmitMessage = struct {
             .unknown_session
         else if (target.?.archive_state == .archiving)
             .session_archiving
-        else if (command.require_model and !configuration_domain.servesProviderOf(t.input.served, null, target.?.provider))
+        else if (command.require_model and !target.?.served)
             .model_capability_unavailable
         else
             null;
@@ -1020,7 +1021,7 @@ pub const StartAgent = struct {
     pub const begin: ?rounds.At = .facts;
     pub const Input = struct {
         io: std.Io,
-        served: provider_route.Routes,
+        served: *const provider_route.Served,
         tools: *const store_core.HostTools,
         binding: action_domain.ActionAttemptBinding,
         caller: []const u8,
@@ -1097,7 +1098,7 @@ pub const StartAgent = struct {
         const configuration = t.input.configuration;
         const buffer = t.input.result_buffer;
         if (t.later.taken != null) return t.fail(r, "Rui could not start the agent: its command key is already taken. Nothing was started.");
-        if (try configuration_domain.inheritParent(host_tool_set, configuration, creation)) |code| {
+        if (try configuration_domain.inheritParent(host_tool_set, t.input.served, configuration, creation)) |code| {
             if (configuration_domain.missingToolMessage(host_tool_set, code, &configuration.tools)) |detail| {
                 var writer = std.Io.Writer.fixed(buffer);
                 try detail.write(&writer);
@@ -1236,7 +1237,7 @@ pub const Configure = struct {
     pub const begin: ?rounds.At = .facts;
     pub const Input = struct {
         io: std.Io,
-        served: provider_route.Routes,
+        served: *const provider_route.Served,
         tools: *const store_core.HostTools,
         command: *const content_custody.ConfigureCommand,
         preset: ?*const configuration_domain.PresetDecision,
@@ -2097,9 +2098,9 @@ pub const PinSession = struct {
 };
 
 const target_session = rsql.Read(.{
-    .sql = "SELECT session_ref,workspace_key,next_position,provider," ++ archive_membership.stateSql("session") ++ " AS archive_state FROM session WHERE session_ref=?1",
+    .sql = "SELECT session_ref,workspace_key,next_position,@served(provider) AS served," ++ archive_membership.stateSql("session") ++ " AS archive_state FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { session: rsql.SessionHead, provider: provider_name.Provider, archive_state: session_archive.State },
+    .Row = struct { session: rsql.SessionHead, served: bool, archive_state: session_archive.State },
     .cardinality = .optional,
 });
 

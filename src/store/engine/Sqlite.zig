@@ -146,7 +146,7 @@ pub fn abandon(self: *const Sqlite) void {
     _ = c.sqlite3_hard_heap_limit64(0);
 }
 
-pub fn serve(self: *Sqlite, served: *provider_route.Routes) error{StoreOpenFailed}!void {
+pub fn serve(self: *Sqlite, served: *provider_route.Served) error{StoreOpenFailed}!void {
     if (c.sqlite3_create_function_v2(self.database, "rui_served", 1, c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC, served, sqlite.servedFunction, null, null, null) != c.SQLITE_OK)
         return error.StoreOpenFailed;
 }

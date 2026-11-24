@@ -1340,7 +1340,7 @@ noinline fn openStoreForHost(
     var identity_mismatch: store_module.IdentityMismatch = .{};
     var migration: StartupMigration = .{ .diagnostics = diagnostics };
     const store_options: store_module.OpenOptions = .{
-        .served = served.routes(),
+        .served = served.served(),
         .cache_spill = limits.sqlite_cache_spill,
         .cache_kib = limits.sqlite_cache_kib,
         .found_schema_version = &found_schema_version,
@@ -1947,6 +1947,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
 
 noinline fn replyHostInfo(host: *Host, fd: *Reply) !void {
     if (!host.lifecycle.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
+    const served_set = host.providers.served();
     try fd.json(200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{host_reply.HostInfo{
         .store = host.lease.paths.store_identity.slice(),
         .instance = host.instance,
@@ -1956,7 +1957,7 @@ noinline fn replyHostInfo(host: *Host, fd: *Reply) !void {
         .started_at = host.started_at,
         .custody_occupied = host.custody.held(),
         .paused = host.lifecycle.turnsHeld(),
-        .routes = host.providers.routes(),
+        .routes = protocol.routesOf(&served_set),
         .doublewrite = host.store.admissionDiagnostic().doublewrite,
         .settings_digest = host.settings_digest,
     }});
@@ -5020,7 +5021,7 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expect(overridden == .accepted);
     try storage.inspectSession(overridden.accepted.session.slice(), &observed);
     try std.testing.expectEqualStrings("preset-override-model", observed.model.slice());
-    try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+    try std.testing.expectEqualStrings("codex", observed.provider.?.slice());
     try std.testing.expectEqualStrings(root, observed.workspace.slice());
     try std.testing.expectEqual(@as(?u64, 12000), observed.compaction_trigger_override);
     try std.testing.expectEqual(@import("configuration_defaults.zig").startEffort(@import("model_catalog.zig").shipped, "preset-override-model"), observed.reasoning_effort_override);

@@ -713,7 +713,7 @@ pub fn TestingConfiguring(comptime Check: type) type {
             const request: configuration_domain.Request = .{
                 .io = b.storage.io,
                 .tools = b.storage.hostTools(),
-                .served = b.storage.served,
+                .served = b.storage.servedSet(),
                 .session = b.session,
                 .configuration = b.configuration,
                 .initial_skills = null,

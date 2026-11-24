@@ -295,7 +295,7 @@ test "one committed selection freezes its settings and input prefix" {
     defer if (view.page.active) view.close();
     var settings: HistoricalSettings = undefined;
     try view.settings(&settings);
-    try std.testing.expectEqual(protocol.Provider.codex, settings.provider);
+    try std.testing.expectEqualStrings("codex", settings.provider.slice());
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
     const offered = [_]*const tool_defs.Record{ tool_defs.record(.bash), tool_defs.record(.web_search) };
     try std.testing.expectEqual(@as(u64, offered.len), settings.tool_count);
@@ -363,7 +363,7 @@ test "one committed selection freezes its settings and input prefix" {
     defer later_view.close();
     var later_settings: HistoricalSettings = undefined;
     try later_view.settings(&later_settings);
-    try std.testing.expectEqual(protocol.Provider.codex, later_settings.provider);
+    try std.testing.expectEqualStrings("codex", later_settings.provider.slice());
     try std.testing.expectEqualStrings("model-b", later_settings.model.slice());
     try std.testing.expectEqual(@as(u64, 0), later_settings.tool_count);
     var position: u64 = 0;

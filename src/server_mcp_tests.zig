@@ -482,7 +482,7 @@ fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: s
         _ = owner.reclaim(root) catch unreachable;
     };
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     var advances: usize = 0;
     while (true) {

@@ -12,6 +12,7 @@
 //! the Store, and an item from another Wire replays from its neutral fields alone.
 
 const std = @import("std");
+const connection_name = @import("connection.zig");
 const codec_abi = @import("codec_abi.zig");
 const output_item = @import("output_item.zig");
 
@@ -25,11 +26,11 @@ pub const Dialect = codec_abi.Dialect;
 /// Where a bag may be read: the same connection (account-bound ids) and the same dialect
 /// (wire grammar).
 pub const Wire = struct {
-    connection: []const u8,
+    connection: connection_name.Name,
     dialect: Dialect,
 
     pub fn eql(self: Wire, other: Wire) bool {
-        return self.dialect == other.dialect and std.mem.eql(u8, self.connection, other.connection);
+        return self.dialect == other.dialect and self.connection.eql(other.connection);
     }
 };
 
@@ -161,6 +162,6 @@ test "a Binding is equal only on the whole of its wire and model" {
     try std.testing.expect(!base.eql(binding("marlin", .anthropic_messages, "model-a")));
 }
 
-fn binding(connection: []const u8, dialect: Dialect, model: []const u8) Binding {
-    return .{ .wire = .{ .connection = connection, .dialect = dialect }, .model = model };
+fn binding(text: []const u8, dialect: Dialect, model: []const u8) Binding {
+    return .{ .wire = .{ .connection = connection_name.Name.parse(text).?, .dialect = dialect }, .model = model };
 }
