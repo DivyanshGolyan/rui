@@ -542,7 +542,11 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 ctx.redraw = true;
             }
             if (self.signInIsFirstRun()) return;
-            try self.appNext(ctx, try self.event(.{ .list_settled = .{ .wide = self.root.size.width >= Root.split_at, .focused = self.root.input.listFocused() and self.root.input.layer == .main, .click_clock_ms = self.animationMs() } }));
+            try self.appNext(ctx, try self.event(.{ .list_settled = .{
+                .wide = self.root.size.width >= Root.split_at,
+                .focused = self.root.input.listFocused() and self.root.input.layer == .main,
+                .click_clock_ms = if (self.root.input.pasting) null else self.animationMs(),
+            } }));
             while (self.retired.items.len != 0 and self.retired.items[0].frame < self.root.frames) {
                 self.disposeSession(self.retired.orderedRemove(0).left);
             }

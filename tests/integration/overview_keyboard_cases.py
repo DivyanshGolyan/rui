@@ -121,6 +121,7 @@ def creator_gestures():
                 frame = screen.contains(task)
                 row = row_of(frame, "Tree parent")
                 screen.click(8, row)
+                screen.keys(b"beforefocus")
                 screen.contains("Parent answer")
                 draft(screen, "")
 

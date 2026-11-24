@@ -1455,7 +1455,6 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .input => |input| {
-            state.parent_click = null;
             endCarry(state);
             if (input.list_origin and !input.pasted and !input.under and input.key != .ignored) {
                 const was_held = holding(state);
@@ -2724,6 +2723,7 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         return;
     }
     if (delivery.under or state.creating()) return;
+    state.parent_click = null;
     const before = state.selected;
     switch (input) {
         .ignored => unreachable,
@@ -4441,7 +4441,7 @@ fn creatorClickCase() !void {
     const release_parent = Event{ .pointer = .{ .phase = .released, .over = target } };
     const last_before_deadline = 100 + ParentClick.interval_ms - 1;
     const deadline = last_before_deadline + 1;
-    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { single, double, childless, focus_left, drag })) |gesture| {
+    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { single, double, childless, focus_left, drag, ignored, paste, navigation })) |gesture| {
         var state = try opened(&.{
             session(&parent, .{ .working = ago(10) }, .{ .label = "Parent", .descendant_count = 1 }),
             session(&child, .{ .finished = ago(1) }, .{ .label = "Child", .creator = parent }),
@@ -4458,6 +4458,12 @@ fn creatorClickCase() !void {
         } else {
             try expectEffects(&.{}, try step(&state, release_parent));
         }
+        switch (gesture) {
+            .ignored => try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .ignored } })),
+            .paste => try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter, .pasted = true } })),
+            .navigation => try expectEffects(&.{}, try press(&state, .select_next)),
+            else => {},
+        }
         try expectEffects(&.{}, try step(&state, .{ .list_settled = .{ .wide = wide, .focused = gesture != .focus_left, .click_clock_ms = last_before_deadline } }));
         if (gesture == .double) {
             try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = target, .at_ms = last_before_deadline } }));
@@ -4467,8 +4473,10 @@ fn creatorClickCase() !void {
             try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = target, .at_ms = deadline + 1 } }));
             try expectOrder(&state, &.{ "Parent", "Child" });
         }
+        if (gesture == .paste) try expectEffects(&.{}, try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } }));
         const settled = try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true, .click_clock_ms = deadline + 1 } });
-        try expectEffects(if (gesture == .single) &.{ .{ .open = parent }, .list_models } else &.{}, settled);
+        const open_parent = gesture == .single or gesture == .ignored or gesture == .paste;
+        try expectEffects(if (open_parent) &.{ .{ .open = parent }, .list_models } else &.{}, settled);
     };
 }
 
