@@ -107,9 +107,9 @@ test "obligation frontier read cost is flat in finished children" {
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         const seed = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
-                "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
+                "INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tool_set_id,permission_mode," ++
                 "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key,parent_ref) " ++
-                "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,1,0,NULL,1,2,1,value+100,zeroblob(32),1,'{1s}' FROM sequence; " ++
+                "SELECT printf('%06d',value),'/','codex','model-a',1,1,0,NULL,1,2,1,value+100,zeroblob(32),1,'{1s}' FROM sequence; " ++
                 "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_at,outcome_position,outcome_content_id) " ++
                 "SELECT value,printf('%06d',value),value,value,1,'completed',1,1,1 FROM sequence",
@@ -118,6 +118,7 @@ test "obligation frontier read cost is flat in finished children" {
         );
         defer std.testing.allocator.free(seed);
         try sqlite.exec(storage.sqliteDatabase(), seed);
+        try store_testing.fixtureRevisions(storage.sqliteDatabase());
         _ = statementWorkSince(storage.sqliteDatabase());
         try tests.refreshFrontierForTesting(&storage, root.slice());
         var statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), null);

@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const ns_per_s: u64 = 1_000_000_000;
-
 pub const Cause = enum(u8) {
     complete,
     sink_refused,
@@ -67,38 +65,6 @@ pub fn pendingAfterSetupFailure(other_setting_up: u32, other_ready_with_room: u3
     return if (other_setting_up == 0 and other_ready_with_room == 0) .end_all else .wait;
 }
 
-/// How a proxy's answer to CONNECT ends the setup, or null when the tunnel
-/// is open: any 2xx (RFC 9110 section 9.3.6).
-pub fn tunnelRefusal(status: u16) ?Cause {
-    return switch (status) {
-        200...299 => null,
-        407 => .proxy_auth_required,
-        403 => .proxy_refused,
-        else => .proxy_failed,
-    };
-}
-
-pub const max_attempts = 2;
-
-/// How long an attempt runs before the next address's starts (RFC 8305
-/// section 5).
-pub const attempt_delay_ns = 250_000_000;
-
-pub const AttemptFacts = struct {
-    in_flight: u8,
-    more_addresses: bool,
-    failed: bool,
-    delay_passed: bool,
-};
-
-pub fn nextAttempt(facts: AttemptFacts) enum { wait, start, replace_oldest, fail } {
-    std.debug.assert(facts.in_flight <= max_attempts);
-    if (!facts.more_addresses) return if (facts.in_flight == 0) .fail else .wait;
-    if (facts.in_flight == 0 or facts.failed) return .start;
-    if (!facts.delay_passed) return .wait;
-    return if (facts.in_flight < max_attempts) .start else .replace_oldest;
-}
-
 pub const StreamFacts = struct {
     request_sent: bool,
     response_started: bool,
@@ -150,50 +116,6 @@ pub fn connectionLost(cause: Cause, stream_id: u32, goaway_last_stream_id: ?u32,
 
 fn replayOrRefused(facts: StreamFacts) Settle {
     return if (facts.replays < max_unprocessed_replays) .replay else .{ .end = .refused };
-}
-
-pub const Liveness = struct {
-    ping_after_quiet_ns: u64 = 45 * ns_per_s,
-    ping_timeout_ns: u64 = 15 * ns_per_s,
-    idle_close_ns: u64 = 118 * ns_per_s,
-};
-
-pub const LivenessFacts = struct {
-    now_ns: u64,
-    last_inbound_ns: u64,
-    ping_sent_ns: ?u64,
-    streams: u32,
-    idle_since_ns: ?u64,
-    is_only_idle: bool,
-};
-
-pub const LivenessAction = enum { none, ping, dead, close };
-
-pub fn liveness(facts: LivenessFacts, config: Liveness) LivenessAction {
-    if (facts.streams == 0) {
-        if (!facts.is_only_idle) return .close;
-        const since = facts.idle_since_ns orelse return .none;
-        return if (facts.now_ns -| since >= config.idle_close_ns) .close else .none;
-    }
-    if (pingOutstanding(facts)) |sent| {
-        return if (facts.now_ns -| sent >= config.ping_timeout_ns) .dead else .none;
-    }
-    return if (facts.now_ns -| facts.last_inbound_ns >= config.ping_after_quiet_ns) .ping else .none;
-}
-
-pub fn livenessDeadline(facts: LivenessFacts, config: Liveness) ?u64 {
-    if (facts.streams == 0) {
-        if (!facts.is_only_idle) return facts.now_ns;
-        const since = facts.idle_since_ns orelse return null;
-        return since +| config.idle_close_ns;
-    }
-    if (pingOutstanding(facts)) |sent| return sent +| config.ping_timeout_ns;
-    return facts.last_inbound_ns +| config.ping_after_quiet_ns;
-}
-
-fn pingOutstanding(facts: LivenessFacts) ?u64 {
-    const sent = facts.ping_sent_ns orelse return null;
-    return if (facts.last_inbound_ns > sent) null else sent;
 }
 
 fn connection(ready: bool, draining: bool, streams: u32, peer_max_streams: u32) ConnectionView {
@@ -260,34 +182,6 @@ fn with(base: anytype, comptime field: []const u8, value: anytype) @TypeOf(base)
     return facts;
 }
 
-test "any 2xx opens the tunnel; 407 and 403 are their own causes" {
-    for ([_]u16{ 200, 204, 299 }) |status| try std.testing.expectEqual(@as(?Cause, null), tunnelRefusal(status));
-    try std.testing.expectEqual(@as(?Cause, .proxy_auth_required), tunnelRefusal(407));
-    try std.testing.expectEqual(@as(?Cause, .proxy_refused), tunnelRefusal(403));
-    for ([_]u16{ 100, 301, 400, 404, 502, 503 }) |status| try std.testing.expectEqual(@as(?Cause, .proxy_failed), tunnelRefusal(status));
-}
-
-test "the next address starts on a failure or after the delay, the oldest of two giving way" {
-    const Case = struct { in_flight: u8, more: bool, failed: bool, delay_passed: bool, step: @TypeOf(nextAttempt(undefined)) };
-    const cases = [_]Case{
-        .{ .in_flight = 0, .more = false, .failed = true, .delay_passed = true, .step = .fail },
-        .{ .in_flight = 1, .more = false, .failed = true, .delay_passed = true, .step = .wait },
-        .{ .in_flight = 2, .more = false, .failed = false, .delay_passed = true, .step = .wait },
-        .{ .in_flight = 0, .more = true, .failed = false, .delay_passed = false, .step = .start },
-        .{ .in_flight = 1, .more = true, .failed = true, .delay_passed = false, .step = .start },
-        .{ .in_flight = 1, .more = true, .failed = false, .delay_passed = false, .step = .wait },
-        .{ .in_flight = 1, .more = true, .failed = false, .delay_passed = true, .step = .start },
-        .{ .in_flight = 2, .more = true, .failed = false, .delay_passed = false, .step = .wait },
-        .{ .in_flight = 2, .more = true, .failed = false, .delay_passed = true, .step = .replace_oldest },
-    };
-    for (cases) |case| try std.testing.expectEqual(case.step, nextAttempt(.{
-        .in_flight = case.in_flight,
-        .more_addresses = case.more,
-        .failed = case.failed,
-        .delay_passed = case.delay_passed,
-    }));
-}
-
 test "a stream closes as complete, a replay, a reroute or a failure" {
     const answered = with(with(with(sent_stream, "response_started", true), "final_seen", true), "end_stream_seen", true);
     const Row = struct { code: ErrorCode, facts: StreamFacts, settle: Settle };
@@ -323,35 +217,4 @@ test "a lost connection resends only streams it proved unprocessed" {
         .{ .stream_id = 5, .last = 3, .facts = with(sent_stream, "local", Cause.body_failed), .settle = .{ .end = .body_failed } },
     };
     for (rows) |row| try std.testing.expectEqual(row.settle, connectionLost(.connection_lost, row.stream_id, row.last, row.facts));
-}
-
-test "one PING per quiet connection, a missed PING is fatal, idle connections close" {
-    const s = ns_per_s;
-    const config: Liveness = .{};
-    const busy: LivenessFacts = .{
-        .now_ns = 100 * s,
-        .last_inbound_ns = 100 * s,
-        .ping_sent_ns = null,
-        .streams = 3,
-        .idle_since_ns = null,
-        .is_only_idle = true,
-    };
-    const Row = struct { facts: LivenessFacts, action: LivenessAction, deadline: ?u64 };
-    const rows = [_]Row{
-        .{ .facts = busy, .action = .none, .deadline = 145 * s },
-        .{ .facts = with(busy, "last_inbound_ns", 56 * s), .action = .none, .deadline = 101 * s },
-        .{ .facts = with(busy, "last_inbound_ns", 55 * s), .action = .ping, .deadline = 100 * s },
-        .{ .facts = with(with(busy, "last_inbound_ns", 50 * s), "ping_sent_ns", 95 * s), .action = .none, .deadline = 110 * s },
-        .{ .facts = with(with(busy, "last_inbound_ns", 50 * s), "ping_sent_ns", 85 * s), .action = .dead, .deadline = 100 * s },
-        .{ .facts = with(with(busy, "last_inbound_ns", 90 * s), "ping_sent_ns", 80 * s), .action = .none, .deadline = 135 * s },
-        .{ .facts = with(with(with(busy, "last_inbound_ns", 90 * s), "ping_sent_ns", 80 * s), "now_ns", 135 * s), .action = .ping, .deadline = 135 * s },
-        .{ .facts = with(with(busy, "streams", 0), "idle_since_ns", 0), .action = .none, .deadline = 118 * s },
-        .{ .facts = with(with(busy, "streams", 0), "idle_since_ns", 100 * s), .action = .none, .deadline = 218 * s },
-        .{ .facts = with(with(with(busy, "streams", 0), "idle_since_ns", 0), "now_ns", 118 * s), .action = .close, .deadline = 118 * s },
-        .{ .facts = with(with(with(busy, "streams", 0), "idle_since_ns", 99 * s), "is_only_idle", false), .action = .close, .deadline = 100 * s },
-    };
-    for (rows) |row| {
-        try std.testing.expectEqual(row.action, liveness(row.facts, config));
-        try std.testing.expectEqual(row.deadline, livenessDeadline(row.facts, config));
-    }
 }

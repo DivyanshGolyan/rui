@@ -169,6 +169,13 @@ pub fn releaseEntry(self: *Sqlite) void {
     if (@import("builtin").is_test) self.statements.assertIdle();
 }
 
+/// Finalizes every cached statement. A test that changes a table's columns (DDL on the open
+/// connection) calls this first, so no statement prepared before the change is reused.
+pub fn forgetStatements(self: *Sqlite) void {
+    self.statements.deinit();
+    self.statements = .{};
+}
+
 pub fn releaseUnusedMemory(self: *Sqlite, comptime statements: anytype) void {
     inline for (statements) |S| self.statements.remove(S.sql);
     _ = c.sqlite3_db_release_memory(self.database);

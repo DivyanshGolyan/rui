@@ -1,5 +1,7 @@
 const std = @import("std");
 const replay_recipe = @import("../../replay_recipe.zig");
+const replay_binding = @import("../../replay_binding.zig");
+const replay_wire = @import("replay_wire.zig");
 const attempt = @import("../../attempt.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -139,7 +141,7 @@ pub const AttemptAdmission = struct {
 };
 
 const latest_turn = rsql.Read(.{
-    .sql = "SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code IS NULL AS active,latest.first_admission_id,r.model " ++
+    .sql = "SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code IS NULL AS active,latest.first_admission_id," ++ replay_wire.operationBindingSql("r") ++ " " ++
         "FROM turn latest @index(turn_session_latest) LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
         "LEFT JOIN session_revision r ON r.session_ref=current.session_ref AND r.revision=current.settings_revision " ++
         "WHERE latest.session_ref=?1 ORDER BY latest.turn_id DESC LIMIT 1",
@@ -150,6 +152,8 @@ const latest_turn = rsql.Read(.{
         operation_id: rsql.Positive,
         active: bool,
         first_admission_id: rsql.Positive,
+        provider: provider_name.Provider,
+        codec: provider_name.Codec,
         model: Bounded(model_capability.max_model_bytes),
     },
     .cardinality = .optional,
@@ -174,7 +178,9 @@ pub const CompactionRead = struct {
     session: []const u8,
     boundary: u64,
     provider: provider_name.Provider,
+    codec: provider_name.Codec,
     model: []const u8,
+    wire: replay_binding.Wire,
     facts: turn_policy.CompactionFacts,
     stage: enum { latest, first, bytes, compound_bytes, done } = .latest,
     latest: latest_turn.Result = undefined,
@@ -186,7 +192,7 @@ pub const CompactionRead = struct {
     pressure: ?*const PartsPressure.Read = null,
 
     pub fn init(session: []const u8, boundary: u64, provider: provider_name.Provider, codec: provider_name.Codec, model: []const u8, policy: model_capability.CompactionPolicy) CompactionRead {
-        return .{ .session = session, .boundary = boundary, .provider = provider, .model = model, .facts = .{
+        return .{ .session = session, .boundary = boundary, .provider = provider, .codec = codec, .model = model, .wire = replay_wire.wireOf(provider, codec), .facts = .{
             .trigger = policy.compaction_trigger,
             .compacts = codecs.compacts(codec),
             .context_changed = false,
@@ -201,7 +207,7 @@ pub const CompactionRead = struct {
         switch (read.stage) {
             .latest => {
                 a.read(latest_turn, .{ .session = read.session }, &read.latest);
-                a.read(admission_context, .{ .session = read.session, .boundary = read.boundary, .provider = read.provider, .model = read.model }, &read.context);
+                a.read(admission_context, .{ .session = read.session, .boundary = read.boundary, .provider = read.provider, .codec = read.codec, .model = read.model }, &read.context);
             },
             .first => a.read(first_runnable, .{ .session = read.session }, &read.first),
             .bytes => a.read(context_bytes, read.bytes_args, &read.bytes),
@@ -244,10 +250,10 @@ pub const CompactionRead = struct {
     fn weigh(read: *CompactionRead, next_first: ?u64) !@TypeOf(read.stage) {
         const latest = read.latest.?;
         const resolution: []const u8 = if (latest.resolution_code) |*code| code.slice() else "";
-        read.facts.previous = previousTurn(latest.purpose == 1, resolution, latest.active, latest.first_admission_id.get(), next_first, output_format.OutputItemKind.compaction.replayableTo(latest.model.slice(), read.model, .selected_base));
+        read.facts.previous = previousTurn(latest.purpose == 1, resolution, latest.active, latest.first_admission_id.get(), next_first, replaysCompaction(replay_wire.bindingOf(replay_wire.wireOf(latest.provider, latest.codec), latest.model.slice()), replay_wire.bindingOf(read.wire, read.model)));
         if (turn_policy.forcedPurpose(read.facts.previous, read.facts.trigger, read.facts.compacts) != null) return .done;
         const context = if (read.context) |*row| row else return error.CorruptStore;
-        read.bytes_args = try takeContext(&read.facts, context, read.model, read.session) orelse return .done;
+        read.bytes_args = try takeContext(&read.facts, context, replay_wire.bindingOf(read.wire, read.model), read.session) orelse return .done;
         return .bytes;
     }
 };
@@ -265,24 +271,29 @@ fn previousTurn(compaction: bool, resolution: []const u8, active: bool, latest_f
     };
 }
 
-fn currentRecipe(context: anytype, model: []const u8) error{CorruptStore}!replay_recipe.Recipe {
-    return replay_recipe.Recipe.select(model, if (context.base_position) |position| .{
+/// Whether a compaction selected at the `producer` Binding replays into `request`.
+fn replaysCompaction(producer: replay_binding.Binding, request: replay_binding.Binding) bool {
+    return replay_binding.decide(.compaction, producer, request, .selected_base) != .omit;
+}
+
+fn currentRecipe(context: anytype, request: replay_binding.Binding) error{CorruptStore}!replay_recipe.Recipe {
+    return replay_recipe.Recipe.select(request, if (context.base_position) |position| .{
         .position = position.get(),
         .floor = if (context.base_floor) |floor| floor.get() else 0,
-        .model = (context.base_model orelse return error.CorruptStore).slice(),
+        .binding = try replay_wire.optionalBinding(context.base_provider, context.base_codec, if (context.base_model) |*model| model.slice() else null),
     } else null, 0);
 }
 
-fn takeContext(compaction: *turn_policy.CompactionFacts, context: anytype, model: []const u8, session: []const u8) !?context_bytes.Args {
-    const recipe = try currentRecipe(context, model);
+fn takeContext(compaction: *turn_policy.CompactionFacts, context: anytype, request: replay_binding.Binding, session: []const u8) !?context_bytes.Args {
+    const recipe = try currentRecipe(context, request);
     compaction.context_changed = recipe.frontier == 0 or context.changed;
     if (!compaction.context_changed) return null;
     var coverage: context_bytes.Args = .{ .session = session, .covered = 0, .frontier = recipe.frontier, .results = recipe.frontier };
     if (context.uncached) |uncached| {
-        const measured = replay_recipe.Recipe.select(model, if (context.usage_base_position) |position| .{
+        const measured = replay_recipe.Recipe.select(request, if (context.usage_base_position) |position| .{
             .position = position.get(),
             .floor = if (context.usage_base_floor) |floor| floor.get() else 0,
-            .model = (context.usage_base_model orelse return error.CorruptStore).slice(),
+            .binding = try replay_wire.optionalBinding(context.usage_base_provider, context.usage_base_codec, if (context.usage_base_model) |*model| model.slice() else null),
         } else null, if (context.usage_floor) |floor| floor.get() else 0);
         const counts: output_format.Usage = .{
             .uncached = uncached,
@@ -301,13 +312,13 @@ fn takeContext(compaction: *turn_policy.CompactionFacts, context: anytype, model
     return coverage;
 }
 
-fn latestUsageSql(comptime session: []const u8, comptime provider: []const u8, comptime model: []const u8) []const u8 {
+fn latestUsageSql(comptime session: []const u8, comptime request: replay_wire.Side) []const u8 {
     return "SELECT o.history_floor AS usage_floor,o.usage_uncached_tokens AS uncached,o.usage_cache_read_tokens AS cache_read,o.usage_cache_write_tokens AS cache_write," ++
         "o.usage_output_tokens AS output,coalesce((SELECT max(i.session_position) FROM model_output_item i WHERE i.operation_id=o.operation_id),o.admission_position) AS usage_position," ++
         "o.admission_position AS result_admission " ++
         "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "WHERE o.session_ref=" ++ session ++ " AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " " ++
-        "AND r.provider=" ++ provider ++ " AND r.model=" ++ model ++ " ORDER BY o.admission_position DESC LIMIT 1";
+        "AND " ++ replay_wire.sameBindingSql(replay_wire.revisionSide("r"), request) ++ " ORDER BY o.admission_position DESC LIMIT 1";
 }
 
 fn uncoveredBytesSql(comptime session: []const u8, comptime usage_position: []const u8, comptime frontier: []const u8, comptime result_admission: []const u8) []const u8 {
@@ -370,20 +381,23 @@ fn changedSinceBaseSql(comptime session: []const u8, comptime boundary: []const 
 }
 
 const base_columns_sql = "base.admission_position AS base_position," ++
-    "base.history_floor AS base_floor,base_revision.model AS base_model";
+    "base.history_floor AS base_floor," ++ replay_wire.operationBindingAsSql("base_revision", "base");
 const base_revision_join_sql = " LEFT JOIN session_revision base_revision ON base_revision.session_ref=base.session_ref AND base_revision.revision=base.settings_revision ";
 
 pub const context_changed = rsql.Read(.{
     .sql = "WITH context_session AS (SELECT ?1 AS session_ref,?2 AS boundary)," ++ baseCteSql("context.session_ref", "context.boundary") ++ ",since AS (SELECT " ++ changedSinceBaseSql("context.session_ref", "context.boundary") ++ " AS changed FROM context_session context) SELECT since.changed," ++ base_columns_sql ++
-        ",(SELECT s.codec FROM session s WHERE s.session_ref=?1) AS codec" ++
-        ",(SELECT r.model FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
-        "WHERE o.session_ref=?1 AND o.admission_position=?2) AS model FROM since LEFT JOIN base ON 1" ++ base_revision_join_sql,
+        "," ++ replay_wire.operationBindingSql("request_revision") ++ " FROM since LEFT JOIN base ON 1" ++ base_revision_join_sql ++
+        " LEFT JOIN model_operation request_operation ON request_operation.session_ref=?1 AND request_operation.admission_position=?2" ++
+        " LEFT JOIN session_revision request_revision ON request_revision.session_ref=request_operation.session_ref AND request_revision.revision=request_operation.settings_revision",
     .Args = struct { session: []const u8, boundary: u64 },
     .Row = struct {
         changed: bool,
         base_position: ?rsql.Positive,
         base_floor: ?rsql.Positive,
+        base_provider: ?provider_name.Provider,
+        base_codec: ?provider_name.Codec,
         base_model: ?Bounded(model_capability.max_model_bytes),
+        provider: provider_name.Provider,
         codec: provider_name.Codec,
         model: Bounded(model_capability.max_model_bytes),
     },
@@ -391,7 +405,8 @@ pub const context_changed = rsql.Read(.{
 });
 
 pub fn contextChanged(context: *const context_changed.Row) error{CorruptStore}!bool {
-    return (try currentRecipe(context, context.model.slice())).frontier == 0 or context.changed;
+    const request = replay_wire.bindingOf(replay_wire.wireOf(context.provider, context.codec), context.model.slice());
+    return (try currentRecipe(context, request)).frontier == 0 or context.changed;
 }
 
 const disagreeing_continuation = rsql.Read(.{
@@ -416,11 +431,11 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 }
 
 fn factsColumnsSql(comptime session: []const u8) []const u8 {
-    return "s.revision,s.provider,s.codec,s.model,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
+    return "s.revision,s.provider,(SELECT r.codec FROM session_revision r WHERE r.session_ref=s.session_ref AND r.revision=s.revision) AS codec,s.model,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
         "s.tool_set_id,s.loaded_tool_set_id," ++ tool_offer.stale_sql ++ " AS offer_stale," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
-        "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution,latest_revision.model AS latest_model," ++
+        "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution," ++ replay_wire.operationBindingAsSql("latest_revision", "latest") ++ "," ++
         "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql(session, "s.revision") ++ ") AS instructions";
 }
 
@@ -434,26 +449,28 @@ fn factsJoinsSql(comptime session: []const u8) []const u8 {
 fn contextCtesSql(comptime scope: []const u8) []const u8 {
     const session = "context.session_ref";
     const boundary = "context.boundary";
-    return "context_session AS (" ++ scope ++ ")," ++ baseCteSql(session, boundary) ++ ",since AS (SELECT " ++ changedSinceBaseSql(session, boundary) ++ " AS changed FROM context_session context),latest_usage AS (" ++ latestUsageSql("(SELECT session_ref FROM context_session)", "(SELECT provider FROM context_session)", "(SELECT model FROM context_session)") ++ ")," ++
+    return "context_session AS (" ++ scope ++ ")," ++ baseCteSql(session, boundary) ++ ",since AS (SELECT " ++ changedSinceBaseSql(session, boundary) ++ " AS changed FROM context_session context),latest_usage AS (" ++ latestUsageSql("(SELECT session_ref FROM context_session)", .{ .provider = "(SELECT provider FROM context_session)", .codec = "(SELECT codec FROM context_session)", .model = "(SELECT model FROM context_session)" }) ++ ")," ++
         "measured AS (SELECT since.changed," ++ base_columns_sql ++
         ",saved.uncached,saved.cache_read,saved.cache_write,saved.output,saved.usage_position,saved.result_admission,saved.usage_floor," ++
         "usage_base.admission_position AS usage_base_position," ++
-        "usage_base.history_floor AS usage_base_floor,usage_revision.model AS usage_base_model " ++
+        "usage_base.history_floor AS usage_base_floor," ++ replay_wire.operationBindingAsSql("usage_revision", "usage_base") ++ " " ++
         "FROM context_session context CROSS JOIN since LEFT JOIN base ON 1" ++ base_revision_join_sql ++
         "LEFT JOIN latest_usage saved ON 1 LEFT JOIN model_operation usage_base ON usage_base.operation_id=" ++
         historical_domain.newestBaseSql(session, "saved.result_admission") ++
         " LEFT JOIN session_revision usage_revision ON usage_revision.session_ref=usage_base.session_ref AND usage_revision.revision=usage_base.settings_revision)";
 }
 
-const context_columns_sql = "measured.changed,measured.base_position,measured.base_floor,measured.base_model," ++
+const context_columns_sql = "measured.changed,measured.base_position,measured.base_floor,measured.base_provider,measured.base_codec,measured.base_model," ++
     "measured.uncached,measured.cache_read,measured.cache_write,measured.output,measured.usage_position,measured.result_admission," ++
-    "measured.usage_floor,measured.usage_base_position,measured.usage_base_floor,measured.usage_base_model";
+    "measured.usage_floor,measured.usage_base_position,measured.usage_base_floor,measured.usage_base_provider,measured.usage_base_codec,measured.usage_base_model";
 
 const ContextRow = struct {
     model: ?Bounded(model_capability.max_model_bytes),
     changed: bool,
     base_position: ?rsql.Positive,
     base_floor: ?rsql.Positive,
+    base_provider: ?provider_name.Provider,
+    base_codec: ?provider_name.Codec,
     base_model: ?Bounded(model_capability.max_model_bytes),
     uncached: ?u64,
     cache_read: ?u64,
@@ -464,12 +481,14 @@ const ContextRow = struct {
     usage_floor: ?rsql.Positive,
     usage_base_position: ?rsql.Positive,
     usage_base_floor: ?rsql.Positive,
+    usage_base_provider: ?provider_name.Provider,
+    usage_base_codec: ?provider_name.Codec,
     usage_base_model: ?Bounded(model_capability.max_model_bytes),
 };
 
 const admission_context = rsql.Read(.{
-    .sql = "WITH " ++ contextCtesSql("SELECT ?1 AS session_ref,?2 AS boundary,?3 AS provider,?4 AS model WHERE EXISTS(SELECT 1 FROM turn latest @index(turn_session_latest) WHERE latest.session_ref=?1)") ++ " SELECT ?4 AS model," ++ context_columns_sql ++ " FROM measured",
-    .Args = struct { session: []const u8, boundary: u64, provider: provider_name.Provider, model: []const u8 },
+    .sql = "WITH " ++ contextCtesSql("SELECT ?1 AS session_ref,?2 AS boundary,?3 AS provider,?4 AS model,?5 AS codec WHERE EXISTS(SELECT 1 FROM turn latest @index(turn_session_latest) WHERE latest.session_ref=?1)") ++ " SELECT ?4 AS model," ++ context_columns_sql ++ " FROM measured",
+    .Args = struct { session: []const u8, boundary: u64, provider: provider_name.Provider, model: []const u8, codec: provider_name.Codec },
     .Row = ContextRow,
     .cardinality = .optional,
 });
@@ -493,11 +512,15 @@ const SelectedRow = struct {
     latest_operation: ?rsql.Positive,
     latest_compaction: ?bool,
     latest_resolution: ?Bounded(outcome_code.max_bytes),
+    latest_provider: ?provider_name.Provider,
+    latest_codec: ?provider_name.Codec,
     latest_model: ?Bounded(model_capability.max_model_bytes),
     instructions: u64,
     changed: bool,
     base_position: ?rsql.Positive,
     base_floor: ?rsql.Positive,
+    base_provider: ?provider_name.Provider,
+    base_codec: ?provider_name.Codec,
     base_model: ?Bounded(model_capability.max_model_bytes),
     uncached: ?u64,
     cache_read: ?u64,
@@ -508,13 +531,15 @@ const SelectedRow = struct {
     usage_floor: ?rsql.Positive,
     usage_base_position: ?rsql.Positive,
     usage_base_floor: ?rsql.Positive,
+    usage_base_provider: ?provider_name.Provider,
+    usage_base_codec: ?provider_name.Codec,
     usage_base_model: ?Bounded(model_capability.max_model_bytes),
 };
 
 fn SelectedContext(comptime candidate_sql: []const u8) type {
     return rsql.Read(.{
         .sql = "WITH admission_selection AS (" ++ candidate_sql ++ ")," ++
-            contextCtesSql("SELECT s.session_ref,s.next_position AS boundary,s.provider,s.model FROM session s JOIN admission_selection chosen ON chosen.session_ref=s.session_ref") ++
+            contextCtesSql("SELECT s.session_ref,s.next_position AS boundary,s.provider,s.model,(SELECT r.codec FROM session_revision r WHERE r.session_ref=s.session_ref AND r.revision=s.revision) AS codec FROM session s JOIN admission_selection chosen ON chosen.session_ref=s.session_ref") ++
             " SELECT " ++ rsql.session_head_columns ++ "," ++ factsColumnsSql("context.session_ref") ++ "," ++ context_columns_sql ++
             " FROM context_session context CROSS JOIN measured JOIN session s ON s.session_ref=context.session_ref" ++ factsJoinsSql("context.session_ref"),
         .Args = struct {},
@@ -879,8 +904,8 @@ const insert_operation = rsql.Write(.{
         "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id,context_window,output_limit,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) " ++
         "SELECT ?1,?2,selected_revision.session_ref,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now,?17," ++
         model_facts_domain.contextWindowSql("?14", "?15", "?16") ++ "," ++ model_facts_domain.outputLimitSql("?14", "?18", "?19") ++ "," ++
-        configuration_domain.effortChoiceRevisionSql("selected_revision") ++ "," ++ operation_effort.previousSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ "," ++
-        "selected_session.codec='openai-responses/2' AND ?10 IS NOT NULL AND NOT @same(?10," ++ historical_domain.effortBeforeSql("selected_revision.session_ref", "?6", "selected_revision.model", "?11", "?10") ++ ")," ++ operation_effort.previousOverrideSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ " " ++
+        configuration_domain.effortChoiceRevisionSql("selected_revision") ++ "," ++ operation_effort.previousSql("selected_revision.session_ref", "?6", replay_wire.revisionSide("selected_revision")) ++ "," ++
+        "selected_revision.codec='openai-responses/2' AND ?10 IS NOT NULL AND NOT @same(?10," ++ historical_domain.effortBeforeSql("selected_revision.session_ref", "?6", replay_wire.revisionSide("selected_revision"), "?11", "?10") ++ ")," ++ operation_effort.previousOverrideSql("selected_revision.session_ref", "?6", replay_wire.revisionSide("selected_revision")) ++ " " ++
         "FROM session_revision selected_revision JOIN session selected_session ON selected_session.session_ref=selected_revision.session_ref WHERE selected_revision.session_ref=@session(?3) AND selected_revision.revision=?4",
     .Args = struct {
         operation_id: u64,
@@ -1008,6 +1033,7 @@ pub const AdmitModel = struct {
 
     pub const Scratch = struct {
         model: @FieldType(SelectedRow, "model"),
+        wire: replay_binding.Wire,
         request: historical_domain.SettingsRead,
         read: union(enum) {
             facts: SelectedRow,
@@ -1063,7 +1089,7 @@ pub const AdmitModel = struct {
             },
             .dropped => return t.freeze(r),
             .inherited => {
-                t.floor = t.input.scratch.read.inherited.floor(t.input.scratch.model.slice());
+                t.floor = t.input.scratch.read.inherited.floor(replay_wire.bindingOf(t.input.scratch.wire, t.input.scratch.model.slice()));
                 return t.freeze(r);
             },
             .offer_project => {
@@ -1091,6 +1117,7 @@ pub const AdmitModel = struct {
         if (!t.facts_found.get()) return error.CorruptStore;
         const facts = &t.input.scratch.read.facts;
         t.input.scratch.model = facts.model;
+        t.input.scratch.wire = replay_wire.wireOf(facts.provider, facts.codec);
         if (facts.session.next_position != selection.session.next_position) return error.SelectionChanged;
         const policy = model_capability.compactionPolicy(facts.model.slice(), codecs.compacts(facts.codec), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
         var compaction: turn_policy.CompactionFacts = .{
@@ -1106,11 +1133,13 @@ pub const AdmitModel = struct {
             if (facts.latest_operation == null) return error.CorruptStore;
             const latest_first = facts.latest_first orelse return error.CorruptStore;
             const resolution: []const u8 = if (facts.latest_resolution) |*code| code.slice() else "";
-            compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission, output_format.OutputItemKind.compaction.replayableTo((facts.latest_model orelse return error.CorruptStore).slice(), facts.model.slice(), .selected_base));
+            const request = replay_wire.bindingOf(replay_wire.wireOf(facts.provider, facts.codec), facts.model.slice());
+            const latest_producer = try replay_wire.optionalBinding(facts.latest_provider, facts.latest_codec, if (facts.latest_model) |*model| model.slice() else null);
+            compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission, replaysCompaction(latest_producer, request));
         }
         var purpose = turn_policy.nextPurpose(compaction);
         var weighed: ?PressureGuard = null;
-        if (try takeContext(&compaction, facts, facts.model.slice(), session_ref)) |coverage| {
+        if (try takeContext(&compaction, facts, replay_wire.bindingOf(replay_wire.wireOf(facts.provider, facts.codec), facts.model.slice()), session_ref)) |coverage| {
             purpose = turn_policy.nextPurpose(compaction);
             if (purpose != .compaction) if (turn_policy.compactingBytes(compaction)) |limit| switch (t.input.pressure) {
                 .over => purpose = .compaction,

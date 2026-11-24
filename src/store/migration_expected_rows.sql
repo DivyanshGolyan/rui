@@ -24,10 +24,10 @@ INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) VALUES
 (2,0,1),
 (4,0,1),
 (4,1,2);
-INSERT INTO session(session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key,app_tool_set_id,app_lane) VALUES
-('d8mv7p','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,4,1,NULL,1,NULL,NULL,NULL,NULL,1793781720,6,1,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1,NULL,'d8mv7p'),
-('brhkcj','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,2,0,NULL,1,NULL,NULL,NULL,NULL,1793781720,6,2,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1,NULL,'brhkcj'),
-('rhvzwc','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,4,1,NULL,1,NULL,NULL,NULL,NULL,1793781720,2,3,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1,NULL,'rhvzwc');
+INSERT INTO session(session_ref,workspace,provider,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key,app_tool_set_id,app_lane) VALUES
+('d8mv7p','/home/user/rui-pr6d','codex',NULL,'model-a',1,4,1,NULL,1,NULL,NULL,NULL,NULL,1793781720,6,1,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1,NULL,'d8mv7p'),
+('brhkcj','/home/user/rui-pr6d','codex',NULL,'model-a',1,2,0,NULL,1,NULL,NULL,NULL,NULL,1793781720,6,2,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1,NULL,'brhkcj'),
+('rhvzwc','/home/user/rui-pr6d','codex',NULL,'model-a',1,4,1,NULL,1,NULL,NULL,NULL,NULL,1793781720,2,3,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1,NULL,'rhvzwc');
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) VALUES
 ('fixture-answer-config',1,'d8mv7p',X'da30d53055d72b570beed083a96a9fbff59605a11f6606d8c06009c43a705489',NULL,NULL,1,'',1,1,1),
 ('fixture-answer-key',2,'d8mv7p',X'f1c556d56340cf43f947a5c7efa143b121b78165d59292dc801d9331b8e7206a',2,NULL,1,'',0,0,2),
@@ -38,10 +38,10 @@ INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id
 ('fixture-stop',3,'rhvzwc',X'd3a4ebf602e078b77bf4e4ccc2b6ab98d0c70d556138a870ca01f9a655dca65f',NULL,NULL,1,'',0,0,7),
 ('fixture-interrupt',4,'d8mv7p',X'f36b025999732c650e4e9c3ff7505e214dfcfd0c0e8cf3ef162d75d9f32d6129',NULL,NULL,0,'operation_resolved',0,0,8),
 ('fixture-rejected',2,'k7m2qx',X'cc0e17dc4472ec1578e9a655c97150feecee8729a14928bc7382c9a61005e1b9',NULL,NULL,0,'unknown_session',0,0,9);
-INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) VALUES
-('brhkcj',1,'fixture-ask-config','/home/user/rui-pr6d','codex','model-a',1,1,2,0,NULL,NULL,NULL,NULL,NULL),
-('d8mv7p',1,'fixture-answer-config','/home/user/rui-pr6d','codex','model-a',1,1,4,1,NULL,NULL,NULL,NULL,NULL),
-('rhvzwc',1,'fixture-stop-config','/home/user/rui-pr6d','codex','model-a',1,1,4,1,NULL,NULL,NULL,NULL,NULL);
+INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,codec,model,instructions_content_id,instructions_updated,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) VALUES
+('brhkcj',1,'fixture-ask-config','/home/user/rui-pr6d','codex','openai-responses/1','model-a',1,1,2,0,NULL,NULL,NULL,NULL,NULL),
+('d8mv7p',1,'fixture-answer-config','/home/user/rui-pr6d','codex','openai-responses/1','model-a',1,1,4,1,NULL,NULL,NULL,NULL,NULL),
+('rhvzwc',1,'fixture-stop-config','/home/user/rui-pr6d','codex','openai-responses/1','model-a',1,1,4,1,NULL,NULL,NULL,NULL,NULL);
 INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_kind) VALUES
 (1,'d8mv7p','fixture-answer-key',2,1,1,1793781720,NULL,NULL,1),
 (2,'brhkcj','fixture-ask-message',6,1,2,1793781720,NULL,NULL,1);

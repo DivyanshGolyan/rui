@@ -15,6 +15,7 @@ fn module(comptime codec: protocol.Codec) type {
 }
 
 const Messages = struct {
+    pub const dialect = messages.dialect;
     pub const manifest = messages.manifest;
     pub const RequestHeader = messages.RequestHeader;
     pub const requestHeaders = messages.requestHeaders;
@@ -38,6 +39,7 @@ const Messages = struct {
 
 fn Responses(comptime version: responses.Version) type {
     return struct {
+        pub const dialect = responses.dialect;
         pub const manifest = responses.manifest;
         pub const RequestHeader = responses.RequestHeader;
         pub const requestHeaders = responses.requestHeaders;
@@ -67,6 +69,13 @@ fn Responses(comptime version: responses.Version) type {
         pub fn effortChangeRefused(scratch: *const responses.ClassifyScratch, status: u16, body: []const u8) bool {
             return version.carriesEffort() and responses.effortChangeRefused(scratch, status, body);
         }
+    };
+}
+
+/// The wire grammar that writes a codec's bags. The one owner of codec-to-dialect.
+pub fn dialect(codec: protocol.Codec) codec_abi.Dialect {
+    return switch (codec) {
+        inline else => |tag| module(tag).dialect,
     };
 }
 
@@ -268,6 +277,16 @@ fn encodeForTesting(encoder: *Encoder, carry: ?*Carry, items: []const TestItem, 
 }
 
 const responses_initial = initialCarry(.@"openai-responses/1", null);
+
+test "every openai-responses version writes one dialect, and Messages writes its own" {
+    for (std.enums.values(protocol.Codec)) |codec| {
+        const expected: codec_abi.Dialect = switch (codec) {
+            .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" => .openai_responses,
+            .@"anthropic-messages/1" => .anthropic_messages,
+        };
+        try std.testing.expectEqual(expected, dialect(codec));
+    }
+}
 
 test "a tool entry escapes its name and description as JSON strings" {
     var encoder = resumeFrom(responses_initial);

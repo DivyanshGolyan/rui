@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 93;
+pub const schema_version: u32 = 94;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -72,7 +72,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 90, .digest = 0x2f2d94715f2d01bc },
     .{ .schema_version = 91, .digest = 0xc92515d104a290dd },
     .{ .schema_version = 92, .digest = 0xdbe10b74e562edbd },
-    .{ .schema_version = 93, .digest = 0x86c450983de71d68 },
+    .{ .schema_version = 93, .digest = 0x0028c239ba46341d },
+    .{ .schema_version = 94, .digest = 0x9803d541a1a4945e },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -990,8 +991,35 @@ pub const migrations = [_]Migration{
             "ALTER TABLE tool_record ADD CHECK(replay<>'unsafe' OR restart_limit=0)",
         },
     },
+    // The codec that wrote a revision's bags moves from the Session to each revision, so an Operation's
+    // Binding reads its frozen revision (replay_binding.Binding). Every existing revision takes its
+    // Session's codec: a Session never changes codec, since a provider change is refused before a Turn.
     .{
         .from = 92,
+        .sqlite = &.{
+            "ALTER TABLE session_revision RENAME TO session_revision_before_93",
+            "CREATE TABLE session_revision(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n revision INTEGER NOT NULL CHECK(revision>0),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n workspace TEXT NOT NULL,\n provider TEXT NOT NULL CHECK(length(CAST(provider AS BLOB)) BETWEEN 1 AND 16 AND provider GLOB '[a-z]*' AND (provider NOT GLOB '*[^a-z0-9_-]*' AND length(provider)=length(CAST(provider AS BLOB)))),\n codec TEXT NOT NULL CHECK(length(CAST(codec AS BLOB)) BETWEEN 3 AND 40),\n codec_options BLOB CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512),\n model TEXT NOT NULL,\n instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),\n instructions_updated INTEGER NOT NULL CHECK(instructions_updated IN (0,1)),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),\n loaded_tool_set_id INTEGER REFERENCES tool_set(tool_set_id),\n permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),\n output_schema_content_id INTEGER REFERENCES content(content_id),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),\n effort_source_revision INTEGER NOT NULL DEFAULT 1 CHECK(effort_source_revision>0 AND effort_source_revision<=revision),\n PRIMARY KEY(session_ref,revision),\n FOREIGN KEY(session_ref,effort_source_revision) REFERENCES session_revision(session_ref,revision)\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,codec,codec_options,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) SELECT r.session_ref,r.revision,r.command_key,r.workspace,r.provider,s.codec,s.codec_options,r.model,r.instructions_content_id,r.instructions_updated,r.tool_set_id,r.loaded_tool_set_id,r.permission_mode,r.output_schema_content_id,r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label,r.effort_source_revision FROM session_revision_before_93 r JOIN session s ON s.session_ref=r.session_ref",
+            "DROP TABLE session_revision_before_93",
+            "CREATE INDEX session_revision_instructions ON session_revision(session_ref,instructions_content_id)",
+            "CREATE INDEX session_revision_output_schema ON session_revision(session_ref,output_schema_content_id)",
+            "ALTER TABLE session DROP COLUMN codec_options",
+            "ALTER TABLE session DROP COLUMN codec",
+        },
+        .mysql = &.{
+            "ALTER TABLE session_revision ADD COLUMN codec TEXT NOT NULL AFTER provider, ADD COLUMN codec_options BLOB AFTER codec",
+            "UPDATE session_revision r JOIN session s ON s.session_ref=r.session_ref SET r.codec=s.codec, r.codec_options=s.codec_options",
+            "ALTER TABLE session_revision ADD CHECK(OCTET_LENGTH(codec) BETWEEN 3 AND 40), ADD CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512)",
+            "SET @rui_codec_ddl=(SELECT CONCAT('ALTER TABLE session ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') SEPARATOR ', ')) FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('codec',cc.CHECK_CLAUSE)>0)",
+            "PREPARE rui_codec FROM @rui_codec_ddl",
+            "EXECUTE rui_codec",
+            "DEALLOCATE PREPARE rui_codec",
+            "SET @rui_codec_ddl=NULL",
+            "ALTER TABLE session DROP COLUMN codec, DROP COLUMN codec_options",
+        },
+    },
+    .{
+        .from = 93,
         .sqlite = &.{
             // Declarations and lanes: a Session names the app records it declares (NULL: none) and the lane it runs on
             // (itself for a root, its parent's for a child). Each existing Session takes the lane of its root, derived
@@ -1002,10 +1030,10 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session_revision ADD COLUMN app_tool_set_id INTEGER REFERENCES tool_set(tool_set_id) CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0)",
             "WITH RECURSIVE lanes(child,root) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT s.session_ref,l.root FROM session s JOIN lanes l ON s.parent_ref=l.child) UPDATE session SET app_lane=(SELECT root FROM lanes WHERE child=session.session_ref)",
             // The field CHECK is generated from revision_fields, so the app_tools tag rebuilds session_change.
-            "ALTER TABLE session_change RENAME TO session_change_before_93",
+            "ALTER TABLE session_change RENAME TO session_change_before_94",
             "CREATE TABLE session_change(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n position INTEGER NOT NULL CHECK(position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0),\n revision INTEGER NOT NULL CHECK(revision>1),\n field TEXT NOT NULL CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label' OR field='reasoning_effort_refused' OR field='app_tools')),\n changed_at INTEGER NOT NULL CHECK(changed_at>0),\n provider_text TEXT CHECK(provider_text IS NULL OR length(CAST(provider_text AS BLOB))<=520),\n refused_operation_id INTEGER,\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n FOREIGN KEY(refused_operation_id,session_ref,revision) REFERENCES model_operation(operation_id,session_ref,effort_source_revision),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL)),\n CHECK((field='reasoning_effort_refused')=(refused_operation_id IS NOT NULL))\n) STRICT, WITHOUT ROWID",
-            "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) SELECT session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id FROM session_change_before_93",
-            "DROP TABLE session_change_before_93",
+            "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) SELECT session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id FROM session_change_before_94",
+            "DROP TABLE session_change_before_94",
             "CREATE INDEX session_change_refused_operation ON session_change(refused_operation_id,session_ref,revision)",
         },
         .mysql = &.{
@@ -1221,6 +1249,9 @@ fn references(comptime column: []const u8, comptime table: []const u8, comptime 
 }
 
 const provider_column: Column = .{ .name = "provider", .type = .{ .text = .{ .min = 1, .max = 16 } }, .check = "@initial(provider,'a-z') AND @charset(provider,'a-z0-9_-')" };
+/// The wire grammar a revision's bags were written by (codec_abi.Dialect's codecs); each revision freezes its own.
+const codec_column: Column = .{ .name = "codec", .type = .{ .text = .{ .min = 3, .max = 40 } } };
+const codec_options_column: Column = .{ .name = "codec_options", .type = .{ .bytes = .{ .min = 1, .max = 512 } }, .nullable = true };
 const tool_set_column: Column = .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" };
 const permission_mode_column: Column = .{ .name = "permission_mode", .type = .int, .check = "permission_mode BETWEEN 0 AND 1" };
 const compaction_trigger_column: Column = .{ .name = "compaction_trigger", .type = .int, .nullable = true, .check = "compaction_trigger IS NULL OR compaction_trigger>0" };
@@ -1439,8 +1470,6 @@ pub const tables = [_]Table{
             .{ .name = "session_ref", .type = .{ .text = .{ .min = 6, .max = 6 } }, .check = "@charset(session_ref,'0123456789abcdefghjkmnpqrstvwxyz')" },
             .{ .name = "workspace", .type = .{ .text = .{ .min = 1, .max = 4096 } } },
             provider_column,
-            .{ .name = "codec", .type = .{ .text = .{ .min = 3, .max = 40 } } },
-            .{ .name = "codec_options", .type = .{ .bytes = .{ .min = 1, .max = 512 } }, .nullable = true },
             .{ .name = "prefix_seal", .type = .{ .bytes = .{ .min = prefix_seal.encoded_bytes, .max = prefix_seal.encoded_bytes } }, .nullable = true },
             .{ .name = "model", .type = .{ .text = .{ .min = 1, .max = 256 } } },
             .{ .name = "instructions_content_id", .type = .int },
@@ -1512,6 +1541,8 @@ pub const tables = [_]Table{
             .{ .name = "command_key", .type = .{ .text = null } },
             .{ .name = "workspace", .type = .{ .text = null } },
             provider_column,
+            codec_column,
+            codec_options_column,
             .{ .name = "model", .type = .{ .text = null } },
             .{ .name = "instructions_content_id", .type = .int },
             .{ .name = "instructions_updated", .type = .flag },
@@ -3746,7 +3777,7 @@ test "schema 80 creator migration retains all prior session facts and backfills 
         for (tables) |table| {
             if (!std.mem.eql(u8, table.name, "session")) continue;
             for (table.columns) |column| {
-                // creator_ref (80), archive_seq (85), app_tool_set_id and app_lane (93) are added after format 79.
+                // creator_ref (80), archive_seq (85), app_tool_set_id and app_lane (94) are added after format 79.
                 if (std.mem.eql(u8, column.name, "creator_ref") or std.mem.eql(u8, column.name, "archive_seq") or
                     std.mem.eql(u8, column.name, "app_tool_set_id") or std.mem.eql(u8, column.name, "app_lane")) continue;
                 if (names.len != 0) names = names ++ ",";
@@ -4058,9 +4089,9 @@ test "SH-119 schema 92 migration gives every saved tool record the zero app poli
     try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record WHERE owner='app'"));
 }
 
-test "SH-120 schema 93 migration gives every Session no app declaration and its root lane, on SQLite" {
-    const step = migrations[92 - migration_baseline];
-    try std.testing.expectEqual(@as(u32, 92), step.from);
+test "SH-120 schema 94 migration gives every Session no app declaration and its root lane, on SQLite" {
+    const step = migrations[93 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 93), step.from);
     var raw: ?*c.sqlite3 = null;
     defer _ = c.sqlite3_close(raw);
     try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
@@ -4091,9 +4122,9 @@ test "SH-120 schema 93 migration gives every Session no app declaration and its 
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET app_lane='nope' WHERE session_ref='ch0001'"));
 }
 
-test "SH-120 schema 93 MySQL step adds each lane column where the bootstrap has it, with its CHECK and key" {
-    const step = migrations[92 - migration_baseline];
-    try std.testing.expectEqual(@as(u32, 92), step.from);
+test "SH-120 schema 94 MySQL step adds each lane column where the bootstrap has it, with its CHECK and key" {
+    const step = migrations[93 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 93), step.from);
     const canonical_session_mysql = comptime blk: {
         for (objects(.mysql)) |object| if (std.mem.eql(u8, object.name, "session")) break :blk object.sql;
         unreachable;

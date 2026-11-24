@@ -36,14 +36,22 @@ pub fn validateKeyEndpoint(target: []const u8, ca_file: ?[]const u8, fixture: bo
     } else if (!std.mem.startsWith(u8, target, "https://")) return error.InsecureKeyEndpoint;
 }
 
-pub fn endpointUnder(allocator: std.mem.Allocator, base: []const u8) ![]const u8 {
+/// The rule every URL a connection names meets (its base, its sign-in
+/// URLs): an https endpoint, or loopback HTTP for a fixture, never a key's
+/// plain HTTP. Callers add their own query and path rules.
+pub fn validateEndpointUrl(target: []const u8) !void {
+    try validateEndpoint(target);
+    try validateKeyEndpoint(target, null, false);
+}
+
+/// The endpoint at `path` under `base`, validated as a key endpoint.
+pub fn endpointUnder(allocator: std.mem.Allocator, base: []const u8, path: []const u8) ![]const u8 {
     const uri = std.Uri.parse(base) catch return error.InvalidBaseUrl;
     if (uri.host == null or uri.host.?.isEmpty() or uri.query != null) return error.InvalidBaseUrl;
     const trimmed = std.mem.trimEnd(u8, base, "/");
-    const under = try std.fmt.allocPrint(allocator, "{s}/responses", .{trimmed});
+    const under = try std.fmt.allocPrint(allocator, "{s}{s}", .{ trimmed, path });
     errdefer allocator.free(under);
-    validateEndpoint(under) catch return error.InvalidBaseUrl;
-    validateKeyEndpoint(under, null, false) catch return error.InvalidBaseUrl;
+    validateEndpointUrl(under) catch return error.InvalidBaseUrl;
     return under;
 }
 
@@ -64,7 +72,7 @@ test "endpoint validation permits TLS and loopback fixture HTTP only" {
     try std.testing.expectError(error.InvalidProviderEndpoint, validateEndpoint("https://example.com?q=1"));
 }
 
-test "a base URL names the https Responses endpoint under it, or nothing" {
+test "a base URL names the https endpoint at a path under it, or nothing" {
     const allocator = std.testing.allocator;
     for ([_][2][]const u8{
         .{ "https://api.openai.com/v1", "https://api.openai.com/v1/responses" },
@@ -72,7 +80,7 @@ test "a base URL names the https Responses endpoint under it, or nothing" {
         .{ "https://host//", "https://host/responses" },
         .{ "https://[::1]/v1", "https://[::1]/v1/responses" },
     }) |case| {
-        const under = try endpointUnder(allocator, case[0]);
+        const under = try endpointUnder(allocator, case[0], "/responses");
         defer allocator.free(under);
         try std.testing.expectEqualStrings(case[1], under);
     }
@@ -80,9 +88,9 @@ test "a base URL names the https Responses endpoint under it, or nothing" {
         "http://api.openai.com/v1", "http://127.0.0.1:9/v1",   "https://",            "https:///v1",
         "https://:443/v1",          "https://user:pw@host/v1", "https://host/v1?x=1", "https://host/v1#f",
         "ftp://host",               "api.openai.com/v1",
-    }) |bad| try std.testing.expectError(error.InvalidBaseUrl, endpointUnder(allocator, bad));
+    }) |bad| try std.testing.expectError(error.InvalidBaseUrl, endpointUnder(allocator, bad, "/responses"));
     const long = "https://h/" ++ @as([max_endpoint_bytes]u8, @splat('a'));
-    try std.testing.expectError(error.InvalidBaseUrl, endpointUnder(allocator, long));
+    try std.testing.expectError(error.InvalidBaseUrl, endpointUnder(allocator, long, "/responses"));
 }
 
 test "key admission preserves fixture opt-in and exclusive local CA" {

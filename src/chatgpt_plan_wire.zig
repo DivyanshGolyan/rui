@@ -17,7 +17,7 @@ pub const max_code_bytes = 2048;
 pub const max_refusal_bytes = 128;
 
 pub const authorize_url = issuer ++ "/api/accounts/authorize";
-const token_url = issuer ++ "/api/accounts/oauth/token";
+pub const token_url = issuer ++ "/api/accounts/oauth/token";
 const revoke_url = issuer ++ "/api/accounts/oauth/revoke";
 const loopback_origin = "http://127.0.0.1:";
 const callback_path = "/auth/callback";

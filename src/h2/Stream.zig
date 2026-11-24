@@ -55,18 +55,6 @@ comptime {
 pub const size = @sizeOf(Record);
 pub const alignment = @alignOf(Record);
 
-pub fn of(stream: *h2.Stream) *Record {
-    return @ptrCast(stream);
-}
-
-pub fn ofConst(stream: *const h2.Stream) *const Record {
-    return @ptrCast(stream);
-}
-
-pub fn public(self: *Record) *h2.Stream {
-    return @ptrCast(self);
-}
-
 pub fn facts(self: *const Record) policy.StreamFacts {
     return .{
         .request_sent = self.flags.request_sent,

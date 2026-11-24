@@ -39,6 +39,8 @@ const json = @import("json.zig");
 const Range = codec_abi.Range;
 const Reason = codec_abi.Reason;
 
+pub const dialect: codec_abi.Dialect = .anthropic_messages;
+
 pub const manifest: codec_abi.Manifest = .{
     .observe = .{
         // Anthropic's correlation header. No served-model header (the served
