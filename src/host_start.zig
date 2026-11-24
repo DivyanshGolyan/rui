@@ -366,8 +366,18 @@ fn putOpenAiConnection(gpa: std.mem.Allocator, document: *std.json.Value, endpoi
     try put(gpa, document, "connections", list);
 }
 
-pub fn connectionAssignment(gpa: std.mem.Allocator, connection: *const Connection) ![]const u8 {
-    return std.fmt.allocPrint(gpa, "connections=[{s}]", .{try openAiConnectionText(gpa, connection.endpoint.slice(), connection.key_file.slice())});
+/// The frozen launch assignment for a confirmed sign-in: the saved connections list with
+/// the confirmed `openai` pair in place, merged by the same owner the save uses, so the
+/// launched Host serves every sibling connection the document keeps.
+pub fn connectionAssignment(init: std.process.Init, gpa: std.mem.Allocator, dir: []const u8, connection: *const Connection) ![]const u8 {
+    const settings = try init.gpa.create(hs.Settings);
+    defer init.gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    var document = try saved(init, gpa, dir, settings, &failure);
+    try putOpenAiConnection(gpa, &document, connection.endpoint.slice(), connection.key_file.slice(), &failure);
+    return std.fmt.allocPrint(gpa, "connections={s}", .{try encoded(gpa, lookup(document, "connections").?)});
 }
 
 pub fn confirmConnection(init: std.process.Init, dir: []const u8, connection: *const Connection) !ConnectionSave {
@@ -685,6 +695,7 @@ pub fn prepare(init: std.process.Init, settings: *hs.Settings, failure: *start_r
     if (settings.store == .mysql and settings.interface.dir.anchored)
         try anchorPlacement(init, settings, cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)], failure);
     hs.anchor(settings, cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)]) catch return invalid(failure, "store.sqlite.dir", "Host directory exceeds the path byte bound");
+    supersedeProviders(settings);
     try resolveProviders(init, settings, failure);
     if (settings.store == .mysql) resolve(init, &settings.store.mysql.url) catch |err| return resolutionFailure(failure, "store.mysql.url", settings.store.mysql.url.source, err);
     for (settings.tools.mcp.names[0..settings.tools.mcp.len], settings.tools.mcp.values[0..settings.tools.mcp.len]) |*name, *server| {
@@ -704,6 +715,9 @@ pub fn resolveConnections(init: std.process.Init, settings: *const hs.Settings, 
     for (settings.connections.entries) |*entry| {
         const served = &entry.value;
         const name = served.name.slice();
+        // Model execution still reaches a provider through its built-in name, so this
+        // version serves a connection only under one; any other name is refused at start.
+        if (@import("provider_route.zig").builtInOf(served.name) == null) return unservedName(failure, name);
         const key = switch (served.credential) {
             .key => |*key| key,
             else => return connectionFailure(failure, name, error.ConnectionUnserved),
@@ -734,11 +748,27 @@ pub fn resolveConnections(init: std.process.Init, settings: *const hs.Settings, 
 /// The automatic OpenAI connection a document without a connections list serves: OpenAI's own
 /// endpoint with the key in the saved key file, HOME/.config/rui/openai.key unless RUI_OPENAI_KEY_FILE names
 /// another. This is the one OpenAI served in that case; the built-in entry is not served beside it.
+fn unservedName(failure: *start_report.Failure, name: []const u8) anyerror {
+    var message: [start_report.max_refusal_message_bytes]u8 = undefined;
+    failure.* = .init(.settings_invalid, std.fmt.bufPrint(&message, "connections.{s}: this version serves a connection only under a built-in name (codex, openai, chatgpt)", .{name}) catch "connections: this version serves a connection only under a built-in name");
+    return error.SettingsInvalid;
+}
+
 fn connectionFailure(failure: *start_report.Failure, name: []const u8, err: anyerror) anyerror {
     if (err == error.OutOfMemory) return err;
     var message: [start_report.max_refusal_message_bytes]u8 = undefined;
     failure.* = .init(.settings_invalid, std.fmt.bufPrint(&message, "connections.{s}.key: {s}", .{ name, @errorName(err) }) catch "connections: a key connection cannot be served");
     return error.SettingsInvalid;
+}
+
+/// A connection named like a built-in provider replaces that provider's entry, so the
+/// replaced entry is neither resolved, sealed nor served: one effective selection.
+fn supersedeProviders(settings: *hs.Settings) void {
+    for (settings.connections.entries) |*entry| {
+        inline for (std.enums.values(protocol.Provider)) |named| {
+            if (std.mem.eql(u8, entry.value.name.slice(), @tagName(named))) @field(settings.providers.entries, @tagName(named)) = null;
+        }
+    }
 }
 
 pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
@@ -1579,6 +1609,34 @@ test "a document without connections adds none: OpenAI stays with the built-in s
     defer connected.wipe();
     try resolveConnections(init, settings, &connected, &failure);
     try std.testing.expectEqual(@as(usize, 0), connected.len);
+}
+
+test "a connection under a non-built-in name is refused at start, and one under a built-in name supersedes that provider's entry" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    try environment.put("HOME", "/nonexistent-home");
+    const init = initForTest(&arena, &environment);
+    const connection_text = "{{\"name\":\"{s}\",\"label\":\"Alpha\",\"base_url\":\"https://alpha.example/v1\",\"credential\":{{\"kind\":\"key\",\"source\":{{\"kind\":\"env\",\"name\":\"RUI_TEST_UNSET_CONNECTION_KEY\"}},\"placement\":\"bearer\"}},\"headers\":[],\"refusals\":[],\"formats\":[{{\"family\":\"responses\",\"dialect\":\"openai-responses/3\",\"web_search\":false}}],\"assign\":[],\"models\":{{\"list\":\"openai\"}}}}";
+    inline for (.{ "alpha", "openai" }) |name| {
+        const settings = try gpa.create(hs.Settings);
+        defer gpa.destroy(settings);
+        settings.* = .{};
+        defer settings.deinit();
+        var failure: start_report.Failure = undefined;
+        const document = try std.fmt.allocPrint(arena.allocator(), "{{\"providers\":{{\"openai\":{{\"key\":{{\"env\":\"RUI_TEST_UNSET_PROVIDER_KEY\"}}}}}},\"connections\":[" ++ connection_text ++ "]}}", .{name});
+        try hs.apply(settings, arena.allocator(), document, .file, checks, &failure);
+        var connected: providers.Connected = .{};
+        defer connected.wipe();
+        try std.testing.expectError(error.SettingsInvalid, resolveConnections(init, settings, &connected, &failure));
+        // alpha: refused by name; openai: reaches its own key, which this test leaves unset.
+        try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "connections." ++ name) != null);
+        try std.testing.expectEqual(std.mem.eql(u8, name, "alpha"), std.mem.indexOf(u8, failure.message.slice(), "built-in name") != null);
+        supersedeProviders(settings);
+        try std.testing.expectEqual(std.mem.eql(u8, name, "openai"), settings.providers.entries.openai == null);
+    }
 }
 
 test "Host start refused JSON input allocations erase secret bytes before release" {
@@ -2661,6 +2719,38 @@ test "inspectConnection reports the key source the Host will use" {
     try std.testing.expectEqual(false, from_open.key_source != null);
 }
 
+test "the guided launch assignment keeps every sibling connection beside the confirmed openai pair" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", home);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    const a = arena.allocator();
+    const Gate = struct {
+        fn yes() bool {
+            return true;
+        }
+    };
+    const sibling = "[{\"name\":\"alpha\",\"label\":\"Alpha\",\"base_url\":\"https://alpha.example/v1\",\"credential\":{\"kind\":\"key\",\"source\":{\"kind\":\"saved\"},\"placement\":\"bearer\"},\"headers\":[],\"refusals\":[],\"formats\":[{\"family\":\"responses\",\"dialect\":\"openai-responses/3\",\"web_search\":false}],\"assign\":[],\"models\":{\"list\":\"openai\"}}]";
+    inline for (.{ false, true }) |with_sibling| {
+        const dir = try std.fs.path.join(a, &.{ home, if (with_sibling) "sibling" else "empty" });
+        var failure: start_report.Failure = undefined;
+        if (with_sibling) try savedEdit(init, dir, "connections", sibling, &failure);
+        const saved_pair = try saveConnection(init, dir, .{ .base = "https://one.example/v1" }, .{ .provided = "first-private-key" }, "vendor-chat-v1", Gate.yes);
+        const assignment = try connectionAssignment(init, a, dir, &saved_pair.saved);
+        try std.testing.expect(std.mem.startsWith(u8, assignment, "connections=["));
+        try std.testing.expectEqual(with_sibling, std.mem.indexOf(u8, assignment, "\"alpha\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, assignment, "\"openai\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, assignment, "first-private-key") == null);
+    }
+}
+
 test "Host start guided connection isolates two Stores preserves providers and freezes the pair" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2722,7 +2812,7 @@ test "Host start guided connection isolates two Stores preserves providers and f
     try std.testing.expectError(error.ConnectionSuperseded, confirmConnection(init, first_dir, &first.saved));
     try std.testing.expect(try api_key.read(first.saved.key_file.slice(), &key));
     try std.testing.expectEqualStrings("first-private-key", key.slice());
-    const assignment = try connectionAssignment(a, &first.saved);
+    const assignment = try connectionAssignment(init, a, first_dir, &first.saved);
     try std.testing.expect(std.mem.indexOf(u8, assignment, "first-private-key") == null);
     settings.deinit();
     settings.* = .{};
