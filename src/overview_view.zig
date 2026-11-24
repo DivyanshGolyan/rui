@@ -8850,6 +8850,49 @@ test "Overview explicit adjacent navigation cancels its queued browse preview be
     try std.testing.expect(!settled.browse_open);
 }
 
+test "Overview explicit Enter and Right consume queued wide browse without a duplicate open" {
+    const rows = [_]Listed{
+        session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" }),
+        session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" }),
+        session("cccccc", .{ .finished = ago(3) }, .{ .label = "third" }),
+    };
+    for ([_]Input{ .enter, .{ .action = .open_session } }) |key| {
+        var state = try opened(&rows);
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = rows[0].reference });
+        state.selected = .{ .session = rows[0].reference };
+        _ = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } });
+        try expectSelected(&state, &rows[1].reference);
+
+        try expectEffects(&.{.{ .open = rows[1].reference }}, try step(&state, .{ .input = .{ .wide = true, .key = key } }));
+        const settled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = true } });
+        try expectEffects(&.{}, settled);
+        try std.testing.expect(!settled.browse_open);
+    }
+}
+
+test "Overview ignored and pasted input preserve the queued wide browse target" {
+    const rows = [_]Listed{
+        session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" }),
+        session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" }),
+    };
+    for ([_]InputDelivery{
+        .{ .key = .ignored, .wide = true },
+        .{ .key = .enter, .pasted = true, .wide = true },
+    }) |delivery| {
+        var state = try opened(&rows);
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = rows[0].reference });
+        state.selected = .{ .session = rows[0].reference };
+        _ = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } });
+        try expectSelected(&state, &rows[1].reference);
+        _ = try step(&state, .{ .input = delivery });
+        const settled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = true } });
+        try expectEffects(&.{.{ .open = rows[1].reference }}, settled);
+        try std.testing.expect(settled.browse_open);
+    }
+}
+
 test "Overview browse New Session never activates until Enter and remains reachable from chat lists" {
     for ([_]bool{ false, true }) |wide| {
         var state = try opened(&mixed);
