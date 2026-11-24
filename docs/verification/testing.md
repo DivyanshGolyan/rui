@@ -96,3 +96,5 @@ Every PR that changes production logic moves the tests of the owners it touches 
 
 A PR that touches production logic and leaves its owners' legacy tests in place says why in its body.
 Documentation, CI and test-only PRs carry no migration duty.
+
+New Store migration tests must build old formats forward from the frozen baseline through `src/store/history.zig` and never rewind a current Store, so a new migration step needs no fixture edit. Existing hand-built old-format tests are held to a shrink-only list in `tests/ci/test_store_engine_boundary.py`: a new one fails CI, and an existing one moves onto `history.zig` as its count drops.
