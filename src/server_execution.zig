@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const tool_result = @import("tool_result.zig");
 const server_mcp = @import("server_mcp.zig");
 const server_mcp_relist = @import("server_mcp_relist.zig");
@@ -734,7 +735,7 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
     };
     for (std.enums.values(provider.ListingKind)) |kind| {
         const name = provider.listedProvider(kind) orelse continue;
-        const served = run.settings.providers.liveList(name) orelse continue;
+        const served = run.settings.providers.liveList(provider_route.nameOf(name)) orelse continue;
         listing_urls.set(kind, std.fmt.allocPrint(run.shared.allocator, "{s}/models", .{providers.responsesBase(served.endpoint).?}) catch |err| {
             run.shared.model_lists.publish(name, err);
             continue;
@@ -750,8 +751,9 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
         } else false;
         if (slots.len == 0 and !any_listing) break :reactor null;
         var endpoints: std.EnumArray(protocol.Provider, ?[]const u8) = .initFill(null);
-        for (run.settings.providers.table.values, &endpoints.values) |served, *endpoint| {
-            if (served) |value| endpoint.* = value.endpoint;
+        for (run.settings.providers.table.names[0..run.settings.providers.table.len], run.settings.providers.table.values[0..run.settings.providers.table.len]) |name, served| {
+            const built_in = provider_route.builtInOf(name) orelse continue;
+            endpoints.set(built_in, served.endpoint);
         }
         reactor_storage.init(run.shared.allocator, run.shared.io, .{
             .endpoints = endpoints,
@@ -1280,7 +1282,7 @@ noinline fn startListings(run: *Run, reactor: *provider.Reactor, works: *std.Enu
 
 fn listingCredential(run: *Run, kind: provider.ListingKind) ?providers.Credential {
     const name = provider.listedProvider(kind) orelse return null;
-    return run.settings.providers.liveList(name).?.credential;
+    return run.settings.providers.liveList(provider_route.nameOf(name)).?.credential;
 }
 
 fn startLeasedListing(run: *Run, reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork, lease: ?*const providers.Lease) void {
@@ -2387,7 +2389,7 @@ fn advanceModelPreparation(
             owner.purpose = preparation.settings.operation;
             run.shared.probes.tracePreparationAdvance("preparation_advance_completed", stats, owner.binding);
             run.shared.probes.traceOperation("preparation_completed", owner.binding);
-            const leased = run.settings.providers.get(request.provider).?.credential.leased();
+            const leased = run.settings.providers.get(provider_route.nameOf(request.provider)).?.credential.leased();
             switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = leased } })) {
                 .authenticate => {
                     moveSlot(run, slot, .model_authenticating, .{ .owner = owner });
@@ -2418,7 +2420,7 @@ fn advanceCredentialWork(run: *Run, reactor: *provider.Reactor, slots: []Executi
                 finishCustodyNow(run, slot);
             } else {
                 active.requested = true;
-                worker.request(run.settings.providers.get(request.provider).?.credential.signIn().?);
+                worker.request(run.settings.providers.get(provider_route.nameOf(request.provider)).?.credential.signIn().?);
             }
             return true;
         },
@@ -2563,7 +2565,7 @@ fn launchPreparedRequest(
     }
     var retained_response: ?named_scratch.Owner = null;
     if (failedAtProviderPrepare(run, slot, token, binding, request)) return;
-    const served = run.settings.providers.get(request.provider).?;
+    const served = run.settings.providers.get(provider_route.nameOf(request.provider)).?;
     var headers: providers.Headers = .{};
     defer headers.deinit();
     served.credential.fields(served.endpoint, run.settings.providers.ca_file, lease, &reactor.credentials, &headers) catch |err| {
@@ -3355,10 +3357,10 @@ test "a leased model list waits behind every model slot, and its lease always go
 
     const models_url = "http://127.0.0.1:1/v1/models";
     var served: providers.Providers = .{};
-    served.table.set(.codex, .{ .endpoint = "http://127.0.0.1:1/responses", .credential = .{ .chatgpt_device = .{ .path = path, .refresh = .synthetic } } });
-    served.table.set(.chatgpt, .{ .endpoint = "http://127.0.0.1:1/v1/responses", .credential = .{ .chatgpt_plan = .{ .path = path, .refresh = .{ .fixture_endpoint = "http://127.0.0.1:1/token" } } } });
-    const plan_source = served.get(.chatgpt).?.credential.signIn().?;
-    const device_source = served.get(.codex).?.credential.signIn().?;
+    served.table.set(provider_route.nameOf(.codex), .{ .endpoint = "http://127.0.0.1:1/responses", .credential = .{ .chatgpt_device = .{ .path = path, .refresh = .synthetic } } }) catch unreachable;
+    served.table.set(provider_route.nameOf(.chatgpt), .{ .endpoint = "http://127.0.0.1:1/v1/responses", .credential = .{ .chatgpt_plan = .{ .path = path, .refresh = .{ .fixture_endpoint = "http://127.0.0.1:1/token" } } } }) catch unreachable;
+    const plan_source = served.get(provider_route.nameOf(.chatgpt)).?.credential.signIn().?;
+    const device_source = served.get(provider_route.nameOf(.codex)).?.credential.signIn().?;
     var records: [1]execution.CustodyRecord = @splat(.{});
     var host = Fixture{
         .io = io,
@@ -5285,7 +5287,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         var counted: CountedEndpoint = undefined;
         if (ordered_limit) {
             try counted.init(root, run.scratch_budget.?);
-            served.table.set(.codex, .{ .endpoint = counted.peer.url(), .credential = .none });
+            served.table.set(provider_route.nameOf(.codex), .{ .endpoint = counted.peer.url(), .credential = .none }) catch unreachable;
         }
         defer if (ordered_limit) counted.deinit();
         if (ordered_limit) {

@@ -1,7 +1,7 @@
 const std = @import("std");
 const catalog = @import("model_catalog.zig");
 const model_capability = @import("model_capability.zig");
-const provider_name = @import("provider_name.zig");
+const connection = @import("connection.zig");
 
 pub const Source = enum {
     catalog,
@@ -96,12 +96,8 @@ pub fn objectKey(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !?[]con
 
 const model_overhead = "{\"id\":\"\",\"known\":false},".len;
 const provider_overhead = ",{\"connection\":\"\",\"source\":\"catalog_fallback\",\"models\":[]}".len + max_provider_name_bytes;
-const max_provider_name_bytes = blk: {
-    var bytes = 0;
-    for (std.meta.fieldNames(provider_name.Provider)) |name| bytes = @max(bytes, name.len);
-    break :blk bytes;
-};
-const provider_count = std.meta.fieldNames(provider_name.Provider).len;
+const max_provider_name_bytes = connection.max_name_bytes;
+const provider_count = connection.max_list;
 
 pub fn providersBytes(facts: []const catalog.Entry) usize {
     @setEvalBranchQuota(20000);
@@ -122,7 +118,7 @@ pub const List = union(Source) {
 };
 
 pub const Entry = struct {
-    provider: provider_name.Provider,
+    provider: connection.Name,
     list: List,
 };
 
@@ -130,7 +126,7 @@ pub fn writeProviders(out: *std.Io.Writer, facts: []const catalog.Entry, entries
     try out.writeByte('[');
     for (entries, 0..) |entry, index| {
         if (index != 0) try out.writeByte(',');
-        try out.print("{{\"connection\":\"{s}\",\"source\":\"{s}\",\"models\":[", .{ @tagName(entry.provider), @tagName(entry.list) });
+        try out.print("{{\"connection\":\"{s}\",\"source\":\"{s}\",\"models\":[", .{ entry.provider.slice(), @tagName(entry.list) });
         var first = true;
         switch (entry.list) {
             .live => |live| {
@@ -152,6 +148,10 @@ fn writeModel(out: *std.Io.Writer, facts: []const catalog.Entry, id: []const u8,
     try out.writeAll("{\"id\":");
     try std.json.Stringify.encodeJsonString(id, .{}, out);
     try out.print(",\"known\":{}}}", .{model_capability.supportsModel(facts, id)});
+}
+
+fn named(text: []const u8) connection.Name {
+    return connection.Name.parse(text).?;
 }
 
 test "an OpenAI list keeps the provider's order and skips IDs Rui cannot select" {
@@ -197,8 +197,8 @@ test "a reply lists each provider's models and whether the catalog knows them" {
     var bytes: [max_providers_bytes]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
     try writeProviders(&out, catalog.shipped, &.{
-        .{ .provider = .codex, .list = .catalog },
-        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\nmy\"model\n" } } },
+        .{ .provider = named("codex"), .list = .catalog },
+        .{ .provider = named("openai"), .list = .{ .live = .{ .bytes = "gpt-6-luna\nmy\"model\n" } } },
     });
     const listed_models = comptime blk: {
         var text: []const u8 = "";
@@ -224,10 +224,10 @@ test "the reply bound holds the largest lists" {
     var bytes: [max_providers_bytes]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
     var entries: [provider_count]Entry = undefined;
-    for (&entries, std.enums.values(provider_name.Provider)) |*entry, provider|
-        entry.* = .{ .provider = provider, .list = .{ .live = .{ .bytes = ids[0..len] } } };
+    for (&entries) |*entry|
+        entry.* = .{ .provider = named("codex"), .list = .{ .live = .{ .bytes = ids[0..len] } } };
     try writeProviders(&out, catalog.shipped, &entries);
-    entries[0] = .{ .provider = .codex, .list = .catalog_fallback };
+    entries[0] = .{ .provider = named("codex"), .list = .catalog_fallback };
     out = std.Io.Writer.fixed(&bytes);
     try writeProviders(&out, catalog.shipped, &entries);
 }
@@ -248,14 +248,14 @@ test "provider lists use selected facts without merging shipped rows or sorting 
             .catalog_fallback => .catalog_fallback,
             .live => unreachable,
         };
-        try writeProviders(&out, facts, &.{.{ .provider = .codex, .list = list }});
+        try writeProviders(&out, facts, &.{.{ .provider = named("codex"), .list = list }});
         var expected: [256]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "[{{\"connection\":\"codex\",\"source\":\"{s}\",\"models\":[{{\"id\":\"a-saved\",\"known\":true}},{{\"id\":\"z-saved\",\"known\":true}}]}}]", .{@tagName(source)}), out.buffered());
         out = std.Io.Writer.fixed(&bytes);
-        try writeProviders(&out, &.{}, &.{.{ .provider = .codex, .list = list }});
+        try writeProviders(&out, &.{}, &.{.{ .provider = named("codex"), .list = list }});
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "[{{\"connection\":\"codex\",\"source\":\"{s}\",\"models\":[]}}]", .{@tagName(source)}), out.buffered());
     }
-    const entries: []const Entry = &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "z-saved\nb-hidden\ngpt-6-luna\na-saved\n" } } }};
+    const entries: []const Entry = &.{.{ .provider = named("openai"), .list = .{ .live = .{ .bytes = "z-saved\nb-hidden\ngpt-6-luna\na-saved\n" } } }};
     out = std.Io.Writer.fixed(&bytes);
     try writeProviders(&out, facts, entries);
     try std.testing.expectEqualStrings(
@@ -282,8 +282,8 @@ test "the dynamic reply bound holds saved catalogs beyond the shipped bound" {
     defer allocator.free(bytes);
     var out = std.Io.Writer.fixed(bytes);
     var entries: [provider_count]Entry = undefined;
-    for (&entries, std.enums.values(provider_name.Provider)) |*entry, provider|
-        entry.* = .{ .provider = provider, .list = .catalog_fallback };
+    for (&entries) |*entry|
+        entry.* = .{ .provider = named("codex"), .list = .catalog_fallback };
     try writeProviders(&out, facts, &entries);
     try std.testing.expect(out.buffered().len > max_providers_bytes);
     try std.testing.expect(out.buffered().len <= bound);

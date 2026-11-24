@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Split = @import("widgets/Split.zig");
@@ -1108,7 +1109,7 @@ test "App root relaunch departure stops child ticks and scheduling at the first 
 test "App root routes Model filter typing to settings and Escape closes only its choice" {
     var text: vxfw.Text = .{ .text = "overview" };
     var root: Self = .{ .overview = text.widget(), .list = text.widget(), .input = .{ .layer = .settings } };
-    root.settings_page.model_choice.open(null, .codex, "");
+    root.settings_page.model_choice.open(null, provider_route.nameOf(.codex), "");
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };

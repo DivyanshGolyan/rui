@@ -1393,6 +1393,67 @@ test "SUI-49 Message placement preserves provenance across pages" {
     try host.withHost(&domain);
 }
 
+test "CLI-35 an Activity read keeps its resolved Store across alias retarget" {
+    const Host = struct {
+        first: [8192]u8 = undefined,
+        first_len: usize = 0,
+        pub fn answer(self: *@This(), fd: std.posix.fd_t) !void {
+            var request_buffer: [8192]u8 = undefined;
+            const request = try fake_host.readRequest(fd, &request_buffer) orelse return;
+            try std.testing.expect(request.is("/v1/activity-page"));
+            if (self.first_len == 0) {
+                @memcpy(self.first[0..request.body.len], request.body);
+                self.first_len = request.body.len;
+            } else {
+                try std.testing.expectEqualSlices(u8, self.first[0..self.first_len], request.body);
+            }
+            var storage: [2048]u8 = undefined;
+            var arena = std.heap.FixedBufferAllocator.init(&storage);
+            const body = try std.json.parseFromSliceLeaky(struct { store: []const u8 }, arena.allocator(), request.body, .{ .ignore_unknown_fields = true });
+            const fixture: FakeHost = .{ .history = 50, .tail = &.{}, .end = 50 };
+            var page = fixture.page(50, 25, null, .backward, .full, 7);
+            try page.work.workspace.set(body.store);
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            try activity_reply.writePage(&output.writer, &page);
+            fake_host.respond(fd, "200 OK", "application/json", "", output.written());
+        }
+    };
+    const Action = struct {
+        pub fn run(_: *@This(), host: *Host, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            try dir.createDir(io, "other", .fromMode(0o700));
+            try dir.symLink(io, ".", "alias", .{ .is_directory = true });
+            var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias", .{root});
+            const paths = try client.resolveClientPaths(io, alias);
+            const requests: client.Requests = .{ .io = io };
+            const cursor: protocol_reply.ActivityCursor = .{ .end = 50, .position = 25, .direction = .backward, .limit = 7 };
+            try std.testing.expectError(error.InvalidSession, requests.activityPageAt(&paths, "invalid", cursor));
+            try std.testing.expectError(error.InvalidCursor, requests.activityPageAt(&paths, "k7m2qx", .{ .limit = 0 }));
+            var cancelled: client.Cancellation = .{};
+            cancelled.requestStop();
+            try std.testing.expectError(error.Cancelled, (client.Requests{ .io = io, .cancellation = &cancelled }).activityPageAt(&paths, "k7m2qx", cursor));
+            const initial = try requests.activityPage(alias, "k7m2qx", cursor);
+            try std.testing.expect(initial == .page);
+            try std.testing.expectEqualStrings(paths.store_identity.slice(), initial.page.facts.work.workspace.slice());
+            try dir.deleteFile(io, "alias");
+            try dir.symLink(io, "other", "alias", .{ .is_directory = true });
+            const retargeted = try client.resolveClientPaths(io, alias);
+            try std.testing.expect(!paths.store_identity.eql(retargeted.store_identity.slice()));
+            const reply = try requests.activityPageAt(&paths, "k7m2qx", cursor);
+            try std.testing.expect(reply == .page);
+            try std.testing.expectEqualStrings(paths.store_identity.slice(), reply.page.facts.work.workspace.slice());
+            try std.testing.expectEqualDeep(initial.page.continuation(), reply.page.continuation());
+            try std.testing.expectEqual(@as(u64, 18), reply.page.continuation().?.position);
+            _ = host;
+        }
+    };
+    var host: Host = .{};
+    var action: Action = .{};
+    try fake_host.withHost(&host, &action);
+}
+
 test "session_reads opening reads one Activity page whatever the history before it" {
     for ([_]u64{ 10, 10_000 }) |earlier| {
         var host: FakeHost = .{ .history = earlier, .tail = &.{}, .end = earlier };

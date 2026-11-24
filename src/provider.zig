@@ -2,6 +2,7 @@ const std = @import("std");
 const h2 = @import("h2");
 const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
+const host_headers = @import("host_headers.zig");
 const attempt = @import("attempt.zig");
 const transport_policy = @import("transport_policy.zig");
 const codec_abi = @import("codec_abi.zig");
@@ -31,24 +32,17 @@ pub const PreparedRequest = struct {
     }
 };
 
-const content_type: h2.Field = .{ .name = "content-type", .value = "application/json", .borrowed = true };
+pub const hostField = host_headers.hostField;
 
-pub const host_request_fields = [_][]const u8{ content_type.name, "authorization", "chatgpt-account-id", "user-agent", "x-openai-fedramp" } ++ routing_fields;
+const content_type: h2.Field = .{ .name = host_headers.content_type, .value = "application/json", .borrowed = true };
 
-const routing_fields = fields: {
-    var names: []const []const u8 = &.{};
+test "the host-owned header list agrees with its owners" {
+    for (h2.owned_fields) |owned| try std.testing.expect(host_headers.hostField(owned));
     for (std.enums.values(protocol.Codec)) |codec| {
         const name = codecs.manifest(codec).observe.turn_state;
-        if (name.len != 0) names = names ++ .{name};
+        if (name.len != 0) try std.testing.expect(host_headers.hostField(name));
     }
-    break :fields names[0..names.len].*;
-};
-
-pub fn hostField(name: []const u8) bool {
-    for (host_request_fields ++ h2.owned_fields) |owned| {
-        if (std.mem.eql(u8, name, owned)) return true;
-    }
-    return false;
+    try std.testing.expect(host_headers.hostField(host_headers.content_type));
 }
 
 pub const max_turn_state_bytes = 4096;

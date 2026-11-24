@@ -1,5 +1,6 @@
 const credential_location = @import("credential_location.zig");
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const host_endpoint = @import("host_endpoint.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const model_catalog = @import("model_catalog.zig");
@@ -408,7 +409,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         .access_failure => .access_failure,
     } else .store_unavailable;
     var shown: codex_auth.Shown = undefined;
-    const account = if (reader != .command_line and readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
+    const account = if (reader != .command_line and readiness.get(provider_route.nameOf(.chatgpt)).usable()) accountDetails(init, &shown) else null;
     const facts: defaults_report.Facts = .{
         .changed = changed,
         .values = values,
@@ -464,7 +465,7 @@ fn signInNames() defaults_report.Names {
 
 fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Readinesses) !void {
     var shown: codex_auth.Shown = undefined;
-    const account = if (readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
+    const account = if (readiness.get(provider_route.nameOf(.chatgpt)).usable()) accountDetails(init, &shown) else null;
     var buffer: [1024]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const names = signInNames();
@@ -2014,7 +2015,7 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
         if (intent.model == null and std.mem.eql(u8, entry.binding.?.provider.slice(), "openai")) entry.binding = null;
     } else {
         const connection_info = try host_start.inspectConnection(init, destination.path);
-        readiness.set(.openai, connection_info.readiness);
+        readiness.set(provider_route.nameOf(.openai), connection_info.readiness);
         entry.binding = try snapshot.resolve(&readiness);
         if (connection_info.custom() and intent.model == null) {
             if (entry.binding) |*binding| if (std.mem.eql(u8, binding.provider.slice(), "openai")) {
@@ -2030,7 +2031,7 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
         var wiping: @import("secret_value.zig").WipingAllocator = .{ .backing = init.gpa };
         var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
         defer memory.deinit();
-        const assignments: []const []const u8 = if (connection) |value| &.{try host_start.connectionAssignment(init, memory.allocator(), value)} else &.{};
+        const assignments: []const []const u8 = if (connection) |value| &.{try host_start.connectionAssignment(init, memory.allocator(), destination.path, value)} else &.{};
         startSelectedOverviewHost(init, destination.path, binding, &readiness, assignments, ops, &entry.launch.?);
         // Keep the Host directory selector: Store identity alone loses saved placement.
         if (entry.launch.?.outcome == .ready) {
@@ -2108,7 +2109,7 @@ fn joinedProviders(comptime separator: []const u8) []const u8 {
 fn localReadiness(init: std.process.Init) provider_selection.Readinesses {
     var readiness: provider_selection.Readinesses = undefined;
     for (std.enums.values(protocol.Provider)) |provider|
-        readiness.set(provider, providerReadiness(init, provider) catch .credential_error);
+        readiness.set(provider_route.nameOf(provider), providerReadiness(init, provider) catch .credential_error);
     return readiness;
 }
 
@@ -2154,8 +2155,13 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         tuning.settings_digest = settings_handoff.digest(frozen.bytes);
         break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &preparation_failure, .detached, .start);
     } else try admitHost(init, .{ .layered = parsed }, selected, settings, &preparation_failure, .foreground, .start);
+    var connected: providers.Connected = .{};
     var failure: ?start_report.Failure = null;
-    return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
+    host_start.resolveConnections(init, settings, &connected, &preparation_failure) catch |err| {
+        failure = preparation_failure;
+        return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, err);
+    };
+    return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, &connected, tuning, &failure));
 }
 
 /// Shared by serve and settings --check: intake, then the proxy precondition,
@@ -2175,7 +2181,9 @@ fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []co
 }
 
 fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, attempt: host_start.Attempt) !host_settings.Prepared {
-    const served = providers.fromSettings(settings);
+    var connected: providers.Connected = .{};
+    host_start.resolveConnections(init, settings, &connected, failure) catch |err| return writeAttemptRefusal(init.io, attempt, failure, caller_exit.knownError(err));
+    const served = providers.fromSettings(settings, &connected);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
         var text: [start_report.max_refusal_message_bytes]u8 = undefined;
         failure.* = .init(.proxy_unusable, std.fmt.bufPrint(&text, "https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy", .{reason}) catch unreachable);
@@ -5606,7 +5614,7 @@ test "Host launch guided activation requires frozen pair and exact fresh identit
         const store = try std.fs.path.join(arena.allocator(), &.{ home, "store" });
         const saved = try host_start.saveConnection(init, store, .{ .base = "https://first.example/v1" }, .{ .provided = "fixture-first-key" }, "custom-model", Gate.yes);
         _ = try host_start.saveConnection(init, store, .{ .base = "https://second.example/v2" }, .{ .provided = "fixture-second-key" }, "another-model", Gate.yes);
-        const frozen_assignment = try host_start.connectionAssignment(init, arena.allocator(), &saved.saved);
+        const frozen_assignment = try host_start.connectionAssignment(init, arena.allocator(), store, &saved.saved);
         var fixture: LaunchFixture = .{ .scenario = case.scenario, .exact_identity = case.exact, .delay_refusal = case.delayed, .openai = case.openai, .expected_assignment = frozen_assignment };
         const activation = try activateOverviewConnectionUsing(init, .{ .store = store, .provider = "openai", .model = "custom-model" }, &saved.saved, fixture.ops());
         try std.testing.expectEqual(case.pending, activation.pending);

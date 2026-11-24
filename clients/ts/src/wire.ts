@@ -1523,6 +1523,11 @@ export interface components {
             presets?: {
                 [key: string]: components["schemas"]["AgentSpec"];
             };
+            /**
+             * Format: connection-list
+             * @description Key connections this Host serves, each by its name.
+             */
+            connections?: Record<string, never>[];
         };
         HostStopReply: {
             /** @constant */

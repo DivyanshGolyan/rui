@@ -2,6 +2,8 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const preference_document = @import("preference_document.zig");
 const provider_selection = @import("provider_selection.zig");
+const provider_route = @import("provider_route.zig");
+const connection = @import("connection.zig");
 const model_capability = @import("model_capability.zig");
 const TerminalText = @import("TerminalText.zig");
 const session_settings = @import("session_settings.zig");
@@ -33,11 +35,15 @@ pub const Names = struct {
     /// Every provider's wire name, joined with `|`.
     choices: []const u8,
 
-    pub fn shownFor(self: *const Names, provider: protocol.Provider) []const u8 {
+    /// The label a connection name is shown under: a built-in provider's own, else the name itself.
+    pub fn shownFor(self: *const Names, name: []const u8) []const u8 {
+        const provider = provider_route.builtInOf(connection.Name.parse(name) orelse return name) orelse return name;
         return self.shown[@backingInt(provider)];
     }
 
-    pub fn loginFor(self: *const Names, provider: protocol.Provider) []const u8 {
+    /// The sign-in command a connection name is pointed at; only a built-in provider has one.
+    pub fn loginFor(self: *const Names, name: []const u8) []const u8 {
+        const provider = provider_route.builtInOf(connection.Name.parse(name) orelse return "") orelse return "";
         return self.login[@backingInt(provider)];
     }
 };
@@ -72,7 +78,7 @@ pub fn overlayStore(local: provider_selection.Readinesses, inspected: ?Inspected
     var overlay: Overlay = .{ .readiness = local };
     const info = inspected orelse return overlay;
     const source = info.key_source orelse return overlay;
-    overlay.readiness.set(.openai, info.readiness);
+    overlay.readiness.set(provider_route.nameOf(.openai), info.readiness);
     overlay.key_source = source;
     return overlay;
 }
@@ -133,7 +139,7 @@ pub fn writeJson(writer: *std.Io.Writer, facts: *const Facts) !void {
     try std.json.Stringify.value(if (values.permission_mode) |mode| @tagName(mode) else null, .{}, writer);
     try writer.writeAll(",\"local_credentials\":{");
     for (std.enums.values(protocol.Provider), 0..) |provider, index|
-        try writer.print("{s}\"{s}\":\"{s}\"", .{ if (index == 0) "" else ",", @tagName(provider), @tagName(facts.readiness.get(provider)) });
+        try writer.print("{s}\"{s}\":\"{s}\"", .{ if (index == 0) "" else ",", @tagName(provider), @tagName(facts.readiness.get(provider_route.nameOf(provider))) });
     try writer.writeAll("},\"openai_key_source\":");
     if (facts.openai_key) |source| switch (source) {
         .file => |path| {
@@ -171,13 +177,11 @@ pub fn writeJson(writer: *std.Io.Writer, facts: *const Facts) !void {
 }
 
 fn shownOf(names: *const Names, saved: []const u8) []const u8 {
-    const provider = std.meta.stringToEnum(protocol.Provider, saved) orelse return saved;
-    return names.shownFor(provider);
+    return names.shownFor(saved);
 }
 
 fn loginOf(names: *const Names, saved: []const u8) []const u8 {
-    const provider = std.meta.stringToEnum(protocol.Provider, saved) orelse return "";
-    return names.loginFor(provider);
+    return names.loginFor(saved);
 }
 
 fn safeText(out: *std.Io.Writer, value: []const u8) !void {
@@ -216,7 +220,7 @@ pub fn writeText(writer: *std.Io.Writer, facts: *const Facts) !void {
     switch (selection) {
         .unsupported_provider => try writer.print("Next Session: saved connection is unsupported; no fallback. Repair with `rui defaults configure " ++ connection_flag ++ " {s} --model {s}`.\n", .{ names.choices, facts.defaults.recommended_model }),
         .unsupported_model => try writer.print("Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure " ++ connection_flag ++ " {s} --model {s}`.\n", .{ names.choices, facts.defaults.recommended_model }),
-        .chooser => try writer.print("Next Session: choose a connection with `rui defaults configure " ++ connection_flag ++ " {s}`; ChatGPT login: `{s}`; OpenAI key: `{s}`.\n", .{ names.choices, names.loginFor(.chatgpt), names.loginFor(.openai) }),
+        .chooser => try writer.print("Next Session: choose a connection with `rui defaults configure " ++ connection_flag ++ " {s}`; ChatGPT login: `{s}`; OpenAI key: `{s}`.\n", .{ names.choices, names.loginFor("chatgpt"), names.loginFor("openai") }),
         .selected => |selected| {
             const login = loginOf(names, selected.provider);
             try writer.print("Next Session: {s} / {s} (", .{ shownOf(names, selected.provider), selected.model });
@@ -253,15 +257,15 @@ fn chatgptLines(writer: *std.Io.Writer, plan: provider_selection.Readiness, devi
             }
             try writer.writeAll(" (remote acceptance not checked).\n");
         },
-        .missing => if (device == .missing) try writer.print("ChatGPT: not signed in; sign in with `{s}` (add --device-code to use a code instead of the browser).\n", .{names.loginFor(.chatgpt)}),
-        .refresh_required => try writer.print("ChatGPT: a renewal did not finish; sign in again with `{s}`.\n", .{names.loginFor(.chatgpt)}),
+        .missing => if (device == .missing) try writer.print("ChatGPT: not signed in; sign in with `{s}` (add --device-code to use a code instead of the browser).\n", .{names.loginFor("chatgpt")}),
+        .refresh_required => try writer.print("ChatGPT: a renewal did not finish; sign in again with `{s}`.\n", .{names.loginFor("chatgpt")}),
         .credential_error => try writer.writeAll("ChatGPT: error reading private Rui credential; inspect it before use.\n"),
     }
     switch (device) {
         .missing => {},
         .configured => try writer.writeAll("ChatGPT (device code): signed in (remote acceptance not checked).\n"),
         .renewal_due => try writer.writeAll("ChatGPT (device code): signed in; renewal due at dispatch (remote acceptance not checked).\n"),
-        .refresh_required => try writer.print("ChatGPT (device code): a renewal did not finish; sign in again with `{s}`.\n", .{names.loginFor(.codex)}),
+        .refresh_required => try writer.print("ChatGPT (device code): a renewal did not finish; sign in again with `{s}`.\n", .{names.loginFor("codex")}),
         .credential_error => try writer.writeAll("ChatGPT (device code): error reading private Rui credential; inspect it before use.\n"),
     }
 }
@@ -271,25 +275,25 @@ fn hostProvidersLine(connections: protocol.Connections, names: *const Names, buf
     var line = std.Io.Writer.fixed(buffer);
     line.writeAll("Host: serves") catch unreachable;
     var first = true;
-    for (std.enums.values(protocol.Provider)) |provider| if (connections.route(@tagName(provider)) != .unserved) {
-        line.print("{s} {s}", .{ if (first) "" else ",", names.shownFor(provider) }) catch unreachable;
+    for (connections.slice()) |fact| {
+        line.print("{s} {s}", .{ if (first) "" else ",", fact.label.slice() }) catch unreachable;
         first = false;
-    };
+    }
     line.writeAll(" (credentials checked locally, not by status)") catch unreachable;
     for (std.enums.values(protocol.Provider)) |provider| if (connections.route(@tagName(provider)) == .unserved) {
-        const login = names.loginFor(provider);
+        const login = names.loginFor(@tagName(provider));
         if (login.len != 0)
-            line.print("; to add {s}, stop and restart it after `{s}`", .{ names.shownFor(provider), login }) catch unreachable
+            line.print("; to add {s}, stop and restart it after `{s}`", .{ names.shownFor(@tagName(provider)), login }) catch unreachable
         else
-            line.print("; {s} needs a sign-in this terminal cannot make yet", .{names.shownFor(provider)}) catch unreachable;
+            line.print("; {s} needs a sign-in this terminal cannot make yet", .{names.shownFor(@tagName(provider))}) catch unreachable;
     };
     line.writeAll(".\n") catch unreachable;
     return line.buffered();
 }
 
 pub fn writeSignIns(writer: *std.Io.Writer, readiness: *const provider_selection.Readinesses, account: ?Account, names: *const Names, source: ?KeySource) !void {
-    try chatgptLines(writer, readiness.get(.chatgpt), readiness.get(.codex), names, account);
-    switch (readiness.get(.openai)) {
+    try chatgptLines(writer, readiness.get(provider_route.nameOf(.chatgpt)), readiness.get(provider_route.nameOf(.codex)), names, account);
+    switch (readiness.get(provider_route.nameOf(.openai))) {
         .configured, .renewal_due => if (source) |key| switch (key) {
             .file => |path| {
                 try writer.writeAll("OpenAI API key: found in file ");
@@ -325,7 +329,7 @@ pub fn writeSignIns(writer: *std.Io.Writer, readiness: *const provider_selection
                 try safeText(writer, name);
                 try writer.writeAll(" is not one valid key; fix it.\n");
             },
-        } else try writer.print("OpenAI API key: unreadable, not owner-only or not one key; save it again with `{s}`.\n", .{names.loginFor(.openai)}),
+        } else try writer.print("OpenAI API key: unreadable, not owner-only or not one key; save it again with `{s}`.\n", .{names.loginFor("openai")}),
     }
 }
 
@@ -407,7 +411,7 @@ test "CLI-30 the defaults report is a function of its facts" {
         for ([_]Readiness{ .configured, .renewal_due }) |plan| {
             for (accounts, usable_lines) |account, expected| {
                 var readiness = provider_selection.Readinesses.initFill(.missing);
-                readiness.set(.chatgpt, plan);
+                readiness.set(provider_route.nameOf(.chatgpt), plan);
                 var output_buffer: [1024]u8 = undefined;
                 var output = std.Io.Writer.fixed(&output_buffer);
                 try writeSignIns(&output, &readiness, account, &names, null);
@@ -422,7 +426,7 @@ test "CLI-30 the defaults report is a function of its facts" {
         for (unusable) |row| {
             for (accounts) |account| {
                 var readiness = provider_selection.Readinesses.initFill(.missing);
-                readiness.set(.chatgpt, row[0]);
+                readiness.set(provider_route.nameOf(.chatgpt), row[0]);
                 var output_buffer: [1024]u8 = undefined;
                 var output = std.Io.Writer.fixed(&output_buffer);
                 try writeSignIns(&output, &readiness, account, &names, null);
@@ -442,7 +446,7 @@ test "CLI-30 the defaults report is a function of its facts" {
         };
         for (lines) |row| {
             var readiness = provider_selection.Readinesses.initFill(.missing);
-            readiness.set(.openai, row[0]);
+            readiness.set(provider_route.nameOf(.openai), row[0]);
             var output_buffer: [1024]u8 = undefined;
             var output = std.Io.Writer.fixed(&output_buffer);
             try writeSignIns(&output, &readiness, null, &names, null);
@@ -462,7 +466,7 @@ test "CLI-30 the defaults report is a function of its facts" {
         };
         for (sourced) |row| {
             var readiness = provider_selection.Readinesses.initFill(.missing);
-            readiness.set(.openai, row[0]);
+            readiness.set(provider_route.nameOf(.openai), row[0]);
             var output_buffer: [1024]u8 = undefined;
             var output = std.Io.Writer.fixed(&output_buffer);
             try writeSignIns(&output, &readiness, null, &names, row[1]);
@@ -478,7 +482,7 @@ test "CLI-30 the defaults report is a function of its facts" {
         };
         for (unreadable_rows) |row| {
             var readiness = provider_selection.Readinesses.initFill(.missing);
-            readiness.set(.openai, row[0]);
+            readiness.set(provider_route.nameOf(.openai), row[0]);
             var unreadable_buffer: [1024]u8 = undefined;
             var unreadable_out = std.Io.Writer.fixed(&unreadable_buffer);
             try writeSignIns(&unreadable_out, &readiness, null, &names, row[1]);
@@ -517,11 +521,11 @@ test "CLI-30 the defaults report is a function of its facts" {
                 const provider = std.meta.stringToEnum(protocol.Provider, name).?;
                 const said = hostProvidersLine(protocol.connectionsOfRoutes(routes), &table, &buffer);
                 var expected_buffer: [256]u8 = undefined;
-                const login = table.loginFor(provider);
+                const login = table.loginFor(@tagName(provider));
                 const expected = if (login.len != 0)
-                    try std.fmt.bufPrint(&expected_buffer, "; to add {s}, stop and restart it after `{s}`", .{ table.shownFor(provider), login })
+                    try std.fmt.bufPrint(&expected_buffer, "; to add {s}, stop and restart it after `{s}`", .{ table.shownFor(@tagName(provider)), login })
                 else
-                    try std.fmt.bufPrint(&expected_buffer, "; {s} needs a sign-in this terminal cannot make yet", .{table.shownFor(provider)});
+                    try std.fmt.bufPrint(&expected_buffer, "; {s} needs a sign-in this terminal cannot make yet", .{table.shownFor(@tagName(provider))});
                 try std.testing.expect(std.mem.indexOf(u8, said, expected) != null);
             }
         }
@@ -531,13 +535,13 @@ test "CLI-30 the defaults report is a function of its facts" {
     inline for (@typeInfo(protocol.Provider).@"enum".field_names) |name| {
         const provider = std.meta.stringToEnum(protocol.Provider, name).?;
         var readiness = provider_selection.Readinesses.initFill(.missing);
-        readiness.set(provider, .configured);
+        readiness.set(provider_route.nameOf(provider), .configured);
         var facts: Facts = .{ .changed = false, .values = .{}, .store = "/s", .saved_store = false, .store_available = true, .readiness = &readiness, .host = .unavailable, .names = names, .defaults = defaults };
         var output_buffer: [2048]u8 = undefined;
         var output = std.Io.Writer.fixed(&output_buffer);
         try writeText(&output, &facts);
         var expected_buffer: [256]u8 = undefined;
-        const expected = try std.fmt.bufPrint(&expected_buffer, "Next Session: {s} / gpt-6.1-sol (local credential configured; remote acceptance not checked).\n", .{names.shownFor(provider)});
+        const expected = try std.fmt.bufPrint(&expected_buffer, "Next Session: {s} / gpt-6.1-sol (local credential configured; remote acceptance not checked).\n", .{names.shownFor(@tagName(provider))});
         try std.testing.expect(std.mem.indexOf(u8, output.buffered(), expected) != null);
         var json_buffer: [4096]u8 = undefined;
         var json = std.Io.Writer.fixed(&json_buffer);
@@ -548,8 +552,8 @@ test "CLI-30 the defaults report is a function of its facts" {
     }
     {
         var readiness = provider_selection.Readinesses.initFill(.missing);
-        readiness.set(.codex, .configured);
-        readiness.set(.openai, .configured);
+        readiness.set(provider_route.nameOf(.codex), .configured);
+        readiness.set(provider_route.nameOf(.openai), .configured);
         var facts: Facts = .{ .changed = false, .values = .{}, .store = "/s", .saved_store = false, .store_available = true, .readiness = &readiness, .host = .unavailable, .names = names, .defaults = defaults };
         var json_buffer: [4096]u8 = undefined;
         var json = std.Io.Writer.fixed(&json_buffer);
@@ -578,7 +582,7 @@ test "CLI-30 the defaults report is a function of its facts" {
     };
     for ([_]Reader{ .command_line, .overview, .conversation }) |reader| for ([_]bool{ false, true }) |changed| for ([_]bool{ false, true }) |saved| for ([_]bool{ false, true }) |available| for ([_]bool{ false, true }) |hostile| for (selections) |selection| {
         var readiness = provider_selection.Readinesses.initFill(.missing);
-        readiness.set(.codex, selection.readiness);
+        readiness.set(provider_route.nameOf(.codex), selection.readiness);
         var values: preference_document.Values = .{};
         try values.provider.set(selection.provider);
         try values.model.set(selection.model);
@@ -667,33 +671,33 @@ test "Store overlay reports the OpenAI key source only when the Store names one"
     }.of;
     const Readiness = provider_selection.Readiness;
     var local = provider_selection.Readinesses.initFill(.missing);
-    local.set(.openai, .configured);
+    local.set(provider_route.nameOf(.openai), .configured);
 
     // No inspect result (the inspect failed, or there is no Store): the local readiness stands, with no source.
     const none = overlayStore(local, null);
-    try std.testing.expectEqual(Readiness.configured, none.readiness.get(.openai));
+    try std.testing.expectEqual(Readiness.configured, none.readiness.get(provider_route.nameOf(.openai)));
     try std.testing.expectEqual(@as(?Tag, null), tagOf(none.key_source));
 
     // A configured file source overrides the local readiness and is reported.
     const configured = overlayStore(local, .{ .readiness = .configured, .key_source = .{ .file = "/keys/configured.key" } });
-    try std.testing.expectEqual(Readiness.configured, configured.readiness.get(.openai));
+    try std.testing.expectEqual(Readiness.configured, configured.readiness.get(provider_route.nameOf(.openai)));
     try std.testing.expectEqual(@as(?Tag, .file), tagOf(configured.key_source));
     try std.testing.expectEqualStrings("/keys/configured.key", configured.key_source.?.file);
 
     // A missing file source overrides a readable local key: the Store's Host reads no key.
     const absent = overlayStore(local, .{ .readiness = .missing, .key_source = .{ .file = "/keys/absent.key" } });
-    try std.testing.expectEqual(Readiness.missing, absent.readiness.get(.openai));
+    try std.testing.expectEqual(Readiness.missing, absent.readiness.get(provider_route.nameOf(.openai)));
     try std.testing.expectEqual(@as(?Tag, .file), tagOf(absent.key_source));
     try std.testing.expectEqualStrings("/keys/absent.key", absent.key_source.?.file);
 
     // An unreadable environment source overrides the local readiness and is reported.
     const unreadable = overlayStore(local, .{ .readiness = .credential_error, .key_source = .{ .env = "RUI_OPENAI_KEY" } });
-    try std.testing.expectEqual(Readiness.credential_error, unreadable.readiness.get(.openai));
+    try std.testing.expectEqual(Readiness.credential_error, unreadable.readiness.get(provider_route.nameOf(.openai)));
     try std.testing.expectEqual(@as(?Tag, .env), tagOf(unreadable.key_source));
     try std.testing.expectEqualStrings("RUI_OPENAI_KEY", unreadable.key_source.?.env);
 
     // Explicit providers that omit openai name no source: the local readiness stands.
     const omitted = overlayStore(local, .{ .readiness = .missing, .key_source = null });
-    try std.testing.expectEqual(Readiness.configured, omitted.readiness.get(.openai));
+    try std.testing.expectEqual(Readiness.configured, omitted.readiness.get(provider_route.nameOf(.openai)));
     try std.testing.expectEqual(@as(?Tag, null), tagOf(omitted.key_source));
 }

@@ -1,4 +1,7 @@
 const std = @import("std");
+const connection_names = @import("connection_names.zig");
+const provider_route = @import("provider_route.zig");
+const connection = @import("connection.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Panel = @import("widgets/Panel.zig");
@@ -119,8 +122,8 @@ fn readValues(self: *Self) !void {
     if (was_failed) self.failures.set(.model, null);
 }
 
-fn provider(self: *const Self) ?protocol.Provider {
-    return std.meta.stringToEnum(protocol.Provider, if (self.values.provider.len == 0) defaults.provider else self.values.provider.slice());
+fn provider(self: *const Self) ?connection.Name {
+    return connection.Name.parse(if (self.values.provider.len == 0) defaults.provider else self.values.provider.slice());
 }
 
 fn model(self: *const Self) []const u8 {
@@ -151,7 +154,7 @@ fn value(self: *const Self, row: Row) []const u8 {
         .effort => if (self.choiceEffort()) |shown| @tagName(shown) else "model default",
         .permissions => permissionText(self.permissionMode()),
         .notifications => if (self.values.notifications) "on" else "off",
-        .sign_in => if (self.provider()) |saved| saved.signIn() else "unavailable",
+        .sign_in => if (self.provider()) |saved| provider_route.signInOf(saved) orelse "unavailable" else "unavailable",
         .version, .memory, .keys => unreachable,
     };
 }
@@ -294,7 +297,7 @@ fn pickModel(raw: *anyopaque, ctx: *vxfw.EventContext, id: []const u8) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     self.panel.custom_choice = null;
     try self.save(ctx, .model, .{
-        .provider = .{ .set = @tagName(self.model_choice.provider) },
+        .provider = .{ .set = self.model_choice.providerName() },
         .model = .{ .set = id },
     });
 }
@@ -706,7 +709,7 @@ test "App settings sign-in and effort choices reflect saved values without assum
     try std.testing.expectEqualStrings("unavailable", page.fields[@backingInt(Row.sign_in)].value);
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(!page.hasChoice());
-    try std.testing.expectEqualStrings(" · sign-in unavailable", page.failures.get(.model).?);
+    try std.testing.expectEqualStrings(" · models unavailable", page.failures.get(.model).?);
     for (catalog.shipped) |entry| if (entry.openai_listed and !entry.efforts.contains(.max)) {
         try fixture.values.model.set(entry.id);
         break;
@@ -779,9 +782,9 @@ test "App settings Permissions choices save both modes and display the saved wor
 test "App settings Model shares the provider list at full width and preserves matches on filtering" {
     const List = struct {
         const entries = [_]picker.Entry{
-            .{ .id = "future-chat", .known = false, .catalogued = false, .providers = .initOne(.codex) },
-            .{ .id = "api-only", .known = false, .catalogued = false, .providers = .initOne(.openai) },
-            .{ .id = "text-embedding-3-small", .known = true, .catalogued = true, .providers = .full },
+            .{ .id = "future-chat", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
+            .{ .id = "api-only", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.openai)}) },
+            .{ .id = "text-embedding-3-small", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&provider_route.built_in_names) },
         };
         const menu: picker.Menu = .{ .entries = &entries };
         fn models(_: *anyopaque) ModelChoice.Snapshot {

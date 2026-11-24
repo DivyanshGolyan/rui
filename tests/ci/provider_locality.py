@@ -42,7 +42,7 @@ CODEC_RULES = (
 )
 
 ALLOWED = {
-    ("provider.zig", "names a ChatGPT or Codex header"),
+    ("host_headers.zig", "names a ChatGPT or Codex header"),
 }
 
 TEST_BLOCK = re.compile(r'^([ \t]*)test\b[^{\n]*\{', re.MULTILINE)
