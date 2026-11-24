@@ -298,8 +298,9 @@ pub const Applied = struct {
     session: Bounded(session_id.max_reference_bytes),
     head: rsql.SessionHead,
     revision: u64,
-    /// The codec a Session's first revision pins (its provider's); later revisions keep the prior one.
-    codec: provider_name.Codec = undefined,
+    /// The codec a Session's first revision pins (its provider's). Null for a later revision, which carries
+    /// the codec of the revision before it in the insert.
+    codec: ?provider_name.Codec = null,
     instructions_id: ?u64,
     output_schema_id: ?u64,
     instructions_updated: bool,
@@ -612,9 +613,9 @@ const insert_revision = rsql.Write(.{
     .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id," ++
         "permission_mode,output_schema_content_id,provider,codec,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) " ++
         "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,provider," ++
-        "?5," ++
+        "CASE WHEN ?5 IS NULL THEN (SELECT prior.codec FROM session_revision prior WHERE prior.session_ref=session.session_ref AND prior.revision=session.revision-1) ELSE ?5 END," ++
         "compaction_trigger,output_reservation,reasoning_effort,label,CASE WHEN revision=1 OR ?4 THEN revision ELSE (SELECT prior.effort_source_revision FROM session_revision prior WHERE prior.session_ref=session.session_ref AND prior.revision=session.revision-1) END FROM session WHERE session_ref=@session(?1)",
-    .Args = struct { session: rsql.SessionHead, command_key: []const u8, instructions_updated: bool, effort_choice: bool, codec: []const u8 },
+    .Args = struct { session: rsql.SessionHead, command_key: []const u8, instructions_updated: bool, effort_choice: bool, codec: ?[]const u8 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -1108,8 +1109,8 @@ fn accept(reads: *ConfigurationReads, head: rsql.SessionHead, target: []const u8
     applied.head = head;
     applied.revision = reads.next.revision;
     // Interim: a Session pins the codec of its first revision (its provider then). A later revision
-    // carries the codec its saved revision holds, so a switch of codec is a later unit.
-    applied.codec = if (created) reads.next.provider.codec() else reads.next.codec;
+    // carries the codec of the revision before it, so a switch of codec is a later unit.
+    applied.codec = if (created) reads.next.provider.codec() else null;
     applied.instructions_updated = created or reads.configuration.instructions.state == .value;
     applied.changes = if (reads.validated.before) |*saved| saved.changed(&reads.next) else .empty;
 }
@@ -1133,7 +1134,7 @@ pub noinline fn queueConfiguredCommand(
     answer: *const StoredAnswer,
 ) !void {
     try command_domain.queueCommand(a, key, kind, applied.session.slice(), digest, primary_content_id, secondary_content_id, answer);
-    a.write(insert_revision, .{ .session = applied.head, .command_key = key, .instructions_updated = applied.instructions_updated, .effort_choice = applied.changes.contains(.model) or applied.changes.contains(.reasoning_effort), .codec = @tagName(applied.codec) });
+    a.write(insert_revision, .{ .session = applied.head, .command_key = key, .instructions_updated = applied.instructions_updated, .effort_choice = applied.changes.contains(.model) or applied.changes.contains(.reasoning_effort), .codec = if (applied.codec) |codec| @tagName(codec) else null });
     if (applied.changes.count() == 0) return;
     const position = try (try a.positions(applied.head)).take(1);
     var fields = applied.changes.iterator();

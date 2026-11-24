@@ -43,7 +43,7 @@ const testingHostToolRecords = shared_fixtures.testingHostToolRecords;
 const testingSessionList = shared_fixtures.testingSessionList;
 const testingSessionReport = shared_fixtures.testingSessionReport;
 
-const entering_fixtures = [_][]const u8{ "prefixSealForTesting", "readSessionForTesting" };
+const entering_fixtures = [_][]const u8{ "prefixSealForTesting", "readSessionForTesting", "readToolDigestsForTesting" };
 // Budgets measured inside another entry point's round: an Archived window or a changed page is a readSessionList request, so it
 // enters the Store through readSessionList and has no Store function of its own.
 const dispatched_points = [_]EntryPoint{ .readArchivedWindow, .readChangedSessionList };
@@ -82,6 +82,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/model_attempt.zig"),
         @embedFile("../domain/model_settlement.zig"),
         @embedFile("../domain/operation_effort.zig"),
+        @embedFile("../domain/replay_wire.zig"),
         @embedFile("../domain/reads.zig"),
         @embedFile("../domain/report.zig"),
         @embedFile("../domain/session_list_read.zig"),

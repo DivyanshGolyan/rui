@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 92;
+pub const schema_version: u32 = 93;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -71,7 +71,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 89, .digest = 0xe163228a5eb523f7 },
     .{ .schema_version = 90, .digest = 0x2f2d94715f2d01bc },
     .{ .schema_version = 91, .digest = 0xc92515d104a290dd },
-    .{ .schema_version = 92, .digest = 0xd34fd39a555e1425 },
+    .{ .schema_version = 92, .digest = 0xdbe10b74e562edbd },
+    .{ .schema_version = 93, .digest = 0xe89eaceaec935791 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -958,16 +959,47 @@ pub const migrations = [_]Migration{
             "ALTER TABLE model_operation ADD COLUMN output_limit BIGINT NOT NULL DEFAULT 32000 AFTER context_window, ADD CHECK(output_limit BETWEEN 0 AND 4294967295)",
         },
     },
+    // Client tools (app owner): a Session declares app records with a replay policy and a wait limit. Every
+    // existing row takes the zero policy, so its meaning and digest are unchanged; the owner value and the
+    // policy columns are new, and the unique key includes the policy so two declarations differing only in it
+    // are two records.
+    .{
+        .from = 91,
+        .sqlite = &.{
+            "ALTER TABLE tool_record RENAME TO tool_record_90",
+            "CREATE TABLE tool_record(\n tool_record_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_record_id>0),\n name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(name)=length(CAST(name AS BLOB)))),\n remote_name TEXT NOT NULL CHECK(length(CAST(remote_name AS BLOB))<=64 AND (remote_name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(remote_name)=length(CAST(remote_name AS BLOB)))),\n owner TEXT NOT NULL CHECK((owner='rui' OR owner='provider' OR owner='mcp' OR owner='app')),\n server TEXT NOT NULL CHECK(length(CAST(server AS BLOB))<=64 AND (server NOT GLOB '*[^A-Za-z0-9_-]*' AND length(server)=length(CAST(server AS BLOB))) AND (owner='mcp' AND length(CAST(server AS BLOB))>0 OR owner<>'mcp' AND length(CAST(server AS BLOB))=0)),\n replay TEXT NOT NULL CHECK(length(CAST(replay AS BLOB))<=6 AND replay IN ('','unsafe','safe') AND (owner='app' AND replay<>'' OR owner<>'app' AND replay='')),\n restart_limit INTEGER NOT NULL CHECK((owner='app' AND restart_limit BETWEEN 0 AND 16 OR owner<>'app' AND restart_limit=0)),\n wait_ms INTEGER NOT NULL CHECK((owner='app' AND wait_ms BETWEEN 1000 AND 3600000 OR owner<>'app' AND wait_ms=0)),\n description_content_id INTEGER NOT NULL REFERENCES content(content_id),\n input_schema_content_id INTEGER NOT NULL REFERENCES content(content_id),\n UNIQUE(name,remote_name,owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id),\n CHECK(replay<>'unsafe' OR restart_limit=0)\n) STRICT",
+            "INSERT INTO tool_record(tool_record_id,name,remote_name,owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id) SELECT tool_record_id,name,remote_name,owner,server,'',0,0,description_content_id,input_schema_content_id FROM tool_record_90",
+            "DROP TABLE tool_record_90",
+        },
+        .mysql = &.{
+            "SET @rui_owner_ddl=(SELECT CONCAT('ALTER TABLE tool_record DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='tool_record' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='owner = _utf8mb4''rui'' or owner = _utf8mb4''provider'' or owner = _utf8mb4''mcp'''",
+            "PREPARE rui_owner_check FROM @rui_owner_ddl",
+            "EXECUTE rui_owner_check",
+            "DEALLOCATE PREPARE rui_owner_check",
+            "ALTER TABLE tool_record ADD CHECK((owner='rui' OR owner='provider' OR owner='mcp' OR owner='app'))",
+            "ALTER TABLE tool_record ADD COLUMN replay VARCHAR(6) NOT NULL DEFAULT '' AFTER server",
+            "ALTER TABLE tool_record ALTER COLUMN replay DROP DEFAULT",
+            "ALTER TABLE tool_record ADD COLUMN restart_limit BIGINT NOT NULL DEFAULT 0 AFTER replay",
+            "ALTER TABLE tool_record ALTER COLUMN restart_limit DROP DEFAULT",
+            "ALTER TABLE tool_record ADD COLUMN wait_ms BIGINT NOT NULL DEFAULT 0 AFTER restart_limit",
+            "ALTER TABLE tool_record ALTER COLUMN wait_ms DROP DEFAULT",
+            "ALTER TABLE tool_record DROP INDEX name, ADD UNIQUE(name,remote_name,owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id)",
+            "ALTER TABLE tool_record ADD CHECK(OCTET_LENGTH(replay)<=6 AND replay IN ('','unsafe','safe') AND (owner='app' AND replay<>'' OR owner<>'app' AND replay=''))",
+            "ALTER TABLE tool_record ADD CHECK((owner='app' AND restart_limit BETWEEN 0 AND 16 OR owner<>'app' AND restart_limit=0))",
+            "ALTER TABLE tool_record ADD CHECK((owner='app' AND wait_ms BETWEEN 1000 AND 3600000 OR owner<>'app' AND wait_ms=0))",
+            "ALTER TABLE tool_record ADD CHECK(replay<>'unsafe' OR restart_limit=0)",
+        },
+    },
     // The codec that wrote a revision's bags moves from the Session to each revision, so an Operation's
     // Binding reads its frozen revision (replay_binding.Binding). Every existing revision takes its
     // Session's codec: a Session never changes codec, since a provider change is refused before a Turn.
     .{
-        .from = 91,
+        .from = 92,
         .sqlite = &.{
-            "ALTER TABLE session_revision RENAME TO session_revision_before_92",
+            "ALTER TABLE session_revision RENAME TO session_revision_before_93",
             "CREATE TABLE session_revision(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n revision INTEGER NOT NULL CHECK(revision>0),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n workspace TEXT NOT NULL,\n provider TEXT NOT NULL CHECK(length(CAST(provider AS BLOB)) BETWEEN 1 AND 16 AND provider GLOB '[a-z]*' AND (provider NOT GLOB '*[^a-z0-9_-]*' AND length(provider)=length(CAST(provider AS BLOB)))),\n codec TEXT NOT NULL CHECK(length(CAST(codec AS BLOB)) BETWEEN 3 AND 40),\n model TEXT NOT NULL,\n instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),\n instructions_updated INTEGER NOT NULL CHECK(instructions_updated IN (0,1)),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),\n loaded_tool_set_id INTEGER REFERENCES tool_set(tool_set_id),\n permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),\n output_schema_content_id INTEGER REFERENCES content(content_id),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),\n effort_source_revision INTEGER NOT NULL DEFAULT 1 CHECK(effort_source_revision>0 AND effort_source_revision<=revision),\n PRIMARY KEY(session_ref,revision),\n FOREIGN KEY(session_ref,effort_source_revision) REFERENCES session_revision(session_ref,revision)\n) STRICT, WITHOUT ROWID",
-            "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,codec,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) SELECT r.session_ref,r.revision,r.command_key,r.workspace,r.provider,s.codec,r.model,r.instructions_content_id,r.instructions_updated,r.tool_set_id,r.loaded_tool_set_id,r.permission_mode,r.output_schema_content_id,r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label,r.effort_source_revision FROM session_revision_before_92 r JOIN session s ON s.session_ref=r.session_ref",
-            "DROP TABLE session_revision_before_92",
+            "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,codec,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) SELECT r.session_ref,r.revision,r.command_key,r.workspace,r.provider,s.codec,r.model,r.instructions_content_id,r.instructions_updated,r.tool_set_id,r.loaded_tool_set_id,r.permission_mode,r.output_schema_content_id,r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label,r.effort_source_revision FROM session_revision_before_93 r JOIN session s ON s.session_ref=r.session_ref",
+            "DROP TABLE session_revision_before_93",
             "CREATE INDEX session_revision_instructions ON session_revision(session_ref,instructions_content_id)",
             "CREATE INDEX session_revision_output_schema ON session_revision(session_ref,output_schema_content_id)",
             "ALTER TABLE session DROP COLUMN codec_options",
@@ -1311,17 +1343,34 @@ pub const tables = [_]Table{
             .{ .name = "tool_record_id", .type = .int, .check = "tool_record_id>0" },
             .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = tool_defs.max_name_bytes } }, .check = "@charset(name,'A-Za-z0-9_-')" },
             .{ .name = "remote_name", .type = .{ .text = .{ .min = 0, .max = tool_defs.max_name_bytes } }, .check = "@charset(remote_name,'A-Za-z0-9_-')" },
-            .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider", "mcp" } } },
+            .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider", "mcp", "app" } } },
             .{
                 .name = "server",
                 .type = .{ .text = .{ .min = 0, .max = tool_defs.max_server_bytes } },
                 .check = "@charset(server,'A-Za-z0-9_-') AND (owner='mcp' AND @octets(server)>0 OR owner<>'mcp' AND @octets(server)=0)",
             },
+            // App policy: the zero policy ('' and 0) on every other owner, so their rows and digests are unchanged.
+            .{
+                .name = "replay",
+                .type = .{ .text = .{ .min = 0, .max = 6 } },
+                .check = "replay IN ('','unsafe','safe') AND (owner='app' AND replay<>'' OR owner<>'app' AND replay='')",
+            },
+            .{
+                .name = "restart_limit",
+                .type = .int,
+                .check = std.fmt.comptimePrint("(owner='app' AND restart_limit BETWEEN 0 AND {d} OR owner<>'app' AND restart_limit=0)", .{tool_defs.max_app_restart_limit}),
+            },
+            .{
+                .name = "wait_ms",
+                .type = .int,
+                .check = std.fmt.comptimePrint("(owner='app' AND wait_ms BETWEEN {d} AND {d} OR owner<>'app' AND wait_ms=0)", .{ tool_defs.min_app_wait_ms, tool_defs.max_app_wait_ms }),
+            },
             .{ .name = "description_content_id", .type = .int },
             .{ .name = "input_schema_content_id", .type = .int },
         },
+        .checks = &.{"replay<>'unsafe' OR restart_limit=0"},
         .primary_key = &.{"tool_record_id"},
-        .uniques = &.{&.{ "name", "remote_name", "owner", "server", "description_content_id", "input_schema_content_id" }},
+        .uniques = &.{&.{ "name", "remote_name", "owner", "server", "replay", "restart_limit", "wait_ms", "description_content_id", "input_schema_content_id" }},
         .foreign_keys = &.{
             references("description_content_id", "content", content_reference),
             references("input_schema_content_id", "content", content_reference),
@@ -3956,6 +4005,49 @@ comptime {
         }
         rsql.collectSchema("digest", std.fmt.comptimePrint("{d}", .{digest()}));
     }
+}
+
+test "SH-119 schema 92 migration gives every saved tool record the zero app policy and checks app policy on SQLite" {
+    const step = migrations[91 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 91), step.from);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |migration| {
+        if (migration.from >= 91) break;
+        for (migration.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    const before = try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record");
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_table_info('tool_record') WHERE name='replay'"));
+    for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(before, try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record"));
+    try std.testing.expectEqual(@as(u32, 3), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_table_info('tool_record') WHERE name IN ('replay','restart_limit','wait_ms')"));
+    try std.testing.expectEqual(before, try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record WHERE replay='' AND restart_limit=0 AND wait_ms=0"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    // The app owner and its policy CHECKs: an app record needs a replay policy, a restart limit of at most 16 and a wait of 1 s to 1 h.
+    const app_row = "INSERT INTO tool_record(tool_record_id,name,remote_name,owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id) VALUES(";
+    try sqlite.exec(database, app_row ++ "999,'ask','','app','','safe',3,900000,1,1)");
+    try sqlite.exec(database, app_row ++ "1000,'ask','','app','','safe',3,900001,1,1)");
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1001,'ask','','app','','',3,900000,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1002,'ask','','app','','safe',17,900000,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1003,'ask','','app','','safe',3,999,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1004,'ask','','app','','safe',3,3600001,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1005,'ask','','app','','safe',3,900000,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1006,'ask','','rui','','safe',0,0,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1007,'ask','','mcp','docs','',0,900000,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1008,'ask','','app','','unsafe',3,900000,1,1)"));
+    // Accepted: a non-app zero-policy row, the restart limit bounds 0 and 16, the wait bounds 1 s and 1 h, and an unsafe row at restart limit 0.
+    try sqlite.exec(database, app_row ++ "1009,'read','','rui','','',0,0,1,1)");
+    try sqlite.exec(database, app_row ++ "1010,'ask','','app','','safe',0,900000,1,1)");
+    try sqlite.exec(database, app_row ++ "1011,'ask','','app','','safe',16,900000,1,1)");
+    try sqlite.exec(database, app_row ++ "1012,'ask','','app','','safe',3,1000,1,1)");
+    try sqlite.exec(database, app_row ++ "1013,'ask','','app','','safe',3,3600000,1,1)");
+    try sqlite.exec(database, app_row ++ "1014,'ask','','app','','unsafe',0,900000,1,1)");
+    try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record WHERE owner='app'"));
 }
 
 test "schema 89 migration leaves each saved tool record's remote name empty, its offered name, on SQLite" {

@@ -599,6 +599,14 @@ fn admitMetadata(name: []const u8, selector: []const u8) !Mysql {
     }, selector, .{});
 }
 
+/// Expects nobody to hold the Store's lock. Callers hold `mutex`.
+fn expectLockFree(name: []const u8) !void {
+    _ = try connection();
+    var buffer: [128]u8 = undefined;
+    try root.query(try std.fmt.bufPrint(&buffer, "SELECT IS_USED_LOCK('{s}') IS NULL", .{name}));
+    try std.testing.expectEqual(@as(u64, 1), try readU64(&root));
+}
+
 fn refusesMetadata(name: []const u8, selector: []const u8, expected: anyerror) !void {
     const admission = admitMetadata(name, selector);
     if (admission) |engine| {
@@ -606,10 +614,7 @@ fn refusesMetadata(name: []const u8, selector: []const u8, expected: anyerror) !
         try admitted.close();
     } else |_| {}
     try std.testing.expectError(expected, admission);
-    var buffer: [128]u8 = undefined;
-    try root.query(try std.fmt.bufPrint(&buffer, "SELECT GET_LOCK('{s}',10)", .{name}));
-    try std.testing.expectEqual(@as(u64, 1), try readU64(&root));
-    try run("DO RELEASE_ALL_LOCKS()");
+    try expectLockFree(name);
 }
 
 test "store.mysql live metadata validates canonical identity independently of a renamed database" {
@@ -770,6 +775,9 @@ test "store.mysql live admission checks the index plan domain without pinning ge
                 const admission = open(&refused, tmp, std.testing.io, .{});
                 if (admission) |_| try refused.close() else |_| {}
                 try std.testing.expectError(error.StoreCatalogMismatch, admission);
+                mutex.lockUncancelable(std.testing.io);
+                defer mutex.unlock(std.testing.io);
+                try expectLockFree(name);
             }
             var repaired: Store = undefined;
             try openLive(&repaired, tmp);

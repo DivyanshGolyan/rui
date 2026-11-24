@@ -8,7 +8,7 @@ const tool_offer = @This();
 
 const projected = rsql.Read(.{
     .compound = true,
-    .sql = "SELECT tool.name,tool.remote_name,tool.owner,tool.server,description.digest AS description,input_schema.digest AS input_schema," ++
+    .sql = "SELECT tool.name,tool.remote_name,tool.owner,tool.server,tool.replay,tool.restart_limit,tool.wait_ms,description.digest AS description,input_schema.digest AS input_schema," ++
         "description.content_id,description.byte_length,CASE WHEN intended.owner='mcp' THEN host.tool_set_id ELSE member.tool_set_id END AS source," ++
         "(tool.name='stop_action' OR EXISTS(SELECT 1 FROM tool_set_member lm JOIN tool_record lt ON lt.tool_record_id=lm.tool_record_id WHERE lm.tool_set_id=?2 AND lt.name=tool.name)) AS loaded " ++
         "FROM tool_set_member member JOIN tool_record intended ON intended.tool_record_id=member.tool_record_id " ++
@@ -18,7 +18,7 @@ const projected = rsql.Read(.{
         "ELSE intended.tool_record_id END " ++
         "JOIN content description ON description.content_id=tool.description_content_id JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id " ++
         "WHERE member.tool_set_id=?1 AND (tool.name<>'stop_action' OR EXISTS(SELECT 1 FROM tool_set_member lm JOIN tool_record lt ON lt.tool_record_id=lm.tool_record_id WHERE lm.tool_set_id=?2 AND lt.name='read_action')) " ++
-        "UNION ALL SELECT tool.name,tool.remote_name,tool.owner,tool.server,description.digest AS description,input_schema.digest AS input_schema," ++
+        "UNION ALL SELECT tool.name,tool.remote_name,tool.owner,tool.server,tool.replay,tool.restart_limit,tool.wait_ms,description.digest AS description,input_schema.digest AS input_schema," ++
         "description.content_id,description.byte_length,host.tool_set_id AS source,1 AS loaded " ++
         "FROM host_tool_set host JOIN tool_set_member member ON member.tool_set_id=host.tool_set_id " ++
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
@@ -32,6 +32,9 @@ const projected = rsql.Read(.{
         remote_name: Bounded(tools.max_name_bytes),
         owner: tools.Owner,
         server: Bounded(tools.max_server_bytes),
+        replay: Bounded(6),
+        restart_limit: u64,
+        wait_ms: u64,
         description: [32]u8,
         input_schema: [32]u8,
         content_id: rsql.Positive,
@@ -58,6 +61,10 @@ const Projection = struct {
             self.invalid = true;
             return false;
         }
+        const app = tool_set.storedAppPolicy(row.owner, row.replay.slice(), row.restart_limit, row.wait_ms) catch {
+            self.invalid = true;
+            return false;
+        };
         const identity: tools.RecordIdentity = .{
             .name = row.name.slice(),
             .remote_name = row.remote_name.slice(),
@@ -65,12 +72,21 @@ const Projection = struct {
             .server = row.server.slice(),
             .description = row.description,
             .input_schema = row.input_schema,
+            .app = app,
         };
         self.members[self.count] = .{ .name = row.name, .source = row.source.get(), .digest = identity.digest() };
         self.count += 1;
         return true;
     }
 };
+
+/// Test seam (Store.readToolDigestsForTesting): the offer's projection and the saved selection of set `set`
+/// in one read, with each digest computed by the same owners the Store's readers use.
+pub fn roundTripDigestsOf(a: anytype, set: u64, freeze: *Freeze, selection: *tool_set.SavedSelection) !void {
+    freeze.project(a, set, set);
+    selection.queue(a, set);
+    try a.run();
+}
 
 pub const stale_sql = "EXISTS(SELECT 1 FROM tool_set_member tm JOIN tool_record tool ON tool.tool_record_id=tm.tool_record_id " ++
     "WHERE tm.tool_set_id=" ++ tool_set.offeredSetSql("s") ++ " AND tool.owner='mcp' AND tm.tool_record_id NOT IN " ++
