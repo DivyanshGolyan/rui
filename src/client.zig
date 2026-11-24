@@ -607,12 +607,6 @@ pub const SessionReads = struct {
             .bound => |paths| self.requests.readActivityContentAt(paths, self.session, position, ordinal, expected, sink),
         };
     }
-    pub fn readConversationContent(self: SessionReads, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
-        return switch (self.route) {
-            .selected => |store| self.requests.readConversationContent(store, self.session, position, ordinal, expected, sink),
-            .bound => error.UnsupportedBoundRead,
-        };
-    }
     pub fn readActivityPrefix(self: SessionReads, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
         return switch (self.route) {
             .selected => |store| self.requests.readActivityPrefix(store, self.session, position, buffer),

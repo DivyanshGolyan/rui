@@ -1241,7 +1241,7 @@ fn messageWith(reads: client.SessionReads, scratch: std.Io.File, item: protocol.
 /// Opens the display of the value an activity entry shows. A parts value reads its
 /// certified list into `scratch`, which the returned Display borrows.
 fn open(reads: client.SessionReads, scratch: std.Io.File, item: protocol.ActivityItem, value: content_value.Value) !value_reads.Display {
-    return switch (try value_reads.Display.openWith(reads, .{ .source = .activity, .position = item.position, .ordinal = item.ordinal }, value, scratch)) {
+    return switch (try value_reads.Display.openActivity(reads, item.position, item.ordinal, value, scratch)) {
         .display => |display| display,
         .failure => |failure| reads.failRead(failure),
     };
