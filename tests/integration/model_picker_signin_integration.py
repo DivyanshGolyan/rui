@@ -49,7 +49,7 @@ def main():
                                     capture_output=True, text=True, timeout=20, check=False)
             assert result.returncode == 0, result.stderr
             value = json.loads(result.stdout)
-            return value["provider"] == provider and value["model"] == "gpt-6-luna"
+            return value["connection"] == provider and value["model"] == "gpt-6-luna"
 
         for sign_in, provider in (("API key", "openai"), ("ChatGPT", "codex")):
             changed = subprocess.run(

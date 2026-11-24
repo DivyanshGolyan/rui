@@ -667,13 +667,13 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
         requests = [] if delay_get else [get, post]
         phases = []
         original_wait = codex_h2.fixture.wait_for
-        listed = {"providers": [{"provider": "openai", "source": "live", "models": [
+        listed = {"connections": [{"connection": "openai", "source": "live", "models": [
             {"id": "gpt-6-sol", "known": True}, {"id": "custom-model", "known": False}]}]}
-        pending = {"providers": [{"provider": "openai", "source": "pending", "models": []}]}
-        fallback = {"providers": [{"provider": "openai", "source": "catalog_fallback", "models": [
+        pending = {"connections": [{"connection": "openai", "source": "pending", "models": []}]}
+        fallback = {"connections": [{"connection": "openai", "source": "catalog_fallback", "models": [
             {"id": "gpt-6-sol", "known": True}]}]}
         if catalog_available:
-            fallback["providers"][0]["models"].insert(0, {"id": "catalog-only", "known": True})
+            fallback["connections"][0]["models"].insert(0, {"id": "catalog-only", "known": True})
         host_models = {}
 
         def shutdown():

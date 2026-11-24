@@ -33,7 +33,7 @@ from host_process import WIRE_VERSION
 from product_defaults import compaction_trigger
 binary, store, ready, key, record, encoded, *drop = sys.argv[1:]
 values = json.loads(encoded)
-fields = {'workspace': 'workspace', 'provider': 'provider', 'model': 'model', 'instructions': 'instructions', 'tools': 'tools', 'permission_mode': 'permissionMode', 'output_schema': 'outputSchema'}
+fields = {'workspace': 'workspace', 'connection': 'connection', 'model': 'model', 'instructions': 'instructions', 'tools': 'tools', 'permission_mode': 'permissionMode', 'output_schema': 'outputSchema'}
 configuration = {spec: values[name] for name, spec in fields.items() if name in values}
 # Complete creation before exercising domain rejections.
 configuration.setdefault('tools', [])
@@ -310,7 +310,7 @@ body = json.dumps({
     "key": "draining-request",
     "session": "",
     "configuration": {
-        "workspace": workspace, "provider": "codex", "model": "gpt-6-sol", "tools": ["bash"],
+        "workspace": workspace, "connection": "codex", "model": "gpt-6-sol", "tools": ["bash"],
         "permissionMode": "bypass", "compactAt": compaction_trigger("codex", "gpt-6-sol"), "effort": "medium",
     },
 }, separators=(",", ":")).encode()
@@ -456,7 +456,7 @@ contains "$unknown_configure_replay" '"code":"unknown_session"'
 contains "$unknown_configure_replay" '"replayed":true'
 
 before_incomplete=$(session_refs)
-incomplete_configuration=$(python3 -c 'import json, sys; print(json.dumps({"workspace": sys.argv[1], "provider": "codex", "model": ""}))' "$root")
+incomplete_configuration=$(python3 -c 'import json, sys; print(json.dumps({"workspace": sys.argv[1], "connection": "codex", "model": ""}))' "$root")
 wire_configure incomplete-key "$records/incomplete.json" "$incomplete_configuration" after-commit >"$state/drop.out" 2>"$state/drop.err"
 require_test 'rejected creation creates no Session' "$(session_refs)" = "$before_incomplete"
 fresh_defaults_case
@@ -470,7 +470,7 @@ printf 'rejected instructions' >"$state/rejected-instructions.txt"
 printf '{"type":"object"}' >"$state/rejected-schema.json"
 unknown_configuration=$(python3 - "$root" "$state/rejected-instructions.txt" "$state/rejected-schema.json" <<'PY'
 import json, pathlib, sys
-print(json.dumps({'workspace': sys.argv[1], 'provider': 'anthropic', 'model': 'gpt-6-sol',
+print(json.dumps({'workspace': sys.argv[1], 'connection': 'anthropic', 'model': 'gpt-6-sol',
     'instructions': pathlib.Path(sys.argv[2]).read_text(), 'output_schema': json.loads(pathlib.Path(sys.argv[3]).read_text()), 'tools': []}))
 PY
 )
@@ -489,7 +489,7 @@ contains "$omitted_binding" '"revision":"3"'
 mixed_model=$("$rui" session configure --store "$store" --record "$records/mixed-model.json" --key mixed-model --session "$binding_session" --model gpt-6.1-sol --tools bash --permission-mode ask)
 contains "$mixed_model" '"revision":"4"'
 binding_current=$($rui session inspect --store "$store" --session "$binding_session" --profile current)
-contains "$binding_current" '"provider":"codex"'
+contains "$binding_current" '"connection":"codex"'
 contains "$binding_current" '"model":"gpt-6.1-sol"'
 contains "$binding_current" '"revision":"4"'
 contains "$binding_current" '"tools":["bash"]'
@@ -500,10 +500,10 @@ unknown_replay=$(not_accepted "$rui" request recover --store "$store" --record "
 contains "$unknown_replay" '"code":"connection_unserved"'
 contains "$unknown_replay" '"replayed":true'
 binding_full=$($rui session inspect --store "$store" --session "$binding_session" --profile full)
-contains "$binding_full" '"provider":"codex"'
+contains "$binding_full" '"connection":"codex"'
 contains "$binding_full" '"model":"gpt-6.1-sol"'
 contains "$binding_full" '"revision":"4"'
-printf '%s' "$binding_full" | python3 -c 'import json,sys; rows=json.load(sys.stdin)["full"]["session_revisions"]; assert len(rows)==4; assert all(r["provider"]=="codex" for r in rows); assert [r["model"] for r in rows]==["gpt-6-sol"]*3+["gpt-6.1-sol"]'
+printf '%s' "$binding_full" | python3 -c 'import json,sys; rows=json.load(sys.stdin)["full"]["session_revisions"]; assert len(rows)==4; assert all(r["connection"]=="codex" for r in rows); assert [r["model"] for r in rows]==["gpt-6-sol"]*3+["gpt-6.1-sol"]'
 restarted_model=$("$rui" session configure --store "$store" --record "$records/restarted-model.json" --key restarted-model --session "$binding_session" --model gpt-6-sol --tools bash)
 contains "$restarted_model" '"revision":"5"'
 binding_rechecked=$($rui session inspect --store "$store" --session "$binding_session" --profile current)
@@ -540,7 +540,7 @@ contains "$replayed" '"replayed":true'
 contains "$replayed" '"revision":"1"'
 require_test 'lost creation replay retains allocated ID' "$(printf '%s' "$replayed" | session_id)" = "$main_session"
 current=$($rui session inspect --store "$store" --session "$main_session")
-contains "$current" '"provider":"codex"'
+contains "$current" '"connection":"codex"'
 contains "$current" '"model":"gpt-6-sol"'
 contains "$current" '"revision":"3"'
 contains "$current" '"tools":[]'

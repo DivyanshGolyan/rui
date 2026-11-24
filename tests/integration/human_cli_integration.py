@@ -1810,9 +1810,9 @@ def main(selected="all"):
         max_path = os.pathconf(preferences_home, "PC_PATH_MAX")
         long_home = str(preferences_home) + "/." * ((max_path - 16 - len(str(preferences_home))) // 2)
         oversized_setup = defaults(long_home, "--connection", "codex")
-        assert oversized_setup["store_available"] is False and oversized_setup["provider"] == "codex", oversized_setup
+        assert oversized_setup["store_available"] is False and oversized_setup["connection"] == "codex", oversized_setup
         assert oversized_setup["host"] == {"status": "store_unavailable"}, oversized_setup
-        assert saved_fields((preferences_home / ".config/rui/preferences"), "provider", "model") == ("codex", "")
+        assert saved_fields((preferences_home / ".config/rui/preferences"), "connection", "model") == ("codex", "")
         invalid_home = os.fsencode(state) + b"/home-\xff"
         try:
             os.mkdir(invalid_home, mode=0o700)
@@ -1855,7 +1855,7 @@ def main(selected="all"):
                 assert not refused_saved.stdout and "[preferences_invalid]" in refused_saved.stderr, refused_saved
                 assert saved.read_bytes() == invalid_bytes, (defaults_args, "malformed saved defaults were rewritten")
         saved.write_text(original_preferences.replace("model=gpt-6-luna", "model=gpt-5.6-sol"))
-        assert saved_fields(saved, "provider", "model") == ("codex", "gpt-5.6-sol")
+        assert saved_fields(saved, "connection", "model") == ("codex", "gpt-5.6-sol")
         assert defaults(preferences_home)["model"] == "gpt-5.6-sol"
         saved.write_text(original_preferences)
         assert saved.stat().st_mode & 0o777 == 0o600
@@ -1863,9 +1863,9 @@ def main(selected="all"):
         missing_setup = defaults(preferences_home)
         assert (missing_setup["store"], missing_setup["store_source"]) == (str(store.resolve()), "saved"), missing_setup
         assert missing_setup["local_credentials"]["codex"] == "missing" and missing_setup["next_session"] == {
-            "status": "selected", "provider": "codex", "model": "gpt-6-luna", "local_credential": "missing"}, missing_setup
+            "status": "selected", "connection": "codex", "model": "gpt-6-luna", "local_credential": "missing"}, missing_setup
         assert missing_setup["host"]["status"] == "ready", missing_setup
-        assert missing_setup["host"]["capabilities"]["providers"]["codex"] != "chatgpt_device", missing_setup
+        assert host_process.capability_routes(missing_setup["host"]["capabilities"])["codex"] != "chatgpt_device", missing_setup
         linked_home = state / "linked-home"
         (linked_home / ".config").mkdir(parents=True)
         (linked_home / ".config/rui").symlink_to(saved.parent, target_is_directory=True)
@@ -1890,7 +1890,7 @@ def main(selected="all"):
         assert (unavailable_setup["store"], unavailable_setup["store_available"]) == (str(retired_store), False), unavailable_setup
         assert unavailable_setup["host"] == {"status": "store_unavailable"}, unavailable_setup
         defaults(preferences_home, "--clear-model")
-        assert saved_fields(saved, "provider", "model") == ("codex", "")
+        assert saved_fields(saved, "connection", "model") == ("codex", "")
         assert f"store={retired_store}\n" in saved.read_text()
         defaults(preferences_home, "--model", "gpt-6-luna")
         defaults(preferences_home, "--store", store)
@@ -1907,7 +1907,7 @@ def main(selected="all"):
         (fresh_provider_home / ".config/rui").mkdir(parents=True, mode=0o700)
         codex_fixture.credentials(fresh_provider_home / ".config/rui/codex.json")
         defaults(fresh_provider_home, "--model", "gpt-6-luna")
-        assert saved_fields(fresh_provider_home / ".config/rui/preferences", "store", "provider", "model") == ("", "codex", "gpt-6-luna")
+        assert saved_fields(fresh_provider_home / ".config/rui/preferences", "store", "connection", "model") == ("", "codex", "gpt-6-luna")
         credential.unlink()
         os.mkfifo(credential, mode=0o600)
         try:
@@ -1964,11 +1964,11 @@ def main(selected="all"):
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         stale = defaults(preferences_home)
         assert stale["local_credentials"]["codex"] == "configured" and stale["next_session"] == {"status": "unsupported_provider"}, stale
-        assert saved_fields(saved, "provider", "model") == ("retired", "old-model")
+        assert saved_fields(saved, "connection", "model") == ("retired", "old-model")
         defaults(preferences_home, "--store", store)
-        assert saved_fields(saved, "provider", "model") == ("retired", "old-model")
+        assert saved_fields(saved, "connection", "model") == ("retired", "old-model")
         defaults(preferences_home, "--connection", "codex")
-        assert saved_fields(saved, "provider", "model") == ("codex", "")
+        assert saved_fields(saved, "connection", "model") == ("codex", "")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         defaults(preferences_home, "--connection", "codex", "--model", "gpt-6-luna")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=old-model\n")
@@ -1978,8 +1978,8 @@ def main(selected="all"):
         defaults(preferences_home, "--model", "gpt-6-luna")
         saved.rename(saved.parent / "preferences.backup")
         sole = defaults(preferences_home)
-        assert sole["provider"] is None and sole["next_session"] == {
-            "status": "selected", "provider": "codex", "model": "gpt-6.1-sol", "local_credential": "configured"}, sole
+        assert sole["connection"] is None and sole["next_session"] == {
+            "status": "selected", "connection": "codex", "model": "gpt-6.1-sol", "local_credential": "configured"}, sole
         (saved.parent / "preferences.backup").rename(saved)
         credential.unlink()
         saved.chmod(0o644)
@@ -2239,7 +2239,7 @@ def main(selected="all"):
             env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=5).stderr
         assert config["request"] in json.loads(run(home, "request", "list"))
         assert json.loads(run(home, "request", "recover", config["request"]))["answer"]["replayed"] is True
-        creation = {"provider": "codex", "model": "gpt-6-sol", "reasoning_effort": "low",
+        creation = {"connection": "codex", "model": "gpt-6-sol", "reasoning_effort": "low",
                     "workspace": str(workspace.resolve()), "tools": ["bash"], "loaded_tools": ["bash"],
                     "permission_mode": "ask", "compaction_trigger": str(compaction_trigger("codex", "gpt-6-sol"))}
         assert config["admission"]["answer"]["configuration"] == creation, config
@@ -2348,7 +2348,7 @@ def main(selected="all"):
             assert "\n  › first input" in conversation_text(greeting) and "\nfirst answer" in conversation_text(greeting), greeting
             binding = chat_info_frame(master)
             bound_session = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
-            assert bound_session["workspace"] == str(workspace.resolve()) and bound_session["provider"] == "codex", bound_session
+            assert bound_session["workspace"] == str(workspace.resolve()) and bound_session["connection"] == "codex", bound_session
             folder = next(row.split("Folder", 1)[1].strip() for row in binding.split("\n")
                           if row.strip().startswith("Folder"))
             assert folder.endswith(workspace.resolve().name), binding
@@ -2385,7 +2385,7 @@ def main(selected="all"):
             saved_default(master, "/setup --model gpt-5.5", "Model: gpt-5.5")
             interactive_saved = preferences_home / ".config/rui/preferences"
             saved_default(master, "/setup --clear-model", "Model: not selected")
-            assert saved_fields(interactive_saved, "provider", "model") == ("codex", "")
+            assert saved_fields(interactive_saved, "connection", "model") == ("codex", "")
             cleared_preferences = interactive_saved.read_bytes()
             for command, error in (("/setup --clear-model --model gpt-6-luna", "model_excludes_clear_model"),
                                    ('/setup --model ""', 'preference_model_invalid'),

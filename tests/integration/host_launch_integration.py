@@ -715,7 +715,7 @@ def new_host_provider_policy(root, env):
                             info = json.loads(observed.stdout)
                             return info if info["status"] == "ready" else None
                         info = wait_for(ready, f"{state} {selection} {door} Host readiness", timeout=20)
-                        assert info["capabilities"]["providers"] == expected, (state, selection, door, info)
+                        assert host_process.capability_routes(info["capabilities"]) == expected, (state, selection, door, info)
                         assert not missing.exists(), "signed-out startup created credentials"
                         if expected["chatgpt"] != "unserved" or expected["openai"] != "unserved":
                             def intercepted():
@@ -931,7 +931,7 @@ def frozen_settings_launches(root, env):
 
             try:
                 ready = held_start(directory, arguments, mutate)
-                assert ready["capabilities"]["providers"] == expected, (door, mutation, policy, ready)
+                assert host_process.capability_routes(ready["capabilities"]) == expected, (door, mutation, policy, ready)
                 # Saved document bytes also locate a later DIR client. Restore
                 # them only AFTER launch returned positive A readiness with B
                 # still installed; explicit and assignment sources stay B.
@@ -939,7 +939,7 @@ def frozen_settings_launches(root, env):
                     source.write_bytes(admitted)
                 observed = status(directory, selected_env)
                 assert instance(observed, 2) == ready["instance"]
-                assert observed["capabilities"]["providers"] == expected, observed
+                assert host_process.capability_routes(observed["capabilities"]) == expected, observed
                 assert (directory / "rui.sqlite3").is_file()
                 checked += 1
             finally:
@@ -966,7 +966,7 @@ def frozen_settings_launches(root, env):
 
         try:
             ready = held_start(directory, [], move_source)
-            assert ready["store"] == str(data_a.resolve()) and ready["capabilities"]["providers"] == none, ready
+            assert ready["store"] == str(data_a.resolve()) and host_process.capability_routes(ready["capabilities"]) == none, ready
             assert (data_a / "rui.sqlite3").is_file() and not data_b.exists()
             assert (interface / "rui.sock").is_socket()
             source.write_bytes(admitted)
@@ -1001,7 +1001,7 @@ def frozen_settings_launches(root, env):
         ready = held_start(directory, arguments, remove_presets)
         observed = status(directory, selected_env)
         assert instance(observed, 2) == ready["instance"]
-        assert observed["capabilities"]["providers"] == none, observed
+        assert host_process.capability_routes(observed["capabilities"]) == none, observed
         assert all(not source.exists() for source in sources)
         checked += 1
     finally:
@@ -1628,7 +1628,7 @@ def main():
         try:
             started = run_start(invalid_store, invalid_env)
             assert started.returncode == 0, started.stderr
-            providers = status(invalid_store, invalid_env)["capabilities"]["providers"]
+            providers = host_process.capability_routes(status(invalid_store, invalid_env)["capabilities"])
             assert providers == {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}, providers
         finally:
             forced_crash_cleanup(invalid_store)
@@ -1638,7 +1638,7 @@ def main():
         try:
             started = run_start(openai_store, openai_env, "--set", "providers.openai.endpoint=https://proxy.example/v1/responses")
             assert started.returncode == 0, started.stderr
-            providers = status(openai_store, openai_env)["capabilities"]["providers"]
+            providers = host_process.capability_routes(status(openai_store, openai_env)["capabilities"])
             assert providers["openai"] == "key_file", providers
         finally:
             forced_crash_cleanup(openai_store)
@@ -1790,7 +1790,7 @@ def main():
             assert "Bash commands can run without asking you" not in screen.completed, screen.completed
             assert not list((bare_home / ".config/rui/requests").glob("*.json")), "the overview captured a request"
             assert len(wait_for_processes(bare_store, 1)) == 1
-            assert status(bare_store, bare_env)["capabilities"]["providers"] == {
+            assert host_process.capability_routes(status(bare_store, bare_env)["capabilities"]) == {
                 "codex": "chatgpt_device", "chatgpt": "unserved", "openai": "unserved"}
             os.set_blocking(master, False)
             deadline = time.monotonic() + 5

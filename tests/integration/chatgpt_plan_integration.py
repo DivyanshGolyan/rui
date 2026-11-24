@@ -116,7 +116,7 @@ def plan_list(host, store):
         "version": host_process.WIRE_VERSION, "kind": "model_list", "store": str(store),
     }).encode())
     assert b" 200 " in head, (head, body)
-    return next(entry for entry in json.loads(body)["providers"] if entry["provider"] == "chatgpt")
+    return next(entry for entry in json.loads(body)["connections"] if entry["connection"] == "chatgpt")
 
 
 def settled_list(host, store, source, description):
@@ -159,7 +159,7 @@ def run():
     try:
         host = start(store, url)
         status = fixture.command("host", "status", "--store", store)
-        assert status["capabilities"]["providers"]["chatgpt"] == "chatgpt_plan", status
+        assert host_process.capability_routes(status["capabilities"])["chatgpt"] == "chatgpt_plan", status
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
             "--key", "configure", "--workspace", fixture.ROOT,

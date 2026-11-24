@@ -105,9 +105,9 @@ def run():
         head, listed_body = raw_request(host.rui_ready_fields["socket"], "/v1/model-list", json.dumps({
             "version": host_process.WIRE_VERSION, "kind": "model_list", "store": str(store),
         }).encode())
-        listed = json.loads(listed_body)["providers"]
+        listed = json.loads(listed_body)["connections"]
         assert b" 200 " in head and len(listed) == 1, (head, listed)
-        assert listed[0]["provider"] == "codex" and listed[0]["source"] == "catalog", listed
+        assert listed[0]["connection"] == "codex" and listed[0]["source"] == "catalog", listed
         assert listed[0]["models"] and all(model["known"] for model in listed[0]["models"]), listed
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
@@ -672,7 +672,7 @@ def openai_journey():
 
         host = start(store, url, "--set", f"providers.openai.endpoint={url}")
         status = fixture.command("host", "status", "--store", store)
-        assert status["capabilities"]["providers"] == {"codex": "chatgpt_device", "openai": "key_file", "chatgpt": "unserved"}, status
+        assert host_process.capability_routes(status["capabilities"]) == {"codex": "chatgpt_device", "openai": "key_file", "chatgpt": "unserved"}, status
         sessions = {}
         for provider in ("codex", "openai"):
             configured = fixture.command(

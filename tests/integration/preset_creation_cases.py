@@ -26,7 +26,7 @@ def _preset_creation(binary, root, store_settings, env, runtime):
     for name in ("RUI_STORE", "RUI_ADDRESS", "RUI_SENDER_HANDLE"):
         clean.pop(name, None)
     socket = runtime / "rui.sock"
-    preset = {"provider": "openai", "workspace": str(workspace), "model": "gpt-6.1-sol",
+    preset = {"connection": "openai", "workspace": str(workspace), "model": "gpt-6.1-sol",
               "effort": "low", "compactAt": 100000, "outputReservation": 1234,
               "tools": ["bash", "find_tools"], "loadedTools": ["find_tools"],
               "permissionMode": "ask", "instructions": "Preset instructions", "label": "Restricted",
@@ -105,7 +105,7 @@ def _preset_creation(binary, root, store_settings, env, runtime):
         return observed["observation"]
 
     def restricted(saved, loaded=("find_tools",)):
-        assert saved["provider"] == preset["provider"] and saved["workspace"] == str(workspace), saved
+        assert saved["connection"] == preset["connection"] and saved["workspace"] == str(workspace), saved
         assert saved["model"] == preset["model"] and saved["reasoning_effort_override"] == "low", saved
         assert saved["compaction_trigger_override"] == "100000", saved
         assert saved["output_reservation_override"] == "1234", saved
@@ -173,7 +173,7 @@ def _preset_creation(binary, root, store_settings, env, runtime):
             "--reasoning-effort", "default", "--compaction-trigger", "2000", "--output-reservation", "default",
             "--instructions", "-", "--label", "", "--text-output", "--test-drop-reply", "after-commit", input="")
         configuration = changed_capture["configuration"]
-        assert "provider" not in configuration and "workspace" not in configuration, configuration
+        assert "connection" not in configuration and "workspace" not in configuration, configuration
         assert configuration["tools"] == [] and configuration["loadedTools"] == [], configuration
         assert configuration["instructions"] == "" and configuration["compactAt"] == 2000, configuration
         for name in ("effort", "outputReservation", "label", "outputSchema"):
@@ -181,7 +181,7 @@ def _preset_creation(binary, root, store_settings, env, runtime):
         changed_reply = recover(override)
         changed_session = changed_reply["context"]["session"]
         changed = inspect(changed_session)["session"]
-        assert changed["provider"] == "openai" and changed["workspace"] == str(workspace), changed
+        assert changed["connection"] == "openai" and changed["workspace"] == str(workspace), changed
         assert changed["model"] == "gpt-4.1" and changed["reasoning_effort_override"] is None, changed
         assert changed["tools"] == [] and changed["loaded_tools"] == [] and changed["permission_mode"] == "bypass", changed
         assert changed["compaction_trigger_override"] == "2000" and changed["output_reservation_override"] is None, changed

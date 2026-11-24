@@ -306,7 +306,7 @@ def credential_location_matrix():
                     if should_start:
                         assert started.returncode == 0, (case, started)
                         info = host_info(runtime / "rui.sock", str(store))
-                        assert kind in info["capabilities"]["providers"], (case, info)
+                        assert kind in host_process.capability_routes(info["capabilities"]), (case, info)
                         host_stop(runtime / "rui.sock", str(store), info["instance"])
                     else:
                         missing_key_refusal(started, leaf=leaf, door="start", store=store, receipts=receipts, key_file=explicit)
@@ -410,7 +410,7 @@ def main(network, ci):
     wait_for_host(sock, store, host)
     info = host_info(sock, str(store))
     assert info["active_capacity"] == "2", info
-    assert info["capabilities"]["providers"]["openai"] == "key_file", info
+    assert host_process.capability_routes(info["capabilities"])["openai"] == "key_file", info
     for name, data in (os_semantics.launch_records(host.pid) or {}).items():
         assert b"sk-launch-test" not in data, name
 

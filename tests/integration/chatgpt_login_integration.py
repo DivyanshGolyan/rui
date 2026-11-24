@@ -129,7 +129,7 @@ def start_line(stdout):
 
 def saved_default():
     inspected = fixture.command("defaults", "inspect")
-    return inspected["provider"], inspected["model"]
+    return inspected["connection"], inspected["model"]
 
 
 SIGNED_OUT = "Rui: Signed out of ChatGPT.\n"

@@ -330,7 +330,7 @@ def main(report_source):
         assert undelivered["pending_messages"] == "0" and undelivered["recent_messages"] == [], undelivered
         start_receipt = json.loads((workspace / "b-start.json").read_text())
         assert allocated(start_receipt) == session_b, start_receipt
-        assert start_receipt["configuration"] == {"provider": "codex", "model": "gpt-6-sol",
+        assert start_receipt["configuration"] == {"connection": "codex", "model": "gpt-6-sol",
             "reasoning_effort": start_effort("gpt-6-sol"), "effort_source": "model_default"}, start_receipt
         announcement = (workspace / "b-send.err").read_text()
         handle = re.fullmatch(r"request: (\S+) \(wait: rui request wait \1; if unconfirmed: rui request recover \1\)\n", announcement)
@@ -665,13 +665,13 @@ def stdin_start_contract():
             start_receipt = json.loads(started.stdout)
             new_session = allocated(start_receipt)
             assert list(start_receipt) == ["context", "configuration", "answer", "input", "queue"], start_receipt
-            assert start_receipt["configuration"] == {"provider": "codex", "model": model,
+            assert start_receipt["configuration"] == {"connection": "codex", "model": model,
                 "reasoning_effort": effort, "effort_source": source}, start_receipt
             tools = DEFAULTS.tools.split(",")
             if not (os_semantics.PROC_FS or os_semantics.DARWIN):
                 tools.remove("read_image")
             loaded = list(tools)
-            creation = {"provider": "codex", "model": model, "reasoning_effort": effort,
+            creation = {"connection": "codex", "model": model, "reasoning_effort": effort,
                         "workspace": str(state.resolve()), "tools": tools, "loaded_tools": loaded,
                         "permission_mode": DEFAULTS.permission_mode,
                         "compaction_trigger": str(compaction_trigger("codex", model))}
