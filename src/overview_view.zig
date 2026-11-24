@@ -3696,6 +3696,8 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
         .held => |word| word,
     };
     const title_floor: usize = 24;
+    // Leave room for a two-cell title grapheme and an ellipsis.
+    const useful_title_cells: usize = 3;
     const mark_and_gap: usize = 2;
     const inset: usize = 1;
     const row_width: usize = width;
@@ -3771,13 +3773,13 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
     // On very narrow rows leave space for the title and omit badges whole.
     var suffix_cells: usize = 0;
     for (&suffixes) |*suffix| {
-        if (suffix.cells > room -| 3 -| suffix_cells) suffix.cells = 0;
+        if (suffix.cells > room -| useful_title_cells -| suffix_cells) suffix.cells = 0;
         suffix_cells += suffix.cells;
     }
     const age_cells = built.measure(age);
     const age_room = room -| (suffix_cells + age_cells + 1);
     const show_age = age_cells != 0 and room > suffix_cells + age_cells and
-        (age_room >= title_floor or age_room >= built.measure(name));
+        (age_room >= useful_title_cells or age_room >= built.measure(name));
     const name_room = if (show_age) age_room else room -| suffix_cells;
     const selected = rowSelected(state, row);
     const used = try built.put(start_name, name, name_room, .{ .colour = if (selected) .strong else .normal, .background = background, .bold = selected, .dim = quiet });
@@ -9576,10 +9578,14 @@ test "launch admission belongs to bare app startup" {
 
 fn creatorWidthCase() !void {
     const name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    for ([_]u64{ 60, 18 * 3600, 24 * 3600 }) |age| for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 5, 8, 30, 32, 36, 40, 46, 140 }) |width| {
+    for ([_]struct { seconds: u64, text: []const u8 }{
+        .{ .seconds = 60, .text = "1m" },
+        .{ .seconds = 18 * 3600, .text = "18h" },
+        .{ .seconds = 24 * 3600, .text = "1d" },
+    }) |age| for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 5, 8, 30, 32, 36, 40, 46, 140 }) |width| {
         var state = try opened(&.{
-            session("a1b2c3", .{ .working = ago(age) }, .{ .label = "Ancestor" }),
-            session("b4n8wd", .{ .finished = ago(age) }, .{ .label = name, .creator = "a1b2c3".*, .descendant_count = 2, .descendant_needs_you_count = 1 }),
+            session("a1b2c3", .{ .working = ago(age.seconds) }, .{ .label = "Ancestor" }),
+            session("b4n8wd", .{ .finished = ago(age.seconds) }, .{ .label = name, .creator = "a1b2c3".*, .descendant_count = 2, .descendant_needs_you_count = 1 }),
             session("c3d4e5", .{ .approval = ago(1) }, .{ .label = "Question", .creator = "b4n8wd".* }),
             session("d4e5f6", .{ .working = ago(2) }, .{ .label = "Other", .creator = "b4n8wd".* }),
         });
@@ -9604,7 +9610,13 @@ fn creatorWidthCase() !void {
             try std.testing.expect(std.mem.startsWith(u8, text[badge_at.?..], expected_badges));
         }
         if (width <= 8) try std.testing.expect(std.mem.indexOfScalar(u8, text, '?') == null);
-        const minimum_title = if (width < 30) 2 else @min(23, width - 8);
+        if (width >= 30) try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, text, " "), age.text));
+        const minimum_title: usize = switch (width) {
+            5, 8 => 2,
+            30 => 18,
+            32, 40 => 20,
+            else => 23,
+        };
         try std.testing.expect(std.mem.indexOf(u8, text, name[0..minimum_title]) != null);
     };
 }
@@ -9621,34 +9633,61 @@ fn creatorActivityWidthCase() !void {
         .{ .work = .{ .stopping = ago(1) }, .age = "stopping" },
     };
     const widths = [_]struct { width: u16, direct_col: u16, deep_col: u16 }{
+        .{ .width = 20, .direct_col = 3, .deep_col = 3 },
         .{ .width = 29, .direct_col = 3, .deep_col = 3 },
         .{ .width = 30, .direct_col = 5, .deep_col = 5 },
         .{ .width = 32, .direct_col = 5, .deep_col = 7 },
         .{ .width = 36, .direct_col = 5, .deep_col = 9 },
         .{ .width = 140, .direct_col = 5, .deep_col = 9 },
     };
-    for ([_]bool{ false, true }) |use_unicode| for ([_]bool{ false, true }) |deep| {
-        const options: TestSession = .{ .label = "Leaf café", .creator = if (deep) second.reference else root.reference };
+    const Placement = enum { alone, direct, deep };
+    for ([_]bool{ false, true }) |use_unicode| for (std.enums.values(Placement)) |placement| for ([_][]const u8{
+        "Leaf café",
+        "Leaf ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    }) |name| {
+        const options: TestSession = .{ .label = name, .creator = switch (placement) {
+            .alone => null,
+            .direct => root.reference,
+            .deep => second.reference,
+        } };
         const leaf = session("d4e5f6", changes[0].work, options);
-        const rows = [_]Listed{ root, leaf, first, second };
-        var state = try opened(if (deep) &rows else rows[0..2]);
+        const rows = [_]Listed{ leaf, root, first, second };
+        const leaf_at: usize = switch (placement) {
+            .alone => 0,
+            .direct => 1,
+            .deep => 3,
+        };
+        var state = try opened(rows[0 .. leaf_at + 1]);
         defer state.deinit();
         for (changes, 0..) |change, generation| {
             if (generation != 0) _ = try refresh(&state, .changed, testToken(1 + generation), &.{session("d4e5f6", change.work, options)});
             for (widths) |size| {
                 var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer arena.deinit();
-                const row = (try Lines.at(arena.allocator(), &state, if (deep) 3 else 1, size.width, .{ .unicode = use_unicode }, 0)).?;
+                const row = (try Lines.at(arena.allocator(), &state, leaf_at, size.width, .{ .unicode = use_unicode }, 0)).?;
                 try std.testing.expectEqualStrings("d4e5f6", &row.target.?.open);
                 const text = try segmentText(arena.allocator(), row.segments);
-                const name = if (use_unicode) "Leaf café" else "Leaf caf?";
-                const name_start = std.mem.indexOf(u8, text, name).?;
-                const expected_col = if (deep) size.deep_col else size.direct_col;
+                const name_start = std.mem.indexOf(u8, text, "Leaf").?;
+                const expected_col: u16 = switch (placement) {
+                    .alone => 3,
+                    .direct => size.direct_col,
+                    .deep => size.deep_col,
+                };
                 const prefix = text[0..name_start];
                 try std.testing.expectEqual(expected_col, gwidth.gwidth(prefix, .unicode));
-                try std.testing.expectEqual(use_unicode and size.width >= 30, std.mem.indexOf(u8, prefix, "╰") != null);
-                const suffix = std.mem.trim(u8, text[name_start + name.len ..], " ");
-                try std.testing.expectEqualStrings(if (use_unicode) change.age else change.ascii_age orelse change.age, suffix);
+                try std.testing.expectEqual(use_unicode and expected_col > 3, std.mem.indexOf(u8, prefix, "╰") != null);
+                const trimmed_row = std.mem.trimEnd(u8, text, " ");
+                const age_text = if (use_unicode) change.age else change.ascii_age orelse change.age;
+                if (age_text.len == 0) {
+                    try std.testing.expect(row.spins);
+                    try std.testing.expect(!std.mem.endsWith(u8, trimmed_row, " working"));
+                } else {
+                    try std.testing.expect(std.mem.endsWith(u8, trimmed_row, age_text));
+                }
+                if (size.width >= 29 and std.mem.eql(u8, name, "Leaf café")) {
+                    const shown = if (use_unicode) name else "Leaf caf?";
+                    try std.testing.expect(std.mem.startsWith(u8, text[name_start..], shown));
+                }
             }
         }
     };
