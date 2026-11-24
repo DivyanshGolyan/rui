@@ -1418,6 +1418,15 @@ fn keepRef(buffer: []u8, ref: []const u8) []const u8 {
 // else the saved lane, with Host precedence. A parent narrows its children's app tools only by naming app tools the Host
 // does not shadow. start_agent resolves the same names through the same lane round; its acceptance of an app-only
 // name needs the model offer projecting app tools, which pr-b2b adds, so it is not checked on this branch.
+/// A configure that must be accepted: a refusal fails the test by naming the step and the code it returned.
+fn expectAccepted(step: []const u8, reply: anytype) !void {
+    switch (reply) {
+        .accepted => {},
+        .rejected => |refused| try std.testing.expectEqualStrings(step, @tagName(refused.code)),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "SH-175 configure resolves names through the lane's effective declaration, and a Host-shadowed app tool narrows no parent" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -1440,7 +1449,7 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
             declareAppTools(&created.configuration, ask_and_other_declaration);
             created.configuration.tools = try .of(&.{ "ask", "find_tools" });
             const created_reply = try storage.configure(&created, .{});
-            try std.testing.expect(created_reply == .accepted);
+            try expectAccepted("created", created_reply);
             const root = keepRef(&refs[0], created_reply.accepted.session.slice());
 
             // Replace: the new declaration drops `other`, so naming it is refused; naming the kept `ask` is accepted.
@@ -1455,7 +1464,7 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
             try replace_ask.session.set(root);
             declareAppTools(&replace_ask.configuration, ask_only_declaration);
             replace_ask.configuration.tools = try .of(&.{ "ask", "find_tools" });
-            try std.testing.expect((try storage.configure(&replace_ask, .{})) == .accepted);
+            try expectAccepted("replace_ask", try storage.configure(&replace_ask, .{}));
 
             // Clear: an empty declaration leaves the lane no app tools, so naming `ask` is refused.
             var clear: wire_request.ConfigureCommand = .{};
@@ -1470,14 +1479,14 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
             try omitted.key.set("sh175-omitted");
             try omitted.session.set(root);
             omitted.configuration.tools = try .of(&.{ "ask", "find_tools" });
-            try std.testing.expect((try storage.configure(&omitted, .{})) == .accepted);
+            try expectAccepted("omitted", try storage.configure(&omitted, .{}));
 
             // Host precedence: a declaration whose `lookup` the Host shadows creates, and the Host name is selected.
             var shadowed = try completeConfiguration("sh175-shadowed", "", workspace, "model-a");
             declareAppTools(&shadowed.configuration, lookup_and_ask_declaration);
             shadowed.configuration.tools = try .of(&.{"lookup"});
             const shadowed_reply = try storage.configure(&shadowed, .{});
-            try std.testing.expect(shadowed_reply == .accepted);
+            try expectAccepted("shadowed", shadowed_reply);
             const shadow_root = keepRef(&refs[1], shadowed_reply.accepted.session.slice());
 
             // A child of that root names `ask`: the shadowed `lookup` narrows nothing, so `ask` is offered to it.
@@ -1485,14 +1494,14 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
             child_ask.configuration.parent.state = .value;
             try child_ask.configuration.parent.value.set(shadow_root);
             child_ask.configuration.tools = try .of(&.{"ask"});
-            try std.testing.expect((try storage.configure(&child_ask, .{})) == .accepted);
+            try expectAccepted("child_ask", try storage.configure(&child_ask, .{}));
 
             // A real subset: the root names `ask` alone of its two app tools, so its child may not name `other`.
             var subset_root_command = try completeConfiguration("sh175-subset-root", "", workspace, "model-a");
             declareAppTools(&subset_root_command.configuration, ask_and_other_declaration);
             subset_root_command.configuration.tools = try .of(&.{ "ask", "find_tools" });
             const subset_reply = try storage.configure(&subset_root_command, .{});
-            try std.testing.expect(subset_reply == .accepted);
+            try expectAccepted("subset", subset_reply);
             const subset_root = keepRef(&refs[2], subset_reply.accepted.session.slice());
             var child_other = try completeConfiguration("sh175-child-other", "", workspace, "model-a");
             child_other.configuration.parent.state = .value;
