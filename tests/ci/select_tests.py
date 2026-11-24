@@ -688,6 +688,8 @@ def setup_requirements(targets):
 def execution_batches(targets, check_part="all"):
     if check_part != "all" and "check-full" not in targets:
         raise ValueError("A full-check part requires check-full in the selection")
+    if check_part == "both":
+        return [*execution_batches(targets, "execution"), ["check-full", "-Dcheck-part=callers"]]
     if check_part == "execution":
         return [["check-full", "-Dcheck-part=execution"],
                 *execution_batches([target for target in targets if target != "check-full"])]

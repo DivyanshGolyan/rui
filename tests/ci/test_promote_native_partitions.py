@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 
+from select_tests import execution_batches
 
 
 class NativePartitionTest(unittest.TestCase):
@@ -13,6 +14,19 @@ class NativePartitionTest(unittest.TestCase):
         targets = ["admission-debug-integration", "check-full", "future-integration", "test-full"]
         batches = [["check-full", "-Dcheck-part=execution"], ["future-integration"],
                    ["admission-debug-integration"], ["test-full"], ["check-full", "-Dcheck-part=callers"]]
+        cases = (
+            (targets, batches),
+            (["check-full"], [["check-full", "-Dcheck-part=execution"],
+                              ["check-full", "-Dcheck-part=callers"]]),
+            (["test-logic", "check-full"], [["check-full", "-Dcheck-part=execution"],
+                                            ["test-logic"], ["check-full", "-Dcheck-part=callers"]]),
+        )
+        for selected, expected in cases:
+            with self.subTest(selected=selected):
+                self.assertEqual(execution_batches(selected, "both"), expected)
+        for selected in ([], ["test-logic"]):
+            with self.subTest(selected=selected), self.assertRaises(ValueError):
+                execution_batches(selected, "both")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             zig = root / "zig"

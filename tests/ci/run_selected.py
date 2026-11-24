@@ -29,10 +29,7 @@ def main():
                              "then passes a second such failure, promotion fails it")
     args = parser.parse_args()
     targets = json.loads(args.targets)
-    if args.check_part == "both":
-        batches = execution_batches(targets, "execution") + execution_batches(["check-full"], "callers")
-    else:
-        batches = execution_batches(targets, args.check_part)
+    batches = execution_batches(targets, args.check_part)
     for index, batch in enumerate(batches):
         returncode, output = execute(batch, args.ci_artifacts)
         if returncode and args.quarantine != "off" and (flakes := listed(output)):
