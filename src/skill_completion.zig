@@ -508,8 +508,8 @@ test "leading skill collisions use the complete grammar including hidden command
 
 test "chat table lists visible commands with substantive descriptions plus every loaded skill" {
     try std.testing.expect(!@hasDecl(slash_commands, "overview"));
-    const names = [_][]const u8{ "archive", "clear", "copy", "effort", "model", "new", "pin", "reload-skills", "reload-tools", "rename", "requests", "result", "setup", "unarchive", "unpin" };
-    const descriptions = [_][]const u8{ "", "start a new chat", "copy the last answer", "", "", "start a new chat", "", "", "", "", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "" };
+    const names = [_][]const u8{ "clear", "copy", "effort", "model", "new", "pin", "reload-skills", "reload-tools", "rename", "requests", "result", "setup", "unarchive", "unpin" };
+    const descriptions = [_][]const u8{ "start a new chat", "copy the last answer", "", "", "start a new chat", "", "", "", "", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "" };
     var skill_names: [skill_suggestions.capacity][16]u8 = undefined;
     var entries: [skill_suggestions.capacity]skill_suggestions.Entry = undefined;
     for (&entries, &skill_names, 0..) |*entry, *name, index| entry.* = .{
@@ -521,7 +521,7 @@ test "chat table lists visible commands with substantive descriptions plus every
         var rows: Rows = .{};
         _ = reads.ask("").?;
         _ = reads.answer(1, testPage(entries[0..count]), "");
-        const listed = reads.shown(&rows, "/", 1, 1, .{}, null).?.list;
+        const listed = reads.shown(&rows, "/", 1, 1, .{ .archive_state = .archived }, null).?.list;
         try std.testing.expectEqual(names.len + count, listed.count);
         for (names, descriptions, listed.shown()[0..names.len]) |name, description, entry| {
             try std.testing.expectEqualStrings(name, entry.shown[1..]);

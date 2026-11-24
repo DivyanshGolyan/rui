@@ -1912,7 +1912,7 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     held.self.skill_read = Fake.read;
     try held.keys("/");
     try Fake.answered(held);
-    try std.testing.expectEqual(@as(usize, 17), held.self.menu.shown.?.list.count);
+    try std.testing.expectEqual(@as(usize, 15), held.self.menu.shown.?.list.count);
     try held.keys("re\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r");
     try std.testing.expectEqualStrings("/recap ", held.self.input.composition().bytes);
     try std.testing.expect(held.self.submission.view() == null);
@@ -5476,15 +5476,11 @@ test "SUI-25 archive slash verbs follow observed chat state and preserve command
         try std.testing.expectEqual(@as(usize, @intFromBool(case.accepted)), overview.archives);
         try std.testing.expectEqual(@as(usize, @intFromBool(case.accepted)), overview.host_inputs);
         if (case.accepted) try std.testing.expectEqual(std.mem.eql(u8, case.command, "/archive"), overview.requested);
-        if (case.refusal) |expected| try std.testing.expectEqualStrings(expected, held.self.notice.?);
+        if (case.refusal) |expected| try std.testing.expectEqualStrings(expected, try barShows(held));
         try std.testing.expect(held.self.submission.view() == null);
     }
-    try staleArchiveSlashPicks();
-    try staleExactArchiveSlash();
-}
 
-fn staleArchiveSlashPicks() !void {
-    const InputPath = enum { tab, click };
+    const InputPath = enum { tab, click, enter };
     for (std.enums.values(InputPath)) |path| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -5494,7 +5490,8 @@ fn staleArchiveSlashPicks() !void {
         held.self.lender = overview.lender();
         held.self.line.read = .{ .revision = 1, .end = 1 };
         held.self.line.archive_state = .active;
-        try sendKeys(&held.self, "/arch");
+        const draft = if (path == .enter) "/archive" else "/arch";
+        try sendKeys(&held.self, draft);
         _ = try held.draw();
         const pick = held.self.menu.drawn_pick.?;
         try std.testing.expectEqualStrings("/archive", held.self.menu.shown.?.list.entries[pick.index].shown);
@@ -5505,34 +5502,15 @@ fn staleArchiveSlashPicks() !void {
                 var ctx = held.context();
                 try appSelectCommand(&held.self, &ctx, pick);
             },
+            .enter => try sendKeys(&held.self, "\r"),
         }
         try std.testing.expectEqual(@as(usize, 0), overview.archives);
         try std.testing.expectEqual(@as(usize, 0), overview.host_inputs);
         try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
-        try std.testing.expectEqualStrings("/arch", held.self.input.composition().bytes);
+        try std.testing.expectEqualStrings(if (path == .enter) "" else draft, held.self.input.composition().bytes);
+        if (path == .enter) try std.testing.expectEqualStrings("This chat is already archived.", try barShows(held));
         try std.testing.expect(held.self.submission.intent == null);
     }
-}
-
-fn staleExactArchiveSlash() !void {
-    const held = try HeldFrontend.create();
-    defer held.destroy();
-    var overview: ArchiveOverview = .{ .state = undefined };
-    try overview.init();
-    defer overview.deinit();
-    held.self.lender = overview.lender();
-    held.self.line.read = .{ .revision = 1, .end = 1 };
-    held.self.line.archive_state = .active;
-    try sendKeys(&held.self, "/archive");
-    _ = try held.draw();
-    try std.testing.expect(held.self.menu.drawn_pick != null);
-    held.self.line.archive_state = .archived;
-    try sendKeys(&held.self, "\r");
-    try std.testing.expectEqual(@as(usize, 0), overview.archives);
-    try std.testing.expectEqual(@as(usize, 0), overview.host_inputs);
-    try std.testing.expectEqualStrings("This chat is already archived.", held.self.notice.?);
-    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
-    try std.testing.expect(held.self.submission.intent == null);
 }
 
 test "conversation slash archive errors propagate and consume only the submitted line" {
@@ -10037,8 +10015,8 @@ test "App Session palette total budget stays between input rules and reserves fe
         }
     };
     for ([_]struct { width: u16, height: u16, more: []const u8 }{
-        .{ .width = 140, .height = 40, .more = "4 more" },
-        .{ .width = 46, .height = 30, .more = "7 more" },
+        .{ .width = 140, .height = 40, .more = "2 more" },
+        .{ .width = 46, .height = 30, .more = "5 more" },
     }) |case| {
         const held = try HeldFrontend.create();
         defer held.destroy();
