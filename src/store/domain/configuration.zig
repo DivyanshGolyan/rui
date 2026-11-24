@@ -500,7 +500,7 @@ pub const ConfigurationReads = struct {
     inherits_parent: bool = false,
     attach_parent: bool = true,
     inherited: parent_settings.Row = undefined,
-    /// The parent's lane, read with `inherited`; a child's new lane.
+    /// The parent's lane, read with `inherited`: the lane of any child, attached or detached. A root has no parent and is its own lane.
     parent_lane: Bounded(session_id.bytes) = .{},
     parent_found: store_access.Found = .missing,
     parent_checked: bool = false,
@@ -1094,7 +1094,8 @@ fn insertCreated(a: anytype, request: *const Request, reads: *ConfigurationReads
         .next_position = .of(1),
     };
     const creator = if (reads.creator) |*reference| reference else null;
-    const lane: ?Bounded(session_id.bytes) = if (reads.attach_parent and reads.inherits_parent) reads.parent_lane else null;
+    // A child, attached or detached, runs on its creator's lane; a Session without a parent is its own lane root.
+    const lane: ?Bounded(session_id.bytes) = if (reads.inherits_parent) reads.parent_lane else null;
     insertSession(a, head, &reads.next, &reads.workspace_digest, created_seq, if (reads.attach_parent) creator else null, creator, lane);
     try accept(reads, head, &reads.reference);
     if (try skills_domain.Appending.initial(head, request.initial_skills)) |appending| {

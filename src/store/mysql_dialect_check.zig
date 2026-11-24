@@ -1278,7 +1278,8 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
                 @setEvalBranchQuota(1_000_000);
                 var rows = store_testing.expected_mysql_rows;
                 const baseline = store_testing.baseline_rows;
-                for (.{ "INSERT INTO message_admission(", "INSERT INTO conversation_entry(" }) |insert| {
+                // Format 93 adds session.app_tool_set_id and app_lane; format 74 has neither, and step 93 backfills each lane.
+                for (.{ "INSERT INTO message_admission(", "INSERT INTO conversation_entry(", "INSERT INTO session(" }) |insert| {
                     const start = std.mem.indexOf(u8, rows, insert).?;
                     const end = start + std.mem.indexOf(u8, rows[start..], ";\n").? + 2;
                     const old_start = std.mem.indexOf(u8, baseline, insert).?;

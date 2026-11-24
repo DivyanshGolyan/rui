@@ -26,11 +26,13 @@ Labels, shared Workspaces and peer Messages after the first never establish a cr
 
 ### App lane
 
-A Session's `app_lane` names the lane root whose app tool declaration it runs on: the Session itself for a lane root, and its parent's lane for a child.
-The Store saves it at creation and never updates it, so a child keeps the lane it was created on.
-`session.app_tool_set_id` is the content-addressed app tool set that lane root declares; NULL means no declaration.
-This step saves the columns only: no Session can declare app tools yet, so every lane's declaration is NULL and the offer is unchanged.
-[Store format and upgrades](store.md#store-format-and-upgrades) owns the step that adds them.
+A Session's `app_lane` names the lane root whose app tool declaration it runs on.
+A Session with no parent is its own lane root, and a lane root with no declaration offers no app tools.
+An attached child and a detached child both take their creator's lane, and a grandchild takes its root's lane, so every Session in one tree shares one lane.
+The Store saves the lane at creation and never updates it: configuring a child after creation, or replaying its creation, leaves the lane as it was.
+Before the declaration step exists, every Session's lane is saved from its root by the step that adds the column, and no Session declares app tools.
+`session.app_tool_set_id` is the content-addressed app tool set that a lane root declares; NULL means no declaration.
+[Store format and upgrades](store.md#store-format-and-upgrades) owns the step that adds the columns.
 
 ### Stops and terminal outcomes
 

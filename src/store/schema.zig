@@ -1001,9 +1001,9 @@ pub const migrations = [_]Migration{
             "WITH RECURSIVE lanes(child,root) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT s.session_ref,l.root FROM session s JOIN lanes l ON s.parent_ref=l.child) UPDATE session SET app_lane=(SELECT root FROM lanes WHERE child=session.session_ref)",
         },
         .mysql = &.{
-            "ALTER TABLE session ADD COLUMN app_tool_set_id BIGINT NULL, ADD CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0), ADD FOREIGN KEY(app_tool_set_id) REFERENCES tool_set(tool_set_id)",
-            "ALTER TABLE session ADD COLUMN app_lane VARCHAR(6) NULL, ADD FOREIGN KEY(app_lane) REFERENCES session(session_ref)",
-            "UPDATE session s JOIN (WITH RECURSIVE lanes(child,root) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT s.session_ref,l.root FROM session s JOIN lanes l ON s.parent_ref=l.child) SELECT child,root FROM lanes) l ON l.child=s.session_ref SET s.app_lane=l.root",
+            "ALTER TABLE session ADD COLUMN app_tool_set_id BIGINT AFTER archive_seq, ADD CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0), ADD FOREIGN KEY(app_tool_set_id) REFERENCES tool_set(tool_set_id)",
+            "ALTER TABLE session ADD COLUMN app_lane VARCHAR(6) AFTER app_tool_set_id, ADD CHECK(app_lane IS NULL OR OCTET_LENGTH(app_lane)=6), ADD FOREIGN KEY(app_lane) REFERENCES session(session_ref)",
+            "WITH RECURSIVE lanes(child,root) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT s.session_ref,l.root FROM session s JOIN lanes l ON s.parent_ref=l.child) UPDATE session s JOIN (SELECT child,root FROM lanes) l ON l.child=s.session_ref SET s.app_lane=l.root",
         },
     },
 };
@@ -4071,6 +4071,31 @@ test "SH-120 schema 93 migration gives every Session no app declaration and its 
     try sqlite.exec(database, "UPDATE session SET app_tool_set_id=4 WHERE session_ref='d8mv7p'");
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET app_tool_set_id=0 WHERE session_ref='d8mv7p'"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET app_lane='nope' WHERE session_ref='ch0001'"));
+}
+
+test "SH-120 schema 93 MySQL step adds each lane column where the bootstrap has it, with its CHECK and key" {
+    const step = migrations[92 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 92), step.from);
+    const canonical_session_mysql = comptime blk: {
+        for (objects(.mysql)) |object| if (std.mem.eql(u8, object.name, "session")) break :blk object.sql;
+        unreachable;
+    };
+    // The step reproduces the bootstrap's column order, CHECK text and foreign keys, so a fresh and a migrated Store match.
+    const archive_position = std.mem.indexOf(u8, canonical_session_mysql, "archive_seq BIGINT").?;
+    const tool_set_position = std.mem.indexOf(u8, canonical_session_mysql, "app_tool_set_id BIGINT").?;
+    const lane_position = std.mem.indexOf(u8, canonical_session_mysql, "app_lane VARCHAR(6)").?;
+    try std.testing.expect(archive_position < tool_set_position and tool_set_position < lane_position);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "ADD COLUMN app_tool_set_id BIGINT AFTER archive_seq") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[1], "ADD COLUMN app_lane VARCHAR(6) AFTER app_tool_set_id") != null);
+    const tool_set_check = "CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0)";
+    const lane_check = "CHECK(app_lane IS NULL OR OCTET_LENGTH(app_lane)=6)";
+    try std.testing.expect(std.mem.indexOf(u8, canonical_session_mysql, tool_set_check) != null);
+    try std.testing.expect(std.mem.indexOf(u8, canonical_session_mysql, lane_check) != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], tool_set_check) != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[1], lane_check) != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "FOREIGN KEY(app_tool_set_id) REFERENCES tool_set(tool_set_id)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[1], "FOREIGN KEY(app_lane) REFERENCES session(session_ref)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[2], "WITH RECURSIVE lanes") != null);
 }
 
 test "schema 89 migration leaves each saved tool record's remote name empty, its offered name, on SQLite" {
