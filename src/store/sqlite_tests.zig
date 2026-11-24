@@ -274,7 +274,7 @@ pub fn expectModelRevisions(storage: *Store, session: []const u8, phase: []const
             try std.testing.expectEqual(before.revision + 1, reply.accepted.revision);
         } else {
             try std.testing.expect(reply == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.provider_is_immutable, reply.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.connection_is_immutable, reply.rejected.code);
         }
         const after = try storage.inspectSessionForTesting(session);
         try std.testing.expectEqual(before.revision + @as(u64, if (variant != 4) 1 else 0), after.revision);

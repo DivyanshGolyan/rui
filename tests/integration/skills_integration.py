@@ -222,7 +222,7 @@ def main():
                 key = f"{label}-{operation}"
                 record = state / f"{key}.json"
                 result = subprocess.run([str(fixture.RUI), "session", operation, "--store", str(store),
-                    "--workspace", str(rejected_workspace), "--provider", "codex", "--model", "gpt-6-sol",
+                    "--workspace", str(rejected_workspace), "--connection", "codex", "--model", "gpt-6-sol",
                     "--record", str(record), "--key", key], input="refused initial Message" if operation == "start" else None,
                     text=True, capture_output=True, timeout=15, env=environment)
                 assert result.returncode == 3, (label, operation, result.returncode, result.stdout, result.stderr)
@@ -259,7 +259,7 @@ def main():
             print("skills inaccessible-root permission fixture skipped for privileged root")
 
         created = invoke("session", "configure", "--store", store, "--workspace", workspace,
-                         "--provider", "codex", "--model", "gpt-6-sol", "--instructions", "-",
+                         "--connection", "codex", "--model", "gpt-6-sol", "--instructions", "-",
                          "--record", state / "create.json", "--key", "create", text=PARENT_INSTRUCTIONS)
         assert created["answer"]["created"] is True, created
         parent = created["context"]["session"]
@@ -295,7 +295,7 @@ def main():
         assert "skill" in declarations(first), first
 
         restricted = invoke("session", "start", "--store", store, "--workspace", workspace,
-                            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash",
+                            "--connection", "codex", "--model", "gpt-6-sol", "--tools", "bash",
                             "--record", state / "initial.json", "--key", "initial", text="restricted initial message")
         restricted_session = restricted["context"]["session"]
         initial_capture = (state / "initial.json").read_bytes()
@@ -348,7 +348,7 @@ def main():
         assert activity_bytes(parent, row["position"]) == typed.encode()
 
         initial_inline = invoke("session", "start", "--store", store, "--workspace", workspace,
-                                "--provider", "codex", "--model", "gpt-6-sol", "--record", state / "inline-first.json",
+                                "--connection", "codex", "--model", "gpt-6-sol", "--record", state / "inline-first.json",
                                 "--key", "inline-first", text="/shared /demo")
         initial_inline_session = initial_inline["context"]["session"]
         complete("inline-first")

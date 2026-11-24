@@ -33,7 +33,7 @@ def main():
         env = {**os.environ, "HOME": str(home)}
         configured = subprocess.run(
             [str(fixture.RUI), "defaults", "configure", "--store", str(store),
-             "--provider", "codex", "--model", "gpt-5.5"],
+             "--connection", "codex", "--model", "gpt-5.5"],
             env=env, capture_output=True, text=True, timeout=20,
         )
         assert configured.returncode == 0, configured.stderr
@@ -96,7 +96,7 @@ def main():
 
         created = subprocess.run(
             [str(fixture.RUI), "session", "configure", "--store", str(store),
-             "--workspace", str(state), "--provider", "codex", "--model", "gpt-5.5"],
+             "--workspace", str(state), "--connection", "codex", "--model", "gpt-5.5"],
             env=env, capture_output=True, text=True, timeout=20,
         )
         assert created.returncode == 0, created.stderr
@@ -118,7 +118,7 @@ def main():
                                     "--session", session], env=env, capture_output=True, text=True, timeout=20)
         assert inspected.returncode == 0, inspected.stderr
         saved_session = json.loads(inspected.stdout)["session"]
-        assert saved_session["model"] == "gpt-6-luna" and saved_session["provider"] == "codex", inspected.stdout
+        assert saved_session["model"] == "gpt-6-luna" and saved_session["connection"] == "codex", inspected.stdout
         host_process.wait_for(saved_model, "chat model change leaves overview default unchanged")
         panel_frame(master, lambda screen: "Copy last answer" not in screen, b"\x1b")
         os.write(master, b"\x03")

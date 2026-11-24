@@ -60,7 +60,7 @@ test("stopAction reaches the native owner and recovers its original answer", { s
 			store: { sqlite: { dir: join(root, "store") } },
 			providers: { codex: { endpoint: `http://127.0.0.1:${address.port}/responses`, unauthenticated: true } },
 		}, { binary: binary ?? "rui" });
-		const spec = { workspace: root, provider: "codex", model: "gpt-6-sol", effort: "low", compactAt: 100000, tools: ["bash"], permissionMode: "ask" } satisfies Parameters<typeof rui.sessions.create>[0];
+		const spec = { workspace: root, connection: "codex", model: "gpt-6-sol", effort: "low", compactAt: 100000, tools: ["bash"], permissionMode: "ask" } satisfies Parameters<typeof rui.sessions.create>[0];
 		const session = await rui.sessions.create(spec, { idempotencyKey: "session" });
 		await session.send("run", { idempotencyKey: "message" });
 		let action: string | undefined;

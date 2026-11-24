@@ -218,7 +218,7 @@ def attached_child(world, engine):
         child, = children
         saved = profile(w, child, ["skill"], ["skill"], "ask")
         parent_saved = w.inspect(parent)["session"]
-        assert saved["workspace"] == parent_saved["workspace"] and saved["provider"] == parent_saved["provider"], saved
+        assert saved["workspace"] == parent_saved["workspace"] and saved["connection"] == parent_saved["connection"], saved
         first_request(w, child, ["skill"])
         requests = requests_for(w, parent)
         assert all(declarations(request) == {"skill", "start_agent"} for request in requests), requests

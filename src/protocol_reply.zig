@@ -1,6 +1,8 @@
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
 const protocol = @import("protocol.zig");
+const provider_route = @import("provider_route.zig");
+const connection = @import("connection.zig");
 const command_spec = @import("command_spec.zig");
 const session_list = @import("session_list.zig");
 const activity_reply = @import("activity_reply.zig");
@@ -334,7 +336,7 @@ pub const HostStatus = union(enum) {
         innodb_doublewrite: ?protocol.Bounded(32) = null,
         /// SHA-256 of the settings frame a detached Host was started with; absent for older Hosts and foreground starts.
         settings_digest: ?@import("host_settings_handoff.zig").Digest = null,
-        capabilities: @FieldType(protocol.HostInfo, "capabilities"),
+        capabilities: protocol.HostCapabilities,
     },
     unavailable,
     owned_unavailable,
@@ -382,7 +384,7 @@ test "a model list reply reads as what the Host writes" {
     try std.testing.expectEqual(@as(?model_list.Source, .catalog), menu.sources.get(.codex));
     try std.testing.expectEqual(@as(?model_list.Source, .live), menu.sources.get(.openai));
     try std.testing.expectEqualStrings("unlisted-model", menu.entries[menu.others].id);
-    for ([_][]const u8{ "", protocol.model_list_reply.head, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"providers\":[]}" }) |body|
+    for ([_][]const u8{ "", protocol.model_list_reply.head, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"connections\":[]}" }) |body|
         try std.testing.expectError(error.InvalidModelList, modelListProviders(body));
 }
 
@@ -392,6 +394,19 @@ pub const HostInfoFacts = @FieldType(HostStatus, "ready");
 /// here: its facts come from its own executable's `host status` (client.zig).
 pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
     return .{ .ready = try parseHostInfoFacts(body, store) };
+}
+
+fn connectionFacts(list: anytype) !protocol.Connections {
+    if (list.len > provider_route.max_served) return error.InvalidHostInfo;
+    var out: protocol.Connections = .{};
+    for (list, 0..) |item, index| {
+        const name = connection.Name.parse(item.name) orelse return error.InvalidHostInfo;
+        for (list[0..index]) |earlier| if (std.mem.eql(u8, earlier.name, item.name)) return error.InvalidHostInfo;
+        const label = provider_route.Label.parse(item.label) orelse return error.InvalidHostInfo;
+        out.items[out.len] = .{ .name = name, .label = label, .route = item.route };
+        out.len += 1;
+    }
+    return out;
 }
 
 fn parseHostInfoFacts(body: []const u8, store: []const u8) !HostInfoFacts {
@@ -449,12 +464,7 @@ fn parseHostInfoFacts(body: []const u8, store: []const u8) !HostInfoFacts {
         .settings_digest = settings_digest,
         .capabilities = .{
             .bash = info.capabilities.bash,
-            .providers = routes: {
-                var routes = protocol.routesAll(.unserved);
-                inline for (@typeInfo(@TypeOf(info.capabilities.providers)).@"struct".field_names) |name|
-                    @field(routes, name) = @field(info.capabilities.providers, name);
-                break :routes routes;
-            },
+            .connections = try connectionFacts(info.capabilities.connections),
         },
     };
 }
@@ -471,7 +481,7 @@ test "Host information parses omitted and bounded string diagnostics with one se
             .started_at = 1792918800,
             .custody_occupied = 0,
             .paused = false,
-            .routes = protocol.routesAll(.unserved),
+            .connections = &.{},
             .doublewrite = null,
             .settings_digest = null,
         };
@@ -509,7 +519,7 @@ test "Host information parses the settings digest only as 64 lowercase hex chara
         .started_at = 1792918800,
         .custody_occupied = 0,
         .paused = false,
-        .routes = protocol.routesAll(.unserved),
+        .connections = &.{},
         .doublewrite = null,
         .settings_digest = digest,
     };
@@ -530,13 +540,13 @@ test "Host information parses the settings digest only as 64 lowercase hex chara
 }
 
 test "Host information is bounded and rejects ambiguous identities and capacity" {
-    const golden = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}";
+    const golden = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"paused\":true,\"capabilities\":{\"bash\":true,\"connections\":[]}}";
     const result = try parseHostInfo(golden, "/one");
     try std.testing.expect(result.ready.store.eql("/one"));
     try std.testing.expectEqual(@as(usize, 17), result.ready.active_capacity);
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, &result.ready.instance);
     try std.testing.expect(result.ready.capabilities.bash);
-    try std.testing.expectEqual(protocol.Route.unserved, result.ready.capabilities.providers.codex);
+    try std.testing.expectEqual(protocol.Route.unserved, result.ready.capabilities.connections.route("codex"));
     try std.testing.expectEqual(@as(u64, 1792918800), result.ready.started_at);
     try std.testing.expectEqual(@as(usize, 17), result.ready.custody_occupied);
     try std.testing.expect(result.ready.paused);
@@ -560,15 +570,15 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
     }
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(golden, "/other"));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"connections\":[]}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"connections\":[]}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"connections\":[]}}",
         "/one",
     ));
     for ([_][]const u8{ "intake_capacity", "descriptor_limit" }) |field| {
@@ -597,14 +607,13 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
     }
 }
 
-const host_info_fields_after_version = ",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}";
+const host_info_fields_after_version = ",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"connections\":[{\"name\":\"codex\",\"label\":\"ChatGPT (device code)\",\"route\":\"endpoint\"}]}}";
 const current_host_info = "{\"version\":\"" ++ protocol.wire_version ++ "\"" ++ host_info_fields_after_version;
 
 test "Host information requires complete current-wire facts" {
     const facts = (try parseHostInfo(current_host_info, "/one")).ready;
-    try std.testing.expectEqual(protocol.Route.endpoint, facts.capabilities.providers.codex);
-    try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.openai);
-    try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.chatgpt);
+    try std.testing.expectEqual(protocol.Route.endpoint, facts.capabilities.connections.route("codex"));
+    try std.testing.expectEqual(@as(usize, 1), facts.capabilities.connections.len);
     try std.testing.expect(facts.store.eql("/one"));
     try std.testing.expectEqual(@as(usize, 17), facts.active_capacity);
     try std.testing.expectEqual(@as(usize, 10), facts.intake_capacity);
@@ -614,31 +623,27 @@ test "Host information requires complete current-wire facts" {
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, &facts.instance);
     try std.testing.expect(facts.paused and facts.capabilities.bash);
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(current_host_info, "/other"));
-    const missing_chatgpt = try std.mem.replaceOwned(u8, std.testing.allocator, current_host_info, ",\"chatgpt\":\"unserved\"", "");
-    defer std.testing.allocator.free(missing_chatgpt);
-    try std.testing.expectError(error.MissingField, parseHostInfo(missing_chatgpt, "/one"));
+    const missing_route = try std.mem.replaceOwned(u8, std.testing.allocator, current_host_info, ",\"route\":\"endpoint\"", "");
+    defer std.testing.allocator.free(missing_route);
+    try std.testing.expectError(error.MissingField, parseHostInfo(missing_route, "/one"));
 
-    inline for (@typeInfo(protocol.Routes).@"struct".field_names) |provider| {
-        for (std.meta.tags(protocol.Route)) |route| {
-            const before = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\":\"{s}\"", .{ provider, @tagName(@field(facts.capabilities.providers, provider)) });
-            defer std.testing.allocator.free(before);
-            const after = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\":\"{s}\"", .{ provider, @tagName(route) });
-            defer std.testing.allocator.free(after);
-            const body = try std.mem.replaceOwned(u8, std.testing.allocator, current_host_info, before, after);
-            defer std.testing.allocator.free(body);
-            var expected = facts;
-            @field(expected.capabilities.providers, provider) = route;
-            try std.testing.expectEqualDeep(expected, (try parseHostInfo(body, "/one")).ready);
-        }
+    for (std.meta.tags(protocol.Route)) |route| {
+        const route_text = try std.fmt.allocPrint(std.testing.allocator, "\"route\":\"{s}\"", .{@tagName(route)});
+        defer std.testing.allocator.free(route_text);
+        const body = try std.mem.replaceOwned(u8, std.testing.allocator, current_host_info, "\"route\":\"endpoint\"", route_text);
+        defer std.testing.allocator.free(body);
+        var expected = facts;
+        expected.capabilities.connections.items[0].route = route;
+        try std.testing.expectEqualDeep(expected, (try parseHostInfo(body, "/one")).ready);
     }
     for ([_]struct { from: []const u8, to: []const u8, failure: anyerror }{
-        .{ .from = "\"codex\":\"endpoint\",", .to = "", .failure = error.MissingField },
-        .{ .from = ",\"openai\":\"unserved\"", .to = "", .failure = error.MissingField },
-        .{ .from = "\"codex\":\"endpoint\"", .to = "\"codex\":null", .failure = error.UnexpectedToken },
-        .{ .from = "\"openai\":\"unserved\"", .to = "\"openai\":\"unknown\"", .failure = error.InvalidEnumTag },
-        .{ .from = "\"codex\":\"endpoint\"", .to = "\"codex\":\"endpoint\",\"codex\":\"unserved\"", .failure = error.DuplicateField },
-        .{ .from = "\"openai\":\"unserved\"", .to = "\"openai\":\"unserved\",\"openai\":\"unserved\"", .failure = error.DuplicateField },
-        .{ .from = "\"openai\":\"unserved\"", .to = "\"openai\":\"unserved\",\"unknown\":\"unserved\"", .failure = error.UnknownField },
+        .{ .from = "\"name\":\"codex\",", .to = "", .failure = error.MissingField },
+        .{ .from = "\"route\":\"endpoint\"", .to = "\"route\":null", .failure = error.UnexpectedToken },
+        .{ .from = "\"route\":\"endpoint\"", .to = "\"route\":\"unknown\"", .failure = error.InvalidEnumTag },
+        .{ .from = "\"route\":\"endpoint\"", .to = "\"route\":\"endpoint\",\"route\":\"unserved\"", .failure = error.DuplicateField },
+        .{ .from = "\"route\":\"endpoint\"", .to = "\"route\":\"endpoint\",\"unknown\":\"unserved\"", .failure = error.UnknownField },
+        .{ .from = "\"route\":\"endpoint\"}]", .to = "\"route\":\"endpoint\"},{\"name\":\"codex\",\"label\":\"ChatGPT (device code)\",\"route\":\"unserved\"}]", .failure = error.InvalidHostInfo },
+        .{ .from = "\"name\":\"codex\"", .to = "\"name\":\"Codex\"", .failure = error.InvalidHostInfo },
         .{ .from = "\"type\":\"host_info\"", .to = "\"type\":\"host_status\"", .failure = error.InvalidHostInfo },
         .{ .from = "\"store\":\"/one\"", .to = "\"store\":\"/one\",\"store\":\"/one\"", .failure = error.DuplicateField },
         .{ .from = "\"paused\":true", .to = "\"paused\":true,\"paused\":false", .failure = error.DuplicateField },
@@ -650,7 +655,6 @@ test "Host information requires complete current-wire facts" {
         .{ .from = "\"descriptor_limit\":\"256\"", .to = "\"descriptor_limit\":\"+256\"", .failure = error.InvalidHostInfo },
         .{ .from = "\"started_at\":\"1792918800\"", .to = "\"started_at\":\"0\"", .failure = error.InvalidHostInfo },
         .{ .from = "\"custody_occupied\":\"3\"", .to = "\"custody_occupied\":\"18\"", .failure = error.InvalidHostInfo },
-        .{ .from = "\"codex\":\"endpoint\"", .to = "\"codex\":\"unknown\"", .failure = error.InvalidEnumTag },
     }) |case| {
         const bad = try std.mem.replaceOwned(u8, std.testing.allocator, current_host_info, case.from, case.to);
         defer std.testing.allocator.free(bad);
@@ -669,11 +673,11 @@ test "Host information requires complete current-wire facts" {
         .{ .value = "false", .failure = error.UnexpectedToken },
         .{ .value = "{}", .failure = error.UnexpectedToken },
         .{ .value = "[]", .failure = error.UnexpectedToken },
-        .{ .value = "\"unserved\",\"chatgpt\":\"unserved\"", .failure = error.DuplicateField },
+        .{ .value = "\"unserved\",\"route\":\"unserved\"", .failure = error.DuplicateField },
     }) |case| {
-        const field = try std.fmt.allocPrint(std.testing.allocator, "\"chatgpt\":{s}", .{case.value});
+        const field = try std.fmt.allocPrint(std.testing.allocator, "\"route\":{s}", .{case.value});
         defer std.testing.allocator.free(field);
-        const bad = try std.mem.replaceOwned(u8, std.testing.allocator, current_host_info, "\"chatgpt\":\"unserved\"", field);
+        const bad = try std.mem.replaceOwned(u8, std.testing.allocator, current_host_info, "\"route\":\"endpoint\"", field);
         defer std.testing.allocator.free(bad);
         try std.testing.expectError(case.failure, parseHostInfo(bad, "/one"));
     }
@@ -964,11 +968,12 @@ pub const Current = struct {
         reference: JsonString(protocol.max_session_bytes),
         parent: ?JsonString(protocol.session_id_bytes),
         workspace: JsonString(protocol.max_workspace_bytes),
-        provider: JsonEnum(protocol.Provider),
+        connection: JsonString(connection.max_name_bytes),
         model: JsonString(protocol.max_model_bytes),
         revision: Id,
         tools: ReportTools,
         loaded_tools: ReportTools,
+        app_tools: ReportTools,
         permission_mode: JsonEnum(enum { ask, bypass }),
         instructions: Reference,
         output_schema: ?Reference,
@@ -1436,7 +1441,7 @@ pub const SessionListPage = struct {
                 parent: ?JsonString(protocol.session_id_bytes),
                 creator: ?JsonString(protocol.session_id_bytes),
                 workspace: JsonString(protocol.max_workspace_bytes),
-                provider: JsonEnum(protocol.Provider),
+                connection: JsonString(connection.max_name_bytes),
                 model: JsonString(protocol.max_model_bytes),
                 tools: ReportTools,
                 permission_mode: JsonEnum(protocol.PermissionMode),
@@ -1471,7 +1476,7 @@ pub const SessionListPage = struct {
                 .parent = if (wire.parent) |parent| parent.value else null,
                 .creator = if (wire.creator) |creator| creator.value else null,
                 .workspace = wire.workspace.value,
-                .provider = wire.provider.value,
+                .provider = connection.Name.parse(wire.connection.value.slice()) orelse return error.InvalidSessionRow,
                 .model = wire.model.value,
                 .tools = wire.tools.names,
                 .permission_mode = wire.permission_mode.value,
@@ -3056,7 +3061,7 @@ fn listValidationCase0() !void {
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
         "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"2\",\"step\":\"8\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"},\"decide\":null}}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
-    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"archive_seq\":null,\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
+    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"archive_seq\":null,\"workspace\":\"/w\\nµ\",\"connection\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         facts ++ ",\"extra\":[null,{\"discard\":true}]}" ++ testing_list_facts ++ "null,\"extra\":1}";
     try file.writePositionalAll(io, wire, 0);
     const decoded = try SessionListReply.decode(io, file, "/w\nµ", .{}, .{ .report = .{ .bytes = wire.len } });
@@ -3087,7 +3092,7 @@ fn listValidationCase0() !void {
     var output: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try page.writeJson(&writer);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/w\\nµ\",\"connection\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         "\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
@@ -3149,7 +3154,7 @@ test "Session list byte range reads a shorter overwritten prefix without changin
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const old = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"old\",\"archive_seq\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}" ++ testing_list_facts ++ "null}";
+    const old = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"old\",\"archive_seq\":null,\"workspace\":\"/w\",\"connection\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}" ++ testing_list_facts ++ "null}";
     const current = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, old, 0);
     try file.writePositionalAll(io, current, 0);
@@ -3208,7 +3213,7 @@ fn listValidationCase1() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const row = "{\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}";
+    const row = "{\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/other\",\"connection\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}";
     inline for (.{
         "{\"version\":\"" ++ protocol.next_wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
         "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
@@ -3222,7 +3227,7 @@ fn listValidationCase1() !void {
         try file.writePositionalAll(io, wire, 0);
         try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, wire.len, null, .{}));
     }
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",";
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/other\",\"connection\":\"codex\",\"model\":\"m\",";
     inline for (.{
         "\"tools\":[\"bash\",\"bash\"],\"permission_mode\":\"ask\"",
         "\"tools\":null,\"permission_mode\":\"ask\"",
@@ -3315,7 +3320,7 @@ fn testingListPage(buffer: []u8, references: []const []const u8, facts: []const 
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     for (references, 0..) |reference, index| {
         if (index != 0) try writer.writeAll(",");
-        try writer.print("{{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"reference\":\"{s}\",\"archive_seq\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});
+        try writer.print("{{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"reference\":\"{s}\",\"archive_seq\":null,\"workspace\":\"/w\",\"connection\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});
         try writer.writeAll(testing_row_details ++ "}");
     }
     try writer.writeAll(facts);
@@ -3419,7 +3424,7 @@ test "Session list terminal cursor accepts only empty rows without rejecting ini
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "terminal", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
+    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/w\",\"connection\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire, 0);
     inline for (.{ SessionListCursor{}, SessionListCursor{ .after = 7, .ceiling = 8 } }) |cursor| {
         const reply = try SessionListReply.decode(io, file, null, cursor, .{ .report = .{ .bytes = wire.len } });
@@ -3440,7 +3445,7 @@ test "Session list rows retain host tool names" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "tools", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[\"bash\",\"fetch_page\"],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
+    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/w\",\"connection\":\"codex\",\"model\":\"m\",\"tools\":[\"bash\",\"fetch_page\"],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire, 0);
     const page = try SessionListPage.read(io, file, wire.len, null, .{});
     try std.testing.expectEqualStrings("bash fetch_page", page.rows[0].tools.names.slice());
@@ -3465,7 +3470,7 @@ fn listValidationCase2() !void {
     const writer = &output.interface;
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     const largest = std.math.maxInt(i64);
-    var maximal: protocol.SessionRow = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .archive_state = .archiving, .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .state_change_at = largest, .subtree_state_change_at = largest, .descendant_count = largest, .descendant_needs_you_count = largest, .revision = largest, .end = largest };
+    var maximal: protocol.SessionRow = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .archive_state = .archiving, .provider = @import("connection.zig").Name.parse("codex").?, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .state_change_at = largest, .subtree_state_change_at = largest, .descendant_count = largest, .descendant_needs_you_count = largest, .revision = largest, .end = largest };
     // An archiving row carries its archive key; the largest one is the longest row.
     maximal.archive_seq = largest;
     maximal.creator = .{};
@@ -3935,7 +3940,7 @@ test "Current settings preserve decimal token heuristics in projections" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}";
+    const wire = "{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"connection\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"app_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}";
     const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
@@ -4070,7 +4075,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
     const reference = "{\"type\":\"text\",\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
-    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":\"p33rs1\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"peers\":{\"from_person_at\":\"1792925300\"},\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":" ++ reference ++ "},\"selected_message\":\"\",\"recent_messages\":[");
+    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":\"p33rs1\",\"workspace\":\"/w\",\"connection\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"loaded_tools\":[],\"app_tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"peers\":{\"from_person_at\":\"1792925300\"},\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":" ++ reference ++ "},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"turn\":\"{d}\",\"message\":\"key/{d}\",\"outcome\":\"completed\"}}", .{ 30 - i, i });

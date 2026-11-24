@@ -12,6 +12,8 @@ const model_picker = @import("model_picker.zig");
 const model_picker_view = @import("model_picker_view.zig");
 const overview_style = @import("overview_style.zig");
 const provider_name = @import("provider_name.zig");
+const connection = @import("connection.zig");
+const provider_route = @import("provider_route.zig");
 const session_list = @import("session_list.zig");
 const session_work = @import("session_work.zig");
 const session_upgrade = @import("session_upgrade.zig");
@@ -274,7 +276,7 @@ pub const Listed = struct {
             .archive_seq = row.archive_seq,
             .label = if (row.label) |*text| text.slice() else null,
             .workspace = "",
-            .provider = .codex,
+            .provider = pn(.codex),
             .state = .{ .stopped = .{ .since = row.stopped_at, .cause = .stop } },
             .state_change_at = 0,
             .subtree_state_change_at = 0,
@@ -691,20 +693,43 @@ pub const Effect = union(enum) {
     exit,
 };
 
-pub const Provider = provider_name.Provider;
+/// A Session's connection, by name. Labels, sign-in commands and usage pages
+/// come from the built-in facts its name spells; any other name shows as itself.
+pub const Provider = connection.Name;
+
+pub fn pn(provider: provider_name.Provider) Provider {
+    return connection.Name.parse(@tagName(provider)).?;
+}
+
+fn sameProvider(a: ?Provider, b: ?Provider) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return a.?.eql(b.?);
+}
+
+fn shownOf(name: Provider) []const u8 {
+    return if (provider_route.builtInOf(name)) |built_in| built_in.shown() else name.slice();
+}
+
+fn loginOf(name: Provider) ?[]const u8 {
+    return if (provider_route.builtInOf(name)) |built_in| built_in.login() else null;
+}
+
+fn usageOf(name: Provider) ?[]const u8 {
+    return if (provider_route.builtInOf(name)) |built_in| built_in.usage() else null;
+}
 
 pub const Default = struct {
     provider: Provider,
     model: Bounded(model_capability.max_model_bytes),
 
     pub fn of(provider: ?[]const u8, model: ?[]const u8) ?Default {
-        var binding: Default = .{ .provider = std.meta.stringToEnum(Provider, provider orelse return null) orelse return null, .model = .{} };
+        var binding: Default = .{ .provider = connection.Name.parse(provider orelse return null) orelse return null, .model = .{} };
         binding.model.set(model orelse return null) catch return null;
         return binding;
     }
 
     pub fn eql(self: *const Default, other: *const Default) bool {
-        return self.provider == other.provider and self.model.eql(other.model.slice());
+        return self.provider.eql(other.provider) and self.model.eql(other.model.slice());
     }
 };
 
@@ -1018,11 +1043,11 @@ pub const State = struct {
     }
 
     pub fn savedProvider(self: *const State, explicit: ?[]const u8, saved: ?[]const u8) ?[]const u8 {
-        return explicit orelse saved orelse if (self.default) |binding| @tagName(binding.provider) else null;
+        return explicit orelse saved orelse if (self.default) |*binding| binding.provider.slice() else null;
     }
 
     pub fn nextBinding(self: *const State) Binding {
-        return .{ .provider = if (self.default) |binding| @tagName(binding.provider) else null, .model = if (self.default) |*binding| binding.model.slice() else null };
+        return .{ .provider = if (self.default) |*binding| binding.provider.slice() else null, .model = if (self.default) |*binding| binding.model.slice() else null };
     }
     pub fn nextStart(self: *const State) ?Default {
         return self.default;
@@ -1750,12 +1775,12 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .failed => |code| {
                     state.answer(at, .failed, code);
                     const next = state.nextBinding().provider;
-                    const missing = if (std.mem.eql(u8, code, "model_capability_unavailable")) std.meta.stringToEnum(Provider, next orelse "") else null;
+                    const missing = if (std.mem.eql(u8, code, "model_capability_unavailable")) connection.Name.parse(next orelse "") else null;
                     if (missing) |provider| {
-                        if (provider.login()) |command|
-                            state.say(.attention, "! {s} sign-in missing · {s}", .{ provider.shown(), command })
+                        if (loginOf(provider)) |command|
+                            state.say(.attention, "! {s} sign-in missing · {s}", .{ shownOf(provider), command })
                         else
-                            state.say(.attention, "! {s} sign-in missing · this terminal cannot sign in to it yet", .{provider.shown()});
+                            state.say(.attention, "! {s} sign-in missing · this terminal cannot sign in to it yet", .{shownOf(provider)});
                     } else state.say(.attention, "! Not created: {s}", .{code});
                 },
                 .unconfirmed => |handle| {
@@ -3290,7 +3315,7 @@ pub fn band(state: *const State) ?Band {
 
 fn reachedSince(state: *const State, failed: *const Row, since: u64) bool {
     for (state.rows.items) |*row| {
-        if (!visible(state, row) or row.archive_state == .archived or row.provider != failed.provider.? or !std.mem.eql(u8, row.model.slice(), failed.model.slice())) continue;
+        if (!visible(state, row) or row.archive_state == .archived or !sameProvider(row.provider, failed.provider) or !std.mem.eql(u8, row.model.slice(), failed.model.slice())) continue;
         const work = (&row.state).asOf(state.now_ms);
         const answered = switch (work) {
             .idle, .pending, .working, .retrying, .stopping, .failed, .stopped => false,
@@ -3634,22 +3659,22 @@ fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]
     var buffer: [8]u8 = undefined;
     return bandLine(built, switch (trouble.trouble) {
         .sign_in => sign_in: {
-            if (trouble.provider.?.login()) |command| {
+            if (loginOf(trouble.provider.?)) |command| {
                 const run = try std.fmt.allocPrint(built.arena, "Sign-in expired. Run {s}.", .{command});
                 if (run.len <= built.width -| 2) break :sign_in run;
             }
-            break :sign_in try std.fmt.allocPrint(built.arena, "{s} sign-in expired.", .{trouble.provider.?.shown()});
+            break :sign_in try std.fmt.allocPrint(built.arena, "{s} sign-in expired.", .{shownOf(trouble.provider.?)});
         },
-        .api_key => if (trouble.provider.?.login()) |command|
-            try std.fmt.allocPrint(built.arena, "{s} API key rejected. Run {s}, then rui host pause.", .{ trouble.provider.?.shown(), command })
+        .api_key => if (loginOf(trouble.provider.?)) |command|
+            try std.fmt.allocPrint(built.arena, "{s} API key rejected. Run {s}, then rui host pause.", .{ shownOf(trouble.provider.?), command })
         else
-            try std.fmt.allocPrint(built.arena, "{s} API key rejected. Save a new key, then rui host pause.", .{trouble.provider.?.shown()}),
+            try std.fmt.allocPrint(built.arena, "{s} API key rejected. Save a new key, then rui host pause.", .{shownOf(trouble.provider.?)}),
         .quota => quota: {
             const used = if (trouble.resets_at) |at|
                 try std.fmt.allocPrint(built.arena, "Quota used up. Resets in {s}.", .{(Age{ .remaining = at }).text(&buffer, now_ms)})
             else
                 "Quota used up.";
-            if (trouble.provider.?.usage()) |usage| {
+            if (usageOf(trouble.provider.?)) |usage| {
                 const managed = try std.fmt.allocPrint(built.arena, "{s} {s}", .{ used, usage });
                 if (managed.len <= built.width -| 2) break :quota managed;
             }
@@ -4067,7 +4092,7 @@ pub fn newestEmpty(rows: []const Row, binding: ?Default) ?Reference {
     var newest: ?*const Row = null;
     for (rows) |*row| {
         if (!row.listed or row.archive_state == .archived or row.first != null) continue;
-        if (binding) |want| if (row.provider != want.provider or !row.model.eql(want.model.slice())) continue;
+        if (binding) |want| if (!sameProvider(row.provider, want.provider) or !row.model.eql(want.model.slice())) continue;
         if (newest == null or row.created_at > newest.?.created_at or
             (row.created_at == newest.?.created_at and std.mem.order(u8, &row.reference, &newest.?.reference) == .gt)) newest = row;
     }
@@ -4185,7 +4210,7 @@ const TestSession = struct {
     pin_order: ?@import("session_pin.zig").PinOrder = null,
     label: ?[]const u8 = null,
     workspace: []const u8 = "/home/d/code/rui",
-    provider: Provider = .codex,
+    provider: Provider = pn(.codex),
     model: []const u8 = "gpt-6-luna",
     first: ?First = .{ .position = 1, .admission = 4, .sender = null, .content = test_first },
     yours: bool = false,
@@ -5028,13 +5053,13 @@ test "the band names the provider of the newest sign-in or key failure" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const rows = [_]Listed{
-        session("aaaaaa", .{ .failed = .{ .since = test_now_s - 90, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .{ .provider = .codex }),
-        session("bbbbbb", .{ .failed = .{ .since = test_now_s - 30, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .{ .provider = .chatgpt }),
+        session("aaaaaa", .{ .failed = .{ .since = test_now_s - 90, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .{ .provider = pn(.codex) }),
+        session("bbbbbb", .{ .failed = .{ .since = test_now_s - 30, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .{ .provider = pn(.chatgpt) }),
     };
     for ([_]struct { []const Listed, []const u8 }{
         .{ &rows, "Sign-in expired. Run rui auth login chatgpt." },
         .{ rows[0..1], "Sign-in expired. Run rui auth login chatgpt --device-code." },
-        .{ &.{session("cccccc", .{ .failed = .{ .since = test_now_s - 60, .code = bounded(session_work.max_code_bytes, failure_class.api_key_rejected), .resets_at = null } }, .{ .provider = .openai })}, "OpenAI API key rejected. Run rui auth login openai, then rui host pause." },
+        .{ &.{session("cccccc", .{ .failed = .{ .since = test_now_s - 60, .code = bounded(session_work.max_code_bytes, failure_class.api_key_rejected), .resets_at = null } }, .{ .provider = pn(.openai) })}, "OpenAI API key rejected. Run rui auth login openai, then rui host pause." },
     }) |case| {
         var state = try opened(case[0]);
         defer state.deinit();
@@ -5399,11 +5424,11 @@ test "activity before metadata and an omitted open row use the same bounded row 
 
 test "full and changed metadata supply every provider without replacing newer activity work" {
     const ref = "aaaaaa".*;
-    const providers = std.enums.values(Provider);
+    const providers = std.enums.values(provider_name.Provider);
     for ([_]Delta{ .full, .changed }) |delta| for ([_]bool{ false, true }) |known| for (providers, 0..) |provider, i| {
         const other = providers[(i + 1) % providers.len];
         var state = if (known)
-            try opened(&.{session(&ref, .{ .working = ago(10) }, .{ .provider = other })})
+            try opened(&.{session(&ref, .{ .working = ago(10) }, .{ .provider = pn(other) })})
         else
             try testState();
         defer state.deinit();
@@ -5416,24 +5441,24 @@ test "full and changed metadata supply every provider without replacing newer ac
             .opening = false,
         };
         _ = try step(&state, .{ .observed = latest });
-        try std.testing.expectEqual(if (known) @as(?Provider, other) else null, state.find(ref).?.provider);
+        try std.testing.expectEqual(if (known) @as(?Provider, pn(other)) else null, state.find(ref).?.provider);
         if (!known) try std.testing.expect(band(&state) == null);
         _ = try step(&state, .{ .tick = (test_now_s * 1000) + list_interval_ms });
-        const metadata = session(&ref, .{ .stopping = ago(5) }, .{ .provider = provider, .label = "Listed metadata" });
+        const metadata = session(&ref, .{ .stopping = ago(5) }, .{ .provider = pn(provider), .label = "Listed metadata" });
         _ = try respond(&state, delta, testToken(2), &.{metadata});
-        try std.testing.expectEqual(@as(?Provider, provider), state.find(ref).?.provider);
+        try std.testing.expectEqual(@as(?Provider, pn(provider)), state.find(ref).?.provider);
         try std.testing.expectEqualDeep(latest.work, state.find(ref).?.work());
         try std.testing.expectEqualDeep(latest.last_line, state.find(ref).?.last_line);
         try std.testing.expectEqual(testToken(3), state.find(ref).?.read_version.?);
         try std.testing.expectEqual(test_now_s, shownSince(&state, state.find(ref).?));
-        try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = provider }, band(&state).?);
+        try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = pn(provider) }, band(&state).?);
         _ = try step(&state, .{ .conversation = null });
         try std.testing.expectEqualDeep(latest.work, state.find(ref).?.work());
-        try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = provider }, band(&state).?);
-        var changed = session(&ref, latest.work.state, .{ .provider = other, .turn = 8 });
+        try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = pn(provider) }, band(&state).?);
+        var changed = session(&ref, latest.work.state, .{ .provider = pn(other), .turn = 8 });
         changed.last_line = .{ .position = 9, .text = null };
         _ = try refresh(&state, delta, testToken(4), &.{changed});
-        try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = other }, band(&state).?);
+        try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = pn(other) }, band(&state).?);
         try std.testing.expectEqualDeep(latest.work, state.find(ref).?.work());
         try std.testing.expectEqualDeep(latest.last_line, state.find(ref).?.last_line);
     };
@@ -6086,16 +6111,16 @@ fn projectionCase3() !void {
 
 test "the band derives provider trouble from rows, in priority order" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Done" });
-    for ([_][]const u8{ "provider_http_401", "provider_sign_in_required", "provider_sign_in_refresh_token_expired" }) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
+    for ([_][]const u8{ "provider_http_401", "provider_sign_in_required", "provider_sign_in_refresh_token_expired" }) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
     try std.testing.expect(signInCode("provider_sign_in_refresh_token_expired") and signInCode("provider_http_401") and signInCode("provider_sign_in_required"));
     try std.testing.expect(!signInCode("provider_authentication_backend_failed"));
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ session("ffffff", .{ .finished = ago(30) }, .{}), failedRow("aaaaaa", 60, "provider_http_401", null) }, null));
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_http_401", null) }, test_now_s - 30));
-    try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 10, "provider_http_401", null) }, test_now_s - 30)).?);
-    try std.testing.expectEqual(Band{ .trouble = .api_key, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, failure_class.api_key_rejected, null) }, null)).?);
+    try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 10, "provider_http_401", null) }, test_now_s - 30)).?);
+    try std.testing.expectEqual(Band{ .trouble = .api_key, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, failure_class.api_key_rejected, null) }, null)).?);
     try std.testing.expect(!signInCode(failure_class.api_key_rejected));
-    try std.testing.expectEqual(Band{ .trouble = .quota, .resets_at = test_now_s + 1200, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 1200) }, null)).?);
-    try std.testing.expectEqual(Band{ .trouble = .quota, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", null) }, null)).?);
+    try std.testing.expectEqual(Band{ .trouble = .quota, .resets_at = test_now_s + 1200, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 1200) }, null)).?);
+    try std.testing.expectEqual(Band{ .trouble = .quota, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", null) }, null)).?);
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_plan", test_now_s) }, null));
     try std.testing.expectEqual(Band{ .trouble = .rate_limit, .sessions = 2 }, (try bandOf(&.{ retryRow("aaaaaa", "provider_temporary_http_429", 10), retryRow("bbbbbb", "provider_temporary_http_429", 20), retryRow("cccccc", "provider_temporary_error", 20) }, null)).?);
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{retryRow("aaaaaa", "provider_temporary_error", 10)}, null));
@@ -6110,9 +6135,9 @@ test "the band derives provider trouble from rows, in priority order" {
 test "a failure band clears only when its own provider and model are reached after it" {
     const Other = struct { provider: Provider, model: []const u8 };
     const others = [_]Other{
-        .{ .provider = .codex, .model = "gpt-6-luna" },
-        .{ .provider = .codex, .model = "gpt-6-sol" },
-        .{ .provider = .chatgpt, .model = "gpt-6-luna" },
+        .{ .provider = pn(.codex), .model = "gpt-6-luna" },
+        .{ .provider = pn(.codex), .model = "gpt-6-sol" },
+        .{ .provider = pn(.chatgpt), .model = "gpt-6-luna" },
     };
     const code = bounded(session_work.max_code_bytes, "provider_temporary_http_503");
     for ([_][]const u8{ "provider_quota", "provider_http_401" }) |failure| for (others) |other| for (std.enums.values(session_work.Kind)) |kind| for ([_]u64{ 90, 60, 30 }) |seconds_ago| {
@@ -6133,12 +6158,12 @@ test "a failure band clears only when its own provider and model are reached aft
             .idle, .pending, .working, .retrying, .stopping, .failed, .stopped => false,
             .bash, .approval, .finished => true,
         };
-        const cleared = other.provider == .codex and std.mem.eql(u8, other.model, "gpt-6-luna") and answered and seconds_ago <= 60;
+        const cleared = other.provider.eql(pn(.codex)) and std.mem.eql(u8, other.model, "gpt-6-luna") and answered and seconds_ago <= 60;
         const shown = try bandOf(&.{ session("ffffff", work, .{ .label = "Other", .provider = other.provider, .model = other.model }), failedRow("aaaaaa", 60, failure, null) }, null);
         if (cleared) {
             try std.testing.expectEqual(@as(?Band, null), shown);
         } else {
-            try std.testing.expectEqual(Provider.codex, shown.?.provider.?);
+            try std.testing.expect(pn(.codex).eql(shown.?.provider.?));
             try std.testing.expectEqual(failure_class.of(failure) == .quota, shown.?.trouble == .quota);
         }
     };
@@ -6157,16 +6182,16 @@ test "a quota band adds where its provider raises the limit only when the line h
     const managed = "Quota used up. " ++ usage;
     const Case = struct { provider: Provider, resets_at: ?u64 = null, width: u16, shown: []const u8 };
     for ([_]Case{
-        .{ .provider = .chatgpt, .width = 200, .shown = managed },
-        .{ .provider = .chatgpt, .width = managed.len + 2, .shown = managed },
-        .{ .provider = .chatgpt, .width = managed.len + 1, .shown = "Quota used up." },
-        .{ .provider = .chatgpt, .width = 60, .shown = "Quota used up." },
-        .{ .provider = .chatgpt, .width = 40, .shown = "Quota used up." },
-        .{ .provider = .chatgpt, .resets_at = test_now_s + 1200, .width = 200, .shown = "Quota used up. Resets in 20m. " ++ usage },
-        .{ .provider = .chatgpt, .resets_at = test_now_s + 1200, .width = 60, .shown = "Quota used up. Resets in 20m." },
-        .{ .provider = .openai, .resets_at = test_now_s + 59, .width = 200, .shown = "Quota used up. Resets in under a minute." },
-        .{ .provider = .codex, .width = 200, .shown = "Quota used up." },
-        .{ .provider = .openai, .resets_at = test_now_s + 1200, .width = 200, .shown = "Quota used up. Resets in 20m." },
+        .{ .provider = pn(.chatgpt), .width = 200, .shown = managed },
+        .{ .provider = pn(.chatgpt), .width = managed.len + 2, .shown = managed },
+        .{ .provider = pn(.chatgpt), .width = managed.len + 1, .shown = "Quota used up." },
+        .{ .provider = pn(.chatgpt), .width = 60, .shown = "Quota used up." },
+        .{ .provider = pn(.chatgpt), .width = 40, .shown = "Quota used up." },
+        .{ .provider = pn(.chatgpt), .resets_at = test_now_s + 1200, .width = 200, .shown = "Quota used up. Resets in 20m. " ++ usage },
+        .{ .provider = pn(.chatgpt), .resets_at = test_now_s + 1200, .width = 60, .shown = "Quota used up. Resets in 20m." },
+        .{ .provider = pn(.openai), .resets_at = test_now_s + 59, .width = 200, .shown = "Quota used up. Resets in under a minute." },
+        .{ .provider = pn(.codex), .width = 200, .shown = "Quota used up." },
+        .{ .provider = pn(.openai), .resets_at = test_now_s + 1200, .width = 200, .shown = "Quota used up. Resets in 20m." },
     }) |case| {
         var state = try opened(&.{session("q1q1q1", .{ .failed = .{ .since = test_now_s - 60, .code = bounded(session_work.max_code_bytes, "provider_quota"), .resets_at = case.resets_at } }, .{ .provider = case.provider })});
         defer state.deinit();
@@ -8165,8 +8190,8 @@ test "New Session Enter and click create exactly once with a copied default" {
         const effects = try step(&state, input);
         try expectEffects(&.{.{ .create = state.default }}, effects);
         state.default.?.model.set("changed-after-admission") catch unreachable;
-        state.default.?.provider = .codex;
-        try std.testing.expectEqual(Provider.openai, effects.slice()[0].create.?.provider);
+        state.default.?.provider = pn(.codex);
+        try std.testing.expect(pn(.openai).eql(effects.slice()[0].create.?.provider));
         try std.testing.expectEqualStrings("gpt-6-sol", effects.slice()[0].create.?.model.slice());
         state.default = null;
         try std.testing.expect(state.creating());
@@ -8547,15 +8572,15 @@ test "Upgrade is never refused as a Host request: the status bar shows its run a
 }
 
 test "a creation the Host refuses for want of its sign-in names the sign-in and its login, if it has one" {
-    for ([_]Provider{ .codex, .chatgpt }) |provider| {
+    for ([_]provider_name.Provider{ .codex, .chatgpt }) |provider| {
         var state = try opened(&.{});
         state.default = Default.of(@tagName(provider), "gpt-6-luna");
         defer state.deinit();
         _ = try submit(&state);
         try expectEffects(&.{}, try step(&state, .{ .created = .{ .failed = "model_capability_unavailable" } }));
         const said = state.notice.?.text();
-        try std.testing.expect(std.mem.indexOf(u8, said, provider.shown()) != null);
-        if (provider.login()) |command|
+        try std.testing.expect(std.mem.indexOf(u8, said, shownOf(pn(provider))) != null);
+        if (loginOf(pn(provider))) |command|
             try std.testing.expect(std.mem.indexOf(u8, said, command) != null)
         else
             try std.testing.expect(std.mem.indexOf(u8, said, "cannot sign in to it yet") != null and std.mem.indexOf(u8, said, "rui auth login") == null);
@@ -8620,7 +8645,7 @@ test "empty Session projection retains full and delta metadata until any sender'
         try std.testing.expect(state.selected == .new_session);
         empty.label = "Renamed";
         empty.workspace = "/another/workspace";
-        empty.provider = .openai;
+        empty.provider = pn(.openai);
         _ = try refresh(&state, .changed, testToken(2), &.{empty});
         const row = state.find(empty.reference).?;
         try std.testing.expectEqualStrings("Renamed", row.label.?.slice());
@@ -9902,28 +9927,28 @@ fn launchStoreRows(store: LaunchStore, buffer: *[2]Listed) []const Listed {
     switch (store) {
         .none => return buffer[0..0],
         .same => {
-            buffer[0] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .codex, .model = "gpt-6-luna" });
+            buffer[0] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = pn(.codex), .model = "gpt-6-luna" });
             return buffer[0..1];
         },
         .other_provider => {
-            buffer[0] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .openai, .model = "gpt-6-luna" });
+            buffer[0] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = pn(.openai), .model = "gpt-6-luna" });
             return buffer[0..1];
         },
         .other_model => {
-            buffer[0] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .codex, .model = "gpt-6-sol" });
+            buffer[0] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = pn(.codex), .model = "gpt-6-sol" });
             return buffer[0..1];
         },
         .behind_newer_other => {
-            buffer[0] = session("aaaaaa", .{ .idle = ago(1) }, .{ .first = null, .provider = .codex, .model = "gpt-6-luna" });
+            buffer[0] = session("aaaaaa", .{ .idle = ago(1) }, .{ .first = null, .provider = pn(.codex), .model = "gpt-6-luna" });
             buffer[0].created_at = 1;
-            buffer[1] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .openai, .model = "gpt-6-luna" });
+            buffer[1] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = pn(.openai), .model = "gpt-6-luna" });
             buffer[1].created_at = 2;
             return buffer[0..2];
         },
         .archived_and_populated => {
-            buffer[0] = session("cccccc", .{ .idle = ago(1) }, .{ .first = null, .archive_state = .archived, .provider = .codex, .model = "gpt-6-luna" });
+            buffer[0] = session("cccccc", .{ .idle = ago(1) }, .{ .first = null, .archive_state = .archived, .provider = pn(.codex), .model = "gpt-6-luna" });
             buffer[0].created_at = 3;
-            buffer[1] = session("dddddd", .{ .idle = ago(1) }, .{ .provider = .codex, .model = "gpt-6-luna" });
+            buffer[1] = session("dddddd", .{ .idle = ago(1) }, .{ .provider = pn(.codex), .model = "gpt-6-luna" });
             buffer[1].created_at = 4;
             return buffer[0..2];
         },

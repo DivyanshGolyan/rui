@@ -58,13 +58,16 @@ test {
     _ = @import("release_candidate.zig");
     _ = @import("upgrade_process.zig");
     _ = @import("host_coordinator.zig");
+    _ = @import("host_coordinator_custody_test.zig");
     _ = @import("self_executable.zig");
     _ = @import("HostLifecycle.zig");
     _ = @import("host_restart_all.zig");
+    _ = @import("host_restart_report.zig");
     _ = @import("host_identity.zig");
     _ = @import("upgrade.zig");
     _ = @import("installation_path.zig");
     _ = @import("UpgradeJob.zig");
+    _ = @import("ReleaseWatch.zig");
     _ = @import("stderr.zig");
     _ = @import("BashLifecycle.zig");
     _ = @import("word_search.zig");

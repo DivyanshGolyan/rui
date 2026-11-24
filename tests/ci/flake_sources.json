@@ -168,7 +168,7 @@
     "test_double": 3
   },
   "tests/ci/test_selection.py": {
-    "test_double": 26
+    "test_double": 25
   },
   "tests/ci/test_settings_fixture.py": {
     "test_double": 6

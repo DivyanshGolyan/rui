@@ -17,7 +17,7 @@ import model_fixture as fixture
 import os_semantics
 
 
-ORDINARY_EXCHANGE_DESCRIPTORS = 5
+ORDINARY_EXCHANGE_DESCRIPTORS = os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS
 DEFAULT_CLIENT_DESCRIPTORS = 100 * ORDINARY_EXCHANGE_DESCRIPTORS + 3
 # Open lines: src/line.zig capacity, outside intake's exchange population.
 LINE_DESCRIPTORS = 16
@@ -90,7 +90,7 @@ def run(*, observed=False, intake=100):
         diagnostics = HostDiagnostics(host)
         configuration = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
-            "--workspace", fixture.ROOT, "--provider", "codex",
+            "--workspace", fixture.ROOT, "--connection", "codex",
             "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configuration["answer"]["status"] == "accepted"
@@ -220,7 +220,7 @@ def openai_base_url_run(*, catalog_available=False):
             **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), **os_semantics.system_trust(root / "cert.pem"),
                     })
         def model_list():
-            return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
+            return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["connections"]
         assert model_list()[0]["source"] == "pending", model_list()
         def models_received():
             with endpoint.lock:
@@ -229,7 +229,7 @@ def openai_base_url_run(*, catalog_available=False):
         fixture.wait_for(models_received, "the initial OpenAI models GET", timeout=20)
         configuration = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
-            "--workspace", fixture.ROOT, "--provider", "openai", "--model", "gpt-6-sol", "--tools", "none",
+            "--workspace", fixture.ROOT, "--connection", "openai", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configuration["answer"]["status"] == "accepted", configuration
         session = configuration["answer"]["session"]
@@ -243,7 +243,7 @@ def openai_base_url_run(*, catalog_available=False):
         listed = fixture.wait_for(
             lambda: (value if (value := model_list())[0]["source"] != "pending" else None),
             "the OpenAI model list", timeout=20)
-        assert listed == [{"provider": "openai", "source": "live", "models": [
+        assert listed == [{"connection": "openai", "source": "live", "models": [
             {"id": "gpt-6-sol", "known": True}, {"id": "custom-model", "known": False}]}], listed
         def provider_headers():
             return [headers for headers in endpoint.request_headers if headers[b":path"] != b"/api.json"]
@@ -283,7 +283,7 @@ def openai_base_url_run(*, catalog_available=False):
         assert fallback[0]["source"] == "catalog_fallback", fallback
         assert fallback[0]["models"] and all(model["known"] for model in fallback[0]["models"]), fallback
         if catalog_available:
-            assert fallback == [{"provider": "openai", "source": "catalog_fallback", "models": [
+            assert fallback == [{"connection": "openai", "source": "catalog_fallback", "models": [
                 {"id": "catalog-only", "known": True}, {"id": "gpt-6-sol", "known": True}]}], fallback
         print("openai catalog fallback passed: failed live list exposes catalog_fallback with known catalog models")
         complete = True
@@ -352,10 +352,10 @@ def saved_catalog_run():
                  f"models.catalogUrl=https://localhost:{endpoint.server_address[1]}/api.json"]
 
     def listed():
-        return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
+        return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["connections"]
 
     def expected(source, ids, known=None):
-        return [{"provider": "openai", "source": source,
+        return [{"connection": "openai", "source": source,
                  "models": [{"id": model, "known": True if known is None else model in known} for model in ids]}]
 
     def await_list(wanted, description):
@@ -403,7 +403,7 @@ def saved_catalog_run():
 
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", root / "changed.json", "--key", "changed",
-            "--workspace", fixture.ROOT, "--provider", "openai", "--model", shipped, "--tools", "none",
+            "--workspace", fixture.ROOT, "--connection", "openai", "--model", shipped, "--tools", "none",
             "--reasoning-effort", changed_effort, "--compaction-trigger", str(window),
         )
         assert configured["answer"]["status"] == "accepted", configured
@@ -487,8 +487,8 @@ def saved_catalog_run():
         endpoint_index = next(i for i, value in enumerate(codex_arguments) if str(value).startswith('providers.openai.endpoint='))
         del codex_arguments[endpoint_index - 1:endpoint_index + 1]
         host, ready = start_ready_process(codex_arguments, env={**env, "RUI_CODEX_CREDENTIAL_FILE": str(credential)})
-        codex_list = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
-        assert codex_list == [{"provider": "codex", "source": "catalog",
+        codex_list = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["connections"]
+        assert codex_list == [{"connection": "codex", "source": "catalog",
                                "models": [{"id": model, "known": True} for model in large_ids]}], codex_list
         for headers in catalog_requests():
             assert b"authorization" not in headers and b"chatgpt-account-id" not in headers, headers

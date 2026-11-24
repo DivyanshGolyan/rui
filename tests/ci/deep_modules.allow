@@ -250,8 +250,7 @@ field-leak feed_window.Window.opened
 field-leak feed_window.Window.tail_rows
 field-leak history_memo.Table.entries
 field-leak host_drain.Watch.until_ns
-field-leak host_restart_all.OptionalOutput.writer
-field-leak host_restart_all.Target.version
+field-leak host_restart_report.OptionalOutput.writer
 field-leak host_settings.Secret.source
 field-leak host_start.LeafName.len
 field-leak json_ascii.Escaping.writer
@@ -515,7 +514,6 @@ shallow-module execution
 shallow-module feed_window
 shallow-module history_memo
 shallow-module host_reply
-shallow-module host_restart_all
 shallow-module mcp/document
 shallow-module output_format
 shallow-module platform

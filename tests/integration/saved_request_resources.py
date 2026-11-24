@@ -133,7 +133,7 @@ def main():
             cli.fixture.RUI = baseline
             cli.fixture.command("configure", "--store", state / "live-store", "--session", "resources/original",
                 "--record", state / "configure-record", "--key", "resources-configure",
-                "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+                "--workspace", state, "--connection", "codex", "--model", "gpt-6-sol")
             for label, binary in (("baseline", baseline), ("candidate", candidate)):
                 print(json.dumps(retained(state, binary, label)), flush=True)
         finally:

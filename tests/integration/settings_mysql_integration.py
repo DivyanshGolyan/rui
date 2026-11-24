@@ -221,7 +221,7 @@ def main():
                 record = directory / "request.json"
                 receipt = json.loads(command("session", "start", "--store", directory,
                                              "--record", record, "--key", "directory-start",
-                                             "--provider", "codex", "--model", "gpt-5.5", "--workspace", root,
+                                             "--connection", "codex", "--model", "gpt-5.5", "--workspace", root,
                                              message="Saved MySQL placement evidence").stdout)
                 assert receipt["context"]["store"] == store_id, receipt
                 command("request", "inspect", "--store", directory, "--key", "directory-start")

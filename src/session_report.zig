@@ -19,7 +19,7 @@ pub const Current = struct {
     reference: []const u8,
     parent: ?[]const u8,
     workspace: []const u8,
-    provider: provider_name.Provider,
+    provider: @import("connection.zig").Name,
     model: []const u8,
     compaction_trigger: ?u64,
     context_estimate: ?u64,
@@ -31,6 +31,8 @@ pub const Current = struct {
     revision: u64,
     tools: []const []const u8,
     loaded_tools: []const []const u8,
+    /// The app tool names the Session's lane root declares; empty when none.
+    app_tools: []const []const u8 = &.{},
     permission_mode: cli_value.PermissionMode,
     instructions: Content,
     output_schema: ?Content,
@@ -145,7 +147,7 @@ pub const Revision = struct {
     revision: u64,
     command_key: []const u8,
     workspace: []const u8,
-    provider: provider_name.Provider,
+    provider: @import("connection.zig").Name,
     model: []const u8,
     compaction_trigger: ?u64,
     output_reservation: ?u64,
@@ -153,6 +155,8 @@ pub const Revision = struct {
     label: ?[]const u8,
     tools: []const []const u8,
     loaded_tools: []const []const u8,
+    /// The app tool names this revision's configure declared; empty when none.
+    app_tools: []const []const u8 = &.{},
     permission_mode: cli_value.PermissionMode,
 };
 

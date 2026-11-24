@@ -69,7 +69,10 @@ path = urllib.parse.urlsplit(url).path
 # Configuration and protocol confinement remain mandatory on every attempt.
 assert args[0] == "--disable", args
 assert args[args.index("--proto") + 1] == "=http", args
-assert args[args.index("--proto-redir") + 1] == ("=http" if path == "/releases/latest" else "=https"), args
+# Each redirect hop is its own attempt: one redirect_url probe with no --location.
+redirect_hop = "%{redirect_url}" in args
+assert ("--location" in args) != redirect_hop, args
+assert args[args.index("--proto-redir") + 1] == ("=http" if redirect_hop else "=https"), args
 previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 number = sum(row["path"] == path for row in previous)
 failures = plan["failures"].get(path, [])
@@ -268,7 +271,7 @@ def discovery_cases(root, binary, releases):
         assert f"Latest published stable: {releases.version}" in output, output
         assert "Selected managed release: 0.1.0" in output, output
         assert "No running Hosts discovered now" in output
-        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path]
+        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", releases.sums_path]
         c.assert_unchanged()
         c.assert_no_host()
         for args in (("--bogus",), ("unexpected-message",), ("--check", "--check")):
@@ -355,7 +358,7 @@ def install_cases(root, binary, releases):
         installing = output.index(f"Installing Rui {releases.version}...")
         verdict = output.index(f"Upgraded to Rui {releases.version}. Complete build: ")
         assert check_end < installing < verdict, output
-        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path, releases.archive_path]
+        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", releases.sums_path, releases.archive_path]
         assert c.link.resolve() != c.original
         assert c.original.exists(), "retained old complete build removed"
         assert c.run("--version").startswith("rui " + releases.version)
@@ -422,7 +425,7 @@ def frozen_upgrade_cases(root, binary, releases):
             previous = c.status()
             old_pid = peer_pid(c.ready["socket"])
             assert started["instance"] == previous["instance"] and previous["paused"] is False, previous
-            assert previous["active_capacity"] == "2" and previous["capabilities"]["providers"] == none, previous
+            assert previous["active_capacity"] == "2" and host_process.capability_routes(previous["capabilities"]) == none, previous
             assert os_semantics.process_executable(old_pid) == retained / "bin/rui"
 
             admitted_b = json.loads(json.dumps(admitted_a))
@@ -474,7 +477,7 @@ def frozen_upgrade_cases(root, binary, releases):
             for facts in (direct, current):
                 assert facts["instance"] != previous["instance"] and facts["paused"] is True, (source_kind, facts)
                 assert facts["active_capacity"] == "2", "observed active capacity is projected last"
-                assert facts["capabilities"]["providers"] == expected_providers, facts
+                assert host_process.capability_routes(facts["capabilities"]) == expected_providers, facts
                 assert facts["store"] == previous["store"], facts
             assert direct["instance"] == current["instance"]
             assert os_semantics.process_executable(peer_pid(c.ready["socket"])) == c.link.resolve()
@@ -493,7 +496,7 @@ def frozen_upgrade_cases(root, binary, releases):
                 assert "1 restarted" in next_output, next_output
                 next_status = c.status()
                 assert next_status["instance"] != current["instance"] and next_status["paused"] is False, next_status
-                assert next_status["active_capacity"] == "2" and next_status["capabilities"]["providers"] == none, next_status
+                assert next_status["active_capacity"] == "2" and host_process.capability_routes(next_status["capabilities"]) == none, next_status
             print(f"upgrade native: frozen {source_kind} A -> new checked B -> {mutation} C consumed B; full verification passed", flush=True)
 
 
@@ -515,7 +518,7 @@ def frozen_credential_refusal_case(root, binary, releases):
                                                                "key": {"file": str(key_file)}}}}))
         saved.chmod(0o600)
         old, previous = c.start_host(sources_only=True)
-        assert previous["capabilities"]["providers"]["openai"] == "key_file", previous
+        assert host_process.capability_routes(previous["capabilities"])["openai"] == "key_file", previous
         assert test_key not in os_semantics.process_environment(old.pid, env=c.env)
         c.select(c.build("checked-credential-target"))
         gate = c.root / "credential-after-check.gate"
@@ -1374,7 +1377,7 @@ def tool_custody_cases(root, binary, releases, operation):
                 endpoint.responses.append(fixture.sse_tool_calls(name, [("bash", name, arguments)]))
                 endpoint.responses.append(fixture.sse_answer(name + "-after", "reason", "message", "done")[0])
                 session = origin.json("session", "configure", "--store", origin.store,
-                    "--workspace", origin.root, "--provider", "codex", "--model", "gpt-6-luna",
+                    "--workspace", origin.root, "--connection", "codex", "--model", "gpt-6-luna",
                     "--tools", "bash", "--permission-mode", "bypass")["answer"]["session"]
                 origin.json("session", "send", "--store", origin.store, "--session", session, input="upgrade now")
 
@@ -1422,14 +1425,14 @@ def terminal_setup(c):
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     credential = directory / "codex.json"
     credentials(credential)
-    c.run("defaults", "configure", "--provider", "codex", "--model", "gpt-6-luna")
+    c.run("defaults", "configure", "--connection", "codex", "--model", "gpt-6-luna")
     configured = c.json("session", "configure", "--store", c.store,
-        "--workspace", c.root, "--provider", "codex", "--model", "gpt-6-luna")
+        "--workspace", c.root, "--connection", "codex", "--model", "gpt-6-luna")
     return configured["answer"]["session"], credential.read_bytes()
 
 
 def overview_args(binary, c):
-    return [str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-luna"]
+    return [str(binary), "--store", str(c.store), "--connection", "codex", "--model", "gpt-6-luna"]
 
 
 def proof_relaunched(c, screen, process):
@@ -1589,7 +1592,7 @@ def terminal_handoffs(root, binary, releases, artifacts):
 
 
 def terminal_download_recovery(root, binary, releases, artifacts):
-    """Settings > Version recovers DNS failure through the same download owner."""
+    """Settings > Version reads the release itself and recovers DNS failure through its own download owner."""
     with case(root, binary, releases, "terminal-download-recovery") as c:
         c.old_selection()
         old_host, previous = c.start_host()
@@ -1598,11 +1601,14 @@ def terminal_download_recovery(root, binary, releases, artifacts):
         # of any other application-owned Hosts discovered for the fixture uid.
         shadow = c.build("recovery-shadowing-path", "0.1.0", managed=False) / "bin/rui"
         c.env["PATH"] = f"{shadow.parent}:{c.env['PATH']}"
-        curl = CurlAttempts(c, {"/releases/latest": [6]})
+        # The TUI's background read (first attempt) succeeds; the request's own lookup then fails once.
+        curl = CurlAttempts(c, {"/releases/latest": [0, 6]})
         gate = releases.gate_archive()
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.launch_overview()
+            screen.until(lambda: curl.log.exists() and any(row["path"] == "/releases/redirect" for row in curl.observed()),
+                         "background read finished its redirect before the request")
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "Settings download recovered and reached archive")
             screen.contains("preparing Upgrade")
@@ -1615,8 +1621,11 @@ def terminal_download_recovery(root, binary, releases, artifacts):
             screen.sidebar()
             proof_ready(c, previous, old_host)
             screen.save(artifacts, "download-recovered")
-            curl.assert_attempts([("/releases/latest", "normal", 6),
+            curl.assert_attempts([("/releases/latest", "normal", 0),
+                                 ("/releases/redirect", "normal", 0),
+                                 ("/releases/latest", "normal", 6),
                                  ("/releases/latest", "ipv4", 0),
+                                 ("/releases/redirect", "ipv4", 0),
                                  (releases.sums_path, "ipv4", 0),
                                  (releases.archive_path, "ipv4", 0)])
             receipt = exit_on_sigint(screen, process, "recovered download report after terminal restoration")
@@ -1717,11 +1726,13 @@ def signal_during_check(root, binary, releases, artifacts):
         host, previous = c.start_host()
         _, credential = terminal_setup(c)
         gate = releases.gates["/releases/latest"] = Gate()
+        start = len(releases.requests)
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.launch_overview()
             screen.start_upgrade()
-            screen.until(gate.entered.is_set, "release check held before terminal signal")
+            screen.until(lambda: releases.requests[start:].count("/releases/latest") >= 2,
+                         "background read and release check both held before terminal signal")
             screen.contains("checking for updates")
             screen.save(artifacts, "signal-during-check")
             exit_on_sigint(screen, process, "terminal exit during held upgrade check")
@@ -1786,6 +1797,8 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
             try:
                 screen = TerminalScreen(master, process)
                 screen.launch_overview()
+                screen.until(lambda: "/releases/redirect" in releases.requests[start:], "background read finished before the selected check")
+                start = len(releases.requests)
                 screen.start_upgrade()
 
                 def child_started():

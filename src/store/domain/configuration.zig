@@ -26,6 +26,7 @@ const command_domain = @import("command.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const tool_set = @import("tool_set.zig");
+const app_tools = @import("../../tool_record.zig").app_tools;
 const skills_domain = @import("skills.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
@@ -110,6 +111,10 @@ pub const CurrentConfiguration = struct {
     created_at: u64 = 0,
     workspace_key: u64 = 0,
     parent_ref: ?Bounded(session_id.bytes) = null,
+    /// The app tool set this Session declares (its lane root declares it); null: none. Column order follows saved_session.
+    app_tool_set_id: ?u64 = null,
+    /// The lane root this Session runs on; a root is its own lane.
+    app_lane: ?Bounded(session_id.bytes) = null,
     previous_reasoning_effort: ?model_capability.ReasoningEffort = null,
 };
 
@@ -179,12 +184,12 @@ pub fn configurationBeforeWorkspace(
         null;
     _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
     const provider = if (requested.provider.state == .value)
-        connection.Name.parse(requested.provider.value.slice()) orelse return .unsupported_provider
+        connection.Name.parse(requested.provider.value.slice()) orelse return .unknown_connection
     else
         null;
     if (current) |existing| {
         if (provider) |value| {
-            if (!value.eql(existing.provider)) return .provider_is_immutable;
+            if (!value.eql(existing.provider)) return .connection_is_immutable;
         }
     }
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
@@ -321,6 +326,7 @@ const Settings = struct {
     output_reservation: ?u64,
     reasoning_effort: ?model_capability.ReasoningEffort,
     label: ?Bounded(tool_presentation.max_label_bytes),
+    app_tool_set_id: ?u64,
 
     fn of(current: *const CurrentConfiguration) Settings {
         return .{
@@ -335,6 +341,7 @@ const Settings = struct {
             .output_reservation = current.output_reservation,
             .reasoning_effort = current.reasoning_effort,
             .label = current.label,
+            .app_tool_set_id = current.app_tool_set_id,
         };
     }
 
@@ -350,7 +357,7 @@ const Settings = struct {
                         (if (old) |value| (if (next) |other| value.eql(other.slice()) else false) else next == null)
                     else
                         old.eql(next.slice()),
-                    .choice, .content, .tools, .decimal_policy => old == next,
+                    .choice, .content, .tools, .decimal_policy, .app_tools => old == next,
                 };
                 fields.setPresent(@field(session_settings.SessionField, entry.field), !same);
             }
@@ -374,10 +381,10 @@ pub const creation_hint = rsql.Read(.{
 });
 
 const parent_settings = rsql.Read(.{
-    .sql = "SELECT workspace,provider,coalesce(" ++ tool_set.namesSql("session.tool_set_id") ++ ",'') AS tools,permission_mode FROM session WHERE session_ref=?1 " ++
+    .sql = "SELECT workspace,provider,coalesce(" ++ tool_set.namesSql("session.tool_set_id") ++ ",'') AS tools,permission_mode,session.app_lane FROM session WHERE session_ref=?1 " ++
         "AND session.archive_seq IS NULL",
     .Args = struct { session: []const u8 },
-    .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: connection.Name, tools: *Bounded(tool_set.max_names_bytes), permission_mode: u8 },
+    .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: connection.Name, tools: *Bounded(tool_set.max_names_bytes), permission_mode: u8, app_lane: *Bounded(session_id.bytes) },
     .cardinality = .optional,
 });
 
@@ -405,7 +412,7 @@ pub const ParentFailure = struct {
 
 fn prepareParent(a: anytype, reference: []const u8, reads: *ConfigurationReads) void {
     reads.inherits_parent = true;
-    reads.inherited = .{ .workspace = &reads.next.workspace, .provider = undefined, .tools = &reads.saved_tools.names, .permission_mode = undefined };
+    reads.inherited = .{ .workspace = &reads.next.workspace, .provider = undefined, .tools = &reads.saved_tools.names, .permission_mode = undefined, .app_lane = &reads.parent_lane };
     a.readInto(parent_settings, .{ .session = reference }, &reads.inherited, &reads.parent_found);
 }
 
@@ -505,11 +512,15 @@ pub const ConfigurationReads = struct {
     inherits_parent: bool = false,
     attach_parent: bool = true,
     inherited: parent_settings.Row = undefined,
+    /// The parent's lane, read with `inherited`: the lane of any child, attached or detached. A root has no parent and is its own lane.
+    parent_lane: Bounded(session_id.bytes) = .{},
     parent_found: store_access.Found = .missing,
     parent_checked: bool = false,
     parent_failure: ?ParentFailure = null,
     /// Set with a `missing_settings` rejection: the settings the new Session lacks.
     missing: ?required_settings.Missing = null,
+    /// The validated app declaration and the app tool set it saves as.
+    apps: tool_set.AppSet = .{},
 
     fn instructionsValue(reads: *ConfigurationReads, configuration: *const content_custody.Configuration) *content_domain.Import {
         return if (configuration.instructions.state == .value) &reads.instructions else &reads.empty;
@@ -519,7 +530,7 @@ pub const ConfigurationReads = struct {
 const saved_session = rsql.Read(.{
     .sql = "SELECT workspace,provider,(SELECT r.codec FROM session_revision r WHERE r.session_ref=session.session_ref AND r.revision=session.revision) AS codec,model,instructions_content_id AS instructions_id,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
-        reasoningEffortOverrideSql("session") ++ " AS reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
+        reasoningEffortOverrideSql("session") ++ " AS reasoning_effort,label,created_at,workspace_key,parent_ref,app_tool_set_id,app_lane," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = CurrentConfiguration,
     .cardinality = .optional,
@@ -535,8 +546,8 @@ const creation_facts = rsql.Read(.{
 
 const insert_session = rsql.Write(.{
     .sql = "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,next_position," ++
-        "provider,compaction_trigger,output_reservation,reasoning_effort,label,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id,creator_ref) " ++
-        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,@now,?14,?15,?16,?17,?18)",
+        "provider,compaction_trigger,output_reservation,reasoning_effort,label,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id,creator_ref,app_lane,app_tool_set_id) " ++
+        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,@now,?14,?15,?16,?17,?18,COALESCE(?19,@session(?1)),?20)",
     .Args = struct {
         session: rsql.SessionHead,
         workspace: []const u8,
@@ -556,11 +567,14 @@ const insert_session = rsql.Write(.{
         parent: ?Bounded(session_id.bytes),
         loaded_tool_set_id: ?u64,
         creator: ?Bounded(session_id.bytes),
+        /// The parent's lane for a child; null makes the new Session its own lane root.
+        lane: ?Bounded(session_id.bytes),
+        app_tool_set_id: ?u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64, parent: ?*const [session_id.bytes]u8, creator: ?*const [session_id.bytes]u8) void {
+pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64, parent: ?*const [session_id.bytes]u8, creator: ?*const [session_id.bytes]u8, lane: ?Bounded(session_id.bytes)) void {
     var parent_ref: ?Bounded(session_id.bytes) = null;
     if (parent) |reference| {
         parent_ref = .{};
@@ -585,12 +599,14 @@ pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentCon
         .parent = parent_ref,
         .loaded_tool_set_id = next.loaded_tool_set_id,
         .creator = if (creator) |reference| Bounded(session_id.bytes).from(reference) catch unreachable else null,
+        .lane = lane,
+        .app_tool_set_id = next.app_tool_set_id,
     });
 }
 
 const update_session = rsql.Write(.{
     .sql = "UPDATE session SET model=?2,instructions_content_id=?3,tool_set_id=?4,permission_mode=?5,output_schema_content_id=?6,revision=?7,provider=?8," ++
-        "compaction_trigger=?9,output_reservation=?10,reasoning_effort=?11,label=?12,loaded_tool_set_id=?13 WHERE session_ref=@session(?1)",
+        "compaction_trigger=?9,output_reservation=?10,reasoning_effort=?11,label=?12,loaded_tool_set_id=?13,app_tool_set_id=?14 WHERE session_ref=@session(?1)",
     .Args = struct {
         session: rsql.SessionHead,
         model: []const u8,
@@ -605,6 +621,7 @@ const update_session = rsql.Write(.{
         reasoning_effort: ?model_capability.ReasoningEffort,
         label: ?[]const u8,
         loaded_tool_set_id: ?u64,
+        app_tool_set_id: ?u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.SessionUpdateFailed } },
 });
@@ -612,9 +629,9 @@ const update_session = rsql.Write(.{
 pub const update_session_sql = update_session.sql;
 
 const insert_revision = rsql.Write(.{
-    .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id," ++
+    .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id,app_tool_set_id," ++
         "permission_mode,output_schema_content_id,provider,codec,codec_options,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) " ++
-        "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,provider," ++
+        "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tool_set_id,loaded_tool_set_id,app_tool_set_id,permission_mode,output_schema_content_id,provider," ++
         "CASE WHEN ?5 IS NULL THEN (SELECT prior.codec FROM session_revision prior WHERE prior.session_ref=session.session_ref AND prior.revision=session.revision-1) ELSE ?5 END," ++
         "CASE WHEN ?5 IS NULL THEN (SELECT prior.codec_options FROM session_revision prior WHERE prior.session_ref=session.session_ref AND prior.revision=session.revision-1) END," ++
         "compaction_trigger,output_reservation,reasoning_effort,label,CASE WHEN revision=1 OR ?4 THEN revision ELSE (SELECT prior.effort_source_revision FROM session_revision prior WHERE prior.session_ref=session.session_ref AND prior.revision=session.revision-1) END FROM session WHERE session_ref=@session(?1)",
@@ -778,6 +795,8 @@ pub const Request = struct {
     configuration: *const content_custody.Configuration,
     initial_skills: ?*const skills_domain.Initial,
     saved: *tool_set.SavedSelection,
+    /// Where a validated declaration keeps its parsed records for this transaction; reset by the Store per transaction.
+    declarations: std.mem.Allocator,
 };
 
 pub const ValidationRound = enum { model, saved_tools, saved_loaded, loaded_source, loaded };
@@ -842,7 +861,7 @@ test "a null or empty model is invalid and an omitted one is left to the missing
 
 const CreationCheck = union(enum) {
     missing: required_settings.Missing,
-    unsupported_provider,
+    unknown_connection,
     unserved_connection,
     complete: struct { provider: connection.Name },
 };
@@ -851,7 +870,7 @@ const CreationCheck = union(enum) {
 /// start_agent) reaches it after the parent is read, so the reply names every missing setting.
 fn creationCheck(configuration: *const ConfigurationView, reads: *const ConfigurationReads, served: *const provider_route.Served) CreationCheck {
     const explicit: ?connection.Name = if (configuration.provider.state == .value)
-        connection.Name.parse(configuration.provider.value.slice()) orelse return .unsupported_provider
+        connection.Name.parse(configuration.provider.value.slice()) orelse return .unknown_connection
     else
         null;
     // Naming a connection the Host does not serve is refused; a default or inherited provider is not.
@@ -867,6 +886,40 @@ fn creationCheck(configuration: *const ConfigurationView, reads: *const Configur
         .missing => |missing| .{ .missing = missing },
         .complete => |complete| .{ .complete = .{ .provider = complete.provider } },
     };
+}
+
+/// Validates the declared app tools once: the child check, then the document's bytes and app_tools.parse. A child (a
+/// Session whose lane is another Session) may not declare a list, empty or not; a lane root's declaration is kept for
+/// the apply rounds.
+fn declareAppTools(request: *const Request, reads: *ConfigurationReads) !?configuration_admission.Rejection {
+    if (isChild(request, reads)) return .app_tools_on_child;
+    const field = &request.configuration.app_tools;
+    if (field.length > app_tools.max_document_bytes) return .app_tools_too_large;
+    const bytes = declarationBytes(request.io, field, request.declarations) catch return .invalid_app_tools;
+    const declaration = switch (app_tools.parse(request.declarations, bytes)) {
+        .refused => |refusal| return switch (refusal) {
+            inline else => |tag| @field(configuration_admission.Rejection, @tagName(tag)),
+        },
+        .declared => |declared| declared,
+    };
+    reads.apps.declaration = declaration;
+    return null;
+}
+
+fn isChild(request: *const Request, reads: *const ConfigurationReads) bool {
+    if (request.session.len == 0) return reads.inherits_parent;
+    const lane = reads.next.app_lane orelse return false;
+    return !std.mem.eql(u8, lane.slice(), request.session);
+}
+
+/// The declaration's whole bytes: borrowed from the request, or read from its file into the declaration arena.
+fn declarationBytes(io: std.Io, field: *const content_custody.ContentField, arena: std.mem.Allocator) ![]const u8 {
+    if (field.borrowedBytes()) |bytes| return bytes;
+    const file = field.file orelse return error.MissingContentCustody;
+    const bytes = try arena.alloc(u8, @intCast(field.length));
+    const read = try file.readPositionalAll(io, bytes, 0);
+    if (read != bytes.len) return error.ContentChanged;
+    return bytes;
 }
 
 fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
@@ -902,10 +955,11 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
             reads.missing = missing;
             return .{ .rejected = .missing_settings };
         },
-        .unsupported_provider => return .{ .rejected = .unsupported_provider },
+        .unknown_connection => return .{ .rejected = .unknown_connection },
         .unserved_connection => return .{ .rejected = .connection_unserved },
         .complete => |complete| complete.provider,
     } else null;
+    if (request.configuration.app_tools.state == .value) if (try declareAppTools(request, reads)) |code| return .{ .rejected = code };
     reads.step = .{ .validating = undefined };
     const v = &reads.step.validating;
     v.creation_provider = creation_provider;
@@ -924,7 +978,7 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     if (configuration.compaction_trigger.state == .value) _ = tokenCount(configuration.compaction_trigger.value.slice(), false) catch return .{ .rejected = .invalid_compaction_trigger };
     _ = configurationTokens(configuration.output_reservation, null, true) catch return .{ .rejected = .invalid_output_reservation };
     const provider = if (configuration.provider.state == .value)
-        connection.Name.parse(configuration.provider.value.slice()) orelse return .{ .rejected = .unsupported_provider }
+        connection.Name.parse(configuration.provider.value.slice()) orelse return .{ .rejected = .unknown_connection }
     else if (current_configuration) |existing| existing.provider else v.creation_provider.?;
     const model = if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice();
     reads.defaults = configuration_defaults.resolve(v.model.facts(), .{
@@ -999,7 +1053,7 @@ fn finishValidation(request: *const Request, reads: *ConfigurationReads) Validat
     return .{ .ready = &reads.validated };
 }
 
-pub const ApplyRound = enum { creation, catalog };
+pub const ApplyRound = enum { app_set, app_texts, app_records, creation, catalog };
 
 pub const Applying = union(enum) {
     round: ApplyRound,
@@ -1014,6 +1068,23 @@ const ApplyState = struct {
 pub fn applyStep(a: anytype, request: *const Request, faults: Faults, reads: *ConfigurationReads, ran: ?ApplyRound) !Applying {
     const at = ran orelse return applyContent(a, request, faults, reads);
     switch (at) {
+        .app_set => {
+            const apps = &reads.apps;
+            if (apps.set) |row| {
+                apps.set_id = row.tool_set_id.get();
+                apps.phase = .done;
+                return applyContent(a, request, faults, reads);
+            }
+            apps.phase = .saving;
+            apps.saving = .{ .records = apps.declaration.?.records };
+            apps.saving.lookup(a);
+            return .{ .round = .app_texts };
+        },
+        .app_texts => {
+            if (try reads.apps.saving.importTexts(a)) return .{ .round = .app_records };
+            return appInsert(a, request, faults, reads);
+        },
+        .app_records => return appInsert(a, request, faults, reads),
         .creation => {
             if (reads.creation.taken) return drawReference(a, request.io, reads);
             return insertCreated(a, request, reads);
@@ -1025,6 +1096,14 @@ pub fn applyStep(a: anytype, request: *const Request, faults: Faults, reads: *Co
     }
 }
 
+/// Writes the declared app tool set once its records are interned, then carries on with the other settings.
+fn appInsert(a: anytype, request: *const Request, faults: Faults, reads: *ConfigurationReads) !Applying {
+    const apps = &reads.apps;
+    apps.set_id = try tool_set.insertAppToolSet(a, &apps.saving, &apps.declaration.?, &apps.digest);
+    apps.phase = .done;
+    return applyContent(a, request, faults, reads);
+}
+
 fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *ConfigurationReads) !Applying {
     const io = request.io;
     const session = request.session;
@@ -1033,6 +1112,15 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
     const created = !reads.found.get();
     const next = &reads.next;
     const content_actions = reads.validated.content_actions;
+    if (reads.apps.phase == .idle) {
+        if (reads.apps.declaration) |*declaration| if (declaration.records.len != 0) {
+            reads.apps.phase = .looking;
+            reads.apps.digest = tool_set.toolSetDigest(&declaration.toolSet());
+            tool_set.lookupHostToolSet(a, &reads.apps.digest, &reads.apps.set);
+            return .{ .round = .app_set };
+        };
+        reads.apps.phase = .done;
+    }
     reads.step = .{ .applying = undefined };
     const applied = &reads.applied;
     applied.instructions_id = null;
@@ -1063,6 +1151,8 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
     } else if (creating or configuration.loaded_tools.state == .value or configuration.tools.state == .value) {
         next.loaded_tool_set_id = null;
     }
+    // An omitted appTools keeps the saved declaration; a list (empty or not) or null replaces it.
+    if (request.configuration.app_tools.state != .omitted) next.app_tool_set_id = reads.apps.set_id;
     if (created) {
         std.debug.assert(next.revision == 1);
         reads.step.applying.created_seq = try a.identity(.created_seq);
@@ -1083,6 +1173,7 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
         .output_reservation = next.output_reservation,
         .reasoning_effort = next.reasoning_effort,
         .label = if (next.label) |*label| label.slice() else null,
+        .app_tool_set_id = next.app_tool_set_id,
     });
     try accept(reads, head, session);
     return .{ .accepted = applied };
@@ -1102,7 +1193,9 @@ fn insertCreated(a: anytype, request: *const Request, reads: *ConfigurationReads
         .next_position = .of(1),
     };
     const creator = if (reads.creator) |*reference| reference else null;
-    insertSession(a, head, &reads.next, &reads.workspace_digest, created_seq, if (reads.attach_parent) creator else null, creator);
+    // A child, attached or detached, runs on its creator's lane; a Session without a parent is its own lane root.
+    const lane: ?Bounded(session_id.bytes) = if (reads.inherits_parent) reads.parent_lane else null;
+    insertSession(a, head, &reads.next, &reads.workspace_digest, created_seq, if (reads.attach_parent) creator else null, creator, lane);
     try accept(reads, head, &reads.reference);
     if (try skills_domain.Appending.initial(head, request.initial_skills)) |appending| {
         reads.step.applying.catalog = appending;

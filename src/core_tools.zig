@@ -300,6 +300,7 @@ fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configu
     if (inherits_parent) {
         if (spec.contains("workspace")) return refused("spec.workspace: an agent always works in your Workspace");
         if (spec.contains("provider")) return refused("spec.provider: an agent always uses your provider");
+        if (spec.contains("connection")) return refused("spec.connection: an agent always uses your connection");
     }
     if (try protocol.parseAgentSpec(wire_request.Custody, arena, spec, configuration)) |reason|
         return .{ .rejected = reason };
@@ -584,7 +585,7 @@ test "core_tools sparse specs leave Workspace completeness to Host and preserve 
         .{ .spec = "{\"tools\":[\"bash\"]}", .direct = "spec.model", .agent = "spec.model" },
         .{ .spec = "{\"model\":\"custom\",\"tools\":[\"bash\"],\"workspace\":\"/\"}", .agent = "spec.workspace" },
         .{ .spec = "{\"model\":\"custom\",\"workspace\":\"\"}", .direct = "spec.workspace", .agent = "spec.workspace" },
-        .{ .spec = "{\"model\":\"custom\",\"provider\":\"openai\"}", .agent = "spec.provider" },
+        .{ .spec = "{\"model\":\"custom\",\"connection\":\"openai\"}", .agent = "spec.connection" },
         .{ .spec = "{\"model\":\"custom\",\"parent\":\"k7m2qx\"}", .direct = "spec.parent", .agent = "spec.parent" },
         .{ .spec = "{\"model\":\"custom\",\"tools\":null}", .direct = "spec.tools", .agent = "spec.tools" },
         .{ .spec = "{\"model\":\"custom\",\"loadedTools\":null}", .direct = "spec.loadedTools", .agent = "spec.loadedTools" },
@@ -864,12 +865,12 @@ test "start_agent presets cannot supply provider or workspace even with override
     const arena = memory.allocator();
     const start = try arena.create(StartAgent);
     const configuration = try arena.create(wire_request.Configuration);
-    for ([_][]const u8{ "provider", "workspace" }) |field| {
+    for ([_][]const u8{ "connection", "workspace" }) |field| {
         const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
             \\{"model":"model-a","effort":"low","compactAt":1000,"tools":[],"permissionMode":"ask"}
         , .{})).object;
         var seeded = spec;
-        try seeded.put(arena, field, .{ .string = if (std.mem.eql(u8, field, "provider")) "openai" else "/" });
+        try seeded.put(arena, field, .{ .string = if (std.mem.eql(u8, field, "connection")) "openai" else "/" });
         try std.testing.expect(try parseAgentSpec(arena, seeded, configuration) == .accepted);
         const presets = [_]Preset{.{ .name = "review", .spec = seeded }};
         const null_override = try std.fmt.allocPrint(arena, ",\"spec\":{{\"{s}\":null}}", .{field});
@@ -962,7 +963,7 @@ test "start_agent and configure parse the same plain agent spec into the same Co
                 try std.testing.expectEqual(a.count, b.count);
                 try std.testing.expectEqualStrings(a.names.slice(), b.names.slice());
             },
-            .content => {
+            .content, .app_tools => {
                 try std.testing.expectEqual(a.length, b.length);
                 try std.testing.expectEqualSlices(u8, &a.digest, &b.digest);
                 try std.testing.expect(b.hasFile());
@@ -979,14 +980,15 @@ test "start_agent spec schema covers every noninherited Session setting" {
     const properties = schema.object.get("properties").?.object.get("spec").?.object.get("properties").?.object;
     try std.testing.expect(!properties.contains("workspace") and !properties.contains("provider"));
     try std.testing.expect(properties.contains("loadedTools") and properties.contains("outputReservation"));
+    // A child cannot declare app tools (its lane root does), so start_agent's spec leaves appTools out.
     inline for (@import("session_settings.zig").entries) |entry| {
-        if (comptime !std.mem.eql(u8, entry.field, "workspace") and !std.mem.eql(u8, entry.field, "provider"))
+        if (comptime !std.mem.eql(u8, entry.field, "workspace") and !std.mem.eql(u8, entry.field, "provider") and !std.mem.eql(u8, entry.field, "app_tools"))
             try std.testing.expect(properties.contains(entry.spec));
     }
     const preferences = properties.get("preferences").?.object;
     try std.testing.expect(preferences.get("properties").?.object.contains("reasoning_effort"));
     try std.testing.expect(preferences.get("properties").?.object.contains("permission_mode"));
-    try std.testing.expectEqual(@import("session_settings.zig").entries.len - 1, properties.count());
+    try std.testing.expectEqual(@import("session_settings.zig").entries.len - 2, properties.count());
 }
 
 test "read_action accepts only own-Session bounded canonical decimal arguments" {

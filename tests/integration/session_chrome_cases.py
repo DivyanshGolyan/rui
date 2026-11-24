@@ -104,7 +104,7 @@ class Chrome:
 
     def session(self, permission="bypass"):
         reply = json.loads(run(self.home, "session", "configure", "--workspace", self.workspace,
-            "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", permission))
+            "--connection", "codex", "--model", "gpt-6-sol", "--permission-mode", permission))
         return reply["answer"]["session"]
 
     def answered(self, session, *inputs):

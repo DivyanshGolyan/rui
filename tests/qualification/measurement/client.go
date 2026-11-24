@@ -170,7 +170,7 @@ func (c Client) Configure(key, session string, extra ...string) (string, error) 
 	}
 	arguments := []string{
 		"session", "configure", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+"-configure.json"),
-		"--key", key + "-configure", "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna",
+		"--key", key + "-configure", "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-luna",
 	}
 	if session != "" {
 		arguments = append(arguments, "--session", session)

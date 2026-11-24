@@ -517,7 +517,7 @@ test "list rows share chat heading marks except unmarked finished Sessions" {
         _ = try overview.step(&state, .{ .host = .{ .instance = @splat(7), .started_at = 1, .slots = 1, .slots_in_use = 0 } });
         _ = try overview.step(&state, .{ .tick = 100_000 });
         _ = try overview.step(&state, .{ .list = .{ .page = .{
-            .rows = &.{.{ .reference = "k7m2qx".*, .read_version = .{ .instance = @splat(7), .generation = 1 }, .state_change_at = 1, .subtree_state_change_at = 1, .descendant_count = 0, .descendant_needs_you_count = 0, .workspace = "/work", .provider = .codex, .label = "Work", .state = case.state, .first = .{ .position = 1, .admission = 1, .sender = null, .content = .{ .text = .{ .length = 4, .digest = @splat(1) } } } }},
+            .rows = &.{.{ .reference = "k7m2qx".*, .read_version = .{ .instance = @splat(7), .generation = 1 }, .state_change_at = 1, .subtree_state_change_at = 1, .descendant_count = 0, .descendant_needs_you_count = 0, .workspace = "/work", .provider = @import("connection.zig").Name.parse("codex").?, .label = "Work", .state = case.state, .first = .{ .position = 1, .admission = 1, .sender = null, .content = .{ .text = .{ .length = 4, .digest = @splat(1) } } } }},
             .answer = .{ .delta = .full, .since = .{ .instance = @splat(7), .generation = 1 } },
         } } });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -1323,7 +1323,7 @@ fn ending(sink: anytype, end: Ending, colour: bool) !void {
     try sink.feed("\n");
 }
 
-fn workEnded(sink: anytype, code: []const u8, provider: ?protocol.Provider, colour: bool) !void {
+fn workEnded(sink: anytype, code: []const u8, provider: ?@import("connection.zig").Name, colour: bool) !void {
     const cause = marks.cause(code, provider);
     try ending(sink, .{ .mark = if (failure_class.of(code) == .interrupted) .stopped else .failed, .words = cause.words, .place = cause.place }, colour);
 }
@@ -1359,14 +1359,14 @@ test "an ended Turn shows one plain cause line for every failure class, and its 
     const cases = .{
         .{ "provider_policy", null, "× Refused by the provider" },
         .{ "provider_quota", null, "× Out of quota · Settings" },
-        .{ "provider_quota", .codex, "× Out of quota · Settings" },
-        .{ "provider_quota", .openai, "× Out of quota · Settings" },
-        .{ "provider_quota", .chatgpt, "× Out of quota · Manage usage: https://chatgpt.com/settings/usage" },
+        .{ "provider_quota", @import("connection.zig").Name.parse("codex"), "× Out of quota · Settings" },
+        .{ "provider_quota", @import("connection.zig").Name.parse("openai"), "× Out of quota · Settings" },
+        .{ "provider_quota", @import("connection.zig").Name.parse("chatgpt"), "× Out of quota · Manage usage: https://chatgpt.com/settings/usage" },
         .{ "provider_plan", null, "× Model not in plan · Settings" },
-        .{ "provider_plan", .chatgpt, "× Model not in plan · Settings" },
+        .{ "provider_plan", @import("connection.zig").Name.parse("chatgpt"), "× Model not in plan · Settings" },
         .{ "provider_model_unavailable", null, "× Model not served" },
         .{ "provider_http_401", null, "× Sign-in expired · Settings" },
-        .{ "provider_http_401", .chatgpt, "× Sign-in expired · Settings" },
+        .{ "provider_http_401", @import("connection.zig").Name.parse("chatgpt"), "× Sign-in expired · Settings" },
         .{ "provider_api_key_rejected", null, "× API key rejected · Settings" },
         .{ "ResourceExceeded", null, "× Context full" },
         .{ "provider_tls_verification_failed", null, "× Provider unreachable" },
@@ -1449,7 +1449,7 @@ pub fn visibleMessage(value: protocol.ActivityItem.Message) bool {
 }
 
 /// `scratch` holds the part list of a parts value while its row draws.
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, provider: ?protocol.Provider, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, provider: ?@import("connection.zig").Name, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
     switch (item.value) {
         .admission, .received, .user => |value| if (!visibleMessage(value)) return false,
         else => {},

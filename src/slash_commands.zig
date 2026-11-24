@@ -64,7 +64,7 @@ comptime {
     for (@typeInfo(Copy).@"enum".field_names[1..], copy_words) |field, choice| std.debug.assert(std.mem.eql(u8, field, choice.word));
 }
 
-const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider", "reasoning-effort", "notifications", "clear-model", "store" }, true);
+const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "connection", "reasoning-effort", "notifications", "clear-model", "store" }, true);
 
 const ConversationName = enum {
     archive,
@@ -749,7 +749,7 @@ test "/setup lists its options and every effort for any model" {
         const after = conversation.suggest(line, .{ .model = "gpt-6-luna" }).?;
         if (entry.runs) try std.testing.expectEqual(setup_options.entries.len, after.count);
     }
-    try std.testing.expectEqualStrings("--provider ", conversation.suggest("/setup --model gpt-5.5 --p", .{}).?.shown()[0].word);
+    try std.testing.expectEqualStrings("--connection ", conversation.suggest("/setup --model gpt-5.5 --c", .{}).?.shown()[0].word);
     try std.testing.expect(conversation.suggest("/setup --model \"a ", .{}) == null);
 }
 
