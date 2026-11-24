@@ -2155,8 +2155,13 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         tuning.settings_digest = settings_handoff.digest(frozen.bytes);
         break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &preparation_failure, .detached, .start);
     } else try admitHost(init, .{ .layered = parsed }, selected, settings, &preparation_failure, .foreground, .start);
+    var connected: providers.Connected = .{};
     var failure: ?start_report.Failure = null;
-    return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
+    host_start.resolveConnections(init, settings, &connected, &preparation_failure) catch |err| {
+        failure = preparation_failure;
+        return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, err);
+    };
+    return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, &connected, tuning, &failure));
 }
 
 /// Shared by serve and settings --check: intake, then the proxy precondition,
@@ -2176,7 +2181,9 @@ fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []co
 }
 
 fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, attempt: host_start.Attempt) !host_settings.Prepared {
-    const served = providers.fromSettings(settings);
+    var connected: providers.Connected = .{};
+    host_start.resolveConnections(init, settings, &connected, failure) catch |err| return writeAttemptRefusal(init.io, attempt, failure, caller_exit.knownError(err));
+    const served = providers.fromSettings(settings, &connected);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
         var text: [start_report.max_refusal_message_bytes]u8 = undefined;
         failure.* = .init(.proxy_unusable, std.fmt.bufPrint(&text, "https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy", .{reason}) catch unreachable);

@@ -986,6 +986,7 @@ pub noinline fn serve(
     allocator: std.mem.Allocator,
     host_directory: []const u8,
     prepared: host_settings.Prepared,
+    connected: *const providers.Connected,
     tuning: Tuning,
     failure: *?start_report.Failure,
 ) !void {
@@ -993,7 +994,7 @@ pub noinline fn serve(
     const settings = prepared.get();
     const active_capacity = settings.execution.active_capacity.value;
     const limits = tuning.limits;
-    const served_value = providers.fromSettings(settings);
+    const served_value = providers.fromSettings(settings, connected);
     const served = &served_value;
     var connections = try server_mcp_settings.Connections.init(allocator, settings);
     defer connections.deinit();

@@ -5,6 +5,7 @@ const settings_handoff = @import("host_settings_handoff.zig");
 const transfer = @import("host_launch_transfer.zig");
 const cli_args = @import("cli_args.zig");
 const providers = @import("providers.zig");
+const served_connection = @import("connection.zig");
 const protocol = @import("protocol.zig");
 const api_key = @import("api_key.zig");
 const provider_login = @import("provider_login.zig");
@@ -629,6 +630,48 @@ pub fn prepare(init: std.process.Init, settings: *hs.Settings, failure: *start_r
     return hs.seal(settings, failure);
 }
 
+/// Loads the key and resolves the URL of each key connection the settings serve, into
+/// `connected`. Connection keys are read here, through keyBytes, and nowhere else; their
+/// bytes live in `connected` and never in the settings value.
+pub fn resolveConnections(init: std.process.Init, settings: *const hs.Settings, connected: *providers.Connected, failure: *start_report.Failure) !void {
+    connected.wipe();
+    for (settings.connections.entries) |*entry| {
+        const served = &entry.value;
+        const name = served.name.slice();
+        const key = switch (served.credential) {
+            .key => |*key| key,
+            else => return connectionFailure(failure, name, error.ConnectionUnserved),
+        };
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const source: KeySource = switch (key.source) {
+            .saved => .{ .file = credential_location.connectionKeyFile(init.environ_map, name, &path_buffer) catch |err| return connectionFailure(failure, name, err) },
+            .file => |path| .{ .file = path },
+            .env => |variable| .{ .env = variable },
+            .command => return connectionFailure(failure, name, error.ConnectionUnserved),
+        };
+        var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
+        defer std.crypto.secureZero(u8, &key_buffer);
+        const bytes = keyBytes(init, source, &key_buffer) catch |err| return connectionFailure(failure, name, err);
+        if (!api_key.valid(bytes)) return connectionFailure(failure, name, error.InvalidApiKey);
+        var url_buffer: [providers.Connected.max_url_bytes]u8 = undefined;
+        const resolved = served_connection.resolve(served, .{ .id = "", .native_family = .responses }, &url_buffer) catch |err| return connectionFailure(failure, name, err);
+        const fixture = hs.fixtureEndpoint(settings, resolved.url);
+        const presentation: providers.Connected.Presentation = .{
+            .label = served.label,
+            .codec = resolved.codec,
+            .web_search = if (served.endpointFor(.responses)) |endpoint| endpoint.web_search else false,
+        };
+        _ = connected.add(served.name, presentation, resolved.url, bytes, fixture) catch |err| return connectionFailure(failure, name, err);
+    }
+}
+
+fn connectionFailure(failure: *start_report.Failure, name: []const u8, err: anyerror) anyerror {
+    if (err == error.OutOfMemory) return err;
+    var message: [start_report.max_refusal_message_bytes]u8 = undefined;
+    failure.* = .init(.settings_invalid, std.fmt.bufPrint(&message, "connections.{s}.key: {s}", .{ name, @errorName(err) }) catch "connections: a key connection cannot be served");
+    return error.SettingsInvalid;
+}
+
 pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
     inline for (std.enums.values(protocol.Provider)) |provider| {
         if (@field(settings.providers.entries, @tagName(provider))) |*entry| {
@@ -709,6 +752,20 @@ test "a secret source refusal names the variable or file and why it gave no usab
     }
 }
 
+/// Where an API key's bytes come from: a named environment variable or an owner-only file.
+pub const KeySource = union(enum) {
+    env: []const u8,
+    file: []const u8,
+};
+
+/// The one loader of API key bytes: provider keys and connection keys both read through it.
+fn keyBytes(init: std.process.Init, source: KeySource, buffer: []u8) ![]const u8 {
+    return switch (source) {
+        .env => |name| init.environ_map.get(name) orelse error.ApiKeyMissing,
+        .file => |path| api_key.trimNewline(try credentials.readPrivate(path, buffer) orelse return error.ApiKeyMissing),
+    };
+}
+
 fn resolve(init: std.process.Init, secret: anytype) !void {
     const Secret = @typeInfo(@TypeOf(secret)).pointer.child;
     if (secret.source == .literal) return;
@@ -723,8 +780,8 @@ fn resolve(init: std.process.Init, secret: anytype) !void {
     const bytes = switch (secret.source) {
         .literal => unreachable,
         .default => return error.ApiKeyMissing,
-        .env => |*name| init.environ_map.get(name.slice()) orelse return error.ApiKeyMissing,
-        .file => |*file| api_key.trimNewline(try credentials.readPrivate(file.slice(), buffer) orelse return error.ApiKeyMissing),
+        .env => |*name| try keyBytes(init, .{ .env = name.slice() }, buffer),
+        .file => |*file| try keyBytes(init, .{ .file = file.slice() }, buffer),
     };
     if (Secret.default_source == .mysql) {
         try secret.bytes.set(init.arena.allocator(), bytes);
