@@ -5,7 +5,8 @@ const std = @import("std");
 
 const NamedPath = struct { name: []const u8, path: []const u8 };
 
-pub fn add(b: *std.Build, product: *std.Build.Module) void {
+/// Returns the `deep-modules` step, which `check` runs outside the PR tier.
+pub fn add(b: *std.Build, product: *std.Build.Module) *std.Build.Step {
     const modules = firstPartyModules(b, product);
 
     const tool = b.addExecutable(.{
@@ -23,7 +24,8 @@ pub fn add(b: *std.Build, product: *std.Build.Module) void {
     run.addArgs(&.{ "--allow", "tests/ci/deep_modules.allow", "--trusted", "origin/main" });
     for (modules) |module| run.addArgs(&.{ "--module", b.fmt("{s}={s}", .{ module.name, module.path }) });
     run.addPassthruArgs();
-    b.step("deep-modules", "Fail on a deep-modules finding that the allow file does not cover, a stale allowance, or an allowance that grew past origin/main").dependOn(&run.step);
+    const lint = b.step("deep-modules", "Fail on a deep-modules finding that the allow file does not cover, a stale allowance, or an allowance that grew past origin/main");
+    lint.dependOn(&run.step);
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -33,6 +35,7 @@ pub fn add(b: *std.Build, product: *std.Build.Module) void {
         }),
     });
     b.step("deep-modules-test", "Run the deep-modules tool's own tests").dependOn(&b.addRunArtifact(tests).step);
+    return lint;
 }
 
 /// The named modules `product` reaches through its imports whose root file is a source of this

@@ -72,7 +72,7 @@ class PlanTest(unittest.TestCase):
         )
         normal_linux = ['check', 'test-native', 'transport-h2-integration']
         # CI-69: promotion, scheduled or by hand, runs every check the PR tier skips, whatever the batch touched.
-        promoted_linux = ['admission-debug-integration', 'check-full', 'host-status-integration',
+        promoted_linux = ['admission-debug-integration', 'check-full', 'deep-modules', 'host-status-integration',
                           'mysql-wire-integration', 'rsql-table', 'stack-frames', 'test-logic', 'transport-h2-integration']
         promoted_mac = ['admission-debug-integration', 'check-full', 'test-logic', 'transport-h2-integration']
         expected_targets = {
@@ -194,9 +194,9 @@ class PlanTest(unittest.TestCase):
         from select_tests import select
         available = set(build_files.steps())
         for paths, ready_compile in (
-                (['src/store/schema.zig'], ['stack-frames', 'test', 'test-native', 'test-store']),
-                (['src/request_encoding.zig'], ['stack-frames', 'test-logic', 'test-native']),
-                (['README.md', 'src/request_encoding.zig'], ['stack-frames', 'test-logic', 'test-native'])):
+                (['src/store/schema.zig'], ['deep-modules', 'stack-frames', 'test', 'test-native', 'test-store']),
+                (['src/request_encoding.zig'], ['deep-modules', 'stack-frames', 'test-logic', 'test-native']),
+                (['README.md', 'src/request_encoding.zig'], ['deep-modules', 'stack-frames', 'test-logic', 'test-native'])):
             with self.subTest(paths=paths):
                 selected = select(paths, 'review', available)
                 self.assertEqual(selected['unit_compile_required'], paths == ['src/store/schema.zig'])

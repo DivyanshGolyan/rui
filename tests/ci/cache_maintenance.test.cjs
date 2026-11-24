@@ -512,7 +512,7 @@ test('maintenance warms both producer parts on both platforms using the consumer
     assert.match(consumers[`${platform}_build`], /^    timeout-minutes: 60$/m);
     assert.match(consumers[`${platform}_build_unit`], new RegExp(`^    timeout-minutes: ${platform === 'linux' ? 15 : 60}$`, 'm'));
   }
-  assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration","stack-frames"\]/);
+  assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration","stack-frames","deep-modules"\]/);
   assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration"\]/);
   assert.match(jobs.compiled, /^    timeout-minutes: 120$/m);
 });

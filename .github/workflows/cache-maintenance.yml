@@ -125,7 +125,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     env:
-      TARGETS: ${{ matrix.runner == 'ubuntu-24.04' && '["check-full","test-logic","admission-debug-integration","stack-frames"]' || '["check-full","test-logic","admission-debug-integration"]' }}
+      TARGETS: ${{ matrix.runner == 'ubuntu-24.04' && '["check-full","test-logic","admission-debug-integration","stack-frames","deep-modules"]' || '["check-full","test-logic","admission-debug-integration"]' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

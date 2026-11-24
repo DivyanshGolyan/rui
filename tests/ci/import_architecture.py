@@ -18,7 +18,8 @@ import build_files
 
 ROOT = Path(__file__).resolve().parents[2]
 ROOTS = ("src/cli.zig",)
-TEST_ONLY_ROOTS = ("src/tests.zig", "src/logic_tests.zig", "src/parser_fuzz_tests.zig", "tests/integration/mysql_wire_test.zig")
+TEST_ONLY_ROOTS = ("src/tests.zig", "src/logic_tests.zig", "src/parser_fuzz_tests.zig", "tests/integration/mysql_wire_test.zig",
+                   "tests/ci/deep_modules/tests.zig")
 MODULE_TEST_ROOTS = ("src/h2/h2.zig", "src/store/wire/pg.zig", "src/url.zig", "src/os/os.zig")
 BASELINE = Path(__file__).with_name("import_cycles.json")
 STORE_DIRECTORY = "src/store/"

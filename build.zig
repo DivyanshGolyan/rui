@@ -464,6 +464,7 @@ pub fn build(b: *std.Build) void {
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("build"));
     format.addDirectoryArg(b.path("src"));
+    format.addDirectoryArg(b.path("tests/ci/deep_modules"));
     const release_small = product.addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
     const fast_integrations = screen_module.screenCommand(b, screen, &.{"env"});
     fast_integrations.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
@@ -551,7 +552,8 @@ pub fn build(b: *std.Build) void {
 
     darwin.configureAcceptance(b, ci.directory);
     link_table.add(b);
-    deep_modules.add(b, rui.root_module);
+    const deep_modules_step = deep_modules.add(b, rui.root_module);
+    if (!pr_ci) check_step.dependOn(deep_modules_step);
 
     const ci_build = b.step("ci-build", "Compile selected CI gates without running tests");
     if (ci_targets) |selected| {
