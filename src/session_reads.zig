@@ -148,28 +148,7 @@ fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, valu
     };
 }
 
-fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
-    var value: Bounded(limit) = .{ .len = 0 };
-    var text: TerminalText = .{ .mode = .multiline };
-    var room: usize = 0;
-    for (bytes, 1..) |byte, count| {
-        var storage: [32]u8 = undefined;
-        var piece = std.Io.Writer.fixed(&storage);
-        text.feed(&piece, &.{byte}) catch unreachable;
-        if (count == bytes.len) text.finish(&piece) catch unreachable;
-        const shown = piece.buffered();
-        if (value.len + shown.len > limit) {
-            value.len = room;
-            @memcpy(value.bytes[room..][0..session_line.ellipsis.len], session_line.ellipsis);
-            value.len += session_line.ellipsis.len;
-            return value;
-        }
-        for (shown, value.bytes[value.len..][0..shown.len]) |from, *to| to.* = if (from == '\n' or from == '\t') ' ' else from;
-        value.len += shown.len;
-        if (value.len + session_line.ellipsis.len <= limit) room = value.len;
-    }
-    return value;
-}
+const plain = session_line.plain;
 
 pub const Target = union(enum) {
     message: View.Collapsed,

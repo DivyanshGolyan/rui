@@ -1129,7 +1129,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_content.welcome_quiet = quiet;
     const original_presentation = session_notice.presentation(self.reading.opening, self.app_consent.request != null, self.heldOriginal());
     const message_note = original_presentation.note;
+    const local_preview = self.submission.messageText() != null and !self.submission.messageProjected() and (screen.feed.at_end or (self.reading.opening and screen.anchor.following()));
     const queued_note: ?[]const u8 = if (message_note) |note| note: {
+        if (local_preview) break :note note;
         const key = self.submission.messageKey() orelse break :note null;
         for (screen.feed.entries[0..screen.feed.count]) |entry| {
             const entry_key = entry.message_key orelse continue;
@@ -1138,10 +1140,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         break :note null;
     } else null;
     self.app_content.message_note = if (message_note) |note| .{ .key = self.submission.messageKey().?, .text = note } else null;
-    self.app_content.pending = if (self.submission.messageText()) |text|
-        (if (!self.submission.messageProjected() and (screen.feed.at_end or (self.reading.opening and screen.anchor.following()))) .{ .text = if (self.submission.messageHasImage()) (if (text.len == 0) image_label else try std.fmt.allocPrint(ctx.arena, "{s}\n{s}", .{ image_label, text })) else text, .note = message_note } else null)
-    else
-        null;
+    self.app_content.pending = null;
     self.app_document.style = normal;
     self.app_document.colours = colours;
     self.app_document.hover_style = hover;
@@ -1167,7 +1166,12 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.activity.live = self.live.view;
     chrome.activity.work = if (self.app_consent.request != null) null else work_line.of(try ctx.arena.create([work_line.max_words_bytes]u8), &self.live.work.state, self.live.work.operation, now_ms);
     const queued = self.queuedRow();
-    chrome.activity.queued = if (queued) |row| row.waiting else null;
+    chrome.activity.queued = if (local_preview) preview: {
+        const line = try ctx.arena.create(queued_line.Line);
+        const text = self.submission.messageText().?;
+        line.* = session_line.plain(session_line.max_line_bytes, session_line.firstLine(if (text.len == 0 and self.submission.messageHasImage()) image_label else text));
+        break :preview .{ .line = line.slice(), .count = 1 };
+    } else if (queued) |row| row.waiting else null;
     chrome.activity.method = self.app_caps.width;
     chrome.activity.styles = .{ .ink = style.of(self.app_caps, .{ .colour = .ink }), .normal = normal, .quiet = quiet, .attention = attention, .failure = failure };
     self.app_content.tail = chrome.activity.widget();
@@ -6483,7 +6487,7 @@ fn optimisticInputRows() !void {
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .submitting, .key = @splat('K') };
         defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         const pending = try fixture.rowsAtWidth(width);
-        try std.testing.expect(ChromeFixture.find(&pending, "› original model input") != null);
+        try std.testing.expect(ChromeFixture.find(&pending, "◌ original model input") != null);
         var messages: usize = 0;
         for (pending) |line| {
             messages += std.mem.count(u8, line, "original model input");
@@ -6495,19 +6499,18 @@ fn optimisticInputRows() !void {
         self.submission.state = .unconfirmed;
         const unconfirmed = try fixture.rowsAtWidth(width);
         errdefer for (unconfirmed, 0..) |line, row| std.debug.print("optimistic width={d} row={d}: {s}\n", .{ width, row, line });
-        const message_row = ChromeFixture.find(&unconfirmed, "› original model input");
+        const message_row = ChromeFixture.find(&unconfirmed, "◌ original model input");
         const note_row = ChromeFixture.find(&unconfirmed, "Not confirmed · ctrl+r retries original");
         try std.testing.expect(message_row != null);
         try std.testing.expect(note_row != null);
-        try std.testing.expect(note_row.? > message_row.? and note_row.? < 20);
+        try std.testing.expect(note_row.? > message_row.?);
         for (idle[20..23], unconfirmed[20..23]) |before, after| try std.testing.expectEqualStrings(before, after);
         try std.testing.expectEqualStrings("original model input", try self.input.message(original));
         self.submission.state = .rejected;
         const rejected = try fixture.rowsAtWidth(width);
-        try std.testing.expect(ChromeFixture.find(&rejected, "› original model input") != null);
+        try std.testing.expect(ChromeFixture.find(&rejected, "◌ original model input") != null);
         const rejected_note = ChromeFixture.find(&rejected, "Rejected · /discard");
         try std.testing.expect(rejected_note != null);
-        try std.testing.expect(rejected_note.? < 20);
         for (idle[20..23], rejected[20..23]) |before, after| try std.testing.expectEqualStrings(before, after);
         _ = self.input.append("next draft");
         _ = try fixture.rowsAtWidth(width);
@@ -6540,7 +6543,7 @@ test "App Session accepted message refresh keeps the next draft intact without p
     try std.testing.expectEqualStrings("accepted original", self.submission.messageText().?);
     try std.testing.expect(self.submission.retry == null);
     const shown = try fixture.rows();
-    try std.testing.expect(ChromeFixture.find(&shown, "› accepted original") != null);
+    try std.testing.expect(ChromeFixture.find(&shown, "◌ accepted original") != null);
 }
 
 fn optimisticEnteredFrame() !void {
@@ -6561,7 +6564,7 @@ fn optimisticEnteredFrame() !void {
     try fixture.press(.{ .codepoint = vaxis.Key.enter });
     const shown = try fixture.rows();
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
-    try std.testing.expect(ChromeFixture.find(&shown, "› hi") != null);
+    try std.testing.expect(ChromeFixture.find(&shown, "◌ hi") != null);
     for (shown) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Sending") == null);
     try std.testing.expectEqual(session_chrome.Tone.quiet, self.chrome.status.bar.tone);
 }
@@ -6792,7 +6795,7 @@ test "SessionFrontend submission presentation domain keeps Message notes separat
             .rejected => "Rejected",
         };
         if (kind == .message) {
-            const message_row = ChromeFixture.find(&shown, "› matrix original");
+            const message_row = ChromeFixture.find(&shown, "◌ matrix original");
             try std.testing.expect(message_row != null);
             var copies: usize = 0;
             for (shown) |line| {
@@ -6805,8 +6808,8 @@ test "SessionFrontend submission presentation domain keeps Message notes separat
             if (expected) |prefix| {
                 const note_row = ChromeFixture.find(&shown, prefix);
                 try std.testing.expect(note_row != null);
-                try std.testing.expect(note_row.? > message_row.? and note_row.? < 20);
-            } else try std.testing.expect(self.app_content.pending.?.note == null);
+                try std.testing.expect(note_row.? > message_row.?);
+            } else try std.testing.expect(self.chrome.activity.queued != null);
         } else {
             for (shown) |line| try std.testing.expect(std.mem.indexOf(u8, line, "matrix original") == null);
             try std.testing.expect(self.app_content.pending == null);
@@ -7407,6 +7410,46 @@ test "SUI-17 SessionFrontend draws queued and taken Messages once across work" {
             try std.testing.expect(std.mem.indexOf(u8, taken, "AFTER-REJECTION") != null);
         }
     };
+}
+
+test "SessionFrontend held Message uses queue preview until its keyed applied row" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        const self = &held.self;
+        held.size.width = width;
+        const ticket = self.input.submitText("queued original");
+        self.submission.intent = .{ .message = ticket };
+        self.submission.key = @splat('K');
+        self.submission.state = .submitting;
+        defer {
+            self.submission.intent = null;
+            self.input.release(ticket) catch unreachable;
+        }
+        try fixture.page(.opening, &.{.{ .key = 1, .text = "› first\n" }}, true, true);
+        self.live.work.state = .{ .working = .{ .since = 1 } };
+        self.live.queued = .{ .count = 1, .oldest_position = 1, .newest_admission = 8, .newest_position = 1 };
+        self.live.queued_line = .{ .admission = 8, .line = .{} };
+        try self.live.queued_line.?.line.set("unrelated queued");
+        const local = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, local, "◌ 2 ·") == null);
+        try std.testing.expect(std.mem.indexOf(u8, local, "◌ queued original") != null);
+        try std.testing.expect(std.mem.indexOf(u8, local, "› queued original") == null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, local, "queued original"));
+        try fixture.page(.scan, &.{.{ .key = 2, .text = "", .provisional = true, .message_key = @splat('K') }}, true, true);
+        self.live.queued = .{ .count = 1, .oldest_position = 2, .newest_admission = 9, .newest_position = 2 };
+        self.live.queued_line = .{ .admission = 9, .line = .{} };
+        try self.live.queued_line.?.line.set("queued original");
+        const pending = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, pending, "◌ queued original") != null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pending, "queued original"));
+        self.live.queued = .{};
+        try fixture.page(.opening, &.{.{ .key = 3, .text = "› queued original\n", .message_key = @splat('K') }}, true, true);
+        const applied = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, applied, "◌ queued original") == null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, applied, "› queued original"));
+    }
 }
 
 test "SessionFrontend keeps recovery visible beside an invisible queued Admission" {
