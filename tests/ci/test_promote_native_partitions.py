@@ -10,9 +10,9 @@ import unittest
 
 class NativePartitionTest(unittest.TestCase):
     def test_ci_96_both_partitions_run_once_and_fail_closed(self):
-        targets = ["admission-debug-integration", "check-full", "test-full"]
-        batches = [["check-full", "-Dcheck-part=execution"], ["admission-debug-integration"],
-                   ["test-full"], ["check-full", "-Dcheck-part=callers"]]
+        targets = ["admission-debug-integration", "check-full", "future-integration", "test-full"]
+        batches = [["check-full", "-Dcheck-part=execution"], ["future-integration"],
+                   ["admission-debug-integration"], ["test-full"], ["check-full", "-Dcheck-part=callers"]]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             zig = root / "zig"
