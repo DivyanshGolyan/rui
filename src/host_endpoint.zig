@@ -11,6 +11,7 @@
 //! So only the holder of D's lock unlinks a Host socket, and whoever can hold
 //! it (a starting Host, the upgrade census) may remove a dead endpoint.
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("posix");
 const runtime_directory = @import("runtime_directory.zig");
 const host_settings = @import("host_settings.zig");
@@ -133,19 +134,18 @@ const LockResult = union(enum) {
     unusable: anyerror,
 };
 
-/// Test seam: `lockVerified` and `claim` call it between their steps, so a
-/// test can change the world exactly there. Production passes `noPause`.
-const Stage = enum { created, opened };
-const Pause = *const fn (Stage) void;
-fn noPause(_: Stage) void {}
-const no_pause: Pause = noPause;
+/// Test seam: the steps of `claim`, `lockVerified` and `occupancyOnce` call
+/// `pauseAt`, so a test can change the world exactly there. The hook exists
+/// only in test builds and is a no-op until a test sets it.
+const Stage = enum { created, opened, checked };
+fn noPauseHook(_: Stage) void {}
+var pause_hook: if (builtin.is_test) *const fn (Stage) void else void = if (builtin.is_test) noPauseHook else {};
+inline fn pauseAt(stage: Stage) void {
+    if (builtin.is_test) pause_hook(stage);
+}
 
 /// The single decision point for endpoint ownership.
 fn lockVerified(io: std.Io, directory: []const u8) LockResult {
-    return lockVerifiedPaused(io, directory, no_pause);
-}
-
-fn lockVerifiedPaused(io: std.Io, directory: []const u8, pause: Pause) LockResult {
     const dir = openDirectory(directory) catch |err| return switch (err) {
         error.FileNotFound => .absent,
         else => .{ .unusable = err },
@@ -153,7 +153,7 @@ fn lockVerifiedPaused(io: std.Io, directory: []const u8, pause: Pause) LockResul
     var kept = false;
     defer if (!kept) dir.close(io);
     privateDirectory(dir.handle) catch |err| return .{ .unusable = err };
-    pause(.opened);
+    pauseAt(.opened);
     switch (std.posix.errno(std.posix.system.flock(dir.handle, std.posix.LOCK.EX | std.posix.LOCK.NB))) {
         .SUCCESS => {},
         .AGAIN => return .busy,
@@ -166,6 +166,7 @@ fn lockVerifiedPaused(io: std.Io, directory: []const u8, pause: Pause) LockResul
         .held => return .busy,
         .unusable => return .{ .unusable = error.UnexpectedEndpointNode },
     }
+    pauseAt(.checked);
     kept = true;
     return .{ .held = .{ .dir = dir } };
 }
@@ -300,15 +301,11 @@ const claim_wait_ns = 100 * std.time.ns_per_ms;
 /// mtime. Does not touch `rui.sock`; that waits for `listen`, after the caller
 /// owns its Store.
 pub fn claim(io: std.Io, interface: Interface) error{ RuntimeDirectoryInUse, RuntimeDirectoryUnusable }!Endpoint {
-    return claimPaused(io, interface, no_pause);
-}
-
-fn claimPaused(io: std.Io, interface: Interface, pause: Pause) error{ RuntimeDirectoryInUse, RuntimeDirectoryUnusable }!Endpoint {
     const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + claim_wait_ns;
     while (true) {
         createDirectory(io, &interface) catch return error.RuntimeDirectoryUnusable;
-        pause(.created);
-        switch (lockVerifiedPaused(io, interface.path(), pause)) {
+        pauseAt(.created);
+        switch (lockVerified(io, interface.path())) {
             .held => |value| {
                 var held = value;
                 if (c.futimens(held.dir.handle, null) != 0) {
@@ -384,25 +381,21 @@ pub const Occupancy = enum { held, free, absent, unusable };
 const occupancy_attempts = 4;
 
 pub fn occupancy(io: std.Io, directory: []const u8) Occupancy {
-    return occupancyPaused(io, directory, no_pause);
-}
-
-fn occupancyPaused(io: std.Io, directory: []const u8, pause: Pause) Occupancy {
     for (0..occupancy_attempts) |_| {
-        if (occupancyOnce(io, directory, pause)) |result| return result;
+        if (occupancyOnce(io, directory)) |result| return result;
     }
     return .unusable;
 }
 
 /// One look; null when D's path stopped naming the locked inode.
-fn occupancyOnce(io: std.Io, directory: []const u8, pause: Pause) ?Occupancy {
+fn occupancyOnce(io: std.Io, directory: []const u8) ?Occupancy {
     const dir = openDirectory(directory) catch |err| return switch (err) {
         error.FileNotFound => .absent,
         else => .unusable,
     };
     defer dir.close(io);
     privateDirectory(dir.handle) catch return .unusable;
-    pause(.opened);
+    pauseAt(.opened);
     switch (std.posix.errno(std.posix.system.flock(dir.handle, std.posix.LOCK.SH | std.posix.LOCK.NB))) {
         .SUCCESS => {},
         .AGAIN => return .held,
@@ -666,6 +659,133 @@ test "SH-11 only the holder of an interface directory's lock removes its endpoin
         try std.Io.Dir.cwd().deleteTree(io, directory);
     };
 
+    // Interleavings: one actor's step meets an interference at a point in that
+    // step, and the outcome is the contract's. A row's `step` is a hook point
+    // inside claim, lockVerified or occupancy, or `claimed`, the moment after
+    // claim returns, before listen or retire. Rows whose interference is a
+    // held legacy rui.lock before the look are covered by the ownership table
+    // for claim and inspect; occupancy has its own row.
+    const Caller = enum { claim, listen, inspect, occupancy, retire };
+    const Step = enum { created, opened, checked, claimed };
+    const Meddle = enum { none, replace, replace_every, remove, legacy_lock };
+    const Outcome = enum { busy_then_reclaimed, busy_keeps_files, absent, unusable, held, claim_holds, listen_lost, replacement_survives };
+    const Row = struct {
+        caller: Caller,
+        step: Step,
+        meddle: Meddle,
+        socket: SocketState = .absent,
+        outcome: Outcome,
+    };
+    const interleavings = [_]Row{
+        // A D replaced after the open: the lock proves nothing, and the next look reclaims the new D.
+        .{ .caller = .inspect, .step = .opened, .meddle = .replace, .outcome = .busy_then_reclaimed },
+        // A stopping Host removes D after occupancy's open: looks again, and finds it absent.
+        .{ .caller = .occupancy, .step = .opened, .meddle = .remove, .outcome = .absent },
+        // D replaced every time it is opened: occupancy gives up as unusable.
+        .{ .caller = .occupancy, .step = .opened, .meddle = .replace_every, .outcome = .unusable },
+        // A census removes the empty D between claim's mkdir and open: claim retries and holds it.
+        .{ .caller = .claim, .step = .created, .meddle = .remove, .outcome = .claim_holds },
+        // D removed after claim, before listen: listen refuses to bind into it.
+        .{ .caller = .listen, .step = .claimed, .meddle = .remove, .outcome = .listen_lost },
+        // A Host that lost D retires; the replacement claim at the path is left alone.
+        .{ .caller = .retire, .step = .claimed, .meddle = .replace, .outcome = .replacement_survives },
+        // A previous-release Host locks rui.lock after the check: the teardown keeps its socket.
+        .{ .caller = .inspect, .step = .checked, .meddle = .legacy_lock, .socket = .socket, .outcome = .busy_keeps_files },
+        // A previous-release Host locks rui.lock during occupancy's look: the look reports held.
+        .{ .caller = .occupancy, .step = .opened, .meddle = .legacy_lock, .outcome = .held },
+    };
+    const Script = struct {
+        var step: Step = .created;
+        var meddle: Meddle = .none;
+        var armed = false;
+        var path: []const u8 = "";
+        var legacy: ?std.Io.File = null;
+
+        fn hook(stage: Stage) void {
+            if (!armed or !std.mem.eql(u8, @tagName(step), @tagName(stage))) return;
+            armed = meddle == .replace_every;
+            switch (meddle) {
+                .none => {},
+                .replace, .replace_every => {
+                    std.Io.Dir.cwd().deleteDir(testing.io, path) catch unreachable;
+                    std.Io.Dir.cwd().createDir(testing.io, path, .fromMode(0o700)) catch unreachable;
+                },
+                .remove => std.Io.Dir.cwd().deleteDir(testing.io, path) catch unreachable,
+                .legacy_lock => {
+                    const dir = openDirectory(path) catch unreachable;
+                    defer dir.close(testing.io);
+                    const file = dir.createFile(testing.io, legacy_lock_name, .{ .read = true, .truncate = false, .permissions = .fromMode(0o600) }) catch unreachable;
+                    expectFlock(file.handle) catch unreachable;
+                    legacy = file;
+                },
+            }
+        }
+    };
+    for (interleavings) |row| {
+        errdefer std.debug.print("endpoint interleaving row: {any}\n", .{row});
+        {
+            (try arrange(io, directory, .free, .absent, row.socket, false)).release(io);
+            Script.step = row.step;
+            Script.meddle = row.meddle;
+            Script.armed = row.step != .claimed and row.meddle != .none;
+            Script.path = directory;
+            pause_hook = Script.hook;
+            defer {
+                pause_hook = noPauseHook;
+                Script.armed = false;
+                if (Script.legacy) |file| file.close(io);
+                Script.legacy = null;
+            }
+            switch (row.caller) {
+                .claim => {
+                    var endpoint = try claim(io, derived);
+                    try testing.expectEqual(Sighting.busy, inspect(io, &derived));
+                    try endpoint.retire();
+                    try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
+                },
+                .listen => {
+                    var endpoint = try claim(io, derived);
+                    try std.Io.Dir.cwd().deleteDir(io, directory);
+                    try testing.expectError(error.EndpointLost, endpoint.listen(.{}));
+                    try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
+                    try endpoint.retire();
+                },
+                .retire => {
+                    var lost = try claim(io, derived);
+                    try std.Io.Dir.cwd().deleteDir(io, directory);
+                    var replacement = try claim(io, derived);
+                    try testing.expectError(error.EndpointLost, lost.listen(.{}));
+                    try lost.retire();
+                    try testing.expectEqual(Left{}, try leftIn(io, directory));
+                    var listener = try replacement.listen(.{});
+                    listener.deinit(io);
+                    try replacement.retire();
+                    try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
+                },
+                .inspect => {
+                    try testing.expectEqual(Sighting.busy, inspect(io, &derived));
+                    if (row.outcome == .busy_then_reclaimed) {
+                        // The new D is free and empty; the look that follows reclaims it.
+                        try testing.expectEqual(Sighting.reclaimed, inspect(io, &derived));
+                        try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
+                    } else {
+                        try testing.expectEqual(Left{ .socket = .unix_domain_socket, .legacy = true }, try leftIn(io, directory));
+                    }
+                },
+                .occupancy => {
+                    const expected: Occupancy = switch (row.outcome) {
+                        .absent => .absent,
+                        .unusable => .unusable,
+                        .held => .held,
+                        else => unreachable,
+                    };
+                    try testing.expectEqual(expected, occupancy(io, directory));
+                },
+            }
+        }
+        try std.Io.Dir.cwd().deleteTree(io, directory);
+    }
+
     // Crash points: a Host killed after each step of its life leaves a state
     // the next look proves dead and removes, and the next claim serves from.
     const Crash = enum { created, claimed, bound, socket_unlinked };
@@ -885,7 +1005,7 @@ fn backdatePath(path: []const u8) !void {
     if (c.utimensat(c.AT_FDCWD, buffer[0..path.len :0].ptr, &epoch, c.AT_SYMLINK_NOFOLLOW) != 0) return error.BackdateFailed;
 }
 
-test "SH-11 no OS temp cleaner's rules remove a node of a live endpoint (#2128)" {
+test "SH-121 no OS temp cleaner's rules remove a node of a live endpoint" {
     const io = testing.io;
     var runtime = try socket_fixture.Directory.init();
     defer runtime.cleanup();
@@ -894,13 +1014,40 @@ test "SH-11 no OS temp cleaner's rules remove a node of a live endpoint (#2128)"
     const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
     const derived = try Interface.within(root, directory);
 
-    const Phase = enum { claimed, claimed_stalled, bound, unbound };
+    // claimed_over_old: an empty D from days ago, which the claim refreshes.
+    // old_legacy_lock: the pre-#2128 endpoint, an old D holding an old regular
+    // rui.lock that a previous-release Host locks.
+    const Phase = enum { claimed, claimed_over_old, claimed_stalled, bound, unbound, old_legacy_lock };
     for (std.enums.values(Phase)) |phase| for (std.enums.values(Cleaner)) |cleaner| {
         errdefer std.debug.print("endpoint cleaner row: phase={s} cleaner={s}\n", .{ @tagName(phase), @tagName(cleaner) });
+        if (phase == .old_legacy_lock) {
+            {
+                const holders = try arrange(io, directory, .free, .held_elsewhere, .absent, false);
+                defer holders.release(io);
+                try backdate(holders.legacy.?.handle);
+                try backdate(holders.dir.?.handle);
+                _ = try applyCleaner(io, cleaner, directory);
+            }
+            // Only v254 and later, which skip a locked regular file, keep it (E10).
+            try testing.expectEqual(cleaner == .tmpfiles_254, (try leftIn(io, directory)).legacy);
+            try std.Io.Dir.cwd().deleteTree(io, directory);
+            continue;
+        }
+        if (phase == .claimed_over_old) {
+            (try arrange(io, directory, .free, .absent, .absent, false)).release(io);
+            const old = try openDirectory(directory);
+            defer old.close(io);
+            try backdate(old.handle);
+        }
         var endpoint = try claim(io, derived);
+        if (phase == .claimed_over_old) {
+            const probe = try std.Io.Dir.cwd().openDir(io, directory, .{});
+            defer probe.close(io);
+            try testing.expect((try probe.stat(io)).mtime.nanoseconds != 0);
+        }
         var listener: ?std.Io.net.Server = null;
         switch (phase) {
-            .claimed, .claimed_stalled => {},
+            .claimed, .claimed_over_old, .claimed_stalled, .old_legacy_lock => {},
             .bound => listener = try endpoint.listen(.{}),
             .unbound => {
                 var served = try endpoint.listen(.{});
@@ -928,7 +1075,7 @@ test "SH-11 no OS temp cleaner's rules remove a node of a live endpoint (#2128)"
             continue;
         }
         switch (phase) {
-            .claimed, .claimed_stalled => {
+            .claimed, .claimed_over_old, .claimed_stalled => {
                 var served = try endpoint.listen(.{});
                 var socket_buffer: [std.Io.net.UnixAddress.max_len]u8 = undefined;
                 try testing.expect(acceptsConnection(io, try endpoint.socketPath(&socket_buffer)));
@@ -944,225 +1091,9 @@ test "SH-11 no OS temp cleaner's rules remove a node of a live endpoint (#2128)"
                 try endpoint.unbind();
             },
             .unbound => try testing.expectEqual(Sighting.busy, inspect(io, &derived)),
+            .old_legacy_lock => unreachable,
         }
         try endpoint.retire();
         try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
     };
-}
-
-test "SH-11 the cleaners remove the old layout's regular rui.lock unless they honour its lock (#2128)" {
-    const io = testing.io;
-    var runtime = try socket_fixture.Directory.init();
-    defer runtime.cleanup();
-    const root = runtime.root[0..runtime.root_len];
-    var directory_buffer: [Path.max_bytes]u8 = undefined;
-    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
-
-    // The pre-#2128 endpoint: an old D holding an old regular rui.lock that a previous-release Host locks.
-    for (std.enums.values(Cleaner)) |cleaner| {
-        errdefer std.debug.print("endpoint legacy cleaner row: cleaner={s}\n", .{@tagName(cleaner)});
-        {
-            const holders = try arrange(io, directory, .free, .held_elsewhere, .absent, false);
-            defer holders.release(io);
-            try backdate(holders.legacy.?.handle);
-            try backdate(holders.dir.?.handle);
-            _ = try applyCleaner(io, cleaner, directory);
-        }
-        // Only v254 and later, which skip a locked regular file, keep it (E10).
-        try testing.expectEqual(cleaner == .tmpfiles_254, (try leftIn(io, directory)).legacy);
-        try std.Io.Dir.cwd().deleteTree(io, directory);
-    }
-}
-
-test "SH-11 a claimed directory's times are refreshed, so an empty D is not old" {
-    const io = testing.io;
-    var runtime = try socket_fixture.Directory.init();
-    defer runtime.cleanup();
-    const root = runtime.root[0..runtime.root_len];
-    var directory_buffer: [Path.max_bytes]u8 = undefined;
-    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
-    const derived = try Interface.within(root, directory);
-    (try arrange(io, directory, .free, .absent, .absent, false)).release(io);
-    const old = try openDirectory(directory);
-    defer old.close(io);
-    try backdate(old.handle);
-    try testing.expectEqual(@as(i96, 0), (try old.stat(io)).mtime.nanoseconds);
-    var endpoint = try claim(io, derived);
-    defer endpoint.retire() catch {};
-    try testing.expect((try old.stat(io)).mtime.nanoseconds != 0);
-}
-
-test "SH-11 a lock on a directory replaced after the open proves nothing" {
-    const io = testing.io;
-    var runtime = try socket_fixture.Directory.init();
-    defer runtime.cleanup();
-    const root = runtime.root[0..runtime.root_len];
-    var directory_buffer: [Path.max_bytes]u8 = undefined;
-    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
-    const derived = try Interface.within(root, directory);
-    (try arrange(io, directory, .free, .absent, .absent, false)).release(io);
-
-    // Between the open and the flock, D is replaced by a new directory.
-    const Replace = struct {
-        var path: []const u8 = "";
-        fn pause(stage: Stage) void {
-            if (stage != .opened) return;
-            std.Io.Dir.cwd().deleteDir(testing.io, path) catch unreachable;
-            std.Io.Dir.cwd().createDir(testing.io, path, .fromMode(0o700)) catch unreachable;
-        }
-    };
-    Replace.path = directory;
-    try testing.expect(lockVerifiedPaused(io, directory, Replace.pause) == .busy);
-    // The new D is free and empty; the look that follows reclaims it.
-    try testing.expectEqual(Sighting.reclaimed, inspect(io, &derived));
-}
-
-test "SH-11 occupancy looks again when a stopping Host removes D after the open" {
-    const io = testing.io;
-    var runtime = try socket_fixture.Directory.init();
-    defer runtime.cleanup();
-    const root = runtime.root[0..runtime.root_len];
-    var directory_buffer: [Path.max_bytes]u8 = undefined;
-    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
-    (try arrange(io, directory, .free, .absent, .absent, false)).release(io);
-
-    // The stop removes D once, after the open and before the name check.
-    const Remove = struct {
-        var path: []const u8 = "";
-        var armed = false;
-        fn pause(stage: Stage) void {
-            if (stage != .opened or !armed) return;
-            armed = false;
-            std.Io.Dir.cwd().deleteDir(testing.io, path) catch unreachable;
-        }
-    };
-    Remove.path = directory;
-    Remove.armed = true;
-    try testing.expectEqual(Occupancy.absent, occupancyPaused(io, directory, Remove.pause));
-    try testing.expect(!Remove.armed);
-}
-
-test "SH-11 occupancy reports unusable when D keeps being replaced" {
-    const io = testing.io;
-    var runtime = try socket_fixture.Directory.init();
-    defer runtime.cleanup();
-    const root = runtime.root[0..runtime.root_len];
-    var directory_buffer: [Path.max_bytes]u8 = undefined;
-    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
-    (try arrange(io, directory, .free, .absent, .absent, false)).release(io);
-
-    const Replace = struct {
-        var path: []const u8 = "";
-        fn pause(stage: Stage) void {
-            if (stage != .opened) return;
-            std.Io.Dir.cwd().deleteDir(testing.io, path) catch unreachable;
-            std.Io.Dir.cwd().createDir(testing.io, path, .fromMode(0o700)) catch unreachable;
-        }
-    };
-    Replace.path = directory;
-    try testing.expectEqual(Occupancy.unusable, occupancyPaused(io, directory, Replace.pause));
-}
-
-test "SH-11 a claim whose directory is removed before its open retries and holds it" {
-    const io = testing.io;
-    var runtime = try socket_fixture.Directory.init();
-    defer runtime.cleanup();
-    const root = runtime.root[0..runtime.root_len];
-    var directory_buffer: [Path.max_bytes]u8 = undefined;
-    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
-    const derived = try Interface.within(root, directory);
-
-    // Right after the claim's mkdir, a census removes the empty D, once.
-    const Remove = struct {
-        var path: []const u8 = "";
-        var armed = false;
-        fn pause(stage: Stage) void {
-            if (stage != .created or !armed) return;
-            armed = false;
-            std.Io.Dir.cwd().deleteDir(testing.io, path) catch unreachable;
-        }
-    };
-    Remove.path = directory;
-    Remove.armed = true;
-    var endpoint = try claimPaused(io, derived, Remove.pause);
-    try testing.expect(!Remove.armed);
-    try testing.expectEqual(Sighting.busy, inspect(io, &derived));
-    try endpoint.retire();
-    try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
-}
-
-test "SH-11 listen refuses to bind into a directory removed after claim (EndpointLost)" {
-    const io = testing.io;
-    var runtime = try socket_fixture.Directory.init();
-    defer runtime.cleanup();
-    const root = runtime.root[0..runtime.root_len];
-    var directory_buffer: [Path.max_bytes]u8 = undefined;
-    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
-    const derived = try Interface.within(root, directory);
-
-    var endpoint = try claim(io, derived);
-    try std.Io.Dir.cwd().deleteDir(io, directory);
-    // A replacement at the path must not receive the socket either.
-    try testing.expectError(error.EndpointLost, endpoint.listen(.{}));
-    try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
-    try endpoint.retire();
-}
-
-test "SH-11 a Host that lost D does not remove the claim that replaced it" {
-    const io = testing.io;
-    var runtime = try socket_fixture.Directory.init();
-    defer runtime.cleanup();
-    const root = runtime.root[0..runtime.root_len];
-    var directory_buffer: [Path.max_bytes]u8 = undefined;
-    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
-    const derived = try Interface.within(root, directory);
-
-    var lost = try claim(io, derived);
-    try std.Io.Dir.cwd().deleteDir(io, directory);
-    var replacement = try claim(io, derived);
-    try testing.expectError(error.EndpointLost, lost.listen(.{}));
-    // The path names the replacement's D now: retiring the lost Host must leave it.
-    try lost.retire();
-    try testing.expectEqual(Left{}, try leftIn(io, directory));
-    var listener = try replacement.listen(.{});
-    listener.deinit(io);
-    try replacement.retire();
-    try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
-}
-
-test "SH-11 a previous-release Host that locks rui.lock after the check keeps its socket" {
-    const io = testing.io;
-    var runtime = try socket_fixture.Directory.init();
-    defer runtime.cleanup();
-    const root = runtime.root[0..runtime.root_len];
-    var directory_buffer: [Path.max_bytes]u8 = undefined;
-    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
-    const derived = try Interface.within(root, directory);
-
-    // The look's check finds rui.lock free; a previous-release Host then takes it before the teardown.
-    const holders = try arrange(io, directory, .free, .free, .socket, false);
-    defer holders.release(io);
-    var held = switch (lockVerified(io, directory)) {
-        .held => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    try expectFlock(holders.legacy.?.handle);
-    try testing.expectEqual(Teardown.busy, try held.dissolve(io, &derived));
-    try testing.expectEqual(Left{ .socket = .unix_domain_socket, .legacy = true }, try leftIn(io, directory));
-}
-
-test "SH-11 a held legacy rui.lock makes its directory busy for a claim and a look" {
-    const io = testing.io;
-    var runtime = try socket_fixture.Directory.init();
-    defer runtime.cleanup();
-    const root = runtime.root[0..runtime.root_len];
-    var directory_buffer: [Path.max_bytes]u8 = undefined;
-    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
-    const derived = try Interface.within(root, directory);
-
-    const holders = try arrange(io, directory, .free, .held_elsewhere, .socket, false);
-    defer holders.release(io);
-    try testing.expectEqual(Occupancy.held, occupancy(io, directory));
-    try testing.expectError(error.RuntimeDirectoryInUse, claim(io, derived));
-    try testing.expectEqual(Sighting.busy, inspect(io, &derived));
 }
