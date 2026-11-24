@@ -20,6 +20,7 @@ Run commands below from the repository root, sequentially in a disposable checko
 | How do instructions and reasoning settings affect requests? | [Instruction updates and caching](instruction-update-prompt-caching.md), [Codex reasoning effort](codex-reasoning-effort.md). Client defaults are distinct from unknown backend defaults; no live effort test. |
 | Who owns compaction policy and retained context? | [Pi 1.0, OpenCode and Codex sources](compaction-prior-art.md). Model limits, user overrides, exact Codex default and response-trigger replay; source evidence, not live encrypted-state qualification. |
 | How should optional output be retained? | [Output retention](output-retention-prior-art.md). Byte/count budgets, FIFO tracking and cleanup. |
+| Does the release check scale? | [Release check and download at scale](update-check-scale.md). GitHub and Cloudflare documented limits, one burst probe against GitHub web routes, and Cloudflare-hosted options; no sustained-rate or residential-IP measurement. |
 | How are names and retries identified? | [Session identity](session-identity-evidence.md), [idempotency keys](idempotency-identity-evidence.md), [key collisions](idempotency-collision-evidence.md). Representation, binding and retention sources. |
 
 Historical contracts and longer reports remain in the [research snapshot](https://github.com/DivyanshGolyan/rui/tree/4ee987e6479b8010d052b3fd31a5acca044eb269). Some retained provenance refers to files removed from the active tree.
