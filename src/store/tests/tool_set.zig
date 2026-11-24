@@ -2063,3 +2063,68 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
 }
 
 const ask_only_declaration = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+
+// SH-176: settlement classifies a call by the owner its frozen offer gives the name. A Host tool that takes an app tool's
+// name while the request is in flight does not reclassify the call the model was offered as the app's. A Host tool
+// already present at admission is what the projection offers, and the app tool it shadows is not offered.
+test "SH-176 settlement classifies a call by its frozen offer's owner, and a Host tool present at admission shadows the app tool" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const mcp_ask = comptime testingHostToolRecords(&.{.{ .name = "ask", .owner = .mcp, .server = "notes", .description = "Ask.", .input_schema = "{\"type\":\"object\"}" }});
+            var mcp_digests: [mcp_ask.len][32]u8 = undefined;
+            for (&mcp_ask, &mcp_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            var key_buffer: [96]u8 = undefined;
+            var root_buffer: [128]u8 = undefined;
+            for ([_]bool{ false, true }) |narrowed| {
+                const tag = if (narrowed) "narrow" else "wide";
+                // In flight: the Host tool takes the app tool's name after the request is admitted, before it settles.
+                try storage.saveHostToolSet(&tool_defs.built_in_tool_set);
+                var create = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh176-root-{s}", .{tag}), "", workspace, "model-a");
+                declareAppTools(&create.configuration, two_app_tools);
+                if (narrowed) create.configuration.tools = try .of(&.{ "ask", "find_tools" });
+                const root_reply = try storage.configure(&create, .{});
+                try expectAccepted("root", root_reply);
+                const root = copyRef(&root_buffer, root_reply.accepted.session.slice());
+                const binding = try admitMessage(&storage, &tmp, try std.fmt.bufPrint(&key_buffer, "sh176-in-flight-{s}", .{tag}), root);
+                var admitted: Offered = undefined;
+                try offerOf(&storage, binding, &admitted);
+                try std.testing.expectEqual(tool_record.Owner.app, admitted.owner("ask").?);
+                try storage.saveHostToolSet(&.{ .records = &mcp_ask, .digests = &mcp_digests });
+                try settleCallsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&key_buffer, "sh176-calls-{s}", .{tag}), &.{.{
+                    .item_id = "item-1",
+                    .name = "ask",
+                    .encoded_call_id = "call-1",
+                    .decoded_call_id = "call-1",
+                    .encoded_arguments = "{}",
+                    .decoded_arguments = "{}",
+                }});
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code='failed'", .{binding.operation_id}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NULL", .{binding.operation_id}));
+
+                // At admission: the Host tool is already in the set, so the request offers it, and the app tool it shadows is not offered.
+                var shadowed_create = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh176-shadowed-{s}", .{tag}), "", workspace, "model-a");
+                declareAppTools(&shadowed_create.configuration, two_app_tools);
+                if (narrowed) shadowed_create.configuration.tools = try .of(&.{ "ask", "find_tools" });
+                const shadowed_reply = try storage.configure(&shadowed_create, .{});
+                try expectAccepted("shadowed root", shadowed_reply);
+                var shadowed_buffer: [128]u8 = undefined;
+                const shadowed_root = copyRef(&shadowed_buffer, shadowed_reply.accepted.session.slice());
+                const second = try admitMessage(&storage, &tmp, try std.fmt.bufPrint(&key_buffer, "sh176-second-{s}", .{tag}), shadowed_root);
+                var offered: Offered = undefined;
+                try offerOf(&storage, second, &offered);
+                if (narrowed) {
+                    try std.testing.expectEqual(tool_record.Owner.mcp, offered.owner("ask").?);
+                } else {
+                    try std.testing.expect(offered.owner("ask") == null);
+                }
+            }
+        }
+    }.run);
+}
