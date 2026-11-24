@@ -590,15 +590,61 @@ def pre_freeze_target_case(root, binary, releases, pre_freeze_binary):
         print("upgrade native: actual pre-1480 public-check-capable target refused before stop; old PID/instance unchanged", flush=True)
 
 
+class BusyEndpoint:
+    """A derived interface directory a live Host holds: its flock on D, and a listener at rui.sock that never accepts."""
+
+    def __init__(self, directory):
+        self.directory = directory
+        self.socket = directory / "rui.sock"
+        self._lock = None
+        self._listener = None
+
+    def hold(self):
+        self._lock = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        assert os_semantics.try_lock(self._lock), "a fresh interface directory is already locked"
+        self._listener = os_semantics.unix_stream()
+        self._listener.bind(str(self.socket))
+        # Connections queue behind a listener nothing accepts, so the holder never answers.
+        self._listener.listen(16)
+
+    def release(self):
+        """The holder exits: its lock and listener go, and the socket node it leaves is for the next census."""
+        if self._lock is not None:
+            os.close(self._lock)
+            self._lock = None
+        if self._listener is not None:
+            self._listener.close()
+            self._listener = None
+
+
+@contextlib.contextmanager
+def busy_endpoint(runtime_socket, label):
+    """Plant a live-looking endpoint in a derived interface directory and yield its BusyEndpoint.
+
+    While it is held, a census finds D busy and restart cannot prove the socket dead, so it fails
+    with the socket's path. After `release()`, D is free and the next census reclaims it. The
+    directory is removed on exit if nothing reclaimed it first.
+    """
+    directory = pathlib.Path(runtime_socket).parent.parent / hashlib.sha256(label.encode()).hexdigest()[:32]
+    directory.mkdir(mode=0o700)
+    endpoint = BusyEndpoint(directory)
+    try:
+        endpoint.hold()
+        yield endpoint
+    finally:
+        endpoint.release()
+        endpoint.socket.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+
+
 @contextlib.contextmanager
 def unprovable_socket(runtime_socket, label):
     """Plant a regular file at `rui.sock` in a derived interface directory.
 
-    A lock on D proves a socket there dead, so a socket is never unprovable any more: the census
-    reclaims it once nothing holds D. A node Rui did not make is the unprovable case: restart
-    fails with its path and never removes it. `runtime_socket` is any Host socket of the same
-    runtime. Yields (path, handle); the caller may close the handle, and the path and its
-    directory are removed on exit.
+    A node Rui did not make is the unprovable case: restart fails with its path and never removes
+    it, whether or not anything holds D. `runtime_socket` is any Host socket of the same runtime.
+    Yields (path, handle); the path and its directory are removed on exit.
     """
     directory = pathlib.Path(runtime_socket).parent.parent / hashlib.sha256(label.encode()).hexdigest()[:32]
     unreadable = directory / "rui.sock"
@@ -631,7 +677,7 @@ def upgrade_journey(root, binary, releases):
             assert previous["store"] in warning, warning
         assert "left running: application-owned Host" in warning, warning
 
-        with unprovable_socket(a.ready["socket"], "journey-unreadable") as (unreadable, _):
+        with busy_endpoint(a.ready["socket"], "journey-busy") as busy:
             gate = releases.gate_archive()
             start = len(releases.requests)
             child = a.spawn_upgrade()
@@ -647,7 +693,7 @@ def upgrade_journey(root, binary, releases):
             for previous in (previous_a, previous_b):
                 assert f"{previous['store']}: restarted on {releases.version}" in output, output
             assert f"{previous_foreign['store']}: left running: application-owned Host" in output, output
-            assert str(unreadable) in output and "failed at discovery" in output, output
+            assert str(busy.socket) in output and "failed at discovery" in output, output
             assert "4 Hosts: 2 restarted, 0 already current, 1 left unchanged, 1 failed." in output, output
             assert releases.requests[start:].count(releases.archive_path) == 1, releases.requests[start:]
             assert a.link.resolve() != a.original, "restart failure rolled the installation back"
@@ -1225,18 +1271,23 @@ def restart_all_cases(root, binary, releases):
         assert first.status()["instance"] == current_first["instance"]
         assert second.status()["instance"] == current_second["instance"]
 
+        # A held D whose listener never answers is busy, not dead: restart fails with its socket's path.
+        # Once the holder exits, the next restart reclaims the endpoint silently.
+        with busy_endpoint(first.ready["socket"], "restart-busy") as busy:
+            output = first.run("host", "restart", "--all", expect=6)
+            assert str(busy.socket) in output and "failed at discovery:" in output, output
+            assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
+            busy.release()
+            output = first.run("host", "restart", "--all")
+            assert "2 Hosts: 0 restarted, 2 already current" in output, output
+            assert str(busy.socket) not in output and "failed at discovery" not in output, output
         # A regular file at rui.sock in a derived interface directory is unprovable: it fails, and
         # discovery never removes it. The probe is the rui.sock of another derived directory.
-        with unprovable_socket(first.ready["socket"], "restart-unreadable") as (unreadable, listener):
+        with unprovable_socket(first.ready["socket"], "restart-unreadable") as (unreadable, _):
             output = first.run("host", "restart", "--all", expect=6)
             assert "Store unknown (socket " in output and "failed at discovery:" in output, output
             assert re.search(r"Host state is unconfirmed \([A-Za-z]+\);", output), output
             assert "[host_restart_failed]" in output, output
-            assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
-            listener.close()
-            # Closing the handle changes nothing: a regular file is never a socket, so it stays unprovable.
-            output = first.run("host", "restart", "--all", expect=6)
-            assert str(unreadable) in output and "failed at discovery:" in output, output
             assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
         output = first.run("host", "restart", "--all")
         assert "2 Hosts: 0 restarted, 2 already current" in output, output
