@@ -344,8 +344,46 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
 /// The OpenAI connection a sign-in saves: named openai, its key in the private key file, the Responses
 /// dialect. It replaces any connection named openai in the document's connections list and keeps the others.
 fn openAiConnectionText(gpa: std.mem.Allocator, endpoint: []const u8, key_file: []const u8) ![]const u8 {
-    const base = if (std.mem.endsWith(u8, endpoint, "/responses")) endpoint[0 .. endpoint.len - "/responses".len] else endpoint;
-    return std.fmt.allocPrint(gpa, "{{\"name\":\"openai\",\"label\":\"OpenAI\",\"base_url\":{f},\"credential\":{{\"kind\":\"key\",\"source\":{{\"kind\":\"file\",\"path\":{f}}},\"placement\":\"bearer\"}},\"headers\":[],\"refusals\":[],\"formats\":[{{\"family\":\"responses\",\"dialect\":\"openai-responses/2\",\"web_search\":true}}],\"assign\":[],\"models\":{{\"list\":\"openai\"}}}}", .{ std.json.fmt(base, .{}), std.json.fmt(key_file, .{}) });
+    // The admitted endpoint is kept exactly: a conventional `/responses` endpoint is its
+    // base URL with the format's default path; any other is its origin with an explicit path.
+    const split = splitEndpoint(endpoint);
+    var path_field: std.Io.Writer.Allocating = .init(gpa);
+    defer path_field.deinit();
+    if (split.path) |path| try path_field.writer.print(",\"path\":{f}", .{std.json.fmt(path, .{})});
+    return std.fmt.allocPrint(gpa, "{{\"name\":\"openai\",\"label\":\"OpenAI\",\"base_url\":{f},\"credential\":{{\"kind\":\"key\",\"source\":{{\"kind\":\"file\",\"path\":{f}}},\"placement\":\"bearer\"}},\"headers\":[],\"refusals\":[],\"formats\":[{{\"family\":\"responses\",\"dialect\":\"openai-responses/2\"{s},\"web_search\":true}}],\"assign\":[],\"models\":{{\"list\":\"openai\"}}}}", .{ std.json.fmt(split.base, .{}), std.json.fmt(key_file, .{}), path_field.written() });
+}
+
+const SplitEndpoint = struct { base: []const u8, path: ?[]const u8 };
+
+fn splitEndpoint(endpoint: []const u8) SplitEndpoint {
+    if (std.mem.endsWith(u8, endpoint, "/responses")) return .{ .base = endpoint[0 .. endpoint.len - "/responses".len], .path = null };
+    const authority = (std.mem.indexOf(u8, endpoint, "://") orelse return .{ .base = endpoint, .path = null }) + 3;
+    const slash = std.mem.indexOfScalarPos(u8, endpoint, authority, '/') orelse return .{ .base = endpoint, .path = "/" };
+    return .{ .base = endpoint[0..slash], .path = endpoint[slash..] };
+}
+
+test "a saved sign-in endpoint resolves back to exactly the admitted URL" {
+    const cases = [_][]const u8{ "https://api.openai.com/v1/responses", "https://gateway.example/custom", "https://gateway.example/v2/chat/run", "https://gateway.example:8443/responses" };
+    for (cases) |endpoint| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const document = try openAiConnectionText(arena.allocator(), endpoint, "/keys/openai.key");
+        const NoHostField = struct {
+            fn none(_: []const u8) bool {
+                return false;
+            }
+        };
+        const parsed = switch (try served_connection.parse(arena.allocator(), document, NoHostField.none)) {
+            .ok => |value| value,
+            .refused => |found| {
+                std.debug.print("{s}: refused {s} {s}\n", .{ endpoint, found.field, @tagName(found.reason) });
+                return error.TestUnexpectedResult;
+            },
+        };
+        var url_buffer: [providers.Connected.max_url_bytes]u8 = undefined;
+        const resolved = try served_connection.resolve(&parsed, .{ .id = "", .native_family = .responses }, &url_buffer);
+        try std.testing.expectEqualStrings(endpoint, resolved.url);
+    }
 }
 
 /// Writes the sign-in's OpenAI connection into the document's connections list. The providers object is untouched.
