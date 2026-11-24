@@ -182,15 +182,10 @@ fn fetchRelease(init: std.process.Init, allocator: std.mem.Allocator, cancellati
 }
 
 pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download) !Check {
-    var discovered: ?release.ReleaseCandidate = null;
-    return checkDiscovered(init, allocator, store, cancellation, diagnostic, &discovered);
-}
-
-pub fn checkDiscovered(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download, discovered: *?release.ReleaseCandidate) !Check {
     try process.check(cancellation);
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
     // The mode is read only once a caller continues past the check.
-    var facts: upgrade_run.Facts = .{ .mode = .check, .adopted = discovered.* != null };
+    var facts: upgrade_run.Facts = .{ .mode = .check };
     var selected: ?Installation.Selection = null;
     errdefer if (selected) |*value| value.deinit(allocator);
     var candidate: ?release.ReleaseCandidate = null;
@@ -204,16 +199,8 @@ pub fn checkDiscovered(init: std.process.Init, allocator: std.mem.Allocator, sto
             selected = try Installation.inspectCancellable(allocator, init.io, home, cancellation);
             facts.selection = .{ .ok = selectionOf(selected.?) };
         },
-        .release => |source| {
-            try process.check(cancellation);
-            candidate = switch (source) {
-                .adopt => take: {
-                    const value = discovered.*.?;
-                    discovered.* = null;
-                    break :take value;
-                },
-                .discover => try fetchRelease(init, allocator, cancellation, diagnostic),
-            };
+        .release => {
+            candidate = try fetchRelease(init, allocator, cancellation, diagnostic);
             facts.release = .{ .ok = versionOf(candidate.?.version) };
         },
         .census => {
@@ -498,7 +485,7 @@ test "#1854 a non-interactive install says it is installing, then opens its resu
     }
 }
 
-test "adopted candidate stays owned until fresh check preconditions permit consumption" {
+test "release reads refuse before reading when cancelled or without a usable home" {
     const allocator = std.testing.allocator;
     var environ: std.process.Environ.Map = .init(allocator);
     defer environ.deinit();
@@ -507,19 +494,14 @@ test "adopted candidate stays owned until fresh check preconditions permit consu
     init.gpa = allocator;
     init.environ_map = &environ;
     try environ.put("RUI_TEST_UPGRADE_RELEASES_URL", "not-a-fixture");
-    var candidate: ?release.ReleaseCandidate = try release.fromEffectiveUrl(allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64");
-    defer if (candidate) |*owned| owned.deinit(allocator);
-    const identity = candidate.?.archive_url.ptr;
     var download: Download = .{ .family = .ipv4 };
     defer download.deinit(allocator);
     var cancellation: client.Cancellation = .{};
     cancellation.requestStop();
     try std.testing.expectError(error.Cancelled, discoverRelease(init, allocator, &cancellation, &download));
     try std.testing.expectError(error.HomeUnavailable, discoverRelease(init, allocator, null, &download));
-    try std.testing.expectError(error.Cancelled, checkDiscovered(init, allocator, "/fixture", &cancellation, &download, &candidate));
-    try std.testing.expectEqual(identity, candidate.?.archive_url.ptr);
-    try std.testing.expectError(error.HomeUnavailable, checkDiscovered(init, allocator, "/fixture", null, &download, &candidate));
-    try std.testing.expectEqual(identity, candidate.?.archive_url.ptr);
+    try std.testing.expectError(error.Cancelled, check(init, allocator, "/fixture", &cancellation, &download));
+    try std.testing.expectError(error.HomeUnavailable, check(init, allocator, "/fixture", null, &download));
     try std.testing.expectEqual(.ipv4, download.family);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -527,11 +509,9 @@ test "adopted candidate stays owned until fresh check preconditions permit consu
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
     try environ.put("HOME", home);
     try std.testing.expectError(error.InvalidReleaseEndpoint, discoverRelease(init, allocator, null, &download));
-    try std.testing.expectEqual(identity, candidate.?.archive_url.ptr);
     try environ.put("HOME", "relative");
     try std.testing.expectError(error.InvalidInstallationHome, discoverRelease(init, allocator, null, &download));
-    try std.testing.expectError(error.InvalidInstallationHome, checkDiscovered(init, allocator, home, null, &download, &candidate));
-    try std.testing.expectEqual(identity, candidate.?.archive_url.ptr);
+    try std.testing.expectError(error.InvalidInstallationHome, check(init, allocator, home, null, &download));
     try std.testing.expectEqual(.ipv4, download.family);
 }
 

@@ -21,7 +21,6 @@ gate: std.atomic.Value(enum(u8) { open, cancelled, committed }) = .init(.open),
 operation: Operation = .check,
 candidate: ?release_candidate.ReleaseCandidate = null,
 discovery_attempted: bool = false,
-discovery_adopted: bool = false,
 checked: ?upgrade.Check = null,
 result: ?upgrade.Result = null,
 cleanup: upgrade.CleanupReceipts = .{},
@@ -43,24 +42,14 @@ pub fn discovering(self: *const Self) bool {
     return self.operation == .discover;
 }
 
-pub fn retireDiscovery(self: *Self, cancelled: bool) !bool {
+/// Ends background discovery so a requested run can start. The run never
+/// takes discovery's release: it may be hours old, so the check reads the
+/// release itself. A read still in flight is stopped, not waited out.
+pub fn retireDiscovery(self: *Self) !bool {
     std.debug.assert(self.discovering() and self.started);
-    self.discovery_adopted = self.discovery_adopted or !self.finished;
-    if (cancelled) {
-        self.cancel();
-        self.cancelling = true;
-    }
+    self.cancel();
     if (!try self.advance()) return false;
-    if (cancelled or self.cancelling or (self.discovery_adopted and self.failure != null)) {
-        if (self.candidate) |*candidate| candidate.deinit(self.allocator);
-        self.candidate = null;
-        self.operation = .check;
-    } else if (self.failure != null or self.candidate == null) {
-        self.deinit();
-    } else {
-        std.debug.assert(self.checked == null and self.result == null and self.task.thread == null);
-        self.* = .{ .allocator = self.allocator, .candidate = self.candidate, .download = self.download, .discovery_attempted = true };
-    }
+    self.deinit();
     return true;
 }
 
@@ -89,7 +78,7 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (self.operation) {
         .discover => self.candidate = try upgrade.discoverRelease(self.init, self.allocator, &task.cancellation, &self.download),
-        .check => self.checked = try upgrade.checkDiscovered(self.init, self.allocator, self.store, &task.cancellation, &self.download, &self.candidate),
+        .check => self.checked = try upgrade.check(self.init, self.allocator, self.store, &task.cancellation, &self.download),
         .install => self.result = try upgrade.install(self.init, self.allocator, &self.checked.?, &task.cancellation, .{ .context = self, .report = progress }, &self.cleanup, &self.download),
     }
 }
@@ -687,7 +676,7 @@ test "background discovery domain covers version order publication failure cance
     }
 }
 
-test "discovery handoff domain retains validated candidate and transport only for its accepted attempt" {
+test "a requested run never takes discovery's release: retirement stops a read in flight and leaves a fresh job" {
     const Worker = struct {
         var release_worker: std.atomic.Value(bool) = .init(false);
         var fail: bool = false;
@@ -701,12 +690,12 @@ test "discovery handoff domain retains validated candidate and transport only fo
                 return error.ReleaseDownloadFailed;
             }
             job.candidate = try release_candidate.fromEffectiveUrl(job.allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64");
-            job.candidate.?.sha256 = @splat(7);
         }
     };
     for ([_]bool{ false, true }) |background_finished| for ([_]bool{ false, true }) |discovery_failed| for ([_]bool{ false, true }) |cancelled| {
         var init: std.process.Init = undefined;
         init.io = std.testing.io;
+        init.gpa = std.testing.allocator;
         var job: Self = .{ .init = init, .allocator = std.testing.allocator, .started = true, .operation = .discover, .discovery_attempted = true };
         defer job.deinit();
         Worker.release_worker.store(background_finished, .release);
@@ -717,35 +706,26 @@ test "discovery handoff domain retains validated candidate and transport only fo
             try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
             try std.testing.expect(try job.advance());
         } else {
-            try std.testing.expect(!try job.retireDiscovery(cancelled));
-            try std.testing.expect(job.discovering() and job.task.thread != null and job.discovery_adopted);
+            // A read in flight is asked to stop and is not adopted.
+            try std.testing.expect(!try job.retireDiscovery());
+            try std.testing.expect(job.discovering() and job.task.thread != null and job.task.cancellation.stopped.load(.acquire));
             Worker.release_worker.store(true, .release);
             try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
         }
-        const candidate_url = if (job.candidate) |candidate| candidate.archive_url.ptr else null;
-        try std.testing.expect(try job.retireDiscovery(cancelled));
-        try std.testing.expect(!job.discovering() and job.task.thread == null and job.result == null and job.checked == null);
-        if (cancelled or (!background_finished and discovery_failed)) {
-            try std.testing.expect(job.started and job.finished and job.candidate == null);
-            const ended = job.status().ended;
-            try std.testing.expectEqual(Outcome.unchanged, ended.outcome);
-            try std.testing.expectEqualDeep(if (cancelled) upgrade_status.Ended.cancelled else upgrade_status.Ended{ .failed = .download }, ended.how);
-            if (!cancelled) try std.testing.expectEqualStrings("curl fixture final", job.download.stderr.?);
-        } else if (discovery_failed) {
-            try std.testing.expect(!job.started and !job.finished and job.candidate == null);
-            try std.testing.expectEqual(.automatic, job.download.family);
-            try std.testing.expect(job.download.stderr == null);
-        } else {
-            try std.testing.expect(!job.started and !job.finished and !job.cancelling);
-            try std.testing.expectEqual(candidate_url.?, job.candidate.?.archive_url.ptr);
-            try std.testing.expectEqual(.ipv4, job.download.family);
-            try std.testing.expectEqual(@as([32]u8, @splat(7)), job.candidate.?.sha256);
-            try std.testing.expect(!job.task.cancellation.stopped.load(.acquire));
-            try std.testing.expectEqual(.open, job.gate.load(.acquire));
-        }
-        job.deinit();
-        try std.testing.expect(job.candidate == null and job.download.stderr == null and !job.started);
+        try std.testing.expect(try job.retireDiscovery());
+        // Whatever discovery found, failed with or recovered, the run starts from nothing.
+        try std.testing.expect(!job.discovering() and job.discovery_attempted and !job.started and !job.finished and !job.cancelling);
+        try std.testing.expect(job.task.thread == null and job.candidate == null and job.checked == null and job.result == null and job.failure == null);
         try std.testing.expectEqual(.automatic, job.download.family);
+        try std.testing.expect(job.download.stderr == null);
+        try std.testing.expectEqual(.open, job.gate.load(.acquire));
+        if (cancelled) {
+            // Esc during retirement: the caller cancels the fresh run, which ends without checking.
+            job.cancel();
+            try job.begin(init, "/fixture");
+            try std.testing.expect(job.finished and job.task.thread == null and job.checked == null);
+            try std.testing.expectEqualDeep(upgrade_status.Ended.cancelled, job.status().ended.how);
+        }
     };
 }
 
