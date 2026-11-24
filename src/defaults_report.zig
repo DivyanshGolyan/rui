@@ -122,7 +122,7 @@ pub fn writeJson(writer: *std.Io.Writer, facts: *const Facts) !void {
     const values = &facts.values;
     try writer.print("{{\"version\":\"{s}\",\"type\":\"defaults\",\"changed\":{},\"store\":", .{ protocol.wire_version, facts.changed });
     try std.json.Stringify.value(facts.store, .{}, writer);
-    try writer.print(",\"store_source\":\"{s}\",\"store_available\":{},\"provider\":", .{ if (facts.saved_store) "saved" else "home", facts.store_available });
+    try writer.print(",\"store_source\":\"{s}\",\"store_available\":{},\"connection\":", .{ if (facts.saved_store) "saved" else "home", facts.store_available });
     try std.json.Stringify.value(if (values.provider.len != 0) values.provider.slice() else null, .{}, writer);
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(if (values.model.len != 0) values.model.slice() else null, .{}, writer);
@@ -151,7 +151,7 @@ pub fn writeJson(writer: *std.Io.Writer, facts: *const Facts) !void {
     switch (nextSession(facts)) {
         .chooser => try writer.writeAll("{\"status\":\"choose_provider\"}"),
         .selected => |selected| {
-            try writer.print("{{\"status\":\"selected\",\"provider\":\"{s}\",\"model\":", .{selected.provider});
+            try writer.print("{{\"status\":\"selected\",\"connection\":\"{s}\",\"model\":", .{selected.provider});
             try std.json.Stringify.value(selected.model, .{}, writer);
             try writer.print(",\"local_credential\":\"{s}\"}}", .{@tagName(selected.readiness)});
         },
@@ -543,7 +543,7 @@ test "CLI-30 the defaults report is a function of its facts" {
         var json = std.Io.Writer.fixed(&json_buffer);
         try writeJson(&json, &facts);
         var json_expected_buffer: [256]u8 = undefined;
-        const json_expected = try std.fmt.bufPrint(&json_expected_buffer, "\"next_session\":{{\"status\":\"selected\",\"provider\":\"{s}\",\"model\":\"gpt-6.1-sol\",\"local_credential\":\"configured\"}}", .{name});
+        const json_expected = try std.fmt.bufPrint(&json_expected_buffer, "\"next_session\":{{\"status\":\"selected\",\"connection\":\"{s}\",\"model\":\"gpt-6.1-sol\",\"local_credential\":\"configured\"}}", .{name});
         try std.testing.expect(std.mem.indexOf(u8, json.buffered(), json_expected) != null);
     }
     {
@@ -568,11 +568,11 @@ test "CLI-30 the defaults report is a function of its facts" {
         json: []const u8,
     }{
         .{ .provider = "", .model = "", .readiness = .missing, .provider_line = "Connection: not selected\n", .next = "Next Session: choose a connection with `rui defaults configure --connection codex|openai|chatgpt`; ChatGPT login: `rui auth login chatgpt`; OpenAI key: `rui auth login openai`.\n", .json = "\"next_session\":{\"status\":\"choose_provider\"}" },
-        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .configured, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (local credential configured; remote acceptance not checked).\n", .json = "\"next_session\":{\"status\":\"selected\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"configured\"}" },
-        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .renewal_due, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (local credential usable; renewal due at dispatch; remote acceptance not checked).\n", .json = "\"next_session\":{\"status\":\"selected\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"renewal_due\"}" },
-        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .missing, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (credential missing; run `rui auth login chatgpt --device-code`. No fallback).\n", .json = "\"next_session\":{\"status\":\"selected\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"missing\"}" },
-        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .refresh_required, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (credential refresh required; login may be required. No fallback).\n", .json = "\"next_session\":{\"status\":\"selected\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"refresh_required\"}" },
-        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .credential_error, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (credential error; inspect private Rui credential or log in. No fallback).\n", .json = "\"next_session\":{\"status\":\"selected\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"credential_error\"}" },
+        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .configured, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (local credential configured; remote acceptance not checked).\n", .json = "\"next_session\":{\"status\":\"selected\",\"connection\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"configured\"}" },
+        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .renewal_due, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (local credential usable; renewal due at dispatch; remote acceptance not checked).\n", .json = "\"next_session\":{\"status\":\"selected\",\"connection\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"renewal_due\"}" },
+        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .missing, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (credential missing; run `rui auth login chatgpt --device-code`. No fallback).\n", .json = "\"next_session\":{\"status\":\"selected\",\"connection\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"missing\"}" },
+        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .refresh_required, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (credential refresh required; login may be required. No fallback).\n", .json = "\"next_session\":{\"status\":\"selected\",\"connection\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"refresh_required\"}" },
+        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .credential_error, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (credential error; inspect private Rui credential or log in. No fallback).\n", .json = "\"next_session\":{\"status\":\"selected\",\"connection\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"credential_error\"}" },
         .{ .provider = "retired", .model = "old-model", .readiness = .configured, .provider_line = "Connection: retired\n", .next = "Next Session: saved connection is unsupported; no fallback. Repair with `rui defaults configure --connection codex|openai|chatgpt --model gpt-6.1-sol`.\n", .json = "\"next_session\":{\"status\":\"unsupported_provider\"}" },
         .{ .provider = "codex", .model = "bad model", .readiness = .configured, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure --connection codex|openai|chatgpt --model gpt-6.1-sol`.\n", .json = "\"next_session\":{\"status\":\"unsupported_model\"}" },
     };
@@ -655,7 +655,7 @@ test "CLI-30 the defaults report is a function of its facts" {
     var output: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try writeJson(&writer, &wire_facts);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"defaults\",\"changed\":false,\"store\":\"/home/test/.local/share/rui/store\",\"store_source\":\"home\",\"store_available\":false,\"provider\":null,\"model\":null,\"notifications\":true,\"reasoning_effort\":null,\"permission_mode\":null,\"local_credentials\":{\"codex\":\"missing\",\"openai\":\"missing\",\"chatgpt\":\"missing\"},\"openai_key_source\":null,\"next_session\":{\"status\":\"choose_provider\"},\"host\":{\"status\":\"store_unavailable\"}}\n", writer.buffered());
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"defaults\",\"changed\":false,\"store\":\"/home/test/.local/share/rui/store\",\"store_source\":\"home\",\"store_available\":false,\"connection\":null,\"model\":null,\"notifications\":true,\"reasoning_effort\":null,\"permission_mode\":null,\"local_credentials\":{\"codex\":\"missing\",\"openai\":\"missing\",\"chatgpt\":\"missing\"},\"openai_key_source\":null,\"next_session\":{\"status\":\"choose_provider\"},\"host\":{\"status\":\"store_unavailable\"}}\n", writer.buffered());
 }
 
 test "Store overlay reports the OpenAI key source only when the Store names one" {
