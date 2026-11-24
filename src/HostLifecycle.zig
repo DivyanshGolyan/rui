@@ -110,11 +110,11 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, direc
             .observe => seen.observed = if (client.observeHostForUpgrade(allocator, io, directory, null)) |value| observed: {
                 observed = value;
                 break :observed true;
-            } else |_| false,
+            } else |err| if (err == error.OutOfMemory) return err else false,
             .snapshot => seen.snapshot = if (identity.snapshot(allocator, observed.pid)) |value| taken: {
                 snapshot = value;
                 break :taken true;
-            } else |_| false,
+            } else |err| if (err == error.OutOfMemory) return err else false,
             .version => seen.managed = if (try installedVersion(allocator, io, home, snapshot.?.executable, cancellation)) |value| managed: {
                 version = value;
                 break :managed true;
@@ -143,8 +143,7 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, direc
             },
             .confirm => seen.confirmed = if (client.observeHostForUpgrade(allocator, io, directory, null)) |confirmed|
                 sameHost(observed, confirmed) and (identity.generation(observed.pid) catch 0) == snapshot.?.started
-            else |_|
-                false,
+            else |err| if (err == error.OutOfMemory) return err else false,
         },
         .absent => return .absent,
         .unsupported => |reason| return .{ .unsupported = reason },

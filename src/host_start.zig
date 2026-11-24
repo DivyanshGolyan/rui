@@ -1587,7 +1587,7 @@ pub fn launchFailure(result: *HostLaunchResult, kind: HostLaunchResult.Cause.Kin
 
 fn launchRefusal(result: *HostLaunchResult, failure: start_report.Failure, selector: []const u8) void {
     launchFailure(result, if (failure.code == .store_schema_behind) .store_format else if (failure.code == .store_fenced) .store_identity else .child_refused, if (failure.code == .store_fenced) error.StoreIdentityMismatch else error.HostStartupFailed, selector);
-    result.outcome.failed.refusal = failure;
+    result.outcome.failed.detail = .{ .refusal = failure };
     result.outcome.failed.cause.refusal_code = failure.code;
 }
 
@@ -1849,7 +1849,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     if (typed.frozen) |bytes| {
         _ = decodeStart(init, bytes, selected, settings, &reach_failure) catch |err| {
             launchFailure(result, .child_refused, err, null);
-            result.outcome.failed.refusal = reach_failure;
+            result.outcome.failed.detail = .{ .refusal = reach_failure };
             result.outcome.failed.cause.refusal_code = reach_failure.code;
             return;
         };
@@ -1881,7 +1881,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     const request = admitted catch |err| {
         var canonical: [protocol.max_store_bytes]u8 = undefined;
         launchFailure(result, .child_refused, if (err == error.SettingsInvalid) error.HostStartupFailed else err, platform.canonicalStoreDestination(io, selected, &canonical) catch null);
-        result.outcome.failed.refusal = reach_failure;
+        result.outcome.failed.detail = .{ .refusal = reach_failure };
         result.outcome.failed.cause.refusal_code = reach_failure.code;
         return;
     };

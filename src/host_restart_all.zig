@@ -37,31 +37,43 @@ pub const Target = struct {
 };
 
 /// Replace an identified older managed Host on an ordinary detached start.
-pub fn activateOlderHostForStart(init: std.process.Init, directory: []const u8) !HostLifecycle.ActivationOutcome {
+pub fn activateOlderHostForStart(init: std.process.Init, directory: []const u8) !?HostLifecycle.ActivationOutcome {
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
     const allocator = init.gpa;
     var observation = try HostLifecycle.observe(allocator, init.io, home, directory, null);
     defer observation.deinit(allocator);
-    if (observation != .managed) return error.UnrecognizedHost;
-    const target = try Target.init(init, allocator, home, null, null);
+    switch (observation) {
+        .absent => return .not_needed,
+        .unsupported => |reason| return .{ .unsupported = reason },
+        .managed => {},
+    }
+    const target = Target.init(init, allocator, home, null, null) catch |err| switch (err) {
+        error.IneligibleInstallation => return null,
+        else => return err,
+    };
     defer target.deinit(allocator);
     const binary = try std.fmt.allocPrint(allocator, "{s}/bin/rui", .{target.build});
     defer allocator.free(binary);
     const actual = try std.Io.Dir.cwd().realPathFileAlloc(init.io, binary, allocator);
     defer allocator.free(actual);
-    if (!startTargetEligible(observation.managed.observed.foreign, observation.managed.version.order(target.version), actual, try @import("self_executable.zig").path(init.io))) return error.IneligibleStartHandover;
-    return HostLifecycle.activate(init, allocator, &observation, .same, target.build, target.version, null, null);
+    if (!activation.startHandoverEligible(observation.managed.observed.foreign, observation.managed.version.order(target.version), std.mem.eql(u8, actual, try @import("self_executable.zig").path(init.io)))) return null;
+    return try HostLifecycle.activate(init, allocator, &observation, .same, target.build, target.version, null, null);
 }
 
-fn startTargetEligible(foreign: bool, order: std.math.Order, selected: []const u8, running: []const u8) bool {
-    return foreign and order == .lt and std.mem.eql(u8, selected, running);
-}
-
-test "start handover requires an older foreign Host and this selected build" {
-    for ([_]bool{ false, true }) |foreign| for (std.enums.values(std.math.Order)) |order| for ([_]bool{ false, true }) |same| {
-        const running = if (same) "/selected/bin/rui" else "/other/bin/rui";
-        try std.testing.expectEqual(foreign and order == .lt and same, startTargetEligible(foreign, order, "/selected/bin/rui", running));
-    };
+test "SH-123 absent Store owner is not started by handover observation" {
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", root);
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
+    const result = (try activateOlderHostForStart(init, root)).?;
+    try std.testing.expectEqual(std.meta.Tag(activation.Outcome).not_needed, std.meta.activeTag(result));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "host.lock", .{}));
 }
 
 const Result = activation.Category;
@@ -331,71 +343,7 @@ fn field(writer: *std.Io.Writer, text: []const u8) !void {
     try terminal.finish(writer);
 }
 
-fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycle.ActivationOutcome, version: ?release.Version) !Result {
-    try field(writer, store);
-    try writer.writeAll(": ");
-    switch (outcome) {
-        .ready => {
-            try writer.print("restarted on 0.{d}.{d}", .{ version.?.schema, version.?.patch });
-        },
-        .client_incompatible => {
-            // The lifecycle verified a new instance and answering target
-            // release, but this client's protocol cannot read ordinary replies.
-            try writer.print("restarted on 0.{d}.{d}; different Host protocol; inspect with the selected Rui client", .{ version.?.schema, version.?.patch });
-        },
-        .already_ready => {
-            try writer.print("already on 0.{d}.{d}", .{ version.?.schema, version.?.patch });
-        },
-        .superseded => {
-            try writer.print("left running: newer than 0.{d}.{d}; no downgrade", .{ version.?.schema, version.?.patch });
-        },
-        .not_needed => {
-            try writer.writeAll("no longer running; no Host started");
-        },
-        .unsupported => |limitation| {
-            try writer.print("left running: {s}", .{switch (limitation) {
-                .inaccessible => "Store or Host is inaccessible; check access with its owning client",
-                .incompatible => "Host protocol is unsupported; use its owning client",
-                .ownership_status => "ownership is unconfirmed; do not stop a guessed Host (Host status unavailable while owned)",
-                .ownership_observation => "ownership is unconfirmed; do not stop a guessed Host (initial Host observation failed)",
-                .ownership_directory_unavailable => "ownership is unconfirmed; do not stop a guessed Host (Host directory could not be canonicalized)",
-                .ownership_directory_mismatch => "ownership is unconfirmed; do not stop a guessed Host (Host directories differ)",
-                .ownership_confirmation => "ownership is unconfirmed; do not stop a guessed Host (Host identity confirmation failed)",
-                .application_owned => "application-owned Host (including MySQL); restart through its application",
-                .configuration_unavailable => "launch configuration cannot be safely reconstructed; restart through its owner",
-                .target_capability => "target build cannot safely check a detached restart; Host left running",
-            }});
-        },
-        .replacement_observed => {
-            try writer.writeAll("failed at verifying: a replacement Host was observed; inspect with its owning client, then retry");
-        },
-        .cancelled => {
-            try writer.writeAll("failed at activation: cancelled; inspect Host status, then retry");
-        },
-        .target_unusable => |step| {
-            const doing: []const u8 = switch (step) {
-                .resolving => "resolving the target",
-                .checking => "checking the target",
-            };
-            const done: []const u8 = switch (step) {
-                .resolving => "resolved",
-                .checking => "checked",
-            };
-            try writer.print("failed at {s}: the target build could not be {s}; Host left running; check the installation, then retry", .{ doing, done });
-        },
-        .refused => |refusal| {
-            try writer.print("refused at {s}\n", .{@tagName(refusal.stage)});
-            var line: [@import("start_report.zig").max_line_bytes]u8 = undefined;
-            try writer.writeAll(@import("start_report.zig").line(&refusal.failure, &line));
-            return activation.category(outcome);
-        },
-        .failed, .unconfirmed => |stage| {
-            try writer.print("failed at {s}: {s}; inspect Host status with its owning client, then retry", .{ @tagName(stage), if (outcome == .failed) "restart failed" else "restart is unconfirmed" });
-        },
-    }
-    try writer.writeByte('\n');
-    return activation.category(outcome);
-}
+pub const writeOutcome = @import("host_activation_report.zig").writeOutcome;
 
 test "SH-50 restart all reports every activation outcome and limitation with exit truth" {
     const identity = .{ .instance = @as([16]u8, @splat(1)), .pid = @as(c_int, 42) };
@@ -419,6 +367,19 @@ test "SH-50 restart all reports every activation outcome and limitation with exi
         var expected: [1024]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "/store: {s}\n", .{case.text}), writer.buffered());
         covered.insert(std.meta.activeTag(case.outcome));
+    }
+    const without_version = [_]struct { outcome: HostLifecycle.ActivationOutcome, text: []const u8, result: Result }{
+        .{ .outcome = .{ .ready = .{ .instance = identity.instance, .pid = identity.pid } }, .text = "restarted", .result = .restarted },
+        .{ .outcome = .{ .client_incompatible = identity.pid }, .text = "restarted with a different Host protocol; inspect with the selected Rui client", .result = .restarted },
+        .{ .outcome = .{ .already_ready = .{ .instance = identity.instance, .pid = identity.pid } }, .text = "already on the selected build", .result = .current },
+        .{ .outcome = .superseded, .text = "left running: newer than the selected build; no downgrade", .result = .skipped },
+    };
+    for (without_version) |case| {
+        var bytes: [1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try std.testing.expectEqual(case.result, try writeOutcome(&writer, "", case.outcome, null));
+        var expected: [1024]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Host handover: {s}\n", .{case.text}), writer.buffered());
     }
     const limitations = [_][]const u8{
         "Store or Host is inaccessible; check access with its owning client",
@@ -456,6 +417,10 @@ test "SH-50 restart all reports every activation outcome and limitation with exi
             const reason = comptime if (tag == .failed) "restart failed" else "restart is unconfirmed";
             var expected: [1024]u8 = undefined;
             try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "/store: failed at {s}: {s}; inspect Host status with its owning client, then retry\n", .{ @tagName(stage), reason }), writer.buffered());
+            var unscoped: [1024]u8 = undefined;
+            var unscoped_writer = std.Io.Writer.fixed(&unscoped);
+            try std.testing.expectEqual(Result.failed, try writeOutcome(&unscoped_writer, "", @unionInit(HostLifecycle.ActivationOutcome, @tagName(tag), stage), null));
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Host handover: failed at {s}: {s}; inspect Host status with its owning client, then retry\n", .{ @tagName(stage), reason }), unscoped_writer.buffered());
         }
         covered.insert(tag);
     }

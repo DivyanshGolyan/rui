@@ -64,6 +64,29 @@ pub const Seen = struct {
     confirmed: ?bool = null,
 };
 
+/// An ordinary start may hand over an older foreign Host only to its own selected build.
+pub fn startHandoverEligible(foreign: bool, order: std.math.Order, selected_matches: bool) bool {
+    return foreign and order == .lt and selected_matches;
+}
+
+test "SH-121 start activation requires an older foreign Host and the selected client" {
+    const rows = [_]struct { foreign: bool, order: std.math.Order, selected: bool, eligible: bool }{
+        .{ .foreign = false, .order = .lt, .selected = false, .eligible = false },
+        .{ .foreign = false, .order = .lt, .selected = true, .eligible = false },
+        .{ .foreign = false, .order = .eq, .selected = false, .eligible = false },
+        .{ .foreign = false, .order = .eq, .selected = true, .eligible = false },
+        .{ .foreign = false, .order = .gt, .selected = false, .eligible = false },
+        .{ .foreign = false, .order = .gt, .selected = true, .eligible = false },
+        .{ .foreign = true, .order = .lt, .selected = false, .eligible = false },
+        .{ .foreign = true, .order = .lt, .selected = true, .eligible = true },
+        .{ .foreign = true, .order = .eq, .selected = false, .eligible = false },
+        .{ .foreign = true, .order = .eq, .selected = true, .eligible = false },
+        .{ .foreign = true, .order = .gt, .selected = false, .eligible = false },
+        .{ .foreign = true, .order = .gt, .selected = true, .eligible = false },
+    };
+    for (rows) |row| try std.testing.expectEqual(row.eligible, startHandoverEligible(row.foreign, row.order, row.selected));
+}
+
 /// The next fact an observation reads, or what the running Host is.
 pub const Eligibility = union(enum) {
     read: enum { status, observe, snapshot, version, environment, sources, directory, confirm },

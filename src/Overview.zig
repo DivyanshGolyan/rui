@@ -3973,7 +3973,14 @@ test "Host recovery derives launch progress from job custody without copying rea
     try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
 }
 
-test "Host recovery renders the launch result cause without confusing failure and reachability" {
+test "SUI-111 Host recovery renders the launch result cause without confusing failure and reachability" {
+    const Handover = struct {
+        fn summary(outcome: @import("host_activation.zig").Outcome) HostLaunch {
+            var result: @import("host_launch.zig").Result = .failed(.setup, error.HostRestartFailed);
+            result.outcome.failed.detail = .{ .handover = outcome };
+            return result.summary();
+        }
+    };
     const Case = struct { launch: HostLaunch, words: []const u8, retry: bool = false };
     const cases = [_]Case{
         .{ .launch = .{ .ready = {} }, .words = "" },
@@ -3984,6 +3991,11 @@ test "Host recovery renders the launch result cause without confusing failure an
         .{ .launch = .{ .failed = .{ .kind = .incompatible, .err = error.IncompatibleHost } }, .words = "different Rui version" },
         .{ .launch = .{ .failed = .{ .kind = .provider_unserved, .err = error.HostModelUnavailable } }, .words = "does not serve this provider" },
         .{ .launch = .{ .failed = .{ .kind = .store_format, .err = error.HostStartupFailed } }, .words = "needs a compatible Rui" },
+        .{ .launch = Handover.summary(.{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "invalid") } }), .words = "settings refused", .retry = true },
+        .{ .launch = Handover.summary(.{ .failed = .stopping }), .words = "stop failed", .retry = true },
+        .{ .launch = Handover.summary(.{ .unconfirmed = .awaiting_retirement }), .words = "retire unconfirmed", .retry = true },
+        .{ .launch = Handover.summary(.{ .unconfirmed = .starting }), .words = "start unconfirmed", .retry = true },
+        .{ .launch = Handover.summary(.{ .unconfirmed = .verifying }), .words = "verify unconfirmed", .retry = true },
     };
     for (cases) |case| for ([_]HostRecovery.Availability{ .ready, .stopping, .stopped }) |after| {
         errdefer std.debug.print("after={s} words={s}\n", .{ @tagName(after), case.words });

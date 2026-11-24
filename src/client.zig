@@ -720,29 +720,6 @@ fn upgradePathsWithLegacy(io: std.Io, paths: *const platform.Paths, legacy: []co
     return result;
 }
 
-test "legacy endpoint routing requires an owned Store and an absent current endpoint" {
-    const io = std.testing.io;
-    var tmp = try @import("socket_fixture.zig").Directory.init();
-    defer tmp.cleanup();
-    const root = tmp.root[0..tmp.root_len];
-    var paths = try platform.resolveClientPaths(io, root);
-    var current_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
-    const current = try tmp.address("current.sock", &current_buffer);
-    try paths.socket.set(current.path);
-    var legacy_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
-    const legacy = try tmp.address("legacy.sock", &legacy_buffer);
-    var listener = try legacy.listen(io, .{});
-    defer listener.deinit(io);
-    try std.testing.expectEqualStrings(current.path, upgradePathsWithLegacy(io, &paths, legacy.path).socket.slice());
-    var lease = try platform.StoreLease.acquire(io, root);
-    defer lease.release();
-    try std.testing.expectEqualStrings(legacy.path, upgradePathsWithLegacy(io, &paths, legacy.path).socket.slice());
-    try tmp.dir.writeFile(io, .{ .sub_path = "current.sock", .data = "not a socket" });
-    try std.testing.expectEqualStrings(current.path, upgradePathsWithLegacy(io, &paths, legacy.path).socket.slice());
-    try tmp.dir.deleteFile(io, "current.sock");
-    try std.testing.expectEqualStrings(current.path, upgradePathsWithLegacy(io, &paths, root).socket.slice());
-}
-
 pub fn hostStatusAt(io: std.Io, paths: *const platform.Paths, deadline: ?i128) protocol_reply.HostStatus {
     if (paths.kind == .mysql) return readHostInfo(io, paths, deadline);
     return switch (lockState(io, paths)) {
@@ -1331,7 +1308,7 @@ test "upgrade Host observation validates exact foreign rejection envelopes" {
     try std.testing.expect(!hostProtocolMismatch(envelope, rejected, "/store"));
 }
 
-test "upgrade Host observation reads the current wire in one exchange and refuses bad envelopes" {
+test "SH-99 upgrade Host observation reads the current wire in one exchange and refuses bad envelopes" {
     // Another wire is observed through its own executable (`host status`), which an
     // in-process fixture cannot run: that path is covered by readForeignHostStatus tests
     // and by the previous-release upgrade gate. Here every case stops at the envelope.
@@ -1346,6 +1323,8 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
         activation_current,
         activation_200,
         activation_400,
+        activation_legacy,
+        activation_legacy_shadow,
         activation_bad_rejection,
         activation_500,
         activation_503,
@@ -1365,7 +1344,7 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
     const responseWire = struct {
         fn of(mode: Mode) []const u8 {
             return switch (mode) {
-                .current, .unavailable, .activation_current => protocol.wire_version,
+                .current, .unavailable, .activation_current, .activation_legacy, .activation_legacy_shadow => protocol.wire_version,
                 else => released_wire,
             };
         }
@@ -1521,7 +1500,8 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
             const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
             phase.* = .lease;
             var lease = try platform.StoreLease.acquire(io, root);
-            defer lease.release();
+            var lease_held = true;
+            defer if (lease_held) lease.release();
             phase.* = .runtime;
             try lease.prepareForServing(false);
             const paths = lease.paths;
@@ -1530,7 +1510,15 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
                 phase.* = .listener;
                 var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
                 defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
-                var listener = try endpoint.listen(.{});
+                var legacy_buffer: [platform.max_socket_path_bytes]u8 = undefined;
+                const legacy = try platform.legacySocketForCanonical(root, &legacy_buffer);
+                var shadow = if (mode == .activation_legacy_shadow) try (try std.Io.net.UnixAddress.init(legacy)).listen(io, .{}) else null;
+                defer if (shadow) |*server| {
+                    server.deinit(io);
+                    std.Io.Dir.cwd().deleteFile(io, legacy) catch @panic("unable to remove shadow socket");
+                };
+                var listener = if (mode == .activation_legacy) try (try std.Io.net.UnixAddress.init(legacy)).listen(io, .{}) else try endpoint.listen(.{});
+                defer if (mode == .activation_legacy) std.Io.Dir.cwd().deleteFile(io, legacy) catch @panic("unable to remove legacy fixture socket");
                 defer listener.deinit(io);
                 var peer: Peer = .{ .listener = &listener, .store = paths.store_identity.slice(), .mode = mode };
                 phase.* = .peer_spawn;
@@ -1593,7 +1581,7 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
                         try std.testing.expect(reading == .incompatible);
                         try std.testing.expectEqual(std.c.getpid(), reading.incompatible);
                     },
-                    .current, .activation_current => {
+                    .current, .activation_current, .activation_legacy, .activation_legacy_shadow => {
                         const reading = try result;
                         try std.testing.expect(reading == .current);
                         const observed = reading.current;
@@ -1608,6 +1596,22 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
                 try std.testing.expectEqual(@as(usize, 1), peer.seen);
             }
             active_mode.* = null;
+            var legacy_buffer: [platform.max_socket_path_bytes]u8 = undefined;
+            const legacy = try platform.legacySocketForCanonical(root, &legacy_buffer);
+            try std.testing.expect(hostStatusAt(io, &paths, null) == .owned_unavailable);
+            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = legacy, .data = "not a socket" });
+            try std.testing.expect(hostStatusAt(io, &paths, null) == .owned_unavailable);
+            try std.Io.Dir.cwd().deleteFile(io, legacy);
+            var legacy_listener = try (try std.Io.net.UnixAddress.init(legacy)).listen(io, .{});
+            defer std.Io.Dir.cwd().deleteFile(io, legacy) catch @panic("unable to remove legacy socket");
+            defer legacy_listener.deinit(io);
+            try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(paths.socket.slice()).?);
+            defer std.Io.Dir.cwd().deleteTree(io, std.fs.path.dirname(paths.socket.slice()).?) catch @panic("unable to remove fixture endpoint");
+            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = paths.socket.slice(), .data = "not a socket" });
+            try std.testing.expect(hostStatusAt(io, &paths, null) == .owned_unavailable);
+            lease.release();
+            lease_held = false;
+            try std.testing.expect(hostStatusAt(io, &paths, null) == .unavailable);
             const expired = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - 1;
             phase.* = .expired_current;
             try std.testing.expectError(error.TransferInactive, observeHostForUpgrade(std.testing.allocator, io, root, expired));

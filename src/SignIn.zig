@@ -2209,7 +2209,7 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
             if (launch.outcome == .failed) {
                 launch.outcome.failed.store = answer.store;
                 if (case == .os_launch) launch.outcome.failed.os_error = 13;
-                if (case == .refused) launch.outcome.failed.refusal = @import("start_report.zig").Failure.init(.settings_invalid, "retained refusal body");
+                if (case == .refused) launch.outcome.failed.detail = .{ .refusal = @import("start_report.zig").Failure.init(.settings_invalid, "retained refusal body") };
             }
             const marker = "retained child transcript\n";
             @memcpy(launch.startup_bytes[0..marker.len], marker);

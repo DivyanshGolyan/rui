@@ -162,6 +162,7 @@ Unavailable and owned-but-unavailable never claim that outstanding effects have 
 
 `rui host start [--store PATH]` attaches to a ready Host without changing it.
 When bare `rui` or `host start` encounters an older, incompatible managed Host, it attempts the same authenticated activation as restart-all if the selected managed installation is the running client. It verifies the Host and its sources, checks the target, stops the exact instance and confirms replacement readiness before attaching; an unrecognized or unconfirmed owner is never stopped.
+A target check or replacement start refusal retains its typed code and message and names the checking or starting attempt. Other activation outcomes retain their stage and unexpected errors reach the caller; an ineligible handover keeps the original incompatibility report.
 Otherwise the existing starter retains one pointer-stable, wiping-owned unresolved Settings allocation and its provider intent through launch.
 The admitted allocation determines both local placement and a versioned source-only frame; counting and the complete composed bound are checked before directory creation or child launch.
 The bound includes every typed field, encoding expansion, all independently assigned presets, intent and framing, not merely one input document's limit.

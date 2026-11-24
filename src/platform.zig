@@ -647,12 +647,23 @@ test "the stop record reads asked only when present as a file, and unknown when 
     try tmp.dir.deleteFile(io, "store/" ++ stop_record_name);
 }
 
-test "socket path uses the first 16 SHA-256 bytes in lowercase hex" {
-    var buffer: [max_socket_path_bytes]u8 = undefined;
-    const path = try socketPathForCanonical("/tmp/rui-stdlib-hex", &buffer);
-    try std.testing.expect(std.mem.endsWith(u8, path, "/043ea4efef72c68973ebffcb0927e537/rui.sock"));
-    const legacy = try legacySocketForCanonical("/tmp/rui-stdlib-hex", &buffer);
-    try std.testing.expect(std.mem.endsWith(u8, legacy, "/043ea4efef72c68973ebffcb0927e537.sock"));
+test "SH-122 canonical Store paths derive current and legacy endpoints" {
+    const cases = [_]struct { canonical: []const u8, hash: []const u8 }{
+        .{ .canonical = "/tmp/rui-stdlib-hex", .hash = "043ea4efef72c68973ebffcb0927e537" },
+        .{ .canonical = "/", .hash = "8a5edab282632443219e051e4ade2d1d" },
+        .{ .canonical = "/var/tmp/Store space", .hash = "0fe33990882de5ffba8479feeb54d347" },
+    };
+    var runtime_buffer: [max_runtime_directory_bytes]u8 = undefined;
+    const runtime = try runtimeDirectory(&runtime_buffer);
+    for (cases) |case| {
+        var interface_buffer: [max_interface_directory_bytes]u8 = undefined;
+        const interface = try interfaceFor(case.canonical, &interface_buffer);
+        var expected: [max_socket_path_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{s}/{s}", .{ runtime, case.hash }), interface);
+        var legacy_buffer: [max_socket_path_bytes]u8 = undefined;
+        const legacy = try legacySocketForCanonical(case.canonical, &legacy_buffer);
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{s}/{s}.sock", .{ runtime, case.hash }), legacy);
+    }
 }
 
 test "absent destination preflight checks components but bounds canonical aliases" {
