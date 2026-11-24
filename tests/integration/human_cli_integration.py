@@ -627,8 +627,22 @@ def clipboard_paste_case(*, protocol_only=False):
 
     def reopen_fixture(master):
         capture = terminal_capture(master)
-        first_row = b"\x1b[H\x1b[1;2B\x1b[1;2B"
-        keyed_frame(master, first_row, lambda screen, x, y: (cell := capture.style("Clipboard fixture")) is not None and cell.bold)
+
+        def highlighted(label):
+            cell = capture.style(label)
+            for row, cells in zip(capture.completed.splitlines(), capture.completed_cells):
+                start = row.find("Chats")
+                if start >= 0 and "Archived" in row:
+                    ground = cells[start + len("Chats")]
+                    assert ground.data == " ", "overview tab gap was not rendered"
+                    return cell is not None and (cell.bg, cell.reverse) != (ground.bg, ground.reverse)
+            return False
+
+        if not highlighted("Clipboard fixture"):
+            if not highlighted("+ New chat"):
+                keyed_frame(master, b"\x1b[H", lambda screen, x, y: highlighted("+ New chat"))
+            keyed_frame(master, b"\x1b[1;2B", lambda screen, x, y: highlighted("Chats"))
+            keyed_frame(master, b"\x1b[1;2B", lambda screen, x, y: highlighted("Clipboard fixture"))
         return keyed_frame(master, b"\x1b[C", lambda screen, x, y: composer_ready(screen, x, y) and "Image received." in conversation_text(screen))
 
     try:
