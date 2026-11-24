@@ -189,6 +189,18 @@ class PrepushTest(unittest.TestCase):
                 self.assertNotIn("client locality", commands)
                 self.assertNotIn("tests/ci: test_client_locality.py", commands)
 
+    def test_deep_modules_allowance_runs_for_its_inputs(self):
+        for path in ("tests/ci/deep_modules.allow", "tests/ci/deep_modules_allowance.py",
+                     "tests/ci/test_deep_modules_allowance.py"):
+            with self.subTest(path=path):
+                commands = dict(prepush.checks([path], AVAILABLE, "BASE", "quick"))
+                self.assertEqual(commands["deep-modules allowance"],
+                                 [sys.executable, "-B", "tests/ci/deep_modules_allowance.py"])
+                self.assertIn("test_deep_modules_allowance.py", commands["tests/ci: test_deep_modules_allowance.py"])
+        self.assertNotIn("deep-modules allowance", self.commands(["docs/example.md"]))
+        policy = (Path(__file__).resolve().parents[2] / ".github/actions/policy/checks.sh").read_text()
+        self.assertIn(" python3 -B tests/ci/deep_modules_allowance.py\n", policy)
+
     def test_sleep_policy_selects_the_moved_owner(self):
         for path in ("src/store/creator_tests.zig", "tests/integration/host_process.py"):
             with self.subTest(path=path):

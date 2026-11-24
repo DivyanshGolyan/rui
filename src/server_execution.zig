@@ -6177,3 +6177,62 @@ test "pending compound overflow from HTTP and SSE retains original failure throu
         try std.testing.expect(fixture.host.launchAllowed());
     }
 }
+
+test "EXR-92 a Host started before its MCP server serves holds the server's new tool after a pushed list change" {
+    const Script = @import("mcp/test_server.zig");
+    const poll = @import("test_poll");
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The server answers 503 while the Host starts, then lists `beta` on the stream's acknowledgment, then pushes a
+    // change that adds `gamma`.
+    var listening: Script.Listening = .{};
+    var script: Script = .{ .reply = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n", .more = &.{
+        listOf(&.{ "alpha", "beta" }),
+        listOf(&.{ "alpha", "beta", "gamma" }),
+    }, .listening = &listening };
+    try script.start();
+    defer script.stop();
+    var url: [128]u8 = undefined;
+    var server: server_mcp_settings.Server = .{};
+    try server.name.set("docs");
+    @memcpy(server.bearer_token.bytes[0..6], "secret");
+    server.bearer_token.len = 6;
+    try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
+    const servers = [_]server_mcp_settings.Server{server};
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+
+    try owner.startup(io, &storage, null, null);
+    try std.testing.expect(storage.hostTools().host_tool_set.find("beta") == null);
+
+    const Drive = struct {
+        host: *Host,
+        storage: *store_module.Store,
+        script: *const Script,
+        listening: *const Script.Listening,
+        target: ?[]const u8,
+        fn reached(drive: *@This()) bool {
+            _ = serviceRelist(drive.host);
+            if (drive.listening.opens.load(.acquire) < 1) return false;
+            if (drive.target) |name| return drive.storage.hostTools().host_tool_set.find(name) != null;
+            return false;
+        }
+    };
+    // Startup's list failed and the stream's acknowledgment asks one more list, which lists `beta`.
+    var first: Drive = .{ .host = &host, .storage = &storage, .script = &script, .listening = &listening, .target = "beta" };
+    try poll.waitUntil(io, poll.after(io, .fromSeconds(30)), &first, Drive.reached);
+    try std.testing.expectEqual(@as(usize, 2), script.requests.load(.acquire));
+
+    // The server changes its list and pushes the notice; the next Operation's projected set holds `gamma`.
+    listening.push("data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n");
+    var second: Drive = .{ .host = &host, .storage = &storage, .script = &script, .listening = &listening, .target = "gamma" };
+    try poll.waitUntil(io, poll.after(io, .fromSeconds(30)), &second, Drive.reached);
+    try std.testing.expectEqual(@as(usize, 3), script.requests.load(.acquire));
+    listening.finish();
+}
