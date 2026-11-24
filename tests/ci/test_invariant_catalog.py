@@ -47,6 +47,10 @@ class InvariantCatalogTest(unittest.TestCase):
             for path in root.rglob(suffix):
                 for name in TEST.findall(path.read_text()):
                     tests[name].append(path.relative_to(ROOT))
+        for path in (ROOT / 'build').glob('*.patch'):
+            added = '\n'.join(line[1:] for line in path.read_text().splitlines() if line.startswith('+'))
+            for name in TEST.findall(added):
+                tests[name].append(path.relative_to(ROOT))
         for path, number, cells in catalog_rows():
             identity = cells[1]
             owner = re.search(r"`(" + re.escape(identity) + r" [^`]+)`", cells[5])

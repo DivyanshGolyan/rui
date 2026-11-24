@@ -307,11 +307,11 @@ DIRECT, GRAPH, BROAD = select_tests.DIRECT, select_tests.GRAPH, select_tests.BRO
 class SuspectRankingTest(unittest.TestCase):
     def test_a_commit_that_owns_the_target_ranks_above_one_the_graph_reaches_and_one_a_fallback_selects(self):
         batch = [
-            entry("a" * 40, "Graph (#1)", **{"xray": {"stack-frames": GRAPH}}),
-            entry("b" * 40, "Fallback (#2)", **{"yankee": {"stack-frames": BROAD}}),
-            entry("c" * 40, "Owner (#3)", **{"tests/ci/stack_frames.py": {"stack-frames": DIRECT}}),
+            entry("a" * 40, "Graph (#1)", **{"xray": {"deep-modules": GRAPH}}),
+            entry("b" * 40, "Fallback (#2)", **{"yankee": {"deep-modules": BROAD}}),
+            entry("c" * 40, "Owner (#3)", **{"tests/ci/deep_modules.allow": {"deep-modules": DIRECT}}),
         ]
-        ranked = promotion.rank(["stack-frames"], batch)
+        ranked = promotion.rank(["deep-modules"], batch)
         self.assertEqual([(suspect["sha"][0], suspect["tier"]) for suspect in ranked],
                          [("c", DIRECT), ("a", GRAPH), ("b", BROAD)])
 
@@ -339,8 +339,8 @@ class SuspectRankingTest(unittest.TestCase):
 
     def test_no_commit_selecting_the_targets_gives_no_suspects(self):
         batch = [entry("a" * 40, "Unrelated (#7)", **{"delta": {}})]
-        self.assertEqual(promotion.rank(["stack-frames"], batch), [])
-        self.assertEqual(promotion.rank(["stack-frames"], []), [])
+        self.assertEqual(promotion.rank(["deep-modules"], batch), [])
+        self.assertEqual(promotion.rank(["deep-modules"], []), [])
 
     def test_only_the_top_five_are_kept(self):
         batch = [entry(f"{number:040d}", f"Change {number} (#{number})", **{"alpha": {"t": GRAPH}})
@@ -425,10 +425,10 @@ class SuspectReportTest(unittest.TestCase):
     def test_each_suspect_line_names_its_commit_pr_tier_and_matching_files(self):
         ranked = [dict(sha=self.SHA, subject="Change the bash owner (#1692)", tier=GRAPH, log=[],
                        files=["alpha", "beta"], position=3)]
-        [line] = promotion.suspect_lines("stack-frames", ["stack-frames"], ranked, 25)
-        self.assertEqual(line, f"Promotion suspects: stack-frames: 1. {self.SHA} PR #1692, tier b (import or rule): "
+        [line] = promotion.suspect_lines("deep-modules", ["deep-modules"], ranked, 25)
+        self.assertEqual(line, f"Promotion suspects: deep-modules: 1. {self.SHA} PR #1692, tier b (import or rule): "
                                "Change the bash owner (#1692); touched alpha, beta")
-        self.assertTrue(line.startswith(promotion.SUSPECT_PREFIX + "stack-frames: "))
+        self.assertTrue(line.startswith(promotion.SUSPECT_PREFIX + "deep-modules: "))
 
     def test_a_subject_without_a_pull_request_number_says_so(self):
         self.assertIn("no PR number in the subject",
@@ -450,16 +450,16 @@ class SuspectReportTest(unittest.TestCase):
                          ["admission-debug-integration", "human-cli-integration"])
 
     def test_the_report_prints_each_failed_steps_lines_and_its_excerpt(self):
-        failed = [dict(name="stack-frames", argv=["x"], excerpt=["boom", "last line"]),
+        failed = [dict(name="deep-modules", argv=["x"], excerpt=["boom", "last line"]),
                   dict(name="rsql-table", argv=["y"])]
-        entries = [entry(self.SHA, "Change (#8)", **{"alpha": {"stack-frames": GRAPH}})]
+        entries = [entry(self.SHA, "Change (#8)", **{"alpha": {"deep-modules": GRAPH}})]
         lines = promotion.suspect_report(failed, entries)
-        self.assertEqual(lines[0], f"Promotion suspects: stack-frames: 1. {self.SHA} PR #8, tier b (import or rule): "
+        self.assertEqual(lines[0], f"Promotion suspects: deep-modules: 1. {self.SHA} PR #8, tier b (import or rule): "
                                    "Change (#8); touched alpha")
         self.assertEqual(lines[1:5], [
-            "Promotion excerpt: stack-frames: last 2 lines of the failed step's output:",
-            "Promotion excerpt: stack-frames: boom", "Promotion excerpt: stack-frames: last line",
-            "Promotion excerpt: stack-frames: end of excerpt"])
+            "Promotion excerpt: deep-modules: last 2 lines of the failed step's output:",
+            "Promotion excerpt: deep-modules: boom", "Promotion excerpt: deep-modules: last line",
+            "Promotion excerpt: deep-modules: end of excerpt"])
         self.assertEqual(lines[5], "Promotion suspects: rsql-table: none of the 1 batch commits selects rsql-table; "
                                    "read the failed step's log")
 
@@ -497,7 +497,7 @@ class RecordedExcerptTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             runner = self.runner(scratch)
             output = "\n".join([f"line {number}" for number in range(40)] + ["x" * 400])
-            steps.record_failure("stack-frames", ["zig"], output)
+            steps.record_failure("deep-modules", ["zig"], output)
             [entry_] = steps.failures(runner / "rui-failed-steps.jsonl")
         self.assertEqual(len(entry_["excerpt"]), steps.EXCERPT_LINES)
         self.assertEqual(entry_["excerpt"][-1], "x" * steps.EXCERPT_WIDTH)
@@ -512,19 +512,27 @@ class RecordedExcerptTest(unittest.TestCase):
 
 
 class BisectTargetTest(unittest.TestCase):
+    def test_host_memory_bisects_as_its_own_target(self):
+        """CI-94: a manual bisect of the memory step replays host-memory alone, through the function and the subcommand."""
+        self.assertEqual(promotion.bisect_targets("host-memory"), ["host-memory"])
+        result = subprocess.run([sys.executable, "-B", str(PROMOTION), "bisect-targets", "--step", "host-memory"],
+                                capture_output=True, text=True, cwd=select_tests.ROOT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ["host-memory"])
+
     def test_a_step_that_is_not_a_build_target_is_refused_before_any_replay(self):
         with self.assertRaises(SystemExit) as refused:
             promotion.bisect_targets("pty")
         self.assertIn("'pty' is not a build target at HEAD", str(refused.exception))
 
     def test_a_build_target_names_its_own_setup_targets(self):
-        self.assertEqual(promotion.bisect_targets("stack-frames"), ["stack-frames"])
+        self.assertEqual(promotion.bisect_targets("deep-modules"), ["deep-modules"])
 
     def test_the_bisect_targets_subcommand_prints_them_as_json(self):
-        result = subprocess.run([sys.executable, "-B", str(PROMOTION), "bisect-targets", "--step", "stack-frames"],
+        result = subprocess.run([sys.executable, "-B", str(PROMOTION), "bisect-targets", "--step", "deep-modules"],
                                 capture_output=True, text=True, cwd=select_tests.ROOT)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), ["stack-frames"])
+        self.assertEqual(json.loads(result.stdout), ["deep-modules"])
 
 
 class UnattributedTest(unittest.TestCase):
@@ -532,7 +540,7 @@ class UnattributedTest(unittest.TestCase):
         def attribute(sha):
             if sha == "b" * 40:
                 raise ValueError("unreadable tree")
-            return entry(sha, f"Change {sha[0]} (#{ord(sha[0])})", **{"alpha": {"stack-frames": GRAPH}} if sha[0] == "c" else {})
+            return entry(sha, f"Change {sha[0]} (#{ord(sha[0])})", **{"alpha": {"deep-modules": GRAPH}} if sha[0] == "c" else {})
 
         shas = ["a" * 40, "b" * 40, "c" * 40]
         note = io.StringIO()
@@ -540,21 +548,21 @@ class UnattributedTest(unittest.TestCase):
             entries = promotion.attributed(shas, attribute)
         self.assertIn("could not attribute " + "b" * 40, note.getvalue())
         self.assertEqual([item["sha"] for item in entries], shas)
-        lines = promotion.suspect_report([dict(name="stack-frames", argv=["x"])], entries)
-        self.assertEqual(lines[0], f"Promotion suspects: stack-frames: 1. {'c' * 40} PR #{ord('c')}, "
+        lines = promotion.suspect_report([dict(name="deep-modules", argv=["x"])], entries)
+        self.assertEqual(lines[0], f"Promotion suspects: deep-modules: 1. {'c' * 40} PR #{ord('c')}, "
                                    "tier b (import or rule): Change c (#99); touched alpha")
-        self.assertEqual(lines[1], f"Promotion suspects: stack-frames: 2. {'b' * 40} no PR number in the subject, "
+        self.assertEqual(lines[1], f"Promotion suspects: deep-modules: 2. {'b' * 40} no PR number in the subject, "
                                    "unattributed (the selector could not read this commit): (subject unavailable)")
 
 
 class SelectorTargetLineTest(unittest.TestCase):
     def test_a_step_that_is_not_a_build_target_says_it_is_not_a_selector_target(self):
-        entries = [entry("a" * 40, "Change (#3)", **{"alpha": {"stack-frames": GRAPH}})]
-        lines = promotion.suspect_report([dict(name="pty", argv=["x"])], entries, known={"stack-frames"})
+        entries = [entry("a" * 40, "Change (#3)", **{"alpha": {"deep-modules": GRAPH}})]
+        lines = promotion.suspect_report([dict(name="pty", argv=["x"])], entries, known={"deep-modules"})
         self.assertEqual(lines[0], "Promotion suspects: pty: not a selector target; read its log")
 
     def test_a_build_target_no_commit_reaches_still_names_the_batch(self):
-        entries = [entry("a" * 40, "Change (#3)", **{"alpha": {"stack-frames": GRAPH}})]
+        entries = [entry("a" * 40, "Change (#3)", **{"alpha": {"deep-modules": GRAPH}})]
         lines = promotion.suspect_report([dict(name="rsql-table", argv=["x"])], entries, known={"rsql-table"})
         self.assertEqual(lines[0], "Promotion suspects: rsql-table: none of the 1 batch commits selects rsql-table; "
                                    "read the failed step's log")

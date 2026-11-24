@@ -542,7 +542,11 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 ctx.redraw = true;
             }
             if (self.signInIsFirstRun()) return;
-            try self.appNext(ctx, try self.event(.{ .list_settled = .{ .wide = self.root.size.width >= Root.split_at, .focused = self.root.input.listFocused() and self.root.input.layer == .main } }));
+            try self.appNext(ctx, try self.event(.{ .list_settled = .{
+                .wide = self.root.size.width >= Root.split_at,
+                .focused = self.root.input.listFocused() and self.root.input.layer == .main,
+                .click_clock_ms = if (self.root.input.pasting) null else self.animationMs(),
+            } }));
             while (self.retired.items.len != 0 and self.retired.items[0].frame < self.root.frames) {
                 self.disposeSession(self.retired.orderedRemove(0).left);
             }
@@ -646,7 +650,7 @@ fn appScrolled(raw: *anyopaque, ctx: *vxfw.EventContext, top: u32, height: u32) 
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const upgrade_admitted = if (self.app_session) |shown| (if (shown.frontend) |frontend| frontend.admitsUpgrade() else true) else true;
-    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .upgrade_admitted = upgrade_admitted } }));
+    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .upgrade_admitted = upgrade_admitted, .at_ms = self.animationMs() } }));
     ctx.redraw = true;
 }
 
@@ -861,7 +865,10 @@ fn disposeSession(self: *Self, left: Left) void {
         inline for (.{ "scratch", "action", "inspection", "details", "parts" }) |name| @field(files, name).close(self.init.io);
         for (files.actions) |file| file.close(self.init.io);
     }
-    if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
+    if (left.frontend) |frontend| {
+        frontend.input.deinit();
+        self.init.gpa.destroy(frontend);
+    }
 }
 
 fn finishApp(self: *Self, ended: anyerror!void) !?Relaunch {
@@ -929,14 +936,24 @@ noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerro
 fn makeRelaunch(self: *Self, left: ?Left) !Relaunch {
     const gpa = self.init.gpa;
     if (left) |held| if (held.frontend) |frontend| {
-        try self.session_drafts.put(gpa, &held.session, frontend.input.snapshot());
+        try self.session_drafts.putDraft(gpa, &held.session, frontend.input.snapshot(), frontend.input.image());
     };
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const temporary = arena.allocator();
     var entries: std.ArrayList(handoff.Entry) = .empty;
-    defer entries.deinit(gpa);
     var drafts = self.session_drafts.iterator();
-    while (drafts.next()) |entry| try entries.append(gpa, .{ .id = entry.id, .snapshot = entry.snapshot });
+    const encoder = std.base64.standard.Encoder;
+    var version: u8 = 1;
+    while (drafts.next()) |entry| {
+        const encoded = if (entry.image) |image| blk: {
+            version = 2;
+            break :blk encoder.encode(try temporary.alloc(u8, encoder.calcSize(image.bytes.len)), image.bytes);
+        } else null;
+        try entries.append(temporary, .{ .id = entry.id, .snapshot = entry.snapshot, .image_base64 = encoded });
+    }
     const bytes = try handoff.encode(gpa, .{
-        .v = 1,
+        .v = version,
         .store = self.options.store,
         .open = if (left) |*held| &held.session else null,
         .overview = .{ .bytes = "", .cursor = 0 },
@@ -953,7 +970,17 @@ fn makeRelaunch(self: *Self, left: ?Left) !Relaunch {
 fn restoreRelaunch(self: *Self) !void {
     const value = self.options.restoration orelse return;
     self.options.restoration = null;
-    for (value.drafts) |entry| try self.session_drafts.put(self.init.gpa, entry.id, entry.snapshot);
+    for (value.drafts) |entry| {
+        const image = if (entry.image_base64) |encoded| image: {
+            const decoder = std.base64.standard.Decoder;
+            const bytes = try std.heap.page_allocator.alloc(u8, try decoder.calcSizeForSlice(encoded));
+            errdefer std.heap.page_allocator.free(bytes);
+            try decoder.decode(bytes, encoded);
+            break :image try @import("SessionInput.zig").Image.validate(bytes);
+        } else null;
+        defer if (image) |attachment| attachment.deinit();
+        try self.session_drafts.putDraft(self.init.gpa, entry.id, entry.snapshot, image);
+    }
     if (value.open) |id| self.options.open = id[0..session_id.bytes].*;
 }
 
@@ -1288,6 +1315,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
 }
 
 fn destroy(self: *Self) void {
+    self.root.deinitClipboard();
     self.sign_in.deinit();
     self.session_drafts.deinit(self.init.gpa);
     std.debug.assert(self.worker.thread == null);
@@ -4587,7 +4615,7 @@ test "overview Archived window effect runs one job and its reply becomes the win
     try std.testing.expectEqual(@as(u64, 3), Seen.now.line.position);
 }
 
-test "overview archive effects preserve server filter, pending visibility, and restore intent" {
+test "overview archive effects preserve server filter, pending visibility, and restore intent (SUI-25)" {
     const Listing = struct {
         var archive_state: protocol.SessionArchiveState = .active;
         fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
@@ -4644,8 +4672,8 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
     try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[C\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    // Roster deltas ask for changed archived Sessions too (the window takes them); the window itself is a read.
-    try std.testing.expectEqual(protocol.SessionArchiveFilter.all, Seen.now.archive_filter);
+    // Active deltas carry archived changes; the separate window reads archived Sessions.
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
     _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .stopped, .input = .unarchive } });
     try std.testing.expect(try rig.settle() == null);
@@ -4660,7 +4688,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
     try std.testing.expect(try rig.press("\x1b") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(protocol.SessionArchiveFilter.all, Seen.now.archive_filter);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
 }
 
@@ -7243,6 +7271,8 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .shift_tab = &.{ "\x1b[Z", "\x1b[9;2u" },
     .shift_up = &.{ "\x1b[1;2A", "\x1b[1;2:1A" },
     .shift_down = &.{ "\x1b[1;2B", "\x1b[1;2:1B" },
+    .alt_left = &.{ "\x1b[1;3D", "\x1b[1;3:1D" },
+    .alt_right = &.{ "\x1b[1;3C", "\x1b[1;3:1C" },
     .page_up = &.{ "\x1b[5~", "\x1b[5;1~", "\x1b[5;2~" },
     .page_down = &.{ "\x1b[6~", "\x1b[6;1~", "\x1b[6;2~" },
     .home = &.{ "\x1b[H", "\x1bOH", "\x1b[1~", "\x1b[7~", "\x1b[1;1H" },

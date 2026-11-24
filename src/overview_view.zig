@@ -115,6 +115,8 @@ pub const Action = enum {
     stop,
     archive,
     open_session,
+    collapse_tree,
+    expand_tree,
     next_question,
 };
 
@@ -141,6 +143,8 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .shift_tab = null,
     .shift_up = .select_previous,
     .shift_down = .select_next,
+    .alt_left = .collapse_tree,
+    .alt_right = .expand_tree,
     .page_up = null,
     .page_down = null,
     .home = .first,
@@ -391,9 +395,17 @@ const ViewRows = struct { first: Reference, last: Reference };
 /// The order indices a window must keep, first through end (exclusive).
 const Focus = struct { first: usize, end: usize };
 
+const ParentClick = struct {
+    reference: Reference,
+    deadline_ms: u64,
+    released: bool = false,
+
+    const interval_ms = 300;
+};
+
 pub const Event = union(enum) {
     input: InputDelivery,
-    list_settled: struct { wide: bool, focused: bool },
+    list_settled: struct { wide: bool, focused: bool, click_clock_ms: ?u64 = null },
     list_presence: struct { at_ms: u64, pointer_over: bool },
     /// The pointer after a press, over the drawn target under it: a left drag, its release, or a move with no
     /// button held. Lists report it wherever the press landed (see `Carry`).
@@ -439,7 +451,7 @@ pub const Event = union(enum) {
     observed: Observed,
     conversation: ?Reference,
 
-    clicked: struct { target: Click, upgrade_admitted: bool = true },
+    clicked: struct { target: Click, upgrade_admitted: bool = true, at_ms: ?u64 = null },
 
     unconfirmed: Unconfirmed,
 };
@@ -463,7 +475,7 @@ pub const Pointer = struct { over: ?Click, phase: enum { held, released, free } 
 /// does; the drag starts once a held pointer leaves that row. Any other release, any press or move with no button
 /// held anywhere on screen (Root reports those as `free`), a key or another click ends it.
 pub const Carry = struct {
-    /// The row the last press opened, until that press ends.
+    /// The row receiving the primary press, until that press ends.
     pressed: ?Reference = null,
     /// The pressed row's drag has left it.
     carrying: bool = false,
@@ -916,6 +928,7 @@ pub const State = struct {
     nodes: Vec(Node) = .{},
     scratch: Vec(u32) = .{},
     folded: Vec(Reference) = .{},
+    parent_click: ?ParentClick = null,
     pin_end: usize = 0,
     ordered_refs: Vec(Reference) = .{},
     full_order: Vec(u32) = .{},
@@ -962,6 +975,47 @@ pub const State = struct {
         self.menu_revision += 1;
         self.menu.deinit(self.gpa);
         self.menu_read = .unread;
+    }
+
+    fn parentPress(self: *State, candidate: ?Reference, at_ms: ?u64) enum { open, wait, toggle } {
+        const pending = self.parent_click;
+        self.cancelParentClick();
+        const reference = candidate orelse return .open;
+        const now = at_ms orelse return .open;
+        if (pending) |prior| {
+            if (prior.released and now < prior.deadline_ms and std.mem.eql(u8, &prior.reference, &reference)) return .toggle;
+        }
+        self.parent_click = .{ .reference = reference, .deadline_ms = now +| ParentClick.interval_ms };
+        return .wait;
+    }
+
+    fn parentPressHeld(self: *const State) bool {
+        const pending = self.parent_click orelse return false;
+        return !pending.released;
+    }
+
+    fn cancelParentClick(self: *State) void {
+        self.parent_click = null;
+    }
+
+    fn releaseParentClick(self: *State, over: ?Reference) void {
+        if (self.parent_click) |*pending| {
+            if (over != null and std.mem.eql(u8, &over.?, &pending.reference)) {
+                pending.released = true;
+            } else self.cancelParentClick();
+        }
+    }
+
+    fn readyParentClick(self: *State, focused: bool, at_ms: ?u64) ?Reference {
+        if (!focused) {
+            self.cancelParentClick();
+            return null;
+        }
+        const pending = self.parent_click orelse return null;
+        const now = at_ms orelse return null;
+        if (!pending.released or now < pending.deadline_ms) return null;
+        self.cancelParentClick();
+        return pending.reference;
     }
 
     pub fn deinit(self: *State) void {
@@ -1442,7 +1496,8 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .input => |input| {
-            endCarry(state);
+            // Ignored keys must not discard the held parent press before its matching release arrives.
+            if (!state.parentPressHeld() or (!input.pasted and input.key != .ignored)) endCarry(state);
             if (input.list_origin and !input.pasted and !input.under and input.key != .ignored) {
                 const was_held = holding(state);
                 state.now_ms = @max(state.now_ms, input.at_ms orelse state.now_ms);
@@ -1453,6 +1508,7 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
             try listInput(state, input, &effects);
         },
         .viewport => |span| {
+            state.cancelParentClick();
             state.viewport = viewportRows(state, span);
             try archivedReads(state, &effects);
         },
@@ -1463,6 +1519,10 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
             if (was_held and !holding(state)) try releaseOrder(state);
         },
         .list_settled => |frame| {
+            if (state.readyParentClick(frame.focused, frame.click_clock_ms)) |reference| {
+                state.presentation_revision +%= 1;
+                try clickOpen(state, reference, &effects);
+            }
             const pending = state.browse_pending;
             state.browse_pending = false;
             if (pending and frame.wide and frame.focused) {
@@ -1491,11 +1551,27 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
         .clicked => |input| {
             state.launch = .done;
             endCarry(state);
+            const candidate = if (!state.creating() and input.target == .open) input.target.open else null;
+            const parent = if (candidate) |reference|
+                if (position(state, reference) != null and foldable(state, reference)) reference else null
+            else
+                null;
+            const gesture = state.parentPress(parent, input.at_ms);
             if (!state.creating()) switch (input.target) {
                 .open => |reference| {
                     // Only an admitted press can carry its row: while a chat is being created, clicks are refused.
                     state.carry.pressed = reference;
-                    try clickOpen(state, reference, &effects);
+                    switch (gesture) {
+                        .open => try clickOpen(state, reference, &effects),
+                        .wait, .toggle => {
+                            state.browse_pending = false;
+                            state.selected = .{ .session = reference };
+                            if (gesture == .toggle) {
+                                endCarry(state);
+                                try foldSelected(state, !isFolded(state, reference));
+                            }
+                        },
+                    }
                 },
                 .pin => |request| pinIntent(state, request, &effects),
                 .new_session => {
@@ -1802,7 +1878,8 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
         state.listing_wanted = true;
         state.next_list_ms = now_ms + list_interval_ms;
         state.walk_since = state.token != null;
-        effects.add(.{ .list = .{ .since = state.token, .archive = if (state.token == null) .active else .all } });
+        // Active deltas still carry archived change seeds, while their creator rollups follow active membership.
+        effects.add(.{ .list = .{ .since = state.token, .archive = .active } });
         if (state.menu.loading()) askModels(state, effects);
     }
 }
@@ -2518,11 +2595,15 @@ fn isFolded(state: *const State, reference: Reference) bool {
     return false;
 }
 
+fn foldable(state: *const State, reference: Reference) bool {
+    const index = lookup(state.by_reference.items, reference) orelse return false;
+    return index < state.nodes.items.len and state.nodes.items[index].descendants != 0;
+}
+
 fn foldSelected(state: *State, folded: bool) error{OutOfMemory}!void {
     if (state.selected != .session) return;
     const reference = state.selected.session;
-    const index = lookup(state.by_reference.items, reference) orelse return;
-    if (index >= state.nodes.items.len or state.nodes.items[index].descendants == 0) return;
+    if (!foldable(state, reference)) return;
     for (state.folded.items, 0..) |known, at| {
         if (!std.mem.eql(u8, &known, &reference)) continue;
         if (folded) return;
@@ -2684,6 +2765,7 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         return;
     }
     if (delivery.under or state.creating()) return;
+    state.cancelParentClick();
     const before = state.selected;
     switch (input) {
         .ignored => unreachable,
@@ -2693,17 +2775,19 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         },
         .left => if (state.selected == .archived) {
             state.selected = .sessions;
-        } else if (state.selected == .session) try foldSelected(state, true),
+        },
         .action => |action| switch (action) {
             .exit => unreachable,
             .open_session => {
                 state.browse_pending = false;
                 switch (state.selected) {
-                    .session => try foldSelected(state, false),
+                    .session => try activateList(state, .open_session, effects),
                     .sessions => state.selected = .archived,
                     .new_session, .archived, .settings => {},
                 }
             },
+            .collapse_tree => try foldSelected(state, true),
+            .expand_tree => try foldSelected(state, false),
             .clear => {
                 state.notice = null;
                 if (state.archive == .archived) try changeArchiveView(state, .active, effects);
@@ -2845,12 +2929,17 @@ fn carryPointer(state: *State, pointer: Pointer, effects: *Effects) error{OutOfM
         if (!state.carry.carrying) {
             // A drag still inside the pressed row is a click that wobbled.
             if (pointer.over != null and pointer.over.? == .open and std.mem.eql(u8, &pointer.over.?.open, &pressed)) return;
+            state.cancelParentClick();
             state.carry.carrying = true;
         }
         state.carry.over = pointer.over;
         if (!std.meta.eql(before, state.carry)) state.presentation_revision +%= 1;
         return;
     }
+    if (pointer.phase == .released) {
+        const over = if (pointer.over != null and pointer.over.? == .open) pointer.over.?.open else null;
+        state.releaseParentClick(over);
+    } else state.cancelParentClick();
     const dropped = pointer.phase == .released and state.carry.carrying and blk: {
         state.carry.over = pointer.over;
         break :blk state.carry.dropping(state);
@@ -3613,25 +3702,36 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
         .spin => "",
         .held => |word| word,
     };
-    const age_cells = @min(built.measure(age), width -| 3);
+    const title_floor: usize = 24;
+    // Leave room for a two-cell title grapheme and an ellipsis.
+    const useful_title_cells: usize = 3;
+    const mark_and_gap: usize = 2;
+    const inset: usize = 1;
+    const row_width: usize = width;
     const folded = isFolded(state, row.reference) and node.descendants != 0;
     const normal_hidden = if (folded) try std.fmt.allocPrint(arena, " {s} {d}", .{ if (caps.unicode) "▸" else ">", node.descendants }) else "";
     const normal_attention = if (folded and node.attention != 0) try std.fmt.allocPrint(arena, " {s} {d} ?", .{ if (caps.unicode) "·" else ".", node.attention }) else "";
-    const compact = folded and @as(usize, width) < 2 + 24 + built.measure(normal_hidden) + built.measure(normal_attention) + @intFromBool(age_cells != 0) + age_cells;
-    const hidden = if (compact) try std.fmt.allocPrint(arena, "{s}{d}", .{ if (caps.unicode) "▸" else ">", node.descendants }) else normal_hidden;
-    const attention_badge = if (compact and node.attention != 0) try std.fmt.allocPrint(arena, "{s}{d}?", .{ if (caps.unicode) "·" else ".", node.attention }) else normal_attention;
     const archived = if (row.archive_state == .archived and state.archive != .archived)
         if (caps.unicode) " · archived" else " . archived"
     else
         "";
-    const suffix_cells = built.measure(hidden) + built.measure(attention_badge) + built.measure(archived);
-    const age_gap: usize = @intFromBool(age_cells != 0);
-    const tight = folded and @as(usize, width) < 1 + 2 + 24 + suffix_cells + age_gap + age_cells + 1;
-    const end: usize = @as(usize, width) -| @as(usize, @intFromBool(!tight));
-    const name_end = end -| age_cells -| age_gap;
-    const origin: usize = if (tight and name_end -| 2 -| suffix_cells < 25) 0 else 1;
-    const depth_budget = (name_end -| origin -| 2 -| suffix_cells -| 24) / 2;
+    const normal_badge_cells = built.measure(normal_hidden) + built.measure(normal_attention);
+    const archived_cells = built.measure(archived);
+    const normal_suffix_cells = normal_badge_cells + archived_cells;
+    // Budget guides against the spaced badges, so gaining room can never cost a guide.
+    const depth_budget = (row_width -| (2 * inset + mark_and_gap + title_floor + normal_suffix_cells)) / 2;
     const depth: usize = @min(node.depth, depth_budget);
+
+    // Folded rows keep room for an ordinary age where possible. The fixed budgets
+    // retain spaced badges at 40 cells and allow compact badges and 999d at 36.
+    const compact = folded and row_width < mark_and_gap + title_floor + normal_badge_cells + 4;
+    const hidden = if (compact) try std.fmt.allocPrint(arena, "{s}{d}", .{ if (caps.unicode) "▸" else ">", node.descendants }) else normal_hidden;
+    const attention_badge = if (compact and node.attention != 0) try std.fmt.allocPrint(arena, "{s}{d}?", .{ if (caps.unicode) "·" else ".", node.attention }) else normal_attention;
+    const hidden_cells = built.measure(hidden);
+    const attention_cells = built.measure(attention_badge);
+    const tight = folded and row_width < 2 * inset + mark_and_gap + title_floor + archived_cells + hidden_cells + attention_cells + 5;
+    const end = row_width -| (if (tight) @as(usize, 0) else inset);
+    const origin = if (tight and end < inset + mark_and_gap + title_floor + normal_suffix_cells) 0 else inset;
     if (depth != 0) {
         const path = try arena.alloc(u32, depth);
         var current: u32 = index;
@@ -3667,17 +3767,35 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
         .attention => Colour.attention,
     } else rule.colour;
     _ = try built.put(mark_at, glyph, 1, .{ .colour = colour, .background = background, .dim = quiet });
-    const start_name = mark_at + 2;
-    const room = name_end -| start_name;
-    const name_room = room -| @min(room, suffix_cells);
-    const selected = rowSelected(state, row);
+    const start_name = mark_at + mark_and_gap;
+    const room = end -| start_name;
     const named = title(state, row).text;
     const name = if (row.archive_state == .archiving) try std.fmt.allocPrint(arena, "[Archiving] {s}", .{named}) else named;
+    const Suffix = struct { text: []const u8, cells: usize, colour: Colour = .quiet };
+    var suffixes = [_]Suffix{
+        .{ .text = archived, .cells = archived_cells },
+        .{ .text = hidden, .cells = hidden_cells },
+        .{ .text = attention_badge, .cells = attention_cells, .colour = .attention },
+    };
+    // On very narrow rows leave space for the title and omit badges whole.
+    var suffix_cells: usize = 0;
+    for (&suffixes) |*suffix| {
+        if (suffix.cells > room -| useful_title_cells -| suffix_cells) suffix.cells = 0;
+        suffix_cells += suffix.cells;
+    }
+    const age_cells = built.measure(age);
+    const age_room = room -| (suffix_cells + age_cells + 1);
+    const show_age = age_cells != 0 and room > suffix_cells + age_cells and
+        (age_room >= useful_title_cells or age_room >= built.measure(name));
+    const name_room = if (show_age) age_room else room -| suffix_cells;
+    const selected = rowSelected(state, row);
     const used = try built.put(start_name, name, name_room, .{ .colour = if (selected) .strong else .normal, .background = background, .bold = selected, .dim = quiet });
-    const archived_cells = try built.put(start_name + used, archived, room -| used, .{ .colour = .quiet, .background = background, .dim = quiet });
-    const hidden_cells = try built.put(start_name + used + archived_cells, hidden, room -| used -| archived_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
-    _ = try built.put(start_name + used + archived_cells + hidden_cells, attention_badge, room -| used -| archived_cells -| hidden_cells, .{ .colour = .attention, .background = background });
-    _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
+    var suffix_at = start_name + used;
+    for (suffixes) |suffix| {
+        if (suffix.cells == 0) continue;
+        suffix_at += try built.put(suffix_at, suffix.text, suffix.cells, .{ .colour = suffix.colour, .background = background, .dim = quiet and suffix.colour != .attention });
+    }
+    if (show_age) _ = try built.put(end - age_cells, age, age_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
     return segmentsOf(arena, try built.finish(), width, .{ .background = background, .dim = quiet });
 }
 
@@ -4228,9 +4346,9 @@ test "SUI-100 creator tree uses served subtree facts and disjoint nested pins" {
     });
     defer state.deinit();
     _ = try step(&state, .{ .clicked = .{ .target = .{ .open = "b4n8wd".* } } });
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     _ = try step(&state, .{ .clicked = .{ .target = .{ .open = "a1b2c3".* } } });
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     const text = try screenText(&state, 140, 24, .{});
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "Pinned ▸ 1") != null);
@@ -4257,7 +4375,7 @@ fn creatorSnapshotCase() !void {
     _ = try step(&state, .{ .conversation = "b4n8wd".* });
     _ = try step(&state, .{ .observed = .{ .reference = "b4n8wd".*, .read_version = testToken(3), .work = fixtureWork(.{ .state = .{ .working = ago(1) } }), .opening = false } });
     _ = try step(&state, .{ .clicked = .{ .target = .{ .open = "a1b2c3".* } } });
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     const text = try screenText(&state, 140, 24, .{ .depth = .none });
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "Root ▸ 1") != null);
@@ -4270,7 +4388,7 @@ fn creatorPagesCase() !void {
     var state = try opened(&.{root});
     defer state.deinit();
     _ = try step(&state, .{ .clicked = .{ .target = .{ .open = root.reference } } });
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
     root.read_version = testToken(2);
     root.descendant_count = 2;
@@ -4298,6 +4416,7 @@ fn creatorPagesCase() !void {
 
 test "SUI-101 creator tree folding and expansion" {
     try creatorFoldCase();
+    try creatorClickCase();
     try creatorHiddenOpenCase();
 }
 
@@ -4316,6 +4435,7 @@ test "SUI-103 creator tree attention representatives" {
 
 test "SUI-104 creator tree width and badges" {
     try creatorWidthCase();
+    try creatorActivityWidthCase();
     try creatorSidebarCase();
 }
 
@@ -4375,10 +4495,83 @@ fn creatorFoldCase() !void {
     });
     defer state.deinit();
     state.selected = .{ .session = "a1b2c3".* };
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     try expectOrder(&state, &.{"A"});
-    _ = try press(&state, .open_session);
+    const right_effects = try press(&state, .open_session);
+    try expectEffects(&.{ .{ .open = "a1b2c3".* }, .list_models }, right_effects);
+    try expectOrder(&state, &.{"A"});
+    try expectEffects(&.{}, try press(&state, .expand_tree));
     try expectOrder(&state, &.{ "A", "Child" });
+}
+
+fn creatorClickCase() !void {
+    const parent: Reference = "a1b2c3".*;
+    const child: Reference = "b4n8wd".*;
+    const target: Click = .{ .open = parent };
+    const press_parent = Event{ .clicked = .{ .target = target, .at_ms = 100 } };
+    const release_parent = Event{ .pointer = .{ .phase = .released, .over = target } };
+    const last_before_deadline = 100 + ParentClick.interval_ms - 1;
+    const deadline = last_before_deadline + 1;
+    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { single, double, childless, focus_left, drag, ignored, paste, navigation, held_single, held_paste, late_drag, release_elsewhere })) |gesture| {
+        var state = try opened(&.{
+            session(&parent, .{ .working = ago(10) }, .{ .label = "Parent", .descendant_count = 1 }),
+            session(&child, .{ .finished = ago(1) }, .{ .label = "Child", .creator = parent }),
+        });
+        defer state.deinit();
+        if (gesture == .childless) {
+            try expectEffects(&.{ .{ .open = child }, .list_models }, try step(&state, .{ .clicked = .{ .target = .{ .open = child }, .at_ms = 100 } }));
+            continue;
+        }
+        try expectEffects(&.{}, try step(&state, press_parent));
+        try expectOrder(&state, &.{ "Parent", "Child" });
+        const after_deadline: Event = .{ .list_settled = .{ .wide = wide, .focused = true, .click_clock_ms = deadline + 1 } };
+        switch (gesture) {
+            .held_single, .held_paste, .late_drag, .release_elsewhere => {
+                try expectEffects(&.{}, try step(&state, after_deadline));
+                switch (gesture) {
+                    .held_single, .held_paste => {
+                        const ignored = if (gesture == .held_paste) InputDelivery{ .key = .enter, .pasted = true } else InputDelivery{ .key = .ignored };
+                        try expectEffects(&.{}, try step(&state, .{ .input = ignored }));
+                        try expectEffects(&.{}, try step(&state, release_parent));
+                        try expectEffects(&.{ .{ .open = parent }, .list_models }, try step(&state, after_deadline));
+                    },
+                    .late_drag => {
+                        try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .phase = .held, .over = .archived } }));
+                        try expectEffects(&.{.{ .archive = .{ .reference = parent, .archived = true } }}, try step(&state, .{ .pointer = .{ .phase = .released, .over = .archived } }));
+                    },
+                    .release_elsewhere => try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .phase = .free, .over = null } })),
+                    else => unreachable,
+                }
+                try expectEffects(&.{}, try step(&state, after_deadline));
+                continue;
+            },
+            else => {},
+        }
+        if (gesture == .drag) {
+            _ = try step(&state, .{ .pointer = .{ .phase = .held, .over = .archived } });
+        } else {
+            try expectEffects(&.{}, try step(&state, release_parent));
+        }
+        switch (gesture) {
+            .ignored => try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .ignored } })),
+            .paste => try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter, .pasted = true } })),
+            .navigation => try expectEffects(&.{}, try press(&state, .select_next)),
+            else => {},
+        }
+        try expectEffects(&.{}, try step(&state, .{ .list_settled = .{ .wide = wide, .focused = gesture != .focus_left, .click_clock_ms = last_before_deadline } }));
+        if (gesture == .double) {
+            try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = target, .at_ms = last_before_deadline } }));
+            try expectOrder(&state, &.{"Parent"});
+            try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = target, .at_ms = deadline } }));
+            try expectEffects(&.{}, try step(&state, release_parent));
+            try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = target, .at_ms = deadline + 1 } }));
+            try expectOrder(&state, &.{ "Parent", "Child" });
+        }
+        if (gesture == .paste) try expectEffects(&.{}, try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } }));
+        const settled = try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true, .click_clock_ms = deadline + 1 } });
+        const open_parent = gesture == .single or gesture == .ignored or gesture == .paste;
+        try expectEffects(if (open_parent) &.{ .{ .open = parent }, .list_models } else &.{}, settled);
+    };
 }
 
 fn creatorHiddenOpenCase() !void {
@@ -4391,7 +4584,7 @@ fn creatorHiddenOpenCase() !void {
     defer state.deinit();
     try expectOrder(&state, &.{ "A", "Child", "B" });
     state.selected = .{ .session = "a1b2c3".* };
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     try expectOrder(&state, &.{ "A", "B" });
     _ = try step(&state, .{ .conversation = "b4n8wd".* });
     state.selected = .{ .session = "b4n8wd".* };
@@ -4479,7 +4672,7 @@ fn creatorAttentionCase() !void {
     });
     defer state.deinit();
     state.selected = .{ .session = "a1b2c3".* };
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     const index = lookup(state.by_reference.items, "a1b2c3".*).?;
     try std.testing.expectEqual(@as(u64, 2), state.nodes.items[index].descendants);
     try std.testing.expectEqual(@as(u64, 1), state.nodes.items[index].attention);
@@ -4511,7 +4704,7 @@ fn creatorEdgeCase() !void {
     });
     defer state.deinit();
     state.selected = .{ .session = "a1b2c3".* };
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     try std.testing.expectEqual(@as(usize, 0), edgeAttention(&state, .below, 0, 1));
     try std.testing.expectEqual(@as(usize, 1), edgeAttention(&state, .above, 1, 2));
 }
@@ -5443,19 +5636,30 @@ test "a click that names a Session gone from the list since it was drawn changes
     try expectSelected(&state, &selected);
 }
 
+test "SUI-130 Active roster walks commit one complete listing at a time" {
+    try activeRosterPaging();
+    try activeRosterDuplicates();
+    try activeRosterRetry();
+    try activeRosterFullFallback();
+}
+
 fn expectEachOnce(state: *const State, expected: []const []const u8) !void {
-    try std.testing.expectEqual(expected.len, state.rows.items.len);
-    try std.testing.expectEqual(expected.len, state.order.items.len);
-    try std.testing.expectEqual(expected.len, state.by_reference.items.len);
+    try std.testing.expectEqual(expected.len, Lines.count(state));
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
     for (expected) |ref| {
         var seen: usize = 0;
-        for (state.order.items) |at| seen += @intFromBool(std.mem.eql(u8, ref, &state.rows.items[at].reference));
+        for (0..Lines.count(state)) |at| {
+            const line = (try Lines.at(arena.allocator(), state, at, 80, .{}, 0)).?;
+            if (line.target) |target| if (target == .open and std.mem.eql(u8, ref, &target.open)) {
+                seen += 1;
+            };
+        }
         try std.testing.expectEqual(@as(usize, 1), seen);
-        try std.testing.expectEqualStrings(ref, &state.find(ref[0..6].*).?.reference);
     }
 }
 
-test "merging list pages keeps each Session once" {
+fn activeRosterPaging() !void {
     const a = session("aaaaaa", .{ .working = ago(10) }, .{ .label = "A" });
     const b = session("bbbbbb", .{ .working = ago(20) }, .{ .label = "B" });
     const c = session("cccccc", .{ .working = ago(30) }, .{ .label = "C" });
@@ -5471,7 +5675,7 @@ test "merging list pages keeps each Session once" {
     var nine: [9]Listed = undefined;
     for (&nine, 0..) |*row, n| row.* = session(&[6]u8{ 'e', 'e', 'e', 'e', 'e', '0' + @as(u8, @intCast(n)) }, .{ .idle = ago(n) }, .{ .label = "E" });
     var asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
-    try expectEffects(&.{.{ .list = .{ .since = testToken(2), .archive = .all } }}, asked);
+    try expectEffects(&.{.{ .list = .{ .since = testToken(2), .archive = .active } }}, asked);
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = nine[0..8], .answer = null } } });
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc", "dddddd" });
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{ a, b, c, nine[0] }, .restarts = true, .answer = null } } });
@@ -5483,7 +5687,7 @@ test "merging list pages keeps each Session once" {
     try std.testing.expectEqual(testToken(6), state.token.?);
 
     asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
-    try expectEffects(&.{.{ .list = .{ .since = testToken(6), .archive = .all } }}, asked);
+    try expectEffects(&.{.{ .list = .{ .since = testToken(6), .archive = .active } }}, asked);
     _ = try respond(&state, .not_modified, testToken(6), &.{});
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc", "eeeee0", "eeeee8" });
 
@@ -5492,7 +5696,7 @@ test "merging list pages keeps each Session once" {
     try std.testing.expect(state.find("aaaaaa".*).?.state == .finished);
 }
 
-test "a Session listed twice keeps its later row, whatever the order" {
+fn activeRosterDuplicates() !void {
     const a = session("aaaaaa", .{ .working = ago(10) }, .{ .label = "A" });
     const b = session("bbbbbb", .{ .working = ago(20) }, .{ .label = "B" });
     const c = session("cccccc", .{ .working = ago(30) }, .{ .label = "C" });
@@ -5500,7 +5704,13 @@ test "a Session listed twice keeps its later row, whatever the order" {
     defer state.deinit();
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc" });
     try std.testing.expect(state.find("bbbbbb".*).?.state == .finished);
-    try std.testing.expectEqualStrings("C", state.find("cccccc".*).?.label.?.slice());
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const at = lineOfReference(&state, "cccccc".*) orelse return error.MissingRosterRow;
+    const drawn = (try Lines.at(arena.allocator(), &state, at, 80, .{}, 0)).?;
+    try std.testing.expect(for (drawn.segments) |segment| {
+        if (std.mem.eql(u8, segment.text, "C")) break true;
+    } else false);
     for (0..3) |_| {
         if (std.mem.eql(u8, &state.selected.session, "cccccc")) break;
         _ = try press(&state, .next);
@@ -5510,7 +5720,7 @@ test "a Session listed twice keeps its later row, whatever the order" {
 
     var rows: [10]Listed = undefined;
     for (&rows, 0..) |*row, n| row.* = session(&[6]u8{ 'r', 'r', 'r', 'r', 'r', '0' + @as(u8, @intCast(n)) }, .{ .idle = ago(n) }, .{ .label = "R" });
-    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, try step(&state, .{ .tick = state.now_ms + list_interval_ms }));
+    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .active } }}, try step(&state, .{ .tick = state.now_ms + list_interval_ms }));
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = rows[0..8], .answer = null } } });
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = rows[0..8], .answer = null } } });
     const restart = try step(&state, .{ .list = .{ .page = .{ .rows = rows[8..], .answer = .{ .delta = .full, .since = testToken(2) } } } });
@@ -5542,17 +5752,17 @@ test "the overview says when it next needs a tick" {
     try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), state.wakeAt());
 }
 
-test "the overview lists once a second, one listing at a time" {
+fn activeRosterRetry() !void {
     var state = try testState();
     defer state.deinit();
     const start = test_now_s * 1000;
     try expectEffects(&.{.{ .list = .{ .since = null, .archive = .active } }}, try step(&state, .{ .tick = start }));
     try expectEffects(&.{}, try step(&state, .{ .tick = start + 2 * list_interval_ms }));
     _ = try respond(&state, .full, testToken(1), &mixed);
-    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, try step(&state, .{ .tick = start + 2 * list_interval_ms }));
+    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .active } }}, try step(&state, .{ .tick = start + 2 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .tick = start + 2 * list_interval_ms + 500 }));
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
-    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, try step(&state, .{ .tick = start + 3 * list_interval_ms }));
+    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .active } }}, try step(&state, .{ .tick = start + 3 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
     try expectScreenLine(&state, 0, " + New chat");
     var screen = try Frame.of(&state, 80, 24, .{}, 0);
@@ -6789,13 +6999,13 @@ test "an archived delta refreshes the window from the Host and is never synthesi
     try expectWindowMatchesHost(&state, &newer);
 }
 
-test "a since walk answered full re-walks only live Sessions" {
+fn activeRosterFullFallback() !void {
     const live = session("aaaaaa", .{ .idle = ago(1) }, .{ .label = "kept" });
     const archived = session("bbbbbb", .{ .stopped = .{ .since = test_now_s - 9, .cause = .stop } }, .{ .label = "archived", .archive_state = .archived, .archive_seq = 9 });
     var state = try opened(&.{live});
     defer state.deinit();
     const asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
-    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, asked);
+    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .active } }}, asked);
 
     // The Host answers the since walk in full, with an archived row in its page. The walk is dropped unrouted.
     const walked = try answerWalk(&state, .full, testToken(2), &.{archived});
@@ -7485,7 +7695,7 @@ test "shared model reads are admitted by core openings and deduplicated across f
         try expectEffects(&.{ show, .list_models }, try openModelConsumer(&state, opening));
         try expectEffects(&.{show}, try openModelConsumer(&state, opening));
         try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .pending }}) } }));
-        try expectEffects(&.{ .{ .list = .{ .since = testToken(1), .archive = .all } }, .list_models }, try step(&state, .{ .tick = state.next_list_ms }));
+        try expectEffects(&.{ .{ .list = .{ .since = testToken(1), .archive = .active } }, .list_models }, try step(&state, .{ .tick = state.next_list_ms }));
         try expectEffects(&.{show}, try openModelConsumer(&state, opening));
         try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "model-a\n" } } }}) } }));
         try std.testing.expect(!state.asking_models and !state.menu.loading());
@@ -7519,7 +7729,7 @@ test "shared model reads respect every Upgrade hold for opening and loading retr
         try std.testing.expectEqual(wanted, state.asking_models);
         try expectEffects(&.{.open_settings}, try step(&state, .{ .clicked = .{ .target = .settings } }));
         const ticked = try step(&state, .{ .tick = state.next_list_ms });
-        try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, ticked);
+        try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .active } }}, ticked);
         if (hold == .reobserving) {
             _ = try respond(&state, .full, testToken(2), &.{});
             try std.testing.expect(!state.holdsHost());
@@ -8258,7 +8468,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
                 try std.testing.expectEqual(before_requests, state.request_count);
                 switch (action) {
                     .exit => unreachable,
-                    .open_session => {
+                    .open_session, .collapse_tree, .expand_tree => {
                         try std.testing.expect(std.meta.eql(before_notice, state.notice));
                         try std.testing.expectEqual(Selection.new_session, state.selected);
                     },
@@ -8282,7 +8492,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
 }
 
 test "Overview list activation resumes same or opens other chat at wide and narrow widths" {
-    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |same| for ([_]Input{.enter}) |key| {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |same| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| {
         var state = try opened(&mixed);
         defer state.deinit();
         _ = try step(&state, .{ .resized = .{ .width = width, .height = 30 } });
@@ -8362,7 +8572,7 @@ test "Overview browse settles only the last wide list move and never activates c
 }
 
 test "Overview browse explicit Enter and Right share activation and focus departure cancels settle" {
-    for ([_]bool{ false, true }) |wide| for ([_]Input{.enter}) |key| for ([_]Selection{ .new_session, .settings, .{ .session = "b2c3d4".* }, .{ .session = "g7h8j9".* } }) |selection| {
+    for ([_]bool{ false, true }) |wide| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| for ([_]Selection{ .new_session, .settings, .{ .session = "b2c3d4".* }, .{ .session = "g7h8j9".* } }) |selection| {
         var state = try opened(&mixed);
         defer state.deinit();
         _ = try step(&state, .{ .conversation = "b2c3d4".* });
@@ -9415,33 +9625,128 @@ test "launch admission belongs to bare app startup" {
 
 fn creatorWidthCase() !void {
     const name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    for ([_]u64{ 60, 18 * 3600, 24 * 3600 }) |age| for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 40, 46, 140 }) |width| {
+    for ([_]struct { seconds: u64, text: []const u8 }{
+        .{ .seconds = 60, .text = "1m" },
+        .{ .seconds = 18 * 3600, .text = "18h" },
+        .{ .seconds = 24 * 3600, .text = "1d" },
+    }) |age| for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 5, 8, 30, 32, 36, 40, 46, 140 }) |width| {
         var state = try opened(&.{
-            session("a1b2c3", .{ .working = ago(age) }, .{ .label = "Ancestor" }),
-            session("b4n8wd", .{ .finished = ago(age) }, .{ .label = name, .creator = "a1b2c3".*, .descendant_count = 2, .descendant_needs_you_count = 1 }),
+            session("a1b2c3", .{ .working = ago(age.seconds) }, .{ .label = "Ancestor" }),
+            session("b4n8wd", .{ .finished = ago(age.seconds) }, .{ .label = name, .creator = "a1b2c3".*, .descendant_count = 2, .descendant_needs_you_count = 1 }),
             session("c3d4e5", .{ .approval = ago(1) }, .{ .label = "Question", .creator = "b4n8wd".* }),
             session("d4e5f6", .{ .working = ago(2) }, .{ .label = "Other", .creator = "b4n8wd".* }),
         });
         defer state.deinit();
         state.selected = .{ .session = "b4n8wd".* };
-        _ = try step(&state, .{ .input = .{ .key = .left } });
+        _ = try press(&state, .collapse_tree);
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const text = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 1, width, .{ .unicode = use_unicode }, 0));
-        try std.testing.expect(std.mem.indexOf(u8, text, name[0..23]) != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "▸ 2" else "> 2") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "· 1 ?" else ". 1 ?") != null);
+        const row = (try Lines.at(arena.allocator(), &state, 1, width, .{ .unicode = use_unicode }, 0)).?;
+        try std.testing.expectEqualStrings("b4n8wd", &row.target.?.open);
+        const text = try segmentText(arena.allocator(), row.segments);
+        const expected_badges = switch (width) {
+            5 => "",
+            8 => if (use_unicode) "▸2" else ">2",
+            30, 32, 36 => if (use_unicode) "▸2·1?" else ">2.1?",
+            else => if (use_unicode) "▸ 2 · 1 ?" else "> 2 . 1 ?",
+        };
+        const badge_at = std.mem.indexOf(u8, text, if (use_unicode) "▸" else ">");
+        if (expected_badges.len == 0) {
+            try std.testing.expectEqual(@as(?usize, null), badge_at);
+        } else {
+            try std.testing.expect(std.mem.startsWith(u8, text[badge_at.?..], expected_badges));
+        }
+        if (width <= 8) try std.testing.expect(std.mem.indexOfScalar(u8, text, '?') == null);
+        if (width >= 30) try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, text, " "), age.text));
+        const minimum_title: usize = switch (width) {
+            5, 8 => 2,
+            30 => 18,
+            32, 40 => 20,
+            else => 23,
+        };
+        try std.testing.expect(std.mem.indexOf(u8, text, name[0..minimum_title]) != null);
+    };
+}
+
+fn creatorActivityWidthCase() !void {
+    const root = session("a1b2c3", .{ .finished = ago(8) }, .{ .label = "Root" });
+    const first = session("b4n8wd", .{ .finished = ago(7) }, .{ .label = "First", .creator = root.reference });
+    const second = session("c3d4e5", .{ .finished = ago(6) }, .{ .label = "Second", .creator = first.reference });
+    const changes = [_]struct { work: WorkState, age: []const u8, ascii_age: ?[]const u8 = null }{
+        .{ .work = .{ .pending = ago(5) }, .age = "now" },
+        .{ .work = .{ .working = ago(4) }, .age = "", .ascii_age = "working" },
+        .{ .work = .{ .finished = ago(60) }, .age = "1m" },
+        .{ .work = .{ .finished = ago(999 * 86400) }, .age = "999d" },
+        .{ .work = .{ .stopping = ago(1) }, .age = "stopping" },
+    };
+    const widths = [_]struct { width: u16, direct_col: u16, deep_col: u16 }{
+        .{ .width = 20, .direct_col = 3, .deep_col = 3 },
+        .{ .width = 29, .direct_col = 3, .deep_col = 3 },
+        .{ .width = 30, .direct_col = 5, .deep_col = 5 },
+        .{ .width = 32, .direct_col = 5, .deep_col = 7 },
+        .{ .width = 36, .direct_col = 5, .deep_col = 9 },
+        .{ .width = 140, .direct_col = 5, .deep_col = 9 },
+    };
+    const Placement = enum { alone, direct, deep };
+    for ([_]bool{ false, true }) |use_unicode| for (std.enums.values(Placement)) |placement| for ([_][]const u8{
+        "Leaf café",
+        "Leaf ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    }) |name| {
+        const options: TestSession = .{ .label = name, .creator = switch (placement) {
+            .alone => null,
+            .direct => root.reference,
+            .deep => second.reference,
+        } };
+        const leaf = session("d4e5f6", changes[0].work, options);
+        const rows = [_]Listed{ leaf, root, first, second };
+        const leaf_at: usize = switch (placement) {
+            .alone => 0,
+            .direct => 1,
+            .deep => 3,
+        };
+        var state = try opened(rows[0 .. leaf_at + 1]);
+        defer state.deinit();
+        for (changes, 0..) |change, generation| {
+            if (generation != 0) _ = try refresh(&state, .changed, testToken(1 + generation), &.{session("d4e5f6", change.work, options)});
+            for (widths) |size| {
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const row = (try Lines.at(arena.allocator(), &state, leaf_at, size.width, .{ .unicode = use_unicode }, 0)).?;
+                try std.testing.expectEqualStrings("d4e5f6", &row.target.?.open);
+                const text = try segmentText(arena.allocator(), row.segments);
+                const name_start = std.mem.indexOf(u8, text, "Leaf").?;
+                const expected_col: u16 = switch (placement) {
+                    .alone => 3,
+                    .direct => size.direct_col,
+                    .deep => size.deep_col,
+                };
+                const prefix = text[0..name_start];
+                try std.testing.expectEqual(expected_col, gwidth.gwidth(prefix, .unicode));
+                try std.testing.expectEqual(use_unicode and expected_col > 3, std.mem.indexOf(u8, prefix, "╰") != null);
+                const trimmed_row = std.mem.trimEnd(u8, text, " ");
+                const age_text = if (use_unicode) change.age else change.ascii_age orelse change.age;
+                if (age_text.len == 0) {
+                    try std.testing.expect(row.spins);
+                    try std.testing.expect(!std.mem.endsWith(u8, trimmed_row, " working"));
+                } else {
+                    try std.testing.expect(std.mem.endsWith(u8, trimmed_row, age_text));
+                }
+                if (size.width >= 29 and std.mem.eql(u8, name, "Leaf café")) {
+                    const shown = if (use_unicode) name else "Leaf caf?";
+                    try std.testing.expect(std.mem.startsWith(u8, text[name_start..], shown));
+                }
+            }
+        }
     };
 }
 
 fn creatorSidebarCase() !void {
     const name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    const width: u16 = 36;
-    for ([_]bool{ false, true }) |use_unicode| {
+    for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 36, 37, 38 }) |width| {
         var state = try opened(&.{session("a1b2c3", .{ .finished = ago(999 * 86400) }, .{ .label = name, .descendant_count = 2, .descendant_needs_you_count = 1 })});
         defer state.deinit();
         state.selected = .{ .session = "a1b2c3".* };
-        _ = try step(&state, .{ .input = .{ .key = .left } });
+        _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const line = (try Lines.at(arena.allocator(), &state, 0, width, .{ .unicode = use_unicode }, 0)).?;
@@ -9450,7 +9755,7 @@ fn creatorSidebarCase() !void {
         try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "W…" else "W.") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "▸2·1?" else ">2.1?") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "999d") != null);
-    }
+    };
 }
 
 fn creatorPresentationCase() !void {
@@ -9466,7 +9771,7 @@ fn creatorPresentationCase() !void {
     try std.testing.expect(state.presentation_revision != unchanged);
     const nesting = state.presentation_revision;
     state.selected = .{ .session = a.reference };
-    _ = try step(&state, .{ .input = .{ .key = .left, .at_ms = state.now_ms } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree }, .at_ms = state.now_ms } });
     try std.testing.expect(state.presentation_revision != nesting);
     const collapsed = state.presentation_revision;
     _ = try refresh(&state, .full, testToken(4), &.{ a, b });

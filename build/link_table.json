@@ -1,5 +1,5 @@
 {
-  "inputs": "4317480898d3942d81a290d24a55b5da",
+  "inputs": "3c26c14e49102118559e826eac9fd48e",
   "targets": {
     "activity-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "admission-debug-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
@@ -32,6 +32,7 @@
     "dispatch-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "host-allocator-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "host-launch-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
+    "host-memory": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "host-status-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "host-stop-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "human-cli-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
@@ -63,7 +64,6 @@
     "session-list-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "settings-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "skills-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
-    "stack-frames": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "terminal-restoration-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "test": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "test-full": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
@@ -73,6 +73,7 @@
     "test-native": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "test-pg": ["nghttp2", "openssl", "translate_c"],
     "test-store": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
+    "test-vaxis-overlay": ["vaxis"],
     "transport-h2-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "ts-client": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "typecheck-macos": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],

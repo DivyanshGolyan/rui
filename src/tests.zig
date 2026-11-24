@@ -3,6 +3,8 @@ test {
     _ = @import("child_exit_wake.zig");
     _ = @import("InputCapture.zig");
     _ = @import("image_intake.zig");
+    _ = @import("clipboard_paste.zig");
+    _ = @import("os/clipboard_image.zig");
     _ = @import("image_file_source.zig");
     _ = @import("read_image_arguments.zig");
     _ = @import("os/read_image_file.zig");

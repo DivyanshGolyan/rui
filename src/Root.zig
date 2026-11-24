@@ -6,6 +6,8 @@ const AppSettings = @import("app_settings.zig");
 const Dialog = @import("Dialog.zig");
 const TerminalApp = @import("TerminalApp.zig");
 const app_input = @import("app_input.zig");
+const clipboard_paste = @import("clipboard_paste.zig");
+const Input = @import("SessionInput.zig");
 const Self = @This();
 const FocusRect = struct { row: i32, col: i32, width: i32, height: i32 };
 
@@ -33,13 +35,26 @@ pub const FocusOwner = struct {
     /// Live event custody; unlike the candidate order this is not draw state.
     modal: ?*const fn (*anyopaque) bool = null,
     candidates: *const fn (*anyopaque, *[std.enums.values(app_input.Target).len]Candidate) Projection,
+    clipboard: ?struct {
+        target: *const fn (*anyopaque) ?Input.Insertion,
+        paste: *const fn (*anyopaque, *vxfw.EventContext, ClipboardData) anyerror!void,
+    } = null,
 };
+
+pub const ClipboardData = union(enum) { text: []const u8, image: []u8, local_image, failure: clipboard_paste.Failure };
 
 /// The composed main screen ends its presentation when Root changes panes.
 pub const MainPresentation = struct {
     context: *anyopaque,
     close: *const fn (*anyopaque) void,
 };
+clipboard: clipboard_paste.Transaction = .{},
+clipboard_target: ?Input.Insertion = null,
+clipboard_epoch: u64 = 0,
+clipboard_supported: bool = false,
+clipboard_enabled: bool = false,
+clipboard_deadline: ?i96 = null,
+
 main_presentation: ?MainPresentation = null,
 presentation_hold: ?struct { context: *anyopaque, held: *const fn (*anyopaque, u16) bool } = null,
 /// Told of every press, every move with no button held and every release no widget took. vxfw has no pointer
@@ -65,6 +80,74 @@ sign_in: ?vxfw.Widget = null,
 input: app_input.State = .{},
 frames: u64 = 0,
 size: vxfw.Size = .{},
+
+pub fn deinitClipboard(self: *Self) void {
+    self.clipboard.deinit(std.heap.page_allocator);
+}
+
+fn syncClipboard(self: *Self, ctx: *vxfw.EventContext) !void {
+    const target = if (self.clipboard_supported and self.session != null and self.input.layer == .main and self.input.mainFocused() and self.input.field == .input and !self.input.pasting)
+        if (self.session_focus) |owner| if (owner.clipboard) |clipboard| clipboard.target(owner.context) else null else null
+    else
+        null;
+    if (!std.meta.eql(target, self.clipboard_target)) {
+        self.clipboard_target = target;
+        self.clipboard_epoch +%= 1;
+        self.clipboard.abort(std.heap.page_allocator);
+    }
+    const enabled = target != null;
+    if (enabled != self.clipboard_enabled) {
+        try ctx.addCmd(.{ .clipboard_mode = enabled });
+        self.clipboard_enabled = enabled;
+    }
+}
+
+fn clipboardFrame(self: *Self, ctx: *vxfw.EventContext, payload: []const u8) !void {
+    try self.syncClipboard(ctx);
+    const allocator = std.heap.page_allocator;
+    const received = self.clipboard.receive(allocator, payload, self.clipboard_epoch);
+    self.clipboard_deadline = if (self.clipboard.pending()) std.Io.Clock.awake.now(ctx.io).nanoseconds + 5 * std.time.ns_per_s else null;
+    if (received) |effect| try self.clipboardEffect(ctx, effect);
+}
+
+fn clipboardEffect(self: *Self, ctx: *vxfw.EventContext, effect: clipboard_paste.Effect) !void {
+    const allocator = std.heap.page_allocator;
+    switch (effect) {
+        .read => |request| {
+            if (!self.clipboard_enabled) {
+                self.clipboard.abort(allocator);
+                return;
+            }
+            try ctx.addCmd(.{ .clipboard_output = vxfw.ClipboardOutput.init(request.bytes()) });
+        },
+        .text => |text| {
+            defer allocator.free(text.bytes);
+            if (self.clipboard_enabled and text.epoch == self.clipboard_epoch) {
+                const owner = self.session_focus.?;
+                try owner.clipboard.?.paste(owner.context, ctx, .{ .text = text.bytes });
+            }
+        },
+        .image => |image| {
+            if (self.clipboard_enabled and image.epoch == self.clipboard_epoch) {
+                const owner = self.session_focus.?;
+                try owner.clipboard.?.paste(owner.context, ctx, .{ .image = image.bytes });
+            } else allocator.free(image.bytes);
+        },
+        .failure => |failure| {
+            if (self.clipboard_enabled and failure.epoch == self.clipboard_epoch) {
+                const owner = self.session_focus.?;
+                try owner.clipboard.?.paste(owner.context, ctx, .{ .failure = failure.reason });
+            }
+        },
+        .local_image => |epoch| {
+            if (self.clipboard_enabled and epoch == self.clipboard_epoch) {
+                const owner = self.session_focus.?;
+                try owner.clipboard.?.paste(owner.context, ctx, .local_image);
+            }
+        },
+    }
+    try self.syncClipboard(ctx);
+}
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .captureHandler = capture, .eventHandler = event, .drawFn = draw };
@@ -139,6 +222,7 @@ fn navigate(self: *Self, ctx: *vxfw.EventContext, request: app_input.Input) !voi
     const effects = app_input.step(&self.input, self.facts(null), request);
     std.debug.assert(effects.route == .pass);
     try self.apply(ctx, effects, null);
+    try self.syncClipboard(ctx);
 }
 
 fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
@@ -253,11 +337,18 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
         };
     }
     try self.apply(ctx, app_input.step(&self.input, input_facts, input), routed);
+    try self.syncClipboard(ctx);
 }
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
+        .clipboard_protocol => |supported| {
+            self.clipboard_supported = supported;
+            try self.syncClipboard(ctx);
+        },
+        .osc_5522 => |payload| try self.clipboardFrame(ctx, payload),
+        .osc_5522_invalid => self.clipboard.invalidFrame(std.heap.page_allocator),
         .mouse => |mouse| if (mouse.type == .release) if (self.pointer_free) |hook| try hook.free(hook.context, ctx),
         .init => {
             try ctx.requestFocus(self.overview);
@@ -292,7 +383,14 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             }
             if (ctx.quit) return;
             if (self.sign_in) |page| try page.handleEvent(ctx, .tick);
-            if (!ctx.quit) try ctx.tick(16, self.widget());
+            if (!ctx.quit) {
+                try self.syncClipboard(ctx);
+                if (self.clipboard_deadline) |deadline| if (std.Io.Clock.awake.now(ctx.io).nanoseconds >= deadline) {
+                    self.clipboard_deadline = null;
+                    if (self.clipboard.expire(std.heap.page_allocator, self.clipboard_epoch)) |effect| try self.clipboardEffect(ctx, effect);
+                };
+                try ctx.tick(16, self.widget());
+            }
         },
         else => {},
     }
@@ -360,6 +458,82 @@ fn appendFocus(self: *Self, candidate: Candidate) void {
     self.focus_frame.append(candidate.target);
 }
 
+fn expectDividerUnchanged(split_frame: vxfw.Surface) !void {
+    const divider = split_frame.children[1].surface;
+    for (divider.buffer) |cell| {
+        try std.testing.expectEqualStrings("┆", cell.char.grapheme);
+        try std.testing.expect(cell.style.eql(@import("widgets/Stitch.zig").cell(true, .vertical, .{}).style));
+    }
+}
+
+test "SUI-4 split pane focus dims only the inactive chat or sidebar" {
+    const Pane = struct {
+        glyph: []const u8,
+
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .drawFn = drawPane };
+        }
+        fn drawPane(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
+            @memset(surface.buffer, .{ .char = .{ .grapheme = self.glyph, .width = 1 }, .style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } }, .bg = .{ .rgb = .{ 0, 0, 0 } } } });
+            return surface;
+        }
+    };
+    var overview: Pane = .{ .glyph = "o" };
+    var list: Pane = .{ .glyph = "l" };
+    var chat: Pane = .{ .glyph = "c" };
+    try std.testing.expect(!overview.widget().eql(list.widget()));
+    try std.testing.expect(!list.widget().eql(chat.widget()));
+    try std.testing.expect(!overview.widget().eql(chat.widget()));
+    var root: Self = .{ .overview = overview.widget(), .list = list.widget(), .session = chat.widget() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const drawAt = struct {
+        fn run(root_: *Self, arena_: std.mem.Allocator, width: u16, height: u16) !vxfw.Surface {
+            return root_.widget().draw(.{ .arena = arena_, .cell_arena = arena_, .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        }
+    }.run;
+
+    root.input.area = .main;
+    var frame = try drawAt(&root, arena.allocator(), 140, 26);
+    var split_frame = frame.children[0].surface;
+    try expectDividerUnchanged(split_frame);
+    try std.testing.expectEqual(@as(u8, 209), split_frame.children[0].surface.buffer[0].style.fg.rgb[0]);
+    try std.testing.expectEqual(@as(u8, 255), split_frame.children[2].surface.buffer[0].style.fg.rgb[0]);
+    root.input.area = .list;
+    frame = try drawAt(&root, arena.allocator(), 140, 26);
+    split_frame = frame.children[0].surface;
+    try expectDividerUnchanged(split_frame);
+    try std.testing.expectEqual(@as(u8, 255), split_frame.children[0].surface.buffer[0].style.fg.rgb[0]);
+    try std.testing.expectEqual(@as(u8, 209), split_frame.children[2].surface.buffer[0].style.fg.rgb[0]);
+    root.input.area = .settings_row;
+    frame = try drawAt(&root, arena.allocator(), 140, 26);
+    split_frame = frame.children[0].surface;
+    try expectDividerUnchanged(split_frame);
+    try std.testing.expectEqual(@as(u8, 209), split_frame.children[2].surface.buffer[0].style.fg.rgb[0]);
+    for ([_]app_input.Target{ .back, .model, .effort, .info, .latest, .details, .needs, .stop }) |target| {
+        root.input.area = .{ .button = target };
+        frame = try drawAt(&root, arena.allocator(), 140, 26);
+        split_frame = frame.children[0].surface;
+        try expectDividerUnchanged(split_frame);
+        try std.testing.expectEqual(@as(u8, 209), split_frame.children[0].surface.buffer[0].style.fg.rgb[0]);
+        try std.testing.expectEqual(@as(u8, 255), split_frame.children[2].surface.buffer[0].style.fg.rgb[0]);
+    }
+
+    root.input.area = .main;
+    frame = try drawAt(&root, arena.allocator(), 46, 26);
+    try std.testing.expect(frame.children[0].surface.widget.eql(chat.widget()));
+    try std.testing.expectEqual(@as(u8, 255), frame.children[0].surface.buffer[0].style.fg.rgb[0]);
+
+    root.input.layer = .settings;
+    frame = try drawAt(&root, arena.allocator(), 140, 26);
+    try std.testing.expectEqual(@as(usize, 2), frame.children.len);
+    const backdrop = @import("widget_style.zig").backdrop(root.appCaps());
+    for (frame.children[0].surface.buffer) |cell| try std.testing.expect(cell.style.eql(backdrop));
+    try std.testing.expect(containsWidget(frame.children[1].surface, root.settings_page.widget()));
+}
+
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
@@ -398,6 +572,16 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         };
         break :split try split.widget().draw(main_ctx);
     } else try pane.draw(main_ctx);
+    if (layout.split and !covering) {
+        const inactive = switch (self.input.area) {
+            .list, .settings_row => self.session.?,
+            .main, .button => self.list,
+        };
+        for (child.children) |pane_surface| if (pane_surface.surface.widget.eql(inactive)) {
+            @import("widget_style.zig").dimSurface(pane_surface.surface, self.appCaps().depth == .none);
+            break;
+        };
+    }
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child, @import("widget_style.zig").backdrop(self.appCaps()), self.backgroundWidget()) else child };
     self.projectFocus(child, layout);
     if (covering) {
