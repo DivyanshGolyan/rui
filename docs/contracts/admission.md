@@ -36,7 +36,7 @@ A supplied `--session ID` selects only an existing canonical ID.
 Unknown IDs reject as `unknown_session`, presented as `no session k7m2qx in this Store`, without creating a Session or admitting Message work.
 Noncanonical references, including old UUID and NUL-bearing references, reject rather than normalize.
 
-Configure, creating Messages, `start_agent` and connect-time presets use one plain camelCase agent spec: `workspace`, `provider`, `model`, `instructions`, `tools`, `loadedTools`, `permissionMode`, `outputSchema`, `compactAt`, `outputReservation`, `effort`, `label` and `appTools`.
+Configure, creating Messages, `start_agent` and connect-time presets use one plain camelCase agent spec: `workspace`, `connection`, `model`, `instructions`, `tools`, `loadedTools`, `permissionMode`, `outputSchema`, `compactAt`, `outputReservation`, `effort`, `label` and `appTools`.
 An absent member keeps the current value on an update; on creation the Host resolves omitted settings. A direct value sets the setting; explicit null requests the Host default for effort and compactAt and clears other nullable settings.
 Token policies are JSON integers and tool lists normalize into byte order with no duplicate names.
 `instructions` is a text string; `outputSchema` is a JSON object or `null`, as in the shipped `start_agent` and presets.
@@ -46,16 +46,16 @@ Only the parser's internal metadata uses an empty array as the out-of-band schem
 The CLI refuses a malformed schema file before capture publication, since malformed JSON cannot be an object in the plain spec.
 Schema bytes are compact JSON with normalized string escapes, preserving member order and number spelling as the shipped object serializer did; configuration identity hashes these parsed bytes, not the request's whitespace or spelling of string escapes.
 A creation configuration requires an exact nonempty model; null or an empty model is invalid. The supplied model remains the binding. The Host resolves omitted effort, `compactAt`, tools, loaded tools and Permission Mode using the product defaults and model capabilities. An explicit empty tools list means no tools.
-The agent spec also accepts instructions, output schema and label; provider defaults to the Host's single served provider, and a Host serving several has no default, so a creation must name one (D133, D221).
-A creation that lacks a model, a Workspace (standalone, without a parent) or a provider the Host cannot default is refused once with code `missing_settings` and a `missing` list naming every one it lacks, in the order model, workspace, provider ([#937](https://github.com/DivyanshGolyan/rui/issues/937)). `required_settings.zig` alone decides the set for configure, creating Messages and `start_agent`; the Store saves it beside the code (format 89) and a replay returns the same list. A Skills reload carrying any setting, preset or `require_model` is refused with `settings_on_reload`.
+The agent spec also accepts instructions, output schema and label; `connection` defaults to the Host's single served connection, and a Host serving several has no default, so a creation must name one (D133, D221). A named built-in connection is accepted even when this Host does not serve it; a name that is neither served nor built in is refused with `connection_unserved`.
+A creation that lacks a model, a Workspace (standalone, without a parent) or a connection the Host cannot default is refused once with code `missing_settings` and a `missing` list naming every one it lacks, in the order model, workspace, connection ([#937](https://github.com/DivyanshGolyan/rui/issues/937)). `required_settings.zig` alone decides the set for configure, creating Messages and `start_agent`; the Store saves it beside the code (format 89) and a replay returns the same list. A Skills reload carrying any setting, preset or `require_model` is refused with `settings_on_reload`.
 A standalone creation carries the caller’s Workspace, including when its tools do not include Bash; a child inherits its parent’s Workspace. A supplied Workspace is checked before creation. Enabling Bash later runs it in the saved Workspace, which a later configure cannot change.
-Creation atomically establishes Session, baseline, Workspace bookkeeping, access scope and request answer. An accepted configure creation or creating Message answer saves a `configuration` object with `provider`, `model`, nullable `reasoning_effort`, `workspace`, `tools`, `loaded_tools`, `permission_mode` and nullable decimal-string `compaction_trigger` with the admission; same-key replay returns it unchanged after later revisions or restart, with bounded work independent of Session history. Addressed configure and ordinary Message answers do not include creation configuration.
+Creation atomically establishes Session, baseline, Workspace bookkeeping, access scope and request answer. An accepted configure creation or creating Message answer saves a `configuration` object with `connection`, `model`, nullable `reasoning_effort`, `workspace`, `tools`, `loaded_tools`, `permission_mode` and nullable decimal-string `compaction_trigger` with the admission; same-key replay returns it unchanged after later revisions or restart, with bounded work independent of Session history. Addressed configure and ordinary Message answers do not include creation configuration.
 The creation spec may carry personal saved effort and Permission Mode in its `preferences` object, separate from explicit setting members. The Host applies them only to omitted creation settings: a supported saved effort wins over the model default, and a saved Permission Mode applies when valid and within parent authority. An unsupported saved effort or invalid or parent-widening saved permission falls back to the Host default, which remains subject to parent authority. Explicit settings, including null effort requesting the Host default, take precedence and are validated normally; they never silently fall back to a saved value. Preferences are create-only; an addressed update carrying them is refused. The creation answer exposes the resolved configuration.
-Addressed configure preserves every omitted setting; provider and Workspace remain immutable, while the model may change within the provider (D192).
+Addressed configure preserves every omitted setting; connection and Workspace remain immutable, while the model may change within the connection (D192).
 A creating spec may also name `parent`, a Session ID relation, never a revisioned setting (D178).
-The child inherits that Session's Workspace and provider and may only narrow its configured tool names and Permission Mode, through the same admission owner as `start_agent` (D122, D140).
-For an omitted child `compactAt`, the Host uses the inherited provider, not a personal saved provider. For example, with a Codex parent and `gpt-6.1-sol`, the threshold is 450,000 tokens whether the client saved OpenAI or Codex. In the earlier baseline, the saved OpenAI case sent 945,000 and the saved Codex case sent 244,800; main later raised the Codex model default to 450,000.
-Naming provider or Workspace, even equal values, is refused, as is a wider tool set or bypass under an asking parent; refusals name the field and never silently intersect the spec.
+The child inherits that Session's Workspace and connection and may only narrow its configured tool names and Permission Mode, through the same admission owner as `start_agent` (D122, D140).
+For an omitted child `compactAt`, the Host uses the inherited connection, not a personal saved connection. For example, with a Codex parent and `gpt-6.1-sol`, the threshold is 450,000 tokens whether the client saved OpenAI or Codex. In the earlier baseline, the saved OpenAI case sent 945,000 and the saved Codex case sent 244,800; main later raised the Codex model default to 450,000.
+Naming connection or Workspace, even equal values, is refused, as is a wider tool set or bypass under an asking parent; refusals name the field and never silently intersect the spec.
 Missing parents and parents with an archive intent are refused as `unknown_session`; an update naming `parent` is refused as `parent_on_update`.
 A native configure creation admits no task Message. Child approval forwarding and ending Messages use the saved parent relation as for attached agents.
 `parent` participates in the creation request digest only when present, retaining every earlier configuration digest and the existing Store format.
@@ -64,14 +64,14 @@ A native configure creation admits no task Message. Child approval forwarding an
 A creation-only `preset` seeds configure from a connect-time spec: supplied values or nulls override it, omissions inherit it, and resolved answers bind the resolved configuration for idempotent replay (D22).
 Preset lookup/update rejections instead bind the original request, including the preset name, and replay that saved rejection even if the Host can later resolve the preset.
 
-Later configurations preserve omitted provider/model values and accept explicit equal values.
-A different provider rejects the whole update, without a revision or partial changes; unknown providers reject without fallback.
+Later configurations preserve omitted connection/model values and accept explicit equal values.
+A different connection rejects the whole update, without a revision or partial changes; unknown connections reject without fallback.
 A model change is an ordinary revision and writes a `session_changed` row for `model`, before, during or after work.
 The Session ID and attached children carry on.
 Validate retained or supplied effort against the new model only when the catalog lists it; an unlisted model passes any supported effort word through (D229/D137).
 The retained or supplied compactAt must fit the new model's known window.
 
-To use another provider, create a new Session.
+To use another connection, create a new Session.
 V1 has no fork, history transfer or cross-provider handoff.
 Operations still resolve their frozen settings revisions, and output retains its producing Operation's provenance.
 

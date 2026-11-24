@@ -92,7 +92,7 @@ class World:
             start_host = host_factory or fixture.start_host
             self.host = start_host(self.store, f"http://127.0.0.1:{self.endpoint.server_port}/responses",
                                    *host_options, active_capacity=active_capacity)
-            self.run("defaults", "configure", "--store", self.store, "--provider", "codex", "--model", "gpt-6-luna")
+            self.run("defaults", "configure", "--store", self.store, "--connection", "codex", "--model", "gpt-6-luna")
         except BaseException:
             self.close()
             raise
@@ -111,7 +111,7 @@ class World:
 
     def session(self, *args):
         reply = json.loads(self.run("session", "configure", "--store", self.store, "--workspace", self.workspace,
-                                    "--provider", "codex", "--model", "gpt-6-luna", *args))
+                                    "--connection", "codex", "--model", "gpt-6-luna", *args))
         return reply["answer"]["session"]
 
     def inspect(self, session):

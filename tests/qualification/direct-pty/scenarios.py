@@ -47,7 +47,7 @@ class Fixture:
             self.host = model.start_host(self.store, f"http://127.0.0.1:{self.endpoint.server_port}/responses")
         (self.output / "ownership.json").write_text(json.dumps({"root": str(self.root), "host_pid": self.host.pid}))
         result = subprocess.run([self.binary, "session", "configure", "--store", str(self.store),
-            "--workspace", str(self.root), "--provider", "codex", "--model", "gpt-6-luna"],
+            "--workspace", str(self.root), "--connection", "codex", "--model", "gpt-6-luna"],
             env=self.env, capture_output=True, timeout=20)
         assert result.returncode == 0, ("configuration setup", result.stdout, result.stderr)
         configuration = json.loads(result.stdout)

@@ -489,7 +489,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** The models each served provider offers. */
+        /** The models each served connection offers. */
         post: operations["modelList"];
         delete?: never;
         options?: never;
@@ -982,8 +982,7 @@ export interface components {
                 /** @enum {string} */
                 permission_mode?: "ask" | "bypass";
             };
-            /** @enum {string} */
-            provider?: "codex" | "openai" | "chatgpt";
+            connection?: string;
             workspace?: string;
         };
         ArchivedFirstFields: {
@@ -1009,7 +1008,7 @@ export interface components {
         };
         Configuration: {
             workspace?: string;
-            provider?: string;
+            connection?: string;
             model?: string;
             /** @description Text of any length, saved as content. */
             instructions?: string;
@@ -1092,8 +1091,7 @@ export interface components {
                 revision: components["schemas"]["Decimal"];
                 created: boolean;
                 configuration: {
-                    /** @enum {string} */
-                    provider: "codex" | "openai" | "chatgpt";
+                    connection: string;
                     model: string;
                     /** @enum {unknown} */
                     reasoning_effort: "none" | "low" | "medium" | "high" | "xhigh" | "max" | null;
@@ -1146,9 +1144,9 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "missing_settings" | "settings_on_reload" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "invalid_app_tools" | "app_tools_too_large" | "invalid_app_tool_name" | "duplicate_app_tool_name" | "app_tool_built_in_clash" | "invalid_app_tool_policy" | "app_tools_on_child" | "connection_unserved";
+                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unknown_connection" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "missing_settings" | "settings_on_reload" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "connection_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "invalid_app_tools" | "app_tools_too_large" | "invalid_app_tool_name" | "duplicate_app_tool_name" | "app_tool_built_in_clash" | "invalid_app_tool_policy" | "app_tools_on_child" | "connection_unserved";
                 message: string | null;
-                missing: ("model" | "workspace" | "provider")[] | null;
+                missing: ("model" | "workspace" | "connection")[] | null;
             };
             execution: {
                 /** @constant */
@@ -1171,6 +1169,12 @@ export interface components {
             /** @constant */
             require_model?: true;
             preset?: string;
+        };
+        ConnectionEntry: {
+            name: string;
+            label: string;
+            /** @enum {string} */
+            route: "unserved" | "endpoint" | "chatgpt_device" | "key_file" | "chatgpt_plan";
         };
         ContentValue: {
             /** @constant */
@@ -1358,14 +1362,7 @@ export interface components {
             capabilities: {
                 /** @constant */
                 bash: true;
-                providers: {
-                    /** @enum {string} */
-                    codex: "unserved" | "endpoint" | "chatgpt_device" | "key_file" | "chatgpt_plan";
-                    /** @enum {string} */
-                    openai: "unserved" | "endpoint" | "chatgpt_device" | "key_file" | "chatgpt_plan";
-                    /** @enum {string} */
-                    chatgpt: "unserved" | "endpoint" | "chatgpt_device" | "key_file" | "chatgpt_plan";
-                };
+                connections: components["schemas"]["ConnectionEntry"][];
             };
         };
         HostInfoRequest: {
@@ -1838,8 +1835,7 @@ export interface components {
                 session: string;
                 admission: components["schemas"]["Decimal"];
                 configuration: {
-                    /** @enum {string} */
-                    provider: "codex" | "openai" | "chatgpt";
+                    connection: string;
                     model: string;
                     /** @enum {unknown} */
                     reasoning_effort: "none" | "low" | "medium" | "high" | "xhigh" | "max" | null;
@@ -1874,9 +1870,9 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "connection_unserved" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "missing_settings" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "invalid_app_tools" | "app_tools_too_large" | "invalid_app_tool_name" | "duplicate_app_tool_name" | "app_tool_built_in_clash" | "invalid_app_tool_policy" | "app_tools_on_child" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
+                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unknown_connection" | "connection_unserved" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "missing_settings" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "connection_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "invalid_app_tools" | "app_tools_too_large" | "invalid_app_tool_name" | "duplicate_app_tool_name" | "app_tool_built_in_clash" | "invalid_app_tool_policy" | "app_tools_on_child" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
                 message: string | null;
-                missing: ("model" | "workspace" | "provider")[] | null;
+                missing: ("model" | "workspace" | "connection")[] | null;
             };
             input: {
                 /** @constant */
@@ -1899,9 +1895,9 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "connection_unserved" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "missing_settings" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "invalid_app_tools" | "app_tools_too_large" | "invalid_app_tool_name" | "duplicate_app_tool_name" | "app_tool_built_in_clash" | "invalid_app_tool_policy" | "app_tools_on_child" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
+                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unknown_connection" | "connection_unserved" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "missing_settings" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "connection_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "invalid_app_tools" | "app_tools_too_large" | "invalid_app_tool_name" | "duplicate_app_tool_name" | "app_tool_built_in_clash" | "invalid_app_tool_policy" | "app_tools_on_child" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
                 message: string | null;
-                missing: ("model" | "workspace" | "provider")[] | null;
+                missing: ("model" | "workspace" | "connection")[] | null;
             };
             input: {
                 /** @constant */
@@ -2020,8 +2016,7 @@ export interface components {
             };
         };
         ModelListEntry: {
-            /** @enum {string} */
-            provider: "codex" | "openai" | "chatgpt";
+            connection: string;
             /** @enum {string} */
             source: "catalog" | "pending" | "catalog_fallback" | "live";
             models: {
@@ -2034,7 +2029,7 @@ export interface components {
             version: "27";
             /** @constant */
             type: "model_list";
-            providers: components["schemas"]["ModelListEntry"][];
+            connections: components["schemas"]["ModelListEntry"][];
         };
         ModelListRequest: {
             /** @constant */
@@ -3313,8 +3308,7 @@ export interface components {
             reference: string;
             archive_seq: components["schemas"]["Decimal"] | null;
             workspace: string;
-            /** @enum {string} */
-            provider: "codex" | "openai" | "chatgpt";
+            connection: string;
             model: string;
             /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
             tools: string[];
@@ -3609,8 +3603,7 @@ export interface components {
             reference: string;
             parent: string | null;
             workspace: string;
-            /** @enum {string} */
-            provider: "codex" | "openai" | "chatgpt";
+            connection: string;
             model: string;
             compaction_trigger: components["schemas"]["Decimal"] | null;
             context_estimate: components["schemas"]["Decimal"] | null;
@@ -3801,8 +3794,7 @@ export interface components {
             revision: components["schemas"]["Decimal"];
             command_key: string;
             workspace: string;
-            /** @enum {string} */
-            provider: "codex" | "openai" | "chatgpt";
+            connection: string;
             model: string;
             compaction_trigger: components["schemas"]["Decimal"] | null;
             output_reservation: components["schemas"]["Decimal"] | null;

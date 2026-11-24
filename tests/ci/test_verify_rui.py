@@ -29,8 +29,8 @@ def host_cli(state):
         if args[:2] == ("host", "status"):
             if not state["serving"]:
                 return types.SimpleNamespace(returncode=1, stdout="", stderr="rui: host unavailable")
-            providers = {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}
-            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"instance": "i", "capabilities": {"providers": providers}}), stderr="")
+            connections = [{"name": "codex", "label": "ChatGPT (device code)", "route": "chatgpt_device"}]
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"instance": "i", "capabilities": {"connections": connections}}), stderr="")
         if args[:2] == ("host", "pause"):
             state["serving"] = False
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")

@@ -71,7 +71,7 @@ async function openFixture(root: string): Promise<Fixture> {
 		network: { caFile: cert },
 	}, { binary: binary ?? "rui" });
 	const session = await rui.sessions.create({
-		provider: "openai", model: "model-a", effort: null, compactAt: 100000,
+		connection: "openai", model: "model-a", effort: null, compactAt: 100000,
 		workspace: tmpdir(), tools: [], permissionMode: "ask",
 	}, { idempotencyKey: "feed:session" });
 	return {

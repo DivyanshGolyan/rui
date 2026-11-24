@@ -4,10 +4,12 @@ const preference_document = @import("preference_document.zig");
 const provider_selection = @import("provider_selection.zig");
 const model_capability = @import("model_capability.zig");
 const TerminalText = @import("TerminalText.zig");
+const session_settings = @import("session_settings.zig");
+const connection_flag = "--" ++ session_settings.cliName("provider");
 
 pub const Host = union(enum) {
     store_unavailable,
-    ready: @FieldType(protocol.HostInfo, "capabilities"),
+    ready: protocol.HostCapabilities,
     unavailable,
     owned_unavailable,
     incompatible,
@@ -120,7 +122,7 @@ pub fn writeJson(writer: *std.Io.Writer, facts: *const Facts) !void {
     const values = &facts.values;
     try writer.print("{{\"version\":\"{s}\",\"type\":\"defaults\",\"changed\":{},\"store\":", .{ protocol.wire_version, facts.changed });
     try std.json.Stringify.value(facts.store, .{}, writer);
-    try writer.print(",\"store_source\":\"{s}\",\"store_available\":{},\"provider\":", .{ if (facts.saved_store) "saved" else "home", facts.store_available });
+    try writer.print(",\"store_source\":\"{s}\",\"store_available\":{},\"connection\":", .{ if (facts.saved_store) "saved" else "home", facts.store_available });
     try std.json.Stringify.value(if (values.provider.len != 0) values.provider.slice() else null, .{}, writer);
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(if (values.model.len != 0) values.model.slice() else null, .{}, writer);
@@ -149,7 +151,7 @@ pub fn writeJson(writer: *std.Io.Writer, facts: *const Facts) !void {
     switch (nextSession(facts)) {
         .chooser => try writer.writeAll("{\"status\":\"choose_provider\"}"),
         .selected => |selected| {
-            try writer.print("{{\"status\":\"selected\",\"provider\":\"{s}\",\"model\":", .{selected.provider});
+            try writer.print("{{\"status\":\"selected\",\"connection\":\"{s}\",\"model\":", .{selected.provider});
             try std.json.Stringify.value(selected.model, .{}, writer);
             try writer.print(",\"local_credential\":\"{s}\"}}", .{@tagName(selected.readiness)});
         },
@@ -205,16 +207,16 @@ pub fn writeText(writer: *std.Io.Writer, facts: *const Facts) !void {
     try safeText(writer, facts.store orelse "unavailable");
     try writer.writeAll(if (facts.saved_store) " (saved)\n" else " (HOME fallback)\n");
     if (!facts.store_available) try writer.writeAll("Store unavailable: destination cannot be selected; no alternate Store selected.\n");
-    try safeField(writer, "Provider: ", if (values.provider.len != 0) shownOf(names, values.provider.slice()) else "not selected");
+    try safeField(writer, "Connection: ", if (values.provider.len != 0) shownOf(names, values.provider.slice()) else "not selected");
     try safeField(writer, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
     try writer.writeAll(if (values.notifications) "Notifications: on\n" else "Notifications: off\n");
     try safeField(writer, "Reasoning effort: ", if (values.reasoning_effort) |effort| @tagName(effort) else "each model's default");
     try safeField(writer, "Permissions: ", if (values.permission_mode) |mode| @tagName(mode) else facts.defaults.permission_mode);
     try writeSignIns(writer, facts.readiness, facts.account, names, facts.openai_key);
     switch (selection) {
-        .unsupported_provider => try writer.print("Next Session: saved provider is unsupported; no fallback. Repair with `rui defaults configure --provider {s} --model {s}`.\n", .{ names.choices, facts.defaults.recommended_model }),
-        .unsupported_model => try writer.print("Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure --provider {s} --model {s}`.\n", .{ names.choices, facts.defaults.recommended_model }),
-        .chooser => try writer.print("Next Session: choose a provider with `rui defaults configure --provider {s}`; ChatGPT login: `{s}`; OpenAI key: `{s}`.\n", .{ names.choices, names.loginFor(.chatgpt), names.loginFor(.openai) }),
+        .unsupported_provider => try writer.print("Next Session: saved connection is unsupported; no fallback. Repair with `rui defaults configure " ++ connection_flag ++ " {s} --model {s}`.\n", .{ names.choices, facts.defaults.recommended_model }),
+        .unsupported_model => try writer.print("Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure " ++ connection_flag ++ " {s} --model {s}`.\n", .{ names.choices, facts.defaults.recommended_model }),
+        .chooser => try writer.print("Next Session: choose a connection with `rui defaults configure " ++ connection_flag ++ " {s}`; ChatGPT login: `{s}`; OpenAI key: `{s}`.\n", .{ names.choices, names.loginFor(.chatgpt), names.loginFor(.openai) }),
         .selected => |selected| {
             const login = loginOf(names, selected.provider);
             try writer.print("Next Session: {s} / {s} (", .{ shownOf(names, selected.provider), selected.model });
@@ -236,7 +238,7 @@ pub fn writeText(writer: *std.Io.Writer, facts: *const Facts) !void {
         .access_failure => try writer.writeAll("Host: access failure; inspect Store permissions.\n"),
         .ready => |capabilities| {
             var buffer: [512]u8 = undefined;
-            try writer.writeAll(hostProvidersLine(capabilities.providers, names, &buffer));
+            try writer.writeAll(hostProvidersLine(capabilities.connections, names, &buffer));
         },
     }
 }
@@ -264,17 +266,17 @@ fn chatgptLines(writer: *std.Io.Writer, plan: provider_selection.Readiness, devi
     }
 }
 
-fn hostProvidersLine(routes: protocol.Routes, names: *const Names, buffer: []u8) []const u8 {
-    if (!protocol.servesModel(routes)) return "Host: ready without a model provider; use `rui host settings --paths` to configure new model work.\n";
+fn hostProvidersLine(connections: protocol.Connections, names: *const Names, buffer: []u8) []const u8 {
+    if (!connections.servesModel()) return "Host: ready without a model provider; use `rui host settings --paths` to configure new model work.\n";
     var line = std.Io.Writer.fixed(buffer);
     line.writeAll("Host: serves") catch unreachable;
     var first = true;
-    for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) != .unserved) {
+    for (std.enums.values(protocol.Provider)) |provider| if (connections.route(@tagName(provider)) != .unserved) {
         line.print("{s} {s}", .{ if (first) "" else ",", names.shownFor(provider) }) catch unreachable;
         first = false;
     };
     line.writeAll(" (credentials checked locally, not by status)") catch unreachable;
-    for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) == .unserved) {
+    for (std.enums.values(protocol.Provider)) |provider| if (connections.route(@tagName(provider)) == .unserved) {
         const login = names.loginFor(provider);
         if (login.len != 0)
             line.print("; to add {s}, stop and restart it after `{s}`", .{ names.shownFor(provider), login }) catch unreachable
@@ -503,17 +505,17 @@ test "CLI-30 the defaults report is a function of its facts" {
     // Host line: every provider served, then each provider unserved in turn, with and without a sign-in command.
     {
         var buffer: [512]u8 = undefined;
-        try std.testing.expectEqualStrings("Host: serves ChatGPT (device code), OpenAI, ChatGPT (credentials checked locally, not by status).\n", hostProvidersLine(protocol.routesAll(.endpoint), &names, &buffer));
-        const served_one: protocol.Routes = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved };
+        try std.testing.expectEqualStrings("Host: serves ChatGPT (device code), OpenAI, ChatGPT (credentials checked locally, not by status).\n", hostProvidersLine(protocol.connectionsOfRoutes(.{ .codex = .endpoint, .openai = .endpoint, .chatgpt = .endpoint }), &names, &buffer));
+        const served_one = protocol.connectionsOfRoutes(.{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved });
         try std.testing.expectEqualStrings("Host: serves ChatGPT (device code) (credentials checked locally, not by status); to add OpenAI, stop and restart it after `rui auth login openai`; to add ChatGPT, stop and restart it after `rui auth login chatgpt`.\n", hostProvidersLine(served_one, &names, &buffer));
         for ([_]bool{ false, true }) |silent| {
             var table = names;
             if (silent) table.login[@backingInt(protocol.Provider.openai)] = "";
             inline for (@typeInfo(protocol.Provider).@"enum".field_names) |name| {
-                var routes = protocol.routesAll(.endpoint);
+                var routes: std.enums.EnumFieldStruct(protocol.Provider, protocol.Route, null) = .{ .codex = .endpoint, .openai = .endpoint, .chatgpt = .endpoint };
                 @field(routes, name) = .unserved;
                 const provider = std.meta.stringToEnum(protocol.Provider, name).?;
-                const said = hostProvidersLine(routes, &table, &buffer);
+                const said = hostProvidersLine(protocol.connectionsOfRoutes(routes), &table, &buffer);
                 var expected_buffer: [256]u8 = undefined;
                 const login = table.loginFor(provider);
                 const expected = if (login.len != 0)
@@ -541,7 +543,7 @@ test "CLI-30 the defaults report is a function of its facts" {
         var json = std.Io.Writer.fixed(&json_buffer);
         try writeJson(&json, &facts);
         var json_expected_buffer: [256]u8 = undefined;
-        const json_expected = try std.fmt.bufPrint(&json_expected_buffer, "\"next_session\":{{\"status\":\"selected\",\"provider\":\"{s}\",\"model\":\"gpt-6.1-sol\",\"local_credential\":\"configured\"}}", .{name});
+        const json_expected = try std.fmt.bufPrint(&json_expected_buffer, "\"next_session\":{{\"status\":\"selected\",\"connection\":\"{s}\",\"model\":\"gpt-6.1-sol\",\"local_credential\":\"configured\"}}", .{name});
         try std.testing.expect(std.mem.indexOf(u8, json.buffered(), json_expected) != null);
     }
     {
@@ -565,14 +567,14 @@ test "CLI-30 the defaults report is a function of its facts" {
         next: []const u8,
         json: []const u8,
     }{
-        .{ .provider = "", .model = "", .readiness = .missing, .provider_line = "Provider: not selected\n", .next = "Next Session: choose a provider with `rui defaults configure --provider codex|openai|chatgpt`; ChatGPT login: `rui auth login chatgpt`; OpenAI key: `rui auth login openai`.\n", .json = "\"next_session\":{\"status\":\"choose_provider\"}" },
-        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .configured, .provider_line = "Provider: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (local credential configured; remote acceptance not checked).\n", .json = "\"next_session\":{\"status\":\"selected\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"configured\"}" },
-        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .renewal_due, .provider_line = "Provider: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (local credential usable; renewal due at dispatch; remote acceptance not checked).\n", .json = "\"next_session\":{\"status\":\"selected\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"renewal_due\"}" },
-        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .missing, .provider_line = "Provider: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (credential missing; run `rui auth login chatgpt --device-code`. No fallback).\n", .json = "\"next_session\":{\"status\":\"selected\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"missing\"}" },
-        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .refresh_required, .provider_line = "Provider: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (credential refresh required; login may be required. No fallback).\n", .json = "\"next_session\":{\"status\":\"selected\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"refresh_required\"}" },
-        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .credential_error, .provider_line = "Provider: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (credential error; inspect private Rui credential or log in. No fallback).\n", .json = "\"next_session\":{\"status\":\"selected\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"credential_error\"}" },
-        .{ .provider = "retired", .model = "old-model", .readiness = .configured, .provider_line = "Provider: retired\n", .next = "Next Session: saved provider is unsupported; no fallback. Repair with `rui defaults configure --provider codex|openai|chatgpt --model gpt-6.1-sol`.\n", .json = "\"next_session\":{\"status\":\"unsupported_provider\"}" },
-        .{ .provider = "codex", .model = "bad model", .readiness = .configured, .provider_line = "Provider: ChatGPT (device code)\n", .next = "Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure --provider codex|openai|chatgpt --model gpt-6.1-sol`.\n", .json = "\"next_session\":{\"status\":\"unsupported_model\"}" },
+        .{ .provider = "", .model = "", .readiness = .missing, .provider_line = "Connection: not selected\n", .next = "Next Session: choose a connection with `rui defaults configure --connection codex|openai|chatgpt`; ChatGPT login: `rui auth login chatgpt`; OpenAI key: `rui auth login openai`.\n", .json = "\"next_session\":{\"status\":\"choose_provider\"}" },
+        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .configured, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (local credential configured; remote acceptance not checked).\n", .json = "\"next_session\":{\"status\":\"selected\",\"connection\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"configured\"}" },
+        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .renewal_due, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (local credential usable; renewal due at dispatch; remote acceptance not checked).\n", .json = "\"next_session\":{\"status\":\"selected\",\"connection\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"renewal_due\"}" },
+        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .missing, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (credential missing; run `rui auth login chatgpt --device-code`. No fallback).\n", .json = "\"next_session\":{\"status\":\"selected\",\"connection\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"missing\"}" },
+        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .refresh_required, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (credential refresh required; login may be required. No fallback).\n", .json = "\"next_session\":{\"status\":\"selected\",\"connection\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"refresh_required\"}" },
+        .{ .provider = "codex", .model = "gpt-6-luna", .readiness = .credential_error, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: ChatGPT (device code) / gpt-6-luna (credential error; inspect private Rui credential or log in. No fallback).\n", .json = "\"next_session\":{\"status\":\"selected\",\"connection\":\"codex\",\"model\":\"gpt-6-luna\",\"local_credential\":\"credential_error\"}" },
+        .{ .provider = "retired", .model = "old-model", .readiness = .configured, .provider_line = "Connection: retired\n", .next = "Next Session: saved connection is unsupported; no fallback. Repair with `rui defaults configure --connection codex|openai|chatgpt --model gpt-6.1-sol`.\n", .json = "\"next_session\":{\"status\":\"unsupported_provider\"}" },
+        .{ .provider = "codex", .model = "bad model", .readiness = .configured, .provider_line = "Connection: ChatGPT (device code)\n", .next = "Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure --connection codex|openai|chatgpt --model gpt-6.1-sol`.\n", .json = "\"next_session\":{\"status\":\"unsupported_model\"}" },
     };
     for ([_]Reader{ .command_line, .overview, .conversation }) |reader| for ([_]bool{ false, true }) |changed| for ([_]bool{ false, true }) |saved| for ([_]bool{ false, true }) |available| for ([_]bool{ false, true }) |hostile| for (selections) |selection| {
         var readiness = provider_selection.Readinesses.initFill(.missing);
@@ -653,7 +655,7 @@ test "CLI-30 the defaults report is a function of its facts" {
     var output: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try writeJson(&writer, &wire_facts);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"defaults\",\"changed\":false,\"store\":\"/home/test/.local/share/rui/store\",\"store_source\":\"home\",\"store_available\":false,\"provider\":null,\"model\":null,\"notifications\":true,\"reasoning_effort\":null,\"permission_mode\":null,\"local_credentials\":{\"codex\":\"missing\",\"openai\":\"missing\",\"chatgpt\":\"missing\"},\"openai_key_source\":null,\"next_session\":{\"status\":\"choose_provider\"},\"host\":{\"status\":\"store_unavailable\"}}\n", writer.buffered());
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"defaults\",\"changed\":false,\"store\":\"/home/test/.local/share/rui/store\",\"store_source\":\"home\",\"store_available\":false,\"connection\":null,\"model\":null,\"notifications\":true,\"reasoning_effort\":null,\"permission_mode\":null,\"local_credentials\":{\"codex\":\"missing\",\"openai\":\"missing\",\"chatgpt\":\"missing\"},\"openai_key_source\":null,\"next_session\":{\"status\":\"choose_provider\"},\"host\":{\"status\":\"store_unavailable\"}}\n", writer.buffered());
 }
 
 test "Store overlay reports the OpenAI key source only when the Store names one" {

@@ -110,11 +110,11 @@ def run_case(root, provider, operation):
         common = ["--store", store, "--record", state / "message.json", "--key", "message"]
         if operation == "start":
             args = ["session", "start", *common, "--workspace", workspace,
-                    "--provider", provider, "--model", "gpt-6-sol", "--tools", "none"]
+                    "--connection", provider, "--model", "gpt-6-sol", "--tools", "none"]
         else:
             configured = fixture.command("session", "configure", "--store", store,
                 "--record", state / "configure.json", "--key", "configure",
-                "--workspace", workspace, "--provider", provider, "--model", "gpt-6-sol", "--tools", "none")
+                "--workspace", workspace, "--connection", provider, "--model", "gpt-6-sol", "--tools", "none")
             args = ["session", "send", *common, "--session", configured["context"]["session"]]
         part_args = ["--text", "before", "--image", first, "--text-file", text_file,
                      "--image", second, "--text", "after"]
@@ -182,7 +182,7 @@ def cli_rules(root):
         processes.append(fixture.start_host(store, url))
         config = fixture.command("session", "configure", "--store", store,
             "--record", state / "configure.json", "--key", "configure", "--workspace", state,
-            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none")
+            "--connection", "codex", "--model", "gpt-6-sol", "--tools", "none")
         session = config["context"]["session"]
         legacy = state / "legacy.json"
         explicit = state / "explicit.json"
@@ -247,7 +247,7 @@ def unsupported_model(root):
         processes.append(fixture.start_host(store, url))
         result = fixture.command("session", "start", "--store", store,
             "--record", state / "message.json", "--key", "message", "--workspace", state,
-            "--provider", "codex", "--model", "gpt-3.5-turbo", "--tools", "none",
+            "--connection", "codex", "--model", "gpt-3.5-turbo", "--tools", "none",
             "--text", "image", "--image", image)
         assert result["answer"]["status"] == "accepted", result
         observed, _ = wait_message(store, "message")

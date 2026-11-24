@@ -263,7 +263,7 @@ test "creation receipt names reject empty segments and sort valid names" {
 
 fn creationReceipt(row: *const creation_receipt_read.Row, out: *command_reply.CreationConfiguration) !void {
     if (row.tools_invalid or row.loaded_invalid or row.tools_count != row.tools_rows or row.loaded_count != row.loaded_rows) return error.CorruptStore;
-    out.provider = provider_route.builtInOf(row.provider) orelse return error.CorruptStore;
+    out.connection = row.provider;
     out.model = row.model.*;
     out.reasoning_effort = row.reasoning_effort;
     out.workspace = row.workspace.*;
@@ -279,7 +279,7 @@ fn freshReceipt(reads: *const configuration_domain.ConfigurationReads, out: *com
     const next = &reads.next;
     const tools = if (reads.tools) |*selection| selection.names else return error.CorruptStore;
     const loaded = if (reads.loaded_tools) |*selection| selection.names else tools;
-    out.provider = provider_route.builtInOf(next.provider) orelse return error.CorruptStore;
+    out.connection = next.provider;
     out.model = next.model;
     out.reasoning_effort = next.reasoning_effort;
     out.workspace = next.workspace;

@@ -184,12 +184,12 @@ pub fn configurationBeforeWorkspace(
         null;
     _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
     const provider = if (requested.provider.state == .value)
-        connection.Name.parse(requested.provider.value.slice()) orelse return .unsupported_provider
+        connection.Name.parse(requested.provider.value.slice()) orelse return .unknown_connection
     else
         null;
     if (current) |existing| {
         if (provider) |value| {
-            if (!value.eql(existing.provider)) return .provider_is_immutable;
+            if (!value.eql(existing.provider)) return .connection_is_immutable;
         }
     }
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
@@ -861,7 +861,7 @@ test "a null or empty model is invalid and an omitted one is left to the missing
 
 const CreationCheck = union(enum) {
     missing: required_settings.Missing,
-    unsupported_provider,
+    unknown_connection,
     unserved_connection,
     complete: struct { provider: connection.Name },
 };
@@ -870,7 +870,7 @@ const CreationCheck = union(enum) {
 /// start_agent) reaches it after the parent is read, so the reply names every missing setting.
 fn creationCheck(configuration: *const ConfigurationView, reads: *const ConfigurationReads, served: *const provider_route.Served) CreationCheck {
     const explicit: ?connection.Name = if (configuration.provider.state == .value)
-        connection.Name.parse(configuration.provider.value.slice()) orelse return .unsupported_provider
+        connection.Name.parse(configuration.provider.value.slice()) orelse return .unknown_connection
     else
         null;
     // Naming a connection the Host does not serve is refused; a default or inherited provider is not.
@@ -955,7 +955,7 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
             reads.missing = missing;
             return .{ .rejected = .missing_settings };
         },
-        .unsupported_provider => return .{ .rejected = .unsupported_provider },
+        .unknown_connection => return .{ .rejected = .unknown_connection },
         .unserved_connection => return .{ .rejected = .connection_unserved },
         .complete => |complete| complete.provider,
     } else null;
@@ -978,7 +978,7 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     if (configuration.compaction_trigger.state == .value) _ = tokenCount(configuration.compaction_trigger.value.slice(), false) catch return .{ .rejected = .invalid_compaction_trigger };
     _ = configurationTokens(configuration.output_reservation, null, true) catch return .{ .rejected = .invalid_output_reservation };
     const provider = if (configuration.provider.state == .value)
-        connection.Name.parse(configuration.provider.value.slice()) orelse return .{ .rejected = .unsupported_provider }
+        connection.Name.parse(configuration.provider.value.slice()) orelse return .{ .rejected = .unknown_connection }
     else if (current_configuration) |existing| existing.provider else v.creation_provider.?;
     const model = if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice();
     reads.defaults = configuration_defaults.resolve(v.model.facts(), .{

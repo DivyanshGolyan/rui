@@ -46,7 +46,7 @@ function report(work: CurrentReport["work"], parent: string | null = null): Curr
 	return {
 		version: WIRE_VERSION, type: "session_report", delta: "full", since: null, profile: "current", archive_state: "active",
 		session: {
-			reference: "abc123", parent, workspace: "/work", provider: "openai", model: "model-a", revision: "1",
+			reference: "abc123", parent, workspace: "/work", connection: "openai", model: "model-a", revision: "1",
 			tools: ["bash"], loaded_tools: ["bash"], app_tools: [], permission_mode: "ask", label: "Review", created_at: "1",
 			instructions: { type: "text", bytes: "0", sha256: "0".repeat(64) }, output_schema: null,
 			compaction_trigger: "100000", context_estimate: null, output_reservation: "0",
@@ -250,7 +250,7 @@ test("creation sends explicit settings without Host client defaults", async () =
 			assert.deepEqual(request.configuration.effort, null);
 			assert.deepEqual(request.configuration.tools, []);
 			assert.deepEqual(request.configuration.permissionMode, "ask");
-			assert.deepEqual(request.configuration.provider, undefined);
+			assert.deepEqual(request.configuration.connection, undefined);
 			assert.equal(request.configuration.workspace, "/caller");
 			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
 		},
@@ -344,7 +344,7 @@ function presetTypeContract(sessions: Sessions): void {
 	// @ts-expect-error a child inherits its Workspace
 	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol", workspace: "/caller" }, { idempotencyKey: "child-workspace" });
 	// @ts-expect-error a child inherits its provider
-	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol", provider: "openai" }, { idempotencyKey: "child-provider" });
+	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol", connection: "openai" }, { idempotencyKey: "child-provider" });
 	// @ts-expect-error an explicit null model is never valid
 	void sessions.create({ workspace: "/caller", model: null }, { idempotencyKey: "null-model" });
 	// @ts-expect-error a preset name is never null
