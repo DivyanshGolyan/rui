@@ -1102,32 +1102,6 @@ pub const Probes = struct {
     }
 };
 
-pub const Host = struct {
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    lease: *platform.StoreLease,
-    store: *store_module.Store,
-    lifecycle: *Lifecycle = undefined,
-    /// Set by serveOpened, or by TestParts.attach in tests, before any Host method that reads probes runs.
-    probes: *Probes = undefined,
-    instance: protocol.InstanceId = undefined,
-    limits: Limits = .{},
-    providers: *const providers_module.Providers = &providers_module.none,
-    presets: []const core_tools.Preset = &.{},
-    model_lists: ModelLists = .{},
-    bash_facts: environment.HostFacts = bash.default_facts,
-    environments: ?*SessionEnvironments = null,
-    mcp_servers: @import("mcp/servers.zig").Servers = .{},
-    retention: *output_retention.Queue = undefined,
-    intake_capacity: usize = product_defaults.intake_capacity,
-    descriptor_soft_limit: ?usize = null,
-    scratch_used: std.atomic.Value(u64) = .init(0),
-    started_at: u64 = 0,
-    /// The frozen settings frame a detached Host was started with; null for a foreground Host.
-    settings_digest: ?settings_handoff.Digest = null,
-    allowance_diagnostic: AllowanceDiagnostic = .{},
-};
-
 pub fn nowNs(io: std.Io) u64 {
     return @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
 }
