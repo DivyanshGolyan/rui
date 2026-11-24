@@ -91,7 +91,9 @@ const Held = struct {
         defer self.release(io);
         try self.clearSocket(io);
         try unlinkFreeLegacyLock(io, self.dir);
-        if (interface.* == .derived) std.Io.Dir.cwd().deleteDir(io, interface.path()) catch |err| switch (err) {
+        // A Host that lost D (EndpointLost) holds an inode the path no longer names. The path may now
+        // name another Host's freshly claimed D, so only the held inode's own name is ever removed.
+        if (interface.* == .derived and namesDirectory(io, interface.path(), self.dir.handle)) std.Io.Dir.cwd().deleteDir(io, interface.path()) catch |err| switch (err) {
             error.FileNotFound, error.DirNotEmpty => {},
             else => return err,
         };
@@ -965,6 +967,28 @@ test "SH-11 listen refuses to bind into a directory removed after claim (Endpoin
     try testing.expectError(error.EndpointLost, endpoint.listen(.{}));
     try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
     try endpoint.retire();
+}
+
+test "SH-11 a Host that lost D does not remove the claim that replaced it" {
+    const io = testing.io;
+    var runtime = try socket_fixture.Directory.init();
+    defer runtime.cleanup();
+    const root = runtime.root[0..runtime.root_len];
+    var directory_buffer: [Path.max_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
+    const derived = try Interface.within(root, directory);
+
+    var lost = try claim(io, derived);
+    try std.Io.Dir.cwd().deleteDir(io, directory);
+    var replacement = try claim(io, derived);
+    try testing.expectError(error.EndpointLost, lost.listen(.{}));
+    // The path names the replacement's D now: retiring the lost Host must leave it.
+    try lost.retire();
+    try testing.expectEqual(Left{}, try leftIn(io, directory));
+    var listener = try replacement.listen(.{});
+    listener.deinit(io);
+    try replacement.retire();
+    try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
 }
 
 test "SH-11 a held legacy rui.lock makes its directory busy for a claim and a look" {
