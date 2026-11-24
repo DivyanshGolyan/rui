@@ -3257,17 +3257,18 @@ fn showStaged(self: *Self) !void {
             self.submission.observeMessage(key);
         }
         if (entry.message_key) |key| {
+            const has_text = entry.text.bytes.len != 0;
             if (self.local_projection) |*local| if (std.mem.eql(u8, &local.key, &key)) {
-                if (entry.length == 0 and entry.provisional) local.position = entry.key.position else if (entry.length != 0) {
+                if (!has_text and entry.provisional) local.position = entry.key.position else if (has_text) {
                     local.terminal = true;
                 }
             };
             const queued = result.queued;
             const shown = result.queued_line orelse self.live.queued_line;
-            const represented = page.kinds == .all and entry.provisional and entry.length == 0 and queued.count != 0 and
+            const represented = page.kinds == .all and entry.provisional and !has_text and queued.count != 0 and
                 entry.key.position >= queued.oldest_position and entry.key.position <= queued.newest_position and
                 shown != null and shown.?.admission == queued.newest_admission;
-            if (entry.length != 0 or represented) self.submission.observeMessage(key);
+            if (has_text or represented) self.submission.observeMessage(key);
         }
         inserted += 1;
     }
