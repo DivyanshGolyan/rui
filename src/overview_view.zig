@@ -10588,7 +10588,39 @@ fn stopUnlistedConversationCase() !void {
     try std.testing.expect(std.mem.indexOf(u8, departure.written(), "rui request recover original-stop-key") != null);
 }
 
+fn stopRestoredRowCase() !void {
+    const ref = "k7m2qx".*;
+    for ([_]bool{ false, true }) |open| for ([_]bool{ false, true }) |changed| {
+        const original = session(&ref, .{ .working = ago(10) }, .{ .label = "Later work", .turn = 7 });
+        var state = try opened(&.{original});
+        defer state.deinit();
+        try expectEffects(&.{.{ .stop = ref }}, try press(&state, .stop));
+        _ = try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .unconfirmed = "original-stop-key" } } });
+        if (open) _ = try step(&state, .{ .conversation = ref });
+        var archived = original;
+        archived.archive_state = .archived;
+        archived.archive_seq = 10;
+        _ = try refresh(&state, .changed, testToken(2), &.{archived});
+        var restored = if (changed)
+            session(&ref, .{ .approval = ago(0) }, .{ .label = "Later work", .turn = 8, .first_action = 42 })
+        else
+            original;
+        restored.read_version = testToken(3);
+        _ = try refresh(&state, .changed, testToken(3), &.{restored});
+        const text = try screenText(&state, 80, 24, .{});
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqualStrings(if (changed) "●" else "◝", markOf(text, "Later work"));
+        try std.testing.expect(!conversation(&state, ref, true).stoppable);
+        try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .{ .stop = true } } }));
+        var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer departure.deinit();
+        try writeDeparture(&state, null, &departure.writer);
+        try std.testing.expect(std.mem.indexOf(u8, departure.written(), "rui request recover original-stop-key") != null);
+    };
+}
+
 test "SUI-5 stop_intent" {
+    try stopRestoredRowCase();
     try stopUnlistedConversationCase();
     try stopHostReplacementCase();
     try stopLaterObservationCase();
