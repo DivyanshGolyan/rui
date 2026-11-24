@@ -54,15 +54,17 @@ pub const Snapshot = struct {
         return (try self.resolveWith(provider, usable)).?;
     }
 
-    /// A name this client does not know locally goes to the Host unchanged, with the model it names: the explicit
-    /// model, else the saved model of that same connection. This client cannot know another connection's default
-    /// model, so a name with neither is refused here, by name, and the caller passes --model.
+    /// A name this client does not know locally goes to the Host unchanged, with the model the shared owner gives it.
     fn resolveUnknown(self: *const Snapshot, name: []const u8) !Binding {
+        const unknown = try provider_selection.resolveUnknown(
+            name,
+            self.intent.model,
+            if (self.defaults.provider.len == 0) null else self.defaults.provider.slice(),
+            if (self.defaults.model.len == 0) null else self.defaults.model.slice(),
+        );
         var binding: Binding = .{};
-        try binding.provider.set(name);
-        const saved_for_name = self.defaults.provider.len != 0 and self.defaults.model.len != 0 and std.mem.eql(u8, self.defaults.provider.slice(), name);
-        const model = self.intent.model orelse (if (saved_for_name) self.defaults.model.slice() else return error.ConnectionModelRequired);
-        try binding.model.set(model);
+        try binding.provider.set(unknown.provider);
+        try binding.model.set(unknown.model);
         return binding;
     }
 
@@ -227,39 +229,4 @@ test "CM-58 new Session binding takes a usable served name, and an unprompted ca
     try std.testing.expectEqualStrings("alpha", (try snapshot.resolveUnprompted(&usable)).provider.slice());
     try snapshot.defaults.provider.set("gone");
     try std.testing.expectError(error.UnsupportedSelectionProvider, snapshot.resolveUnprompted(&usable));
-}
-
-test "CM-60 unprompted binding: a locally known or unknown name takes its explicit, saved-matching, saved-other or no model" {
-    const connection = @import("connection.zig");
-    const known = connection.Name.parse("alpha").?;
-    var usable: provider_selection.Readinesses = .initFill(.missing);
-    usable.set(known, .configured);
-    const Model = enum { explicit, saved_matching, saved_other, none };
-    for ([_][]const u8{ "alpha", "beta" }) |name| for (std.enums.values(Model)) |model_case| {
-        var snapshot: Snapshot = .{ .intent = .{ .provider = name }, .defaults = .{} };
-        if (model_case == .explicit) snapshot.intent.model = "explicit-model";
-        if (model_case == .saved_matching) {
-            try snapshot.defaults.provider.set(name);
-            try snapshot.defaults.model.set("saved-model");
-        }
-        if (model_case == .saved_other) {
-            try snapshot.defaults.provider.set("gamma");
-            try snapshot.defaults.model.set("saved-model");
-        }
-        const result = snapshot.resolveUnprompted(&usable);
-        const is_known = std.mem.eql(u8, name, "alpha");
-        // A name this client does not know, with neither an explicit nor a saved model for it, is refused by name.
-        if (!is_known and (model_case == .saved_other or model_case == .none)) {
-            try std.testing.expectError(error.ConnectionModelRequired, result);
-            continue;
-        }
-        const binding = try result;
-        try std.testing.expectEqualStrings(name, binding.provider.slice());
-        switch (model_case) {
-            .explicit => try std.testing.expectEqualStrings("explicit-model", binding.model.slice()),
-            .saved_matching => try std.testing.expectEqualStrings("saved-model", binding.model.slice()),
-            // A known name with no model for it takes its own recommended model; an unknown name never reaches here.
-            .saved_other, .none => try std.testing.expect(binding.model.slice().len != 0),
-        }
-    };
 }

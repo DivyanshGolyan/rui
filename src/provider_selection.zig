@@ -71,6 +71,21 @@ pub const Selection = union(enum) {
     },
 };
 
+/// The model a name runs, for every name known or not: the explicit model, else the saved model when the saved
+/// connection is that name, else null. Nothing else decides the precedence.
+pub fn modelFor(name: []const u8, explicit_model: ?[]const u8, saved_provider: ?[]const u8, saved_model: ?[]const u8) ?[]const u8 {
+    return explicit_model orelse (if (saved_provider != null and std.mem.eql(u8, name, saved_provider.?)) saved_model else null);
+}
+
+/// A name this client does not know locally: its model comes from modelFor alone, and a name with none is refused
+/// by name, because this client cannot know another connection's default model.
+pub const Unknown = struct { provider: []const u8, model: []const u8 };
+
+pub fn resolveUnknown(name: []const u8, explicit_model: ?[]const u8, saved_provider: ?[]const u8, saved_model: ?[]const u8) error{ConnectionModelRequired}!Unknown {
+    const model = modelFor(name, explicit_model, saved_provider, saved_model) orelse return error.ConnectionModelRequired;
+    return .{ .provider = name, .model = model };
+}
+
 pub fn resolve(capabilities: []const Capability, explicit_provider: ?[]const u8, explicit_model: ?[]const u8, saved_provider: ?[]const u8, saved_model: ?[]const u8) !Selection {
     var chosen = explicit_provider orelse saved_provider;
     if (chosen == null) {
@@ -83,7 +98,7 @@ pub fn resolve(capabilities: []const Capability, explicit_provider: ?[]const u8,
     const name = chosen orelse return .chooser;
     for (capabilities) |capability| {
         if (!std.mem.eql(u8, name, capability.name)) continue;
-        const model = explicit_model orelse (if (saved_provider != null and std.mem.eql(u8, name, saved_provider.?)) saved_model else null) orelse capability.recommended_model;
+        const model = modelFor(name, explicit_model, saved_provider, saved_model) orelse capability.recommended_model;
         if (!capability.admits_model(model)) return error.UnsupportedSelectionModel;
         return .{ .selected = .{
             .provider = capability.name,
@@ -188,5 +203,39 @@ test "CM-59 local served names resolve at their own readiness, and a name the cl
         try std.testing.expect(passesThrough(unknown.slice(), &known));
         try std.testing.expectError(error.UnsupportedSelectionProvider, resolve(caps.slice(), unknown.slice(), null, null, null));
         try std.testing.expect(!passesThrough(null, &known));
+    };
+}
+
+test "CM-60 model precedence: a known or unknown name takes its explicit, saved-matching, saved-other or no model" {
+    const model_capability = @import("model_capability.zig");
+    const known = connection.Name.parse("alpha").?;
+    var readiness: Readinesses = .initFill(.missing);
+    readiness.set(known, .configured);
+    var caps = model_capability.capabilities(&readiness);
+    const Model = enum { explicit, saved_matching, saved_other, absent };
+    for ([_][]const u8{ "alpha", "beta" }) |name| for (std.enums.values(Model)) |model_case| {
+        const explicit: ?[]const u8 = if (model_case == .explicit) "explicit-model" else null;
+        const saved_provider: ?[]const u8 = switch (model_case) {
+            .saved_matching => name,
+            .saved_other => "gamma",
+            else => null,
+        };
+        const saved_model: ?[]const u8 = if (saved_provider != null) "saved-model" else null;
+        if (std.mem.eql(u8, name, "alpha")) {
+            // A known name supplies its recommended model when neither an explicit nor a matching saved model names one.
+            const selection = try resolve(caps.slice(), name, explicit, saved_provider, saved_model);
+            switch (model_case) {
+                .explicit => try std.testing.expectEqualStrings("explicit-model", selection.selected.model),
+                .saved_matching => try std.testing.expectEqualStrings("saved-model", selection.selected.model),
+                .saved_other, .absent => try std.testing.expect(selection.selected.model.len != 0),
+            }
+        } else {
+            // An unknown name supplies no model of its own: a name with neither is refused by name.
+            switch (model_case) {
+                .explicit => try std.testing.expectEqualStrings("explicit-model", (try resolveUnknown(name, explicit, saved_provider, saved_model)).model),
+                .saved_matching => try std.testing.expectEqualStrings("saved-model", (try resolveUnknown(name, explicit, saved_provider, saved_model)).model),
+                .saved_other, .absent => try std.testing.expectError(error.ConnectionModelRequired, resolveUnknown(name, explicit, saved_provider, saved_model)),
+            }
+        }
     };
 }
