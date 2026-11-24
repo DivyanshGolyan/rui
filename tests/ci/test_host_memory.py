@@ -1,12 +1,15 @@
 from pathlib import Path
+import contextlib
+import io
 import os
+import resource
 import subprocess
 import sys
 import tempfile
 import unittest
 
-from host_memory import (COMPARABLE, PER_AGENT_BUDGET, RAMP_FROM, RAMP_TO, Ramp, Readings, SCENARIOS,
-                         summary, verdict)
+from host_memory import (COMPARABLE, FIXTURE_DESCRIPTORS, PER_AGENT_BUDGET, RAMP_FROM, RAMP_RUNS, RAMP_TO, Ramp,
+                         Readings, SCENARIOS, fixture_shortfall, raise_descriptor_limit, ramp_runs, summary, verdict)
 
 MACHINE = {"image": "ubuntu24 20261101.1", "cpu": "Example CPU @ 2.10GHz", "kernel": "6.8.0", "glibc": "glibc 2.39"}
 BUDGET_KIB = (RAMP_TO - RAMP_FROM) * PER_AGENT_BUDGET // 1024   # 3600 KiB of slope is exactly the budget
@@ -118,6 +121,139 @@ class SummaryTest(unittest.TestCase):
     def test_scenarios_have_distinct_names_and_read_a_smaps_rollup_field(self):
         self.assertEqual(len({scenario.name for scenario in SCENARIOS}), len(SCENARIOS))
         self.assertTrue({scenario.metric for scenario in SCENARIOS} <= {"Private_Dirty", "Anonymous"})
+
+
+# The Host's own refusal, as start_ready_process reports it when the Host exits before ready (server.zig prints this line).
+HOST_REFUSAL = ("rui: Host cannot start: descriptor soft limit 64 is below the minimum intake requirement 4,311 "
+                "(10 ordinary clients). Rui already tried raising it.")
+
+
+def scripted_ramp(outcomes):
+    """A stand-in for host_memory.ramp. Each run takes the next outcome: "ok", "before" (fails before the
+    yield, while the Host starts or holds) or "teardown" (fails after the yield, while the Host stops)."""
+    remaining = iter(outcomes)
+    started = []
+
+    @contextlib.contextmanager
+    def fake(binary, root, store):
+        outcome = next(remaining)
+        started.append(outcome)
+        if outcome == "before":
+            raise RuntimeError("the model listing never held")
+        yield Ramp(BASE, BASE + 3000)
+        if outcome == "teardown":
+            raise RuntimeError("Host did not stop within 10 seconds")
+
+    return fake, started
+
+
+def quietly(call):
+    with contextlib.redirect_stderr(io.StringIO()):
+        return call()
+
+
+class DescriptorLimitTest(unittest.TestCase):
+    def test_a_soft_limit_below_hard_is_raised_to_hard_and_the_new_soft_limit_is_returned(self):
+        limits = {"now": (1024, 4096)}
+        calls = []
+
+        def setrlimit(which, value):
+            calls.append((which, value))
+            limits["now"] = value
+
+        soft = raise_descriptor_limit(getrlimit=lambda which: limits["now"], setrlimit=setrlimit)
+        self.assertEqual(calls, [(resource.RLIMIT_NOFILE, (4096, 4096))])
+        self.assertEqual(soft, 4096)
+
+    def test_a_refused_raise_keeps_the_soft_limit_and_does_not_fail(self):
+        def setrlimit(which, value):
+            raise ValueError("not permitted")
+
+        soft = raise_descriptor_limit(getrlimit=lambda which: (1024, 4096), setrlimit=setrlimit)
+        self.assertEqual(soft, 1024)
+
+    def test_a_sufficient_fixture_limit_has_no_shortfall(self):
+        self.assertIsNone(fixture_shortfall(FIXTURE_DESCRIPTORS))
+        self.assertIsNone(fixture_shortfall(FIXTURE_DESCRIPTORS + 1))
+
+    def test_an_insufficient_fixture_limit_names_the_fixture_headroom(self):
+        reason = fixture_shortfall(FIXTURE_DESCRIPTORS - 1)
+        self.assertIsNotNone(reason)
+        self.assertIn(f"{FIXTURE_DESCRIPTORS - 1:,}", reason)
+        self.assertIn(f"{FIXTURE_DESCRIPTORS:,}", reason)
+
+    def test_an_unlimited_fixture_limit_has_no_shortfall(self):
+        self.assertIsNone(fixture_shortfall(resource.RLIM_INFINITY))
+
+    def test_a_sufficient_fixture_limit_runs_the_ramps(self):
+        fake, started = scripted_ramp(["ok"] * RAMP_RUNS)
+        result = quietly(lambda: ramp_runs(Path("rui"), Path("root"), raise_limit=lambda: FIXTURE_DESCRIPTORS, open_ramp=fake))
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), RAMP_RUNS)
+        self.assertEqual(len(started), RAMP_RUNS)
+
+    def test_an_insufficient_fixture_limit_is_not_measured_and_starts_no_host(self):
+        fake, started = scripted_ramp(["ok"] * RAMP_RUNS)
+        result = quietly(lambda: ramp_runs(Path("rui"), Path("root"), raise_limit=lambda: FIXTURE_DESCRIPTORS - 1, open_ramp=fake))
+        self.assertIsInstance(result, str)
+        self.assertIn("fixture's descriptor limit", result)
+        self.assertEqual(started, [])
+
+    def test_the_host_refusing_to_start_becomes_not_measured_with_its_own_reason(self):
+        @contextlib.contextmanager
+        def refused(binary, root, store):
+            raise RuntimeError(f"Host exited before ready; stdout=b''; stderr_tail=b'{HOST_REFUSAL}'")
+            yield  # pragma: no cover
+
+        result = quietly(lambda: ramp_runs(Path("rui"), Path("root"), raise_limit=lambda: FIXTURE_DESCRIPTORS, open_ramp=refused))
+        self.assertIsInstance(result, str)
+        self.assertIn("rui: Host cannot start: descriptor soft limit 64 is below the minimum intake requirement", result)
+        judged = verdict(result)
+        self.assertFalse(judged.within)
+        self.assertIsNone(judged.per_agent)
+        self.assertIn("not measured", judged.line)
+        self.assertIn("Host cannot start", judged.line)
+
+
+class RampCountingTest(unittest.TestCase):
+    def count(self, outcomes):
+        fake, started = scripted_ramp(outcomes)
+        result = quietly(lambda: ramp_runs(Path("rui"), Path("root"), raise_limit=lambda: FIXTURE_DESCRIPTORS, open_ramp=fake))
+        return result, started
+
+    def test_a_failure_before_the_yield_is_never_counted(self):
+        result, _ = self.count(["before"] * RAMP_RUNS)
+        self.assertIsInstance(result, str)
+        self.assertIn("model listing never held", result)
+        self.assertFalse(verdict(result).within)
+
+    def test_a_failure_at_teardown_after_the_yield_is_never_counted(self):
+        result, started = self.count(["teardown"] * RAMP_RUNS)
+        self.assertEqual(started, ["teardown"] * RAMP_RUNS)
+        self.assertIsInstance(result, str)
+        self.assertIn("did not stop within 10 seconds", result)
+        judged = verdict(result)
+        self.assertFalse(judged.within)
+        self.assertIsNone(judged.per_agent)
+
+    def test_teardown_failures_cannot_make_up_min_ramp_runs(self):
+        # Two clean runs and three that fail at teardown: only the two clean ones count, below MIN_RAMP_RUNS.
+        result, _ = self.count(["ok", "ok", "teardown", "teardown", "teardown"])
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)
+        judged = verdict(result)
+        self.assertFalse(judged.within)
+        self.assertIn("2 of 5 ramp runs completed", judged.line)
+
+    def test_failures_before_the_yield_cannot_make_up_min_ramp_runs(self):
+        result, _ = self.count(["ok", "ok", "before", "before", "before"])
+        self.assertEqual(len(result), 2)
+        self.assertIn("2 of 5 ramp runs completed", verdict(result).line)
+
+    def test_clean_runs_count_and_reach_min_ramp_runs(self):
+        result, _ = self.count(["ok", "ok", "ok", "teardown", "before"])
+        self.assertEqual(len(result), 3)
+        self.assertTrue(verdict(result, budget=10**9).within)
 
 
 class MainTest(unittest.TestCase):

@@ -27,7 +27,7 @@ PER_AGENT_BUDGET = 4_096          # bytes of Private_Dirty per agent waiting on 
 MIN_RAMP_RUNS = 3                 # fewer completed runs is "not measured", never a pass
 PUBLISH_AGENTS = 100              # activeCapacity the publish-only rows have always run at, so they stay comparable
 STEADY_READS = 3
-FIXTURE_DESCRIPTORS = RAMP_TO + 64          # the endpoint's accepted connections and listener, in this process
+FIXTURE_DESCRIPTORS = RAMP_TO + 64          # this process's own sockets: one per held RAMP_TO stream, plus the listener and margin
 COMPARABLE = ("Numbers are comparable only release to release on the same runner type; "
               "another machine, kernel or glibc reads other values.")
 
@@ -229,34 +229,45 @@ def mcp_listing(binary, root, store):
         silent.close()
 
 
-def descriptor_shortfall():
-    """Raise the soft descriptor limit to the hard limit, then say why it is still too low, if it is.
-    The Host inherits this limit, and Rui needs 5 * capacity + 421 descriptors plus the fixture's own."""
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+def raise_descriptor_limit(getrlimit=resource.getrlimit, setrlimit=resource.setrlimit):
+    """Raise the soft descriptor limit to the hard limit, so the Host inherits it, and return the soft limit now in force.
+    Whether the Host has enough is the Host's to say: it refuses to start with its own reason, which a ramp run reports."""
+    soft, hard = getrlimit(resource.RLIMIT_NOFILE)
     if soft != hard:
         try:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+            setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
         except (OSError, ValueError):
             pass
-    soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
-    needed = 5 * RAMP_TO + 421 + FIXTURE_DESCRIPTORS
+        soft = getrlimit(resource.RLIMIT_NOFILE)[0]
+    return soft
+
+
+def fixture_shortfall(soft, needed=FIXTURE_DESCRIPTORS):
+    """Only this process's own headroom is checked here. None when the soft limit covers it."""
     if soft != resource.RLIM_INFINITY and soft < needed:
-        return f"the descriptor limit is {soft:,}, below the {needed:,} that {RAMP_TO:,} agents need"
+        return f"the fixture's descriptor limit is {soft:,}, below the {needed:,} its {RAMP_TO:,} held streams need"
     return None
 
 
-def ramp_runs(binary, root):
-    shortfall = descriptor_shortfall()
+def completed_ramp(open_ramp, binary, root, store) -> Ramp:
+    """The reading is returned only after ramp() has exited cleanly, so a failure at teardown raises
+    and the run is never counted."""
+    with open_ramp(binary, root, store) as measured:
+        pass
+    return measured
+
+
+def ramp_runs(binary, root, raise_limit=raise_descriptor_limit, open_ramp=ramp):
+    shortfall = fixture_shortfall(raise_limit())
     if shortfall:
         return shortfall
     ramps, last = [], "no ramp run started"
-    for run in range(RAMP_RUNS):
+    for index in range(RAMP_RUNS):
         try:
-            with ramp(binary, root, root / f"ramp-store-{run}") as completed:
-                ramps.append(completed)
+            ramps.append(completed_ramp(open_ramp, binary, root, root / f"ramp-store-{index}"))
         except Exception as error:
             last = reason(error)
-            print(f"host-memory: ramp run {run + 1} of {RAMP_RUNS} not measured: {last}", file=sys.stderr)
+            print(f"host-memory: ramp run {index + 1} of {RAMP_RUNS} not measured: {last}", file=sys.stderr)
     return ramps or last
 
 
