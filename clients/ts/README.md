@@ -47,7 +47,7 @@ const rui = await Rui.connect({
 	providers: { chatgpt: {} }, // Or { credentialFile: "/private/chatgpt.json" }.
 	tools: { mcp: { drift: { url: "http://127.0.0.1:3000/mcp" } } },
 	presets: { drift: {
-		provider: "chatgpt", model: "gpt-6.1-sol", effort: "low", compactAt: 100000,
+		connection: "chatgpt", model: "gpt-6.1-sol", effort: "low", compactAt: 100000,
 		workspace: "/workspace", tools: ["drift_tool"], permissionMode: "bypass",
 	} },
 });
@@ -195,7 +195,7 @@ await session.update({ compactAt: 200000 });
 await session.update({ model: "gpt-5.5" });
 ```
 
-`await session.status()` reads the Current report: work `state` and `since`, `turn`, `operation`, `pendingMessages`, `parent`, `label`, `model`, `effort`, `tools`, `permissionMode`, `latestOutcome` and `archiveState`.
+`await session.status()` reads the Current report: work `state` and `since`, `turn`, `operation`, `pendingMessages`, `parent`, `label`, `model`, `effort`, `tools`, `appTools`, `permissionMode`, `latestOutcome` and `archiveState`.
 Counts, times and Turn/Operation IDs stay decimal strings; absent targets, parents and outcomes are `null`.
 A separate ending is not in the report, so status does not invent one.
 `interruptTarget` is the Host-served target from that snapshot. Pass it explicitly with a key to interrupt that observed call in one request, and reuse the same key to recover its answer:
@@ -221,6 +221,22 @@ const rui = await Rui.connect({
 });
 const review = await rui.sessions.create({ preset: "review", instructions: "Review this patch" }, { idempotencyKey: "review:1" });
 await rui.close();
+```
+
+## App tools
+
+A lane root declares the app tools its tree offers with `appTools` on `create` or `update`; `[]` clears them.
+Each record has a `name`, a `description` and an `inputSchema` object; `replay` (`"safe"` or `"unsafe"`, the default), `restartLimit` (0 to 16) and `waitMs` (1000 to 3600000) are optional.
+The Host validates the whole list and refuses a bad one by name, so nothing is saved partly.
+A child Session refuses `appTools` with `app_tools_on_child`.
+Connect-time presets do not take `appTools`.
+
+```ts
+await rui.sessions.create({
+	workspace: "/work/project",
+	model: "gpt-6.1-sol",
+	appTools: [{ name: "lookup", description: "Find a record by id.", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] }, replay: "safe" }],
+}, { idempotencyKey: "project:tools" });
 ```
 
 ## Archive and restore

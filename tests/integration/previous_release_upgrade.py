@@ -155,8 +155,11 @@ def assert_running_upgrade(dialect, binary, store, seed, ready, previous, versio
     assert current["active_capacity"] == previous["active_capacity"], (previous, current)
     assert current["paused"] == previous["paused"], (previous, current)
     assert current["capabilities"]["bash"] == previous["capabilities"]["bash"], (previous, current)
-    for provider, served in current["capabilities"]["providers"].items():
-        assert served == previous["capabilities"]["providers"].get(provider, "unserved"), (previous, current)
+    # The previous release reports {name: route}; this candidate lists served connections with their route.
+    served = {entry["name"]: entry["route"] for entry in current["capabilities"]["connections"]}
+    before = previous["capabilities"]["providers"]
+    for name in set(before) | set(served):
+        assert served.get(name, "unserved") == before.get(name, "unserved"), (previous, current)
     with os_semantics.unix_stream() as connection:
         connection.settimeout(5)
         connection.connect(str(host_process.store_endpoint(store)))
@@ -199,6 +202,9 @@ class Dialect(HostServeDialect):
         self.short_ids = "--to ID" in send_help or "Requires: --session ID" in send_help
         self.stdin_message = bool(help_text(binary, "session", "start"))
         self.pause = ("host", "pause") if help_text(binary, "host", "pause") else ("host", "stop")
+        # #1862 renamed the binding from provider to connection on the CLI and the wire.
+        configure_help = help_text(binary, "session", "configure") if self.resource_first else send_help
+        self.binding_name = "connection" if "--connection NAME" in (configure_help or "") else "provider"
 
     def host_status(self, binary, store, timeout):
         status = subprocess.run([binary, "host", "status", "--store", store],
@@ -214,7 +220,7 @@ class Dialect(HostServeDialect):
         reply = fixture.command(*(("session", "configure") if self.resource_first else ("configure",)),
             "--store", store, "--record", state / f"{key}.json", "--key", key,
             *(("--session", session) if not self.short_ids else ()),
-            "--workspace", fixture.ROOT, "--provider", "codex", "--model", model,
+            "--workspace", fixture.ROOT, f"--{self.binding_name}", "codex", "--model", model,
             "--tools", "bash", "--permission-mode", "ask")
         assert reply["answer"]["status"] == "accepted", reply
         return reply["answer"]["session"] if self.short_ids else session
@@ -368,12 +374,12 @@ def main():
             original_binding = dialect.binding(observation)
             assert len(endpoint.requests) == 1, "seed work did not use the provider exactly once"
             configuration = {
-                "workspace": str(workspace), "provider": "codex", "model": "gpt-6-sol",
+                "workspace": str(workspace), "binding": "codex", "model": "gpt-6-sol",
                 "tools": ["bash"], "permission_mode": "ask",
             }
             before = dialect.inspect_session(store, session)["session"]
             for field, value in configuration.items():
-                assert before[field] == value, (field, value, before)
+                assert before[dialect.binding_name if field == "binding" else field] == value, (field, value, before)
             if args.running_host:
                 state, shown = dialect.host_status(previous_artifact, store, 5)
                 assert state == "ready" and seed.poll() is None, shown
@@ -468,7 +474,7 @@ def main():
             assert dialect.read_result(store, "upgrade-message") == expected, "saved answer changed"
             after = dialect.inspect_session(store, session)["session"]
             for field, value in configuration.items():
-                assert after[field] == value, (field, value, after)
+                assert after[dialect.binding_name if field == "binding" else field] == value, (field, value, after)
             assert len(endpoint.requests) == 1, "upgrade replayed completed work"
             if args.running_host:
                 # A ready socket alone cannot show the endpoint/network source

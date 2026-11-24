@@ -613,7 +613,7 @@ fn leafFor(comptime T: type, comptime value: T, comptime pattern: []const u8, co
             row.json_schema.format = "agent-spec";
             row.json_schema.set_capacity = preset_value.max_presets;
             row.json_schema.name_max_bytes = preset_value.max_preset_name_bytes;
-            row.sample_json = "{\"workspace\":\"/tmp/host-settings\",\"provider\":\"" ++ @tagName(std.enums.values(provider_name.Provider)[0]) ++ "\",\"model\":\"sample-model\",\"effort\":null,\"compactAt\":1000,\"tools\":[\"bash\"],\"permissionMode\":\"ask\"}";
+            row.sample_json = "{\"workspace\":\"/tmp/host-settings\",\"connection\":\"" ++ @tagName(std.enums.values(provider_name.Provider)[0]) ++ "\",\"model\":\"sample-model\",\"effort\":null,\"compactAt\":1000,\"tools\":[\"bash\"],\"permissionMode\":\"ask\"}";
             row.sample_text = row.sample_json;
         },
         .named, .providers => @compileError("set is not an atomic leaf"),

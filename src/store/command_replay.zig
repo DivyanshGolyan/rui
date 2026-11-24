@@ -46,7 +46,35 @@ pub fn classify(
     if (existing.kind != kind or (!((kind == .configure or kind == .message) and target.len == 0) and !std.mem.eql(u8, existing.target, target)) or
         !std.mem.eql(u8, &existing.digest, digest)) return .conflict;
     if (existing.accepted) return .accepted;
-    return .{ .rejected = std.meta.stringToEnum(Rejection, existing.code) orelse return error.CorruptStore };
+    return .{ .rejected = rejectionOf(Rejection, existing.code) orelse return error.CorruptStore };
+}
+
+/// Saved refusal codes whose name a later version changed. A saved code is a durable identity, so the Store
+/// reads the old name as the new one instead of rewriting rows; a name leaves this table only with a data
+/// migration that rewrites `core_command.code`.
+const renamed_codes = [_]struct { saved: []const u8, current: []const u8 }{
+    .{ .saved = "unsupported_provider", .current = "unknown_connection" },
+    .{ .saved = "provider_is_immutable", .current = "connection_is_immutable" },
+};
+
+fn rejectionOf(comptime Rejection: type, code: []const u8) ?Rejection {
+    if (std.meta.stringToEnum(Rejection, code)) |tag| return tag;
+    for (renamed_codes) |rename| if (std.mem.eql(u8, rename.saved, code)) return std.meta.stringToEnum(Rejection, rename.current);
+    return null;
+}
+
+test "a refusal saved under a renamed code replays as its current name" {
+    const Current = enum { unknown_connection, connection_is_immutable, other };
+    const digest: [32]u8 = @splat(7);
+    inline for (.{ cli_value.CommandKind.configure, cli_value.CommandKind.message }) |kind| {
+        for (renamed_codes) |rename| {
+            const saved: Saved = .{ .kind = kind, .target = "", .digest = digest, .accepted = false, .code = rename.saved };
+            const replay = try classify(Current, saved, kind, "", &digest);
+            try std.testing.expectEqual(std.meta.stringToEnum(Current, rename.current).?, replay.rejected);
+        }
+        const unknown: Saved = .{ .kind = kind, .target = "", .digest = digest, .accepted = false, .code = "never_a_code" };
+        try std.testing.expectError(error.CorruptStore, classify(Current, unknown, kind, "", &digest));
+    }
 }
 
 const TestRejection = enum { missing, stale };

@@ -77,13 +77,13 @@ fn runtimeCatalogListing(storage: *Store, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, out.written());
 }
 
-const runtime_catalog_listing = "[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[" ++
+const runtime_catalog_listing = "[{\"connection\":\"codex\",\"source\":\"catalog\",\"models\":[" ++
     "{\"id\":\"gpt-6.1-sol\",\"known\":true},{\"id\":\"runtime-null\",\"known\":true},{\"id\":\"runtime-only\",\"known\":true}]}," ++
-    "{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6.1-sol\",\"known\":true},{\"id\":\"gpt-6.1-terra\",\"known\":false}," ++
+    "{\"connection\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6.1-sol\",\"known\":true},{\"id\":\"gpt-6.1-terra\",\"known\":false}," ++
     "{\"id\":\"runtime-only\",\"known\":true},{\"id\":\"runtime-null\",\"known\":true},{\"id\":\"runtime-private\",\"known\":true}]}]";
 
-const runtime_catalog_empty_listing = "[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[]}," ++
-    "{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6.1-sol\",\"known\":false},{\"id\":\"gpt-6.1-terra\",\"known\":false}," ++
+const runtime_catalog_empty_listing = "[{\"connection\":\"codex\",\"source\":\"catalog\",\"models\":[]}," ++
+    "{\"connection\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6.1-sol\",\"known\":false},{\"id\":\"gpt-6.1-terra\",\"known\":false}," ++
     "{\"id\":\"runtime-only\",\"known\":false},{\"id\":\"runtime-null\",\"known\":false},{\"id\":\"runtime-private\",\"known\":false}]}]";
 
 test "runtime catalog model list selects one owned generation and survives reopen" {
@@ -245,7 +245,7 @@ test "runtime catalog failed publication retains the selected generation for con
             try std.testing.expect(rounds.taken() <= 1);
             var out: std.Io.Writer.Allocating = .init(arena.allocator());
             try @import("../../model_list.zig").writeProviders(&out.writer, facts, &.{.{ .provider = provider_route.nameOf(.codex), .list = .catalog }});
-            try std.testing.expectEqualStrings("[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[{\"id\":\"kept\",\"known\":true}]}]", out.written());
+            try std.testing.expectEqualStrings("[{\"connection\":\"codex\",\"source\":\"catalog\",\"models\":[{\"id\":\"kept\",\"known\":true}]}]", out.written());
             try runtimeCatalogCreation(&storage, "runtime-rollback-accept", "kept", null, "100", null);
             try runtimeCatalogCreation(&storage, "runtime-rollback-refuse", "kept", null, "101", .compact_at_too_large);
             try runtimeCatalogCreation(&storage, "runtime-rollback-effort", "kept", "low", "100", .unsupported_reasoning_effort);

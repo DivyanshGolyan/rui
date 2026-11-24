@@ -1,7 +1,7 @@
 const std = @import("std");
 const execution_owner = @import("execution_owner.zig");
 const execution = @import("execution.zig");
-const Host = @import("server_host.zig").Host;
+const Fixture = if (@import("builtin").is_test) @import("server_host_testing.zig").Fixture else void;
 const store = @import("store.zig");
 const InputCapture = @import("InputCapture.zig");
 const arguments = @import("read_image_arguments.zig");
@@ -354,7 +354,7 @@ fn testReadImage(cases: []const TestCase) !void {
         var records: [1]execution.CustodyRecord = @splat(.{});
         // The first allocation admits Active; fail Result.create after admission.
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 1 });
-        var host: Host = .{ .io = std.testing.io, .allocator = if (case == .result_allocation or case == .empty_allocation or case == .oversized_allocation) failing.allocator() else std.testing.allocator, .lease = undefined, .store = &storage, .retention = &queue };
+        var host: Fixture = .{ .io = std.testing.io, .allocator = if (case == .result_allocation or case == .empty_allocation or case == .oversized_allocation) failing.allocator() else std.testing.allocator, .lease = undefined, .store = &storage, .retention = &queue };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, undefined);
         const results: tool_result.Results = .{ .io = std.testing.io, .allocator = host.allocator, .retention = &queue };

@@ -187,7 +187,7 @@ func initializeTemplate(binary, sqliteBinary, directory, store string, deadline 
 		var reply map[string]any
 		if err := measurement.RunJSON(deadline, &reply, binary, "session", "configure", "--store", store,
 			"--record", filepath.Join(directory, key+".json"), "--key", key, "--workspace", workspace,
-			"--provider", "codex", "--model", "gpt-6-luna", "--tools", "none"); err != nil {
+			"--connection", "codex", "--model", "gpt-6-luna", "--tools", "none"); err != nil {
 			return "", err
 		}
 		if status, _ := measurement.StringField(reply, "answer", "status"); status != "accepted" {

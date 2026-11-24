@@ -33,6 +33,8 @@ const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
 const server_host = @import("server_host.zig");
+const ModelLists = @import("ModelLists.zig");
+const mcp_servers_module = @import("mcp/servers.zig");
 const execution_owner = @import("execution_owner.zig");
 const host_drain = @import("host_drain.zig");
 const signal_stack = @import("signal_stack.zig");
@@ -48,7 +50,7 @@ const h2 = @import("h2");
 const read_action_tool = @import("read_action_tool.zig");
 const read_transcript = @import("read_transcript.zig");
 const session_skills = @import("session_skills.zig");
-const Host = server_host.Host;
+const Fixture = if (@import("builtin").is_test) @import("server_host_testing.zig").Fixture else void;
 const AuthWorker = struct {
     io: std.Io,
     mutex: std.Io.Mutex = .init,
@@ -145,7 +147,7 @@ const BashWork = union {
 
 /// The execution thread's own state: rows of the thread's table, guarded by the thread alone.
 const Run = struct {
-    host: *Host,
+    shared: Shared,
     settings: Settings,
     execution: *execution_owner.Execution,
     custody: *execution.CustodyPool,
@@ -159,8 +161,22 @@ const Run = struct {
 
 /// The tool-result owner every execution path creates results through.
 fn toolResults(run: *const Run) tool_result.Results {
-    return .{ .allocator = run.host.allocator, .io = run.host.io, .retention = run.host.retention };
+    return .{ .allocator = run.shared.allocator, .io = run.shared.io, .retention = run.shared.retention };
 }
+
+/// The pointers and handles the execution thread shares with the rest of the Host process.
+pub const Shared = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    lease: *platform.StoreLease,
+    store: *store_module.Store,
+    lifecycle: *server_host.Lifecycle,
+    probes: *server_host.Probes,
+    retention: *output_retention.Queue,
+    model_lists: *ModelLists,
+    environments: ?*SessionEnvironments,
+    allowance_diagnostic: *server_host.AllowanceDiagnostic,
+};
 
 /// Settings the execution thread reads for its whole life, passed in by the thread's spawn.
 pub const Settings = struct {
@@ -169,6 +185,11 @@ pub const Settings = struct {
     background_after_ms: u64 = @import("host_settings.zig").default_background_after_ms,
     catalog_url: ?[]const u8 = null,
     failed_response_store: ?std.Io.Dir = null,
+    limits: Limits = .{},
+    providers: *const providers.Providers = &providers.none,
+    presets: []const tools.core_tools.Preset = &.{},
+    bash_facts: environment.HostFacts = bash.default_facts,
+    mcp_servers: mcp_servers_module.Servers = .{},
 };
 
 const pages = @import("os/pages.zig");
@@ -180,7 +201,7 @@ const default_bash_path = server_host.default_bash_path;
 const test_pause = @import("testing/pause.zig");
 
 fn reachAction(run: *Run, point: test_pause.Point, binding: store_module.ActionAttemptBinding) void {
-    run.host.probes.reach(point, .{
+    run.shared.probes.reach(point, .{
         .operation = binding.parent_operation_id,
         .action = binding.action_id,
         .attempt = @import("attempt.zig").action_attempt_ordinal,
@@ -188,7 +209,7 @@ fn reachAction(run: *Run, point: test_pause.Point, binding: store_module.ActionA
 }
 
 fn reachModel(run: *Run, point: test_pause.Point, binding: store_module.AttemptBinding) void {
-    run.host.probes.reach(point, .{ .operation = binding.operation_id, .attempt = binding.attempt_ordinal });
+    run.shared.probes.reach(point, .{ .operation = binding.operation_id, .attempt = binding.attempt_ordinal });
 }
 
 const AttemptOwner = struct {
@@ -417,7 +438,7 @@ fn moveSlot(
     if (action) return;
     const to = slotCustody(slot);
     if (from == .attached and to != .attached) {
-        std.debug.assert(!run.custody.holdsUndeliveredAction(token.?) or !run.host.lifecycle.launchAllowed());
+        std.debug.assert(!run.custody.holdsUndeliveredAction(token.?) or !run.shared.lifecycle.launchAllowed());
         run.custody.detach(token.?) catch unreachable;
     }
     switch (to) {
@@ -429,18 +450,46 @@ fn moveSlot(
 
 const TestParts = if (@import("builtin").is_test) @import("server_host_testing.zig").TestParts else void;
 
+/// Test-only derivations of the thread's inputs from a test Host, so every test Run is built the same way.
+const testing_parts = if (@import("builtin").is_test) struct {
+    fn sharedOf(host: *Fixture) Shared {
+        return .{
+            .io = host.io,
+            .allocator = host.allocator,
+            .lease = host.lease,
+            .store = host.store,
+            .lifecycle = host.lifecycle,
+            .probes = host.probes,
+            .retention = host.retention,
+            .model_lists = &host.model_lists,
+            .environments = host.environments,
+            .allowance_diagnostic = &host.allowance_diagnostic,
+        };
+    }
+
+    fn settingsOf(host: *const Fixture) Settings {
+        return .{
+            .limits = host.limits,
+            .providers = host.providers,
+            .presets = host.presets,
+            .bash_facts = host.bash_facts,
+            .mcp_servers = host.mcp_servers,
+        };
+    }
+} else struct {};
+
 /// Test-only Attempt over a custody record the test attaches itself.
-fn testAttempt(host: *Host, custody: *execution.CustodyPool, token: execution.CustodyToken, binding: store_module.ActionAttemptBinding) action_attempt.Attempt {
+fn testAttempt(shared: Shared, custody: *execution.CustodyPool, token: execution.CustodyToken, binding: store_module.ActionAttemptBinding) action_attempt.Attempt {
     return .{
-        .parts = .{ .store = host.store, .lifecycle = host.lifecycle, .probes = host.probes, .custody = custody },
+        .parts = .{ .store = shared.store, .lifecycle = shared.lifecycle, .probes = shared.probes, .custody = custody },
         .token = token,
         .labels = bash_labels,
         .binding = binding,
     };
 }
 
-fn testBashAttempt(host: *Host, custody: *execution.CustodyPool, token: execution.CustodyToken, permit: anytype) !action_attempt.Attempt {
-    return testAttempt(host, custody, token, try custody.attach(token, permit));
+fn testBashAttempt(shared: Shared, custody: *execution.CustodyPool, token: execution.CustodyToken, permit: anytype) !action_attempt.Attempt {
+    return testAttempt(shared, custody, token, try custody.attach(token, permit));
 }
 
 test "execution slots change only through attachSlot and moveSlot" {
@@ -616,11 +665,11 @@ const ListingWork = struct {
     auth: enum { none, waiting, requested } = .none,
 };
 
-pub fn executionMain(host: *Host, settings: Settings, execution_state: *execution_owner.Execution) void {
-    const parts = execution_state.attempts(host.store, host.probes);
-    var run: Run = .{ .host = host, .settings = settings, .execution = execution_state, .custody = parts.custody };
+pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execution_owner.Execution) void {
+    const parts = execution_state.attempts(shared.store, shared.probes);
+    var run: Run = .{ .shared = shared, .settings = settings, .execution = execution_state, .custody = parts.custody };
     const mapped_workspace = pages.Mapped(Workspace).map() catch |err| {
-        run.host.lifecycle.fenceDispatch("execution workspace allocation", err);
+        run.shared.lifecycle.fenceDispatch("execution workspace allocation", err);
         return;
     };
     defer mapped_workspace.unmap();
@@ -628,13 +677,13 @@ pub fn executionMain(host: *Host, settings: Settings, execution_state: *executio
     workspace.failure_after = 0;
     workspace.model_admission.init();
     defer workspace.model_admission.deinit();
-    const auth_worker: ?*AuthWorker = if (run.host.providers.anySignIn()) worker: {
-        workspace.auth_worker = .{ .io = run.host.io };
+    const auth_worker: ?*AuthWorker = if (run.settings.providers.anySignIn()) worker: {
+        workspace.auth_worker = .{ .io = run.shared.io };
         break :worker &workspace.auth_worker;
     } else null;
     const auth_thread: ?std.Thread = if (auth_worker) |worker|
         signal_stack.spawn(.{}, AuthWorker.run, .{worker}) catch |err| {
-            run.host.lifecycle.fenceDispatch("authentication worker initialization", err);
+            run.shared.lifecycle.fenceDispatch("authentication worker initialization", err);
             return;
         }
     else
@@ -645,12 +694,12 @@ pub fn executionMain(host: *Host, settings: Settings, execution_state: *executio
         auth_worker.?.stop(thread);
     };
     const slots = mapZeroed(ExecutionSlot, run.custody.records.len) catch |err| {
-        run.host.lifecycle.fenceDispatch("execution workspace allocation", err);
+        run.shared.lifecycle.fenceDispatch("execution workspace allocation", err);
         return;
     };
     defer unmapZeroed(slots);
     const turn_states = mapZeroed(turn_states_module.TurnStates.Entry, slots.len * std.enums.values(protocol.Provider).len) catch |err| {
-        run.host.lifecycle.fenceDispatch("execution workspace allocation", err);
+        run.shared.lifecycle.fenceDispatch("execution workspace allocation", err);
         return;
     };
     run.turn_states = .init(turn_states);
@@ -660,16 +709,16 @@ pub fn executionMain(host: *Host, settings: Settings, execution_state: *executio
         unmapZeroed(turn_states);
     }
     const history_memos = mapZeroed(model_adapter.HistoryMemos.Entry, slots.len) catch |err| {
-        run.host.lifecycle.fenceDispatch("execution workspace allocation", err);
+        run.shared.lifecycle.fenceDispatch("execution workspace allocation", err);
         return;
     };
-    run.history_memos = .{ .entries = history_memos, .scratch_path = run.host.lease.paths.scratch.slice() };
+    run.history_memos = .{ .entries = history_memos, .scratch_path = run.shared.lease.paths.scratch.slice() };
     defer {
-        run.history_memos.deinit(run.host.io);
+        run.history_memos.deinit(run.shared.io);
         unmapZeroed(history_memos);
     }
     const bash_work = mapZeroed(BashWork, slots.len) catch |err| {
-        run.host.lifecycle.fenceDispatch("execution workspace allocation", err);
+        run.shared.lifecycle.fenceDispatch("execution workspace allocation", err);
         return;
     };
     run.bash_work = bash_work;
@@ -677,18 +726,18 @@ pub fn executionMain(host: *Host, settings: Settings, execution_state: *executio
         run.bash_work = &.{};
         unmapZeroed(bash_work);
     }
-    const budget = run.host.retention.sharedBudget().narrowed(
-        if (run.host.probes.fails(.request_scratch_acquire)) 0 else run.host.limits.request_scratch_limit_bytes,
+    const budget = run.shared.retention.sharedBudget().narrowed(
+        if (run.shared.probes.fails(.request_scratch_acquire)) 0 else run.settings.limits.request_scratch_limit_bytes,
     );
     var listing_urls: std.EnumArray(provider.ListingKind, ?[]const u8) = .initFill(null);
     defer for (listing_urls.values, std.enums.values(provider.ListingKind)) |url, kind| {
-        if (kind != .catalog) if (url) |owned| run.host.allocator.free(owned);
+        if (kind != .catalog) if (url) |owned| run.shared.allocator.free(owned);
     };
     for (std.enums.values(provider.ListingKind)) |kind| {
         const name = provider.listedProvider(kind) orelse continue;
-        const served = run.host.providers.liveList(provider_route.nameOf(name)) orelse continue;
-        listing_urls.set(kind, std.fmt.allocPrint(run.host.allocator, "{s}/models", .{providers.responsesBase(served.endpoint).?}) catch |err| {
-            run.host.model_lists.publish(name, err);
+        const served = run.settings.providers.liveList(provider_route.nameOf(name)) orelse continue;
+        listing_urls.set(kind, std.fmt.allocPrint(run.shared.allocator, "{s}/models", .{providers.responsesBase(served.endpoint).?}) catch |err| {
+            run.shared.model_lists.publish(name, err);
             continue;
         });
     }
@@ -702,25 +751,25 @@ pub fn executionMain(host: *Host, settings: Settings, execution_state: *executio
         } else false;
         if (slots.len == 0 and !any_listing) break :reactor null;
         var endpoints: std.EnumArray(protocol.Provider, ?[]const u8) = .initFill(null);
-        for (run.host.providers.table.names[0..run.host.providers.table.len], run.host.providers.table.values[0..run.host.providers.table.len]) |name, served| {
+        for (run.settings.providers.table.names[0..run.settings.providers.table.len], run.settings.providers.table.values[0..run.settings.providers.table.len]) |name, served| {
             const built_in = provider_route.builtInOf(name) orelse continue;
             endpoints.set(built_in, served.endpoint);
         }
-        reactor_storage.init(run.host.allocator, run.host.io, .{
+        reactor_storage.init(run.shared.allocator, run.shared.io, .{
             .endpoints = endpoints,
-            .ca_file = run.host.providers.ca_file,
+            .ca_file = run.settings.providers.ca_file,
             .capacity = slots.len,
-            .inactivity_seconds = @intCast(run.host.limits.provider_inactivity_seconds),
+            .inactivity_seconds = @intCast(run.settings.limits.provider_inactivity_seconds),
             .observation = .{ .turn_state = run.turn_states.sink() },
-            .scratch_path = run.host.lease.paths.scratch.slice(),
+            .scratch_path = run.shared.lease.paths.scratch.slice(),
             .budget = budget,
             .listing_urls = listing_urls,
         }) catch |err| {
-            if (!run.host.providers.any()) {
+            if (!run.settings.providers.any()) {
                 listingFailed(&run, .catalog, err);
                 break :reactor null;
             }
-            run.host.lifecycle.fenceDispatch("transport reactor initialization", err);
+            run.shared.lifecycle.fenceDispatch("transport reactor initialization", err);
             return;
         };
         if (reactor_storage.catalog_endpoint_error) |err| listingFailed(&run, .catalog, err);
@@ -731,20 +780,20 @@ pub fn executionMain(host: *Host, settings: Settings, execution_state: *executio
     defer if (reactor) |active| {
         for (std.enums.values(provider.ListingKind)) |kind| endListing(active, kind, workspace.listings.getPtr(kind));
     };
-    run.host.lifecycle.connectDispatchWake(reactor, run.host.store);
-    defer run.host.store.commitWake().store(null, .release);
+    run.shared.lifecycle.connectDispatchWake(reactor, run.shared.store);
+    defer run.shared.store.commitWake().store(null, .release);
     // The loop's own commits stay unsynced until something could observe
     // them; Store.settle syncs once for all of them.
-    run.host.store.queue().deferring.store(std.Thread.getCurrentId(), .monotonic);
-    defer run.host.store.queue().deferring.store(0, .monotonic);
+    run.shared.store.queue().deferring.store(std.Thread.getCurrentId(), .monotonic);
+    defer run.shared.store.queue().deferring.store(0, .monotonic);
     // One process-wide SIGCHLD owner: with two Hosts in one process the later
     // attach wins and the other falls back to its Bash wait timeout.
-    const child_wake: child_exit_wake.Wake = run.host.lifecycle.childExitWake();
+    const child_wake: child_exit_wake.Wake = run.shared.lifecycle.childExitWake();
     child_exit_wake.attach(&child_wake);
     defer child_exit_wake.detach(&child_wake);
     const transport: ?std.Thread = if (reactor) |active|
         signal_stack.spawn(.{}, provider.Reactor.serve, .{active}) catch |err| {
-            run.host.lifecycle.fenceDispatch("transport thread start", err);
+            run.shared.lifecycle.fenceDispatch("transport thread start", err);
             return;
         }
     else
@@ -756,7 +805,7 @@ pub fn executionMain(host: *Host, settings: Settings, execution_state: *executio
     if (reactor != null) run.scratch_budget = budget;
     defer run.scratch_budget = null;
     var mcp_calls: server_mcp.Calls = .{};
-    const attempts: action_attempt.Parts = run.execution.attempts(run.host.store, run.host.probes);
+    const attempts: action_attempt.Parts = run.execution.attempts(run.shared.store, run.shared.probes);
     workspace.image_calls = .{};
     defer workspace.image_calls.shutdown(toolResults(&run));
     defer shutdownExecution(&run, slots, workspace);
@@ -766,7 +815,7 @@ pub fn executionMain(host: *Host, settings: Settings, execution_state: *executio
     var measurement: LifecycleMeasurement = .{};
     var heap_release: HeapRelease = .{};
     var drain: ?host_drain.Watch = null;
-    while (!run.host.lifecycle.executionEnding()) {
+    while (!run.shared.lifecycle.executionEnding()) {
         var native = NativeTurn{
             .run = &run,
             .reactor = reactor,
@@ -778,30 +827,30 @@ pub fn executionMain(host: *Host, settings: Settings, execution_state: *executio
             .attempts = attempts,
             .fenced = false,
         };
-        run.host.lifecycle.resetDispatchWake();
+        run.shared.lifecycle.resetDispatchWake();
         const outcome = execution_turn.run(&workspace.turn_state, &native);
         const drain_wait_ms = if (watchDrain(&run, &drain, workspace, &native, outcome)) |wait| wait else break;
         switch (outcome) {
             .continue_immediately => heap_release.worked = true,
             .wait => |kind| {
                 if (heap_release.due(slots, if (reactor) |active| active.listingPending() else false)) process.releaseFreeHeap();
-                const wait_started = std.Io.Clock.Timestamp.now(run.host.io, .awake);
+                const wait_started = std.Io.Clock.Timestamp.now(run.shared.io, .awake);
                 const kind_ms: u32 = switch (kind) {
                     .transport => if (mcp_calls.any()) 25 else transportWaitMs(slots),
                     .bash => 25,
                     .idle => 100,
                 };
                 awaitDispatchWake(&run, @intCast(@min(drain_wait_ms, kind_ms, relistWaitMs(&run))));
-                const wait_finished = std.Io.Clock.Timestamp.now(run.host.io, .awake);
+                const wait_finished = std.Io.Clock.Timestamp.now(run.shared.io, .awake);
                 measurement.wait_since_service_ns += @intCast(wait_started.durationTo(wait_finished).raw.nanoseconds);
             },
             .terminate => break,
         }
         if (native.fenced) break;
     }
-    const stopped_at = std.Io.Clock.Timestamp.now(run.host.io, .awake);
+    const stopped_at = std.Io.Clock.Timestamp.now(run.shared.io, .awake);
     if (measurement.last_service_at) |last| {
-        run.host.probes.traceServiceBoundary(
+        run.shared.probes.traceServiceBoundary(
             @intCast(last.raw.nanoseconds),
             @intCast(stopped_at.raw.nanoseconds),
             measurement.wait_since_service_ns,
@@ -811,17 +860,17 @@ pub fn executionMain(host: *Host, settings: Settings, execution_state: *executio
             @as(u64, @intCast(last.durationTo(stopped_at).raw.nanoseconds)),
         );
     }
-    run.host.probes.traceLifecycleService(measurement.maximum_gap_ns);
+    run.shared.probes.traceLifecycleService(measurement.maximum_gap_ns);
 }
 
 /// Judges a draining pause after each pass. Returns how long the loop may
 /// wait before deciding again, or null once the drain has ended the Host.
 fn watchDrain(run: *Run, drain: *?host_drain.Watch, workspace: *Workspace, native: *NativeTurn, outcome: execution_turn.Outcome) ?u64 {
-    const until = run.host.lifecycle.drainUntil() orelse return std.math.maxInt(u64);
+    const until = run.shared.lifecycle.drainUntil() orelse return std.math.maxInt(u64);
     if (drain.* == null) drain.* = .{ .until_ns = until };
     drain.*.?.until_ns = until;
     const decision = drain.*.?.observe(.{
-        .now_ns = server_host.nowNs(run.host.io),
+        .now_ns = server_host.nowNs(run.shared.io),
         .idle = outcome == .wait and !native.workInFlight(),
         .running = run.custody.running(),
         // A fenced Host admits no retry, so a retry row cannot hold the drain.
@@ -830,7 +879,7 @@ fn watchDrain(run: *Run, drain: *?host_drain.Watch, workspace: *Workspace, nativ
     switch (decision) {
         .wait_at_most_ns => |ns| return std.math.divCeil(u64, ns, std.time.ns_per_ms) catch unreachable,
         .stop => |ended| {
-            if (run.host.lifecycle.finishDrain(ended)) run.host.lifecycle.wakeListener();
+            if (run.shared.lifecycle.finishDrain(ended)) run.shared.lifecycle.wakeListener();
             return null;
         },
     }
@@ -852,16 +901,16 @@ const NativeTurn = struct {
     scheduled_retry: execution_turn.ScheduledRetry = .unknown,
 
     pub fn now(self: *NativeTurn) std.Io.Clock.Timestamp {
-        return std.Io.Clock.Timestamp.now(self.run.host.io, .awake);
+        return std.Io.Clock.Timestamp.now(self.run.shared.io, .awake);
     }
 
     pub fn noteLifecycleOpportunity(self: *NativeTurn) void {
-        if (self.run.host.model_lists.takeAsk()) {
+        if (self.run.shared.model_lists.takeAsk()) {
             if (self.reactor) |reactor| startListings(self.run, reactor, &self.workspace.listings);
         }
         const observed = self.now();
         if (self.measurement.last_service_at) |last| {
-            self.run.host.probes.traceServiceBoundary(
+            self.run.shared.probes.traceServiceBoundary(
                 @intCast(last.raw.nanoseconds),
                 @intCast(observed.raw.nanoseconds),
                 self.measurement.wait_since_service_ns,
@@ -875,7 +924,7 @@ const NativeTurn = struct {
         self.measurement.wait_since_service_ns = 0;
         const trace_due = if (self.measurement.next_trace_at) |deadline| deadline.compare(.lte, observed) else true;
         if (trace_due) {
-            self.run.host.probes.traceLifecycleService(self.measurement.maximum_gap_ns);
+            self.run.shared.probes.traceLifecycleService(self.measurement.maximum_gap_ns);
             self.measurement.next_trace_at = observed.addDuration(.{
                 .raw = .fromMilliseconds(lifecycle_trace_interval_ms),
                 .clock = .awake,
@@ -884,16 +933,16 @@ const NativeTurn = struct {
     }
 
     pub fn consumeControlHint(self: *NativeTurn) bool {
-        return self.run.host.lifecycle.takeControlsChanged();
+        return self.run.shared.lifecycle.takeControlsChanged();
     }
 
     pub fn commitGeneration(self: *const NativeTurn) u64 {
-        return self.run.host.store.commitGeneration();
+        return self.run.shared.store.commitGeneration();
     }
 
     pub fn publishRetryCrossings(self: *NativeTurn, from: u64, now_ms: u64) error{Fence}!execution_turn.DeadlineRead {
-        const read = self.run.host.store.publishRetryCrossings(from, now_ms) catch |err| {
-            self.run.host.lifecycle.fenceDispatch("retry deadline read", err);
+        const read = self.run.shared.store.publishRetryCrossings(from, now_ms) catch |err| {
+            self.run.shared.lifecycle.fenceDispatch("retry deadline read", err);
             self.fenced = true;
             return error.Fence;
         };
@@ -901,7 +950,7 @@ const NativeTurn = struct {
     }
 
     pub fn controlGeneration(self: *const NativeTurn) u64 {
-        return self.run.host.store.controlGeneration();
+        return self.run.shared.store.controlGeneration();
     }
 
     pub fn slotChanges(self: *const NativeTurn) u64 {
@@ -923,25 +972,25 @@ const NativeTurn = struct {
     }
 
     pub noinline fn advanceLiveBash(self: *NativeTurn) bool {
-        const observed = std.Io.Clock.Timestamp.now(self.run.host.io, .awake);
-        const generation = self.run.host.store.commitGeneration();
+        const observed = std.Io.Clock.Timestamp.now(self.run.shared.io, .awake);
+        const generation = self.run.shared.store.commitGeneration();
         var cursor: usize = 0;
         while (self.run.custody.nextMessageWatch(&cursor, generation)) |watch| {
-            const interrupt = self.run.host.store.messageAfterActionLaunch(watch.binding, watch.cutoff) catch |err| {
-                self.run.host.lifecycle.fenceDispatch("Message Action selection", err);
+            const interrupt = self.run.shared.store.messageAfterActionLaunch(watch.binding, watch.cutoff) catch |err| {
+                self.run.shared.lifecycle.fenceDispatch("Message Action selection", err);
                 break;
             };
             if (!interrupt) continue;
-            const reply = self.run.host.store.backgroundAction(.{ .live_action = watch.binding.action_id }, self.run.host.probes.storeFaults(.action_result));
+            const reply = self.run.shared.store.backgroundAction(.{ .live_action = watch.binding.action_id }, self.run.shared.probes.storeFaults(.action_result));
             if (reply == .infrastructure_failure or reply == .conflict) {
-                self.run.host.lifecycle.fenceDispatch("Message Action promotion", error.ActionPromotionFailed);
+                self.run.shared.lifecycle.fenceDispatch("Message Action promotion", error.ActionPromotionFailed);
                 break;
             }
         }
         while (self.run.custody.nextBackgroundDue(observed, self.run.settings.background_after_ms)) |binding| {
-            const reply = self.run.host.store.backgroundAction(.{ .live_action = binding.action_id }, self.run.host.probes.storeFaults(.action_result));
+            const reply = self.run.shared.store.backgroundAction(.{ .live_action = binding.action_id }, self.run.shared.probes.storeFaults(.action_result));
             if (reply == .infrastructure_failure or reply == .conflict) {
-                self.run.host.lifecycle.fenceDispatch("automatic Action promotion", error.ActionPromotionFailed);
+                self.run.shared.lifecycle.fenceDispatch("automatic Action promotion", error.ActionPromotionFailed);
                 break;
             }
         }
@@ -956,11 +1005,11 @@ const NativeTurn = struct {
     }
 
     pub fn dispatchFenced(self: *const NativeTurn) bool {
-        return !self.run.host.lifecycle.launchAllowed();
+        return !self.run.shared.lifecycle.launchAllowed();
     }
 
     pub fn providerConfigured(self: *const NativeTurn) bool {
-        return self.run.host.providers.any();
+        return self.run.settings.providers.any();
     }
 
     pub fn dispatchCapacity(self: *const NativeTurn) DispatchCapacity {
@@ -1010,27 +1059,27 @@ const NativeTurn = struct {
             .containsFn = activeActionContains,
             .maximum_exclusions = self.run.custody.records.len,
         };
-        return self.run.host.store.recoverOneUncertainAction(active_actions) catch |err| {
-            self.run.host.lifecycle.fenceDispatch("uncertain Action recovery", err);
+        return self.run.shared.store.recoverOneUncertainAction(active_actions) catch |err| {
+            self.run.shared.lifecycle.fenceDispatch("uncertain Action recovery", err);
             self.fenced = true;
             return error.Fence;
         };
     }
 
     pub noinline fn recoverExhaustedRetry(self: *NativeTurn) error{Fence}!bool {
-        if (self.run.host.probes.releaseRetryRecovery()) return false;
+        if (self.run.shared.probes.releaseRetryRecovery()) return false;
         const active_slots = ActiveSlots{ .slots = self.slots };
         const active_filter = store_module.ActiveOperationFilter{
             .context = &active_slots,
             .containsFn = activeOperationContains,
             .maximum_exclusions = self.slots.len,
         };
-        const recovered = self.run.host.store.recoverOneExhaustedModelAttempt(active_filter) catch |err| {
-            self.run.host.lifecycle.fenceDispatch("exhausted retry recovery", err);
+        const recovered = self.run.shared.store.recoverOneExhaustedModelAttempt(active_filter) catch |err| {
+            self.run.shared.lifecycle.fenceDispatch("exhausted retry recovery", err);
             self.fenced = true;
             return error.Fence;
         };
-        if (recovered) self.run.host.probes.retryRecovered();
+        if (recovered) self.run.shared.probes.retryRecovered();
         return recovered;
     }
 
@@ -1085,8 +1134,8 @@ const NativeTurn = struct {
     }
 
     pub noinline fn scanWork(self: *NativeTurn, paused: bool, capacity: DispatchCapacity) error{Fence}!execution_turn.Work {
-        const found = self.run.host.store.dispatchWork(paused, capacity) catch |err| {
-            self.run.host.lifecycle.fenceDispatch("dispatch work read", err);
+        const found = self.run.shared.store.dispatchWork(paused, capacity) catch |err| {
+            self.run.shared.lifecycle.fenceDispatch("dispatch work read", err);
             self.fenced = true;
             return error.Fence;
         };
@@ -1098,7 +1147,7 @@ const NativeTurn = struct {
     }
 
     pub fn unixMilliseconds(self: *const NativeTurn) ?u64 {
-        return std.math.cast(u64, store_module.readUnixMilliseconds(self.run.host.io) catch return null);
+        return std.math.cast(u64, store_module.readUnixMilliseconds(self.run.shared.io) catch return null);
     }
 
     pub fn admitNewModel(self: *NativeTurn, paused: bool) execution_turn.Admission {
@@ -1106,7 +1155,7 @@ const NativeTurn = struct {
     }
 
     pub fn turnsPaused(self: *const NativeTurn) bool {
-        return self.run.host.lifecycle.turnsHeld();
+        return self.run.shared.lifecycle.turnsHeld();
     }
 
     pub fn admitToolContinuation(self: *NativeTurn) execution_turn.Admission {
@@ -1125,21 +1174,21 @@ const NativeTurn = struct {
     pub noinline fn advanceModelAdmission(self: *NativeTurn) bool {
         const preparation = &self.workspace.model_admission;
         if (!preparation.pending()) return false;
-        if (!self.run.host.lifecycle.launchAllowed() or
+        if (!self.run.shared.lifecycle.launchAllowed() or
             (preparation.kind == .message and self.turnsPaused()))
         {
             preparation.deinit();
             return true;
         }
         if (preparation.pendingReady()) return false;
-        const progress = self.run.host.store.admitModelAttemptStep(
+        const progress = self.run.shared.store.admitModelAttemptStep(
             preparation.kind.?,
-            self.run.host.probes.storeFaults(.attempt_admission),
+            self.run.shared.probes.storeFaults(.attempt_admission),
             null,
             preparation,
         ) catch |err| {
             preparation.deinit();
-            self.run.host.lifecycle.fenceDispatch("Attempt admission preflight", err);
+            self.run.shared.lifecycle.fenceDispatch("Attempt admission preflight", err);
             self.fenced = true;
             return true;
         };
@@ -1178,11 +1227,11 @@ const NativeTurn = struct {
 
     pub fn driveTransport(self: *NativeTurn) error{Fence}!void {
         if (self.reactor.?.failed()) |err| {
-            self.run.host.lifecycle.fenceDispatch("transport reactor", err);
+            self.run.shared.lifecycle.fenceDispatch("transport reactor", err);
             self.fenced = true;
             return error.Fence;
         }
-        self.run.host.probes.observeUnprocessedCompletions(self.reactor.?);
+        self.run.shared.probes.observeUnprocessedCompletions(self.reactor.?);
     }
 
     pub noinline fn serviceOneCompletion(self: *NativeTurn) bool {
@@ -1198,8 +1247,8 @@ const NativeTurn = struct {
 
     pub fn modelPreparationAllowance(self: *const NativeTurn) execution_turn.Allowance {
         return .{
-            .bytes = self.run.host.limits.request_preparation_byte_allowance,
-            .items = self.run.host.limits.request_preparation_item_allowance,
+            .bytes = self.run.settings.limits.request_preparation_byte_allowance,
+            .items = self.run.settings.limits.request_preparation_item_allowance,
         };
     }
 
@@ -1233,7 +1282,7 @@ noinline fn startListings(run: *Run, reactor: *provider.Reactor, works: *std.Enu
 
 fn listingCredential(run: *Run, kind: provider.ListingKind) ?providers.Credential {
     const name = provider.listedProvider(kind) orelse return null;
-    return run.host.providers.liveList(provider_route.nameOf(name)).?.credential;
+    return run.settings.providers.liveList(provider_route.nameOf(name)).?.credential;
 }
 
 fn startLeasedListing(run: *Run, reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork, lease: ?*const providers.Lease) void {
@@ -1249,11 +1298,11 @@ noinline fn startListing(run: *Run, reactor: *provider.Reactor, kind: provider.L
     var source: ?store_module.ModelCatalogSource = null;
     var fields: [1]h2.Field = undefined;
     const request_fields: []const h2.Field = if (listingCredential(run, kind)) |credential| fields: {
-        try credential.fields(work.url.?, run.host.providers.ca_file, lease, &reactor.credentials, &headers);
+        try credential.fields(work.url.?, run.settings.providers.ca_file, lease, &reactor.credentials, &headers);
         work.credential = headers.takeCredential();
         break :fields headers.fields();
     } else fields: {
-        source = try run.host.store.readModelCatalogSource();
+        source = try run.shared.store.readModelCatalogSource();
         if (source) |*saved| if (saved.etag) |*etag| {
             fields[0] = h2.Field{ .name = "if-none-match", .value = etag.slice() };
             break :fields &fields;
@@ -1265,7 +1314,7 @@ noinline fn startListing(run: *Run, reactor: *provider.Reactor, kind: provider.L
 }
 
 fn listingFailed(run: *Run, kind: provider.ListingKind, err: anyerror) void {
-    if (provider.listedProvider(kind)) |name| return run.host.model_lists.publish(name, err);
+    if (provider.listedProvider(kind)) |name| return run.shared.model_lists.publish(name, err);
     stderr.print("rui: models.dev catalog unavailable ({s}); the saved catalog stands\n", .{@errorName(err)});
 }
 
@@ -1275,8 +1324,8 @@ noinline fn finishListing(run: *Run, reactor: *provider.Reactor, kind: provider.
     if (stream.end().?.cause != .complete) return listingFailed(run, kind, error.ListingTransportFailed);
     if (stream.status() != 200 and !(kind == .catalog and stream.status() == 304)) return listingFailed(run, kind, error.ListingRefused);
     const body = work.response.?[0..@intCast(stream.responseLength())];
-    if (provider.listedProvider(kind)) |name| return run.host.model_lists.publish(name, body);
-    saveCatalogAnswer(run.host.store, work, stream.status().?, body) catch |err| listingFailed(run, kind, err);
+    if (provider.listedProvider(kind)) |name| return run.shared.model_lists.publish(name, body);
+    saveCatalogAnswer(run.shared.store, work, stream.status().?, body) catch |err| listingFailed(run, kind, err);
 }
 
 noinline fn saveCatalogAnswer(store: *store_module.Store, work: *ListingWork, status: u16, body: []const u8) !void {
@@ -1308,12 +1357,12 @@ const slotsHaveBash = hasBash;
 
 fn serviceOneCompletion(run: *Run, reactor: ?*provider.Reactor, slots: []ExecutionSlot, workspace: *Workspace) bool {
     const active_reactor = reactor orelse return false;
-    const completion = active_reactor.nextCompletion(run.host.probes.fails(.response_seal)) catch |err| {
-        run.host.lifecycle.fenceDispatch("transport completion", err);
+    const completion = active_reactor.nextCompletion(run.shared.probes.fails(.response_seal)) catch |err| {
+        run.shared.lifecycle.fenceDispatch("transport completion", err);
         return false;
     } orelse return false;
     const slot = slotOfTransfer(slots, completion.transfer) orelse {
-        run.host.lifecycle.fenceDispatch("transport completion", error.UnknownTransportCompletion);
+        run.shared.lifecycle.fenceDispatch("transport completion", error.UnknownTransportCompletion);
         return false;
     };
     completeTransfer(run, workspace, slot, completion);
@@ -1364,8 +1413,8 @@ test "heap release is due once per return to all slots free" {
 fn serviceRelist(run: *Run) bool {
     const owner = run.execution.relist orelse return false;
     var failure: ?anyerror = null;
-    const progress = owner.service(run.host.store, server_host.nowNs(run.host.io) / std.time.ns_per_ms, &failure);
-    if (failure) |err| run.host.lifecycle.fenceDispatch("MCP tool set publication", err);
+    const progress = owner.service(run.shared.store, server_host.nowNs(run.shared.io) / std.time.ns_per_ms, &failure);
+    if (failure) |err| run.shared.lifecycle.fenceDispatch("MCP tool set publication", err);
     return progress;
 }
 
@@ -1373,11 +1422,11 @@ fn relistWaitMs(run: *Run) u64 {
     const owner = run.execution.relist orelse return std.math.maxInt(u64);
     if (owner.listing()) return 25;
     const at = owner.wakeAt() orelse return std.math.maxInt(u64);
-    return at -| server_host.nowNs(run.host.io) / std.time.ns_per_ms;
+    return at -| server_host.nowNs(run.shared.io) / std.time.ns_per_ms;
 }
 
 fn awaitDispatchWake(run: *Run, timeout_ms: u32) void {
-    run.host.lifecycle.awaitDispatchWake(timeout_ms);
+    run.shared.lifecycle.awaitDispatchWake(timeout_ms);
 }
 
 fn transportWaitMs(slots: []const ExecutionSlot) u32 {
@@ -1411,56 +1460,56 @@ fn cancelSupersededTransfers(
 ) void {
     for (slots) |*slot| switch (slot.*) {
         .model_preparing => |active| {
-            const superseded = run.host.store.operationSupersededByControl(active.binding) catch |err| {
-                run.host.lifecycle.fenceDispatch("preparation control reconciliation", err);
+            const superseded = run.shared.store.operationSupersededByControl(active.binding) catch |err| {
+                run.shared.lifecycle.fenceDispatch("preparation control reconciliation", err);
                 return;
             };
             const control = superseded orelse continue;
-            run.host.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), active.binding);
+            run.shared.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), active.binding);
             workspace.model_preparation.cancel();
             finishCustodyNow(run, slot);
         },
         .model_authenticating => |*active| {
             if (active.cancelled) continue;
-            const superseded = run.host.store.operationSupersededByControl(active.owner.binding) catch |err| {
-                run.host.lifecycle.fenceDispatch("authentication control reconciliation", err);
+            const superseded = run.shared.store.operationSupersededByControl(active.owner.binding) catch |err| {
+                run.shared.lifecycle.fenceDispatch("authentication control reconciliation", err);
                 return;
             };
             if (superseded) |control| {
-                run.host.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), active.owner.binding);
+                run.shared.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), active.owner.binding);
                 active.cancelled = true;
             }
         },
         .model_refreshing => |*active| {
             if (active.cancelled) continue;
-            const superseded = run.host.store.operationSupersededByControl(active.owner.binding) catch |err| {
-                run.host.lifecycle.fenceDispatch("refresh control reconciliation", err);
+            const superseded = run.shared.store.operationSupersededByControl(active.owner.binding) catch |err| {
+                run.shared.lifecycle.fenceDispatch("refresh control reconciliation", err);
                 return;
             };
             if (superseded) |control| {
-                run.host.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), active.owner.binding);
+                run.shared.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), active.owner.binding);
                 active.cancelled = true;
             }
         },
         .model_failure_preparing => |*active| {
-            const superseded = run.host.store.operationSupersededByControl(active.owner.binding) catch |err| {
-                run.host.lifecycle.fenceDispatch("overflow control reconciliation", err);
+            const superseded = run.shared.store.operationSupersededByControl(active.owner.binding) catch |err| {
+                run.shared.lifecycle.fenceDispatch("overflow control reconciliation", err);
                 return;
             };
             if (superseded) |control| {
-                run.host.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), active.owner.binding);
+                run.shared.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), active.owner.binding);
                 active.deinit();
                 finishCustodyNow(run, slot);
             }
         },
         .provider => |*active| {
-            const superseded = run.host.store.operationSupersededByControl(active.owner.binding) catch |err| {
-                run.host.lifecycle.fenceDispatch("control reconciliation", err);
+            const superseded = run.shared.store.operationSupersededByControl(active.owner.binding) catch |err| {
+                run.shared.lifecycle.fenceDispatch("control reconciliation", err);
                 return;
             };
             const control = superseded orelse continue;
             const owner = active.owner;
-            run.host.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), owner.binding);
+            run.shared.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), owner.binding);
             active.transfer.deinit();
             finishCustodyNow(run, slot);
         },
@@ -1543,9 +1592,9 @@ fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
 
 fn bashScratch(run: *Run) bash.Scratch {
     return .{
-        .io = run.host.io,
-        .path = run.host.lease.paths.scratch.slice(),
-        .budget = run.host.retention.sharedBudget().narrowed(run.host.limits.bash_scratch_limit_bytes),
+        .io = run.shared.io,
+        .path = run.shared.lease.paths.scratch.slice(),
+        .budget = run.shared.retention.sharedBudget().narrowed(run.settings.limits.bash_scratch_limit_bytes),
     };
 }
 
@@ -1556,16 +1605,16 @@ fn advanceBash(run: *Run, slots: []ExecutionSlot, workspace: *Workspace) bool {
             const was_running = active.execution.lifecycle.process == .running;
             const service = active.execution.service(bashScratch(run), &workspace.bash_window);
             if (was_running and active.execution.lifecycle.process != .running) {
-                run.host.store.revokeActionSender(active.attempt.binding) catch |err| {
+                run.shared.store.revokeActionSender(active.attempt.binding) catch |err| {
                     _ = failBash(run, slot, "Bash sender retirement", err);
                 };
             }
             made_progress = made_progress or service.made_progress;
             if (service.timeout_action) |action| {
-                run.host.probes.traceActionDeadline("bash_deadline_serviced", action.deadline_ns, action.signal_failed, active.attempt.binding);
+                run.shared.probes.traceActionDeadline("bash_deadline_serviced", action.deadline_ns, action.signal_failed, active.attempt.binding);
             }
             if (service.leader_observed_with_open_pipes) {
-                run.host.probes.traceAction("bash_leader_observed_with_open_pipes", active.attempt.binding);
+                run.shared.probes.traceAction("bash_leader_observed_with_open_pipes", active.attempt.binding);
                 if (comptime test_pause.enabled) reachAction(run, .action_bash_exit_observed, active.attempt.binding);
             }
             if (service.fault) |err| {
@@ -1577,7 +1626,7 @@ fn advanceBash(run: *Run, slots: []ExecutionSlot, workspace: *Workspace) bool {
             }
             if (active.delivery == .closed and service.retired) {
                 const closed = &active.delivery.closed;
-                const now = std.Io.Clock.Timestamp.now(run.host.io, .awake);
+                const now = std.Io.Clock.Timestamp.now(run.shared.io, .awake);
                 if (now.raw.nanoseconds >= closed.reclaim_at.raw.nanoseconds) {
                     made_progress = reclaimBash(run, slot, now) or made_progress;
                 }
@@ -1589,13 +1638,13 @@ fn advanceBash(run: *Run, slots: []ExecutionSlot, workspace: *Workspace) bool {
 }
 
 noinline fn runNextCoreAction(run: *Run, attempts: action_attempt.Parts, mcp: *server_mcp.Calls, images: ?*server_read_image.Calls) execution_turn.Admission {
-    const work = (run.host.store.nextCoreWork(run.custody.dispatchCapacity(!mcp.full())) catch |err| {
-        run.host.lifecycle.fenceDispatch("core tool selection", err);
+    const work = (run.shared.store.nextCoreWork(run.custody.dispatchCapacity(!mcp.full())) catch |err| {
+        run.shared.lifecycle.fenceDispatch("core tool selection", err);
         return .retry_later;
     }) orelse return .no_work;
     return switch (work) {
         .stop => |*owed| runOwedStop(run, owed),
-        .mcp => |call| mcp.admit(attempts, toolResults(run), run.host.mcp_servers, call),
+        .mcp => |call| mcp.admit(attempts, toolResults(run), run.settings.mcp_servers, call),
         .read_image => |call| if (images) |calls| calls.admit(attempts, toolResults(run), call) else .retry_later,
         .ending => |*owed| runOwedEnding(run, owed),
         .forward => |id| runSessionForward(run, id),
@@ -1617,10 +1666,10 @@ noinline fn runMessageDecline(run: *Run, action_id: u64, session: []const u8) ex
     command.session.set(session) catch unreachable;
     const key = std.fmt.bufPrint(&command.key.bytes, "rui.core/message-decline/{d}", .{action_id}) catch unreachable;
     command.key.len = key.len;
-    switch (run.host.store.declineForMessage(&command, run.host.probes.storeFaults(.action_result))) {
+    switch (run.shared.store.declineForMessage(&command, run.shared.probes.storeFaults(.action_result))) {
         .accepted, .rejected, .conflict => return .admitted,
         .infrastructure_failure => {
-            run.host.lifecycle.fenceDispatch("Message approval decline", error.CanonicalStoreFailure);
+            run.shared.lifecycle.fenceDispatch("Message approval decline", error.CanonicalStoreFailure);
             return .retry_later;
         },
     }
@@ -1629,50 +1678,50 @@ noinline fn runMessageDecline(run: *Run, action_id: u64, session: []const u8) ex
 noinline fn runOwedStop(run: *Run, owed: *const store_module.OwedStop) execution_turn.Admission {
     var command: protocol.SessionStopCommand = .{ .key = owed.key };
     command.session.set(owed.session.slice()) catch unreachable;
-    switch (run.host.store.stopOwedSession(&command, run.host.probes.storeFaults(.action_result))) {
+    switch (run.shared.store.stopOwedSession(&command, run.shared.probes.storeFaults(.action_result))) {
         .accepted, .rejected, .conflict => {},
         .infrastructure_failure => {
-            run.host.lifecycle.fenceDispatch("owed stop", error.CanonicalStoreFailure);
+            run.shared.lifecycle.fenceDispatch("owed stop", error.CanonicalStoreFailure);
             return .retry_later;
         },
     }
-    run.host.lifecycle.noteControlsChanged();
+    run.shared.lifecycle.noteControlsChanged();
     return .admitted;
 }
 
 noinline fn runOwedEnding(run: *Run, owed: *const store_module.OwedEnding) execution_turn.Admission {
-    var arena_state: std.heap.ArenaAllocator = .init(run.host.allocator);
+    var arena_state: std.heap.ArenaAllocator = .init(run.shared.allocator);
     defer arena_state.deinit();
     const captured: ?store_module.CapturedMessageSkills = if (owed.answer != null and !owed.quiet)
-        session_skills.bindTo(arena_state.allocator(), run.host.io, run.host.store, owed.parent.slice(), .{ .stored = .{ .store = run.host.store, .reference = owed.answer.? } }) catch |err| switch (err) {
+        session_skills.bindTo(arena_state.allocator(), run.shared.io, run.shared.store, owed.parent.slice(), .{ .stored = .{ .store = run.shared.store, .reference = owed.answer.? } }) catch |err| switch (err) {
             error.OutOfMemory => return .retry_later,
             else => {
-                run.host.lifecycle.fenceDispatch("child ending", err);
+                run.shared.lifecycle.fenceDispatch("child ending", err);
                 return .retry_later;
             },
         }
     else
         null;
-    _ = run.host.store.deliverChildEndingBound(owed.turn_id, if (captured) |*value| value else null, run.host.probes.storeFaults(.action_result)) catch |err| {
-        run.host.lifecycle.fenceDispatch("child ending", err);
+    _ = run.shared.store.deliverChildEndingBound(owed.turn_id, if (captured) |*value| value else null, run.shared.probes.storeFaults(.action_result)) catch |err| {
+        run.shared.lifecycle.fenceDispatch("child ending", err);
         return .retry_later;
     };
     return .admitted;
 }
 
 noinline fn runSessionForward(run: *Run, forward_id: u64) execution_turn.Admission {
-    _ = run.host.store.deliverSessionForward(forward_id, run.host.probes.storeFaults(.action_result)) catch |err| {
-        run.host.lifecycle.fenceDispatch("session forward", err);
+    _ = run.shared.store.deliverSessionForward(forward_id, run.shared.probes.storeFaults(.action_result)) catch |err| {
+        run.shared.lifecycle.fenceDispatch("session forward", err);
         return .retry_later;
     };
     return .admitted;
 }
 
 noinline fn runMessageAgent(run: *Run, input: *const store_module.CoreActionInput) execution_turn.Admission {
-    const arguments_bytes = run.host.allocator.alloc(u8, std.math.cast(usize, input.arguments.length) orelse return .retry_later) catch return .retry_later;
-    defer run.host.allocator.free(arguments_bytes);
-    run.host.store.readCoreArguments(input, arguments_bytes) catch |err| {
-        run.host.lifecycle.fenceDispatch("core tool input", err);
+    const arguments_bytes = run.shared.allocator.alloc(u8, std.math.cast(usize, input.arguments.length) orelse return .retry_later) catch return .retry_later;
+    defer run.shared.allocator.free(arguments_bytes);
+    run.shared.store.readCoreArguments(input, arguments_bytes) catch |err| {
+        run.shared.lifecycle.fenceDispatch("core tool input", err);
         return .retry_later;
     };
     var source: tools.core_tools.SliceSource = .{ .bytes = arguments_bytes };
@@ -1684,35 +1733,35 @@ noinline fn runMessageAgent(run: *Run, input: *const store_module.CoreActionInpu
             try self.list.appendSlice(self.allocator, bytes);
         }
     };
-    var text: Text = .{ .allocator = run.host.allocator };
-    defer text.list.deinit(run.host.allocator);
+    var text: Text = .{ .allocator = run.shared.allocator };
+    defer text.list.deinit(run.shared.allocator);
     const check = tools.core_tools.checkMessageAgent(&source, &text) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         else => {
-            run.host.lifecycle.fenceDispatch("core tool input", err);
+            run.shared.lifecycle.fenceDispatch("core tool input", err);
             return .retry_later;
         },
     };
     const arguments = switch (check) {
         .accepted => |accepted| accepted,
         .rejected => {
-            run.host.lifecycle.fenceDispatch("core tool input", error.CorruptStore);
+            run.shared.lifecycle.fenceDispatch("core tool input", error.CorruptStore);
             return .retry_later;
         },
     };
-    var arena_state: std.heap.ArenaAllocator = .init(run.host.allocator);
+    var arena_state: std.heap.ArenaAllocator = .init(run.shared.allocator);
     defer arena_state.deinit();
-    const captured = session_skills.bindTo(arena_state.allocator(), run.host.io, run.host.store, arguments.id.slice(), .{ .bytes = text.list.items }) catch |err| switch (err) {
+    const captured = session_skills.bindTo(arena_state.allocator(), run.shared.io, run.shared.store, arguments.id.slice(), .{ .bytes = text.list.items }) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         else => {
-            run.host.lifecycle.fenceDispatch("core tool command", err);
+            run.shared.lifecycle.fenceDispatch("core tool command", err);
             return .retry_later;
         },
     };
-    _ = run.host.store.deliverAgentMessageBound(input.binding, arguments.id.slice(), text.list.items, if (captured) |*value| value else null, run.host.probes.storeFaults(.action_result)) catch |err| switch (err) {
+    _ = run.shared.store.deliverAgentMessageBound(input.binding, arguments.id.slice(), text.list.items, if (captured) |*value| value else null, run.shared.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.StaleActionAttemptBinding => return .admitted,
         else => {
-            run.host.lifecycle.fenceDispatch("core tool command", err);
+            run.shared.lifecycle.fenceDispatch("core tool command", err);
             return .retry_later;
         },
     };
@@ -1720,12 +1769,12 @@ noinline fn runMessageAgent(run: *Run, input: *const store_module.CoreActionInpu
 }
 
 noinline fn runFindTools(run: *Run, input: *const store_module.CoreActionInput) execution_turn.Admission {
-    var arena: std.heap.ArenaAllocator = .init(run.host.allocator);
+    var arena: std.heap.ArenaAllocator = .init(run.shared.allocator);
     defer arena.deinit();
-    var call = find_tools.read(run.host.store, arena.allocator(), input) catch |err| switch (err) {
+    var call = find_tools.read(run.shared.store, arena.allocator(), input) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         else => {
-            run.host.lifecycle.fenceDispatch("find_tools core command", err);
+            run.shared.lifecycle.fenceDispatch("find_tools core command", err);
             return .retry_later;
         },
     };
@@ -1733,11 +1782,11 @@ noinline fn runFindTools(run: *Run, input: *const store_module.CoreActionInput) 
         // The report writer fails only when the arena is out of memory, the same retry as the search's.
         call.words.report = findToolsReload(run, arena.allocator()) catch return .retry_later;
     }
-    find_tools.settle(run.host.store, input, &call, arena.allocator(), run.host.probes.storeFaults(.action_result)) catch |err| switch (err) {
+    find_tools.settle(run.shared.store, input, &call, arena.allocator(), run.shared.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         error.StaleActionAttemptBinding => return .admitted,
         else => {
-            run.host.lifecycle.fenceDispatch("find_tools core command", err);
+            run.shared.lifecycle.fenceDispatch("find_tools core command", err);
             return .retry_later;
         },
     };
@@ -1755,13 +1804,13 @@ fn findToolsReload(run: *Run, arena: std.mem.Allocator) ![]const u8 {
 }
 
 noinline fn runReadTranscript(run: *Run, input: *const store_module.CoreActionInput) execution_turn.Admission {
-    var arena: std.heap.ArenaAllocator = .init(run.host.allocator);
+    var arena: std.heap.ArenaAllocator = .init(run.shared.allocator);
     defer arena.deinit();
-    read_transcript.run(run.host.store, arena.allocator(), input, run.host.probes.storeFaults(.action_result)) catch |err| switch (err) {
+    read_transcript.run(run.shared.store, arena.allocator(), input, run.shared.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         error.StaleActionAttemptBinding => return .admitted,
         else => {
-            run.host.lifecycle.fenceDispatch("read_transcript core command", err);
+            run.shared.lifecycle.fenceDispatch("read_transcript core command", err);
             return .retry_later;
         },
     };
@@ -1769,13 +1818,13 @@ noinline fn runReadTranscript(run: *Run, input: *const store_module.CoreActionIn
 }
 
 noinline fn runStopAction(run: *Run, input: *const store_module.CoreActionInput) execution_turn.Admission {
-    var arena: std.heap.ArenaAllocator = .init(run.host.allocator);
+    var arena: std.heap.ArenaAllocator = .init(run.shared.allocator);
     defer arena.deinit();
-    @import("stop_action_tool.zig").run(run.host.store, arena.allocator(), input, run.host.probes.storeFaults(.action_result)) catch |err| switch (err) {
+    @import("stop_action_tool.zig").run(run.shared.store, arena.allocator(), input, run.shared.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         error.StaleActionAttemptBinding => return .admitted,
         else => {
-            run.host.lifecycle.fenceDispatch("stop_action core command", err);
+            run.shared.lifecycle.fenceDispatch("stop_action core command", err);
             return .retry_later;
         },
     };
@@ -1783,13 +1832,13 @@ noinline fn runStopAction(run: *Run, input: *const store_module.CoreActionInput)
 }
 
 noinline fn runReadAction(run: *Run, input: *const store_module.CoreActionInput) execution_turn.Admission {
-    var arena: std.heap.ArenaAllocator = .init(run.host.allocator);
+    var arena: std.heap.ArenaAllocator = .init(run.shared.allocator);
     defer arena.deinit();
-    read_action_tool.run(run.host.store, arena.allocator(), input, run.host.probes.storeFaults(.action_result)) catch |err| switch (err) {
+    read_action_tool.run(run.shared.store, arena.allocator(), input, run.shared.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         error.StaleActionAttemptBinding => return .admitted,
         else => {
-            run.host.lifecycle.fenceDispatch("read_action core command", err);
+            run.shared.lifecycle.fenceDispatch("read_action core command", err);
             return .retry_later;
         },
     };
@@ -1797,7 +1846,7 @@ noinline fn runReadAction(run: *Run, input: *const store_module.CoreActionInput)
 }
 
 noinline fn runSkill(run: *Run, input: *const store_module.CoreActionInput) execution_turn.Admission {
-    var memory: std.heap.ArenaAllocator = .init(run.host.allocator);
+    var memory: std.heap.ArenaAllocator = .init(run.shared.allocator);
     defer memory.deinit();
     const arena = memory.allocator();
     var request: protocol.SkillRequest = .{};
@@ -1805,8 +1854,8 @@ noinline fn runSkill(run: *Run, input: *const store_module.CoreActionInput) exec
         .{ .rejected = "the arguments take more than 4096 bytes" }
     else checked: {
         const bytes = arena.alloc(u8, @intCast(input.arguments.length)) catch return .retry_later;
-        run.host.store.readCoreArguments(input, bytes) catch |err| {
-            run.host.lifecycle.fenceDispatch("skill core input", err);
+        run.shared.store.readCoreArguments(input, bytes) catch |err| {
+            run.shared.lifecycle.fenceDispatch("skill core input", err);
             return .retry_later;
         };
         break :checked tools.core_tools.checkSkill(arena, bytes, &request) catch return .retry_later;
@@ -1814,15 +1863,15 @@ noinline fn runSkill(run: *Run, input: *const store_module.CoreActionInput) exec
     const captured: store_module.CapturedSkill = if (check == .rejected)
         .{ .failed = .{ .code = .skills_unavailable, .bytes = check.rejected } }
     else
-        session_skills.capture(arena, run.host.allocator, run.host.io, run.host.store, input.session.slice(), &request, run.host.bash_facts.home) catch |err| {
-            if (err != error.OutOfMemory) run.host.lifecycle.fenceDispatch("skill capture", err);
+        session_skills.capture(arena, run.shared.allocator, run.shared.io, run.shared.store, input.session.slice(), &request, run.settings.bash_facts.home) catch |err| {
+            if (err != error.OutOfMemory) run.shared.lifecycle.fenceDispatch("skill capture", err);
             return .retry_later;
         };
-    _ = run.host.store.settleSkillTool(input.binding, arena, &captured, run.host.probes.storeFaults(.action_result)) catch |err| switch (err) {
+    _ = run.shared.store.settleSkillTool(input.binding, arena, &captured, run.shared.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.StaleActionAttemptBinding => return .admitted,
         error.OutOfMemory => return .retry_later,
         else => {
-            run.host.lifecycle.fenceDispatch("skill core settlement", err);
+            run.shared.lifecycle.fenceDispatch("skill core settlement", err);
             return .retry_later;
         },
     };
@@ -1830,7 +1879,7 @@ noinline fn runSkill(run: *Run, input: *const store_module.CoreActionInput) exec
 }
 
 noinline fn runStartAgent(run: *Run, input: *const store_module.CoreActionInput) execution_turn.Admission {
-    var arena_state: std.heap.ArenaAllocator = .init(run.host.allocator);
+    var arena_state: std.heap.ArenaAllocator = .init(run.shared.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const start = arena.create(tools.core_tools.StartAgent) catch return .retry_later;
@@ -1838,32 +1887,32 @@ noinline fn runStartAgent(run: *Run, input: *const store_module.CoreActionInput)
         .{ .rejected = std.fmt.comptimePrint("the arguments take more than {d} bytes", .{tools.core_tools.start_agent_max_argument_bytes}) }
     else check: {
         const bytes = arena.alloc(u8, @intCast(input.arguments.length)) catch return .retry_later;
-        run.host.store.readCoreArguments(input, bytes) catch |err| {
-            run.host.lifecycle.fenceDispatch("core tool input", err);
+        run.shared.store.readCoreArguments(input, bytes) catch |err| {
+            run.shared.lifecycle.fenceDispatch("core tool input", err);
             return .retry_later;
         };
-        break :check tools.core_tools.checkStartAgentWithPresets(arena, bytes, run.host.presets, start) catch return .retry_later;
+        break :check tools.core_tools.checkStartAgentWithPresets(arena, bytes, run.settings.presets, start) catch return .retry_later;
     };
     switch (check) {
         .accepted => {},
         .rejected => |reason| {
             const result = std.fmt.allocPrint(arena, "Rui could not start the agent: {s}. Nothing was started.", .{reason}) catch return .retry_later;
-            _ = run.host.store.failCoreCall(input.binding, result, run.host.probes.storeFaults(.action_result)) catch |err| switch (err) {
+            _ = run.shared.store.failCoreCall(input.binding, result, run.shared.probes.storeFaults(.action_result)) catch |err| switch (err) {
                 error.StaleActionAttemptBinding => {},
-                else => run.host.lifecycle.fenceDispatch("core tool command", err),
+                else => run.shared.lifecycle.fenceDispatch("core tool command", err),
             };
             return .admitted;
         },
     }
-    var inheritance = child_environment.Inheritance.init(run.host.environments, input.session.slice(), run.host.allocator, arena) catch return .retry_later;
-    defer inheritance.deinit(run.host.allocator);
+    var inheritance = child_environment.Inheritance.init(run.shared.environments, input.session.slice(), run.shared.allocator, arena) catch return .retry_later;
+    defer inheritance.deinit(run.shared.allocator);
     const committed = inheritance.messageCallback();
-    const parent_skills = run.host.store.readSkills(arena, input.session.slice()) catch return .retry_later;
-    const prepared = session_skills.prepareCreation(arena, run.host.allocator, run.host.io, parent_skills.workspace.slice(), run.host.bash_facts.home, .{ .bytes = start.task }) catch return .retry_later;
-    _ = run.host.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, prepared.initial, if (prepared.captured) |*value| value else null, run.host.probes.storeFaults(.action_result)) catch |err| switch (err) {
+    const parent_skills = run.shared.store.readSkills(arena, input.session.slice()) catch return .retry_later;
+    const prepared = session_skills.prepareCreation(arena, run.shared.allocator, run.shared.io, parent_skills.workspace.slice(), run.settings.bash_facts.home, .{ .bytes = start.task }) catch return .retry_later;
+    _ = run.shared.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, prepared.initial, if (prepared.captured) |*value| value else null, run.shared.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.StaleActionAttemptBinding => return .admitted,
         else => {
-            run.host.lifecycle.fenceDispatch("core tool command", err);
+            run.shared.lifecycle.fenceDispatch("core tool command", err);
             return .retry_later;
         },
     };
@@ -1876,8 +1925,8 @@ fn admitBashAttempt(
     slot: *ExecutionSlot,
     workspace: *Workspace,
 ) AdmissionProgress {
-    const selected = (run.host.store.nextAction(.bash, run.custody.dispatchCapacity(false)) catch |err| {
-        run.host.lifecycle.fenceDispatch("Bash Action selection", err);
+    const selected = (run.shared.store.nextAction(.bash, run.custody.dispatchCapacity(false)) catch |err| {
+        run.shared.lifecycle.fenceDispatch("Bash Action selection", err);
         return .retry_later;
     }) orelse return .no_work;
     const attempt = switch (action_attempt.admit(parts, selected, run.settings.bash_timeout_ms, bash_labels)) {
@@ -1892,27 +1941,27 @@ fn admitBashAttempt(
     // This blocking pause holds the shared execution loop until release.
     if (comptime test_pause.enabled) reachAction(run, .action_attempt_committed, action_binding);
     const input = &workspace.bash_input;
-    run.host.store.readActionExecutionInput(.bash, action_binding, input) catch |err| {
+    run.shared.store.readActionExecutionInput(.bash, action_binding, input) catch |err| {
         settleActionFailure(slot, .storage_failed, "Bash input could not be read.");
         finishCustodyNow(run, slot);
-        if (run.host.store.isFenced()) run.host.lifecycle.fenceDispatch("Bash canonical input", err);
+        if (run.shared.store.isFenced()) run.shared.lifecycle.fenceDispatch("Bash canonical input", err);
         return .admitted;
     };
-    const arguments = run.host.store.openContent(input.arguments) catch |err| {
+    const arguments = run.shared.store.openContent(input.arguments) catch |err| {
         settleActionFailure(slot, .storage_failed, "Bash input could not be opened.");
         finishCustodyNow(run, slot);
-        run.host.lifecycle.fenceDispatch("Bash canonical input", err);
+        run.shared.lifecycle.fenceDispatch("Bash canonical input", err);
         return .admitted;
     };
     if (workspace.bash_preparation.start(
         bashScratch(run),
-        run.host.allocator,
+        run.shared.allocator,
         arguments,
         input,
-        run.host.lease.paths.selector(),
+        run.shared.lease.paths.selector(),
         run.settings.bash_path,
         action_binding.action_id,
-        run.host.probes.bashFaults(),
+        run.shared.probes.bashFaults(),
     )) |failure| {
         var owned = failure;
         finishBashPreparationFailure(run, slot, &owned);
@@ -1930,7 +1979,7 @@ fn advanceBashPreparation(
         else => {},
     } else return false;
     const preparation = &workspace.bash_preparation;
-    if (!run.host.lifecycle.launchAllowed()) {
+    if (!run.shared.lifecycle.launchAllowed()) {
         discardBashResources(run, slot, preparation.cancel());
         return true;
     }
@@ -1963,8 +2012,8 @@ fn finishBashPreparationFailure(run: *Run, slot: *ExecutionSlot, failure: *bash.
         retainBashPreparedCleanup(run, slot, failure.cleanup, cleanup_err);
         return;
     };
-    if (canonical_failure or run.host.store.isFenced()) {
-        run.host.lifecycle.fenceDispatch("Bash canonical preparation", failure.cause);
+    if (canonical_failure or run.shared.store.isFenced()) {
+        run.shared.lifecycle.fenceDispatch("Bash canonical preparation", failure.cause);
     }
     finishCustodyNow(run, slot);
 }
@@ -1987,12 +2036,12 @@ fn launchPreparedBash(run: *Run, slot: *ExecutionSlot, prepared: *bash.Prepared)
     const action_binding = slot.bash_preparing.attempt.binding;
     // This blocking pause holds the shared execution loop until release.
     if (comptime test_pause.enabled) reachAction(run, .action_before_handoff, action_binding);
-    run.host.probes.holdAt(.{ .action_launch = action_binding });
-    if (!run.host.lifecycle.launchAllowed()) {
+    run.shared.probes.holdAt(.{ .action_launch = action_binding });
+    if (!run.shared.lifecycle.launchAllowed()) {
         discardBashResources(run, slot, prepared.takeCleanup());
         return;
     }
-    const base = launchBase(run.host.environments, prepared.session.slice(), prepared.allocator) catch {
+    const base = launchBase(run.shared.environments, prepared.session.slice(), prepared.allocator) catch {
         settleActionFailure(slot, .spawn_failed, "Bash was not started: the Host could not copy the Session's environment.");
         discardBashResources(run, slot, prepared.takeCleanup());
         return;
@@ -2000,8 +2049,9 @@ fn launchPreparedBash(run: *Run, slot: *ExecutionSlot, prepared: *bash.Prepared)
     defer if (base) |bytes| prepared.allocator.free(bytes);
     const work = &run.bash_work[token.index];
     var refused: bash.ArgumentSizes = .{};
-    switch (slot.bash_preparing.attempt.launch(.effect, std.Io.Clock.Timestamp.now(run.host.io, .awake), .{
-        .host = run.host,
+    switch (slot.bash_preparing.attempt.launch(.effect, std.Io.Clock.Timestamp.now(run.shared.io, .awake), .{
+        .shared = run.shared,
+        .bash_facts = run.settings.bash_facts,
         .prepared = prepared,
         .base = base,
         .work = work,
@@ -2009,7 +2059,7 @@ fn launchPreparedBash(run: *Run, slot: *ExecutionSlot, prepared: *bash.Prepared)
     }, startBash)) {
         .started => {},
         .authority => |err| {
-            run.host.lifecycle.fenceDispatch("Bash launch authority", err);
+            run.shared.lifecycle.fenceDispatch("Bash launch authority", err);
             discardBashResources(run, slot, prepared.takeCleanup());
             return;
         },
@@ -2021,7 +2071,7 @@ fn launchPreparedBash(run: *Run, slot: *ExecutionSlot, prepared: *bash.Prepared)
             } else if (err == error.BashArgumentsTooLarge) {
                 settleArgumentsTooLarge(slot, refused);
             } else if (err != error.HostDispatchSuppressed) {
-                run.host.lifecycle.fenceDispatch("Bash dispatch handoff", err);
+                run.shared.lifecycle.fenceDispatch("Bash dispatch handoff", err);
             }
             discardBashResources(run, slot, prepared.takeCleanup());
             return;
@@ -2032,13 +2082,13 @@ fn launchPreparedBash(run: *Run, slot: *ExecutionSlot, prepared: *bash.Prepared)
         .attempt = attempt,
         .execution = &work.execution,
     });
-    run.host.probes.traceAction("bash_handoff_committed", action_binding);
+    run.shared.probes.traceAction("bash_handoff_committed", action_binding);
     const deadline_ns = slot.bash.execution.deadlineNs();
-    run.host.probes.traceActionDeadline("bash_deadline_established", deadline_ns, false, action_binding);
+    run.shared.probes.traceActionDeadline("bash_deadline_established", deadline_ns, false, action_binding);
 }
 
 fn startBash(context: anytype) !void {
-    context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.base, context.host.lease.paths.runtimeHint(), context.refused) };
+    context.work.* = .{ .execution = try context.prepared.launch(context.bash_facts, context.base, context.shared.lease.paths.runtimeHint(), context.refused) };
 }
 
 fn stopSupersededBash(
@@ -2053,7 +2103,7 @@ fn stopSupersededBash(
                 .running => continue,
                 .stopped => |control| control,
             };
-            run.host.probes.traceActionControl("effect_stop_requested", control.command_key.slice(), slot.bash_preparing.attempt.binding);
+            run.shared.probes.traceActionControl("effect_stop_requested", control.command_key.slice(), slot.bash_preparing.attempt.binding);
             var cleanup = preparation.cancel();
             settleActionFailure(slot, .cancelled, "Bash was stopped before launch.");
             cleanup.cleanup(bashScratch(run)) catch |cleanup_err| {
@@ -2070,12 +2120,12 @@ fn stopSupersededBash(
             };
             if (!active.stop_accepted) {
                 active.stop_accepted = true;
-                run.host.probes.traceActionControl("effect_stop_requested", control.command_key.slice(), active.attempt.binding);
-                const action = active.execution.requestStop(.now(run.host.io, .awake));
-                run.host.store.revokeActionSender(active.attempt.binding) catch |err| {
+                run.shared.probes.traceActionControl("effect_stop_requested", control.command_key.slice(), active.attempt.binding);
+                const action = active.execution.requestStop(.now(run.shared.io, .awake));
+                run.shared.store.revokeActionSender(active.attempt.binding) catch |err| {
                     _ = failBash(run, slot, "Bash sender retirement", err);
                 };
-                run.host.probes.traceActionControlOutcome(
+                run.shared.probes.traceActionControlOutcome(
                     "lifecycle_action_attempted",
                     control.command_key.slice(),
                     action.attempted,
@@ -2100,7 +2150,7 @@ noinline fn completeBash(run: *Run, slot: *ExecutionSlot) void {
     const materialized = materializeBashResult(run, slot, result) orelse return;
     const code = materialized.code;
     const value = materialized.value;
-    run.host.probes.holdAt(.{ .action_result = binding });
+    run.shared.probes.holdAt(.{ .action_result = binding });
     // This blocking pause holds the shared execution loop until release.
     if (comptime test_pause.enabled) reachAction(run, .action_result_ready, binding);
     const delivered = active.attempt.settle(.{ .result = .{ .code = code, .value = value, .retained = result } });
@@ -2119,7 +2169,7 @@ const MaterializedBashResult = struct {
 
 /// Keeps output materialization's frame off the stack while the result settles.
 noinline fn materializeBashResult(run: *Run, slot: *ExecutionSlot, result: *@import("tool_result.zig").Result) ?MaterializedBashResult {
-    const code = slot.bash.execution.writeResult(bashScratch(run), run.host.retention, result) catch |err| {
+    const code = slot.bash.execution.writeResult(bashScratch(run), run.shared.retention, result) catch |err| {
         _ = failBash(run, slot, "Bash outcome materialization", err);
         return null;
     };
@@ -2143,31 +2193,31 @@ fn failBash(run: *Run, slot: *ExecutionSlot, phase: []const u8, err: anyerror) b
 fn closeBashDelivery(run: *Run, slot: *ExecutionSlot) void {
     var closed = slot.bash;
     std.debug.assert(closed.delivery == .open);
-    closed.delivery = .{ .closed = .{ .closing = closed.attempt.close(), .reclaim_at = .now(run.host.io, .awake) } };
+    closed.delivery = .{ .closed = .{ .closing = closed.attempt.close(), .reclaim_at = .now(run.shared.io, .awake) } };
     moveSlot(run, slot, .bash, closed);
-    run.host.probes.traceAction("cleanup_started", closed.attempt.binding);
+    run.shared.probes.traceAction("cleanup_started", closed.attempt.binding);
 }
 
 fn reclaimBash(run: *Run, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) bool {
     const active = &slot.bash;
     const closed = &active.delivery.closed;
     const retry_at = now.addDuration(.{ .raw = .fromMilliseconds(100), .clock = .awake });
-    if (run.host.probes.bashReclaimHeld(active.attempt.binding, closed.reclaim_failed)) {
+    if (run.shared.probes.bashReclaimHeld(active.attempt.binding, closed.reclaim_failed)) {
         closed.reclaim_at = retry_at;
         return false;
     }
-    active.execution.reclaim(bashScratch(run), run.host.retention) catch |err| {
+    active.execution.reclaim(bashScratch(run), run.shared.retention) catch |err| {
         const first_failure = !closed.reclaim_failed;
         closed.reclaim_failed = true;
         closed.reclaim_at = retry_at;
-        if (first_failure) run.host.lifecycle.retainDispatchFence("Bash resource reclamation", err);
+        if (first_failure) run.shared.lifecycle.retainDispatchFence("Bash resource reclamation", err);
         return first_failure;
     };
     const binding = active.attempt.binding;
     const closing = closed.closing;
     moveSlot(run, slot, .free, {});
     closing.finish();
-    run.host.probes.traceAction("cleanup_completed", binding);
+    run.shared.probes.traceAction("cleanup_completed", binding);
     return true;
 }
 
@@ -2177,7 +2227,7 @@ fn retainBashPreparedCleanup(
     cleanup: bash.PreparedCleanup,
     err: anyerror,
 ) void {
-    run.host.lifecycle.retainDispatchFence("Bash preparation cleanup", err);
+    run.shared.lifecycle.retainDispatchFence("Bash preparation cleanup", err);
     const closing = slot.bash_preparing.attempt.close();
     const work = &run.bash_work[closing.token.index];
     work.* = .{ .prepared_cleanup = cleanup };
@@ -2208,20 +2258,20 @@ fn admitNewAttempt(
     preparation: *model_adapter.Preparation,
     pending: *store_module.ModelAdmissionPreparation,
 ) AdmissionProgress {
-    if (!run.host.lifecycle.launchAllowed()) {
+    if (!run.shared.lifecycle.launchAllowed()) {
         pending.deinit();
         return .no_work;
     }
     if (pending.pending() and !pending.pendingReady()) return .progress;
     const token = run.custody.reserve() orelse return .no_work;
-    const progress = run.host.store.admitModelAttemptStep(kind, run.host.probes.storeFaults(.attempt_admission), .{
+    const progress = run.shared.store.admitModelAttemptStep(kind, run.shared.probes.storeFaults(.attempt_admission), .{
         .view = &preparation.page,
         .settings = &preparation.settings,
         .remembered = model_adapter.remembered(&run.history_memos),
     }, pending) catch |err| {
         run.custody.releaseUnused(token) catch unreachable;
         pending.deinit();
-        run.host.lifecycle.fenceDispatch("Attempt admission", err);
+        run.shared.lifecycle.fenceDispatch("Attempt admission", err);
         return .retry_later;
     };
     var admission = switch (progress) {
@@ -2246,9 +2296,9 @@ fn admitRetryAttempt(
     due_ms: *?u64,
 ) AdmissionProgress {
     const token = run.custody.reserve() orelse return .no_work;
-    var admission = run.host.store.tryAdmitNextModelRetry(active, run.host.probes.storeFaults(.attempt_admission), due_ms) catch |err| {
+    var admission = run.shared.store.tryAdmitNextModelRetry(active, run.shared.probes.storeFaults(.attempt_admission), due_ms) catch |err| {
         run.custody.releaseUnused(token) catch unreachable;
-        run.host.lifecycle.fenceDispatch("retry Attempt admission", err);
+        run.shared.lifecycle.fenceDispatch("retry Attempt admission", err);
         return .retry_later;
     } orelse {
         run.custody.releaseUnused(token) catch unreachable;
@@ -2269,24 +2319,24 @@ fn beginAdmittedAttempt(
     const binding = attachSlot(run, slot, token, permit) catch |err| {
         if (started) preparation.page.close();
         run.custody.releaseUnused(token) catch unreachable;
-        run.host.lifecycle.fenceDispatch("custody attachment", err);
+        run.shared.lifecycle.fenceDispatch("custody attachment", err);
         return .admitted;
     };
     if (!started) preparation.page.open(binding);
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
-        run.host.io,
-        run.host.lease.paths.scratch.slice(),
+        run.shared.io,
+        run.shared.lease.paths.scratch.slice(),
         run.scratch_budget.?,
-        run.host.providers.served(),
+        run.settings.providers.served(),
         &run.history_memos,
-        run.host.probes.preparationFaults(),
+        run.shared.probes.preparationFaults(),
         &retained_scratch,
     ) catch |err| {
         finishModelPreparationFailure(run, slot, slot.model_preparing, err, retained_scratch);
         return .admitted;
     };
-    run.host.probes.traceOperation("preparation_started", binding);
+    run.shared.probes.traceOperation("preparation_started", binding);
     return .admitted;
 }
 
@@ -2308,15 +2358,15 @@ fn advanceModelPreparation(
         else => {},
     } else return false;
     var owner = slot.model_preparing;
-    if (execution.modelDecision(.{ .preparing = .{ .launch_allowed = run.host.lifecycle.launchAllowed() } }) == .abandon) {
+    if (execution.modelDecision(.{ .preparing = .{ .launch_allowed = run.shared.lifecycle.launchAllowed() } }) == .abandon) {
         preparation.cancel();
         finishCustodyNow(run, slot);
         return true;
     }
-    run.host.probes.traceOperation("preparation_advance_started", owner.binding);
+    run.shared.probes.traceOperation("preparation_advance_started", owner.binding);
     var progress = preparation.advance(byte_allowance, item_allowance);
     while (progress == .read) {
-        run.host.store.readRequestPage(&preparation.page) catch |err| {
+        run.shared.store.readRequestPage(&preparation.page) catch |err| {
             progress = .{ .failed = err };
             break;
         };
@@ -2326,20 +2376,20 @@ fn advanceModelPreparation(
     switch (progress) {
         .read => unreachable,
         .pending => {
-            run.host.probes.tracePreparationAdvance("preparation_advance_completed", stats, owner.binding);
+            run.shared.probes.tracePreparationAdvance("preparation_advance_completed", stats, owner.binding);
             // This blocking pause holds the shared execution loop until release.
             if (comptime test_pause.enabled) reachModel(run, .model_preparation_advanced, owner.binding);
         },
         .failed => |err| {
-            run.host.probes.tracePreparationAdvanceError("preparation_advance_failed", err, stats, owner.binding);
+            run.shared.probes.tracePreparationAdvanceError("preparation_advance_failed", err, stats, owner.binding);
             preparation.cancel();
             finishModelPreparationFailure(run, slot, owner, err, null);
         },
         .prepared => |request| {
             owner.purpose = preparation.settings.operation;
-            run.host.probes.tracePreparationAdvance("preparation_advance_completed", stats, owner.binding);
-            run.host.probes.traceOperation("preparation_completed", owner.binding);
-            const leased = run.host.providers.get(provider_route.nameOf(request.provider)).?.credential.leased();
+            run.shared.probes.tracePreparationAdvance("preparation_advance_completed", stats, owner.binding);
+            run.shared.probes.traceOperation("preparation_completed", owner.binding);
+            const leased = run.settings.providers.get(provider_route.nameOf(request.provider)).?.credential.leased();
             switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = leased } })) {
                 .authenticate => {
                     moveSlot(run, slot, .model_authenticating, .{ .owner = owner });
@@ -2366,11 +2416,11 @@ fn advanceCredentialWork(run: *Run, reactor: *provider.Reactor, slots: []Executi
     for (slots) |*slot| switch (slot.*) {
         .model_authenticating => |*active| {
             if (active.cancelled) {
-                request.deinit(run.host.io, run.scratch_budget.?);
+                request.deinit(run.shared.io, run.scratch_budget.?);
                 finishCustodyNow(run, slot);
             } else {
                 active.requested = true;
-                worker.request(run.host.providers.get(provider_route.nameOf(request.provider)).?.credential.signIn().?);
+                worker.request(run.settings.providers.get(provider_route.nameOf(request.provider)).?.credential.signIn().?);
             }
             return true;
         },
@@ -2430,8 +2480,8 @@ fn retireAnsweredResponse(response: *?provider.SealedResponse) void {
 
 fn beginForcedRefresh(run: *Run, slot: *ExecutionSlot, answered: *const AnsweredAttempt, refresh: providers.Credential.Refresh, response: *?provider.SealedResponse) bool {
     const owner = answered.owner;
-    const claimed = run.host.store.claimModelAuthRefresh(owner.binding) catch |err| {
-        if (err != error.SupersededByControl) run.host.lifecycle.fenceDispatch("credential refresh claim", err);
+    const claimed = run.shared.store.claimModelAuthRefresh(owner.binding) catch |err| {
+        if (err != error.SupersededByControl) run.shared.lifecycle.fenceDispatch("credential refresh claim", err);
         slot.provider.transfer.deinit();
         retireAnsweredResponse(response);
         finishCustodyNow(run, slot);
@@ -2454,7 +2504,7 @@ fn advanceAuthentication(run: *Run, reactor: *provider.Reactor, slot: *Execution
     const active = &slot.model_authenticating;
     const decision = execution.modelDecision(.{ .authenticating = .{
         .cancelled = active.cancelled,
-        .launch_allowed = run.host.lifecycle.launchAllowed(),
+        .launch_allowed = run.shared.lifecycle.launchAllowed(),
         .result = if (result) |value| (if (value == .ready) .ready else .failed) else .pending,
     } });
     if (decision == .wait) return false;
@@ -2463,7 +2513,7 @@ fn advanceAuthentication(run: *Run, reactor: *provider.Reactor, slot: *Execution
     switch (decision) {
         .launch => launchPreparedRequest(run, reactor, slot, owner, request, result.?.ready),
         .abandon, .settle_authentication_failure => {
-            request.deinit(run.host.io, run.scratch_budget.?);
+            request.deinit(run.shared.io, run.scratch_budget.?);
             if (decision == .settle_authentication_failure)
                 settleUnansweredFailure(run, owner.token, owner.binding, providers.leaseFailureCode(result.?.failed), .ordinary);
             finishCustodyNow(run, slot);
@@ -2482,15 +2532,15 @@ fn finishModelPreparationFailure(
 ) void {
     switch (execution.modelDecision(.{ .preparation_failed = .{
         .retained_scratch = retained_scratch != null,
-        .canonical_fenced = retained_scratch == null and run.host.store.isFenced(),
+        .canonical_fenced = retained_scratch == null and run.shared.store.isFenced(),
         .superseded = err == error.SupersededByControl,
     } })) {
         .retain_cleanup => {
             moveSlot(run, slot, .named_scratch, .{ .token = owner.token, .owner = retained_scratch.? });
-            run.host.lifecycle.retainDispatchFence("request scratch unlink", err);
+            run.shared.lifecycle.retainDispatchFence("request scratch unlink", err);
             return;
         },
-        .fence => run.host.lifecycle.fenceDispatch("canonical request read", err),
+        .fence => run.shared.lifecycle.fenceDispatch("canonical request read", err),
         .settle_preparation_failure => settleUnansweredFailure(run, owner.token, owner.binding, model_adapter.preparationFailureCode(err), .ordinary),
         .abandon => {},
         else => unreachable,
@@ -2508,19 +2558,19 @@ fn launchPreparedRequest(
 ) void {
     const token = owner.token;
     const binding = owner.binding;
-    if (!run.host.lifecycle.launchAllowed()) {
-        request.deinit(run.host.io, run.scratch_budget.?);
+    if (!run.shared.lifecycle.launchAllowed()) {
+        request.deinit(run.shared.io, run.scratch_budget.?);
         finishCustodyNow(run, slot);
         return;
     }
     var retained_response: ?named_scratch.Owner = null;
     if (failedAtProviderPrepare(run, slot, token, binding, request)) return;
-    const served = run.host.providers.get(provider_route.nameOf(request.provider)).?;
+    const served = run.settings.providers.get(provider_route.nameOf(request.provider)).?;
     var headers: providers.Headers = .{};
     defer headers.deinit();
-    served.credential.fields(served.endpoint, run.host.providers.ca_file, lease, &reactor.credentials, &headers) catch |err| {
-        request.deinit(run.host.io, run.scratch_budget.?);
-        run.host.lifecycle.fenceDispatch("provider preparation", err);
+    served.credential.fields(served.endpoint, run.settings.providers.ca_file, lease, &reactor.credentials, &headers) catch |err| {
+        request.deinit(run.shared.io, run.scratch_budget.?);
+        run.shared.lifecycle.fenceDispatch("provider preparation", err);
         finishCustodyNow(run, slot);
         return;
     };
@@ -2531,48 +2581,48 @@ fn launchPreparedRequest(
     const active = &slot.provider;
     active.transfer.start(reactor, request, binding, .{
         .fields = headers.fields(),
-        .observe_allowance = run.host.probes.hooks.observe_allowance and served.credential.signIn() != null,
+        .observe_allowance = run.shared.probes.hooks.observe_allowance and served.credential.signIn() != null,
         .timing = run.custody.modelTiming(token) catch unreachable,
         .credential = headers.takeCredential(),
         .routing = .{ .turn_id = binding.turn_id, .owner = served.credential.routingOwner(lease) },
-        .faults = run.host.probes.transferFaults(),
+        .faults = run.shared.probes.transferFaults(),
         .response_workspace_bytes = if (owner.purpose == .compaction) @sizeOf(PendingFailure) else 0,
     }, &retained_response) catch |err| {
-        request.deinit(run.host.io, run.scratch_budget.?);
+        request.deinit(run.shared.io, run.scratch_budget.?);
         if (retained_response) |retained| {
             moveSlot(run, slot, .named_scratch, .{
                 .token = token,
                 .owner = retained,
             });
-            run.host.lifecycle.retainDispatchFence("response scratch unlink", err);
+            run.shared.lifecycle.retainDispatchFence("response scratch unlink", err);
             return;
         }
         stderr.print("rui: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         if (err == error.ResponseCaptureAcquisitionFailed) {
             settleUnansweredFailure(run, token, binding, "response_capture_failed", .ordinary);
         } else {
-            run.host.lifecycle.fenceDispatch("provider preparation", err);
+            run.shared.lifecycle.fenceDispatch("provider preparation", err);
         }
         finishCustodyNow(run, slot);
         return;
     };
-    run.host.probes.noteTransferStarted();
+    run.shared.probes.noteTransferStarted();
     // This blocking pause holds the shared execution loop until release.
     if (comptime test_pause.enabled) reachModel(run, .model_before_handoff, binding);
-    run.host.probes.holdAt(.{ .model_launch = binding });
-    run.custody.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(run.host.io, .awake)) catch |err| {
+    run.shared.probes.holdAt(.{ .model_launch = binding });
+    run.custody.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(run.shared.io, .awake)) catch |err| {
         active.transfer.deinit();
         stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
-        run.host.lifecycle.fenceDispatch("dispatch handoff", err);
+        run.shared.lifecycle.fenceDispatch("dispatch handoff", err);
         finishCustodyNow(run, slot);
         return;
     };
-    run.host.store.withDispatchHandoff(
+    run.shared.store.withDispatchHandoff(
         binding,
-        .{ .host = run.host, .reactor = reactor, .transfer = &active.transfer },
+        .{ .shared = run.shared, .reactor = reactor, .transfer = &active.transfer },
         struct {
             fn handoff(context: anytype) !void {
-                try context.host.lifecycle.withEffectLaunch(context, launch);
+                try context.shared.lifecycle.withEffectLaunch(context, launch);
             }
 
             fn launch(context: anytype) !void {
@@ -2588,18 +2638,18 @@ fn launchPreparedRequest(
         else
             .unexpected })) {
             .abandon => if (err == error.SupersededByControl) {
-                run.host.probes.traceOperation("canonical_handoff_superseded", binding);
+                run.shared.probes.traceOperation("canonical_handoff_superseded", binding);
             },
             .fence => {
                 stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
-                run.host.lifecycle.fenceDispatch("dispatch handoff", err);
+                run.shared.lifecycle.fenceDispatch("dispatch handoff", err);
             },
             else => unreachable,
         }
         finishCustodyNow(run, slot);
         return;
     };
-    run.host.probes.traceOperation("transport_handoff_committed", binding);
+    run.shared.probes.traceOperation("transport_handoff_committed", binding);
 }
 
 fn completeTransfer(
@@ -2610,10 +2660,10 @@ fn completeTransfer(
 ) void {
     const active = &slot.provider;
     const owner = active.owner;
-    if (active.transfer.allowance) |observation| server_host.writeAllowance(&run.host.allowance_diagnostic, observation);
-    run.host.probes.traceCompletionQueue(completion.queued_after, owner.binding);
-    defer run.host.probes.traceOperation("provider_completion_serviced", owner.binding);
-    if (run.host.providers.anySignIn()) run.host.probes.traceTransfer(&active.transfer, owner.binding);
+    if (active.transfer.allowance) |observation| server_host.writeAllowance(run.shared.allowance_diagnostic, observation);
+    run.shared.probes.traceCompletionQueue(completion.queued_after, owner.binding);
+    defer run.shared.probes.traceOperation("provider_completion_serviced", owner.binding);
+    if (run.settings.providers.anySignIn()) run.shared.probes.traceTransfer(&active.transfer, owner.binding);
     var error_response: execution.ErrorResponse = .ordinary;
     var answered_response: ?provider.SealedResponse = null;
     defer retireAnsweredResponse(&answered_response);
@@ -2624,7 +2674,7 @@ fn completeTransfer(
             if (evidence.disposition.answered()) {
                 answered_response = active.transfer.takeResponse();
                 const response = &answered_response.?;
-                error_response = model_adapter.interpretErrorResponse(&workspace.decode, active.transfer.codec(), run.host.io, response.file, response.length, evidence.http_status, &workspace.provider_failure);
+                error_response = model_adapter.interpretErrorResponse(&workspace.decode, active.transfer.codec(), run.shared.io, response.file, response.length, evidence.http_status, &workspace.provider_failure);
                 if (error_response == .unreadable) stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(error_response.unreadable) });
             }
         },
@@ -2661,10 +2711,10 @@ fn completeTransfer(
             }
             return;
         },
-        .fence_request_source => run.host.lifecycle.fenceDispatch("request scratch read", error.RequestScratchReadFailed),
+        .fence_request_source => run.shared.lifecycle.fenceDispatch("request scratch read", error.RequestScratchReadFailed),
         .fail => |failure| {
             const code = transferFailureCode(active.rejection, failure, &code_buffer);
-            const disposition = failureClass(run.host, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
+            const disposition = failureClass(run.settings.limits, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(run, owner, &active.transfer);
                 if (execution.rejectsCredential(failure)) switch (active.rejection) {
@@ -2705,7 +2755,7 @@ fn completeTransfer(
 }
 
 fn failureClass(
-    host: *const Host,
+    limits: Limits,
     kind: execution.FailureKind,
     retry_after_ms: ?u64,
     retry_after_deadline_ms: ?i64,
@@ -2715,7 +2765,7 @@ fn failureClass(
         .effort_change_refused => .effort_change_refused,
         .context_overflow => .context_overflow,
         .temporary => .{ .retryable = .{
-            .waits_ms = host.limits.retry_waits_ms,
+            .waits_ms = limits.retry_waits_ms,
             .retry_after_ms = retry_after_ms,
             .retry_after_deadline_ms = retry_after_deadline_ms,
         } },
@@ -2742,12 +2792,12 @@ noinline fn completeRejectedTransfer(run: *Run, workspace: *Workspace, slot: *Ex
     var response_owned = true;
     defer if (response_owned) response.deinit();
     const rejection = &workspace.interpretation.rejected;
-    run.host.probes.traceOperation("validation_failed", owner.binding);
+    run.shared.probes.traceOperation("validation_failed", owner.binding);
     stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(rejection.reason) });
     var detail: [512]u8 = undefined;
     const diagnostic = rejection.format(&detail);
     retainFailedResponse(run, .{ .file = response.file, .length = response.length, .transfer = .complete }, answered.retention(rejection.code, diagnostic, http_status));
-    const disposition = failureClass(run.host, rejection.kind, null, null);
+    const disposition = failureClass(run.settings.limits, rejection.kind, null, null);
     if (beginOverflowFailure(run, owner, answered.rejection(rejection.code, diagnostic, workspace.provider_failure.report.slice()), disposition, response)) |pending| {
         if (pending) {
             response_owned = false;
@@ -2786,17 +2836,17 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
         owner.binding.attempt_ordinal,
     ) catch unreachable;
     var retained_metadata: ?named_scratch.Owner = null;
-    const metadata_budget = run.host.retention.sharedBudget().narrowed(run.host.limits.request_scratch_limit_bytes);
+    const metadata_budget = run.shared.retention.sharedBudget().narrowed(run.settings.limits.request_scratch_limit_bytes);
     var metadata = output_format.OutputMetadataWriter.init(
-        run.host.io,
-        run.host.lease.paths.scratch.slice(),
+        run.shared.io,
+        run.shared.lease.paths.scratch.slice(),
         metadata_name,
         metadata_budget,
-        run.host.probes.fails(.response_metadata_unlink),
+        run.shared.probes.fails(.response_metadata_unlink),
         &retained_metadata,
     ) catch |err| {
         if (retained_metadata) |retained| {
-            run.host.lifecycle.retainDispatchFence("response metadata unlink", err);
+            run.shared.lifecycle.retainDispatchFence("response metadata unlink", err);
             return .{ .named_scratch = retained };
         }
         stderr.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
@@ -2809,9 +2859,9 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
     const data_name = named_scratch.NumericName.response.format(&data_name_buffer, owner.binding.operation_id, owner.binding.attempt_ordinal) catch unreachable;
     var retained_data: ?named_scratch.Owner = null;
     const event_data = &workspace.event_data;
-    event_data.init(run.host.io, run.host.lease.paths.scratch.slice(), data_name, metadata_budget, false, &retained_data) catch |err| {
+    event_data.init(run.shared.io, run.shared.lease.paths.scratch.slice(), data_name, metadata_budget, false, &retained_data) catch |err| {
         if (retained_data) |retained| {
-            run.host.lifecycle.retainDispatchFence("response data unlink", err);
+            run.shared.lifecycle.retainDispatchFence("response data unlink", err);
             return .{ .named_scratch = retained };
         }
         stderr.print("rui: response data acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
@@ -2820,10 +2870,10 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
         return .cleanup;
     };
     defer event_data.deinit();
-    run.host.probes.traceOperation("validation_started", owner.binding);
+    run.shared.probes.traceOperation("validation_started", owner.binding);
     const operation = owner.purpose;
-    metadata.fail_writes = run.host.probes.fails(.response_metadata);
-    output_decode.interpret(&workspace.interpret, codec, run.host.io, response.file, response.length, &metadata, event_data, operation, .{
+    metadata.fail_writes = run.shared.probes.fails(.response_metadata);
+    output_decode.interpret(&workspace.interpret, codec, run.shared.io, response.file, response.length, &metadata, event_data, operation, .{
         .openai = openai_model.slice(),
         .alternate = x_openai_model.slice(),
     }, &workspace.provider_failure, &workspace.interpretation);
@@ -2835,11 +2885,11 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
         },
     };
     const validated = &accepted.output;
-    run.host.probes.traceOperation("validation_completed", owner.binding);
+    run.shared.probes.traceOperation("validation_completed", owner.binding);
     if (comptime test_pause.enabled) reachModel(run, .model_result_ready, owner.binding);
-    run.host.probes.holdAt(.{ .model_result = owner.binding });
+    run.shared.probes.holdAt(.{ .model_result = owner.binding });
     if (!run.custody.claimTerminalDelivery(owner.token)) return .cleanup;
-    var settlement_trace = SettlementTrace.init(run.host.probes, owner.binding);
+    var settlement_trace = SettlementTrace.init(run.shared.probes, owner.binding);
     workspace.settlement = .{
         .source = validated.source,
         .source_length = validated.source_length,
@@ -2853,17 +2903,17 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
         .model_evidence = accepted.model_evidence,
         .request_id = answered.request_id,
     };
-    run.host.store.settleModelSuccess(owner.binding, &workspace.settlement, run.host.probes.storeFaults(.{ .model_output = settlement_trace.storeTrace() })) catch |err| {
+    run.shared.store.settleModelSuccess(owner.binding, &workspace.settlement, run.shared.probes.storeFaults(.{ .model_output = settlement_trace.storeTrace() })) catch |err| {
         if (err == error.SupersededByControl) {
-            run.host.probes.traceOperation("model_settlement_superseded", owner.binding);
+            run.shared.probes.traceOperation("model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
             rejectContradictoryOutput(run, rejected, &answered, err, http_status);
         } else {
-            run.host.lifecycle.fenceDispatch("model output import", err);
+            run.shared.lifecycle.fenceDispatch("model output import", err);
         }
         return .cleanup;
     };
-    run.host.probes.traceOperation("model_settlement_committed", owner.binding);
+    run.shared.probes.traceOperation("model_settlement_committed", owner.binding);
     return .cleanup;
 }
 
@@ -2915,7 +2965,7 @@ fn advanceRetainedCleanup(
             made_progress = true;
         },
         .named_scratch => |*retained| {
-            _ = retained.owner.reclaim(run.host.lease.paths.scratch.slice()) catch continue;
+            _ = retained.owner.reclaim(run.shared.lease.paths.scratch.slice()) catch continue;
             moveSlot(run, slot, .free, {});
             made_progress = true;
         },
@@ -2933,7 +2983,7 @@ fn shutdownExecution(run: *Run, slots: []ExecutionSlot, workspace: *Workspace) v
             finishCustodyNow(run, slot);
         },
         .model_authenticating => {
-            workspace.model_preparation.request.deinit(run.host.io, run.scratch_budget.?);
+            workspace.model_preparation.request.deinit(run.shared.io, run.scratch_budget.?);
             finishCustodyNow(run, slot);
         },
         .model_refreshing => finishCustodyNow(run, slot),
@@ -2942,20 +2992,20 @@ fn shutdownExecution(run: *Run, slots: []ExecutionSlot, workspace: *Workspace) v
             finishCustodyNow(run, slot);
         },
         .bash_preparing => discardBashResources(run, slot, workspace.bash_preparation.cancel()),
-        .bash => |*active| active.execution.requestInfrastructureShutdown(.now(run.host.io, .awake)),
+        .bash => |*active| active.execution.requestInfrastructureShutdown(.now(run.shared.io, .awake)),
         .bash_prepared_cleanup, .named_scratch => {},
         .provider => |*active| {
             active.transfer.deinit();
             finishCustodyNow(run, slot);
         },
     };
-    if (comptime test_pause.enabled) run.host.probes.reach(.host_shutdown_signalled, .{});
-    var retained_cleanup_at = std.Io.Clock.Timestamp.now(run.host.io, .awake);
+    if (comptime test_pause.enabled) run.shared.probes.reach(.host_shutdown_signalled, .{});
+    var retained_cleanup_at = std.Io.Clock.Timestamp.now(run.shared.io, .awake);
     while (hasOwnedSlots(slots)) {
         var made_progress = advanceBash(run, slots, workspace);
-        const now = std.Io.Clock.Timestamp.now(run.host.io, .awake);
+        const now = std.Io.Clock.Timestamp.now(run.shared.io, .awake);
         made_progress = advanceRetainedCleanup(run, slots, now, &retained_cleanup_at) or made_progress;
-        if (!made_progress) _ = run.host.io.sleep(.fromMilliseconds(100), .awake) catch {};
+        if (!made_progress) _ = run.shared.io.sleep(.fromMilliseconds(100), .awake) catch {};
     }
 }
 
@@ -3022,9 +3072,9 @@ fn retainFailedResponse(run: *Run, source: failed_responses.Source, failure: fai
     if (source.length == 0) return;
     const store_dir = run.settings.failed_response_store orelse return;
     const status = status: {
-        var dir = failed_responses.open(run.host.io, store_dir) catch |err| break :status err;
-        defer dir.close(run.host.io);
-        const retained = failed_responses.retain(run.host.io, dir, .{}, source, failure) catch |err| break :status err;
+        var dir = failed_responses.open(run.shared.io, store_dir) catch |err| break :status err;
+        defer dir.close(run.shared.io);
+        const retained = failed_responses.retain(run.shared.io, dir, .{}, source, failure) catch |err| break :status err;
         break :status retained.omission orelse return;
     };
     stderr.print("rui: failed response for operation {d} attempt {d} not retained ({s}); its saved failure is unchanged\n", .{
@@ -3039,9 +3089,9 @@ fn failedAtProviderPrepare(
     binding: store_module.AttemptBinding,
     request: *provider.PreparedRequest,
 ) bool {
-    if (!run.host.probes.fails(.provider_prepare)) return false;
-    request.deinit(run.host.io, run.scratch_budget.?);
-    settleUnansweredFailure(run, token, binding, "provider_transport_failure", failureClass(run.host, .temporary, null, null));
+    if (!run.shared.probes.fails(.provider_prepare)) return false;
+    request.deinit(run.shared.io, run.scratch_budget.?);
+    settleUnansweredFailure(run, token, binding, "provider_transport_failure", failureClass(run.settings.limits, .temporary, null, null));
     finishCustodyNow(run, slot);
     return true;
 }
@@ -3068,14 +3118,14 @@ fn settleFailure(
 }
 
 fn saveImmediateFailure(run: *Run, binding: store_module.AttemptBinding, failure: store_module.ModelFailure, disposition: store_module.ModelFailureClass) void {
-    const settled = run.host.store.settleModelAttemptFailurePrepared(binding, failure, disposition, run.host.probes.storeFaults(.model_failure), null) catch |err| {
-        if (err != error.SupersededByControl) run.host.lifecycle.fenceDispatch("model failure save", err);
+    const settled = run.shared.store.settleModelAttemptFailurePrepared(binding, failure, disposition, run.shared.probes.storeFaults(.model_failure), null) catch |err| {
+        if (err != error.SupersededByControl) run.shared.lifecycle.fenceDispatch("model failure save", err);
         return;
     };
     // Compaction overflow is staged by beginOverflowFailure while its response
     // still owns the pre-reserved continuation storage. No service caller may
     // fall back to a synchronous history scan.
-    if (!settled) run.host.lifecycle.fenceDispatch("model failure preparation", error.MissingOverflowPreparation);
+    if (!settled) run.shared.lifecycle.fenceDispatch("model failure preparation", error.MissingOverflowPreparation);
 }
 
 fn beginOverflowFailure(
@@ -3087,8 +3137,8 @@ fn beginOverflowFailure(
 ) ?bool {
     if (owner.purpose != .compaction or disposition != .context_overflow) return null;
     if (!run.custody.claimTerminalDelivery(owner.token)) return false;
-    const settled = run.host.store.settleModelAttemptFailurePrepared(owner.binding, failure, disposition, run.host.probes.storeFaults(.model_failure), null) catch |err| {
-        if (err != error.SupersededByControl) run.host.lifecycle.fenceDispatch("model failure save", err);
+    const settled = run.shared.store.settleModelAttemptFailurePrepared(owner.binding, failure, disposition, run.shared.probes.storeFaults(.model_failure), null) catch |err| {
+        if (err != error.SupersededByControl) run.shared.lifecycle.fenceDispatch("model failure save", err);
         return false;
     };
     if (settled) return false;
@@ -3108,27 +3158,27 @@ fn advancePendingFailure(run: *Run, slots: []ExecutionSlot, workspace: *Workspac
         const active = &slot.model_failure_preparing;
         const owner = active.owner;
         const pending = active.response.state(PendingFailure);
-        if (!run.host.lifecycle.launchAllowed()) {
+        if (!run.shared.lifecycle.launchAllowed()) {
             active.deinit();
             finishCustodyNow(run, slot);
             return true;
         }
         if (!pending.floor.ready) {
-            _ = run.host.store.advanceHistoryFloor(&pending.floor) catch |err| {
-                if (err != error.SupersededByControl) run.host.lifecycle.fenceDispatch("overflow floor preparation", err);
+            _ = run.shared.store.advanceHistoryFloor(&pending.floor) catch |err| {
+                if (err != error.SupersededByControl) run.shared.lifecycle.fenceDispatch("overflow floor preparation", err);
                 active.deinit();
                 finishCustodyNow(run, slot);
             };
             return true;
         }
-        const settled = run.host.store.settleModelAttemptFailurePrepared(
+        const settled = run.shared.store.settleModelAttemptFailurePrepared(
             owner.binding,
             pending.value(),
             .context_overflow,
-            run.host.probes.storeFaults(.model_failure),
+            run.shared.probes.storeFaults(.model_failure),
             &pending.floor.prepared.?,
         ) catch |err| {
-            if (err != error.SupersededByControl) run.host.lifecycle.fenceDispatch("model failure save", err);
+            if (err != error.SupersededByControl) run.shared.lifecycle.fenceDispatch("model failure save", err);
             active.deinit();
             finishCustodyNow(run, slot);
             return true;
@@ -3146,7 +3196,7 @@ fn advancePendingFailure(run: *Run, slots: []ExecutionSlot, workspace: *Workspac
 }
 
 fn finishCustodyNow(run: *Run, slot: *ExecutionSlot) void {
-    const traced = if (run.host.probes.hooks.phase_trace) run.custody.binding(slotToken(slot).?) catch unreachable else null;
+    const traced = if (run.shared.probes.hooks.phase_trace) run.custody.binding(slotToken(slot).?) catch unreachable else null;
     switch (slot.*) {
         .bash_preparing => |*active| {
             const closing = active.attempt.close();
@@ -3156,8 +3206,8 @@ fn finishCustodyNow(run: *Run, slot: *ExecutionSlot) void {
         else => moveSlot(run, slot, .free, {}),
     }
     if (traced) |binding| switch (binding) {
-        .model => |model| run.host.probes.traceOperation("cleanup_completed", model),
-        .action => |action| run.host.probes.traceAction("cleanup_completed", action),
+        .model => |model| run.shared.probes.traceOperation("cleanup_completed", model),
+        .action => |action| run.shared.probes.traceAction("cleanup_completed", action),
     };
 }
 
@@ -3213,7 +3263,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
 
     for ([_]bool{ false, true }) |ready| {
         var records: [1]execution.CustodyRecord = @splat(.{});
-        var host = Host{
+        var host = Fixture{
             .io = io,
             .allocator = std.testing.allocator,
             .lease = undefined,
@@ -3223,7 +3273,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
         host_parts.attach(&host, undefined);
         var execution_state: execution_owner.Execution = undefined;
         execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-        var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{}, .auth_worker = &worker };
+        var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody, .auth_worker = &worker };
         const token = execution_state.custody.reserve().?;
         var permit = store_module.DispatchPermit{ .binding = .{
             .turn_id = 7,
@@ -3312,7 +3362,7 @@ test "a leased model list waits behind every model slot, and its lease always go
     const plan_source = served.get(provider_route.nameOf(.chatgpt)).?.credential.signIn().?;
     const device_source = served.get(provider_route.nameOf(.codex)).?.credential.signIn().?;
     var records: [1]execution.CustodyRecord = @splat(.{});
-    var host = Host{
+    var host = Fixture{
         .io = io,
         .allocator = std.testing.allocator,
         .lease = undefined,
@@ -3324,7 +3374,7 @@ test "a leased model list waits behind every model slot, and its lease always go
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{}, .auth_worker = &worker };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody, .auth_worker = &worker };
     defer host.model_lists.deinit();
     var used: std.atomic.Value(u64) = .init(0);
     var urls: std.EnumArray(provider.ListingKind, ?[]const u8) = .initFill(null);
@@ -3514,7 +3564,7 @@ test "HTTP error capture retires before execution custody" {
         var used: std.atomic.Value(u64) = .init(17);
         const budget = ScratchBudget{ .used = &used, .limit = 4096 };
         var records: [1]execution.CustodyRecord = @splat(.{});
-        var host = Host{
+        var host = Fixture{
             .io = io,
             .allocator = std.testing.allocator,
             .lease = undefined,
@@ -3524,7 +3574,7 @@ test "HTTP error capture retires before execution custody" {
         host_parts.attach(&host, undefined);
         var execution_state: execution_owner.Execution = undefined;
         execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-        var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+        var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
         host_parts.probes.hooks = .{ .phase_trace = true };
         const token = execution_state.custody.reserve().?;
         var permit = store_module.DispatchPermit{ .binding = .{
@@ -3591,12 +3641,12 @@ test "HTTP error capture retires before execution custody" {
 
 test "forced refresh captures retire before custody publication across Store claims" {
     const Case = enum { superseded, unreadable_store, declined, accepted };
-    const Fixture = struct {
+    const Scene = struct {
         tmp: std.testing.TmpDir,
         storage: store_module.Store,
         root: [platform.max_scratch_path_bytes]u8,
         records: [1]execution.CustodyRecord,
-        host: Host,
+        host: Fixture,
         host_parts: TestParts,
         execution: execution_owner.Execution,
         run: Run,
@@ -3644,7 +3694,7 @@ test "forced refresh captures retire before custody publication across Store cla
     vtable.now = Boundary.now;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     for ([_]Case{ .superseded, .unreadable_store, .declined, .accepted }) |kind| {
-        const mapped = try pages.Mapped(Fixture).map();
+        const mapped = try pages.Mapped(Scene).map();
         defer mapped.unmap();
         const fixture = mapped.value;
         fixture.tmp = std.testing.tmpDir(.{});
@@ -3664,7 +3714,7 @@ test "forced refresh captures retire before custody publication across Store cla
         };
         fixture.host_parts.attach(&fixture.host, undefined);
         fixture.execution.init(&fixture.records, null, &fixture.host_parts.lifecycle, &fixture.host.scratch_used, null);
-        fixture.run = .{ .host = &fixture.host, .settings = .{}, .execution = &fixture.execution, .custody = &fixture.execution.custody };
+        fixture.run = .{ .shared = testing_parts.sharedOf(&fixture.host), .settings = testing_parts.settingsOf(&fixture.host), .execution = &fixture.execution, .custody = &fixture.execution.custody };
         fixture.host_parts.probes.hooks = .{ .phase_trace = true };
         fixture.host.scratch_used.store(17, .release);
         const budget = ScratchBudget{ .used = &fixture.host.scratch_used, .limit = 4 * 1024 * 1024 };
@@ -3790,7 +3840,7 @@ test "cleanup publication follows complete execution retirement" {
     var vtable = std.testing.io.vtable.*;
     vtable.now = Boundary.now;
     var records: [1]execution.CustodyRecord = @splat(.{});
-    var host = Host{
+    var host = Fixture{
         .io = .{ .userdata = &boundary, .vtable = &vtable },
         .allocator = std.testing.allocator,
         .lease = undefined,
@@ -3800,7 +3850,7 @@ test "cleanup publication follows complete execution retirement" {
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
     host_parts.probes.hooks = .{ .phase_trace = true };
     var slot: ExecutionSlot = .free;
     boundary.slot = &slot;
@@ -3824,7 +3874,7 @@ test "cleanup publication follows complete execution retirement" {
                 .parent_operation_id = 7,
                 .action_id = 11,
             } };
-            slot = .{ .bash_preparing = .{ .attempt = try testBashAttempt(&host, &execution_state.custody, token, &permit) } };
+            slot = .{ .bash_preparing = .{ .attempt = try testBashAttempt(testing_parts.sharedOf(&host), &execution_state.custody, token, &permit) } };
             try std.testing.expect(slot == .bash_preparing);
             try std.testing.expect(execution_state.custody.claimTerminalDelivery(token));
             finishCustodyNow(&run, &slot);
@@ -3855,11 +3905,11 @@ test "cleanup publication follows complete execution retirement" {
     var entries: [2]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
-    host.retention = &retention;
+    run.shared.retention = &retention;
     var lease: platform.StoreLease = undefined;
     lease.paths = .{};
     try lease.paths.scratch.set(root);
-    host.lease = &lease;
+    run.shared.lease = &lease;
     var scratch = bashScratch(&run);
     scratch.io = std.testing.io;
     var input: store_module.ActionExecutionInput = .{
@@ -3915,7 +3965,7 @@ test "cleanup publication follows complete execution retirement" {
     });
     var refused: bash.ArgumentSizes = .{};
     var bash_execution = try prepared.launch(bash.default_facts, null, null, &refused);
-    slot = .{ .bash = .{ .attempt = testAttempt(&host, &execution_state.custody, token, binding), .execution = &bash_execution, .delivery = .{ .closed = .{ .closing = .{ .custody = &execution_state.custody, .token = token }, .reclaim_at = deadline } } } };
+    slot = .{ .bash = .{ .attempt = testAttempt(testing_parts.sharedOf(&host), &execution_state.custody, token, binding), .execution = &bash_execution, .delivery = .{ .closed = .{ .closing = .{ .custody = &execution_state.custody, .token = token }, .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     const service = .{ .execution = slot.bash.execution, .scratch = scratch, .window = &window };
     defer if (slot == .bash) {
@@ -3992,19 +4042,19 @@ test "Bash releases both spills after lost custody or fenced settlement" {
         var lease: platform.StoreLease = undefined;
         lease.paths = .{};
         try lease.paths.scratch.set(root);
-        var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+        var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, &lease);
         var execution_state: execution_owner.Execution = undefined;
         execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-        var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+        var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
         var entries: [2]output_retention.Entry = @splat(.{});
         var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &host.scratch_used, .limit = 1024 * 1024 }, &entries);
         defer retention.cleanupAll();
-        host.retention = &retention;
+        run.shared.retention = &retention;
         const token = execution_state.custody.reserve().?;
         var slot: ExecutionSlot = .free;
-        slot = .{ .bash_preparing = .{ .attempt = try testBashAttempt(&host, &execution_state.custody, token, &admission.permit) } };
+        slot = .{ .bash_preparing = .{ .attempt = try testBashAttempt(testing_parts.sharedOf(&host), &execution_state.custody, token, &admission.permit) } };
         const binding = slot.bash_preparing.attempt.binding;
         var input: store_module.ActionExecutionInput = undefined;
         try storage.readActionExecutionInput(.bash, binding, &input);
@@ -4139,7 +4189,7 @@ test "named scratch retry releases custody through the shutdown owner path" {
     var scratch_used: std.atomic.Value(u64) = .init(9);
     var removal_gate: std.atomic.Value(bool) = .init(true);
     var records: [1]execution.CustodyRecord = @splat(.{});
-    var host = Host{
+    var host = Fixture{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .lease = &lease,
@@ -4149,7 +4199,7 @@ test "named scratch retry releases custody through the shutdown owner path" {
     host_parts.attach(&host, &lease);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
     const token = execution_state.custody.reserve().?;
     var permit = store_module.DispatchPermit{ .binding = .{
         .turn_id = 1,
@@ -4318,7 +4368,7 @@ test "compound admission preflight releases transient custody and cancels its re
             .lock_file = undefined,
         };
         var records: [1]execution.CustodyRecord = @splat(.{});
-        var host = Host{
+        var host = Fixture{
             .io = std.testing.io,
             .allocator = std.testing.allocator,
             .lease = &lease,
@@ -4328,7 +4378,7 @@ test "compound admission preflight releases transient custody and cancels its re
         host_parts.attach(&host, &lease);
         var execution_state: execution_owner.Execution = undefined;
         execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-        var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+        var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
         run.scratch_budget = .{ .used = &host.scratch_used, .limit = 1024 * 1024 };
         const mapped = try pages.Mapped(Workspace).map();
         defer mapped.unmap();
@@ -4434,7 +4484,7 @@ test "no-work admission restores only its temporary custody reservation" {
     inline for (std.meta.tags(Kind)) |kind| {
         for ([_]bool{ false, true }) |with_sibling| {
             var records: [3]execution.CustodyRecord = @splat(.{});
-            var host = Host{
+            var host = Fixture{
                 .io = std.testing.io,
                 .allocator = std.testing.allocator,
                 .lease = undefined,
@@ -4444,7 +4494,7 @@ test "no-work admission restores only its temporary custody reservation" {
             host_parts.attach(&host, undefined);
             var execution_state: execution_owner.Execution = undefined;
             execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-            var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+            var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
             var slots = [_]ExecutionSlot{ .free, .free, .free };
             const sibling = if (with_sibling) execution_state.custody.reserve().? else null;
             if (sibling) |token| {
@@ -4549,7 +4599,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             }
 
             var records: [3]execution.CustodyRecord = @splat(.{});
-            var host = Host{
+            var host = Fixture{
                 .io = std.testing.io,
                 .allocator = std.testing.allocator,
                 .lease = undefined,
@@ -4559,7 +4609,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             host_parts.attach(&host, undefined);
             var execution_state: execution_owner.Execution = undefined;
             execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-            var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+            var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
             host_parts.probes.hooks = .{ .failures = if (kind == .message) .initOne(.attempt_before_commit) else .empty };
             var slots = [_]ExecutionSlot{ .free, .free, .free };
             const sibling = if (with_sibling) execution_state.custody.reserve().? else null;
@@ -4616,7 +4666,7 @@ test "closed Bash delivery retains its payload with detached custody" {
         .store_dir = undefined,
         .lock_file = undefined,
     };
-    var host = Host{
+    var host = Fixture{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .lease = &lease,
@@ -4626,7 +4676,7 @@ test "closed Bash delivery retains its payload with detached custody" {
     host_parts.attach(&host, &lease);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
     const token = execution_state.custody.reserve().?;
     var permit = store_module.ActionDispatchPermit{ .binding = .{
         .turn_id = 1,
@@ -4636,7 +4686,7 @@ test "closed Bash delivery retains its payload with detached custody" {
     const binding = try execution_state.custody.attach(token, &permit);
     var slots = [_]ExecutionSlot{
         .{ .bash = .{
-            .attempt = testAttempt(&host, &execution_state.custody, token, binding),
+            .attempt = testAttempt(testing_parts.sharedOf(&host), &execution_state.custody, token, binding),
             .execution = undefined,
         } },
     };
@@ -4859,7 +4909,7 @@ test "retained named scratch blocks its slot until the same owner reclaims" {
     var scratch_used: std.atomic.Value(u64) = .init(9);
     var removal_gate: std.atomic.Value(bool) = .init(true);
     var records: [1]execution.CustodyRecord = @splat(.{});
-    var host = Host{
+    var host = Fixture{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .lease = &lease,
@@ -4869,7 +4919,7 @@ test "retained named scratch blocks its slot until the same owner reclaims" {
     host_parts.attach(&host, &lease);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
     const token = execution_state.custody.reserve().?;
     var permit = store_module.DispatchPermit{ .binding = .{
         .turn_id = 1,
@@ -4991,7 +5041,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     for ([_]server_host.Phase{ .fenced, .stopping }) |phase| {
         var records: [1]execution.CustodyRecord = @splat(.{});
-        var host = Host{
+        var host = Fixture{
             .io = std.testing.io,
             .allocator = std.testing.allocator,
             .lease = undefined,
@@ -5001,7 +5051,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
         host_parts.attach(&host, undefined);
         var execution_state: execution_owner.Execution = undefined;
         execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-        var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+        var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
         const token = execution_state.custody.reserve().?;
         var permit = store_module.DispatchPermit{ .binding = .{
             .turn_id = 1,
@@ -5221,7 +5271,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         };
         var records: [1]execution.CustodyRecord = @splat(.{});
         var served: providers.Providers = .{};
-        var host = Host{
+        var host = Fixture{
             .io = std.testing.io,
             .allocator = std.testing.allocator,
             .lease = &lease,
@@ -5232,7 +5282,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         host_parts.attach(&host, &lease);
         var execution_state: execution_owner.Execution = undefined;
         execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-        var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+        var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
         run.scratch_budget = .{ .used = &host.scratch_used, .limit = if (ordered_limit) 2 * 1024 * 1024 else 1024 * 1024 };
         var counted: CountedEndpoint = undefined;
         if (ordered_limit) {
@@ -5315,7 +5365,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
     defer tmp.cleanup();
     for ([_]server_host.Phase{ .fenced, .stopping }) |phase| {
         var records: [1]execution.CustodyRecord = @splat(.{});
-        var host = Host{
+        var host = Fixture{
             .io = std.testing.io,
             .allocator = std.testing.allocator,
             .lease = undefined,
@@ -5325,7 +5375,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
         host_parts.attach(&host, undefined);
         var execution_state: execution_owner.Execution = undefined;
         execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-        var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+        var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
         const token = execution_state.custody.reserve().?;
         var permit = store_module.DispatchPermit{ .binding = .{
             .turn_id = 1,
@@ -5376,7 +5426,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
     for ([_]server_host.Phase{ .fenced, .stopping }) |phase| {
         for ([_]bool{ false, true }) |fail_cleanup| {
             var records: [1]execution.CustodyRecord = @splat(.{});
-            var host = Host{
+            var host = Fixture{
                 .io = std.testing.io,
                 .allocator = std.testing.allocator,
                 .lease = &lease,
@@ -5386,7 +5436,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             host_parts.attach(&host, &lease);
             var execution_state: execution_owner.Execution = undefined;
             execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
-            var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+            var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
             const token = execution_state.custody.reserve().?;
             var permit = store_module.ActionDispatchPermit{ .binding = .{
                 .turn_id = 1,
@@ -5400,7 +5450,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             try name.set("suppressed-bash");
             host.scratch_used.store(7, .release);
             var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &host.scratch_used, .limit = 7 }, &.{});
-            host.retention = &retention;
+            run.shared.retention = &retention;
             if (fail_cleanup) {
                 const gate = try tmp.dir.createFile(std.testing.io, bash.fault_gate_name, .{});
                 gate.close(std.testing.io);
@@ -5424,7 +5474,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                 .stderr_capture = null,
             };
             var slots = [_]ExecutionSlot{.{ .bash_preparing = .{
-                .attempt = testAttempt(&host, &execution_state.custody, token, binding),
+                .attempt = testAttempt(testing_parts.sharedOf(&host), &execution_state.custody, token, binding),
             } }};
             var work: [1]BashWork = undefined;
             run.bash_work = &work;
@@ -5570,7 +5620,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
         try std.testing.expect(std.mem.indexOf(u8, pending, "\"tool\":\"fetch_page\"") != null);
     }
     var custody: [1]execution.CustodyRecord = @splat(.{});
-    var host = Host{
+    var host = Fixture{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .lease = undefined,
@@ -5580,7 +5630,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&custody, null, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
     var mcp_calls: server_mcp.Calls = .{};
     defer mcp_calls.shutdown(.{ .allocator = host.allocator, .io = host.io, .retention = host.retention });
     var native: NativeTurn = .{
@@ -5636,18 +5686,18 @@ test "a skill tool reload under heap exhaustion runs again later without fencing
         .decoded_arguments = "{\"operation\":\"reload\"}",
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
-        host.allocator = failing.allocator();
+        run.shared.allocator = failing.allocator();
         const admission = runSkill(&run, &input);
-        host.allocator = std.testing.allocator;
+        run.shared.allocator = std.testing.allocator;
         try std.testing.expect(!storage.isFenced() and host.lifecycle.launchAllowed());
         if (!failing.has_induced_failure) {
             try std.testing.expectEqual(execution_turn.Admission.admitted, admission);
@@ -5739,12 +5789,12 @@ test "a model reload settles in the pass that asks, and a find_tools search find
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try std.testing.expect(input.tool == .find_tools);
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&.{}, &owner, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
 
     // One pass settles the reload: the server is asked again, its generation advanced, and nothing waits.
     try std.testing.expectEqual(@as(u64, 1), owner.asks[0].load(.acquire));
@@ -5810,12 +5860,12 @@ test "a reload while a list is in flight folds into the next list, one extra lis
         .decoded_arguments = "{\"reload\":true}",
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&.{}, &owner, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
 
     // A list is already in flight when the reload asks; the reload's generation waits for the list after it.
     _ = owner.ask(0);
@@ -5870,12 +5920,12 @@ test "a reload does not hold back a later core Action in another Session" {
         .decoded_arguments = "{\"words\":\"alpha\"}",
     }});
     const reload = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&.{}, &owner, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
     try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&run, &reload));
 
     // Once the reload settles, the next core Action is the other Session's search, not the reload again.
@@ -5908,12 +5958,12 @@ test "a reload with no MCP server configured says so and asks nothing" {
         .decoded_arguments = "{\"reload\":true,\"words\":\"alpha\"}",
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
     try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&run, &input));
     var text: [256]u8 = undefined;
     try std.testing.expectEqualStrings("No MCP servers are configured, so nothing was reloaded.\nNo tools matched. 0 tools are still not loaded.", try reloadText(&storage, session, input.binding.action_id, &text));
@@ -5952,12 +6002,12 @@ test "a find_tools reload with words reports the asks, then the loaded tools, an
         .decoded_arguments = "{\"reload\":true,\"words\":\"alpha\"}",
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&.{}, &owner, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
     const revisions = try testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1", .{session.slice()});
 
     try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&run, &input));
@@ -5997,12 +6047,12 @@ test "a find_tools reload with invalid words is refused and asks no server" {
         .decoded_arguments = "{\"reload\":true,\"words\":7}",
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&.{}, &owner, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
     try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&run, &input));
     var text: [256]u8 = undefined;
     try std.testing.expectEqualStrings("Rui could not find tools: words must be a string. Nothing was loaded.", try reloadText(&storage, session, input.binding.action_id, &text));
@@ -6039,18 +6089,18 @@ test "a find_tools reload under heap exhaustion retries later without fencing, a
         .decoded_arguments = "{\"reload\":true}",
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&.{}, &owner, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
-        host.allocator = failing.allocator();
+        run.shared.allocator = failing.allocator();
         const admission = runFindTools(&run, &input);
-        host.allocator = std.testing.allocator;
+        run.shared.allocator = std.testing.allocator;
         try std.testing.expect(!storage.isFenced() and host.lifecycle.launchAllowed());
         if (!failing.has_induced_failure) {
             try std.testing.expectEqual(execution_turn.Admission.admitted, admission);
@@ -6119,7 +6169,7 @@ const PendingOverflowFixture = struct {
     records: [3]execution.CustodyRecord = @splat(.{}),
     slots: [3]ExecutionSlot = @splat(.free),
     sessions: [3]protocol.Bounded(protocol.max_session_bytes) = @splat(.{}),
-    host: Host,
+    host: Fixture,
     run: Run,
     parts: TestParts = undefined,
     execution: execution_owner.Execution = undefined,
@@ -6138,9 +6188,9 @@ const PendingOverflowFixture = struct {
         self.host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &self.lease, .store = &self.storage };
         self.parts.attach(&self.host, &self.lease);
         self.execution.init(&self.records, null, &self.parts.lifecycle, &self.host.scratch_used, null);
-        self.run = .{ .host = &self.host, .settings = .{}, .execution = &self.execution, .custody = self.execution.attempts(&self.storage, self.host.probes).custody };
+        self.run = .{ .shared = testing_parts.sharedOf(&self.host), .settings = testing_parts.settingsOf(&self.host), .execution = &self.execution, .custody = self.execution.attempts(&self.storage, self.host.probes).custody };
         self.retention = output_retention.Queue.initialize(std.testing.io, self.path(), self.budget(), &self.entries);
-        self.host.retention = &self.retention;
+        self.run.shared.retention = &self.retention;
         self.work = try pages.Mapped(Workspace).map();
         self.work.value.failure_after = 0;
         self.work.value.model_admission.init();
@@ -6454,12 +6504,12 @@ test "EXR-92 a Host started before its MCP server serves holds the server's new 
     var storage: store_module.Store = undefined;
     try testing.testingStoreToolSet(&storage, &tmp, io, null);
     defer storage.close() catch unreachable;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
     execution_state.init(&.{}, &owner, &host_parts.lifecycle, &host.scratch_used, null);
-    var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
+    var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody };
 
     try owner.startup(io, &storage, null, null);
     try std.testing.expect(storage.hostTools().host_tool_set.find("beta") == null);

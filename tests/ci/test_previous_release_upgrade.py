@@ -133,8 +133,9 @@ class RunningUpgradeTest(unittest.TestCase):
         dialect = Mock()
         dialect.host_status.return_value = status, json.dumps({
             "store": store, "instance": instance, "active_capacity": capacity, "paused": paused,
-            "capabilities": {"bash": bash, "providers": providers if providers is not None else
-                             {"codex": "endpoint", "openai": "unserved", "chatgpt": "unserved"}},
+            "capabilities": {"bash": bash, "connections": [
+                {"name": name, "route": route} for name, route in (providers if providers is not None else
+                {"codex": "endpoint", "openai": "unserved", "chatgpt": "unserved"}).items() if route != "unserved"]},
         })
         seed = SimpleNamespace(pid=11, poll=lambda: 1 if retired else None)
 

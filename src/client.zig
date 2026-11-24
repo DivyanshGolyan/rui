@@ -1400,7 +1400,7 @@ test "SH-99 upgrade Host observation reads the current wire in one exchange and 
             const response_wire = responseWire(self.mode);
             const body_wire = if (self.mode == .body_mismatch or self.mode == .activation_body_version) protocol.wire_version else response_wire;
             var body_buffer: [1024]u8 = undefined;
-            const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store });
+            const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"connections\":[{{\"name\":\"codex\",\"label\":\"ChatGPT (device code)\",\"route\":\"endpoint\"}}]}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store });
             var error_buffer: [256]u8 = undefined;
             const body: []const u8 = switch (self.mode) {
                 .activation_400, .activation_bad_rejection, .activation_500, .activation_503, .strict_503 => try std.fmt.bufPrint(&error_buffer, "{{\"version\":\"{s}\",\"type\":\"invocation_error\",\"code\":\"{s}\"}}", .{ response_wire, if (self.mode == .activation_bad_rejection) "SomeOtherFailure" else "WrongWireVersion" }),
@@ -2847,6 +2847,8 @@ const Capture = struct {
         try self.write("{");
         var separator: []const u8 = "";
         inline for (@import("session_settings.zig").spec_entries) |entry| {
+            // ConfigureInput has no appTools field: the Zig CLI has no option for it, and only the TypeScript client sends it.
+            if (comptime entry.kind == .app_tools) continue;
             const value = @field(input, entry.field);
             const present = switch (entry.kind) {
                 .content => value.state != .omitted,
@@ -2870,6 +2872,7 @@ const Capture = struct {
                         .value => if (entry.json_object) try self.writeInputFile(value.path, protocol.max_sqlite_content_bytes, false, true) else try self.writeJsonFile(value.path),
                     },
                     .tools => try self.writeTools(value.?),
+                    .app_tools => unreachable,
                     .decimal_policy => if (value.value) |text| {
                         const tokens = try std.fmt.parseInt(u64, text, 10);
                         var digits: [20]u8 = undefined;
@@ -6555,6 +6558,7 @@ test "Session settings client writes every setting and the Host parser preserves
     var missing_buffer: [4096]u8 = undefined;
     var missing: std.Io.Writer = .fixed(&missing_buffer);
     inline for (session_settings.entries) |entry| {
+        if (comptime entry.kind == .app_tools) continue;
         if (@field(configuration, entry.field).state != .value)
             try missing.print("{s}: ConfigureInput fixture / client.Capture.writeConfiguration / Host Parser\n", .{entry.field});
     }

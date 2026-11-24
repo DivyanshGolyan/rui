@@ -1109,8 +1109,9 @@ def fatal_reporting_cases(state):
         missing_session = "000000" if session != "000000" else "000001"
         diagnostics = [
             (["session", "resume", "--store", str(store), missing_session], b"[internal_unexpected]"),
-            (["defaults", "configure", "--connection", "unsupported"], b"[choice_unsupported]"),
-            (["--store", str(store), "--connection", "unsupported", "--model", "gpt-6-sol"], b"[choice_unsupported]"),
+            # A connection is a name, not a closed choice: an unknown one is refused as an invalid saved default.
+            (["defaults", "configure", "--connection", "unsupported"], b"[preference_provider_invalid]"),
+            (["--store", str(store), "--connection", "unsupported", "--model", "gpt-6-sol"], b"[selection_provider_unsupported]"),
         ]
         for args, error, stopped in ((args, error, stopped) for args, error in diagnostics for stopped in (False, True)):
             master, slave = open_pty()
@@ -1122,7 +1123,7 @@ def fatal_reporting_cases(state):
                     termios.tcflow(error_slave, termios.TCOOFF)
                 caller = spawn([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=error_slave)
-                assert caller.wait(timeout=3) == (2 if error == b"[choice_unsupported]" else 1), "fatal diagnostic did not exit"
+                assert caller.wait(timeout=3) == {b"[preference_provider_invalid]": 2, b"[selection_provider_unsupported]": 6}.get(error, 1), "fatal diagnostic did not exit"
                 assert termios.tcgetattr(slave) == original
                 assert_file_flags(fcntl.fcntl(error_slave, fcntl.F_GETFL), error_flags)
                 if not stopped:
