@@ -3592,7 +3592,7 @@ test "Host line and Settings tail show together without overlap at wide and narr
     try std.testing.expectEqual(at.settings.start, at.input);
 }
 
-test "overview pins Settings below update states and feedback without an open chat" {
+fn sidebarUpgradeStates() !void {
     const rig = try openListed();
     defer rig.close();
     const overview = rig.overview;
@@ -6032,6 +6032,7 @@ fn controlsAboveScroll() !void {
 test "SUI-42 sidebar controls and footer survive chat and listing changes" {
     try sidebarControls();
     try sidebarLateListing();
+    try sidebarUpgradeStates();
 }
 
 fn sidebarControls() !void {
