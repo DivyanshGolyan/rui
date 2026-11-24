@@ -1295,7 +1295,7 @@ fn ParserOf(comptime Custody: type) type {
                             .content => if (entry.json_object) try self.readSchema(value, false) else try self.readContentString(value),
                             .tools => try self.readToolList(value),
                             .decimal_policy => try self.readSpecDecimal(&value.value),
-                            // The declaration's bytes arrive as a captured document, like an output schema; app_tools.zig validates them.
+                            // The declaration's bytes arrive as a captured document, like an output schema; tool_record.app_tools validates them.
                             .app_tools => try self.readSchema(value, true),
                         }
                     },

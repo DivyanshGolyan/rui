@@ -7,7 +7,7 @@ const rsql = @import("rsql.zig");
 const engine = @import("engine.zig");
 const sqlite = @import("sqlite.zig");
 const pass_plan = @import("pass_plan.zig");
-const app_tools = @import("../app_tools.zig");
+const app_tools = @import("../tool_record.zig").app_tools;
 const tool_set = @import("domain/tool_set.zig");
 
 pub const Mode = pass_plan.Mode;

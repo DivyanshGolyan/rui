@@ -3,7 +3,7 @@ const model_catalog = @import("model_catalog.zig");
 const session_settings = @import("session_settings.zig");
 const tool_name = @import("tool_name.zig");
 const tool_record = @import("tool_record.zig");
-const app_tools = @import("app_tools.zig");
+const app_tools = @import("tool_record.zig").app_tools;
 const protocol = @import("protocol.zig");
 const command_spec = @import("command_spec.zig");
 const wire_request = @import("wire_request.zig");
@@ -530,7 +530,7 @@ fn configurationMembers(comptime index: usize) type {
     };
 }
 
-/// One declared app tool, as app_tools.zig reads it; the bounds are the owners' constants.
+/// One declared app tool, as tool_record.app_tools reads it; the bounds are the owners' constants.
 const app_tool_record_schema = std.fmt.comptimePrint(
     "{{\"type\":\"object\",\"properties\":{{" ++
         "\"name\":{{\"type\":\"string\",\"pattern\":\"^[A-Za-z0-9_-]{{1,{d}}}$\"}}," ++

@@ -2017,8 +2017,8 @@ pub const CommitSubscriber = struct {
 };
 
 const OutOfLine = struct {
-    /// The parse arena for one transaction's app declaration (app_tools.zig); reset by `declarationArena`.
-    declaration_bytes: [@import("../app_tools.zig").arena_bytes]u8 = undefined,
+    /// The parse arena for one transaction's app declaration (tool_record.app_tools); reset by `declarationArena`.
+    declaration_bytes: [@import("../tool_record.zig").app_tools.arena_bytes]u8 = undefined,
     declarations: std.heap.FixedBufferAllocator = undefined,
     model_timings: @import("../model_timing.zig").Source,
     ring: change_ring.Ring,

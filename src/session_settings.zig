@@ -36,7 +36,7 @@ pub const entries = [_]Entry{
     .{ .field = "output_reservation", .spec = "outputReservation", .kind = .decimal_policy, .nullable = true, .cli = .{ .name = "output-reservation" }, .column = "output_reservation" },
     .{ .field = "reasoning_effort", .spec = "effort", .kind = .{ .choice = 16 }, .nullable = true, .cli = .{ .name = "reasoning-effort" }, .column = "reasoning_effort" },
     .{ .field = "label", .spec = "label", .kind = .{ .text = 100 }, .nullable = true, .cli = .{ .name = "label" }, .column = "label" },
-    // The declared app tools of a lane root: the document is validated by app_tools.zig, saved as a tool set
+    // The declared app tools of a lane root: the document is validated by tool_record.app_tools, saved as a tool set
     // and read back as the declared list. Only a lane root may declare them (a child refuses by name).
     .{ .field = "app_tools", .spec = "appTools", .kind = .app_tools, .nullable = true, .cli = null, .digest = .unless_omitted, .column = "app_tool_set_id", .since_refused = true },
 };
