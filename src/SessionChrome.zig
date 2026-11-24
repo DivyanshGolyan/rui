@@ -84,6 +84,7 @@ close: Chip,
 keys: chrome.FooterKeys = chrome.footerKeys(.closed),
 details: Chip,
 repair_details: bool = false,
+force_notice: bool = false,
 list_visible: bool = false,
 stoppable: bool = false,
 
@@ -165,7 +166,7 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         const primary_width = primary.width() + self.status.key.width() + self.status.stop.width() + 9;
         if (primary_width + self.details.width() > ctx.max.width.?) self.details.label = "";
     }
-    const notice = if (repair_details) null else self.status.bar.notice;
+    const notice = if (repair_details and !self.force_notice) null else self.status.bar.notice;
     const keys = [_]*Chip{ primary, secondary, &self.details, &self.status.key, &self.status.stop };
     var right: std.ArrayList(u8) = .empty;
     for (keys) |key| if (key.label.len != 0) {

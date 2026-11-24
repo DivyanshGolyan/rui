@@ -279,8 +279,8 @@ def send_recovery_case():
             note = "Not confirmed · ctrl+r retries original"
             failed = chrome.frame(master, b"RECOVER-ME\r", lambda screen: note in screen)
             transcript = "\n".join(transcript_rows(failed))
-            assert transcript.count("› RECOVER-ME") == 1 and transcript.count(note) == 1, failed
-            assert transcript.index("› RECOVER-ME") < transcript.index(note), failed
+            assert transcript.count("◌ RECOVER-ME") == 1 and transcript.count(note) == 1, failed
+            assert transcript.index("◌ RECOVER-ME") < transcript.index(note), failed
             assert note not in footer(failed) and note not in status(failed), failed
             assert "Sending" not in failed and composing(failed, ""), failed
             original = attempts[0]
