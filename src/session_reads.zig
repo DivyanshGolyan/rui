@@ -2270,17 +2270,20 @@ test "SUI-56 quote extraction follows visible Message provenance" {
     try peer.label.set("Other Session");
     var received = FakeHost.message(2).admission;
     received.sender = peer;
+    const source = "  雪e\u{301}\n  body\n\nlast";
+    var authored = FakeHost.message(1);
+    authored.admission.content = .{ .text = .{ .length = source.len, .digest = protocol.contentDigest(source) } };
     const Case = enum { person, peer, stopped };
     for (std.enums.values(Case)) |case| {
         const tail = [_]FakeHost.Tail{
             .{ .value = switch (case) {
                 .peer => .{ .received = received },
-                else => FakeHost.message(1),
+                else => authored,
             }, .excluded_at = if (case == .stopped) 3 else null },
             .{ .value = .{ .received = received } },
             .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 2, .completion = .completed } } },
         };
-        var host: FakeHost = .{ .history = 0, .tail = tail[0..if (case == .stopped) 3 else 1], .end = if (case == .stopped) 3 else 1 };
+        var host: FakeHost = .{ .history = 0, .tail = tail[0..if (case == .stopped) 3 else 1], .end = if (case == .stopped) 3 else 1, .content_texts = &.{source} };
         var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = host.end } };
         try host.read(&job);
         try std.testing.expectEqual(@as(usize, if (case == .stopped) 2 else 1), job.result.row_count);
@@ -2296,12 +2299,16 @@ test "SUI-56 quote extraction follows visible Message provenance" {
             try document.prepare();
             try window.append(&.{.{ .key = row.key, .text = feed_window.Text.fromDocument(document) }});
         }
+        document.clear();
+        try document.append("Finished\n" ++ View.Mark.body ++ "unknown lookalike body\n" ++ View.Mark.reset);
+        try document.prepare();
+        try window.append(&.{.{ .key = .{ .position = 4 }, .text = feed_window.Text.fromDocument(document) }});
         const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
         if (case != .stopped) {
             try std.testing.expect(result == .nothing);
         } else {
             defer gpa.free(result.text.bytes);
-            try std.testing.expectEqualStrings(FakeHost.text ++ "\n", result.text.bytes);
+            try std.testing.expectEqualStrings(source ++ "\n", result.text.bytes);
         }
     }
 }

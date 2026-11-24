@@ -1136,37 +1136,6 @@ const QuoteTestSink = struct {
     }
 };
 
-test "quote body extraction consumes user renderer provenance and denies lookalike chrome" {
-    const gpa = std.testing.allocator;
-    var rendered: std.Io.Writer.Allocating = .init(gpa);
-    defer rendered.deinit();
-    var sink: QuoteTestSink = .{ .writer = &rendered.writer };
-    try sink.feed("Finished\n");
-    try View.userPrefix(&sink, false, 0);
-    const source = "  雪e\u{301}\n  body\n\nlast";
-    var user: View.UserBody(*QuoteTestSink) = undefined;
-    try user.init(&sink, source.len, false);
-    try user.feed(source);
-    try std.testing.expect(!try user.finish());
-    try sink.body("\n");
-    try sink.feed(View.Mark.body ++ "unknown lookalike body\n" ++ View.Mark.reset);
-    var document: viewport.Sized(2048, true) = .{};
-    try document.append(rendered.written());
-    try document.prepare();
-    const window = try gpa.create(Window);
-    defer gpa.destroy(window);
-    window.* = .{};
-    try window.append(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&document) }});
-    const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
-    defer gpa.free(result.text.bytes);
-    try std.testing.expectEqualStrings(source ++ "\n", result.text.bytes);
-    const normal = try @import("transcript_selection.zig").copy(gpa, &window.document, .{ .from = 0, .to = window.document.length });
-    defer gpa.free(normal.text.bytes);
-    const first_line = "Finished\n  雪e\u{301}\n";
-    try std.testing.expectEqualStrings(first_line, normal.text.bytes[0..first_line.len]);
-    try std.testing.expect(std.mem.indexOf(u8, normal.text.bytes, "unknown lookalike body") != null);
-}
-
 test "quote body extraction consumes tool output provenance and keeps linked answer text" {
     const gpa = std.testing.allocator;
     const fold = @import("tool_fold.zig");

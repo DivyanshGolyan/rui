@@ -1121,12 +1121,13 @@ test "SUI-111 FeedView drag excludes message chrome from highlight and clipboard
         var document: PendingDocument = .{};
         try document.append(PendingText.user_message_on);
         try View.userPrefix(PendingSink{ .document = &document }, colour, 1);
-        try document.append("  › body\n" ++ PendingText.user_message_off);
+        try document.append("  › 雪e\u{301}\n" ++ PendingText.user_message_off);
         try document.prepare();
-        try window.append(&.{
-            .{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&document) },
-            .{ .key = .{ .position = 2 }, .text = .{ .bytes = "next\n" } },
-        });
+        try window.append(&.{.{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&document) }});
+        document.clear();
+        try document.append(View.Mark.body ++ "next\n" ++ View.Mark.reset);
+        try document.prepare();
+        try window.append(&.{.{ .key = .{ .position = 2 }, .text = resident.Text.fromDocument(&document) }});
         var anchor: Feed = .{};
         var fixture: RetryClicks = .{};
         var view: Self = .{ .window = window, .anchor = &anchor, .handler = fixture.handler(), .colour = colour, .colours = .{ .user_band = .{ .index = 10 }, .no_depth = !colour } };
@@ -1163,7 +1164,7 @@ test "SUI-111 FeedView drag excludes message chrome from highlight and clipboard
             try quoteReport(&view, &ctx, try std.fmt.bufPrint(&report, "\x1b[<0;{d};{d}m", .{ end[0], end[1] }));
             try std.testing.expectEqual(@as(usize, 1), clipboardCommands(&ctx));
             for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) {
-                try std.testing.expectEqualStrings("  › body\nnext", command.copy_to_clipboard);
+                try std.testing.expectEqualStrings("  › 雪e\u{301}\nnext", command.copy_to_clipboard);
             };
             const released = try testFrame(&view, alloc, width, 10);
             try std.testing.expectEqualDeep(initial.buffer, released.buffer);
