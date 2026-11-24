@@ -6236,6 +6236,15 @@
             },
             "maxProperties": 64,
             "description": "Named creation specs held only by this Host."
+          },
+          "connections": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object"
+            },
+            "format": "connection-list",
+            "description": "Key connections this Host serves, each by its name."
           }
         },
         "additionalProperties": false,

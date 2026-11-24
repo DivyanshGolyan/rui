@@ -850,6 +850,12 @@ pub const Document = struct {
             value = try d.osBytes(if (fact.native_path_limit) null else fact.max_bytes.?, hex.pattern, if (fact.native_path_limit) null else hex.max_length);
         } else if (fact.format != null and std.mem.eql(u8, fact.format.?, "agent-spec")) {
             value = try d.ref("AgentSpec");
+        } else if (fact.format != null and std.mem.eql(u8, fact.format.?, "connection-list")) {
+            value = try d.object(.{
+                .type = Value{ .string = "array" },
+                .maxItems = try d.unsigned(fact.set_capacity.?),
+                .items = try d.object(.{ .type = Value{ .string = "object" } }),
+            });
         } else {
             value = try d.object(.{ .type = Value{ .string = @tagName(fact.type) } });
             if (fact.max_bytes) |maximum| value = try d.boundedString(maximum);
@@ -1566,13 +1572,13 @@ fn applySettingsSample(d: *Document, pattern: []const u8, value: Value, accepted
     defer settings.deinit();
     var failure: start_report.Failure = undefined;
     if (accepted) {
-        try host_settings.apply(settings, d.arena, text, .pipe, checkSettingsPreset, &failure);
+        try host_settings.apply(settings, d.arena, text, .pipe, .{ .preset = checkSettingsPreset, .host_field = @import("provider.zig").hostField }, &failure);
         var output: std.Io.Writer.Allocating = .init(d.arena);
         try host_settings.write(settings, &output.writer);
         const written = try std.json.parseFromSliceLeaky(Value, d.arena, output.written(), .{ .parse_numbers = false });
         try std.testing.expect(conforms(d.schemas, schema, written));
     } else {
-        try std.testing.expectError(error.SettingsInvalid, host_settings.apply(settings, d.arena, text, .pipe, checkSettingsPreset, &failure));
+        try std.testing.expectError(error.SettingsInvalid, host_settings.apply(settings, d.arena, text, .pipe, .{ .preset = checkSettingsPreset, .host_field = @import("provider.zig").hostField }, &failure));
     }
 }
 

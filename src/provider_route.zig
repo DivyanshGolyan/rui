@@ -6,7 +6,7 @@ const Provider = provider_name.Provider;
 pub const Route = enum { unserved, endpoint, chatgpt_device, key_file, chatgpt_plan };
 
 /// The most connections one Host serves at once.
-pub const max_served = 16;
+pub const max_served = connection.max_list;
 
 /// A served connection's label, as the Host shows it.
 pub const Label = struct {

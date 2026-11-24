@@ -17,10 +17,10 @@ const codex_auth = @import("codex_auth.zig");
 const start_report = @import("start_report.zig");
 pub const ShutdownPolicy = hs.Interface.Lifetime;
 
-const checkPreset = @import("host_settings_file.zig").checkPreset;
+const checks: hs.Checks = .{ .preset = @import("host_settings_file.zig").checkPreset, .host_field = @import("host_headers.zig").hostField };
 
 fn assign(settings: *hs.Settings, gpa: std.mem.Allocator, path: []const u8, value: []const u8, failure: *start_report.Failure) !void {
-    try hs.assign(settings, gpa, path, value, checkPreset, failure);
+    try hs.assign(settings, gpa, path, value, checks, failure);
 }
 
 fn text(settings: *hs.Settings, gpa: std.mem.Allocator, path: []const u8, value: []const u8, failure: *start_report.Failure) !void {
@@ -120,7 +120,7 @@ fn savedPath(init: std.process.Init, gpa: std.mem.Allocator, dir: []const u8) ![
 fn saved(init: std.process.Init, gpa: std.mem.Allocator, dir: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !std.json.Value {
     var canonical: [protocol.max_store_bytes]u8 = undefined;
     const host = try platform.canonicalStoreDestination(init.io, dir, &canonical);
-    return @import("host_settings_file.zig").read(init.io, init.gpa, gpa, host, settings, failure);
+    return @import("host_settings_file.zig").read(init.io, init.gpa, gpa, host, settings, checks, failure);
 }
 
 pub fn savedEdit(init: std.process.Init, dir: []const u8, path: []const u8, value: ?[]const u8, failure: *start_report.Failure) !void {
@@ -156,7 +156,7 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
     defer settings.deinit();
     var document: std.json.Value = .{ .object = .{} };
     if (current) |bytes| {
-        try hs.apply(settings, init.gpa, bytes, .file, checkPreset, failure);
+        try hs.apply(settings, init.gpa, bytes, .file, checks, failure);
         document = try parse(gpa, bytes, failure);
     }
     var automatic_buffer: AutomaticBuffer = undefined;
@@ -200,7 +200,7 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
     const bytes = try encoded(gpa, document);
     if (bytes.len > hs.max_document_bytes) return invalid(failure, "settings", "saved document exceeds the document byte bound");
     settings.deinit();
-    try hs.apply(settings, init.gpa, bytes, .file, checkPreset, failure);
+    try hs.apply(settings, init.gpa, bytes, .file, checks, failure);
     try detachedPaths(settings, failure);
     return bytes;
 }
@@ -265,7 +265,7 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
             var failure: start_report.Failure = undefined;
             var document: std.json.Value = .{ .object = .{} };
             if (current) |bytes| {
-                try hs.apply(settings, ctx.init.gpa, bytes, .file, checkPreset, &failure);
+                try hs.apply(settings, ctx.init.gpa, bytes, .file, checks, &failure);
                 document = try parse(ctx.gpa, bytes, &failure);
             }
             try checkStart(ctx.init, .{ .dir = ctx.dir }, &failure);
@@ -299,7 +299,7 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
             const bytes = try encoded(ctx.gpa, document);
             if (bytes.len > hs.max_document_bytes) return error.SettingsInvalid;
             settings.deinit();
-            try hs.apply(settings, ctx.init.gpa, bytes, .file, checkPreset, &failure);
+            try hs.apply(settings, ctx.init.gpa, bytes, .file, checks, &failure);
             if (std.Io.Dir.cwd().statFile(ctx.init.io, ctx.key_file, .{ .follow_symlinks = false })) |_| return error.PathAlreadyExists else |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,
@@ -368,7 +368,7 @@ fn confirmConnectionWithFault(init: std.process.Init, dir: []const u8, connectio
             settings.* = .{};
             defer settings.deinit();
             var failure: start_report.Failure = undefined;
-            try hs.apply(settings, ctx.init.gpa, bytes, .file, checkPreset, &failure);
+            try hs.apply(settings, ctx.init.gpa, bytes, .file, checks, &failure);
             const entry = settings.providers.entries.openai orelse return null;
             const endpoint = if (entry.endpoint) |*value| value.slice() else openai_endpoint;
             if (entry.key.source != .file or entry.unauthenticated.value or !std.mem.eql(u8, endpoint, ctx.connection.endpoint.slice()) or !std.mem.eql(u8, entry.key.source.file.slice(), ctx.connection.key_file.slice())) return null;
@@ -569,7 +569,7 @@ fn readDocumentAt(init: std.process.Init, source: []const u8, settings: *hs.Sett
     const path = if (std.fs.path.isAbsolute(source)) source else try std.fs.path.join(gpa, &.{ cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)], source });
     const bytes = credentials.readPrivate(path, buffer) catch return invalid(failure, "settings", "must be a readable private file within the document byte bound");
     const document = bytes orelse return invalid(failure, "settings", "file does not exist");
-    try hs.apply(settings, init.gpa, document, .file, checkPreset, failure);
+    try hs.apply(settings, init.gpa, document, .file, checks, failure);
     const json = try parse(gpa, document, failure);
     return json.object.contains("providers");
 }
@@ -588,7 +588,7 @@ fn readPipeAt(init: std.process.Init, file: std.Io.File, settings: *hs.Settings,
     if (length == 0 or length > hs.max_document_bytes) return invalid(failure, "settings", "document length must be 1 to 1048576 bytes");
     const bytes = try memory.allocator().alloc(u8, length);
     readExact(init.io, file, bytes) catch return invalid(failure, "settings", "stdin closed before the whole document arrived");
-    try hs.apply(settings, init.gpa, bytes, .pipe, checkPreset, failure);
+    try hs.apply(settings, init.gpa, bytes, .pipe, checks, failure);
     const json = try parse(memory.allocator(), bytes, failure);
     return json.object.contains("providers");
 }
@@ -803,7 +803,7 @@ test "sign-in leaf overrides environment location before dispatch" {
                 settings.* = .{};
                 defer settings.deinit();
                 var failure: start_report.Failure = undefined;
-                try hs.apply(settings, arena.allocator(), "{\"providers\":{}}", .file, checkPreset, &failure);
+                try hs.apply(settings, arena.allocator(), "{\"providers\":{}}", .file, checks, &failure);
                 try assign(settings, arena.allocator(), "providers." ++ @tagName(provider), "{}", &failure);
                 if (leaf) try assign(settings, arena.allocator(), "providers." ++ @tagName(provider) ++ ".credentialFile", "/explicit/credential", &failure);
                 try resolveProviders(init, settings, &failure);
@@ -827,7 +827,7 @@ test "Host start resolves environment private file and saved credential sources"
     settings.* = .{};
     defer settings.deinit();
     var failure: start_report.Failure = undefined;
-    try hs.apply(settings, gpa, "{\"providers\":{}}", .file, checkPreset, &failure);
+    try hs.apply(settings, gpa, "{\"providers\":{}}", .file, checks, &failure);
     try assign(settings, gpa, "providers.openai.key", "env:HOST_START_TEST_\xff", &failure);
     _ = try prepare(init, settings, &failure);
     try std.testing.expectEqualStrings("env-key", settings.providers.entries.openai.?.key.value());
@@ -1822,7 +1822,7 @@ pub fn freezeStart(init: std.process.Init, request: Spawn, settings: *hs.Setting
 pub fn decodeStart(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
     var canonical: [protocol.max_store_bytes]u8 = undefined;
     const directory = try platform.canonicalStoreDestination(init.io, selected, &canonical);
-    const intent = try settings_handoff.decode(bytes, directory, settings, init.gpa, checkPreset, failure);
+    const intent = try settings_handoff.decode(bytes, directory, settings, init.gpa, checks, failure);
     try detachedValue(settings, failure);
     try anchorPlacement(init, settings, directory, failure);
     return intent;
