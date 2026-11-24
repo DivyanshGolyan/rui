@@ -117,6 +117,62 @@ test "SH-123 start activation requires an older foreign Host and the selected cl
     for (rows) |row| try std.testing.expectEqual(row.eligible, startHandoverEligible(row.foreign, row.order, row.selected));
 }
 
+/// Whether an ordinary start that found an incompatible Host hands it over. A frozen launch never does.
+pub fn startHandoverWanted(incompatible: bool, frozen: bool) bool {
+    return incompatible and !frozen;
+}
+
+/// What an ordinary start does next with its Store's handover outcome.
+pub const StartStep = enum { attach, keep_incompatible, report };
+
+/// The one rule an ordinary start applies to a handover outcome: attach to a Host that is
+/// now serving this Store (or none is left to replace), keep the original incompatible
+/// report when nothing was touched, or report the outcome as the start's failure.
+pub fn startStep(outcome: Outcome) StartStep {
+    return switch (outcome) {
+        .ready, .already_ready, .superseded, .not_needed => .attach,
+        .unsupported, .target_unusable, .cancelled => .keep_incompatible,
+        .refused, .failed, .unconfirmed, .faulted, .replacement_observed, .client_incompatible => .report,
+    };
+}
+
+test "SH-122 an ordinary start hands over only an incompatible start and attaches, keeps or reports each outcome" {
+    const wanted = [_]struct { incompatible: bool, frozen: bool, expected: bool }{
+        .{ .incompatible = true, .frozen = false, .expected = true },
+        .{ .incompatible = true, .frozen = true, .expected = false },
+        .{ .incompatible = false, .frozen = false, .expected = false },
+        .{ .incompatible = false, .frozen = true, .expected = false },
+    };
+    for (wanted) |row| try std.testing.expectEqual(row.expected, startHandoverWanted(row.incompatible, row.frozen));
+    const instance: protocol.InstanceId = @splat(7);
+    const cause = try protocol.Bounded(64).from("TestCause");
+    const Row = struct { outcome: Outcome, step: StartStep };
+    const rows = [_]Row{
+        .{ .outcome = .not_needed, .step = .attach },
+        .{ .outcome = .superseded, .step = .attach },
+        .{ .outcome = .{ .already_ready = .{ .instance = instance, .pid = 1 } }, .step = .attach },
+        .{ .outcome = .{ .ready = .{ .instance = instance, .pid = 1 } }, .step = .attach },
+        .{ .outcome = .{ .unsupported = .not_start_eligible }, .step = .keep_incompatible },
+        .{ .outcome = .{ .unsupported = .inaccessible }, .step = .keep_incompatible },
+        .{ .outcome = .{ .target_unusable = .checking }, .step = .keep_incompatible },
+        .{ .outcome = .cancelled, .step = .keep_incompatible },
+        .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = start_report.Failure.init(.settings_invalid, "refused") } }, .step = .report },
+        .{ .outcome = .{ .failed = .stopping }, .step = .report },
+        .{ .outcome = .{ .unconfirmed = .verifying }, .step = .report },
+        .{ .outcome = .{ .faulted = .{ .effect = .resolve_target, .cause = cause } }, .step = .report },
+        .{ .outcome = .{ .faulted = .{ .effect = .stop, .cause = cause } }, .step = .report },
+        .{ .outcome = .replacement_observed, .step = .report },
+        .{ .outcome = .{ .client_incompatible = 3 }, .step = .report },
+    };
+    // Every Outcome variant needs a row above; a new variant must add one.
+    var seen: [std.meta.tags(std.meta.Tag(Outcome)).len]bool = @splat(false);
+    for (rows) |row| {
+        try std.testing.expectEqual(row.step, startStep(row.outcome));
+        seen[@intFromEnum(std.meta.activeTag(row.outcome))] = true;
+    }
+    for (seen) |covered| try std.testing.expect(covered);
+}
+
 /// The next fact an observation reads, or what the running Host is.
 pub const Eligibility = union(enum) {
     read: enum { status, observe, snapshot, version, environment, sources, directory, confirm },
@@ -389,6 +445,53 @@ pub const Counts = struct {
         }
     }
 };
+
+/// The short words an Overview shows for one outcome.
+pub fn words(outcome: Outcome) []const u8 {
+    return switch (outcome) {
+        .not_needed => "no longer running",
+        .superseded => "newer build already running",
+        .already_ready => "already on selected build",
+        .ready => "restarted",
+        .client_incompatible => "restarted; client incompatible",
+        .unsupported => |limitation| switch (limitation) {
+            .inaccessible => "Host inaccessible",
+            .incompatible => "Host protocol unsupported",
+            .ownership_status => "Host status unavailable",
+            .ownership_observation => "Host observation failed",
+            .ownership_directory_unavailable => "Host directory unavailable",
+            .ownership_directory_mismatch => "Host directories differ",
+            .ownership_confirmation => "Host identity unconfirmed",
+            .application_owned => "application-owned Host",
+            .configuration_unavailable => "launch configuration unavailable",
+            .target_capability => "target cannot check restart",
+            .not_start_eligible => "not eligible to start",
+        },
+        .replacement_observed => "replacement Host observed",
+        .cancelled => "activation cancelled",
+        .faulted => |fault| if (fault.effect.stage()) |stage| words(.{ .unconfirmed = stage }) else "handover failed",
+        .target_unusable => |step| switch (step) {
+            .resolving => "target resolution failed",
+            .checking => "target check failed",
+        },
+        .refused => |refusal| switch (refusal.stage) {
+            .checking => "settings refused",
+            .starting => "refused to start",
+        },
+        .failed => |stage| switch (stage) {
+            .stopping => "stop failed",
+            .awaiting_retirement => "retire failed",
+            .starting => "start failed",
+            .verifying => "verify failed",
+        },
+        .unconfirmed => |stage| switch (stage) {
+            .stopping => "stop unconfirmed",
+            .awaiting_retirement => "retire unconfirmed",
+            .starting => "start unconfirmed",
+            .verifying => "verify unconfirmed",
+        },
+    };
+}
 
 pub fn category(outcome: Outcome) Category {
     return switch (outcome) {

@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 MAC_PATHS = (
     "src/os/*", "src/cli.zig", "src/client.zig", "src/platform.zig", "src/runtime_directory.zig", "src/HostLifecycle.zig",
-    "src/host_coordinator.zig", "src/host_endpoint.zig", "src/host_restart_all.zig", "src/host_start.zig", "src/host_start_handover.zig", "src/host_identity.zig",
+    "src/host_coordinator.zig", "src/host_endpoint.zig", "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig",
     "src/upgrade.zig", "src/upgrade_process.zig", "src/self_executable.zig",
     # The Python fixtures' platform owner. Fixtures ask it for platform facts
     # and stay off this list.
@@ -93,7 +93,6 @@ def zig_sites(source):
         'host_restart_all.zig': {"discover", "restart", "run"},
         'host_identity.zig': {"generation", "peer", "snapshot"},
         'host_start.zig': {"spawn"},
-        'host_start_handover.zig': {"spawn"},
     }
     def module_name(token):
         return token[1:-1].rsplit("/", 1)[-1] if token.startswith('"') and token.endswith('"') else ""

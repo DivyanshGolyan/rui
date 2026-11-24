@@ -1,6 +1,7 @@
 const std = @import("std");
 const HostLifecycle = @import("HostLifecycle.zig");
 const restart_all = @import("host_restart_all.zig");
+const host_restart_report = @import("host_restart_report.zig");
 const release = @import("release_candidate.zig");
 const stderr = @import("stderr.zig");
 
@@ -15,7 +16,7 @@ const Task = struct {
 const Event = union(enum) {
     progress: HostLifecycle.Stage,
     version: release.Version,
-    entry: restart_all.Entry,
+    entry: host_restart_report.Entry,
     /// Only the live typed refusal line crosses the private pipe, never the
     /// unused backing bytes of Failure.message.
     refused: struct {
@@ -84,7 +85,7 @@ fn lineResult(term: std.process.Child.Term) !void {
 }
 
 /// `stderr` is the coordinator's stderr policy: `.ignore` where the caller owns the terminal.
-pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: restart_all.Options, stderr_policy: std.process.SpawnOptions.StdIo) !restart_all.Batch {
+pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: restart_all.Options, stderr_policy: std.process.SpawnOptions.StdIo) !host_restart_report.Batch {
     try @import("upgrade_process.zig").check(options.cancellation);
     var child = try submit(init, .{
         .home = options.home,
@@ -106,15 +107,15 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: re
     return batch;
 }
 
-fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progress: ?HostLifecycle.Progress) !restart_all.Batch {
+fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progress: ?HostLifecycle.Progress) !host_restart_report.Batch {
     var buffer: [event_limit]u8 = undefined;
     var output = file.readerStreaming(io, &buffer);
-    var entries: std.ArrayList(restart_all.Entry) = .empty;
+    var entries: std.ArrayList(host_restart_report.Entry) = .empty;
     errdefer {
         for (entries.items) |entry| entry.deinit(allocator);
         entries.deinit(allocator);
     }
-    var result: restart_all.Batch = .{};
+    var result: host_restart_report.Batch = .{};
     while (try output.interface.takeDelimiter('\n')) |line| {
         const parsed = try std.json.parseFromSlice(Event, allocator, line, .{});
         defer parsed.deinit();
@@ -148,7 +149,7 @@ fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progr
     return error.HostRestartUnconfirmed;
 }
 
-fn receiveEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(restart_all.Entry), entry: restart_all.Entry) !void {
+fn receiveEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(host_restart_report.Entry), entry: host_restart_report.Entry) !void {
     const socket = if (entry.socket) |path| try allocator.dupe(u8, path) else null;
     errdefer if (socket) |path| allocator.free(path);
     const directory = if (entry.directory) |path| try allocator.dupe(u8, path) else null;
@@ -215,7 +216,7 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
         .target = if (task.target) |*target| target else null,
         .scope = task.scope,
         .progress = .{ .context = &process_init, .report = progressEvent },
-    }) catch |err| restart_all.Batch{ .failure = err };
+    }) catch |err| host_restart_report.Batch{ .failure = err };
     defer batch.deinit(allocator);
     if (batch.version) |version| event(init, .{ .version = version });
     for (batch.entries) |entry| event(init, .{ .entry = entry });
@@ -258,7 +259,7 @@ test "coordinator transfers every batch outcome and progress without reduction" 
     try expectRoundTrip(outcomeEvent(.{ .ready = .{ .pid = 123, .instance = @splat(42) } }));
     try expectRoundTrip(outcomeEvent(.{ .already_ready = .{ .pid = 456, .instance = @splat(17) } }));
     try expectRoundTrip(outcomeEvent(.{ .client_incompatible = 789 }));
-    inline for (std.enums.values(restart_all.Stage)) |stage| {
+    inline for (std.enums.values(host_restart_report.Stage)) |stage| {
         try expectRoundTrip(Event{ .entry = .{ .socket = "/socket", .state = .{ .failed = .{ .stage = stage, .cause = "HostSocketStoreMismatch" } } } });
     }
     try expectRoundTrip(Event{ .failure = .cancelled });

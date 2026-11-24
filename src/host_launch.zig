@@ -109,7 +109,7 @@ pub const Result = struct {
             .failed => |failure| failed: {
                 var cause = failure.cause;
                 switch (failure.detail) {
-                    .handover => |outcome| cause.handover_words = @import("host_activation_report.zig").summary(outcome),
+                    .handover => |outcome| cause.handover_words = activation.words(outcome),
                     else => {},
                 }
                 break :failed .{ .failed = cause };
@@ -143,7 +143,7 @@ pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: us
                 if (failure.refusalView()) |refusal| {
                     try writeSentence(writer, refusal.attempt, refusal.failure);
                 } else {
-                    _ = try @import("host_activation_report.zig").writeOutcome(writer, failure.store.slice(), failure.detail.handover, null);
+                    _ = try @import("host_restart_report.zig").writeOutcome(writer, failure.store.slice(), failure.detail.handover, null);
                 }
                 return;
             }

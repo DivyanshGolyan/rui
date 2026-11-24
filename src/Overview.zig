@@ -6322,7 +6322,7 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                         },
                         .result = .{
                             .installation = if (outcome == .unchanged) .{ .unchanged = receipt } else .{ .installed = receipt },
-                            .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = try a.dupe(@import("host_restart_all.zig").Entry, &.{.{ .socket = try a.dupe(u8, ""), .store = try a.dupe(u8, "/store"), .state = .{ .outcome = switch (outcome) {
+                            .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = try a.dupe(@import("host_restart_report.zig").Entry, &.{.{ .socket = try a.dupe(u8, ""), .store = try a.dupe(u8, "/store"), .state = .{ .outcome = switch (outcome) {
                                 .unchanged => .not_needed,
                                 .compatible => .{ .ready = .{ .instance = @splat(1), .pid = 42 } },
                                 .incompatible => .{ .client_incompatible = 42 },

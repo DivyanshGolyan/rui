@@ -10,7 +10,6 @@ test {
     _ = @import("os/read_image_file.zig");
     _ = @import("server_read_image.zig");
     _ = @import("host_start.zig");
-    _ = @import("host_start_handover.zig");
     _ = @import("host_launch_transfer.zig");
     _ = @import("server_mcp_settings.zig");
     _ = @import("testing/host_settings.zig");
@@ -62,6 +61,7 @@ test {
     _ = @import("self_executable.zig");
     _ = @import("HostLifecycle.zig");
     _ = @import("host_restart_all.zig");
+    _ = @import("host_restart_report.zig");
     _ = @import("host_identity.zig");
     _ = @import("upgrade.zig");
     _ = @import("installation_path.zig");

@@ -127,8 +127,7 @@ class PlatformBoundaryTest(unittest.TestCase):
                     ("host_coordinator.zig", ("restart", "restartAll", "run")),
                     ("host_restart_all.zig", ("discover", "restart", "run")),
                     ("host_identity.zig", ("generation", "peer", "snapshot")),
-                    ("host_start.zig", ("spawn",)),
-                    ("host_start_handover.zig", ("spawn",))):
+                    ("host_start.zig", ("spawn",))):
                 for method in methods:
                     for directory, prefix in (("src", ""), ("src/nested", "../")):
                         (root / directory).mkdir(exist_ok=True)
@@ -161,7 +160,7 @@ class PlatformBoundaryTest(unittest.TestCase):
     def test_upgrade_lifecycle_paths_select_mac(self):
         paths = ["build.zig", "docs/contracts/store.md", "docs/host.md",
                  "src/HostLifecycle.zig", "src/cli.zig", "src/client.zig",
-                 "src/host_coordinator.zig", "src/host_restart_all.zig", "src/host_start.zig", "src/host_start_handover.zig",
+                 "src/host_coordinator.zig", "src/host_restart_all.zig", "src/host_start.zig",
                  "src/serve_grammar.zig", "src/upgrade.zig", "src/upgrade_process.zig",
                  "tests/ci/host_settings_locality.py", "tests/ci/prepush.py",
                  "tests/ci/test_host_settings_locality.py", "tests/ci/test_prepush.py",
@@ -171,7 +170,7 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertTrue(select(paths, "review", AVAILABLE)["mac_required"])
         self.assertTrue(select(["src/cli.zig"], "review", AVAILABLE)["mac_required"])
         for path in ("src/HostLifecycle.zig", "src/host_coordinator.zig",
-                     "src/host_restart_all.zig", "src/host_start.zig", "src/host_start_handover.zig", "src/host_identity.zig", "src/upgrade.zig",
+                     "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig", "src/upgrade.zig",
                      "src/upgrade_process.zig"):
             self.assertTrue(select([path], "review", AVAILABLE)["mac_required"], path)
 

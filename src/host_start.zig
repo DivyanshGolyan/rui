@@ -1585,6 +1585,18 @@ pub fn launchFailure(result: *HostLaunchResult, kind: HostLaunchResult.Cause.Kin
     if (store) |canonical| result.outcome.failed.store.set(canonical) catch unreachable;
 }
 
+/// Reports a handover outcome as the start's failure: a refusal keeps its typed cause, every
+/// other outcome is the handover's own line, read unchanged by the Overview and the terminal.
+pub fn handoverFailed(result: *HostLaunchResult, outcome: @import("host_activation.zig").Outcome) void {
+    if (outcome == .refused) {
+        launchFailure(result, .child_refused, error.HostStartupFailed, null);
+        result.outcome.failed.cause.refusal_code = outcome.refused.failure.code;
+    } else {
+        launchFailure(result, .setup, error.HostRestartFailed, null);
+    }
+    result.outcome.failed.detail = .{ .handover = outcome };
+}
+
 fn launchRefusal(result: *HostLaunchResult, failure: start_report.Failure, selector: []const u8) void {
     launchFailure(result, if (failure.code == .store_schema_behind) .store_format else if (failure.code == .store_fenced) .store_identity else .child_refused, if (failure.code == .store_fenced) error.StoreIdentityMismatch else error.HostStartupFailed, selector);
     result.outcome.failed.detail = .{ .refusal = failure };
