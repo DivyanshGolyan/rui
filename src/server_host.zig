@@ -1363,8 +1363,8 @@ fn tempStorePath(tmp: *std.testing.TmpDir, out: []u8) ![]const u8 {
     return std.fmt.bufPrint(out, "{s}/store", .{root});
 }
 
-/// Runs `body` with Probes built from `hooks` and a test observation pipe for `plan`; `body` gets the pipe's read end.
-fn withTraceSink(plan: TestObservation.Plan, hooks: Hooks, dir: std.Io.Dir, body: *const fn (*Probes, c_int, std.Io.Dir) anyerror!void) !void {
+/// Runs `body` with Probes on `io` built from `hooks` and a test observation pipe for `plan`; `body` gets the pipe's read end.
+fn withTraceSink(io: std.Io, plan: TestObservation.Plan, hooks: Hooks, dir: std.Io.Dir, body: *const fn (*Probes, c_int, std.Io.Dir) anyerror!void) !void {
     const native = @import("posix");
     var descriptors: [2]c_int = undefined;
     try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
@@ -1382,30 +1382,61 @@ fn withTraceSink(plan: TestObservation.Plan, hooks: Hooks, dir: std.Io.Dir, body
     defer stderr.release();
     var traced = hooks;
     traced.phase_trace = true;
-    var probes: Probes = .{ .io = std.testing.io, .hooks = traced, .observation = observation };
+    var probes: Probes = .{ .io = io, .hooks = traced, .observation = observation };
     try body(&probes, descriptors[0], dir);
 }
 
 /// Counts the trace frames naming `phase` that were written since the last count, draining the pipe.
+/// Each frame carries its own length prefix, so frames that one read returns together are counted apart.
 fn countTraces(read_fd: c_int, phase: []const u8) usize {
     const native = @import("posix");
     var count: usize = 0;
-    var bytes: [TestObservation.record_bytes]u8 = undefined;
+    var bytes: [4 * TestObservation.record_bytes]u8 = undefined;
+    var held: usize = 0;
     while (true) {
-        const length = native.read(read_fd, &bytes, bytes.len);
-        if (length <= 0) return count;
-        if (std.mem.indexOf(u8, bytes[0..@intCast(length)], phase) != null) count += 1;
+        const length = native.read(read_fd, bytes[held..].ptr, bytes.len - held);
+        if (length > 0) held += @intCast(length);
+        var start: usize = 0;
+        while (held - start >= 2) {
+            const frame = std.mem.readInt(u16, bytes[start..][0..2], .little);
+            if (frame < 2 or held - start < frame) break;
+            if (std.mem.indexOf(u8, bytes[start..][0..frame], phase) != null) count += 1;
+            start += frame;
+        }
+        std.mem.copyForwards(u8, bytes[0 .. held - start], bytes[start..held]);
+        held -= start;
+        if (length <= 0) {
+            std.debug.assert(held == 0);
+            return count;
+        }
     }
 }
+
+/// Controlled sleep for the hold case: records the requested wait and the traces written before it, without waiting.
+const HoldSleep = struct {
+    var read_fd: c_int = -1;
+    var requested: ?std.Io.Timeout = null;
+    var traced_before: usize = 0;
+
+    fn sleep(_: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+        requested = timeout;
+        traced_before = countTraces(read_fd, "prepared_before_handoff");
+    }
+};
 
 fn holdCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
     _ = dir;
     const binding: store_module.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
-    const before = nowNs(probes.io);
+    HoldSleep.read_fd = read_fd;
+    HoldSleep.requested = null;
+    HoldSleep.traced_before = 0;
     probes.holdAt(.{ .action_launch = binding });
-    // The hold waits at least its delay; only the lower bound is deterministic.
-    try std.testing.expect(nowNs(probes.io) - before >= std.time.ns_per_ms);
-    try std.testing.expectEqual(@as(usize, 1), countTraces(read_fd, "prepared_before_handoff"));
+    // The hold traces once, then asks for exactly its configured delay.
+    try std.testing.expectEqual(@as(usize, 1), HoldSleep.traced_before);
+    const requested = HoldSleep.requested orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i96, 7 * std.time.ns_per_ms), requested.duration.raw.nanoseconds);
+    try std.testing.expectEqual(std.Io.Clock.awake, requested.duration.clock);
+    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "prepared_before_handoff"));
 }
 
 fn retryCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
@@ -1440,10 +1471,14 @@ test "SH-128 a test hold traces once then waits, and the retry and Bash reclaim 
     var retry_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var bash_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var hold_hooks: Hooks = .{};
-    hold_hooks.pauses.getPtr(.action_launch).delay_ms = 1;
-    try withTraceSink(.recovery, hold_hooks, tmp.dir, holdCase);
-    try withTraceSink(.dispatch, .{ .retry_recovery_gate_path = try std.fmt.bufPrint(&retry_buffer, "{s}/retry-gate", .{root}) }, tmp.dir, retryCase);
-    try withTraceSink(.bash_cleanup, .{ .bash_reclaim_gate_path = try std.fmt.bufPrint(&bash_buffer, "{s}/bash-gate", .{root}) }, tmp.dir, bashCase);
+    hold_hooks.pauses.getPtr(.action_launch).delay_ms = 7;
+    var hold_vtable = std.testing.io.vtable.*;
+    hold_vtable.sleep = HoldSleep.sleep;
+    var hold_io = std.testing.io;
+    hold_io.vtable = &hold_vtable;
+    try withTraceSink(hold_io, .recovery, hold_hooks, tmp.dir, holdCase);
+    try withTraceSink(std.testing.io, .dispatch, .{ .retry_recovery_gate_path = try std.fmt.bufPrint(&retry_buffer, "{s}/retry-gate", .{root}) }, tmp.dir, retryCase);
+    try withTraceSink(std.testing.io, .bash_cleanup, .{ .bash_reclaim_gate_path = try std.fmt.bufPrint(&bash_buffer, "{s}/bash-gate", .{root}) }, tmp.dir, bashCase);
 }
 
 test "SH-124 Host phases only move forward and the phase readers follow them" {
