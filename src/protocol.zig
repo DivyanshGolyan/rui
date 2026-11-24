@@ -1266,6 +1266,7 @@ fn ParserOf(comptime Custody: type) type {
                             .content => if (entry.json_object) try self.readSchema(value) else try self.readContentString(value),
                             .tools => try self.readToolList(value),
                             .decimal_policy => try self.readSpecDecimal(&value.value),
+                            .app_tools => return error.AppToolsNotSupportedYet,
                         }
                     },
                 }

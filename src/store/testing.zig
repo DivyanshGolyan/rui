@@ -762,6 +762,7 @@ fn dropPinOrganization(storage: *Store) !void {
 /// earlier columns do. On MySQL they were added in place with their foreign keys and checks, and a column
 /// that a key or check names cannot be dropped, so those go first, in one statement.
 fn dropFormat93SessionLanes(storage: *Store) !void {
+    try dropFormat93AppToolsCheck(storage);
     if (storage.engine != .mysql) {
         try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE session DROP COLUMN app_lane");
         try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE session DROP COLUMN app_tool_set_id");
@@ -776,6 +777,29 @@ fn dropFormat93SessionLanes(storage: *Store) !void {
     try mysql_testing.rawExec(storage, "DEALLOCATE PREPARE rui_lane");
     try mysql_testing.rawExec(storage, "SET @rui_lane_ddl=NULL");
     try mysql_testing.rawExec(storage, "ALTER TABLE session DROP COLUMN app_tool_set_id, DROP COLUMN app_lane");
+}
+
+/// Undoes format 93's session_change field tag, app_tools: the field CHECK goes back to the format 92 list
+/// and the rows keep their refusal columns. SQLite rebuilds the table, MySQL swaps the one CHECK by its text.
+fn dropFormat93AppToolsCheck(storage: *Store) !void {
+    if (storage.engine == .mysql) {
+        try mysql_testing.rawExec(storage, "SET @rui_field_ddl=(SELECT CONCAT('ALTER TABLE session_change DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK((field=''provider'' OR field=''model'' OR field=''instructions'' OR field=''tools'' OR field=''loaded_tools'' OR field=''permission_mode'' OR field=''output_schema'' OR field=''compaction_trigger'' OR field=''output_reservation'' OR field=''reasoning_effort'' OR field=''label'' OR field=''reasoning_effort_refused''))') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session_change' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('''provider''',cc.CHECK_CLAUSE)>0 AND LOCATE('provider_text',cc.CHECK_CLAUSE)=0)");
+        try mysql_testing.rawExec(storage, "PREPARE rui_field_check FROM @rui_field_ddl");
+        try mysql_testing.rawExec(storage, "EXECUTE rui_field_check");
+        try mysql_testing.rawExec(storage, "DEALLOCATE PREPARE rui_field_check");
+        try mysql_testing.rawExec(storage, "SET @rui_field_ddl=NULL");
+        return;
+    }
+    const schema = @import("schema.zig");
+    // Format 66's rebuild text is the format 92 table. Its copy statement names only six columns, so the rows
+    // are copied here with every column, keeping the refusal columns that the format 93 CHECK relates.
+    try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE session_change RENAME TO session_change_before_66");
+    for (schema.migrations[66 - schema.migration_baseline].sqlite) |sql| {
+        if (std.mem.startsWith(u8, sql, "CREATE TABLE session_change(")) try sqlite.exec(storage.sqliteDatabase(), sql);
+    }
+    try sqlite.exec(storage.sqliteDatabase(), "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) SELECT session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id FROM session_change_before_66");
+    try sqlite.exec(storage.sqliteDatabase(), "DROP TABLE session_change_before_66");
+    try sqlite.exec(storage.sqliteDatabase(), "CREATE INDEX session_change_refused_operation ON session_change(refused_operation_id,session_ref,revision)");
 }
 
 /// Undoes format 92 on MySQL: the app owner's policy columns, added in place. Newest first, so the

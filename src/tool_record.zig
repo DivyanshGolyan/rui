@@ -67,7 +67,7 @@ const agent_required_properties = blk: {
 const agent_spec_properties = blk: {
     var properties: []const u8 = "";
     for (@import("session_settings.zig").entries) |entry| {
-        if (std.mem.eql(u8, entry.field, "workspace") or std.mem.eql(u8, entry.field, "provider")) continue;
+        if (std.mem.eql(u8, entry.field, "workspace") or std.mem.eql(u8, entry.field, "provider") or entry.kind == .app_tools) continue;
         const kind = switch (entry.kind) {
             .tools => "array",
             .decimal_policy => "integer",

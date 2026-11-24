@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Kind = union(enum) { text: usize, choice: usize, content, tools, decimal_policy };
+pub const Kind = union(enum) { text: usize, choice: usize, content, tools, decimal_policy, app_tools };
 pub const Create = enum { optional, must_value };
 pub const Cli = struct {
     name: []const u8,
@@ -18,6 +18,9 @@ pub const Entry = struct {
     cli: ?Cli,
     digest: enum { always, unless_omitted } = .always,
     column: []const u8,
+    /// Added after the refused marker: its revision tag follows `reasoning_effort_refused`, so the tags before it
+    /// never move (revision tags are append-only).
+    since_refused: bool = false,
 };
 
 pub const entries = [_]Entry{
@@ -33,6 +36,8 @@ pub const entries = [_]Entry{
     .{ .field = "output_reservation", .spec = "outputReservation", .kind = .decimal_policy, .nullable = true, .cli = .{ .name = "output-reservation" }, .column = "output_reservation" },
     .{ .field = "reasoning_effort", .spec = "effort", .kind = .{ .choice = 16 }, .nullable = true, .cli = .{ .name = "reasoning-effort" }, .column = "reasoning_effort" },
     .{ .field = "label", .spec = "label", .kind = .{ .text = 100 }, .nullable = true, .cli = .{ .name = "label" }, .column = "label" },
+    // Not changeable until the Store saves it (its save step replaces this): configure refuses it by name.
+    .{ .field = "app_tools", .spec = "appTools", .kind = .app_tools, .nullable = true, .changeable = false, .cli = null, .digest = .unless_omitted, .column = "app_tool_set_id", .since_refused = true },
 };
 
 pub const relations = [_]Entry{
@@ -40,12 +45,18 @@ pub const relations = [_]Entry{
 };
 pub const spec_entries = entries ++ relations;
 
+/// Revision tags in order: the settings before the refused marker, the marker, then the settings added after it.
+/// A tag's ordinal is its position here, so new settings only append after the marker.
 pub const revision_fields = blk: {
     var names: []const []const u8 = &.{};
-    for (entries) |entry| if (!std.mem.eql(u8, entry.field, "workspace")) {
+    for (entries) |entry| if (!entry.since_refused and !std.mem.eql(u8, entry.field, "workspace")) {
         names = names ++ .{entry.field};
     };
-    break :blk names ++ .{"reasoning_effort_refused"};
+    names = names ++ .{"reasoning_effort_refused"};
+    for (entries) |entry| if (entry.since_refused) {
+        names = names ++ .{entry.field};
+    };
+    break :blk names;
 };
 
 pub const SessionField = blk: {
@@ -60,13 +71,16 @@ test "Session settings revision tags retain persisted names ordinals and backing
     const expected = @typeInfo(Before).@"enum";
     const actual = @typeInfo(SessionField).@"enum";
     try std.testing.expect(expected.tag_type == actual.tag_type);
-    try std.testing.expectEqual(expected.field_names.len + 1, actual.field_names.len);
+    // The marker takes the ordinal after the eleven settings it followed, and app_tools the next: later settings append.
+    try std.testing.expectEqual(expected.field_names.len + 2, actual.field_names.len);
     inline for (expected.field_names, actual.field_names[0..expected.field_names.len], expected.field_values, actual.field_values[0..expected.field_names.len]) |old, new, old_value, new_value| {
         try std.testing.expectEqualStrings(old, new);
         try std.testing.expectEqual(old_value, new_value);
     }
     try std.testing.expectEqualStrings("reasoning_effort_refused", actual.field_names[expected.field_names.len]);
     try std.testing.expectEqual(expected.field_names.len, @backingInt(SessionField.reasoning_effort_refused));
+    try std.testing.expectEqualStrings("app_tools", actual.field_names[expected.field_names.len + 1]);
+    try std.testing.expectEqual(expected.field_names.len + 1, @backingInt(SessionField.app_tools));
     inline for (entries) |entry| try std.testing.expect(!std.mem.eql(u8, entry.field, "reasoning_effort_refused"));
 }
 

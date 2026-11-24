@@ -2793,6 +2793,8 @@ const Capture = struct {
         try self.write("{");
         var separator: []const u8 = "";
         inline for (@import("session_settings.zig").spec_entries) |entry| {
+            // app_tools has no client input until its declaration step.
+            if (comptime entry.kind == .app_tools) continue;
             const value = @field(input, entry.field);
             const present = switch (entry.kind) {
                 .content => value.state != .omitted,
@@ -2816,6 +2818,7 @@ const Capture = struct {
                         .value => if (entry.json_object) try self.writeInputFile(value.path, protocol.max_sqlite_content_bytes, false, true) else try self.writeJsonFile(value.path),
                     },
                     .tools => try self.writeTools(value.?),
+                    .app_tools => unreachable,
                     .decimal_policy => if (value.value) |text| {
                         const tokens = try std.fmt.parseInt(u64, text, 10);
                         var digits: [20]u8 = undefined;

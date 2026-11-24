@@ -501,11 +501,14 @@ fn configurationMembers(comptime index: usize) type {
         const shape = .{ Optional(.{ ",\"preferences\":", PreferencesShape }), "}" };
     };
     const entry = session_settings.spec_entries[index];
+    // app_tools has no wire shape until its declaration step; the parser refuses it by name.
+    if (entry.kind == .app_tools) return configurationMembers(index + 1);
     const value = switch (entry.kind) {
         .text, .choice => |capacity| Plain(Hole{ .string = capacity }, entry.nullable),
         .decimal_policy => Plain(TokenCount, entry.nullable),
         .tools => Plain(ToolNameList, entry.nullable),
         .content => Plain(if (entry.json_object) SchemaObject else Content, entry.nullable),
+        .app_tools => unreachable,
     };
     const member = .{ (if (index == 0) "" else ",") ++ "\"" ++ entry.spec ++ "\":", value };
     return struct {
