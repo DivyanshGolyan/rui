@@ -119,7 +119,7 @@ def main():
         try:
             process, fields = start_host(store, provider)
             configured = command("session", "configure", "--store", store, "--record", state / "config", "--key", "config",
-                "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "ask")
+                "--workspace", pathlib.Path.cwd(), "--connection", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "ask")
             assert configured["answer"]["status"] == "accepted", configured
             SESSION = configured["answer"]["session"]
             foreign = configure(state, store, "foreign-config")
@@ -428,7 +428,7 @@ def performance_case(item_bytes):
         worker.start()
         process, fields = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         configured = command("session", "configure", "--store", store, "--record", state / "config", "--key", "config",
-            "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "ask")
+            "--workspace", pathlib.Path.cwd(), "--connection", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "ask")
         assert configured["answer"]["status"] == "accepted", configured
         SESSION = configured["answer"]["session"]
         independent = configure(state, store, "second-config")

@@ -1,7 +1,9 @@
 const std = @import("std");
+const connection_names = @import("connection_names.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Panel = @import("widgets/Panel.zig");
+const provider_route = @import("provider_route.zig");
 const Footer = @import("widgets/Footer.zig");
 const status = @import("status_page.zig");
 const catalog = @import("model_catalog.zig");
@@ -1535,7 +1537,7 @@ test "Chat info natural body matches the mock grows by actual Model rows and shr
     const picker = @import("model_picker.zig");
     const entries = comptime blk: {
         var result: [10]picker.Entry = undefined;
-        for (&result, 0..) |*entry, index| entry.* = .{ .id = std.fmt.comptimePrint("model-{d}", .{index}), .known = false, .catalogued = false, .providers = .initOne(.codex) };
+        for (&result, 0..) |*entry, index| entry.* = .{ .id = std.fmt.comptimePrint("model-{d}", .{index}), .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) };
         break :blk result;
     };
     const menu: picker.Menu = .{ .entries = &entries };
@@ -1558,7 +1560,7 @@ test "Chat info natural body matches the mock grows by actual Model rows and shr
         const text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 40);
         try std.testing.expect(std.mem.endsWith(u8, text, "   Rename     Archive     Copy last answer\n\n"));
         page.panel.selected = 4;
-        page.model_choice.open(&menu, .codex, "model-0");
+        page.model_choice.open(&menu, provider_route.nameOf(.codex), "model-0");
         const all = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height + 8, all.size.height);
         try std.testing.expectEqual(@as(u16, 8), page.panel.custom_height);
@@ -1811,7 +1813,7 @@ test "Chat info standalone Model and Effort retry read and save failures by draw
         try std.testing.expect(page.failures[index] == null);
         if (field == .model) {
             try std.testing.expect(page.model_choice.active);
-            try std.testing.expectEqual(fixture.session.provider, page.model_choice.provider);
+            try std.testing.expect(page.model_choice.provider.eql(fixture.session.provider));
             try std.testing.expectEqualStrings(fixture.session.model.slice(), page.model_choice.current);
         } else {
             const choice = page.panel.choice.?;

@@ -143,7 +143,7 @@ def run(model, external_credential=None):
         configured = caller.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
             "--key", "configure", "--workspace", workspace,
-            "--provider", "codex", "--model", model, "--tools", "none",
+            "--connection", "codex", "--model", model, "--tools", "none",
             "--permission-mode", "ask",
         )
         assert configured["answer"]["status"] == "accepted", "configuration rejected"

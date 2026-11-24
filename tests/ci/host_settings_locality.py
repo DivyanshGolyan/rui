@@ -74,7 +74,9 @@ def facts(root=ROOT):
         wire_paths.update(wp)
     for file, declaration in (("store_target.zig", "Kind"),
                               ("tool_record.zig", "Owner"),
-                              ("call_classification.zig", "BashArguments")):
+                              ("call_classification.zig", "BashArguments"),
+                              ("provider_name.zig", "Provider"),
+                              ("model_picker.zig", "Entry")):
         source = root / "src" / file
         if source.exists():
             shared.update(declaration_members(source.read_text(), declaration))
@@ -348,7 +350,8 @@ def host_environment_violations(root=ROOT):
             if token.text != "getenv" and not any(re.search(r"(?:^env$|environ)", x, re.I) for x in receiver):
                 continue
             owner = next((names[j + 1] for j in range(i - 1, -1, -1) if names[j] == "fn" and names[j + 2:j + 3] == ["("]), None)
-            if path.name == "host_start.zig" and owner == "resolve":
+            # keyBytes is the one loader of a key named by the settings document (provider or connection).
+            if path.name == "host_start.zig" and owner == "keyBytes":
                 continue
             value = unquote(names[i + 2]) if i + 2 < len(names) else None
             if value in HOST_ENV_ALLOW or (path.name == "host_start.zig" and owner == "spawn" and value in HOST_LAUNCH_TEST_GATES):

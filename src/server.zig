@@ -987,6 +987,7 @@ pub noinline fn serve(
     allocator: std.mem.Allocator,
     host_directory: []const u8,
     prepared: host_settings.Prepared,
+    connected: *const providers.Connected,
     tuning: Tuning,
     failure: *?start_report.Failure,
 ) !void {
@@ -994,7 +995,7 @@ pub noinline fn serve(
     const settings = prepared.get();
     const active_capacity = settings.execution.active_capacity.value;
     const limits = tuning.limits;
-    const served_value = providers.fromSettings(settings);
+    const served_value = providers.fromSettings(settings, connected);
     const served = &served_value;
     var connections = try server_mcp_settings.Connections.init(allocator, settings);
     defer connections.deinit();
@@ -1275,10 +1276,10 @@ fn serveOpened(
     );
     defer retention.cleanupAll();
     if (served.any()) {
-        for (served.table.values) |entry| if (entry) |value| {
+        for (served.table.values[0..served.table.len]) |value| {
             try provider.validateEndpoint(value.endpoint);
             try value.credential.validate(value.endpoint, served.ca_file);
-        };
+        }
         try provider.checkLibraries();
     }
     storage.instance = instance;
@@ -1304,10 +1305,7 @@ fn serveOpened(
         .descriptor_soft_limit = descriptor_soft_limit,
         .started_at = @intCast(started_at),
         .settings_digest = settings_digest,
-        .routes = routes: {
-            const served_set = served.served();
-            break :routes protocol.routesOf(&served_set);
-        },
+        .served = served.served(),
         .presets = settings.presets.specs,
         .bash_home = bash_facts.home,
     };
@@ -2042,7 +2040,7 @@ test "initial Message reply binds its allocated Session and original input befor
     const protocol_reply = @import("protocol_reply.zig");
     const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
     const configuration: @import("creation_receipt.zig").Configuration = .{
-        .provider = .codex,
+        .connection = @import("connection.zig").Name.parse("codex").?,
         .model = try .from("model-a"),
         .reasoning_effort = null,
         .workspace = try .from("/workspace"),
@@ -3733,7 +3731,7 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     const protocol_reply = @import("protocol_reply.zig");
     var response: protocol.ResponseBuffer = .{};
     const id = "0123456789abcdef0123456789abcdef";
-    var info: host_reply.HostInfo = .{ .store = id, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1792918800, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = "OFF", .settings_digest = null };
+    var info: host_reply.HostInfo = .{ .store = id, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1792918800, .custody_occupied = 0, .paused = false, .connections = &.{}, .doublewrite = "OFF", .settings_digest = null };
     try response.render(host_reply.renderHostInfo, .{info});
     const status = try protocol_reply.parseHostInfo(response.slice(), id);
     try std.testing.expectEqualStrings("OFF", status.ready.innodb_doublewrite.?.slice());
@@ -3743,7 +3741,9 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     try response.render(host_reply.renderHostInfo, .{info});
     try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
     const shape = protocol.host_info_reply;
-    try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.doublewrite) + protocol.shapeBytes(shape.settings_digest) + protocol.shapeBytes(shape.tail), protocol.max_host_info_response_bytes);
+    const optional_bytes = protocol.shapeBytes(shape.doublewrite) + protocol.shapeBytes(shape.settings_digest);
+    try std.testing.expect(response.slice().len <= protocol.max_host_info_response_bytes);
+    try std.testing.expect(protocol.shapeBytes(shape.head) + optional_bytes <= protocol.max_host_info_response_bytes);
 }
 
 test "MCP socket capacity is reserved beside model and Bash descriptors" {
@@ -4645,7 +4645,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             // Creation now requires a resolved receipt. Keep the legacy missing
             // receipt probe above and witness a valid creation independently.
             var configuration: @import("creation_receipt.zig").Configuration = .{
-                .provider = .openai,
+                .connection = @import("connection.zig").Name.parse("openai").?,
                 .model = .{},
                 .reasoning_effort = .low,
                 .workspace = .{},
@@ -4661,7 +4661,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             initial.accepted.configuration = &configuration;
             response = .{};
             try response.render(render, .{ @as([]const u8, ""), initial });
-            const config_json = ",\"configuration\":{\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"115200\"}";
+            const config_json = ",\"configuration\":{\"connection\":\"openai\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"115200\"}";
             const expected_creation = if (kind == .configure)
                 "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"13\",\"created\":true" ++ config_json ++ "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}"
             else
@@ -4677,8 +4677,8 @@ test "mutation decoder preserves base bytes and the entire command domain" {
         }
         const expected = switch (kind) {
             .action_stop => continue,
-            .configure => "b501240e06ee15fe16fae07682f8a4897ecd3d7e33aa3e89b2ef46d717957a88",
-            .message => "797f0ff670112ac114ab31b9cc7fd07c953a6eb68edc921f2bee955895ce8204",
+            .configure => "8da0e11a8f7ba497ce790c1d875353fa426913b507bdfaf3168f1b928519b3fb",
+            .message => "28e8bdbb373d38e429aac2b7d3b92ff519585f7f3fcb0ed0df1706197fa38c2b",
             .session_stop => "a98107ee7efe29d5c2480097568daa514649c76e9c7c1cc740ed5fbc697cbc90",
             .session_archive => "91da63974ced68e1596b479409b543ae90ec8161c1612840b3e26a0eca02acb3",
             .model_interruption => "54ed6236f058bb77a9b8039bb9a2bc144a5066bf742084c9ceb7ff7e73f890e1",

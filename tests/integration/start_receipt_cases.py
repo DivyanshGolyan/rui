@@ -47,7 +47,7 @@ def main():
             host = fixture.start_host(store, None)
             proxy = canonical_fixture.ReplyProxy(host, "/v1/message", hold_create_response)
             record = root / "original.json"
-            args = ["session", "start", "--store", store, "--provider", "codex",
+            args = ["session", "start", "--store", store, "--connection", "codex",
                     "--model", DEFAULTS.recommended_model, "--workspace", workspace,
                     "--record", record, "--key", "receipt-original"]
             task = "retain the original creation receipt"
@@ -68,13 +68,13 @@ def main():
             assert caller.returncode == 0, (stdout, stderr)
             admitted = json.loads(stdout)
             assert not stderr, stderr
-            expected = {"provider": "codex", "model": DEFAULTS.recommended_model,
+            expected = {"connection": "codex", "model": DEFAULTS.recommended_model,
                         "reasoning_effort": start_effort(DEFAULTS.recommended_model), "effort_source": "model_default"}
             assert admitted["configuration"] == expected, admitted
             assert admitted["context"]["session"] == session and not admitted["answer"]["replayed"], admitted
             original = record.read_bytes()
             saved = json.loads(original)
-            assert set(saved["configuration"]) == {"provider", "model", "workspace"}, saved
+            assert set(saved["configuration"]) == {"connection", "model", "workspace"}, saved
             replay_args = args[:-4] + ["--record", root / "replay.json", "--key", "receipt-original"]
             replayed = json.loads(invoke(*replay_args, input=task).stdout)
             assert replayed["configuration"] == expected and replayed["context"] == admitted["context"], replayed
@@ -99,7 +99,7 @@ def main():
             configure_record = root / "lost-configure.json"
             lost_configure = subprocess.run(
                 [str(fixture.RUI), "session", "configure", "--store", str(store),
-                 "--provider", "codex", "--model", DEFAULTS.recommended_model,
+                 "--connection", "codex", "--model", DEFAULTS.recommended_model,
                  "--workspace", str(workspace), "--record", str(configure_record),
                  "--key", "receipt-configure-lost", "--test-drop-reply", "after-commit"],
                 env=environment, cwd=workspace, text=True, capture_output=True, timeout=20)

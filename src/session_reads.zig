@@ -77,7 +77,7 @@ pub const Line = struct {
     first: ?First = null,
     folder: ?Bounded(protocol.max_workspace_bytes) = null,
     model: Bounded(protocol.max_model_bytes) = .{},
-    provider: ?protocol.Provider = null,
+    provider: ?@import("connection.zig").Name = null,
     effort: ?protocol.ReasoningEffort = null,
     left: ?u8 = null,
     archive_state: protocol.SessionArchiveState = .active,
@@ -100,7 +100,7 @@ pub const Line = struct {
             .first = if (first) |message| .{ .position = message.value.position, .content = message.value.content } else null,
             .folder = if (first == null) plain(protocol.max_workspace_bytes, settings.workspace.slice()) else null,
             .model = plain(protocol.max_model_bytes, settings.model.slice()),
-            .provider = settings.provider.value,
+            .provider = @import("connection.zig").Name.parse(settings.connection.value.slice()),
             .effort = if (settings.reasoning_effort) |effort| effort.value else null,
             .left = if (trigger != null and estimate != null) session_line.left(trigger.?.value, estimate.?.value) else null,
             .archive_state = current.archive_state,
@@ -213,7 +213,7 @@ pub const Job = struct {
     status_actions: std.Io.File = undefined,
     line_read: ?Moment = null,
     hint_wanted: bool = false,
-    provider: ?protocol.Provider = null,
+    provider: ?@import("connection.zig").Name = null,
     result: struct {
         work: protocol.PageWork = .{},
         line: ?Line = null,
@@ -243,7 +243,7 @@ pub const Job = struct {
         retry: ?Retry = null,
     } = .{},
 
-    fn sessionProvider(self: *const Job) ?protocol.Provider {
+    fn sessionProvider(self: *const Job) ?@import("connection.zig").Name {
         return if (self.result.line) |line| line.provider else self.provider;
     }
 
@@ -574,7 +574,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
 }
 
-fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: []const u8, provider: ?protocol.Provider) void {
+fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: []const u8, provider: ?@import("connection.zig").Name) void {
     const key: Key = .{ .position = item.position, .ordinal = item.ordinal };
     if (latest.*) |old| if (key.order(old.key) != .gt) return;
     const marks = @import("marks.zig");
@@ -1031,7 +1031,7 @@ test "session_reads the Session line takes archive and other facts from Current 
     }) |case| {
         for ([_]protocol.SessionArchiveState{ .active, .archiving, .archived }) |archive| {
             var bytes: [4096]u8 = undefined;
-            const report = try std.fmt.bufPrint(&bytes, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt\\u0001x\",\"revision\":\"3\",\"tools\":[],\"loaded_tools\":[],\"app_tools\":[],\"permission_mode\":\"{s}\",\"instructions\":" ++ reference_format ++ ",\"output_schema\":null,\"reasoning_effort\":{s},\"reasoning_effort_override\":null,\"compaction_trigger\":{s},\"context_estimate\":{s},\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":{s},\"created_at\":\"1\"}},\"archive_state\":\"{s}\",\"pending_messages\":\"0\",\"work\":{{\"state\":{{\"kind\":\"idle\",\"since\":\"1\"}},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"latest_outcome\":null}},\"peers\":{{\"from_person_at\":null}},\"first_message\":{s},\"selected_message\":null,\"recent_messages\":[],\"actions\":{{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]}},\"rejected_calls\":{{\"count\":\"0\",\"items\":[]}},\"actionable_permissions\":[],\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}}}", .{ case.mode, case.effort, case.trigger, case.estimate, case.label, @tagName(archive), case.first });
+            const report = try std.fmt.bufPrint(&bytes, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"connection\":\"codex\",\"model\":\"gpt\\u0001x\",\"revision\":\"3\",\"tools\":[],\"loaded_tools\":[],\"app_tools\":[],\"permission_mode\":\"{s}\",\"instructions\":" ++ reference_format ++ ",\"output_schema\":null,\"reasoning_effort\":{s},\"reasoning_effort_override\":null,\"compaction_trigger\":{s},\"context_estimate\":{s},\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":{s},\"created_at\":\"1\"}},\"archive_state\":\"{s}\",\"pending_messages\":\"0\",\"work\":{{\"state\":{{\"kind\":\"idle\",\"since\":\"1\"}},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"latest_outcome\":null}},\"peers\":{{\"from_person_at\":null}},\"first_message\":{s},\"selected_message\":null,\"recent_messages\":[],\"actions\":{{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]}},\"rejected_calls\":{{\"count\":\"0\",\"items\":[]}},\"actionable_permissions\":[],\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}}}", .{ case.mode, case.effort, case.trigger, case.estimate, case.label, @tagName(archive), case.first });
             try file.setLength(io, 0);
             try file.writePositionalAll(io, report, 0);
             const reply = protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } }) catch |err| {
@@ -1391,6 +1391,67 @@ test "SUI-49 Message placement preserves provenance across pages" {
     var host: FakeHost = .{ .history = 0, .tail = &.{}, .end = 0 };
     var domain: Domain = .{};
     try host.withHost(&domain);
+}
+
+test "CLI-35 an Activity read keeps its resolved Store across alias retarget" {
+    const Host = struct {
+        first: [8192]u8 = undefined,
+        first_len: usize = 0,
+        pub fn answer(self: *@This(), fd: std.posix.fd_t) !void {
+            var request_buffer: [8192]u8 = undefined;
+            const request = try fake_host.readRequest(fd, &request_buffer) orelse return;
+            try std.testing.expect(request.is("/v1/activity-page"));
+            if (self.first_len == 0) {
+                @memcpy(self.first[0..request.body.len], request.body);
+                self.first_len = request.body.len;
+            } else {
+                try std.testing.expectEqualSlices(u8, self.first[0..self.first_len], request.body);
+            }
+            var storage: [2048]u8 = undefined;
+            var arena = std.heap.FixedBufferAllocator.init(&storage);
+            const body = try std.json.parseFromSliceLeaky(struct { store: []const u8 }, arena.allocator(), request.body, .{ .ignore_unknown_fields = true });
+            const fixture: FakeHost = .{ .history = 50, .tail = &.{}, .end = 50 };
+            var page = fixture.page(50, 25, null, .backward, .full, 7);
+            try page.work.workspace.set(body.store);
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            try activity_reply.writePage(&output.writer, &page);
+            fake_host.respond(fd, "200 OK", "application/json", "", output.written());
+        }
+    };
+    const Action = struct {
+        pub fn run(_: *@This(), host: *Host, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            try dir.createDir(io, "other", .fromMode(0o700));
+            try dir.symLink(io, ".", "alias", .{ .is_directory = true });
+            var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias", .{root});
+            const paths = try client.resolveClientPaths(io, alias);
+            const requests: client.Requests = .{ .io = io };
+            const cursor: protocol_reply.ActivityCursor = .{ .end = 50, .position = 25, .direction = .backward, .limit = 7 };
+            try std.testing.expectError(error.InvalidSession, requests.activityPageAt(&paths, "invalid", cursor));
+            try std.testing.expectError(error.InvalidCursor, requests.activityPageAt(&paths, "k7m2qx", .{ .limit = 0 }));
+            var cancelled: client.Cancellation = .{};
+            cancelled.requestStop();
+            try std.testing.expectError(error.Cancelled, (client.Requests{ .io = io, .cancellation = &cancelled }).activityPageAt(&paths, "k7m2qx", cursor));
+            const initial = try requests.activityPage(alias, "k7m2qx", cursor);
+            try std.testing.expect(initial == .page);
+            try std.testing.expectEqualStrings(paths.store_identity.slice(), initial.page.facts.work.workspace.slice());
+            try dir.deleteFile(io, "alias");
+            try dir.symLink(io, "other", "alias", .{ .is_directory = true });
+            const retargeted = try client.resolveClientPaths(io, alias);
+            try std.testing.expect(!paths.store_identity.eql(retargeted.store_identity.slice()));
+            const reply = try requests.activityPageAt(&paths, "k7m2qx", cursor);
+            try std.testing.expect(reply == .page);
+            try std.testing.expectEqualStrings(paths.store_identity.slice(), reply.page.facts.work.workspace.slice());
+            try std.testing.expectEqualDeep(initial.page.continuation(), reply.page.continuation());
+            try std.testing.expectEqual(@as(u64, 18), reply.page.continuation().?.position);
+            _ = host;
+        }
+    };
+    var host: Host = .{};
+    var action: Action = .{};
+    try fake_host.withHost(&host, &action);
 }
 
 test "session_reads opening reads one Activity page whatever the history before it" {

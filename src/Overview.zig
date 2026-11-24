@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const session_list = @import("session_list.zig");
 const model_catalog = @import("model_catalog.zig");
 const vaxis = @import("vaxis");
@@ -1627,7 +1628,7 @@ fn creationInput(self: *const Self, snapshot: *const CreationSnapshot) !configur
         .session = .create,
         .require_model = true,
         .workspace = .{ .present = true, .value = self.options.workspace },
-        .provider = if (binding.*) |value| .{ .present = true, .value = @tagName(value.provider) } else .{},
+        .provider = if (binding.*) |*value| .{ .present = true, .value = value.provider.slice() } else .{},
         .model = if (binding.*) |*value| .{ .present = true, .value = value.model.slice() } else .{},
     };
     configuration.applySavedCreation(saved.effort, saved.permission);
@@ -2221,8 +2222,8 @@ const fake_operations: Operations = .{
             errdefer reply.deinit();
             try reply.writer.writeAll(protocol.model_list_reply.head);
             try model_list.writeProviders(&reply.writer, model_catalog.shipped, &.{
-                .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\n" } } },
-                .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
+                .{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\n" } } },
+                .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
             });
             try reply.writer.writeAll(protocol.model_list_reply.tail);
             return reply.toOwnedSlice();
@@ -6453,7 +6454,7 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         const rig = try openOverview();
         defer rig.close();
         const overview = rig.overview;
-        try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "future-chat\ngpt-5.5\n" } } }}) } }) == null);
+        try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "future-chat\ngpt-5.5\n" } } }}) } }) == null);
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try overview.root.openSettings(&ctx);
@@ -6466,7 +6467,7 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         if (release) {
             try std.testing.expect(try overview.event(.leave) == null);
         } else {
-            try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }}) } }) == null);
+            try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }}) } }) == null);
         }
         try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
         try std.testing.expect(!page.hasChoice());
@@ -6536,8 +6537,8 @@ fn sui4ModelFilter() !void {
         try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
         _ = try overview.event(.{ .input = .{ .key = .{ .action = .first } } });
         try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{
-            .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
-            .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
+            .{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
+            .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
         }) } }) == null);
         try std.testing.expect(try rig.press("kept draft") == null);
         var ctx = rig.context();
@@ -6957,7 +6958,7 @@ test "Sign-in completion applies the core default and restores only a visible fo
             try std.testing.expect(std.mem.indexOf(u8, text, "couldn't save default") != null);
             try std.testing.expect(std.mem.indexOfAny(u8, text, "\r\n\x1b") == null);
         }
-        try std.testing.expectEqual(protocol.Provider.openai, overview.state.default.?.provider);
+        try std.testing.expectEqualStrings("openai", overview.state.default.?.provider.slice());
         try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
         const next_creation = overview.creationSnapshot(overview.state.default);
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), (try next_creation.settings).effort);
@@ -7571,7 +7572,7 @@ const EmptySessionOwner = struct {
             .result = .{
                 .status = true,
                 .work = .{ .read_version = .{ .instance = @splat(1), .generation = generation }, .work = row.work.core() },
-                .line = .{ .read = .{ .revision = row.revision, .end = row.end }, .model = row.model, .provider = .codex, .folder = row.workspace, .effort = effort },
+                .line = .{ .read = .{ .revision = row.revision, .end = row.end }, .model = row.model, .provider = view.pn(.codex), .folder = row.workspace, .effort = effort },
                 .hint = .absent,
                 .cursor = .{ .position = row.end },
                 .at_start = true,
@@ -8131,7 +8132,7 @@ fn checkCreationPreferenceFailure() !void {
             defer file.close(std.testing.io);
             try file.writePositionalAll(std.testing.io, bytes, 0);
         }
-        const valid = "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=high\npermission_mode=bypass\n";
+        const valid = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=high\npermission_mode=bypass\n";
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -8579,7 +8580,7 @@ test "overview redraw deadline includes quota header with failed row off screen"
             row.work.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = test_now_s + 200 } };
             try row.work.state.failed.code.set("provider_quota");
             row.work = fixtureSessionWork(row.work.core());
-            row.provider = .codex;
+            row.provider = view.pn(.codex);
             return failure;
         }
     };
@@ -8797,7 +8798,7 @@ test "named launch waits for sign-in before choosing its binding" {
             row.* = .{ .created_at = 10, .read_version = page.since, .work = .{ .state = .{ .idle = .{ .since = test_now_s } } } };
             row.reference.set(listed_references[0]) catch unreachable;
             row.workspace.set("/work") catch unreachable;
-            row.provider = .codex;
+            row.provider = view.pn(.codex);
             row.model.set("gpt-6-luna") catch unreachable;
             return null;
         }

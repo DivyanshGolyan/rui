@@ -1,14 +1,16 @@
 const std = @import("std");
+const connection_names = @import("connection_names.zig");
 const catalog = @import("model_catalog.zig");
 const product_defaults = @import("product_defaults.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
+const connection = @import("connection.zig");
 const provider_name = @import("provider_name.zig");
+const provider_route = @import("provider_route.zig");
 const nextToken = model_list.nextToken;
 const objectKey = model_list.objectKey;
 
-pub const Provider = provider_name.Provider;
-pub const Providers = std.enums.EnumSet(Provider);
+pub const Providers = connection_names.NameSet;
 
 pub const Entry = struct {
     id: []const u8,
@@ -27,12 +29,12 @@ pub const Entry = struct {
     }
 };
 
-pub const Sources = std.enums.EnumArray(Provider, ?model_list.Source);
+pub const Sources = connection_names.NameArray(model_list.Source);
 
 pub const Menu = struct {
     entries: []const Entry = &.{},
     ids: []u8 = &.{},
-    sources: Sources = .initFill(null),
+    sources: Sources = .{},
     others: usize = 0,
     widest: usize = 0,
 
@@ -48,7 +50,7 @@ pub const Menu = struct {
     }
 
     pub fn loading(self: *const Menu) bool {
-        for (self.sources.values) |source| if (source == .pending) return true;
+        for (self.sources.values[0..self.sources.len]) |source| if (source == .pending) return true;
         return false;
     }
 
@@ -82,20 +84,20 @@ pub const ReasoningEffort = model_capability.ReasoningEffort;
 
 pub const Defaults = struct {
     model: ?[]const u8 = null,
-    provider: ?Provider = null,
+    provider: ?connection.Name = null,
     effort: ?ReasoningEffort = null,
 };
 
 pub const Row = struct {
     effort: ?ReasoningEffort,
-    provider: Provider,
+    provider: connection.Name,
     current: bool,
 };
 
 pub const Query = struct {
     words: []const u8,
     effort: ?ReasoningEffort = null,
-    provider: ?Provider = null,
+    provider: ?connection.Name = null,
 
     pub fn parse(words: []const u8) Query {
         var query: Query = .{ .words = words };
@@ -104,9 +106,10 @@ pub const Query = struct {
             for (std.enums.values(ReasoningEffort)) |effort| {
                 if (std.ascii.eqlIgnoreCase(@tagName(effort), word)) query.effort = effort;
             }
-            for (std.enums.values(Provider)) |provider| {
-                for (signInWords(provider)) |name| {
-                    if (std.ascii.eqlIgnoreCase(name, word)) query.provider = provider;
+            for (std.enums.values(provider_name.Provider)) |provider| {
+                const named = provider_route.nameOf(provider);
+                for (signInWords(&named)) |name| {
+                    if (std.ascii.eqlIgnoreCase(name, word)) query.provider = named;
                 }
             }
         }
@@ -129,11 +132,11 @@ pub const Query = struct {
             if (beginsOne(word, efforts, entry.providers)) continue;
             return null;
         }
-        const product_provider = comptime std.meta.stringToEnum(Provider, product_defaults.provider).?;
-        const provider = for ([_]?Provider{ self.provider, defaults.provider, product_provider }) |wanted| {
+        const product_provider = comptime connection.Name.parse(product_defaults.provider).?;
+        const provider = for ([_]?connection.Name{ self.provider, defaults.provider, product_provider }) |wanted| {
             if (wanted) |one| if (entry.providers.contains(one)) break one;
-        } else for (std.enums.values(Provider)) |one| {
-            if (entry.providers.contains(one)) break one;
+        } else for (entry.providers.slice()) |one| {
+            break one;
         } else unreachable;
         return .{
             .effort = self.effort orelse defaults.effort,
@@ -145,21 +148,29 @@ pub const Query = struct {
     fn beginsOne(word: []const u8, efforts: catalog.Efforts, providers: Providers) bool {
         var efforts_offered = efforts.iterator();
         while (efforts_offered.next()) |effort| if (std.ascii.startsWithIgnoreCase(@tagName(effort), word)) return true;
-        var providers_offered = providers.iterator();
-        while (providers_offered.next()) |provider| {
-            for ([_]?Provider{ provider, provider.sameAccount() }) |one| {
-                const named = one orelse continue;
-                for (signInWords(named)) |name| if (std.ascii.startsWithIgnoreCase(name, word)) return true;
+        for (providers.slice()) |*provider| {
+            for ([_]?connection.Name{ provider.*, sameAccount(provider) }) |one| {
+                var named = one orelse continue;
+                for (signInWords(&named)) |name| if (std.ascii.startsWithIgnoreCase(name, word)) return true;
             }
         }
         return false;
     }
 };
 
-fn signInWords(provider: Provider) [2][]const u8 {
+/// The name a built-in provider shares its sign-in with, if any.
+fn sameAccount(name: *const connection.Name) ?connection.Name {
+    const provider = provider_route.builtInOf(name.*) orelse return null;
+    return provider_route.nameOf(provider.sameAccount() orelse return null);
+}
+
+/// The words a person types to reach a name: its sign-in's first word, and its
+/// own name when it shares an account. A name that is not built in has only its own name.
+fn signInWords(name: *const connection.Name) [2][]const u8 {
+    const provider = provider_route.builtInOf(name.*) orelse return .{ name.slice(), name.slice() };
     const label = provider.signIn();
     const first = label[0 .. std.mem.indexOfScalar(u8, label, ' ') orelse label.len];
-    return .{ first, if (provider.sameAccount() != null) @tagName(provider) else first };
+    return .{ first, if (provider.sameAccount() != null) name.slice() else first };
 }
 
 pub fn read(gpa: std.mem.Allocator, providers: []const u8) error{ OutOfMemory, InvalidModelList }!Menu {
@@ -177,12 +188,12 @@ pub fn read(gpa: std.mem.Allocator, providers: []const u8) error{ OutOfMemory, I
             .object_begin => {},
             else => return error.InvalidModelList,
         }
-        var provider: ?Provider = null;
+        var provider: ?connection.Name = null;
         var source: ?model_list.Source = null;
         var models: ?[2]usize = null;
         while (try objectKey(&scanner, temporary)) |key| {
-            if (std.mem.eql(u8, key, "provider")) {
-                provider = std.meta.stringToEnum(Provider, try string(&scanner, temporary)) orelse return error.InvalidModelList;
+            if (std.mem.eql(u8, key, "connection")) {
+                provider = connection.Name.parse(try string(&scanner, temporary)) orelse return error.InvalidModelList;
             } else if (std.mem.eql(u8, key, "source")) {
                 source = std.meta.stringToEnum(model_list.Source, try string(&scanner, temporary)) orelse return error.InvalidModelList;
             } else if (std.mem.eql(u8, key, "models")) {
@@ -210,7 +221,7 @@ pub fn read(gpa: std.mem.Allocator, providers: []const u8) error{ OutOfMemory, I
                     const model = id orelse return error.InvalidModelList;
                     if (!model_capability.validModelSyntax(model)) return error.InvalidModelList;
                     if (count == offered.len) return error.InvalidModelList;
-                    offered[count] = .{ .id = model, .known = known orelse return error.InvalidModelList, .catalogued = model_capability.supportsModel(catalog.shipped, model), .providers = .empty };
+                    offered[count] = .{ .id = model, .known = known orelse return error.InvalidModelList, .catalogued = model_capability.supportsModel(catalog.shipped, model), .providers = .{} };
                     count += 1;
                 }
                 models = .{ start, count };
@@ -219,8 +230,11 @@ pub fn read(gpa: std.mem.Allocator, providers: []const u8) error{ OutOfMemory, I
         const served = provider orelse return error.InvalidModelList;
         const span = models orelse return error.InvalidModelList;
         if (menu.sources.get(served) != null) return error.InvalidModelList;
-        menu.sources.set(served, source orelse return error.InvalidModelList);
-        for (offered[span[0]..span[1]]) |*entry| entry.providers = .initOne(served);
+        menu.sources.set(served, source orelse return error.InvalidModelList) catch return error.InvalidModelList;
+        for (offered[span[0]..span[1]]) |*entry| {
+            entry.providers = .{};
+            entry.providers.insert(served) catch return error.InvalidModelList;
+        }
     }
     if (try nextToken(&scanner, temporary) != .end_of_document) return error.InvalidModelList;
     std.mem.sort(Entry, offered[0..count], {}, Entry.idLessThan);
@@ -228,7 +242,7 @@ pub fn read(gpa: std.mem.Allocator, providers: []const u8) error{ OutOfMemory, I
     var id_bytes: usize = 0;
     for (offered[0..count]) |entry| {
         if (len != 0 and std.mem.eql(u8, offered[len - 1].id, entry.id)) {
-            offered[len - 1].providers.setUnion(entry.providers);
+            offered[len - 1].providers.unionWith(&entry.providers) catch return error.InvalidModelList;
             offered[len - 1].known = offered[len - 1].known or entry.known;
             continue;
         }
@@ -278,8 +292,8 @@ fn expectOrder(shown: Shown, ids: []const []const u8) !void {
 
 test "the default leads, known models follow in catalog order, then the others by name, each once with every sign-in that offers it" {
     var menu = try testMenu(&.{
-        .{ .provider = .codex, .list = .catalog },
-        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "zz-unlisted\ngpt-6-luna\naa-unlisted\ngpt-5.5\n" } } },
+        .{ .provider = provider_route.nameOf(.codex), .list = .catalog },
+        .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "zz-unlisted\ngpt-6-luna\naa-unlisted\ngpt-5.5\n" } } },
     });
     defer menu.deinit(std.testing.allocator);
     var expected: [catalog.openai_ids.len + 2][]const u8 = undefined;
@@ -294,15 +308,15 @@ test "the default leads, known models follow in catalog order, then the others b
     for (menu.entries) |entry| {
         const both = std.mem.eql(u8, entry.id, "gpt-6-luna") or std.mem.eql(u8, entry.id, "gpt-5.5");
         const live_only = std.mem.eql(u8, entry.id, "aa-unlisted") or std.mem.eql(u8, entry.id, "zz-unlisted");
-        try std.testing.expectEqual(!live_only, entry.providers.contains(.codex));
-        try std.testing.expectEqual(both or live_only, entry.providers.contains(.openai));
+        try std.testing.expectEqual(!live_only, entry.providers.contains(provider_route.nameOf(.codex)));
+        try std.testing.expectEqual(both or live_only, entry.providers.contains(provider_route.nameOf(.openai)));
         try std.testing.expectEqual(!live_only, entry.known);
     }
     try std.testing.expectEqual(catalog.openai_ids.len, menu.shown("gpt-6-sol").others());
     var widest: usize = "zz-unlisted".len;
     for (catalog.openai_ids) |id| widest = @max(widest, id.len);
     try std.testing.expectEqual(widest, menu.widest);
-    try std.testing.expectEqual(@as(?model_list.Source, .live), menu.sources.get(.openai));
+    try std.testing.expectEqual(@as(?model_list.Source, .live), menu.sources.get(provider_route.nameOf(.openai)));
     try std.testing.expect(!menu.loading());
     expected[0] = "gpt-5.5";
     at = 1;
@@ -323,7 +337,7 @@ test "the default leads, known models follow in catalog order, then the others b
 }
 
 test "the Host's word decides which models are known; Rui's catalog only orders them" {
-    var menu = try read(std.testing.allocator, "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[" ++
+    var menu = try read(std.testing.allocator, "[{\"connection\":\"openai\",\"source\":\"live\",\"models\":[" ++
         "{\"id\":\"o9\",\"known\":false},{\"id\":\"gpt-6-luna\",\"known\":false},{\"id\":\"zz-next\",\"known\":true},{\"id\":\"gpt-5.5\",\"known\":true}]}]");
     defer menu.deinit(std.testing.allocator);
     try expectOrder(menu.shown(null), &.{ "gpt-5.5", "zz-next", "gpt-6-luna", "o9" });
@@ -332,9 +346,9 @@ test "the Host's word decides which models are known; Rui's catalog only orders 
 }
 
 test "a sign-in the Host does not serve has no source, and a pending list asks again" {
-    var menu = try testMenu(&.{.{ .provider = .openai, .list = .pending }});
+    var menu = try testMenu(&.{.{ .provider = provider_route.nameOf(.openai), .list = .pending }});
     defer menu.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(?model_list.Source, null), menu.sources.get(.codex));
+    try std.testing.expectEqual(@as(?model_list.Source, null), menu.sources.get(provider_route.nameOf(.codex)));
     try std.testing.expect(menu.loading());
     try std.testing.expectEqualStrings(catalog.openai_ids[0], menu.entries[0].id);
     try std.testing.expect(menu.find("gpt-6.1-sol") != null);
@@ -348,21 +362,21 @@ test "a reply Rui cannot read is refused whole" {
     for ([_][]const u8{
         "",
         "{}",
-        "[{\"provider\":\"codex\",\"source\":\"table\",\"models\":[]}]",
-        "[{\"provider\":\"openai\",\"source\":\"table_fallback\",\"models\":[]}]",
-        "[{\"provider\":\"claude\",\"source\":\"catalog\",\"models\":[]}]",
-        "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"a b\",\"known\":false}]}]",
-        "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6-luna\"}]}]",
-        "[{\"provider\":\"openai\",\"source\":\"live\"}]",
-        "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[]},{\"provider\":\"openai\",\"source\":\"catalog\",\"models\":[]}]",
+        "[{\"connection\":\"codex\",\"source\":\"table\",\"models\":[]}]",
+        "[{\"connection\":\"openai\",\"source\":\"table_fallback\",\"models\":[]}]",
+        "[{\"connection\":\"Claude\",\"source\":\"catalog\",\"models\":[]}]",
+        "[{\"connection\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"a b\",\"known\":false}]}]",
+        "[{\"connection\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6-luna\"}]}]",
+        "[{\"connection\":\"openai\",\"source\":\"live\"}]",
+        "[{\"connection\":\"openai\",\"source\":\"live\",\"models\":[]},{\"connection\":\"openai\",\"source\":\"catalog\",\"models\":[]}]",
         "[] []",
     }) |reply| try std.testing.expectError(error.InvalidModelList, read(std.testing.allocator, reply));
 }
 
 fn pickerMenu() !Menu {
     return testMenu(&.{
-        .{ .provider = .codex, .list = .catalog },
-        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-terra\ngpt-6.1-sol\ngpt-6.1-sol-2026-10-14\nft:custom\n" ++
+        .{ .provider = provider_route.nameOf(.codex), .list = .catalog },
+        .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-6.1-terra\ngpt-6.1-sol\ngpt-6.1-sol-2026-10-14\nft:custom\n" ++
             "@cf/deepseek-ai/deepseek-v4-flash-0731\nazure/gpt-5-pro\nopenai/gpt-4.1\nalibaba/qwen-max\nauto/mistralai/mistral-medium-3.5\n" } } },
     });
 }
@@ -378,30 +392,30 @@ fn plainRow(menu: *const Menu, id: []const u8, defaults: Defaults) Row {
 test "a row previews only typed or saved effort and keeps provider selection" {
     var menu = try pickerMenu();
     defer menu.deinit(std.testing.allocator);
-    const Case = struct { id: []const u8, effort: ?ReasoningEffort, provider: Provider };
-    const saved: Defaults = .{ .model = "gpt-6.1-sol", .provider = .openai, .effort = .none };
+    const Case = struct { id: []const u8, effort: ?ReasoningEffort, provider: connection.Name };
+    const saved: Defaults = .{ .model = "gpt-6.1-sol", .provider = provider_route.nameOf(.openai), .effort = .none };
     for ([_]Case{
-        .{ .id = "gpt-6.1-terra", .effort = .none, .provider = .openai },
-        .{ .id = "gpt-6.1-sol", .effort = .none, .provider = .openai },
-        .{ .id = "gpt-6-astra", .effort = .none, .provider = .codex },
-        .{ .id = "gpt-5.5-pro", .effort = .none, .provider = .codex },
-        .{ .id = "ft:custom", .effort = .none, .provider = .openai },
-        .{ .id = "azure/gpt-5-pro", .effort = .none, .provider = .openai },
-        .{ .id = "openai/gpt-4.1", .effort = .none, .provider = .openai },
+        .{ .id = "gpt-6.1-terra", .effort = .none, .provider = provider_route.nameOf(.openai) },
+        .{ .id = "gpt-6.1-sol", .effort = .none, .provider = provider_route.nameOf(.openai) },
+        .{ .id = "gpt-6-astra", .effort = .none, .provider = provider_route.nameOf(.codex) },
+        .{ .id = "gpt-5.5-pro", .effort = .none, .provider = provider_route.nameOf(.codex) },
+        .{ .id = "ft:custom", .effort = .none, .provider = provider_route.nameOf(.openai) },
+        .{ .id = "azure/gpt-5-pro", .effort = .none, .provider = provider_route.nameOf(.openai) },
+        .{ .id = "openai/gpt-4.1", .effort = .none, .provider = provider_route.nameOf(.openai) },
     }) |case| {
         const row = plainRow(&menu, case.id, saved);
         try std.testing.expectEqual(case.effort, row.effort);
-        try std.testing.expectEqual(case.provider, row.provider);
+        try std.testing.expect(row.provider.eql(case.provider));
     }
     for ([_]Case{
-        .{ .id = "gpt-6.1-sol", .effort = null, .provider = .codex },
-        .{ .id = "gpt-5.5-pro", .effort = null, .provider = .codex },
-        .{ .id = "ft:custom", .effort = null, .provider = .openai },
-        .{ .id = "azure/gpt-5-pro", .effort = null, .provider = .openai },
+        .{ .id = "gpt-6.1-sol", .effort = null, .provider = provider_route.nameOf(.codex) },
+        .{ .id = "gpt-5.5-pro", .effort = null, .provider = provider_route.nameOf(.codex) },
+        .{ .id = "ft:custom", .effort = null, .provider = provider_route.nameOf(.openai) },
+        .{ .id = "azure/gpt-5-pro", .effort = null, .provider = provider_route.nameOf(.openai) },
     }) |case| {
         const row = plainRow(&menu, case.id, .{});
         try std.testing.expectEqual(case.effort, row.effort);
-        try std.testing.expectEqual(case.provider, row.provider);
+        try std.testing.expect(row.provider.eql(case.provider));
     }
     try std.testing.expectEqual(@as(?ReasoningEffort, .high), plainRow(&menu, "gpt-5.5-pro", .{ .effort = .high }).effort);
     try std.testing.expectEqual(@as(?ReasoningEffort, .high), plainRow(&menu, "gpt-6.1-sol", .{ .effort = .high }).effort);
@@ -412,10 +426,10 @@ test "the ✓ marks the row of the model new Sessions use, whatever its sign-in"
     defer menu.deinit(std.testing.allocator);
     var marked: usize = 0;
     for (menu.entries) |entry| {
-        const row = Query.parse("").row(entry, .{ .model = "gpt-6.1-sol", .provider = .codex }) orelse continue;
+        const row = Query.parse("").row(entry, .{ .model = "gpt-6.1-sol", .provider = provider_route.nameOf(.codex) }) orelse continue;
         try std.testing.expectEqual(std.mem.eql(u8, entry.id, "gpt-6.1-sol"), row.current);
         marked += @intFromBool(row.current);
-        try std.testing.expect(!Query.parse("").row(entry, .{ .provider = .codex, .effort = .high }).?.current);
+        try std.testing.expect(!Query.parse("").row(entry, .{ .provider = provider_route.nameOf(.codex), .effort = .high }).?.current);
     }
     try std.testing.expectEqual(@as(usize, 1), marked);
 }
@@ -434,18 +448,18 @@ fn expectRows(menu: *const Menu, typed: []const u8, ids: []const []const u8) !vo
 test "/model terra low api leaves one row, set to low on the API key, whatever was saved" {
     var menu = try pickerMenu();
     defer menu.deinit(std.testing.allocator);
-    const saved: Defaults = .{ .model = "gpt-6.1-sol", .provider = .codex, .effort = .high };
+    const saved: Defaults = .{ .model = "gpt-6.1-sol", .provider = provider_route.nameOf(.codex), .effort = .high };
     for ([_][]const u8{ "terra low api", "api low terra", "  TERRA  Low API ", "terra high low api codex api" }) |typed| {
         try expectRows(&menu, typed, &.{"gpt-6.1-terra"});
         const row = Query.parse(typed).row(entryOf(&menu, "gpt-6.1-terra"), saved).?;
         try std.testing.expectEqual(@as(?ReasoningEffort, .low), row.effort);
-        try std.testing.expectEqual(Provider.openai, row.provider);
+        try std.testing.expect(row.provider.eql(provider_route.nameOf(.openai)));
         try std.testing.expect(!row.current);
     }
     try expectRows(&menu, "terra low", &.{ "gpt-5.6-terra", "gpt-6.1-terra" });
     try expectRows(&menu, "terra codex", &.{ "gpt-5.6-terra", "gpt-6.1-terra" });
-    const codex = Query.parse("terra codex").row(entryOf(&menu, "gpt-6.1-terra"), .{ .provider = .openai, .effort = .medium }).?;
-    try std.testing.expectEqual(Provider.codex, codex.provider);
+    const codex = Query.parse("terra codex").row(entryOf(&menu, "gpt-6.1-terra"), .{ .provider = provider_route.nameOf(.openai), .effort = .medium }).?;
+    try std.testing.expect(codex.provider.eql(provider_route.nameOf(.codex)));
     try std.testing.expectEqual(@as(?ReasoningEffort, .medium), codex.effort);
 }
 
@@ -454,9 +468,9 @@ test "a word narrows to the rows whose ID holds it or that offer the effort or s
     defer menu.deinit(std.testing.allocator);
     for ([_][]const u8{ "6.1-terra l", "6.1-terra lo", "6.1-terra ap", "6.1-terra AP" }) |typed| {
         try expectRows(&menu, typed, &.{"gpt-6.1-terra"});
-        const row = Query.parse(typed).row(entryOf(&menu, "gpt-6.1-terra"), .{ .provider = .codex, .effort = .high }).?;
+        const row = Query.parse(typed).row(entryOf(&menu, "gpt-6.1-terra"), .{ .provider = provider_route.nameOf(.codex), .effort = .high }).?;
         try std.testing.expectEqual(@as(?ReasoningEffort, .high), row.effort);
-        try std.testing.expectEqual(Provider.codex, row.provider);
+        try std.testing.expect(row.provider.eql(provider_route.nameOf(.codex)));
     }
     try expectRows(&menu, "6.1-sol none", &.{"gpt-6.1-sol-2026-10-14"});
     try expectRows(&menu, "astra api", &.{});
@@ -477,7 +491,7 @@ test "a word narrows to the rows whose ID holds it or that offer the effort or s
 }
 
 test "model picker domain admits chat and unknown live IDs but not catalog-proven non-chat families" {
-    var menu = try testMenu(&.{.{ .provider = .openai, .list = .{ .live = .{
+    var menu = try testMenu(&.{.{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{
         .bytes = "gpt-6.1-sol\ngpt-4.1\nfuture-chat\ngpt-imagery-next\n" ++
             "gpt-image-2\ngpt-image-1-mini\ntext-embedding-3-large\ngpt-realtime-2.1\n" ++
             "openai/whisper-1\ngpt-image-next\ntext-embedding-next\ngpt-realtime-next\n",
@@ -490,7 +504,7 @@ test "model picker domain admits chat and unknown live IDs but not catalog-prove
     var body: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer body.deinit();
     for (catalog.shipped) |entry| try body.writer.print("{s}\n", .{entry.id});
-    var whole = try testMenu(&.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = body.written() } } }});
+    var whole = try testMenu(&.{.{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = body.written() } } }});
     defer whole.deinit(std.testing.allocator);
     var offered_chat: usize = 0;
     for (whole.entries) |entry| {

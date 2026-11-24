@@ -98,7 +98,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
 
     def configuration(session):
         settings = inspect(session)["session"]
-        return {name: settings[name] for name in ("parent", "workspace", "provider", "model", "revision",
+        return {name: settings[name] for name in ("parent", "workspace", "connection", "model", "revision",
                                                  "tools", "loaded_tools", "permission_mode")}
 
     def wait(handle):
@@ -142,9 +142,9 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                                                   required_fields={"execution": "enabled"})
         # These ordinary defaults and cwd would violate the attached contract if
         # the CLI inserted them before forwarding the parent-bearing spec.
-        invoke("defaults", "configure", "--store", directory, "--provider", "openai", "--model", "gpt-6.1-sol")
+        invoke("defaults", "configure", "--store", directory, "--connection", "openai", "--model", "gpt-6.1-sol")
         parent = value("session", "configure", "--store", directory, "--workspace", workspace,
-                       "--provider", "codex", *spec)["context"]["session"]
+                       "--connection", "codex", *spec)["context"]["session"]
         seed = invoke("session", "send", "--store", directory, "--session", parent,
                       input="seed the parent environment", mark="parent-original")
         wait(announced(seed))
@@ -156,7 +156,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         # Saved client bindings must not choose an attached child's compaction
         # policy. Both creating routes resolve against the inherited provider.
         for saved_provider in ("openai", "codex"):
-            invoke("defaults", "configure", "--provider", saved_provider, "--model", "gpt-6.1-sol")
+            invoke("defaults", "configure", "--connection", saved_provider, "--model", "gpt-6.1-sol")
             for door in ("configure", "start"):
                 for explicit in (False, True):
                     key = f"parent-compaction-{saved_provider}-{door}-{explicit}"
@@ -167,14 +167,14 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                                     "--permission-mode", "bypass", "--record", record, "--key", key, *options,
                                     input="attached compaction evidence" if door == "start" else None)
                     captured = json.loads(record.read_bytes())["configuration"]
-                    assert "provider" not in captured and "workspace" not in captured, captured
+                    assert "connection" not in captured and "workspace" not in captured, captured
                     if explicit:
                         assert captured["compactAt"] == 2000, captured
                     else:
                         assert "compactAt" not in captured, captured
                     child = created["context"]["session"]
                     saved = inspect(child)["session"]
-                    assert saved["parent"] == parent and saved["provider"] == "codex", saved
+                    assert saved["parent"] == parent and saved["connection"] == "codex", saved
                     assert saved["workspace"] == str(workspace) and saved["model"] == "gpt-6.1-sol", saved
                     expected = "2000" if explicit else str(compaction_trigger("codex", "gpt-6.1-sol"))
                     assert saved["compaction_trigger"] == expected, saved
@@ -186,7 +186,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                     replay = value("request", "recover", "--store", directory, "--record", record,
                                    "--kind", "message" if door == "start" else "configure")
                     assert replay["answer"]["replayed"] is True and replay["context"]["session"] == child, replay
-        invoke("defaults", "configure", "--provider", "openai", "--model", "gpt-6.1-sol")
+        invoke("defaults", "configure", "--connection", "openai", "--model", "gpt-6.1-sol")
         assert configuration(parent) == saved_parent
         print("attached CLI: OpenAI/Codex saved bindings preserve inherited compaction and explicit overrides", flush=True)
         records = []
@@ -201,7 +201,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
             captured = json.loads(original)
             assert captured["session"] == "" and captured["configuration"]["parent"] == parent, captured
             assert captured["kind"] == ("message" if door == "start" else "configure"), captured
-            assert "provider" not in captured["configuration"] and "workspace" not in captured["configuration"], captured
+            assert "connection" not in captured["configuration"] and "workspace" not in captured["configuration"], captured
             assert captured["configuration"]["tools"] == ["bash"], captured
             if door == "start":
                 assert captured["text"] == {"state": "value", "value": TASK}, captured
@@ -215,7 +215,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
             assert replay["context"]["key"] == handle, replay
             current = inspect(child)
             settings = current["session"]
-            assert settings["parent"] == parent and settings["provider"] == "codex", settings
+            assert settings["parent"] == parent and settings["connection"] == "codex", settings
             assert settings["workspace"] == str(workspace) and settings["tools"] == ["bash"], settings
             assert settings["loaded_tools"] == ["bash"] and settings["permission_mode"] == "bypass", settings
             expect_count(f"SELECT count(*) FROM session WHERE session_ref='{child}' AND parent_ref='{parent}'", 1)
@@ -259,7 +259,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         # are separate facts. Neither may widen the parent's saved restrictions.
         direct = value("session", "start", "--store", directory, "--parent", parent,
                        *spec, input="attached start receipt evidence")
-        assert direct["configuration"]["provider"] is None and direct["configuration"]["parent"] == parent, direct
+        assert direct["configuration"]["connection"] is None and direct["configuration"]["parent"] == parent, direct
         direct_child = direct["context"]["session"]
         wait(direct["context"]["key"])
         assert configuration(direct_child)["parent"] == parent
@@ -271,13 +271,13 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         assert configuration(parent) == saved_parent
         invoke("session", "configure", "--store", directory, "--session", parent, "--permission-mode", "ask")
         archived = value("session", "configure", "--store", directory, "--workspace", workspace,
-                         "--provider", "codex", *spec)["context"]["session"]
+                         "--connection", "codex", *spec)["context"]["session"]
         invoke("session", "archive", "--store", directory, "--session", archived)
         known = session_refs()
         unknown = next(f"{number:06d}" for number in range(len(known) + 1) if f"{number:06d}" not in known)
         rejected_records = []
         cases = [
-            ("provider", parent, ["--provider", "codex"], "parent_provider_forbidden"),
+            ("connection", parent, ["--connection", "codex"], "parent_provider_forbidden"),
             ("workspace", parent, ["--workspace", workspace], "parent_workspace_forbidden"),
             ("tools", parent, ["--tools", "bash,web_search"], "tools_not_in_parent"),
             ("permission", parent, ["--permission-mode", "bypass"], "permission_mode_wider_than_parent"),
@@ -319,11 +319,11 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         # Use explicit captures so HOME is not needed to choose a record path.
         preferences = home / ".config/rui/preferences"
         saved_preferences = preferences.read_bytes()
-        assert b"provider=openai\n" in saved_preferences, saved_preferences
+        assert b"connection=openai\n" in saved_preferences, saved_preferences
         try:
             for mode in ("no-home", "stale-provider"):
                 if mode == "stale-provider":
-                    preferences.write_bytes(saved_preferences.replace(b"provider=openai\n", b"provider=retired-provider\n"))
+                    preferences.write_bytes(saved_preferences.replace(b"connection=openai\n", b"connection=retired-provider\n"))
                 for door in ("configure", "start"):
                     for name, selected, extra, code in (cases[0], cases[1], cases[4], cases[5]):
                         key = f"attached-{mode}-{door}-{name}"
@@ -336,7 +336,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                         assert rejected["answer"]["code"] == code, rejected
                         captured = json.loads(record.read_bytes())
                         assert captured["configuration"]["parent"] == selected, captured
-                        if name in ("provider", "workspace"):
+                        if name in ("connection", "workspace"):
                             assert captured["configuration"][name] == str(extra[1]), captured
                         replay = value("request", "recover", "--store", directory, "--record", record,
                                        "--kind", "message" if door == "start" else "configure",

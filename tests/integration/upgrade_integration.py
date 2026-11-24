@@ -425,7 +425,7 @@ def frozen_upgrade_cases(root, binary, releases):
             previous = c.status()
             old_pid = peer_pid(c.ready["socket"])
             assert started["instance"] == previous["instance"] and previous["paused"] is False, previous
-            assert previous["active_capacity"] == "2" and previous["capabilities"]["providers"] == none, previous
+            assert previous["active_capacity"] == "2" and host_process.capability_routes(previous["capabilities"]) == none, previous
             assert os_semantics.process_executable(old_pid) == retained / "bin/rui"
 
             admitted_b = json.loads(json.dumps(admitted_a))
@@ -477,7 +477,7 @@ def frozen_upgrade_cases(root, binary, releases):
             for facts in (direct, current):
                 assert facts["instance"] != previous["instance"] and facts["paused"] is True, (source_kind, facts)
                 assert facts["active_capacity"] == "2", "observed active capacity is projected last"
-                assert facts["capabilities"]["providers"] == expected_providers, facts
+                assert host_process.capability_routes(facts["capabilities"]) == expected_providers, facts
                 assert facts["store"] == previous["store"], facts
             assert direct["instance"] == current["instance"]
             assert os_semantics.process_executable(peer_pid(c.ready["socket"])) == c.link.resolve()
@@ -496,7 +496,7 @@ def frozen_upgrade_cases(root, binary, releases):
                 assert "1 restarted" in next_output, next_output
                 next_status = c.status()
                 assert next_status["instance"] != current["instance"] and next_status["paused"] is False, next_status
-                assert next_status["active_capacity"] == "2" and next_status["capabilities"]["providers"] == none, next_status
+                assert next_status["active_capacity"] == "2" and host_process.capability_routes(next_status["capabilities"]) == none, next_status
             print(f"upgrade native: frozen {source_kind} A -> new checked B -> {mutation} C consumed B; full verification passed", flush=True)
 
 
@@ -518,7 +518,7 @@ def frozen_credential_refusal_case(root, binary, releases):
                                                                "key": {"file": str(key_file)}}}}))
         saved.chmod(0o600)
         old, previous = c.start_host(sources_only=True)
-        assert previous["capabilities"]["providers"]["openai"] == "key_file", previous
+        assert host_process.capability_routes(previous["capabilities"])["openai"] == "key_file", previous
         assert test_key not in os_semantics.process_environment(old.pid, env=c.env)
         c.select(c.build("checked-credential-target"))
         gate = c.root / "credential-after-check.gate"
@@ -1377,7 +1377,7 @@ def tool_custody_cases(root, binary, releases, operation):
                 endpoint.responses.append(fixture.sse_tool_calls(name, [("bash", name, arguments)]))
                 endpoint.responses.append(fixture.sse_answer(name + "-after", "reason", "message", "done")[0])
                 session = origin.json("session", "configure", "--store", origin.store,
-                    "--workspace", origin.root, "--provider", "codex", "--model", "gpt-6-luna",
+                    "--workspace", origin.root, "--connection", "codex", "--model", "gpt-6-luna",
                     "--tools", "bash", "--permission-mode", "bypass")["answer"]["session"]
                 origin.json("session", "send", "--store", origin.store, "--session", session, input="upgrade now")
 
@@ -1425,14 +1425,14 @@ def terminal_setup(c):
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     credential = directory / "codex.json"
     credentials(credential)
-    c.run("defaults", "configure", "--provider", "codex", "--model", "gpt-6-luna")
+    c.run("defaults", "configure", "--connection", "codex", "--model", "gpt-6-luna")
     configured = c.json("session", "configure", "--store", c.store,
-        "--workspace", c.root, "--provider", "codex", "--model", "gpt-6-luna")
+        "--workspace", c.root, "--connection", "codex", "--model", "gpt-6-luna")
     return configured["answer"]["session"], credential.read_bytes()
 
 
 def overview_args(binary, c):
-    return [str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-luna"]
+    return [str(binary), "--store", str(c.store), "--connection", "codex", "--model", "gpt-6-luna"]
 
 
 def proof_relaunched(c, screen, process):

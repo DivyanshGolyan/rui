@@ -50,6 +50,7 @@ const cores = .{
     .{ "configuration_defaults.zig", @import("configuration_defaults.zig") },
     .{ "configure_input.zig", @import("configure_input.zig") },
     .{ "connection.zig", @import("connection.zig") },
+    .{ "connection_names.zig", @import("connection_names.zig") },
     .{ "content_string.zig", @import("content_string.zig") },
     .{ "content_value.zig", @import("content_value.zig") },
     .{ "conversation_read.zig", @import("conversation_read.zig") },
@@ -449,7 +450,7 @@ fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
         row.* = .{
             .reference = reference,
             .workspace = workspaces[at % workspaces.len],
-            .provider = .codex,
+            .provider = @import("connection.zig").Name.parse("codex").?,
             .label = if (at % 3 == 0) null else "Find why the store tests fail on the second run",
             .state = state,
             .state_change_at = since,
