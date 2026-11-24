@@ -30,6 +30,14 @@ pub const Scratch = struct {
     pub const Chunk = struct { record: ?*Record, bytes: []const u8 };
 };
 
+pub const Streams = struct {
+    context: *anyopaque,
+    head: *const fn (context: *anyopaque, record: *Record, head: h2.Head) h2.Verdict,
+    deliver: *const fn (context: *anyopaque, record: *Record, iovecs: []std.posix.iovec_const, total: usize) ?policy.Cause,
+    retireBody: *const fn (context: *anyopaque, record: *Record) void,
+    settle: *const fn (context: *anyopaque, record: *Record, settle: policy.Settle) void,
+};
+
 pub const Env = struct {
     allocator: std.mem.Allocator,
     clock: *const Clock,
@@ -40,6 +48,7 @@ pub const Env = struct {
     tls: *?tls.Context,
     connect_timeout_ns: u64,
     stream_capacity: u32,
+    streams: Streams,
     faults: if (builtin.is_test) ?*Faults else void = if (builtin.is_test) null else {},
 };
 
@@ -505,7 +514,12 @@ pub fn detach(self: *Connection, record: *Record) void {
 
 pub fn endOpen(self: *Connection, record: *Record, cause: policy.Cause) void {
     self.detach(record);
-    self.engine.endStream(record, cause);
+    self.settle(record, .{ .end = cause });
+}
+
+fn settle(self: *Connection, record: *Record, outcome: policy.Settle) void {
+    const port = self.env.streams;
+    port.settle(port.context, record, outcome);
 }
 
 pub fn consume(self: *Connection, stream_id: i32, bytes: usize) void {
@@ -514,6 +528,46 @@ pub fn consume(self: *Connection, stream_id: i32, bytes: usize) void {
 
 pub fn consumeConnection(self: *Connection, bytes: usize) void {
     self.check(c.nghttp2_session_consume_connection(self.session, bytes));
+}
+
+fn flush(self: *Connection, only: ?*Record) void {
+    const scratch = self.env.scratch;
+    defer if (only == null) {
+        scratch.chunk_count = 0;
+    };
+    const chunks = scratch.chunks[0..scratch.chunk_count];
+    for (chunks, 0..) |*first, start| {
+        const record = first.record orelse continue;
+        if (only != null and only != record) continue;
+        var total: usize = 0;
+        var iovec_count: usize = 0;
+        for (chunks[start..]) |*chunk| {
+            if (chunk.record != record) continue;
+            scratch.iovecs[iovec_count] = .{ .base = chunk.bytes.ptr, .len = chunk.bytes.len };
+            iovec_count += 1;
+            total += chunk.bytes.len;
+            chunk.record = null;
+        }
+        const stream_id = record.route.open.stream_id;
+        if (record.state != .open) {
+            self.consume(stream_id, total);
+            continue;
+        }
+        const streams_port = self.env.streams;
+        if (streams_port.deliver(streams_port.context, record, scratch.iovecs[0..iovec_count], total)) |cause| {
+            self.consumeConnection(total);
+            self.endOpen(record, cause);
+            continue;
+        }
+        self.consume(stream_id, total);
+    }
+}
+
+fn gather(self: *Connection, record: *Record, bytes: []const u8) void {
+    const scratch = self.env.scratch;
+    if (scratch.chunk_count == Scratch.max_chunks) self.flush(null);
+    scratch.chunks[scratch.chunk_count] = .{ .record = record, .bytes = bytes };
+    scratch.chunk_count += 1;
 }
 
 fn check(self: *Connection, result: c_int) void {
@@ -552,7 +606,7 @@ pub fn receive(self: *Connection) ReadOutcome {
             }
         }
         const decoded = c.nghttp2_session_mem_recv2(self.session, bytes.ptr, bytes.len);
-        engine.flush(self, null);
+        self.flush(null);
         if (decoded < 0) {
             self.protocol_failure = true;
             self.fail(.protocol_error);
@@ -666,11 +720,7 @@ pub fn lose(self: *Connection, cause: policy.Cause) void {
         next = record.next;
         if (record.state != .open or record.route.open.connection != self.index + 1) continue;
         const stream_id: u32 = @intCast(record.route.open.stream_id);
-        switch (policy.connectionLost(effective, stream_id, self.goaway_last_stream_id, record.facts())) {
-            .end => |end| engine.endStream(record, end),
-            .replay => engine.requeue(record, true),
-            .reroute => engine.requeue(record, false),
-        }
+        self.settle(record, policy.connectionLost(effective, stream_id, self.goaway_last_stream_id, record.facts()));
     }
     self.close(.abrupt);
 }
@@ -762,7 +812,7 @@ fn onFrameSend(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
             if (frame.*.hd.flags & c.NGHTTP2_FLAG_END_STREAM == 0) return 0;
             const record = self.recordOf(frame.*.hd.stream_id) orelse return 0;
             record.flags.body_done = true;
-            if (record.flags.response_started) self.engine.retireBody(record);
+            if (record.flags.response_started) self.retireBody(record);
         },
         c.NGHTTP2_GOAWAY => if (frame.*.goaway.error_code != c.NGHTTP2_NO_ERROR) {
             self.protocol_failure = true;
@@ -776,7 +826,12 @@ fn responseStarted(self: *Connection, record: *Record) void {
     if (record.flags.response_started) return;
     record.flags.response_started = true;
     record.releaseFields(self.env.allocator);
-    if (record.flags.body_done) self.engine.retireBody(record);
+    if (record.flags.body_done) self.retireBody(record);
+}
+
+fn retireBody(self: *Connection, record: *Record) void {
+    const streams_port = self.env.streams;
+    streams_port.retireBody(streams_port.context, record);
 }
 
 fn onBeginHeaders(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_data: ?*anyopaque) callconv(.c) c_int {
@@ -884,11 +939,12 @@ fn emitHead(self: *Connection, record: *Record) void {
                 return self.endOpen(record, .encoded_response);
         }
     }
-    const verdict = self.engine.observe(record, .{ .head = .{
+    const streams_port = self.env.streams;
+    const verdict = streams_port.head(streams_port.context, record, .{
         .kind = kind,
         .status = if (kind == .trailers) 0 else status,
         .fields = self.head.fields.items,
-    } });
+    });
     if (verdict == .refuse) self.endOpen(record, .rejected_headers);
 }
 
@@ -899,27 +955,22 @@ fn onDataChunk(_: ?*c.nghttp2_session, _: u8, stream_id: i32, data: [*c]const u8
         return 0;
     };
     self.responseStarted(record);
-    self.engine.gather(self, record, data[0..length]);
+    self.gather(record, data[0..length]);
     return 0;
 }
 
 fn onStreamClose(_: ?*c.nghttp2_session, stream_id: i32, error_code: u32, user_data: ?*anyopaque) callconv(.c) c_int {
     const self = of(user_data);
-    const engine = self.engine;
     self.streams -= 1;
     if (self.streams == 0) self.idle_since_ns = self.env.clock.now();
     const closing = self.recordOf(stream_id) orelse return 0;
     self.closing_stream_id = stream_id;
     defer self.closing_stream_id = 0;
-    engine.flush(self, closing);
+    self.flush(closing);
     const record = self.recordOf(stream_id) orelse return 0;
     _ = c.nghttp2_session_set_stream_user_data(self.session, stream_id, null);
     if (self.head.record == record) self.releaseHead();
-    switch (policy.streamClosed(@fromBackingInt(@intCast(error_code)), record.facts())) {
-        .end => |cause| engine.endStream(record, cause),
-        .replay => engine.requeue(record, true),
-        .reroute => engine.requeue(record, false),
-    }
+    self.settle(record, policy.streamClosed(@fromBackingInt(@intCast(error_code)), record.facts()));
     return 0;
 }
 

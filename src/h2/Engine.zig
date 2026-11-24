@@ -114,7 +114,43 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
         .tls = &self.tls_context,
         .connect_timeout_ns = options.connect_timeout_ns,
         .stream_capacity = options.stream_capacity,
+        .streams = .{
+            .context = self,
+            .head = streamsHead,
+            .deliver = streamsDeliver,
+            .retireBody = streamsRetireBody,
+            .settle = streamsSettle,
+        },
     };
+}
+
+fn streamsHead(context: *anyopaque, record: *Record, head: h2.Head) h2.Verdict {
+    const self: *Engine = @ptrCast(@alignCast(context));
+    return self.observe(record, .{ .head = head });
+}
+
+fn streamsDeliver(context: *anyopaque, record: *Record, iovecs: []std.posix.iovec_const, total: usize) ?policy.Cause {
+    const self: *Engine = @ptrCast(@alignCast(context));
+    if (self.observe(record, .{ .body = total }) == .refuse) return .sink_refused;
+    if (!self.writeSink(record, iovecs, total)) return if (record.flags.sink_is_buffer) .sink_refused else .sink_failed;
+    record.sink_written += total;
+    record.last_activity_ns = self.clock.now();
+    self.timers.moveToTail(record);
+    return null;
+}
+
+fn streamsRetireBody(context: *anyopaque, record: *Record) void {
+    const self: *Engine = @ptrCast(@alignCast(context));
+    self.retireBody(record);
+}
+
+fn streamsSettle(context: *anyopaque, record: *Record, settle: policy.Settle) void {
+    const self: *Engine = @ptrCast(@alignCast(context));
+    switch (settle) {
+        .end => |cause| self.endStream(record, cause),
+        .replay => self.requeue(record, true),
+        .reroute => self.requeue(record, false),
+    }
 }
 
 fn active(self: *Engine) []Connection {
@@ -295,7 +331,7 @@ pub fn nextFinished(self: *Engine) ?*Record {
     return record;
 }
 
-pub fn endStream(self: *Engine, record: *Record, cause: policy.Cause) void {
+fn endStream(self: *Engine, record: *Record, cause: policy.Cause) void {
     std.debug.assert(record.state == .pending or record.state == .open);
     if (record.state == .pending) self.pendingOf(record).remove(record);
     self.timers.remove(record);
@@ -307,7 +343,7 @@ pub fn endStream(self: *Engine, record: *Record, cause: policy.Cause) void {
     self.finished_count += 1;
 }
 
-pub fn requeue(self: *Engine, record: *Record, replay: bool) void {
+fn requeue(self: *Engine, record: *Record, replay: bool) void {
     std.debug.assert(record.state == .open and !record.flags.response_started);
     if (replay) record.flags.replays += 1;
     record.state = .pending;
@@ -316,13 +352,13 @@ pub fn requeue(self: *Engine, record: *Record, replay: bool) void {
     self.pendingOf(record).putBack(record);
 }
 
-pub fn retireBody(self: *Engine, record: *Record) void {
+fn retireBody(self: *Engine, record: *Record) void {
     if (record.flags.body_retired) return;
     record.flags.body_retired = true;
     _ = self.observe(record, .body_retired);
 }
 
-pub fn observe(self: *Engine, record: *Record, event: h2.Event) h2.Verdict {
+fn observe(self: *Engine, record: *Record, event: h2.Event) h2.Verdict {
     const receiver = self.receiver.?;
     return receiver.observe(receiver.context, record, event);
 }
@@ -557,46 +593,6 @@ fn expireInactive(self: *Engine) void {
     }
 }
 
-pub fn flush(self: *Engine, connection: *Connection, only: ?*Record) void {
-    const scratch = self.scratch;
-    defer if (only == null) {
-        scratch.chunk_count = 0;
-    };
-    const chunks = scratch.chunks[0..scratch.chunk_count];
-    for (chunks, 0..) |*first, start| {
-        const record = first.record orelse continue;
-        if (only != null and only != record) continue;
-        var total: usize = 0;
-        var iovec_count: usize = 0;
-        for (chunks[start..]) |*chunk| {
-            if (chunk.record != record) continue;
-            scratch.iovecs[iovec_count] = .{ .base = chunk.bytes.ptr, .len = chunk.bytes.len };
-            iovec_count += 1;
-            total += chunk.bytes.len;
-            chunk.record = null;
-        }
-        const stream_id = record.route.open.stream_id;
-        if (record.state != .open) {
-            connection.consume(stream_id, total);
-            continue;
-        }
-        if (self.observe(record, .{ .body = total }) == .refuse) {
-            connection.consumeConnection(total);
-            connection.endOpen(record, .sink_refused);
-            continue;
-        }
-        if (!self.writeSink(record, scratch.iovecs[0..iovec_count], total)) {
-            connection.consumeConnection(total);
-            connection.endOpen(record, if (record.flags.sink_is_buffer) .sink_refused else .sink_failed);
-            continue;
-        }
-        record.sink_written += total;
-        record.last_activity_ns = self.clock.now();
-        self.timers.moveToTail(record);
-        connection.consume(stream_id, total);
-    }
-}
-
 fn writeSink(self: *Engine, record: *Record, iovecs: []std.posix.iovec_const, total: usize) bool {
     if (record.flags.sink_is_buffer) {
         if (record.sink_capacity - record.sink_written < total) return false;
@@ -632,13 +628,6 @@ fn writeSink(self: *Engine, record: *Record, iovecs: []std.posix.iovec_const, to
         }
     }
     return true;
-}
-
-pub fn gather(self: *Engine, connection: *Connection, record: *Record, bytes: []const u8) void {
-    const scratch = self.scratch;
-    if (scratch.chunk_count == Connection.Scratch.max_chunks) self.flush(connection, null);
-    scratch.chunks[scratch.chunk_count] = .{ .record = record, .bytes = bytes };
-    scratch.chunk_count += 1;
 }
 
 pub fn wait(self: *Engine, timeout_ms: u32) h2.DriveError!void {

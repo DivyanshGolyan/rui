@@ -571,7 +571,6 @@ shallow-module cli_grammar
 shallow-module codex_credential_policy
 shallow-module execution
 shallow-module feed_window
-shallow-module h2/Engine
 shallow-module history_memo
 shallow-module host_reply
 shallow-module host_restart_all
