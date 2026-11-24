@@ -91,14 +91,15 @@ pub const LinkOpener = union(enum) {
         if (!supported) return error.Unsupported;
         // Reserve the waiter before launching so failure cannot strand a child.
         const waiter = try Waiter.start();
-        defer waiter.publish();
-        waiter.pid = switch (self) {
+        errdefer waiter.publish(null);
+        const pid = switch (self) {
             .desktop => |command| try launch(io, &.{ command, link }),
             .wsl => |fallback| launch(io, &.{ "rundll32.exe", "url.dll,FileProtocolHandler", link }) catch |err| blk: {
                 const command = fallback orelse return err;
                 break :blk try launch(io, &.{ command, link });
             },
         };
+        waiter.publish(pid);
     }
 
     fn launch(io: std.Io, argv: []const []const u8) !?std.posix.pid_t {
@@ -124,7 +125,8 @@ pub const LinkOpener = union(enum) {
             return waiter;
         }
 
-        fn publish(waiter: *Waiter) void {
+        fn publish(waiter: *Waiter, pid: ?std.posix.pid_t) void {
+            waiter.pid = pid;
             waiter.ready.set(std.Io.Threaded.global_single_threaded.io());
             waiter.release();
         }
