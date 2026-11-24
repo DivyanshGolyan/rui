@@ -3,7 +3,7 @@
 //! its signature and `inputs` match, so a stale line costs compile time, never a different render.
 const rsql = @import("rsql.zig");
 
-pub const inputs = "254ff35fc66d93610e03076b15ba33e5";
+pub const inputs = "003bab6686ec6e9630d11b2846c39e9e";
 
 pub const entries = struct {
     pub const @"INSERT INTO action_control_command(command_key,action_id,selected_action_id,selection,selection_position) VALUES(?1,?2,?3,?4,?5)": rsql.TableEntry = .{ .variants = &.{.{ .signature = "w0:.....", .sqlite = "INSERT INTO action_control_command(command_key,action_id,selected_action_id,selection,selection_position) VALUES(?1,?2,?3,?4,?5)" }}, .mysql = .{ .parts = &.{ "INSERT INTO action_control_command(command_key,action_id,selected_action_id,selection,selection_position) VALUES(", ",", ",", ",", ",", ")" }, .slots = &.{ .{ .argument = 0 }, .{ .argument = 1 }, .{ .argument = 2 }, .{ .argument = 3 }, .{ .argument = 4 } } }, .facts = .{ .uses_now = false, .shape = .insert_row, .single_row = false } };
