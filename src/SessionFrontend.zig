@@ -22,6 +22,8 @@ const activity_reply = @import("activity_reply.zig");
 const protocol = @import("protocol.zig");
 const content_value = @import("content_value.zig");
 const Input = @import("SessionInput.zig");
+const clipboard_image = @import("os/clipboard_image.zig");
+const image_label = @import("part_text.zig").first_image;
 const Submission = @import("SessionSubmission.zig");
 const original_state = @import("submission_state.zig");
 const Task = @import("ClientTask.zig");
@@ -398,11 +400,11 @@ fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
     self.app_input.bottom = &hooks.root.bottom;
-    hooks.root.session_focus = .{ .context = self, .changed = focusChanged, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates };
+    hooks.root.session_focus = .{ .context = self, .changed = focusChanged, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates, .clipboard = .{ .target = clipboardTarget, .paste = pasteClipboard } };
     self.app_info = .{ .backend = self.infoBackend(), .home = self.home };
     if (hooks.drafts) |drafts| if (drafts.take(self.init.gpa, self.session)) |draft| {
-        defer draft.deinit(self.init.gpa);
-        self.input.restore(draft.snapshot);
+        defer self.init.gpa.free(draft.snapshot.bytes);
+        self.input.restoreWithImage(draft.snapshot, draft.image);
     };
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
@@ -848,7 +850,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         .has_effort = self.hasEffort(),
         .saving = self.app_info.pending != null,
         .details = session_notice.presentation(false, false, self.heldOriginal()).details_available,
-        .draft_empty = self.input.composition().bytes.len == 0,
+        .draft_empty = self.input.draftEmpty(),
         .host_startable = if (self.app_hooks.host) |host| host.startable(host.context) else false,
         .shown_row = accepted != null,
         .send = self.sendFacts(),
@@ -891,13 +893,19 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
             },
             .message, .command => unreachable,
         },
+        .paste_image => {
+            self.notice = null;
+            if (self.input.insertionTarget() != null and delivery.under == .main and self.app_hooks.root.input.mainFocused()) try self.pasteLocalImage();
+        },
         .take_row => {
             self.notice = null;
             try self.takeRow(self.menu.accept(source, accepted.?));
         },
         .edit => |edit| {
             self.notice = null;
-            switch (self.input.appEvent(conversation_keys, event, delivery.pasted, edit.send)) {
+            if (!delivery.pasted and event == .key_press and event.key_press.matchExact(vaxis.Key.backspace, .{}) and self.input.composition().cursor == 0 and self.input.image() != null and self.input.insertionTarget() != null) {
+                self.input.setImage(null);
+            } else switch (self.input.appEvent(conversation_keys, event, delivery.pasted, edit.send)) {
                 .message => |ticket| try self.beginMessage(.{ .message = ticket }),
                 .command => try self.runLine(),
                 .busy => self.sayBusy(null, false),
@@ -920,11 +928,75 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
     try self.openFooterChoice(ctx);
 }
 
+fn imagePasteKey(key: vaxis.Key) bool {
+    return key.matchExact('v', .{ .ctrl = true }) or key.matchExact(0x16, .{}) or
+        (clipboard_image.command_key and key.matchExact('v', .{ .super = true }));
+}
+
+fn clipboardTarget(raw: *anyopaque) ?Input.Insertion {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.leaving != null or self.app_consent.request != null or modalFocus(self)) return null;
+    return self.input.insertionTarget();
+}
+
+fn pasteClipboard(raw: *anyopaque, ctx: *vxfw.EventContext, data: Root.ClipboardData) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    self.shown_notice.dismiss();
+    self.notice = null;
+    _ = self.app_content.cancelQuote();
+    switch (data) {
+        .image => |bytes| self.attachImage(bytes),
+        .local_image => try self.pasteLocalImage(),
+        .failure => |reason| self.notice = switch (reason) {
+            .text_too_long => refusedNotice(.paste_overflow),
+            .image_too_large => "! Clipboard image exceeds 16 MiB",
+            .invalid => "! Clipboard paste is invalid",
+            .unavailable => "! Could not read the clipboard",
+            .timed_out => "! Clipboard read timed out",
+        },
+        .text => |bytes| {
+            _ = self.input.appEvent(conversation_keys, .paste_start, true, false);
+            _ = self.input.appEvent(conversation_keys, .{ .key_press = .{ .codepoint = 0, .text = bytes } }, true, false);
+            const end = self.input.appEvent(conversation_keys, .paste_end, false, false);
+            if (end == .editor and end.editor == .refused) self.notice = refusedNotice(end.editor.refused);
+        },
+    }
+    ctx.redraw = true;
+    try self.afterInput(ctx);
+}
+
+fn pasteLocalImage(self: *Self) !void {
+    const bytes = clipboard_image.read(self.init.io, self.init.environ_map) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        self.notice = "! Could not read a clipboard image";
+        return;
+    } orelse {
+        self.notice = "! No supported clipboard image";
+        return;
+    };
+    self.attachImage(bytes);
+}
+
+fn attachImage(self: *Self, bytes: []u8) void {
+    const inactive = if (self.app_hooks.drafts) |drafts| drafts.imageBytes() else 0;
+    if (bytes.len > Input.image_budget -| (inactive + self.input.submittedImageBytes())) {
+        std.heap.page_allocator.free(bytes);
+        self.notice = "! Clipboard image exceeds the draft storage limit";
+        return;
+    }
+    const attachment = Input.Image.validate(bytes) catch {
+        std.heap.page_allocator.free(bytes);
+        self.notice = "! Clipboard image is invalid or too large";
+        return;
+    };
+    self.input.setImage(attachment);
+}
+
 fn sessionKey(event: vxfw.Event) session_keys.Key {
     return switch (event) {
         .paste_start => .paste_start,
         .paste_end => .paste_end,
-        .key_press => |key| if (keypress.named(key)) |name| .{ .named = name } else if (keypress.isEnter(key)) .enter else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (keypress.selectKey(conversation_keys, key)) {
+        .key_press => |key| if (imagePasteKey(key)) .paste_image else if (keypress.named(key)) |name| .{ .named = name } else if (keypress.isEnter(key)) .enter else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (keypress.selectKey(conversation_keys, key)) {
             .text => .text,
             else => .other,
         },
@@ -1005,7 +1077,7 @@ fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
         const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.input.pasting, false);
         if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
         if (self.app_hooks.drafts) |drafts| {
-            try drafts.put(self.init.gpa, self.session, self.input.snapshot());
+            try drafts.putDraft(self.init.gpa, self.session, self.input.snapshot(), self.input.image());
         }
         self.app_consent.withdraw();
         self.app_card.ready_pending = false;
@@ -1036,7 +1108,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const facts_style = quiet;
     self.app_screen.style = normal;
     self.app_input.composer.caret = self.app_hooks.root.input.layer == .main and self.app_hooks.root.input.mainFocused() and !self.info_open and !self.app_info.standaloneOpen() and self.app_hooks.root.input.field == .input;
-    self.app_input.composer.setCaps(self.app_caps);
+    self.app_input.composer.setCaps(self.app_caps, self.input.image() != null);
     self.app_input.composer.placeholder = if (self.line.read != null and self.line.folder != null) "What shall we work on?" else "";
     self.app_input.composer.editor = &self.input.editors[self.input.active];
     self.app_card.style = normal;
@@ -1067,7 +1139,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     } else null;
     self.app_content.message_note = if (message_note) |note| .{ .key = self.submission.messageKey().?, .text = note } else null;
     self.app_content.pending = if (self.submission.messageText()) |text|
-        (if (!self.submission.messageProjected() and (screen.feed.at_end or (self.reading.opening and screen.anchor.following()))) .{ .text = text, .note = message_note } else null)
+        (if (!self.submission.messageProjected() and (screen.feed.at_end or (self.reading.opening and screen.anchor.following()))) .{ .text = if (self.submission.messageHasImage()) (if (text.len == 0) image_label else try std.fmt.allocPrint(ctx.arena, "{s}\n{s}", .{ image_label, text })) else text, .note = message_note } else null)
     else
         null;
     self.app_document.style = normal;
@@ -1580,7 +1652,7 @@ test "App Session link click leaves for the peer only where Esc would leave" {
 }
 
 fn draftSafeToLeave(self: *const Self) bool {
-    return self.input.composition().bytes.len == 0 or self.app_hooks.drafts != null;
+    return self.input.draftEmpty() or self.app_hooks.drafts != null;
 }
 
 fn startInput(self: *Self) void {
@@ -1679,14 +1751,66 @@ fn settle(self: *Self, restored: anyerror!void) Settled {
     return .{ .restored = restored, .reader = reader, .admission_error = admission.failure(), .skills_error = skills_error };
 }
 
-test "Ctrl-D leaves the Session detached with no notice" {
-    for ([_][]const u8{ "\x04", "\x1b[100;5u" }) |key| {
-        const held = try HeldFrontend.create();
-        defer held.destroy();
-        try held.settle();
-        try held.keys(key);
-        try std.testing.expectEqual(@as(?Outcome, .detached), held.left);
-        try std.testing.expect(held.self.notice == null);
+test "SUI-113 clipboard paste stays in its originating composer until Enter" {
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    const encoded = comptime blk: {
+        var buffer: [std.base64.standard.Encoder.calcSize(png.len)]u8 = undefined;
+        _ = std.base64.standard.Encoder.encode(&buffer, png);
+        break :blk buffer;
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try held.settle();
+    _ = held.self.input.append("caption");
+    var ctx = held.context();
+    const root = held.root.widget();
+    try root.handleEvent(&ctx, .{ .clipboard_protocol = true });
+    try std.testing.expect(ctx.cmds.items[0].clipboard_mode);
+
+    for ([_]bool{ true, false }) |change_draft| {
+        try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=OK:pw=dG9rZW4=" });
+        try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=DATA:mime=Lg==;aW1hZ2UvcG5n" });
+        try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=DONE" });
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1] == .clipboard_output);
+        if (change_draft) try held.keys("!");
+        try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=OK" });
+        try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=DATA:mime=aW1hZ2UvcG5n;" ++ encoded });
+        try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=DONE" });
+        try std.testing.expectEqual(!change_draft, held.self.input.image() != null);
+        try std.testing.expect(held.self.submission.intent == null);
+    }
+    try std.testing.expectEqualStrings("caption!", held.self.input.composition().bytes);
+    try std.testing.expect((try rowWith(held, "[Image 1]")) != null);
+    try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=OK:pw=dG9rZW4=" });
+    try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=DATA:mime=Lg==;aW1hZ2UvcG5n" });
+    try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=DONE" });
+    try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=EPERM" });
+    try std.testing.expect((try rowWith(held, "Could not read the clipboard")) != null);
+    try std.testing.expectEqualSlices(u8, png, held.self.input.image().?.bytes);
+    try std.testing.expectEqualStrings("caption!", held.self.input.composition().bytes);
+    try held.keys("\x1b[H\x7f");
+    try std.testing.expect(held.self.input.image() == null);
+    try std.testing.expectEqualStrings("caption!", held.self.input.composition().bytes);
+    try std.testing.expect(imagePasteKey(.{ .codepoint = 'v', .mods = .{ .ctrl = true } }));
+    try std.testing.expect(!imagePasteKey(.{ .codepoint = 'v', .mods = .{ .ctrl = true, .shift = true } }));
+}
+
+test "SUI-129 Ctrl-D detaches only an empty draft and otherwise deletes text at the caret" {
+    const image = try Input.Image.validate(@embedFile("codecs/fixtures/image-input/pixel.png"));
+    for ([_][]const u8{ "\x04", "\x1b[100;5u", "\x1b[100;5;100u", "\x1b[27;5;100~" }) |key| {
+        for ([_]bool{ false, true }) |attached| for ([_]bool{ false, true }) |captioned| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            try held.settle();
+            const input = &held.self.input;
+            if (attached) input.setImage(try image.clone());
+            if (captioned) try held.keys("abc\x1b[D");
+            try held.keys(key);
+            try std.testing.expectEqual(if (attached or captioned) null else @as(?Outcome, .detached), held.left);
+            try std.testing.expectEqualStrings(if (captioned) "ab" else "", input.composition().bytes);
+            try std.testing.expectEqual(attached, input.image() != null);
+            try std.testing.expect(held.self.notice == null);
+        };
     }
 }
 
@@ -2371,6 +2495,7 @@ fn archiveCommandRefusal(state: ?protocol.SessionArchiveState, archiving: bool) 
 }
 
 fn menuSource(self: *Self) slash_menu.Source {
+    if (self.input.image() != null) return .none;
     const context: slash_commands_shared.Context = .{
         .model = if (self.line.read != null) self.line.model.slice() else null,
         .effort = if (self.line.read != null) self.line.effort else null,
@@ -3428,6 +3553,8 @@ const HeldFrontend = struct {
         _ = held.self.joinReader();
         _ = held.self.submission.join();
         held.self.submission.close();
+        held.self.input.deinit();
+        held.root.deinitClipboard();
         held.screen.deinit();
         std.testing.allocator.destroy(held.screen);
         held.tmp.cleanup();

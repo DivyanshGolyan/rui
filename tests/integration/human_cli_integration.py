@@ -589,6 +589,82 @@ def quiet_output(master, seconds):
     return raw
 
 
+def clipboard_paste_case():
+    state = screen_fixture_root("rui-clipboard.")
+    home = state / "home"
+    home.mkdir(mode=0o700)
+    store = state / "store"
+    png = (pathlib.Path(__file__).parents[2] / "src/codecs/fixtures/image-input/pixel-multi-window.png").read_bytes()
+    endpoint = fixture.SuccessEndpoint([fixture.sse_answer("clipboard", "response", "message", "Image received.")[0]])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = None
+    completed = False
+
+    def frame(metadata, payload=None):
+        body = b";" + base64.b64encode(payload) if payload is not None else b""
+        return b"\x1b]5522;type=read:status=" + metadata + body + b"\x1b\\"
+
+    def paste(master, mime, payload, malformed=None, at=0):
+        os.write(master, frame(b"OK:pw=dG9rZW4=") + frame(b"DATA:mime=Lg==", mime) + frame(b"DONE"))
+        request = raw_output(master, b";" + base64.b64encode(mime) + b"\x1b\\")
+        handle = re.search(rb"type=read:id=([0-9]+)", request).group(1)
+        prefix = b":id=" + handle
+        data = b"DATA:mime=" + base64.b64encode(mime) + prefix
+        frames = [frame(data, payload[offset:offset + 4096]) for offset in range(0, len(payload), 4096)]
+        if malformed:
+            corrupt = frame(data, b"x" * (7000 if malformed == "oversized" else 1))
+            frames.insert(at, corrupt if malformed == "oversized" else corrupt[:-2])
+        os.write(master, frame(b"OK" + prefix) + b"".join(frames) + frame(b"DONE" + prefix))
+
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        session = create_session(home, "--store", store, "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+        with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+                env={**os.environ, "HOME": str(home), "SSH_CONNECTION": "clipboard-fixture"}, cwd=state) as (caller, master):
+            capture = terminal_capture(master)
+            reply = capture.reply
+            capture.reply = lambda data: None if b"[?5522;" in data or b"]5522;" in data else reply(data)
+            raw_output(master, b"\x1b[?5522$p")
+            read_terminal(master, "› ")
+            os.write(master, b"\x16")
+            raw_output(master, lambda screen: "No supported clipboard image" in screen)
+            os.write(master, b"\x1b[?5522;2$y")
+            raw_output(master, b"\x1b[?5522h")
+            paste(master, b"text/plain", b"Clipboard caption")
+            raw_output(master, lambda screen: "Clipboard caption" in screen)
+            paste(master, b"text/plain", b"x" * 65_538)
+            raw_output(master, lambda screen: "Paste too long" in screen and "Clipboard caption" in screen)
+            paste(master, b"image/png", png)
+            raw_output(master, lambda screen: "[Image 1]" in screen)
+            assert endpoint.requests == []
+            os.write(master, b"\r")
+            read_terminal(master, "Image received.")
+            rows = current_screen(master).splitlines()
+            attachment = next(index for index, row in enumerate(rows) if "[Image 1]" in row)
+            assert "Clipboard caption" in rows[attachment + 1], rows
+            assert not any("PNG 1x1" in row for row in rows), rows
+            assert len(endpoint.requests) == 1
+            request = json.loads(endpoint.requests[0])
+            parts = next(item["content"] for item in reversed(request["input"]) if item.get("role") == "user")
+            assert [part["type"] for part in parts] == ["input_text", "input_image"], parts
+            assert parts[0]["text"] == "Clipboard caption", parts
+            assert parts[1]["image_url"] == "data:image/png;base64," + base64.b64encode(png).decode(), parts
+            os.write(master, b"\x03")
+            reset = raw_output(master, b"Your chats keep working")
+            assert b"\x1b[?5522l" in reset, reset
+            assert caller.wait(timeout=5) == 0
+        completed = True
+        print("clipboard paste: native caption and image reached the provider, and the terminal mode was restored")
+    finally:
+        dispose_all(lambda: fixture.stop_host(host) if host else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
+        if completed:
+            shutil.rmtree(state)
+        else:
+            retain_failure_state("clipboard paste failure state", state)
+
+
 def persistent_copy_case():
     state = screen_fixture_root("rui-copy.")
     home = state / "home"
@@ -1626,7 +1702,7 @@ def main(selected="all"):
     import tool_intent_cases
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-intent", "tool-profiles", "start-receipt"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-intent", "tool-profiles", "start-receipt", "clipboard-paste"), selected
     if selected in ("all", "callers", "caller-core", "start-receipt"):
         start_receipt_cases.main()
     if selected == "start-receipt":
@@ -1642,6 +1718,10 @@ def main(selected="all"):
     if selected in ("all", "renderer", "session-chrome"):
         session_chrome_cases.main()
     if selected == "session-chrome":
+        return
+    if selected in ("all", "renderer", "clipboard-paste"):
+        clipboard_paste_case()
+    if selected == "clipboard-paste":
         return
     if selected in ("all", "callers", "caller-core", "provider-lines"):
         provider_line_cases()

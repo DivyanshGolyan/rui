@@ -588,6 +588,8 @@ def fixture_rows(before, after):
     return {match[1] for match in FIXTURE_ROW.finditer(after) if rows.get(match[1]) != match[0]}
 
 
+VAXIS_OVERLAY_TARGETS = ("test-native", "human-cli-integration", "terminal-restoration-integration")
+
 BUILD_MODULES = {
     "build/product.zig": BUILD_HUB,
     "build/ci.zig": BUILD_HUB,
@@ -599,6 +601,7 @@ BUILD_MODULES = {
     "build/link_table.zig": BUILD_HUB,
     "build/darwin.zig": ("test", "host-launch-integration"),
     "build/deep_modules.zig": ("deep-modules", "deep-modules-test"),
+    "build/vaxis_overlay.zig": VAXIS_OVERLAY_TARGETS,
     ".github/actions/setup/caches/action.yml": ("test-logic",),
     ".github/actions/setup/caches/save-keys.cjs": ("test-logic",),
     ".github/actions/setup/fixtures/action.yml":
@@ -607,6 +610,8 @@ BUILD_MODULES = {
 RULES += tuple(((module,), targets, tuple(target for target in targets if target not in LINUX_ONLY),
                 "Build module: the targets it defines or builds for")
                for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
+RULES += ((('build/vaxis_overlay.patch',), VAXIS_OVERLAY_TARGETS, VAXIS_OVERLAY_TARGETS,
+           "Vaxis overlay input: the native terminal and its integration fixtures"),)
 
 
 # The module lint reads every production src/ file (from src/cli.zig) and its allow file; build/deep_modules.zig
