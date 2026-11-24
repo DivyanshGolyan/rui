@@ -2433,13 +2433,9 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &store_buffer);
             var usable = selectableReadiness(init, store);
-            // A name the local readiness does not know passes through unchanged: the Host refuses it by name if it is unserved.
-            const explicit: ?[]const u8 = if (input.provider.present) input.provider.value else null;
-            if (!provider_selection.passesThrough(explicit, &usable)) {
-                binding = try snapshot.resolveUnprompted(&usable);
-                input.model = .{ .present = true, .value = binding.model.slice() };
-                if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
-            }
+            binding = try snapshot.resolveUnprompted(&usable);
+            input.model = .{ .present = true, .value = binding.model.slice() };
+            if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
         }
         input.applySavedCreation(saved_effort, snapshot.defaults.permission_mode);
         if (!input.parent.present and !input.workspace.present) {

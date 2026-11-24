@@ -71,6 +71,21 @@ pub const Selection = union(enum) {
     },
 };
 
+/// The model a name runs, for every name known or not: the explicit model, else the saved model when the saved
+/// connection is that name, else null. Nothing else decides the precedence.
+pub fn modelFor(name: []const u8, explicit_model: ?[]const u8, saved_provider: ?[]const u8, saved_model: ?[]const u8) ?[]const u8 {
+    return explicit_model orelse (if (saved_provider != null and std.mem.eql(u8, name, saved_provider.?)) saved_model else null);
+}
+
+/// A name this client does not know locally: its model comes from modelFor alone, and a name with none is refused
+/// by name, because this client cannot know another connection's default model.
+pub const Unknown = struct { provider: []const u8, model: []const u8 };
+
+pub fn resolveUnknown(name: []const u8, explicit_model: ?[]const u8, saved_provider: ?[]const u8, saved_model: ?[]const u8) error{ConnectionModelRequired}!Unknown {
+    const model = modelFor(name, explicit_model, saved_provider, saved_model) orelse return error.ConnectionModelRequired;
+    return .{ .provider = name, .model = model };
+}
+
 pub fn resolve(capabilities: []const Capability, explicit_provider: ?[]const u8, explicit_model: ?[]const u8, saved_provider: ?[]const u8, saved_model: ?[]const u8) !Selection {
     var chosen = explicit_provider orelse saved_provider;
     if (chosen == null) {
@@ -83,7 +98,7 @@ pub fn resolve(capabilities: []const Capability, explicit_provider: ?[]const u8,
     const name = chosen orelse return .chooser;
     for (capabilities) |capability| {
         if (!std.mem.eql(u8, name, capability.name)) continue;
-        const model = explicit_model orelse (if (saved_provider != null and std.mem.eql(u8, name, saved_provider.?)) saved_model else null) orelse capability.recommended_model;
+        const model = modelFor(name, explicit_model, saved_provider, saved_model) orelse capability.recommended_model;
         if (!capability.admits_model(model)) return error.UnsupportedSelectionModel;
         return .{ .selected = .{
             .provider = capability.name,
@@ -94,7 +109,7 @@ pub fn resolve(capabilities: []const Capability, explicit_provider: ?[]const u8,
     return error.UnsupportedSelectionProvider;
 }
 
-test "Codex selection accepts identifiers without claiming model qualification" {
+test "CM-62 model identifier admission: a bounded printable identifier is admitted as the model, and any other is refused" {
     var readiness: Readinesses = .initFill(.configured);
     const capability = @import("model_capability.zig").capabilities(&readiness).slice()[0];
     try std.testing.expectEqualStrings("family=variant", (try resolve(&.{capability}, null, "family=variant", null, null)).selected.model);
