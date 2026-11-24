@@ -958,8 +958,6 @@ fn validateLane(a: anytype, request: *const Request, reads: *ConfigurationReads)
     const creating = request.session.len == 0;
     const next = &reads.next;
     try reads.lane.check();
-    reads.lane_tools = reads.lane.view(request.tools.host_tool_set);
-    parentApps(reads);
     if (creating) if (try inheritParent(request.configuration, reads)) |code| return .{ .rejected = code };
     const creation_provider: ?connection.Name = if (creating) switch (creationCheck(configuration, reads, request.served)) {
         .missing => |missing| {
@@ -971,6 +969,9 @@ fn validateLane(a: anytype, request: *const Request, reads: *ConfigurationReads)
         .complete => |complete| complete.provider,
     } else null;
     if (request.configuration.app_tools.state == .value) if (try declareAppTools(request, reads)) |code| return .{ .rejected = code };
+    // The one lane resolver for this request: the declaration it carries (create, replace or clear), else the saved lane.
+    reads.lane_tools = if (reads.apps.declaration) |*declaration| declaredLaneTools(request.tools.host_tool_set, declaration) else reads.lane.view(request.tools.host_tool_set);
+    parentApps(reads);
     if (creating or configuration.tools.state == .value) {
         reads.tools = tool_set.Selection.of(&reads.lane_tools, if (creating) configuration_defaults.creationTools(configuration.tools, configuration.model.value.slice(), @import("../../os/read_image_file.zig").available) else configuration.tools, reads.lane.set);
         if (reads.tools) |*tools| tool_set.lookupSelection(a, tools);
@@ -983,11 +984,22 @@ fn validateLane(a: anytype, request: *const Request, reads: *ConfigurationReads)
     return .{ .round = .model };
 }
 
-/// The app names a child's parent offers, as the lane's records narrow them to the parent's names.
+/// The Host set plus a declaration this request carries: its records replace the saved lane's for this request.
+fn declaredLaneTools(host: *const tool_defs.HostToolSet, declaration: *const app_tools.Declaration) tool_defs.HostToolSet {
+    return .{
+        .records = host.records,
+        .digests = host.digests,
+        .configured_servers = host.configured_servers,
+        .apps = declaration.records,
+        .app_digests = declaration.digests,
+    };
+}
+
+/// The app names a child's parent offers, as the lane's resolved tools narrow them to the parent's names.
 fn parentApps(reads: *ConfigurationReads) void {
     reads.parent_apps = .{};
     if (!reads.inherits_parent) return;
-    reads.lane.offeredTo(reads.inherited.tools.slice(), &reads.parent_apps);
+    tool_set.offeredAppNamesTo(&reads.lane_tools, reads.inherited.tools.slice(), &reads.parent_apps);
 }
 
 fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
@@ -1166,6 +1178,11 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
             next.output_schema_id = @intCast(applied.output_schema_id.?);
         },
         .clear => next.output_schema_id = null,
+    }
+    // A declaration this request applied is the lane's set now, so the selections record it as their app set.
+    if (reads.apps.declaration != null) {
+        if (reads.tools) |*tools| tools.app_set = reads.apps.set_id;
+        if (reads.loaded_tools) |*loaded| loaded.app_set = reads.apps.set_id;
     }
     if (creating or configuration.tools.state == .value) {
         const tools = &(reads.tools orelse return error.CorruptStore);

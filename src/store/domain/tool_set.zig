@@ -484,6 +484,31 @@ const lane_app_members = rsql.Read(.{
 });
 
 /// A lane's app records as a Host-shaped view: each record's digest is the one the offer and a saved selection rebuild.
+/// The app names a child's parent offers, into `out`, read from the lane's resolved view. Only app records the Host does
+/// not shadow are offered (Host precedence, as `HostToolSet.resolve` decides), and a parent narrows to them only by
+/// naming one of those app records: a parent name the Host resolves is not an app narrowing. The parent offers every
+/// offered app name when it names none of them.
+pub fn offeredAppNamesTo(view: *const tool_record.HostToolSet, parent_names: []const u8, out: *Bounded(max_app_names_bytes)) void {
+    var narrowed = false;
+    for (view.apps) |*app| {
+        if (view.find(app.name) == null and listsName(parent_names, app.name)) narrowed = true;
+    }
+    var buffer: [max_app_names_bytes]u8 = undefined;
+    var length: usize = 0;
+    for (view.apps) |*app| {
+        if (view.find(app.name) != null) continue;
+        if (narrowed and !listsName(parent_names, app.name)) continue;
+        if (length != 0) {
+            buffer[length] = ',';
+            length += 1;
+        }
+        @memcpy(buffer[length..][0..app.name.len], app.name);
+        length += app.name.len;
+    }
+    out.* = .{};
+    out.set(buffer[0..length]) catch unreachable;
+}
+
 pub const LaneApps = struct {
     set: u64 = 0,
     count: usize = 0,
@@ -525,28 +550,6 @@ pub const LaneApps = struct {
         self.digests[self.count] = identity.digest();
         self.count += 1;
         return true;
-    }
-
-    /// The app names a child's parent offers, into `out`: the lane's app names the parent names, or every lane app name
-    /// when the parent names none of them (the offer of an app set the Session does not narrow).
-    pub fn offeredTo(self: *const LaneApps, parent_names: []const u8, out: *Bounded(max_app_names_bytes)) void {
-        var narrowed = false;
-        for (self.names[0..self.count]) |*name| {
-            if (listsName(parent_names, name.slice())) narrowed = true;
-        }
-        var buffer: [max_app_names_bytes]u8 = undefined;
-        var length: usize = 0;
-        for (self.names[0..self.count]) |*name| {
-            if (narrowed and !listsName(parent_names, name.slice())) continue;
-            if (length != 0) {
-                buffer[length] = ',';
-                length += 1;
-            }
-            @memcpy(buffer[length..][0..name.len], name.slice());
-            length += name.len;
-        }
-        out.* = .{};
-        out.set(buffer[0..length]) catch unreachable;
     }
 
     pub fn check(self: *const LaneApps) error{CorruptStore}!void {

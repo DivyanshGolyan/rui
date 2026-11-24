@@ -158,7 +158,7 @@ test "configuration pre-Workspace decisions allow model revisions" {
         const current: ?*const CurrentConfiguration = if (case.has_current) &existing else null;
         std.testing.expectEqual(
             case.expected,
-            configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, &tool_defs.built_in_tool_set, &served_builtins, current, &requested, connection.Name.parse("codex").?),
+            configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, current, &requested),
         ) catch |err| {
             std.debug.print("configuration pre-Workspace case failed: {s}\n", .{case.name});
             return err;
@@ -167,27 +167,39 @@ test "configuration pre-Workspace decisions allow model revisions" {
 }
 
 test "configure refuses a tool name the tool set lacks and a provider tool its provider does not run" {
-    const hosted: tool_defs.Record = .{ .name = "code_interpreter", .owner = .provider };
-    const records = [_]tool_defs.Record{ tool_defs.bash_record, hosted, tool_defs.web_search_record };
-    const digests = [_][32]u8{ tool_defs.recordDigest(&records[0]), tool_defs.recordDigest(&records[1]), tool_defs.recordDigest(&records[2]) };
-    const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
-    try std.testing.expect(host_tool_set.valid());
-    var existing: CurrentConfiguration = .{};
-    existing.provider = connection.Name.parse("codex").?;
-    try existing.model.set("model-a");
-    const Case = struct { names: []const []const u8, expected: ?protocol.ConfigurationRejection };
-    for ([_]Case{
-        .{ .names = &.{ "bash", "web_search" }, .expected = null },
-        .{ .names = &.{}, .expected = null },
-        .{ .names = &.{"edit"}, .expected = .unknown_tool },
-        .{ .names = &.{ "bash", "edit" }, .expected = .unknown_tool },
-        .{ .names = &.{"code_interpreter"}, .expected = .provider_tool_missing },
-    }) |case| {
-        var requested: wire_request.Configuration = .{};
-        requested.tools = try .of(case.names);
-        var served = protocol.servedBuiltIns(.endpoint);
-        try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, &host_tool_set, &served, &existing, &requested, connection.Name.parse("codex").?));
-    }
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const hosted: tool_defs.Record = .{ .name = "code_interpreter", .owner = .provider };
+            const records = [_]tool_defs.Record{ tool_defs.bash_record, hosted, tool_defs.web_search_record };
+            const digests = [_][32]u8{ tool_defs.recordDigest(&records[0]), tool_defs.recordDigest(&records[1]), tool_defs.recordDigest(&records[2]) };
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: store_core.Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try storage.saveHostToolSet(&.{ .records = &records, .digests = &digests });
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const Case = struct { names: []const []const u8, expected: ?protocol.ConfigurationRejection };
+            for ([_]Case{
+                .{ .names = &.{ "bash", "web_search" }, .expected = null },
+                .{ .names = &.{}, .expected = null },
+                .{ .names = &.{"edit"}, .expected = .unknown_tool },
+                .{ .names = &.{ "bash", "edit" }, .expected = .unknown_tool },
+                .{ .names = &.{"code_interpreter"}, .expected = .provider_tool_missing },
+            }, 0..) |tool_case, index| {
+                var key_buffer: [32]u8 = undefined;
+                var create = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "tools-refusal-{d}", .{index}), "", workspace, "model-a");
+                create.configuration.tools = try .of(tool_case.names);
+                const reply = try storage.configure(&create, .{});
+                if (tool_case.expected) |code| {
+                    try std.testing.expectEqual(code, reply.rejected.code);
+                } else {
+                    try std.testing.expect(reply == .accepted);
+                }
+            }
+        }
+    }.run);
 }
 
 test "Store configuration requires Workspace and model and, on a Host serving several, a provider" {
