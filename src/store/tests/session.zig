@@ -165,7 +165,7 @@ fn insertSessionForTesting(storage: *Store, current: *const configuration_domain
             if (ran != 0) return .done;
             const head: rsql.SessionHead = .{ .ref = b.ref.*, .workspace_key = .of(b.current.workspace_key), .next_position = .of(1) };
             const digest = store_core.workspaceDigest(b.current.workspace.slice());
-            configuration_domain.insertSession(r, head, b.current, &digest, 1_000_000, null, null);
+            configuration_domain.insertSession(r, head, b.current, &digest, 1_000_000, null, null, null);
             return .round;
         }
     };

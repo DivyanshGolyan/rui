@@ -17,6 +17,22 @@ type Schemas = components["schemas"];
 export type ActionStatus = Schemas["ReadActionReply"];
 export type ActionSelection = Extract<Schemas["ActionBackgroundReply"]["answer"], { status: "accepted" }>["action_selection"];
 
+/** An app tool a lane root declares: a tool its caller runs, served to the model beside the Host's own tools. */
+export interface AppToolSpec {
+	/** 1 to 64 ASCII letters, digits, `_` or `-`; not a built-in tool's name. */
+	name: string;
+	/** 1 to 200 bytes of valid UTF-8. */
+	description: string;
+	/** The JSON Schema object of the tool's input. */
+	inputSchema: Record<string, unknown>;
+	/** `safe` lets the Host repeat a call that did not finish; `unsafe` (the default) never repeats one. */
+	replay?: "safe" | "unsafe";
+	/** Repeats a safe call may take, 0 to 16. Only a safe tool has repeats; the default is 3. */
+	restartLimit?: number;
+	/** Milliseconds an unclaimed call waits, 1000 to 3600000. The default is 900000. */
+	waitMs?: number;
+}
+
 /** Session settings. The Host resolves omitted creation settings. */
 export interface AgentSpec {
 	/** The Session Workspace, fixed for its life. Root creation requires it; children inherit it. */
@@ -43,6 +59,8 @@ export interface AgentSpec {
 	preferences?: { reasoningEffort?: NonNullable<Schemas["AgentSpec"]["effort"]>; permissionMode?: "ask" | "bypass" };
 	/** A name shown in lists. `null` clears it. */
 	label?: string | null;
+	/** The app tools a lane root declares; `[]` clears them. A child Session cannot declare them. */
+	appTools?: readonly AppToolSpec[];
 }
 
 /** The same agent spec accepted by creation and connect-time presets. */
@@ -63,7 +81,7 @@ export type SessionCreate = CreationSettings & (
 );
 
 /** The settings `update` may change: everything but the ones fixed at creation. */
-export type SessionUpdate = Partial<Pick<SessionSpec, "model" | "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation">>;
+export type SessionUpdate = Partial<Pick<SessionSpec, "model" | "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation" | "appTools">>;
 
 export interface WriteOptions {
 	/** Optional caller-supplied key for replay. Takes precedence over `idempotencyKey`. */
@@ -141,6 +159,8 @@ export interface SessionStatus extends ServedWork {
 	tools: CurrentReport["session"]["tools"];
 	/** Loaded tool intent; an active Operation keeps its frozen model offer. */
 	loadedTools: CurrentReport["session"]["loaded_tools"];
+	/** Names of the app tools this Session's lane declared. */
+	appTools: CurrentReport["session"]["app_tools"];
 	permissionMode: CurrentReport["session"]["permission_mode"];
 	latestOutcome: CurrentReport["work"]["latest_outcome"];
 }
@@ -149,6 +169,17 @@ export interface ModelSummary {
 	connection: string;
 	id: string;
 	known: boolean;
+}
+
+function appToolRecord(tool: AppToolSpec): NonNullable<Schemas["Configuration"]["appTools"]>[number] {
+	return {
+		name: tool.name,
+		description: tool.description,
+		input_schema: tool.inputSchema,
+		...(tool.replay === undefined ? {} : { replay: tool.replay }),
+		...(tool.restartLimit === undefined ? {} : { restart_limit: tool.restartLimit }),
+		...(tool.waitMs === undefined ? {} : { wait_ms: tool.waitMs }),
+	};
 }
 
 export function agentSpec(spec: Partial<SessionSpec>): Schemas["Configuration"] {
@@ -165,6 +196,7 @@ export function agentSpec(spec: Partial<SessionSpec>): Schemas["Configuration"] 
 		...(spec.outputReservation === undefined ? {} : { outputReservation: spec.outputReservation }),
 		...(spec.effort === undefined ? {} : { effort: spec.effort }),
 		...(spec.label === undefined ? {} : { label: spec.label }),
+		...(spec.appTools === undefined ? {} : { appTools: spec.appTools.map(appToolRecord) }),
 		...(spec.preferences === undefined ? {} : { preferences: {
 			...(spec.preferences.reasoningEffort === undefined ? {} : { reasoning_effort: spec.preferences.reasoningEffort }),
 			...(spec.preferences.permissionMode === undefined ? {} : { permission_mode: spec.preferences.permissionMode }),
@@ -280,6 +312,7 @@ export class Session {
 			effort: reply.session.reasoning_effort,
 			tools: reply.session.tools,
 			loadedTools: reply.session.loaded_tools,
+			appTools: reply.session.app_tools,
 			permissionMode: reply.session.permission_mode,
 			latestOutcome: reply.work.latest_outcome,
 		};

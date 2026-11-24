@@ -59,6 +59,8 @@ pub fn Reply(comptime Capture: type) type {
             try reply.appendTools(values.tools);
             try reply.capture.append(CurrentJson.Settings.loaded_tools);
             try reply.appendTools(values.loaded_tools);
+            try reply.capture.append(CurrentJson.Settings.app_tools);
+            try reply.appendTools(values.app_tools);
             try appendShape(reply.capture, CurrentJson.Settings.tail, .{
                 values.permission_mode,
                 reference(values.instructions),
@@ -188,6 +190,8 @@ pub fn Reply(comptime Capture: type) type {
             try reply.appendTools(revision.tools);
             try reply.capture.append(shape.loaded_tools);
             try reply.appendTools(revision.loaded_tools);
+            try reply.capture.append(shape.app_tools);
+            try reply.appendTools(revision.app_tools);
             try appendShape(reply.capture, shape.permission_mode, .{revision.permission_mode});
         }
 
@@ -414,6 +418,9 @@ pub const CurrentJson = struct {
     const ToolNames = struct {
         pub const openapi_tools = true;
     };
+    const AppToolNames = struct {
+        pub const openapi_app_tool_names = true;
+    };
     pub const Settings = struct {
         pub const openapi_name = "domainreportCurrentJsonSettings";
         const head = .{
@@ -441,7 +448,8 @@ pub const CurrentJson = struct {
             ",\"created_at\":\"",      H.decimal,
             "\"}",
         };
-        pub const json_shape = head ++ .{ ToolNames, loaded_tools, ToolNames } ++ tail;
+        const app_tools = ",\"app_tools\":";
+        pub const json_shape = head ++ .{ ToolNames, loaded_tools, ToolNames, app_tools, AppToolNames } ++ tail;
     };
     pub const Outcome = struct {
         pub const openapi_name = "domainreportCurrentJsonOutcome";
@@ -523,6 +531,9 @@ pub const FullJson = struct {
     const OfferedTools = struct {
         pub const openapi_offered_tools = true;
     };
+    const AppToolNames = struct {
+        pub const openapi_app_tool_names = true;
+    };
     pub const Inline = struct {
         pub const openapi_name = "domainreport_full_shapeFullInline";
         const head = .{ "{\"type\":\"text\",\"bytes\":\"", H.decimal, "\",\"sha256\":\"", H{ .hex = 32 }, "\",\"text\":\"" };
@@ -556,9 +567,10 @@ pub const FullJson = struct {
             ",\"tools\":",
         };
         const loaded_tools = ",\"loaded_tools\":";
+        const app_tools = ",\"app_tools\":";
         const permission_mode = .{ ",\"permission_mode\":\"", H{ .tag = cli_value.PermissionMode }, "\"" };
         const contents = .{ ",\"instructions\":", H{ .json = RevisionContent }, ",\"output_schema\":", H{ .optional_json = RevisionContent }, "}" };
-        pub const json_shape = head ++ .{ Tools, loaded_tools, Tools } ++ permission_mode ++ contents;
+        pub const json_shape = head ++ .{ Tools, loaded_tools, Tools, app_tools, AppToolNames } ++ permission_mode ++ contents;
     };
     pub const Outcome = struct {
         pub const openapi_name = "domainreport_full_shapeFullOutcome";

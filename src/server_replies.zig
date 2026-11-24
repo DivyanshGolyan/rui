@@ -31,7 +31,7 @@ const activity_reply = @import("activity_reply.zig");
 const builtin = @import("builtin");
 const TestParts = if (builtin.is_test) @import("server_host_testing.zig").TestParts else void;
 const sendReply = server_reply.sendReply;
-const Host = server_host.Host;
+const Fixture = if (builtin.is_test) @import("server_host_testing.zig").Fixture else void;
 const Lifecycle = server_host.Lifecycle;
 const Probes = server_host.Probes;
 const Answer = server_reply.Answer;
@@ -59,9 +59,36 @@ pub const Prepared = struct {
 
 pub const DropMode = enum { none, before_admission, during_admission, after_commit };
 
-/// The Host's answers. `init` reads the Host once, for the facts a reply shows. The Store, Lifecycle and Probes are
-/// shared. `execution` answers the Execution facts of a report, the capacity of Host info and the MCP lists a request
-/// asks for; `lists` holds the model lists the execution thread publishes.
+/// The pointers Replies shares with the rest of the process: the Store, Lifecycle and Probes, the retention queue and
+/// scratch budget, and the model lists and environments the Host owns.
+pub const Shared = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    lease: *platform.StoreLease,
+    store: *store_module.Store,
+    lifecycle: *Lifecycle,
+    probes: *Probes,
+    retention: *output_retention.Queue,
+    model_lists: *ModelLists,
+    scratch_used: *const std.atomic.Value(u64),
+    environments: ?*SessionEnvironments,
+};
+
+/// The values fixed when the Host starts, which the replies show.
+pub const Facts = struct {
+    instance: protocol.InstanceId,
+    intake_capacity: usize,
+    descriptor_soft_limit: ?usize,
+    started_at: u64,
+    settings_digest: ?@import("host_settings_handoff.zig").Digest,
+    served: protocol.Served,
+    presets: []const core_tools.Preset,
+    bash_home: ?[]const u8,
+};
+
+/// The Host's answers. `init` copies the shared pointers and the start-time facts once. `execution` answers the
+/// Execution facts of a report, the capacity of Host info and the MCP lists a request asks for; `lists` holds the
+/// model lists the execution thread publishes.
 pub const Replies = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -88,27 +115,27 @@ pub const Replies = struct {
         if (self.store.isFenced()) self.lifecycle.fenceDispatch(phase, err);
     }
 
-    pub fn init(host: *Host, execution_state: *execution_owner.Execution) Replies {
+    pub fn init(shared: Shared, facts: Facts, execution_state: *execution_owner.Execution) Replies {
         return .{
-            .io = host.io,
-            .allocator = host.allocator,
-            .lists = &host.model_lists,
-            .lease = host.lease,
-            .store = host.store,
-            .lifecycle = host.lifecycle,
-            .probes = host.probes,
-            .retention = host.retention,
+            .io = shared.io,
+            .allocator = shared.allocator,
+            .lists = shared.model_lists,
+            .lease = shared.lease,
+            .store = shared.store,
+            .lifecycle = shared.lifecycle,
+            .probes = shared.probes,
+            .retention = shared.retention,
             .execution = execution_state,
-            .scratch_used = &host.scratch_used,
-            .instance = host.instance,
-            .intake_capacity = host.intake_capacity,
-            .descriptor_soft_limit = host.descriptor_soft_limit,
-            .started_at = host.started_at,
-            .settings_digest = host.settings_digest,
-            .served = host.providers.served(),
-            .presets = host.presets,
-            .environments = host.environments,
-            .bash_home = host.bash_facts.home,
+            .scratch_used = shared.scratch_used,
+            .instance = facts.instance,
+            .intake_capacity = facts.intake_capacity,
+            .descriptor_soft_limit = facts.descriptor_soft_limit,
+            .started_at = facts.started_at,
+            .settings_digest = facts.settings_digest,
+            .served = facts.served,
+            .presets = facts.presets,
+            .environments = shared.environments,
+            .bash_home = facts.bash_home,
         };
     }
 
@@ -749,6 +776,37 @@ test "preset overlay retains or replaces the whole preferences object" {
     try std.testing.expectEqual(protocol.FieldState.omitted, base.preferences.?.reasoning_effort.state);
 }
 
+/// Test-only derivations of Replies' inputs from a test Host, so every test builds them the same way.
+pub const testing_parts = if (builtin.is_test) struct {
+    pub fn sharedOf(host: *Fixture) Shared {
+        return .{
+            .io = host.io,
+            .allocator = host.allocator,
+            .lease = host.lease,
+            .store = host.store,
+            .lifecycle = host.lifecycle,
+            .probes = host.probes,
+            .retention = host.retention,
+            .model_lists = &host.model_lists,
+            .scratch_used = &host.scratch_used,
+            .environments = host.environments,
+        };
+    }
+
+    pub fn factsOf(host: *const Fixture) Facts {
+        return .{
+            .instance = host.instance,
+            .intake_capacity = host.intake_capacity,
+            .descriptor_soft_limit = host.descriptor_soft_limit,
+            .started_at = host.started_at,
+            .settings_digest = host.settings_digest,
+            .served = host.providers.served(),
+            .presets = host.presets,
+            .bash_home = host.bash_facts.home,
+        };
+    }
+} else struct {};
+
 fn controlSubject(comptime kind: command_spec.CommandKind, command: *const @FieldType(wire_request.Request, @tagName(kind))) host_reply.MutationSubject(kind) {
     return switch (kind) {
         .session_stop, .session_archive, .session_pin => command.session.slice(),
@@ -809,7 +867,7 @@ test "Conversation stream native delivery reads each byte once and closes on fai
         .{ .encoded = @as([257 * "\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".len]u8, @bitCast(@as([257]["\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".len]u8, @splat("\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".*)))) ++ "tail", .decoded = @as([257 * "é中🙂\n\\\"/".len]u8, @bitCast(@as([257]["é中🙂\n\\\"/".len]u8, @splat("é中🙂\n\\\"/".*)))) ++ "tail" },
     });
     command.stream = true;
-    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -874,7 +932,7 @@ test "Conversation stream native delivery reads each byte once and closes on fai
             std.debug.assert(std.c.write(returned[1], "r", 1) == 1);
             thread.join();
         }
-        var replies = Replies.init(&host, &execution_state);
+        var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
         try Replies.deliverConversationContent(&replies, sockets[0], command);
     }
     try std.testing.expectEqual(@as(u64, expected.len), storage.testing_content_work.read.load(.monotonic));
@@ -884,7 +942,7 @@ test "Conversation stream native delivery reads each byte once and closes on fai
     const body_start = (std.mem.indexOf(u8, peer.received[0..peer.used], "\r\n\r\n") orelse return error.MissingHeaders) + 4;
     try std.testing.expectEqualStrings(expected, peer.received[body_start..peer.used]);
     storage.testing_content_work = .{};
-    var replies = Replies.init(&host, &execution_state);
+    var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     try Replies.deliverConversationContent(&replies, -1, command);
     try std.testing.expectEqual(@as(u64, protocol.content_window_bytes), storage.testing_content_work.read.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
@@ -908,7 +966,7 @@ test "presets seed configure before Store validation and idempotency" {
         \\{"model":"gpt-6.1-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","connection":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
     , .{})).object;
     const presets = [_]core_tools.Preset{.{ .name = "review", .spec = spec }};
-    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .presets = &presets };
+    var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .presets = &presets };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -922,16 +980,16 @@ test "presets seed configure before Store validation and idempotency" {
     const reload = try arena.create(wire_request.ConfigureCommand);
     reload.* = .{ .preset = create.preset, .reload_skills = true };
     try reload.key.set("skills-reload-preset-empty");
-    var replies = Replies.init(&host, &execution_state);
+    var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const reload_refused = try Replies.submitConfigure(&replies, reload, null);
     try std.testing.expect(reload_refused == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, reload_refused.rejected.code);
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     try std.testing.expect((try Replies.submitConfigure(&replies, reload, null)).rejected.replayed);
     reload.reload_skills = false;
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     try std.testing.expect(try Replies.submitConfigure(&replies, reload, null) == .conflict);
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const first = try Replies.submitConfigure(&replies, create, null);
     try std.testing.expect(first == .accepted);
     try std.testing.expect(!first.accepted.replayed);
@@ -943,7 +1001,7 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expectEqualStrings("ask", observed.permission_mode.slice());
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Preset instructions"), &observed.instructions.digest);
     try std.testing.expect(observed.output_schema != null);
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const replay = try Replies.submitConfigure(&replies, create, null);
     try std.testing.expect(replay == .accepted and replay.accepted.replayed);
     try std.testing.expectEqualStrings(session.slice(), replay.accepted.session.slice());
@@ -972,7 +1030,7 @@ test "presets seed configure before Store validation and idempotency" {
         .length = "Overridden instructions".len,
         .digest = protocol.contentDigest("Overridden instructions"),
     };
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const overridden = try Replies.submitConfigure(&replies, override, null);
     try std.testing.expect(overridden == .accepted);
     try storage.inspectSession(overridden.accepted.session.slice(), &observed);
@@ -992,11 +1050,11 @@ test "presets seed configure before Store validation and idempotency" {
     , .{})).object;
     const edited_presets = [_]core_tools.Preset{.{ .name = "review", .spec = edited_spec }};
     host.presets = &edited_presets;
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const same = try Replies.submitConfigure(&replies, override, null);
     try std.testing.expect(same == .accepted and same.accepted.replayed);
     try std.testing.expectEqualStrings(overridden.accepted.session.slice(), same.accepted.session.slice());
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     try std.testing.expect(try Replies.submitConfigure(&replies, create, null) == .conflict);
     try storage.inspectSession(session.slice(), &observed);
     try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
@@ -1008,32 +1066,32 @@ test "presets seed configure before Store validation and idempotency" {
     try invalid.configuration.workspace.value.set(root);
     invalid.configuration.compaction_trigger.state = .value;
     try invalid.configuration.compaction_trigger.value.set("0");
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const refused = try Replies.submitConfigure(&replies, invalid, null);
     try std.testing.expect(refused == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, refused.rejected.code);
     host.presets = &.{};
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     try std.testing.expect(try Replies.submitConfigure(&replies, create, null) == .conflict);
     const missing = try arena.create(wire_request.ConfigureCommand);
     missing.* = .{ .preset = create.preset };
     try missing.key.set("preset-missing");
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const unknown = try Replies.submitConfigure(&replies, missing, null);
     try std.testing.expect(unknown == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, unknown.rejected.code);
     host.presets = &presets;
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const refused_again = try Replies.submitConfigure(&replies, missing, null);
     try std.testing.expect(refused_again == .rejected and refused_again.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, refused_again.rejected.code);
     invalid.session = session;
     try invalid.key.set("preset-on-update");
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const update = try Replies.submitConfigure(&replies, invalid, null);
     try std.testing.expect(update == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update.rejected.code);
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const update_replay = try Replies.submitConfigure(&replies, invalid, null);
     try std.testing.expect(update_replay == .rejected and update_replay.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update_replay.rejected.code);
@@ -1049,7 +1107,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     const servers = [_]server_mcp_settings.Server{ docs, notes };
     var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .instance = @splat(0x7e) };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .instance = @splat(0x7e) };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -1063,7 +1121,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
         var reply: Reply = undefined;
         reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
-        var replies = Replies.init(&host, &execution_state);
+        var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
         try Replies.replyToolsReload(&replies, &reply, &request);
         const wire = try server_reply.sentWire(io, std.testing.allocator, &reply);
         defer std.testing.allocator.free(wire);
@@ -1080,7 +1138,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
         reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
         request.server = null;
-        var replies = Replies.init(&host, &execution_state);
+        var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
         try Replies.replyToolsReload(&replies, &reply, &request);
         const wire = try server_reply.sentWire(io, std.testing.allocator, &reply);
         defer std.testing.allocator.free(wire);
@@ -1097,7 +1155,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
         var reply: Reply = undefined;
         reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
-        var replies = Replies.init(&host, &execution_state);
+        var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
         try Replies.replyToolsReload(&replies, &reply, &request);
         const wire = try server_reply.sentWire(io, std.testing.allocator, &reply);
         defer std.testing.allocator.free(wire);
@@ -1115,7 +1173,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
         var reply: Reply = undefined;
         reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
-        var replies = Replies.init(&host, &execution_state);
+        var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
         try Replies.replyToolsReload(&replies, &reply, &request);
         const wire = try server_reply.sentWire(io, std.testing.allocator, &reply);
         defer std.testing.allocator.free(wire);
@@ -1128,7 +1186,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
         var reply: Reply = undefined;
         reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
-        var replies = Replies.init(&host, &execution_state);
+        var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
         try Replies.replyToolsStatus(&replies, &reply);
         const wire = try server_reply.sentWire(io, std.testing.allocator, &reply);
         defer std.testing.allocator.free(wire);
@@ -1136,7 +1194,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     }
 
     // A Host with no MCP servers answers empty lists, and an unnamed ask asks nothing.
-    var bare = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .instance = @splat(0x7e) };
+    var bare = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .instance = @splat(0x7e) };
     var bare_parts: TestParts = undefined;
     bare_parts.attach(&bare, undefined);
     var bare_execution: execution_owner.Execution = undefined;
@@ -1145,7 +1203,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
         var reply: Reply = undefined;
         reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
-        var bare_replies = Replies.init(&bare, &bare_execution);
+        var bare_replies = Replies.init(testing_parts.sharedOf(&bare), testing_parts.factsOf(&bare), &bare_execution);
         try Replies.replyToolsReload(&bare_replies, &reply, &.{});
         const wire = try server_reply.sentWire(io, std.testing.allocator, &reply);
         defer std.testing.allocator.free(wire);
@@ -1155,7 +1213,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
         var reply: Reply = undefined;
         reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
-        var bare_replies = Replies.init(&bare, &bare_execution);
+        var bare_replies = Replies.init(testing_parts.sharedOf(&bare), testing_parts.factsOf(&bare), &bare_execution);
         try Replies.replyToolsStatus(&bare_replies, &reply);
         const wire = try server_reply.sentWire(io, std.testing.allocator, &reply);
         defer std.testing.allocator.free(wire);
@@ -1181,7 +1239,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     var environments: SessionEnvironments = undefined;
     try environments.init(io, allocator);
     defer environments.deinit();
-    var host: Host = .{ .io = io, .allocator = allocator, .lease = &lease, .store = &storage, .environments = &environments };
+    var host: Fixture = .{ .io = io, .allocator = allocator, .lease = &lease, .store = &storage, .environments = &environments };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
     var execution_state: execution_owner.Execution = undefined;
@@ -1203,7 +1261,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     try child.configuration.permission_mode.value.set("ask");
     child.configuration.parent.state = .value;
     try child.configuration.parent.value.set(parent.slice());
-    var replies = Replies.init(&host, &execution_state);
+    var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const result = try Replies.submitConfigure(&replies, &child, null);
     try std.testing.expect(result == .accepted);
     const session = result.accepted.session;
@@ -1215,7 +1273,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     defer newer.deinit(allocator);
     @memcpy(newer.room(), "B=2\x00");
     environments.offer(parent.slice(), .{ .origin = .person, .admission = 2 }, &newer);
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const replay = try Replies.submitConfigure(&replies, &child, null);
     try std.testing.expect(replay == .accepted and replay.accepted.replayed);
     const retained = (try environments.copy(session.slice(), allocator)).?;
@@ -1224,7 +1282,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     try child.key.set("env-child-refused");
     child.configuration.provider.state = .value;
     try child.configuration.provider.value.set("codex");
-    replies = Replies.init(&host, &execution_state);
+    replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const refusal = try Replies.submitConfigure(&replies, &child, null);
     try std.testing.expect(refusal == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.parent_provider_forbidden, refusal.rejected.code);
@@ -1234,7 +1292,7 @@ test "configure parent inherits the Host environment only after a fresh creation
 test "every accepted control publishes exactly one hint before reply handling" {
     const native = @import("posix");
     const Probe = struct {
-        host: *Host,
+        host: *Fixture,
         observation: *TestObservation,
         accepted: bool,
         allocations: usize = 0,
@@ -1282,7 +1340,7 @@ test "every accepted control publishes exactly one hint before reply handling" {
                     try std.testing.expectEqual(@as(c_int, 0), native.ftruncate(native.fileno(backing), TestObservation.state_bytes));
                     var observation = try TestObservation.init(descriptors[1], native.dup(native.fileno(backing)), .control, 37);
                     defer observation.close();
-                    var host = Host{
+                    var host = Fixture{
                         .io = std.testing.io,
                         .allocator = std.testing.allocator,
                         .lease = undefined,
@@ -1294,7 +1352,7 @@ test "every accepted control publishes exactly one hint before reply handling" {
                     execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
                     host_parts.probes.hooks = .{ .phase_trace = true };
                     host_parts.probes.observation = observation;
-                    var replies = Replies.init(&host, &execution_state);
+                    var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
                     var result = initial;
                     switch (result) {
                         .accepted => |*value| value.replayed = replayed,
@@ -1355,7 +1413,7 @@ test "SH-61 Host submits a sealed ordered input through Message admission" {
     lease.paths = .{};
     try lease.paths.store_identity.set(root);
     try lease.paths.scratch.set(root);
-    var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var host: Fixture = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
     var execution_state: execution_owner.Execution = undefined;
@@ -1380,7 +1438,7 @@ test "SH-61 Host submits a sealed ordered input through Message admission" {
     var command: wire_request.MessageCommand = .{ .session = configured.accepted.session };
     try command.key.set("parts-host-message");
     var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
-    var replies = Replies.init(&host, &execution_state);
+    var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
     const result = try Replies.submitMessageInput(&replies, &command, &offer, loan, null);
     try std.testing.expect(result == .accepted);
     const content = result.accepted.content;
@@ -1591,7 +1649,7 @@ test "SH-123 report scratch is sealed whole or discarded whole within the shared
     var storage: store_module.Store = undefined;
     try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
     defer storage.close() catch unreachable;
-    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
     var execution_state: execution_owner.Execution = undefined;
@@ -1621,7 +1679,7 @@ test "SH-123 report scratch is sealed whole or discarded whole within the shared
         host.allocator = if (row.heap_fails) failing.allocator() else std.testing.allocator;
         defer host.allocator = std.testing.allocator;
         host_parts.attach(&host, &lease);
-        var replies = Replies.init(&host, &execution_state);
+        var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
         var request: wire_request.Request = .{ .inspect_session = inspect };
         {
             var reply: Reply = undefined;
