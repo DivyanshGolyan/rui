@@ -1154,7 +1154,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const message_note = original_presentation.note;
     const local_preview = self.submission.messageText() != null and !self.submission.messageProjected() and (screen.feed.at_end or (self.reading.opening and screen.anchor.following()));
     const queued_note: ?[]const u8 = if (message_note) |note| note: {
-        if (local_preview) break :note note;
         const key = self.submission.messageKey() orelse break :note null;
         for (screen.feed.entries[0..screen.feed.count]) |entry| {
             const entry_key = entry.message_key orelse continue;
@@ -1194,6 +1193,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         line.* = session_line.plain(session_line.max_line_bytes, session_line.firstLine(if (text.len == 0 and self.submission.messageHasImage()) image_label else text));
         break :preview .{ .line = line.slice(), .count = 1 };
     } else if (queued) |row| row.waiting else null;
+    chrome.activity.queued_note = if (local_preview) message_note else null;
     chrome.activity.method = self.app_caps.width;
     chrome.activity.styles = .{ .ink = style.of(self.app_caps, .{ .colour = .ink }), .normal = normal, .quiet = quiet, .attention = attention, .failure = failure };
     self.app_content.tail = chrome.activity.widget();

@@ -22,6 +22,7 @@ pub const Styles = struct {
 live: session_view.Live = .{},
 work: ?work_line.Line = null,
 queued: ?queued_line.Waiting = null,
+queued_note: ?[]const u8 = null,
 method: vaxis.gwidth.Method = .unicode,
 styles: Styles = .{},
 more: Chip,
@@ -44,18 +45,20 @@ const Plan = struct {
     more: bool,
     work_row: bool,
     queued: bool,
+    queued_note: bool,
 
     fn rows(self: Plan) usize {
-        return self.shown + @intFromBool(self.more) + @intFromBool(self.work_row) + @intFromBool(self.queued);
+        return self.shown + @intFromBool(self.more) + @intFromBool(self.work_row) + @intFromBool(self.queued) + @intFromBool(self.queued_note);
     }
 };
 
 fn plan(self: *const Self, height: usize) Plan {
     const clock_call = self.clockCall();
     const beyond = self.live.total > self.live.count;
-    var result: Plan = .{ .shown = 0, .more = false, .work_row = self.work != null and clock_call == null, .queued = self.queued != null };
+    var result: Plan = .{ .shown = 0, .more = false, .work_row = self.work != null and clock_call == null, .queued = self.queued != null, .queued_note = false };
     for (0..2) |_| {
-        const room = height -| (@as(usize, @intFromBool(result.work_row)) + @intFromBool(result.queued));
+        result.queued_note = result.queued and self.queued_note != null and height > @as(usize, @intFromBool(result.work_row)) + 1;
+        const room = height -| (@as(usize, @intFromBool(result.work_row)) + @intFromBool(result.queued) + @intFromBool(result.queued_note));
         const all_fit = self.live.count + @intFromBool(beyond) <= room;
         result.shown = if (all_fit) self.live.count else room -| 1;
         result.more = if (all_fit) beyond else room >= 1;
@@ -136,6 +139,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (index >= skip) {
             const buffer = try ctx.arena.create([queued_line.waiting_capacity]u8);
             _ = Chip.print(surface, self.method, 0, index - skip, queued_line.waitingRow(buffer, waiting.line, waiting.count, width, self.method), self.styles.quiet, width);
+        }
+    }
+    if (kept.queued_note) {
+        defer index += 1;
+        if (index >= skip) {
+            const note = self.queued_note.?;
+            const indent: u16 = @min(2, width);
+            self.printFitted(surface, index - skip, indent, fitWords(note, "", width - indent, self.method), self.styles.quiet, width);
         }
     }
     surface.children = children;
@@ -316,5 +327,24 @@ test "a narrow or short activity tail keeps the clock and the oldest calls" {
     for ([_]vxfw.Size{ .{ .width = 0, .height = 4 }, .{ .width = 1, .height = 1 }, .{ .width = 4, .height = 0 } }) |size| {
         const tiny = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);
+    }
+}
+
+test "queued recovery note follows its preview without displacing work on short screens" {
+    var click: Click = .{};
+    var block: Self = .{
+        .more = .{ .label = "", .userdata = &click, .on_click = Click.status },
+        .work = .{ .mark = "◝", .tone = .normal, .words = "Thinking", .clock = .{ .elapsed = 1 } },
+        .queued = .{ .line = "original", .count = 1 },
+        .queued_note = "Rejected · /discard",
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 2, 3 }) |height| {
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = height }, .cell_size = .{} };
+        const frame = try block.widget().draw(ctx);
+        try std.testing.expect(std.mem.indexOf(u8, try rowText(frame, 0), "Thinking") != null);
+        try std.testing.expectEqualStrings("◌ original", try rowText(frame, 1));
+        if (height == 3) try std.testing.expectEqualStrings("  Rejected · /discard", try rowText(frame, 2));
     }
 }
