@@ -45,17 +45,35 @@ def tree_key_custody():
                     screen.wait(lambda frame: task in frame and screen.style("Tree parent").bold,
                                 "selected parent expands")
 
-                screen.keys(b"\x1b[200~\x1bb\x1bf\x1b[201~\x1b[F\r")
-                screen.wait(lambda frame: "Notifications" in frame and "Version" in frame, "Settings owns input")
-                screen.keys(b"".join(left + right for left, right in ENCODINGS) + DOWN * 6 + b"\r")
-                screen.wait(lambda frame: "earlier message" in frame and "tool output" in frame,
-                            "Settings Keys panel owns input")
-                screen.keys(b"".join(left + right for left, right in ENCODINGS) + b"\x1b")
-                screen.wait(lambda frame: "Notifications" in frame and "Version" in frame and
-                            "earlier message" not in frame, "Keys panel closes to Settings")
-                screen.keys(b"\x1b")
-                screen.wait(lambda frame: task in frame and "Notifications" not in frame,
-                            "paste, Settings and Keys leave the tree expanded")
+                def tree_state(folded, description):
+                    screen.wait(lambda frame: "Notifications" not in frame and
+                                ((task not in frame and "▸ 1" in frame) if folded else
+                                 (task in frame and "▸ 1" not in frame)), description)
+
+                for left, right in ENCODINGS:
+                    for key, folded in ((left, False), (right, True)):
+                        for owner in ("paste", "Settings", "Keys"):
+                            screen.keys(FIRST_ROW + (left if folded else right))
+                            tree_state(folded, "prepare tree state for " + owner)
+                            if owner == "paste":
+                                screen.keys(b"\x1b[200~" + key + b"\x1b[201~\x1b[F\r")
+                            else:
+                                screen.keys(b"\x1b[F\r")
+                            screen.wait(lambda frame: "Notifications" in frame and "Version" in frame,
+                                        "Settings owns input")
+                            if owner == "Keys":
+                                screen.keys(DOWN * 6 + b"\r")
+                                screen.wait(lambda frame: "earlier message" in frame and "tool output" in frame,
+                                            "Settings Keys panel owns input")
+                            if owner != "paste":
+                                screen.keys(key)
+                            screen.keys(b"\x1b")
+                            if owner == "Keys":
+                                screen.wait(lambda frame: "Notifications" in frame and "Version" in frame and
+                                            "earlier message" not in frame, "Keys panel closes to Settings")
+                                screen.keys(b"\x1b")
+                            tree_state(folded, owner + " retains custody of one tree key")
+
                 screen.keys(FIRST_ROW)
                 screen.wait(lambda _: screen.style("Tree parent").bold, "parent selected after Settings")
                 for left, right in ENCODINGS:
