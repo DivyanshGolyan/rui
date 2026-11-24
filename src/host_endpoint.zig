@@ -1,19 +1,25 @@
-//! Sole owner of a Host's endpoint: the interface directory D, its `rui.lock`
-//! and its `rui.sock`. Every Host serves from `D/rui.sock` while it holds
-//! `D/rui.lock` exclusively, as the inode D names, from before it touches the
-//! socket until after it unlinks it. A lock this process holds and verifies is
-//! a kernel fact that no Host of any release serves D: new Hosts bind only
-//! under it, older MySQL and explicit-directory Hosts bind only under a flock
-//! on the same file, and older SQLite Hosts never bind inside a derived D.
-//! So only the holder of that lock unlinks a Host socket, and whoever can hold
+//! Sole owner of a Host's endpoint: the interface directory D and the
+//! `rui.sock` inside it. A Host serves from `D/rui.sock` while it holds an
+//! exclusive flock on D itself, as the inode D's path names, from before it
+//! touches the socket until after it unlinks it. D is the lock, so an endpoint
+//! holds no regular file for an OS temp cleaner to age (#2128): macOS
+//! clean-tmps and tmp_cleaner delete only regular files and empty old
+//! directories, and systemd-tmpfiles spares live sockets and, from v242,
+//! locked directories. A Host of the previous release still locks
+//! `D/rui.lock`; the one-release check in `lockVerified` keeps its socket
+//! safe, and `legacy_lock_name` goes with that check.
+//! So only the holder of D's lock unlinks a Host socket, and whoever can hold
 //! it (a starting Host, the upgrade census) may remove a dead endpoint.
 const std = @import("std");
 const c = @import("posix");
 const platform = @import("platform.zig");
 const host_settings = @import("host_settings.zig");
 
-pub const lock_name = "rui.lock";
 pub const socket_name = host_settings.socket_name;
+
+/// The lock file of the previous release. One release only: `lockVerified`
+/// refuses a D it holds, and `dissolve` removes the file once it is free.
+const legacy_lock_name = "rui.lock";
 
 /// Bounded so `D/rui.sock` fits Darwin's 104-byte `sun_path`.
 pub const Path = host_settings.OsBytes(host_settings.max_runtime_dir_bytes);
@@ -21,7 +27,7 @@ pub const Path = host_settings.OsBytes(host_settings.max_runtime_dir_bytes);
 /// Where D comes from. A derived D, a 32-lowercase-hex child of the per-user
 /// runtime directory, is Rui's: it is censused, swept and removed once empty.
 /// Any other (a configured `interface.dir`) belongs to the user, and only
-/// Rui's two files in it are ever removed.
+/// Rui's files in it are ever removed.
 pub const Interface = union(enum) {
     derived: Path,
     configured: Path,
@@ -56,12 +62,11 @@ fn derivedName(name: []const u8) bool {
     return true;
 }
 
-/// Proof, held in this process, that `D/rui.lock` is locked exclusively by this
-/// open file description and is the inode D names now. Only `lockVerified`
-/// makes one, and every unlink of a Host socket or lock in Rui takes one.
+/// Proof, held in this process, that this open file description holds an
+/// exclusive flock on D and D's path names that inode now. Only `lockVerified`
+/// makes one. The lock is the descriptor: closing it unlocks, as SIGKILL does.
 const Held = struct {
     dir: std.Io.Dir,
-    lock: std.Io.File,
 
     /// Unlinks `D/rui.sock` when it is a Unix socket. Anything else at that
     /// name is not Rui's and stays.
@@ -77,27 +82,22 @@ const Held = struct {
         };
     }
 
-    /// The one teardown. The socket goes before the lock file, so Rui never
-    /// leaves `rui.sock` without `rui.lock`; a derived D goes last and only
-    /// when empty (MySQL scratch, diagnostics and `host.stopped` stay). A crash
-    /// or failure at any step leaves a free or absent lock, which the next
-    /// census or claim proves and finishes. Always releases the lock.
+    /// The one teardown, under D's lock so no census or claim interleaves: the
+    /// socket, then a free legacy lock file, then a derived D if it is empty
+    /// (MySQL scratch, diagnostics and `host.stopped` stay). A crash or failure
+    /// at any step leaves a free D, which the next census or claim proves and
+    /// finishes. Always releases the lock.
     fn dissolve(self: *Held, io: std.Io, interface: *const Interface) !void {
         defer self.release(io);
         try self.clearSocket(io);
-        self.dir.deleteFile(io, lock_name) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        };
+        try unlinkFreeLegacyLock(io, self.dir);
         if (interface.* == .derived) std.Io.Dir.cwd().deleteDir(io, interface.path()) catch |err| switch (err) {
             error.FileNotFound, error.DirNotEmpty => {},
             else => return err,
         };
     }
 
-    /// Closing the lock's only descriptor is all SIGKILL does, too.
     fn release(self: *Held, io: std.Io) void {
-        self.lock.close(io);
         self.dir.close(io);
         self.* = undefined;
     }
@@ -105,88 +105,128 @@ const Held = struct {
 
 const LockResult = union(enum) {
     held: Held,
-    /// Another open file description holds the lock: a Host that claimed D, or
-    /// an inspect taking it for a moment; or the lock was replaced while this
-    /// call took it.
+    /// Another open file description holds D, a previous-release Host holds
+    /// its `rui.lock`, or D was replaced while this call took its lock.
     busy,
-    /// D is gone, or it has no `rui.lock` and `create` was false.
+    /// D does not exist.
     absent,
-    /// D or `rui.lock` is not a private same-owner directory and file.
+    /// D is not a private directory of this user, or it is a node Rui does
+    /// not expect at D's path.
     unusable: anyerror,
 };
 
+/// Test seam: `lockVerified` and `claim` call it between their steps, so a
+/// test can change the world exactly there. Production passes `noPause`.
+const Stage = enum { created, opened, locked };
+const Pause = *const fn (Stage) void;
+fn noPause(_: Stage) void {}
+const no_pause: Pause = noPause;
+
 /// The single decision point for endpoint ownership.
-fn lockVerified(io: std.Io, directory: []const u8, create: bool) LockResult {
-    const dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch |err| return switch (err) {
+fn lockVerified(io: std.Io, directory: []const u8) LockResult {
+    return lockVerifiedPaused(io, directory, no_pause);
+}
+
+fn lockVerifiedPaused(io: std.Io, directory: []const u8, pause: Pause) LockResult {
+    const dir = openDirectory(directory) catch |err| return switch (err) {
         error.FileNotFound => .absent,
         else => .{ .unusable = err },
     };
     var kept = false;
     defer if (!kept) dir.close(io);
-    const dir_stat = privateDirectory(dir.handle) catch |err| return .{ .unusable = err };
-    // A hostile FIFO must not block the open; never follow a planted link.
-    const fd = std.posix.openat(dir.handle, lock_name, .{
-        .ACCMODE = .RDONLY,
-        .CREAT = create,
-        .NONBLOCK = true,
-        .NOFOLLOW = true,
-        .CLOEXEC = true,
-    }, 0o600) catch |err| return switch (err) {
-        error.FileNotFound => .absent,
-        else => .{ .unusable = err },
-    };
-    const lock: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
-    defer if (!kept) lock.close(io);
-    _ = ownStat(fd, .file) catch |err| return .{ .unusable = err };
-    switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB))) {
+    privateDirectory(dir.handle) catch |err| return .{ .unusable = err };
+    pause(.opened);
+    switch (std.posix.errno(std.posix.system.flock(dir.handle, std.posix.LOCK.EX | std.posix.LOCK.NB))) {
         .SUCCESS => {},
         .AGAIN => return .busy,
         else => return .{ .unusable = error.EndpointLockFailed },
     }
-    // flock belongs to an inode. A lock on a file someone unlinked (and maybe
-    // recreated) after our open, or in a D replaced since, proves nothing.
-    if (!namesLock(io, dir.handle, fd) or !namesDirectory(io, directory, &dir_stat)) return .busy;
+    pause(.locked);
+    // flock belongs to an inode: a D replaced since our open proves nothing.
+    if (!namesDirectory(io, directory, dir.handle)) return .busy;
+    switch (legacyState(dir.handle)) {
+        .absent, .free => {},
+        .held => return .busy,
+        .unusable => return .{ .unusable = error.UnexpectedEndpointNode },
+    }
     kept = true;
-    return .{ .held = .{ .dir = dir, .lock = lock } };
+    return .{ .held = .{ .dir = dir } };
 }
 
-fn ownStat(fd: std.posix.fd_t, kind: enum { directory, file }) !c.struct_stat {
+/// Opens D itself. A symlink at D's own name is refused rather than followed.
+fn openDirectory(directory: []const u8) !std.Io.Dir {
+    const fd = try std.posix.openat(std.Io.Dir.cwd().handle, directory, .{
+        .ACCMODE = .RDONLY,
+        .DIRECTORY = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0);
+    return .{ .handle = fd };
+}
+
+fn privateDirectory(fd: std.posix.fd_t) !void {
     var stat: c.struct_stat = undefined;
     if (c.fstat(fd, &stat) != 0) return error.EndpointStatFailed;
-    const format = stat.st_mode & c.S_IFMT;
-    const expected = switch (kind) {
-        .directory => format == c.S_IFDIR,
-        .file => format == c.S_IFREG,
-    };
-    if (!expected or stat.st_uid != c.geteuid()) return error.UnexpectedEndpointNode;
-    return stat;
-}
-
-fn privateDirectory(fd: std.posix.fd_t) !c.struct_stat {
-    const stat = try ownStat(fd, .directory);
+    if (stat.st_mode & c.S_IFMT != c.S_IFDIR or stat.st_uid != c.geteuid()) return error.UnexpectedEndpointNode;
     if (stat.st_mode & 0o077 != 0) return error.InsecureDirectoryPermissions;
-    return stat;
 }
 
-fn sameNode(a: *const c.struct_stat, b: *const c.struct_stat) bool {
-    return a.st_dev == b.st_dev and a.st_ino == b.st_ino;
-}
-
-fn namesLock(io: std.Io, dir: std.posix.fd_t, fd: std.posix.fd_t) bool {
+/// Whether D's path still names the inode `fd` holds.
+fn namesDirectory(io: std.Io, directory: []const u8, fd: std.posix.fd_t) bool {
     var held: c.struct_stat = undefined;
-    if (c.fstat(fd, &held) != 0 or held.st_nlink == 0) return false;
-    const named = std.posix.openat(dir, lock_name, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .NOFOLLOW = true, .CLOEXEC = true }, 0) catch return false;
-    const file: std.Io.File = .{ .handle = named, .flags = .{ .nonblocking = true } };
-    defer file.close(io);
-    var current: c.struct_stat = undefined;
-    return c.fstat(named, &current) == 0 and sameNode(&held, &current);
+    if (c.fstat(fd, &held) != 0) return false;
+    const current = openDirectory(directory) catch return false;
+    defer current.close(io);
+    var named: c.struct_stat = undefined;
+    return c.fstat(current.handle, &named) == 0 and held.st_dev == named.st_dev and held.st_ino == named.st_ino;
 }
 
-fn namesDirectory(io: std.Io, directory: []const u8, opened: *const c.struct_stat) bool {
-    const dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch return false;
-    defer dir.close(io);
-    var current: c.struct_stat = undefined;
-    return c.fstat(dir.handle, &current) == 0 and sameNode(opened, &current);
+const Legacy = enum { absent, free, held, unusable };
+
+/// One release only (#2128): a previous-release Host locks `D/rui.lock`, not
+/// D. A new Host must not claim, census or remove that Host's live socket, so
+/// a held legacy lock makes D busy. Remove this with `unlinkFreeLegacyLock`.
+fn legacyState(dir: std.posix.fd_t) Legacy {
+    const fd = std.posix.openat(dir, legacy_lock_name, .{
+        .ACCMODE = .RDONLY,
+        .NONBLOCK = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0) catch |err| return switch (err) {
+        error.FileNotFound => .absent,
+        else => .unusable,
+    };
+    defer _ = c.close(fd);
+    return switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.SH | std.posix.LOCK.NB))) {
+        .SUCCESS => .free,
+        .AGAIN => .held,
+        else => .unusable,
+    };
+}
+
+/// One release only (#2128): removes `D/rui.lock` when no previous-release
+/// Host holds it. A lock taken here is only a check, so it is released before
+/// the name goes.
+fn unlinkFreeLegacyLock(io: std.Io, dir: std.Io.Dir) !void {
+    const fd = std.posix.openat(dir.handle, legacy_lock_name, .{
+        .ACCMODE = .RDONLY,
+        .NONBLOCK = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer _ = c.close(fd);
+    switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB))) {
+        .SUCCESS => {},
+        .AGAIN => return,
+        else => return error.EndpointLockFailed,
+    }
+    dir.deleteFile(io, legacy_lock_name) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
 }
 
 /// A Host's endpoint, from `claim` until `retire`.
@@ -200,10 +240,12 @@ pub const Endpoint = struct {
     }
 
     /// Clears a socket a dead Host left at `D/rui.sock`, binds, listens and
-    /// sets mode 0600. A SQLite caller already holds its Store's lease, so no
-    /// older Host of that Store serves here either.
+    /// sets mode 0600. Fails with `error.EndpointLost`, before touching
+    /// anything, when D was removed after `claim` (a stalled Host whose empty
+    /// D a cleaner took): binding would land in whatever now sits at that path.
     pub fn listen(self: *Endpoint, options: std.Io.net.UnixAddress.ListenOptions) !std.Io.net.Server {
         const held = &self.held.?;
+        if (!namesDirectory(self.io, self.interface.path(), held.dir.handle)) return error.EndpointLost;
         try held.clearSocket(self.io);
         var buffer: [std.Io.net.UnixAddress.max_len]u8 = undefined;
         const address = try std.Io.net.UnixAddress.init(try self.socketPath(&buffer));
@@ -234,14 +276,30 @@ pub const Endpoint = struct {
 /// the lock for microseconds, before it reports the directory in use.
 const claim_wait_ns = 100 * std.time.ns_per_ms;
 
-/// Host start: creates D (0700) and holds its lock. Does not touch `rui.sock`;
-/// that waits for `listen`, after the caller owns its Store.
+/// Host start: creates D (0700), holds its lock and sets D's times to now, once,
+/// through the held descriptor. Nothing ages D again while the Host lives: the
+/// bind and the unbind each refresh its mtime. An empty D exists only from
+/// this claim until `listen`, where a cleaner would need D to stall for its
+/// whole age, and `listen` refuses a D that was removed. Does not touch
+/// `rui.sock`; that waits for `listen`, after the caller owns its Store.
 pub fn claim(io: std.Io, interface: Interface) error{ RuntimeDirectoryInUse, RuntimeDirectoryUnusable }!Endpoint {
+    return claimPaused(io, interface, no_pause);
+}
+
+fn claimPaused(io: std.Io, interface: Interface, pause: Pause) error{ RuntimeDirectoryInUse, RuntimeDirectoryUnusable }!Endpoint {
     const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + claim_wait_ns;
     while (true) {
         createDirectory(io, &interface) catch return error.RuntimeDirectoryUnusable;
-        switch (lockVerified(io, interface.path(), true)) {
-            .held => |held| return .{ .io = io, .interface = interface, .held = held },
+        pause(.created);
+        switch (lockVerifiedPaused(io, interface.path(), pause)) {
+            .held => |value| {
+                var held = value;
+                if (c.futimens(held.dir.handle, null) != 0) {
+                    held.release(io);
+                    return error.RuntimeDirectoryUnusable;
+                }
+                return .{ .io = io, .interface = interface, .held = held };
+            },
             .unusable => return error.RuntimeDirectoryUnusable,
             // `absent`: a census removed the empty D between our mkdir and open.
             .busy, .absent => {
@@ -261,7 +319,7 @@ fn createDirectory(io: std.Io, interface: *const Interface) !void {
     }
     const runtime = try std.Io.Dir.cwd().createDirPathOpen(io, std.fs.path.dirname(directory).?, .{ .permissions = .fromMode(0o700) });
     defer runtime.close(io);
-    _ = try privateDirectory(runtime.handle);
+    try privateDirectory(runtime.handle);
     runtime.createDir(io, std.fs.path.basename(directory), .fromMode(0o700)) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -272,18 +330,19 @@ fn createDirectory(io: std.Io, interface: *const Interface) !void {
 pub const Sighting = enum {
     /// This call proved the endpoint dead and removed it.
     reclaimed,
-    /// D, or its lock and socket, were already gone.
+    /// D was already gone.
     vanished,
-    /// Someone holds the lock: a live or starting Host. Probe its socket.
+    /// Someone holds D's lock: a live or starting Host. Probe its socket.
     busy,
-    /// A socket without a lock file, or a node Rui did not make. Rui never
-    /// leaves this state, and never removes it.
+    /// D is not a private directory of this user, or a node Rui did not make
+    /// is at `D/rui.sock` (a regular file or a symlink), or a dissolve failed.
+    /// Rui never leaves this state, and never removes it.
     unprovable,
 };
 
-/// Takes the lock without creating it; a held lock is dissolved. Never blocks.
+/// Takes D's lock without creating D; a free D is dissolved. Never blocks.
 pub fn inspect(io: std.Io, interface: *const Interface) Sighting {
-    switch (lockVerified(io, interface.path(), false)) {
+    switch (lockVerified(io, interface.path())) {
         .held => |value| {
             var held = value;
             held.dissolve(io, interface) catch return .unprovable;
@@ -291,20 +350,33 @@ pub fn inspect(io: std.Io, interface: *const Interface) Sighting {
         },
         .busy => return .busy,
         .unusable => return .unprovable,
-        .absent => {
-            const dir = std.Io.Dir.cwd().openDir(io, interface.path(), .{}) catch |err| return switch (err) {
-                error.FileNotFound => .vanished,
-                else => .unprovable,
-            };
-            defer dir.close(io);
-            if (dir.statFile(io, socket_name, .{ .follow_symlinks = false })) |_| return .unprovable else |err| switch (err) {
-                error.FileNotFound => {},
-                else => return .unprovable,
-            }
-            if (interface.* == .derived) std.Io.Dir.cwd().deleteDir(io, interface.path()) catch {};
-            return .vanished;
-        },
+        .absent => return .vanished,
     }
+}
+
+/// Whether some Host holds D, read without removing anything: the MySQL Store's
+/// observation, which asks this owner instead of reading the lock itself. A
+/// shared flock on D is taken and dropped, and a previous-release holder of
+/// `rui.lock` counts as held.
+pub const Occupancy = enum { held, free, absent, unusable };
+
+pub fn occupancy(io: std.Io, directory: []const u8) Occupancy {
+    const dir = openDirectory(directory) catch |err| return switch (err) {
+        error.FileNotFound => .absent,
+        else => .unusable,
+    };
+    defer dir.close(io);
+    privateDirectory(dir.handle) catch return .unusable;
+    switch (std.posix.errno(std.posix.system.flock(dir.handle, std.posix.LOCK.SH | std.posix.LOCK.NB))) {
+        .SUCCESS => {},
+        .AGAIN => return .held,
+        else => return .unusable,
+    }
+    return switch (legacyState(dir.handle)) {
+        .absent, .free => .free,
+        .held => .held,
+        .unusable => .unusable,
+    };
 }
 
 /// The upgrade census: inspects every derived D of this user, removing the
@@ -336,7 +408,7 @@ fn censusIn(allocator: std.mem.Allocator, io: std.Io, runtime: []const u8, skip:
         else => return err,
     };
     defer directory.close(io);
-    _ = try privateDirectory(directory.handle);
+    try privateDirectory(directory.handle);
     var found: std.ArrayList([]u8) = .empty;
     errdefer {
         for (found.items) |path| allocator.free(path);
@@ -369,7 +441,7 @@ fn censusIn(allocator: std.mem.Allocator, io: std.Io, runtime: []const u8, skip:
 }
 
 fn socketPresent(io: std.Io, interface: *const Interface) bool {
-    const dir = std.Io.Dir.cwd().openDir(io, interface.path(), .{}) catch return false;
+    const dir = openDirectory(interface.path()) catch return false;
     defer dir.close(io);
     _ = dir.statFile(io, socket_name, .{ .follow_symlinks = false }) catch return false;
     return true;
@@ -385,7 +457,7 @@ const testing = std.testing;
 /// What is left in one D, read independently of this module.
 const Left = struct {
     directory: bool = true,
-    lock: bool = false,
+    legacy: bool = false,
     socket: ?std.Io.File.Kind = null,
     extra: bool = false,
 };
@@ -397,28 +469,45 @@ fn leftIn(io: std.Io, directory: []const u8) !Left {
     };
     defer dir.close(io);
     var left: Left = .{};
-    left.lock = if (dir.statFile(io, lock_name, .{ .follow_symlinks = false })) |_| true else |_| false;
+    left.legacy = if (dir.statFile(io, legacy_lock_name, .{ .follow_symlinks = false })) |_| true else |_| false;
     left.socket = if (dir.statFile(io, socket_name, .{ .follow_symlinks = false })) |stat| stat.kind else |_| null;
     left.extra = if (dir.statFile(io, "extra", .{ .follow_symlinks = false })) |_| true else |_| false;
     return left;
 }
 
-const LockState = enum { absent, free, held_elsewhere };
+/// Who holds D's lock. A `null` lock in a row means D is absent.
+const LockState = enum { free, held_elsewhere };
+const LegacyFile = enum { absent, free, held_elsewhere };
 const SocketState = enum { absent, socket, regular, symlink };
 
-/// Builds one D in its row's state. A free lock is a lock file nobody holds,
-/// which is what a SIGKILLed holder leaves; `held_elsewhere` returns the
-/// other holder's descriptor.
-fn arrange(io: std.Io, directory: []const u8, lock: LockState, socket: SocketState, extra: bool) !?std.Io.File {
-    const dir = try std.Io.Dir.cwd().createDirPathOpen(io, directory, .{ .permissions = .fromMode(0o700) });
-    defer dir.close(io);
-    var holder: ?std.Io.File = null;
-    if (lock != .absent) {
-        const file = try dir.createFile(io, lock_name, .{ .read = true, .truncate = false, .permissions = .fromMode(0o600) });
-        if (lock == .held_elsewhere) {
-            try testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(std.posix.system.flock(file.handle, std.posix.LOCK.EX | std.posix.LOCK.NB)));
-            holder = file;
-        } else file.close(io);
+/// The open descriptors a test keeps: a holder keeps its lock until released.
+const Holders = struct {
+    dir: ?std.Io.Dir = null,
+    legacy: ?std.Io.File = null,
+
+    fn release(self: Holders, io: std.Io) void {
+        if (self.legacy) |file| file.close(io);
+        if (self.dir) |dir| dir.close(io);
+    }
+};
+
+fn expectFlock(fd: std.posix.fd_t) !void {
+    try testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB)));
+}
+
+/// Builds one present D in a row's state. A free lock is no holder; a held
+/// one is a descriptor that holds the flock, which the caller releases.
+fn arrange(io: std.Io, directory: []const u8, lock: LockState, legacy: LegacyFile, socket: SocketState, extra: bool) !Holders {
+    // A flock needs a real descriptor: the directory is reopened the way a Host opens it.
+    (try std.Io.Dir.cwd().createDirPathOpen(io, directory, .{ .permissions = .fromMode(0o700) })).close(io);
+    var holders: Holders = .{ .dir = try openDirectory(directory) };
+    errdefer holders.release(io);
+    const dir = holders.dir.?;
+    if (lock == .held_elsewhere) try expectFlock(dir.handle);
+    if (legacy != .absent) {
+        const file = try dir.createFile(io, legacy_lock_name, .{ .read = true, .truncate = false, .permissions = .fromMode(0o600) });
+        holders.legacy = file;
+        if (legacy == .held_elsewhere) try expectFlock(file.handle);
     }
     switch (socket) {
         .absent => {},
@@ -433,7 +522,7 @@ fn arrange(io: std.Io, directory: []const u8, lock: LockState, socket: SocketSta
         .symlink => try dir.symLink(io, "elsewhere", socket_name, .{}),
     }
     if (extra) (try dir.createFile(io, "extra", .{})).close(io);
-    return holder;
+    return holders;
 }
 
 fn acceptsConnection(io: std.Io, path: []const u8) bool {
@@ -446,9 +535,11 @@ fn acceptsConnection(io: std.Io, path: []const u8) bool {
 const Actor = enum { census, host };
 
 const OwnershipRow = struct {
-    lock: LockState,
-    socket: SocketState,
-    extra: bool,
+    /// null: D is absent.
+    lock: ?LockState,
+    legacy: LegacyFile = .absent,
+    socket: SocketState = .absent,
+    extra: bool = false,
     /// What a census look reports, and what it leaves.
     sighting: Sighting,
     after: Left,
@@ -458,8 +549,8 @@ const OwnershipRow = struct {
 
 fn ownershipRow(io: std.Io, derived: *const Interface, row: OwnershipRow, actor: Actor) !void {
     const directory = derived.path();
-    const holder = try arrange(io, directory, row.lock, row.socket, row.extra);
-    defer if (holder) |file| file.close(io);
+    const holders: Holders = if (row.lock) |lock| try arrange(io, directory, lock, row.legacy, row.socket, row.extra) else .{};
+    defer holders.release(io);
     if (actor == .census) {
         try testing.expectEqual(row.sighting, inspect(io, derived));
         try testing.expectEqual(row.after, try leftIn(io, directory));
@@ -478,8 +569,7 @@ fn ownershipRow(io: std.Io, derived: *const Interface, row: OwnershipRow, actor:
         try testing.expectEqual(row.serves, .unexpected_socket);
         try testing.expectEqual(error.UnexpectedSocketPath, err);
         try testing.expectError(error.UnexpectedSocketPath, endpoint.retire());
-        // A node Rui did not make keeps the lock file, which nobody holds now.
-        try testing.expect((try leftIn(io, directory)).lock);
+        try testing.expectEqual(row.after, try leftIn(io, directory));
         try testing.expectEqual(Sighting.unprovable, inspect(io, derived));
         return;
     };
@@ -493,13 +583,13 @@ fn ownershipRow(io: std.Io, derived: *const Interface, row: OwnershipRow, actor:
     listener.deinit(io);
     try endpoint.unbind();
     try testing.expectEqual(Sighting.busy, inspect(io, derived));
-    try testing.expectEqual(Left{ .lock = true, .extra = row.extra }, try leftIn(io, directory));
+    try testing.expectEqual(Left{ .legacy = row.legacy != .absent, .extra = row.extra }, try leftIn(io, directory));
     try endpoint.retire();
     try endpoint.retire();
     try testing.expectEqual(if (row.extra) Left{ .extra = true } else Left{ .directory = false }, try leftIn(io, directory));
 }
 
-test "SH-11 only the holder of an interface directory's rui.lock removes its endpoint" {
+test "SH-11 only the holder of an interface directory's lock removes its endpoint" {
     const io = testing.io;
     var runtime = try socket_fixture.Directory.init();
     defer runtime.cleanup();
@@ -515,22 +605,22 @@ test "SH-11 only the holder of an interface directory's rui.lock removes its end
     try testing.expect(try Interface.within(root, root) == .configured);
 
     // Ownership table. Expected outcomes are the contract's, written out per
-    // row: only a lock this call holds lets anything be removed, and only a
-    // Unix socket, the lock file and an empty derived D are ever removed.
+    // row: only the holder of D's lock lets anything be removed, and only a
+    // Unix socket, a free legacy lock file and an empty derived D go.
     const rows = [_]OwnershipRow{
-        .{ .lock = .absent, .socket = .absent, .extra = false, .sighting = .vanished, .after = .{ .directory = false }, .serves = .yes },
-        .{ .lock = .absent, .socket = .absent, .extra = true, .sighting = .vanished, .after = .{ .extra = true }, .serves = .yes },
-        .{ .lock = .absent, .socket = .socket, .extra = false, .sighting = .unprovable, .after = .{ .socket = .unix_domain_socket }, .serves = .yes },
-        .{ .lock = .absent, .socket = .regular, .extra = false, .sighting = .unprovable, .after = .{ .socket = .file }, .serves = .unexpected_socket },
-        .{ .lock = .absent, .socket = .symlink, .extra = true, .sighting = .unprovable, .after = .{ .socket = .sym_link, .extra = true }, .serves = .unexpected_socket },
-        .{ .lock = .free, .socket = .absent, .extra = false, .sighting = .reclaimed, .after = .{ .directory = false }, .serves = .yes },
-        .{ .lock = .free, .socket = .socket, .extra = false, .sighting = .reclaimed, .after = .{ .directory = false }, .serves = .yes },
+        .{ .lock = null, .sighting = .vanished, .after = .{ .directory = false }, .serves = .yes },
+        .{ .lock = .free, .sighting = .reclaimed, .after = .{ .directory = false }, .serves = .yes },
+        .{ .lock = .free, .extra = true, .sighting = .reclaimed, .after = .{ .extra = true }, .serves = .yes },
+        .{ .lock = .free, .socket = .socket, .sighting = .reclaimed, .after = .{ .directory = false }, .serves = .yes },
         .{ .lock = .free, .socket = .socket, .extra = true, .sighting = .reclaimed, .after = .{ .extra = true }, .serves = .yes },
-        .{ .lock = .free, .socket = .regular, .extra = false, .sighting = .unprovable, .after = .{ .lock = true, .socket = .file }, .serves = .unexpected_socket },
-        .{ .lock = .free, .socket = .symlink, .extra = false, .sighting = .unprovable, .after = .{ .lock = true, .socket = .sym_link }, .serves = .unexpected_socket },
-        .{ .lock = .held_elsewhere, .socket = .absent, .extra = false, .sighting = .busy, .after = .{ .lock = true }, .serves = .in_use },
-        .{ .lock = .held_elsewhere, .socket = .socket, .extra = true, .sighting = .busy, .after = .{ .lock = true, .socket = .unix_domain_socket, .extra = true }, .serves = .in_use },
-        .{ .lock = .held_elsewhere, .socket = .regular, .extra = false, .sighting = .busy, .after = .{ .lock = true, .socket = .file }, .serves = .in_use },
+        .{ .lock = .free, .socket = .regular, .sighting = .unprovable, .after = .{ .socket = .file }, .serves = .unexpected_socket },
+        .{ .lock = .free, .socket = .symlink, .extra = true, .sighting = .unprovable, .after = .{ .socket = .sym_link, .extra = true }, .serves = .unexpected_socket },
+        .{ .lock = .free, .legacy = .free, .sighting = .reclaimed, .after = .{ .directory = false }, .serves = .yes },
+        .{ .lock = .free, .legacy = .free, .socket = .socket, .sighting = .reclaimed, .after = .{ .directory = false }, .serves = .yes },
+        .{ .lock = .free, .legacy = .held_elsewhere, .sighting = .busy, .after = .{ .legacy = true }, .serves = .in_use },
+        .{ .lock = .held_elsewhere, .sighting = .busy, .after = .{}, .serves = .in_use },
+        .{ .lock = .held_elsewhere, .socket = .socket, .extra = true, .sighting = .busy, .after = .{ .socket = .unix_domain_socket, .extra = true }, .serves = .in_use },
+        .{ .lock = .held_elsewhere, .socket = .regular, .sighting = .busy, .after = .{ .socket = .file }, .serves = .in_use },
     };
     for (rows) |row| for ([_]Actor{ .census, .host }) |actor| {
         errdefer std.debug.print("endpoint ownership row: {any} actor={s}\n", .{ row, @tagName(actor) });
@@ -540,16 +630,15 @@ test "SH-11 only the holder of an interface directory's rui.lock removes its end
 
     // Crash points: a Host killed after each step of its life leaves a state
     // the next look proves dead and removes, and the next claim serves from.
-    const Step = enum { mkdir, lock_created, claimed, bound, socket_unlinked, lock_unlinked };
-    for (std.enums.values(Step)) |step| {
-        errdefer std.debug.print("endpoint crash point: {s}\n", .{@tagName(step)});
+    const Crash = enum { created, claimed, bound, socket_unlinked };
+    for (std.enums.values(Crash)) |crash| {
+        errdefer std.debug.print("endpoint crash point: {s}\n", .{@tagName(crash)});
         for ([_]bool{ true, false }) |census_first| {
-            switch (step) {
-                .mkdir, .lock_unlinked => _ = try arrange(io, directory, .absent, .absent, false),
-                .lock_created, .socket_unlinked => _ = try arrange(io, directory, .free, .absent, false),
+            switch (crash) {
+                .created, .socket_unlinked => (try arrange(io, directory, .free, .absent, .absent, false)).release(io),
                 .claimed, .bound => {
                     var endpoint = try claim(io, derived);
-                    if (step == .bound) {
+                    if (crash == .bound) {
                         var listener = try endpoint.listen(.{});
                         listener.deinit(io);
                     }
@@ -594,11 +683,13 @@ test "SH-11 only the holder of an interface directory's rui.lock removes its end
         var paths: [names.len][Path.max_bytes]u8 = undefined;
         var interfaces: [names.len]Interface = undefined;
         for (names, &paths, &interfaces) |name, *buffer, *interface| interface.* = try Interface.within(root, try std.fmt.bufPrint(buffer, "{s}/{s}", .{ root, name }));
-        _ = try arrange(io, interfaces[0].path(), .free, .socket, false);
+        const dead = try arrange(io, interfaces[0].path(), .free, .absent, .socket, false);
+        defer dead.release(io);
         var live = try claim(io, interfaces[1]);
         var live_listener = try live.listen(.{});
         errdefer live_listener.deinit(io);
-        _ = try arrange(io, interfaces[2].path(), .absent, .socket, false);
+        const unprovable = try arrange(io, interfaces[2].path(), .free, .absent, .regular, false);
+        defer unprovable.release(io);
         var starting = try claim(io, interfaces[3]);
         try runtime.dir.createDir(io, "not-an-endpoint", .fromMode(0o700));
         (try runtime.dir.createFile(io, "0123456789abcdef0123456789abcdef.sock", .{})).close(io);
@@ -610,7 +701,7 @@ test "SH-11 only the holder of an interface directory's rui.lock removes its end
         try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{s}/{s}", .{ interfaces[2].path(), socket_name }), found[1]);
         try testing.expectEqual(Left{ .directory = false }, try leftIn(io, interfaces[0].path()));
         try testing.expect(acceptsConnection(io, found[0]));
-        try testing.expectEqual(Left{ .lock = true }, try leftIn(io, interfaces[3].path()));
+        try testing.expectEqual(Left{}, try leftIn(io, interfaces[3].path()));
         _ = try runtime.dir.statFile(io, "not-an-endpoint", .{});
         _ = try runtime.dir.statFile(io, "0123456789abcdef0123456789abcdef.sock", .{});
         // A sweep from the starting Host leaves itself and every live endpoint alone.
@@ -618,9 +709,276 @@ test "SH-11 only the holder of an interface directory's rui.lock removes its end
         const swept = try censusIn(testing.allocator, io, root, interfaces[3].path());
         defer freeSockets(testing.allocator, swept);
         try testing.expectEqual(@as(usize, 2), swept.len);
-        try testing.expect((try leftIn(io, interfaces[3].path())).lock);
+        try testing.expectEqual(Left{}, try leftIn(io, interfaces[3].path()));
         try testing.expectEqual(Sighting.reclaimed, inspect(io, &interfaces[3]));
         live_listener.deinit(io);
         try live.retire();
     }
+}
+
+/// The cleaners' published rules as pure predicates over one node (evidence.md
+/// has the sources). The worst case is assumed: every age is past, so only a
+/// node the Host refreshed is kept by its timestamps.
+const Cleaner = enum {
+    /// Apple 110.clean-tmps (crontabs-54) and tmp_cleaner (macOS 14+, reported):
+    /// `-type f` with every timestamp old, and `-type d -empty` with mtime old.
+    /// Locks are ignored (E1, E3).
+    darwin_find,
+    /// systemd-tmpfiles before v242: ages everything except live sockets, and
+    /// ignores locks (E9, E11).
+    tmpfiles_pre242,
+    /// v242 to v253: also skips a directory it cannot LOCK_EX, and everything below it (E9).
+    tmpfiles_242,
+    /// v254 and later: also skips a non-directory it cannot LOCK_EX (E10).
+    tmpfiles_254,
+};
+
+/// One node as a cleaner's rule reads it.
+const Node = struct {
+    kind: enum { directory, socket, regular },
+    /// A directory with no entries left (a cleaner removes it only then).
+    empty: bool = false,
+    /// A socket that accepts connections (E11: a live socket is spared).
+    live: bool = false,
+    /// Someone holds LOCK_EX on it.
+    locked: bool = false,
+    /// The Host's timestamps are newer than the cleaner's age.
+    refreshed: bool = false,
+};
+
+fn cleanerRemoves(cleaner: Cleaner, node: Node) bool {
+    if (node.refreshed) return false;
+    if (node.kind == .socket and node.live) return false;
+    if (node.locked) switch (cleaner) {
+        .darwin_find, .tmpfiles_pre242 => {},
+        .tmpfiles_242 => if (node.kind == .directory) return false,
+        .tmpfiles_254 => return false,
+    };
+    return switch (node.kind) {
+        .regular => true,
+        .socket => cleaner != .darwin_find,
+        .directory => node.empty,
+    };
+}
+
+/// Whether someone else holds LOCK_EX on D. A probe, as a lock-honouring cleaner takes it.
+fn directoryLocked(io: std.Io, directory: []const u8) !bool {
+    const dir = try openDirectory(directory);
+    defer dir.close(io);
+    return switch (std.posix.errno(std.posix.system.flock(dir.handle, std.posix.LOCK.EX | std.posix.LOCK.NB))) {
+        .SUCCESS => false,
+        .AGAIN => true,
+        else => error.EndpointLockFailed,
+    };
+}
+
+/// Applies one cleaner's pass to the real entries of D, removing what its rule
+/// removes. Returns whether D itself went.
+fn applyCleaner(io: std.Io, cleaner: Cleaner, directory: []const u8, refreshed: bool) !bool {
+    const dir = std.Io.Dir.cwd().openDir(io, directory, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return true,
+        else => return err,
+    };
+    defer dir.close(io);
+    var remaining: usize = 0;
+    var entries = dir.iterate();
+    while (try entries.next(io)) |entry| {
+        var buffer: [std.Io.net.UnixAddress.max_len]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buffer, "{s}/{s}", .{ directory, entry.name });
+        const stat = try dir.statFile(io, entry.name, .{ .follow_symlinks = false });
+        const node: Node = if (stat.kind == .unix_domain_socket)
+            .{ .kind = .socket, .live = acceptsConnection(io, path) }
+        else
+            .{ .kind = .regular };
+        if (cleanerRemoves(cleaner, node)) try dir.deleteFile(io, entry.name) else remaining += 1;
+    }
+    const node: Node = .{ .kind = .directory, .empty = remaining == 0, .locked = try directoryLocked(io, directory), .refreshed = refreshed };
+    if (!cleanerRemoves(cleaner, node)) return false;
+    try std.Io.Dir.cwd().deleteDir(io, directory);
+    return true;
+}
+
+/// Sets D's times to the epoch, as a claim from days ago would have left them.
+fn backdate(dir: std.Io.Dir) !void {
+    const epoch = [2]c.timespec{ .{ .tv_sec = 0, .tv_nsec = 0 }, .{ .tv_sec = 0, .tv_nsec = 0 } };
+    if (c.futimens(dir.handle, &epoch) != 0) return error.BackdateFailed;
+}
+
+test "SH-11 no OS temp cleaner's rules remove a node of a live endpoint (#2128)" {
+    const io = testing.io;
+    var runtime = try socket_fixture.Directory.init();
+    defer runtime.cleanup();
+    const root = runtime.root[0..runtime.root_len];
+    var directory_buffer: [Path.max_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
+    const derived = try Interface.within(root, directory);
+
+    const Phase = enum { claimed, claimed_stalled, bound, unbound };
+    for (std.enums.values(Phase)) |phase| for (std.enums.values(Cleaner)) |cleaner| {
+        errdefer std.debug.print("endpoint cleaner row: phase={s} cleaner={s}\n", .{ @tagName(phase), @tagName(cleaner) });
+        var endpoint = try claim(io, derived);
+        var listener: ?std.Io.net.Server = null;
+        switch (phase) {
+            .claimed, .claimed_stalled => {},
+            .bound => listener = try endpoint.listen(.{}),
+            .unbound => {
+                var served = try endpoint.listen(.{});
+                served.deinit(io);
+                try endpoint.unbind();
+            },
+        }
+        // A stalled claim: D's times are as old as the claim's, long ago.
+        if (phase == .claimed_stalled) try backdate(endpoint.held.?.dir);
+        // Every phase but a stall has the Host's own refresh (claim, bind or unbind) on D.
+        const removed = try applyCleaner(io, cleaner, directory, phase != .claimed_stalled);
+        if (removed) {
+            // Only a stalled claim under a cleaner that ignores locks loses D.
+            try testing.expectEqual(Phase.claimed_stalled, phase);
+            try testing.expect(cleaner == .darwin_find or cleaner == .tmpfiles_pre242);
+            try testing.expectError(error.EndpointLost, endpoint.listen(.{}));
+            try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
+            try endpoint.retire();
+            continue;
+        }
+        switch (phase) {
+            .claimed, .claimed_stalled => {
+                var served = try endpoint.listen(.{});
+                var socket_buffer: [std.Io.net.UnixAddress.max_len]u8 = undefined;
+                try testing.expect(acceptsConnection(io, try endpoint.socketPath(&socket_buffer)));
+                try testing.expectEqual(Sighting.busy, inspect(io, &derived));
+                served.deinit(io);
+                try endpoint.unbind();
+            },
+            .bound => {
+                var socket_buffer: [std.Io.net.UnixAddress.max_len]u8 = undefined;
+                try testing.expect(acceptsConnection(io, try endpoint.socketPath(&socket_buffer)));
+                try testing.expectEqual(Sighting.busy, inspect(io, &derived));
+                listener.?.deinit(io);
+                try endpoint.unbind();
+            },
+            .unbound => try testing.expectEqual(Sighting.busy, inspect(io, &derived)),
+        }
+        try endpoint.retire();
+        try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
+    };
+}
+
+test "SH-11 the cleaner model matches the old regular rui.lock it replaces (#2128)" {
+    // The pre-#2128 endpoint: a regular, locked rui.lock. Every rule but
+    // v254's removes it, which is why the lock file had to go.
+    const locked_file: Node = .{ .kind = .regular, .locked = true };
+    try testing.expect(cleanerRemoves(.darwin_find, locked_file));
+    try testing.expect(cleanerRemoves(.tmpfiles_pre242, locked_file));
+    try testing.expect(cleanerRemoves(.tmpfiles_242, locked_file));
+    try testing.expect(!cleanerRemoves(.tmpfiles_254, locked_file));
+    // The new endpoint's directory, locked and empty: only darwin ignores the lock.
+    const locked_empty: Node = .{ .kind = .directory, .empty = true, .locked = true };
+    try testing.expect(cleanerRemoves(.darwin_find, locked_empty));
+    try testing.expect(!cleanerRemoves(.tmpfiles_242, locked_empty));
+    // A live socket is spared by every rule.
+    for (std.enums.values(Cleaner)) |cleaner| try testing.expect(!cleanerRemoves(cleaner, .{ .kind = .socket, .live = true }));
+}
+
+test "SH-11 a claimed directory's times are refreshed, so an empty D is not old" {
+    const io = testing.io;
+    var runtime = try socket_fixture.Directory.init();
+    defer runtime.cleanup();
+    const root = runtime.root[0..runtime.root_len];
+    var directory_buffer: [Path.max_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
+    const derived = try Interface.within(root, directory);
+    (try arrange(io, directory, .free, .absent, .absent, false)).release(io);
+    const old = try openDirectory(directory);
+    defer old.close(io);
+    try backdate(old);
+    try testing.expectEqual(@as(i96, 0), (try old.stat(io)).mtime.nanoseconds);
+    var endpoint = try claim(io, derived);
+    defer endpoint.retire() catch {};
+    try testing.expect((try old.stat(io)).mtime.nanoseconds != 0);
+}
+
+test "SH-11 a lock on a directory replaced after the open proves nothing" {
+    const io = testing.io;
+    var runtime = try socket_fixture.Directory.init();
+    defer runtime.cleanup();
+    const root = runtime.root[0..runtime.root_len];
+    var directory_buffer: [Path.max_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
+    const derived = try Interface.within(root, directory);
+    (try arrange(io, directory, .free, .absent, .absent, false)).release(io);
+
+    // Between the open and the flock, D is replaced by a new directory.
+    const Replace = struct {
+        var path: []const u8 = "";
+        fn pause(stage: Stage) void {
+            if (stage != .opened) return;
+            std.Io.Dir.cwd().deleteDir(testing.io, path) catch unreachable;
+            std.Io.Dir.cwd().createDir(testing.io, path, .fromMode(0o700)) catch unreachable;
+        }
+    };
+    Replace.path = directory;
+    try testing.expect(lockVerifiedPaused(io, directory, Replace.pause) == .busy);
+    // The new D is free and empty; the look that follows reclaims it.
+    try testing.expectEqual(Sighting.reclaimed, inspect(io, &derived));
+}
+
+test "SH-11 a claim whose directory is removed before its open retries and holds it" {
+    const io = testing.io;
+    var runtime = try socket_fixture.Directory.init();
+    defer runtime.cleanup();
+    const root = runtime.root[0..runtime.root_len];
+    var directory_buffer: [Path.max_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
+    const derived = try Interface.within(root, directory);
+
+    // Right after the claim's mkdir, a census removes the empty D, once.
+    const Remove = struct {
+        var path: []const u8 = "";
+        var armed = false;
+        fn pause(stage: Stage) void {
+            if (stage != .created or !armed) return;
+            armed = false;
+            std.Io.Dir.cwd().deleteDir(testing.io, path) catch unreachable;
+        }
+    };
+    Remove.path = directory;
+    Remove.armed = true;
+    var endpoint = try claimPaused(io, derived, Remove.pause);
+    try testing.expect(!Remove.armed);
+    try testing.expectEqual(Sighting.busy, inspect(io, &derived));
+    try endpoint.retire();
+    try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
+}
+
+test "SH-11 listen refuses to bind into a directory removed after claim (EndpointLost)" {
+    const io = testing.io;
+    var runtime = try socket_fixture.Directory.init();
+    defer runtime.cleanup();
+    const root = runtime.root[0..runtime.root_len];
+    var directory_buffer: [Path.max_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
+    const derived = try Interface.within(root, directory);
+
+    var endpoint = try claim(io, derived);
+    try std.Io.Dir.cwd().deleteDir(io, directory);
+    // A replacement at the path must not receive the socket either.
+    try testing.expectError(error.EndpointLost, endpoint.listen(.{}));
+    try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
+    try endpoint.retire();
+}
+
+test "SH-11 a held legacy rui.lock makes its directory busy for a claim and a look" {
+    const io = testing.io;
+    var runtime = try socket_fixture.Directory.init();
+    defer runtime.cleanup();
+    const root = runtime.root[0..runtime.root_len];
+    var directory_buffer: [Path.max_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
+    const derived = try Interface.within(root, directory);
+
+    const holders = try arrange(io, directory, .free, .held_elsewhere, .socket, false);
+    defer holders.release(io);
+    try testing.expectEqual(Occupancy.held, occupancy(io, directory));
+    try testing.expectError(error.RuntimeDirectoryInUse, claim(io, derived));
+    try testing.expectEqual(Sighting.busy, inspect(io, &derived));
 }
