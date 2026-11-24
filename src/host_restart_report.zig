@@ -117,7 +117,6 @@ pub const Entry = struct {
         if (self.socket) |socket| allocator.free(socket);
         if (self.directory) |directory| allocator.free(directory);
         if (self.store) |store| allocator.free(store);
-        if (self.state == .failed) allocator.free(self.state.failed.cause);
     }
 };
 
@@ -219,7 +218,7 @@ pub fn writeFailure(writer: *std.Io.Writer, store: []const u8, failure: Failure)
         try field(writer, store);
         try writer.writeAll(": ");
     }
-    try writer.print("failed at {s} ({s}): {s}\n", .{ @tagName(failure.stage), failure.cause, switch (failure.stage) {
+    try writer.print("failed at {s} ({s}): {s}\n", .{ @tagName(failure.stage), failure.cause.slice(), switch (failure.stage) {
         .discovery => "could not read this Host's sources; inspect with its owning client, then retry.",
         .observation => "could not confirm this Host; inspect with its owning client, then retry.",
         .selection => "selected installed build has no verified release version; install a managed release and retry.",
@@ -235,7 +234,7 @@ fn writeEntryFailure(writer: *std.Io.Writer, entry: *const Entry, failure: Failu
     } else if (entry.pid) |pid| {
         try writer.print("Host process {d}", .{pid});
     } else try writer.writeAll("Host sources unavailable");
-    try writer.print("): failed at discovery: Host state is unconfirmed ({s}); inspect this {s} with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n", .{ failure.cause, if (entry.socket != null) "socket and its Store" else "Host process" });
+    try writer.print("): failed at discovery: Host state is unconfirmed ({s}); inspect this {s} with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n", .{ failure.cause.slice(), if (entry.socket != null) "socket and its Store" else "Host process" });
 }
 
 pub const OptionalOutput = struct {
@@ -387,7 +386,7 @@ test "every failed stage names its cause" {
     var buffer: [512]u8 = undefined;
     for ([_]Stage{ .discovery, .observation, .selection }) |stage| {
         var writer: std.Io.Writer = .fixed(&buffer);
-        const entry: Entry = .{ .socket = "/run/x.sock", .store = if (stage == .discovery) null else "/store", .state = .{ .failed = .{ .stage = stage, .cause = "ConnectionRefused" } } };
+        const entry: Entry = .{ .socket = "/run/x.sock", .store = if (stage == .discovery) null else "/store", .state = .{ .failed = .of(stage, error.ConnectionRefused) } };
         try writeEntryFailure(&writer, &entry, entry.state.failed);
         const text = writer.buffered();
         try std.testing.expect(std.mem.indexOf(u8, text, "(ConnectionRefused)") != null);
@@ -413,7 +412,7 @@ test "restart batch retains DIR selection independently of wire identity and out
 }
 
 test "restart reports a positively identified Host without a socket or directory" {
-    const entry: Entry = .{ .pid = 42, .state = .{ .failed = .{ .stage = .discovery, .cause = "HostServeStoreMissing" } } };
+    const entry: Entry = .{ .pid = 42, .state = .{ .failed = .of(.discovery, error.HostServeStoreMissing) } };
     var buffer: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try writeEntryFailure(&writer, &entry, entry.state.failed);
@@ -453,8 +452,8 @@ test "SH-127 a failed Store entry keeps its stage, cause and certainty across ev
     const Certainty = enum { ok, failed, unconfirmed };
     const refusal: activation.Outcome = .{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "cannot start") } };
     const cases = [_]struct { name: []const u8, state: ?@FieldType(Entry, "state"), selected: activation.Selected, text: []const u8, certainty: Certainty }{
-        .{ .name = "observation failure", .state = .{ .failed = .{ .stage = .observation, .cause = "OutOfMemory" } }, .selected = .{ .failed = .{ .stage = .observation, .cause = "OutOfMemory" } }, .text = "/store: failed at observation (OutOfMemory): could not confirm this Host; inspect with its owning client, then retry.\n", .certainty = .failed },
-        .{ .name = "selection failure", .state = .{ .failed = .{ .stage = .selection, .cause = "NoVerifiedRelease" } }, .selected = .{ .failed = .{ .stage = .selection, .cause = "NoVerifiedRelease" } }, .text = "/store: failed at selection (NoVerifiedRelease): selected installed build has no verified release version; install a managed release and retry.\n", .certainty = .failed },
+        .{ .name = "observation failure", .state = .{ .failed = .of(.observation, error.OutOfMemory) }, .selected = .{ .failed = .of(.observation, error.OutOfMemory) }, .text = "/store: failed at observation (OutOfMemory): could not confirm this Host; inspect with its owning client, then retry.\n", .certainty = .failed },
+        .{ .name = "selection failure", .state = .{ .failed = .of(.selection, error.NoVerifiedRelease) }, .selected = .{ .failed = .of(.selection, error.NoVerifiedRelease) }, .text = "/store: failed at selection (NoVerifiedRelease): selected installed build has no verified release version; install a managed release and retry.\n", .certainty = .failed },
         .{ .name = "absent", .state = null, .selected = .{ .outcome = .not_needed }, .text = "No running Hosts.\n", .certainty = .ok },
         .{ .name = "not_needed", .state = .{ .outcome = .not_needed }, .selected = .{ .outcome = .not_needed }, .text = "/store: no longer running; no Host started\n", .certainty = .ok },
         .{ .name = "refused", .state = .{ .outcome = refusal }, .selected = .{ .outcome = refusal }, .text = "/store: refused at checking\n", .certainty = .failed },
@@ -481,6 +480,24 @@ test "SH-127 a failed Store entry keeps its stage, cause and certainty across ev
             .unconfirmed => try std.testing.expectError(error.HostRestartUnconfirmed, batch.result()),
         }
     }
+}
+
+test "SH-127 a launch diagnostic renders a failed entry after its Batch is destroyed" {
+    const host_launch = @import("host_launch.zig");
+    const host_start = @import("host_start.zig");
+    const allocator = std.testing.allocator;
+    const entries = try allocator.alloc(Entry, 1);
+    entries[0] = .{ .directory = try allocator.dupe(u8, "/store"), .state = .{ .failed = .of(.observation, error.OutOfMemory) } };
+    var batch: Batch = .{ .entries = entries };
+    const selected = batch.selected("/store");
+    try std.testing.expect(selected == .failed);
+    batch.deinit(allocator);
+    var result: host_launch.Result = .failed(.setup, error.HostRestartUnconfirmed);
+    host_start.handoverFailed(&result, selected);
+    var bytes: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&bytes);
+    try host_launch.writeDiagnostics(&result, &writer, 0);
+    try std.testing.expectEqualStrings("Host handover: failed at observation (OutOfMemory): could not confirm this Host; inspect with its owning client, then retry.\n", writer.buffered());
 }
 
 test "SH-129 batch exit preserves uncertainty across mixed Host results" {

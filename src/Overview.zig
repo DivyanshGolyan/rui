@@ -4029,8 +4029,8 @@ test "SUI-133 Host recovery renders the launch result cause without confusing fa
         .{ .launch = Handover.summary(.{ .unconfirmed = .awaiting_retirement }), .words = "retire unconfirmed", .retry = true },
         .{ .launch = Handover.summary(.{ .unconfirmed = .starting }), .words = "start unconfirmed", .retry = true },
         .{ .launch = Handover.summary(.{ .unconfirmed = .verifying }), .words = "verify unconfirmed", .retry = true },
-        .{ .launch = Handover.selectedSummary(.{ .failed = .{ .stage = .observation, .cause = "OutOfMemory" } }), .words = "observation failed", .retry = true },
-        .{ .launch = Handover.selectedSummary(.{ .failed = .{ .stage = .selection, .cause = "NoVerifiedRelease" } }), .words = "build unverified", .retry = true },
+        .{ .launch = Handover.selectedSummary(.{ .failed = .of(.observation, error.OutOfMemory) }), .words = "observation failed", .retry = true },
+        .{ .launch = Handover.selectedSummary(.{ .failed = .of(.selection, error.NoVerifiedRelease) }), .words = "build unverified", .retry = true },
     };
     for (cases) |case| for ([_]HostRecovery.Availability{ .ready, .stopping, .stopped }) |after| {
         errdefer std.debug.print("after={s} words={s}\n", .{ @tagName(after), case.words });

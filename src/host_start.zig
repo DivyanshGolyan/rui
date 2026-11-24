@@ -1607,7 +1607,7 @@ pub fn handoverFailed(result: *HostLaunchResult, selected: @import("host_activat
 test "SH-122 a failed Store entry reports its stage and cause as an ordinary failure" {
     const host_launch = @import("host_launch.zig");
     var result: HostLaunchResult = .failed(.setup, error.HostRestartUnconfirmed);
-    handoverFailed(&result, .{ .failed = .{ .stage = .observation, .cause = "OutOfMemory" } });
+    handoverFailed(&result, .{ .failed = .of(.observation, error.OutOfMemory) });
     try std.testing.expectEqual(error.HostRestartFailed, result.outcome.failed.cause.err);
     try std.testing.expectEqualStrings("observation failed", result.summary().failed.words());
     var bytes: [512]u8 = undefined;

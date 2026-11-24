@@ -156,10 +156,7 @@ fn receiveEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(host_resta
     errdefer if (directory) |path| allocator.free(path);
     const store = if (entry.store) |path| try allocator.dupe(u8, path) else null;
     errdefer if (store) |path| allocator.free(path);
-    var state = entry.state;
-    if (state == .failed) state.failed.cause = try allocator.dupe(u8, state.failed.cause);
-    errdefer if (state == .failed) allocator.free(state.failed.cause);
-    try entries.append(allocator, .{ .socket = socket, .directory = directory, .pid = entry.pid, .store = store, .state = state });
+    try entries.append(allocator, .{ .socket = socket, .directory = directory, .pid = entry.pid, .store = store, .state = entry.state });
 }
 
 // std.json preserves OS-byte slices: valid UTF-8 is text; other bytes are
@@ -266,7 +263,7 @@ test "coordinator transfers every batch outcome and progress without reduction" 
     try expectRoundTrip(outcomeEvent(.{ .already_ready = .{ .pid = 456, .instance = @splat(17) } }));
     try expectRoundTrip(outcomeEvent(.{ .client_incompatible = 789 }));
     inline for (std.enums.values(host_restart_report.Stage)) |stage| {
-        try expectRoundTrip(Event{ .entry = .{ .socket = "/socket", .state = .{ .failed = .{ .stage = stage, .cause = "HostSocketStoreMismatch" } } } });
+        try expectRoundTrip(Event{ .entry = .{ .socket = "/socket", .state = .{ .failed = .of(stage, error.HostSocketStoreMismatch) } } });
     }
     try expectRoundTrip(Event{ .failure = .cancelled });
     try expectRoundTrip(Event{ .failure = .unconfirmed });
@@ -288,8 +285,8 @@ test "coordinator events keep each failed Host's cause after the line is freed" 
     var lines: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer lines.deinit();
     for ([_]Event{
-        .{ .entry = .{ .socket = "/discovery.sock", .state = .{ .failed = .{ .stage = .discovery, .cause = "HostPeerPidMismatch" } } } },
-        .{ .entry = .{ .socket = "/observed.sock", .directory = "/selected-host", .store = "/store", .state = .{ .failed = .{ .stage = .observation, .cause = "ConnectionRefused" } } } },
+        .{ .entry = .{ .socket = "/discovery.sock", .state = .{ .failed = .of(.discovery, error.HostPeerPidMismatch) } } },
+        .{ .entry = .{ .socket = "/observed.sock", .directory = "/selected-host", .store = "/store", .state = .{ .failed = .of(.observation, error.ConnectionRefused) } } },
         .done,
     }) |value| {
         try writeEvent(value, &lines.writer);
@@ -300,8 +297,8 @@ test "coordinator events keep each failed Host's cause after the line is freed" 
     defer file.close(io);
     var batch = try readEvents(io, std.testing.allocator, file, null);
     defer batch.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("HostPeerPidMismatch", batch.entries[0].state.failed.cause);
-    try std.testing.expectEqualStrings("ConnectionRefused", batch.entries[1].state.failed.cause);
+    try std.testing.expectEqualStrings("HostPeerPidMismatch", batch.entries[0].state.failed.cause.slice());
+    try std.testing.expectEqualStrings("ConnectionRefused", batch.entries[1].state.failed.cause.slice());
     try std.testing.expectEqualStrings("/selected-host", batch.entries[1].directory.?);
     try std.testing.expectEqualStrings("/store", batch.entries[1].store.?);
     var buffer: [1024]u8 = undefined;
@@ -325,7 +322,7 @@ test "coordinator event transport preserves OS routing bytes and typed refusals"
         .state = .{ .outcome = .{ .refused = .{ .stage = .starting, .failure = refusal } } },
     } }, &lines.writer);
     try lines.writer.writeByte('\n');
-    try writeEvent(.{ .entry = .{ .pid = 42, .state = .{ .failed = .{ .stage = .discovery, .cause = "HostServeArgumentsUnreadable" } } } }, &lines.writer);
+    try writeEvent(.{ .entry = .{ .pid = 42, .state = .{ .failed = .of(.discovery, error.HostServeArgumentsUnreadable) } } }, &lines.writer);
     try lines.writer.writeByte('\n');
     try writeEvent(.done, &lines.writer);
     try lines.writer.writeByte('\n');

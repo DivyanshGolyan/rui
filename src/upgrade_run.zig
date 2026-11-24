@@ -249,7 +249,7 @@ const world = struct {
                 .pin => trace.facts.pinned = .{ .ok = {} },
                 .hosts => {
                     var tally: activation.Tally = .{};
-                    for (0..script.restart_failures) |_| tally.add(.{ .place = .other, .state = .{ .failed = .{ .stage = .observation, .cause = "OutOfMemory" } } });
+                    for (0..script.restart_failures) |_| tally.add(.{ .place = .other, .state = .{ .failed = .of(.observation, error.OutOfMemory) } });
                     tally.add(.{ .place = .own, .state = .{ .outcome = .{ .ready = .{ .instance = @splat(1), .pid = 7 } } } });
                     trace.facts.hosts = .{ .ok = tally.finish(null) };
                 },

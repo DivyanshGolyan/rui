@@ -1414,8 +1414,8 @@ test "SUI-134 Sign-in departure keeps a handover's unconfirmed certainty" {
         .{ .selected = .{ .outcome = .{ .faulted = .{ .effect = .stop, .cause = cause } } }, .expected = error.HostRestartUnconfirmed },
         .{ .selected = .{ .outcome = .{ .faulted = .{ .effect = .resolve_target, .cause = cause } } }, .expected = error.HostRestartFailed },
         .{ .selected = .{ .outcome = .{ .failed = .stopping } }, .expected = error.HostRestartFailed },
-        .{ .selected = .{ .failed = .{ .stage = .observation, .cause = "OutOfMemory" } }, .expected = error.HostRestartFailed },
-        .{ .selected = .{ .failed = .{ .stage = .selection, .cause = "NoVerifiedRelease" } }, .expected = error.HostRestartFailed },
+        .{ .selected = .{ .failed = .of(.observation, error.OutOfMemory) }, .expected = error.HostRestartFailed },
+        .{ .selected = .{ .failed = .of(.selection, error.NoVerifiedRelease) }, .expected = error.HostRestartFailed },
     };
     for (cases) |row| {
         var launch: host_launch.Result = .failed(.setup, error.HostRestartFailed);

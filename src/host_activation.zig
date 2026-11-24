@@ -151,10 +151,8 @@ test "SH-122 an ordinary start hands over only an incompatible start and attache
     const instance: protocol.InstanceId = @splat(7);
     const cause = try protocol.Bounded(64).from("TestCause");
     const Row = struct { selected: Selected, step: StartStep };
-    const observation: Selected = .{ .failed = try .of(std.testing.allocator, .observation, error.OutOfMemory) };
-    defer std.testing.allocator.free(observation.failed.cause);
-    const selection: Selected = .{ .failed = try .of(std.testing.allocator, .selection, error.NoVerifiedRelease) };
-    defer std.testing.allocator.free(selection.failed.cause);
+    const observation: Selected = .{ .failed = .of(.observation, error.OutOfMemory) };
+    const selection: Selected = .{ .failed = .of(.selection, error.NoVerifiedRelease) };
     const rows = [_]Row{
         .{ .selected = .{ .outcome = .not_needed }, .step = .attach },
         .{ .selected = .{ .outcome = .superseded }, .step = .attach },
@@ -544,11 +542,12 @@ pub const EntryStage = enum { discovery, observation, selection };
 /// certainty is an ordinary failure; the restart report renders `stage` and `cause`.
 pub const EntryFailure = struct {
     stage: EntryStage,
-    /// Owned by the owning Batch's entry; `Entry.deinit` frees it.
-    cause: []const u8,
+    /// A copy of the error name, so the answer outlives the Batch that recorded it. Error names
+    /// fit the bound, as `Outcome.faulted.cause` relies on.
+    cause: protocol.Bounded(64),
 
-    pub fn of(allocator: std.mem.Allocator, stage: EntryStage, err: anyerror) !EntryFailure {
-        return .{ .stage = stage, .cause = try allocator.dupe(u8, @errorName(err)) };
+    pub fn of(stage: EntryStage, err: anyerror) EntryFailure {
+        return .{ .stage = stage, .cause = protocol.Bounded(64).from(@errorName(err)) catch unreachable };
     }
 };
 
@@ -692,7 +691,7 @@ const sh60 = struct {
         .{ .outcome = .{ .unconfirmed = .verifying }, .category = .failed, .guides = true, .safe = false },
     };
 
-    const entry_failure: EntryFailure = .{ .stage = .observation, .cause = "OutOfMemory" };
+    const entry_failure: EntryFailure = .of(.observation, error.OutOfMemory);
 
     fn expectSummary(expected: struct { restarted: usize = 0, current: usize = 0, skipped: usize = 0, failed: usize = 0, guidance: bool, own: Selected, safe: bool }, actual: Summary) !void {
         try std.testing.expectEqual(expected.restarted, actual.counts.restarted);
@@ -705,7 +704,7 @@ const sh60 = struct {
             .outcome => |outcome| try std.testing.expect(std.meta.eql(outcome, actual.own.outcome)),
             .failed => |entry| {
                 try std.testing.expectEqual(entry.stage, actual.own.failed.stage);
-                try std.testing.expectEqualStrings(entry.cause, actual.own.failed.cause);
+                try std.testing.expectEqualStrings(entry.cause.slice(), actual.own.failed.cause.slice());
             },
         }
         try std.testing.expectEqual(expected.safe, selectedClientSafe(actual.own));

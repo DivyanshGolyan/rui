@@ -116,10 +116,10 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
         entry.directory = if (candidate.directory) |path| try allocator.dupe(u8, path) else null;
         entry.state = switch (candidate.result) {
             .unanswered => unreachable,
-            .failed => |err| .{ .failed = try .of(allocator, .discovery, err) },
+            .failed => |err| .{ .failed = .of(.discovery, err) },
             .observed => |facts| state: {
                 entry.store = try allocator.dupe(u8, facts.facts.store.slice());
-                var observation = HostLifecycle.observe(allocator, init.io, home, facts.directory(), cancellation) catch |err| break :state .{ .failed = try .of(allocator, .observation, err) };
+                var observation = HostLifecycle.observe(allocator, init.io, home, facts.directory(), cancellation) catch |err| break :state .{ .failed = .of(.observation, err) };
                 defer observation.deinit(allocator);
                 break :state switch (observation) {
                     .absent => .{ .outcome = .not_needed },
@@ -165,7 +165,7 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
         entry.state = state: {
             process.check(options.cancellation) catch break :state .{ .outcome = .cancelled };
             var observation = HostLifecycle.observe(allocator, init.io, options.home, facts.directory(), options.cancellation) catch |err| {
-                entry.state = .{ .failed = try .of(allocator, .observation, err) };
+                entry.state = .{ .failed = .of(.observation, err) };
                 continue;
             };
             defer observation.deinit(allocator);
@@ -176,7 +176,7 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
             }
             if (options.target == null and selected == null) {
                 selected = Target.init(init, allocator, options.home, null, options.cancellation) catch |err| {
-                    entry.state = .{ .failed = try .of(allocator, .selection, err) };
+                    entry.state = .{ .failed = .of(.selection, err) };
                     continue;
                 };
                 batch.version = selected.?.version;
@@ -205,7 +205,7 @@ fn restartStore(init: std.process.Init, allocator: std.mem.Allocator, options: O
 fn storeState(init: std.process.Init, allocator: std.mem.Allocator, options: Options, directory: []const u8, version: *?release.Version) !@FieldType(Entry, "state") {
     process.check(options.cancellation) catch return .{ .outcome = .cancelled };
     var observation = HostLifecycle.observe(allocator, init.io, options.home, directory, options.cancellation) catch |err|
-        return .{ .failed = try .of(allocator, .observation, err) };
+        return .{ .failed = .of(.observation, err) };
     defer observation.deinit(allocator);
     switch (observation) {
         .absent => return .{ .outcome = .not_needed },
@@ -218,14 +218,14 @@ fn storeState(init: std.process.Init, allocator: std.mem.Allocator, options: Opt
     const target: *const Target = options.target orelse selected: {
         owned = Target.init(init, allocator, options.home, null, options.cancellation) catch |err| switch (err) {
             error.IneligibleInstallation => return .{ .outcome = .{ .target_unusable = .resolving } },
-            else => return .{ .failed = try .of(allocator, .selection, err) },
+            else => return .{ .failed = .of(.selection, err) },
         };
         break :selected &owned.?;
     };
     version.* = target.version;
     const binary = try std.fmt.allocPrint(allocator, "{s}/bin/rui", .{target.build});
     defer allocator.free(binary);
-    const actual = std.Io.Dir.cwd().realPathFileAlloc(init.io, binary, allocator) catch |err| return .{ .failed = try .of(allocator, .selection, err) };
+    const actual = std.Io.Dir.cwd().realPathFileAlloc(init.io, binary, allocator) catch |err| return .{ .failed = .of(.selection, err) };
     defer allocator.free(actual);
     const selected_is_self = std.mem.eql(u8, actual, try @import("self_executable.zig").path(init.io));
     if (!activation.startHandoverEligible(observation.managed.observed.foreign, observation.managed.version.order(target.version), selected_is_self)) {
