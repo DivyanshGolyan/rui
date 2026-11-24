@@ -1412,31 +1412,41 @@ fn countTraces(read_fd: c_int, phase: []const u8) usize {
     }
 }
 
-/// Controlled sleep for the hold case: records the requested wait and the traces written before it, without waiting.
+/// Controlled sleep for the hold rows: records the requested wait and the traces of the row's phase written before it, without waiting.
 const HoldSleep = struct {
     var read_fd: c_int = -1;
+    var phase: []const u8 = "";
     var requested: ?std.Io.Timeout = null;
     var traced_before: usize = 0;
 
     fn sleep(_: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
         requested = timeout;
-        traced_before = countTraces(read_fd, "prepared_before_handoff");
+        traced_before = countTraces(read_fd, phase);
     }
 };
 
+const HoldRow = struct { point: Hooks.Pause, delay_ms: i64, phase: []const u8 };
+var hold_row: HoldRow = undefined;
+
 fn holdCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
     _ = dir;
-    const binding: store_module.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
     HoldSleep.read_fd = read_fd;
+    HoldSleep.phase = hold_row.phase;
     HoldSleep.requested = null;
     HoldSleep.traced_before = 0;
-    probes.holdAt(.{ .action_launch = binding });
-    // The hold traces once, then asks for exactly its configured delay.
-    try std.testing.expectEqual(@as(usize, 1), HoldSleep.traced_before);
-    const requested = HoldSleep.requested orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(i96, 7 * std.time.ns_per_ms), requested.duration.raw.nanoseconds);
-    try std.testing.expectEqual(std.Io.Clock.awake, requested.duration.clock);
+    probes.holdAt(hold_row.point);
+    if (hold_row.delay_ms == 0) {
+        // An unconfigured hold neither traces nor waits.
+        try std.testing.expect(HoldSleep.requested == null);
+    } else {
+        // A configured hold traces once, then asks for exactly its delay.
+        try std.testing.expectEqual(@as(usize, 1), HoldSleep.traced_before);
+        const requested = HoldSleep.requested orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(i96, hold_row.delay_ms) * std.time.ns_per_ms, requested.duration.raw.nanoseconds);
+        try std.testing.expectEqual(std.Io.Clock.awake, requested.duration.clock);
+    }
     try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "prepared_before_handoff"));
+    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "sealed_before_settlement"));
 }
 
 fn retryCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
@@ -1448,6 +1458,29 @@ fn retryCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
     try std.testing.expect(probes.releaseRetryRecovery());
     try dir.deleteFile(std.testing.io, "retry-gate");
     try std.testing.expect(!probes.releaseRetryRecovery());
+    // A released recovery is not held again, even when the gate returns.
+    try dir.writeFile(std.testing.io, .{ .sub_path = "retry-gate", .data = "" });
+    probes.retryRecovered();
+    try std.testing.expect(!probes.releaseRetryRecovery());
+    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try dir.deleteFile(std.testing.io, "retry-gate");
+}
+
+fn unconfiguredRetryCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    try dir.writeFile(std.testing.io, .{ .sub_path = "retry-gate", .data = "" });
+    defer dir.deleteFile(std.testing.io, "retry-gate") catch {};
+    probes.retryRecovered();
+    try std.testing.expect(!probes.releaseRetryRecovery());
+    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "exhausted_retry_recovery_held"));
+}
+
+fn unconfiguredBashCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    const binding: store_module.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
+    try dir.writeFile(std.testing.io, .{ .sub_path = "bash-gate", .data = "" });
+    defer dir.deleteFile(std.testing.io, "bash-gate") catch {};
+    try std.testing.expect(!probes.bashReclaimHeld(binding, true));
+    try std.testing.expect(!probes.bashReclaimHeld(binding, false));
+    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "cleanup_release_observed"));
 }
 
 fn bashCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
@@ -1463,20 +1496,34 @@ fn bashCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
     try std.testing.expectEqual(@as(usize, 1), countTraces(read_fd, "cleanup_release_observed"));
 }
 
-test "SH-128 a test hold traces once then waits, and the retry and Bash reclaim gates hold while present" {
+test "SH-128 each configured test hold traces once then asks for its delay, unconfigured holds and gates do nothing, and the retry and Bash reclaim gates hold while present" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var retry_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var bash_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var hold_hooks: Hooks = .{};
-    hold_hooks.pauses.getPtr(.action_launch).delay_ms = 7;
     var hold_vtable = std.testing.io.vtable.*;
     hold_vtable.sleep = HoldSleep.sleep;
     var hold_io = std.testing.io;
     hold_io.vtable = &hold_vtable;
-    try withTraceSink(hold_io, .recovery, hold_hooks, tmp.dir, holdCase);
+    const action: store_module.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
+    const model: store_module.AttemptBinding = .{ .turn_id = 4, .operation_id = 5, .attempt_ordinal = 6 };
+    for ([_]i64{ 0, 7 }) |delay_ms| {
+        for ([_]HoldRow{
+            .{ .point = .{ .action_launch = action }, .delay_ms = delay_ms, .phase = "prepared_before_handoff" },
+            .{ .point = .{ .model_launch = model }, .delay_ms = delay_ms, .phase = "prepared_before_handoff" },
+            .{ .point = .{ .action_result = action }, .delay_ms = delay_ms, .phase = "sealed_before_settlement" },
+            .{ .point = .{ .model_result = model }, .delay_ms = delay_ms, .phase = "sealed_before_settlement" },
+        }) |row| {
+            hold_row = row;
+            var hooks: Hooks = .{};
+            hooks.pauses.getPtr(std.meta.activeTag(row.point)).delay_ms = row.delay_ms;
+            try withTraceSink(hold_io, .control, hooks, tmp.dir, holdCase);
+        }
+    }
+    try withTraceSink(std.testing.io, .dispatch, .{}, tmp.dir, unconfiguredRetryCase);
+    try withTraceSink(std.testing.io, .bash_cleanup, .{}, tmp.dir, unconfiguredBashCase);
     try withTraceSink(std.testing.io, .dispatch, .{ .retry_recovery_gate_path = try std.fmt.bufPrint(&retry_buffer, "{s}/retry-gate", .{root}) }, tmp.dir, retryCase);
     try withTraceSink(std.testing.io, .bash_cleanup, .{ .bash_reclaim_gate_path = try std.fmt.bufPrint(&bash_buffer, "{s}/bash-gate", .{root}) }, tmp.dir, bashCase);
 }
