@@ -746,7 +746,13 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
     const catalog_url = run.settings.catalog_url orelse "https://models.dev/api.json";
     listing_urls.set(.catalog, catalog_url);
     for (listing_urls.values, &workspace.listings.values) |url, *work| work.url = url;
-    var reactor_storage: provider.Reactor = undefined;
+    // The transport reactor is too large for this frame; it has its own mapping, as the workspace does.
+    const reactor_mapping = pages.Mapped(provider.Reactor).map() catch |err| {
+        run.shared.lifecycle.fenceDispatch("transport reactor allocation", err);
+        return;
+    };
+    defer reactor_mapping.unmap();
+    const reactor_storage = reactor_mapping.value;
     const reactor: ?*provider.Reactor = reactor: {
         const any_listing = for (listing_urls.values) |url| {
             if (url != null) break true;
@@ -774,7 +780,7 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
             return;
         };
         if (reactor_storage.catalog_endpoint_error) |err| listingFailed(&run, .catalog, err);
-        break :reactor &reactor_storage;
+        break :reactor reactor_storage;
     };
     defer if (reactor) |active| active.deinit();
     if (reactor) |active| startListings(&run, active, &workspace.listings);

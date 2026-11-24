@@ -287,7 +287,7 @@ pub const Credentials = struct {
 
 pub const Reactor = struct {
     comptime {
-        const required_endpoints = std.enums.values(protocol.Provider).len + std.enums.values(ListingKind).len;
+        const required_endpoints = connection.max_served + std.enums.values(ListingKind).len;
         if (h2.max_endpoints < required_endpoints)
             @compileError("provider request and independent listing URLs exceed H2 endpoint capacity");
     }
@@ -993,6 +993,32 @@ test "Reactor registers every provider and independent listing subset without en
             try std.testing.expectEqual(listing_mask & (@as(usize, 1) << @intCast(bit)) != 0, endpoint != null);
         }
     };
+}
+
+test "Reactor holds an endpoint for every name of a full served set" {
+    var endpoints: connection_names.NameArray([]const u8) = .{};
+    var urls: [connection.max_served][40]u8 = undefined;
+    var names: [connection.max_served][8]u8 = undefined;
+    for (0..connection.max_served) |index| {
+        const name = try std.fmt.bufPrint(&names[index], "c{d}", .{index});
+        const url = try std.fmt.bufPrint(&urls[index], "http://127.0.0.1:{d}/responses", .{index + 1});
+        try endpoints.set(connection.Name.parse(name).?, url);
+    }
+    var used: std.atomic.Value(u64) = .init(0);
+    var reactor: Reactor = undefined;
+    try reactor.initForTesting(std.testing.allocator, std.testing.io, .{
+        .endpoints = endpoints,
+        .capacity = 1,
+        .inactivity_seconds = 1,
+        .scratch_path = "/nonexistent",
+        .budget = .{ .used = &used, .limit = 1 },
+    });
+    defer reactor.deinit();
+    for (0..connection.max_served) |index| {
+        const name = try std.fmt.bufPrint(&names[index], "c{d}", .{index});
+        try std.testing.expect(reactor.endpoints.get(connection.Name.parse(name).?) != null);
+    }
+    try std.testing.expectEqual(@as(?h2.Endpoint, null), reactor.endpoints.get(connection.Name.parse("absent").?));
 }
 
 /// The endpoint table a test names by built-in provider; a null field serves nothing.
