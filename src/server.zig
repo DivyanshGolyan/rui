@@ -1330,7 +1330,7 @@ noinline fn openStoreForHost(
     var identity_mismatch: store_module.IdentityMismatch = .{};
     var migration: StartupMigration = .{ .diagnostics = diagnostics };
     const store_options: store_module.OpenOptions = .{
-        .served = served.routes(),
+        .served = served.served(),
         .cache_spill = limits.sqlite_cache_spill,
         .cache_kib = limits.sqlite_cache_kib,
         .found_schema_version = &found_schema_version,
@@ -1937,6 +1937,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
 
 noinline fn replyHostInfo(host: *Host, fd: *Reply) !void {
     if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
+    const served_set = host.providers.served();
     try fd.json(200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{host_reply.HostInfo{
         .store = host.lease.paths.store_identity.slice(),
         .instance = host.instance,
@@ -1946,7 +1947,7 @@ noinline fn replyHostInfo(host: *Host, fd: *Reply) !void {
         .started_at = host.started_at,
         .custody_occupied = host.custody.held(),
         .paused = host.turnsHeld(),
-        .routes = host.providers.routes(),
+        .routes = protocol.routesOf(&served_set),
         .doublewrite = host.store.admissionDiagnostic().doublewrite,
         .settings_digest = host.settings_digest,
     }});

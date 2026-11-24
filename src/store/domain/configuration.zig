@@ -771,7 +771,7 @@ pub const ValidatedConfiguration = struct {
 pub const Request = struct {
     io: std.Io,
     tools: *const store_core.HostTools,
-    served: provider_route.Routes,
+    served: *const provider_route.Served,
     session: []const u8,
     configuration: *const content_custody.Configuration,
     initial_skills: ?*const skills_domain.Initial,
@@ -846,7 +846,7 @@ const CreationCheck = union(enum) {
 
 /// The one creation check: every path that creates a Session (configure, a creating Message,
 /// start_agent) reaches it after the parent is read, so the reply names every missing setting.
-fn creationCheck(configuration: *const ConfigurationView, reads: *const ConfigurationReads, served: provider_route.Routes) CreationCheck {
+fn creationCheck(configuration: *const ConfigurationView, reads: *const ConfigurationReads, served: *const provider_route.Served) CreationCheck {
     const named: ?provider_name.Provider = if (reads.inherits_parent)
         reads.inherited.provider
     else if (configuration.provider.state == .value)
@@ -1121,7 +1121,7 @@ pub fn servesProviderOf(served: anytype, configuration: ?*const content_custody.
         std.meta.stringToEnum(provider_name.Provider, configuration.?.provider.value.slice()) orelse return true
     else
         saved orelse (if (configuration != null) required_settings.resolveProvider(null, served) orelse return true else return true);
-    return provider_route.of(served, provider) != .unserved;
+    return served.route(@tagName(provider)) != .unserved;
 }
 
 pub noinline fn queueConfiguredCommand(

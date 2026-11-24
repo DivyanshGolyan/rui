@@ -388,7 +388,7 @@ pub const SubmitMessage = struct {
     pub const begin: ?rounds.At = .facts;
     pub const Input = struct {
         io: std.Io,
-        served: provider_route.Routes,
+        served: *const provider_route.Served,
         tools: *const store_core.HostTools,
         selector: []const u8,
         command: *const content_custody.MessageCommand,
@@ -1020,7 +1020,7 @@ pub const StartAgent = struct {
     pub const begin: ?rounds.At = .facts;
     pub const Input = struct {
         io: std.Io,
-        served: provider_route.Routes,
+        served: *const provider_route.Served,
         tools: *const store_core.HostTools,
         binding: action_domain.ActionAttemptBinding,
         caller: []const u8,
@@ -1236,7 +1236,7 @@ pub const Configure = struct {
     pub const begin: ?rounds.At = .facts;
     pub const Input = struct {
         io: std.Io,
-        served: provider_route.Routes,
+        served: *const provider_route.Served,
         tools: *const store_core.HostTools,
         command: *const content_custody.ConfigureCommand,
         preset: ?*const configuration_domain.PresetDecision,

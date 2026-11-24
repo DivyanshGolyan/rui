@@ -2,6 +2,7 @@ const std = @import("std");
 const change_ring = @import("../change_ring.zig");
 const schema = @import("schema.zig");
 const provider_name = @import("../provider_name.zig");
+const provider_route = @import("../provider_route.zig");
 
 pub const Dialect = enum { sqlite, mysql };
 
@@ -567,7 +568,7 @@ fn templateRecord(comptime mysql: Template) []const u8 {
         for (mysql.slots) |slot| slots = slots ++ switch (slot) {
             .argument => |n| std.fmt.comptimePrint("a{d},", .{n}),
             .now => "n,",
-            .served => |provider| "s" ++ @tagName(provider) ++ ",",
+            .served => |position| std.fmt.comptimePrint("s{d},", .{position}),
         };
         return parts ++ "\x1f" ++ slots;
     }
@@ -2044,12 +2045,9 @@ fn ComptimeList(comptime T: type) type {
 pub const Slot = union(enum) {
     argument: usize,
     now,
-    served: provider_name.Provider,
+    /// The served set's entry at this position, or '' past the set.
+    served: usize,
 };
-
-pub fn servedBinding(provider: provider_name.Provider, served: bool) []const u8 {
-    return if (served) @tagName(provider) else "";
-}
 
 pub const Template = struct {
     parts: []const []const u8,
@@ -2317,9 +2315,9 @@ const MysqlRenderer = struct {
                 arg_a[0] => try r.range(arguments[0][0], arguments[0][1]),
                 arg_b[0] => try r.range(arguments[1][0], arguments[1][1]),
                 arg_set[0] => r.emit(try r.set(arguments[1])),
-                served_slots[0] => for (std.enums.values(provider_name.Provider), 0..) |provider, position| {
+                served_slots[0] => for (0..provider_route.max_served) |position| {
                     if (position != 0) r.emit(",");
-                    r.slot(.{ .served = provider });
+                    r.slot(.{ .served = position });
                 },
                 else => unreachable,
             }
@@ -2897,7 +2895,7 @@ test "each marker renders its MySQL spelling" {
     try std.testing.expectEqualStrings("GREATEST(a, b)>LEAST(c,d) AND max(e)=1 AND f='@octets(g)'", comptime render(.mysql, "max(a, b)>min(c,d) AND max(e)==1 AND f='@octets(g)'"));
 }
 
-test "@served is the opening's function on SQLite and a slot per provider on MySQL" {
+test "@served is the opening's function on SQLite and a slot per served position on MySQL" {
     const S = Read(.{
         .sql = "SELECT created_seq FROM session WHERE @served(provider) AND created_seq>?1",
         .Args = struct { after: u64 },
@@ -2905,12 +2903,11 @@ test "@served is the opening's function on SQLite and a slot per provider on MyS
         .cardinality = .optional,
     });
     try std.testing.expectEqualStrings("SELECT created_seq FROM session WHERE rui_served(provider) AND created_seq>?1", S.sql);
-    const providers = comptime std.enums.values(provider_name.Provider);
     comptime var list: []const u8 = "";
     comptime var slots: []const Slot = &.{};
-    inline for (providers, 0..) |provider, index| {
+    inline for (0..provider_route.max_served) |index| {
         list = list ++ (if (index == 0) "?" else ",?");
-        slots = slots ++ .{Slot{ .served = provider }};
+        slots = slots ++ .{Slot{ .served = index }};
     }
     try std.testing.expectEqualStrings("SELECT created_seq FROM session WHERE (provider IN (" ++ list ++ ")) AND created_seq>?", comptime S.mysql.prepared());
     try std.testing.expectEqualDeep(slots ++ &[_]Slot{.{ .argument = 0 }}, S.mysql.slots);
@@ -3093,7 +3090,7 @@ test "a served slot never binds NULL, so NOT @served(x) agrees with rui_served" 
     const c = sqlite.c;
     const text = comptime mysqlRendering("SELECT NOT @served(?1)").rendered.prepared();
     comptime var list: []const u8 = "?";
-    inline for (std.enums.values(provider_name.Provider)[1..]) |_| list = list ++ ",?";
+    inline for (1..provider_route.max_served) |_| list = list ++ ",?";
     try std.testing.expectEqualStrings("SELECT NOT (? IN (" ++ list ++ "))", text);
     var database: ?*c.sqlite3 = null;
     try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &database));
@@ -3104,14 +3101,17 @@ test "a served slot never binds NULL, so NOT @served(x) agrees with rui_served" 
     for (providers) |served_one| for (providers) |x| {
         _ = c.sqlite3_reset(statement);
         try sqlite.bindText(statement, 1, @tagName(x));
-        for (providers, 2..) |provider, index| try sqlite.bindText(statement, @intCast(index), servedBinding(provider, provider == served_one));
+        for (0..provider_route.max_served) |slot| {
+            const served_text = if (slot < providers.len and providers[slot] == served_one) @tagName(providers[slot]) else "";
+            try sqlite.bindText(statement, @intCast(slot + 2), served_text);
+        }
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
         try std.testing.expectEqual(c.SQLITE_INTEGER, c.sqlite3_column_type(statement, 0));
         try std.testing.expectEqual(@as(i64, @intFromBool(x != served_one)), c.sqlite3_column_int64(statement, 0));
     };
     _ = c.sqlite3_reset(statement);
     try sqlite.bindText(statement, 1, @tagName(providers[0]));
-    for (2..providers.len + 2) |index| _ = c.sqlite3_bind_null(statement, @intCast(index));
+    for (2..provider_route.max_served + 2) |index| _ = c.sqlite3_bind_null(statement, @intCast(index));
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
     try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement, 0));
 }

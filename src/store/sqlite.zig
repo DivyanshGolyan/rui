@@ -233,13 +233,10 @@ pub fn setLimit(database: *c.sqlite3, category: c_int, value: c_int) !void {
 
 pub fn servedFunction(context: ?*c.sqlite3_context, argc: c_int, argv: [*c]?*c.sqlite3_value) callconv(.c) void {
     std.debug.assert(argc == 1);
-    const routes: *const provider_route.Routes = @ptrCast(@alignCast(c.sqlite3_user_data(context)));
+    const served_set: *const provider_route.Served = @ptrCast(@alignCast(c.sqlite3_user_data(context)));
     const text = c.sqlite3_value_text(argv[0]);
     const length = c.sqlite3_value_bytes(argv[0]);
-    const served = if (text == null or length < 0) false else if (std.meta.stringToEnum(provider_name.Provider, text[0..@intCast(length)])) |provider|
-        provider_route.of(routes.*, provider) != .unserved
-    else
-        false;
+    const served = if (text == null or length < 0) false else served_set.route(text[0..@intCast(length)]) != .unserved;
     c.sqlite3_result_int(context, @intFromBool(served));
 }
 

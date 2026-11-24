@@ -2151,7 +2151,7 @@ fn beginAdmittedAttempt(
         host.io,
         host.lease.paths.scratch.slice(),
         host.scratch_budget.?,
-        host.providers.routes(),
+        host.providers.served(),
         &host.history_memos,
         host.hooks.preparationFaults(),
         &retained_scratch,
@@ -4596,7 +4596,7 @@ test "preparing slots belong to their live preparations" {
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
     preparation.page.open(binding_a);
-    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
 
@@ -4830,7 +4830,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             std.testing.io,
             root,
             .{ .used = &host.scratch_used, .limit = 1024 },
-            protocol.routesAll(.endpoint),
+            protocol.servedBuiltIns(.endpoint),
             null,
             .{},
             &retained,
@@ -5065,7 +5065,7 @@ test "an encode failure settles unanswered and releases request scratch" {
             std.testing.io,
             root,
             .{ .used = &host.scratch_used, .limit = if (ordered_limit) 2 * 1024 * 1024 else 1024 * 1024 },
-            protocol.routesAll(.endpoint),
+            protocol.servedBuiltIns(.endpoint),
             null,
             if (ordered_limit) .{} else .{ .codec_declines = .request_end },
             &retained,

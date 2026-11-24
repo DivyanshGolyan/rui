@@ -684,7 +684,7 @@ pub const Preparation = struct {
     state: State,
 
     const State = struct {
-        routes: protocol.Routes,
+        routes: protocol.Served,
         faults: PreparationFaults,
         memos: ?*history_memo.Table,
         active: bool = false,
@@ -804,7 +804,7 @@ pub const Preparation = struct {
         io: std.Io,
         scratch_path: []const u8,
         budget: ScratchBudget,
-        routes: protocol.Routes,
+        routes: protocol.Served,
         memos: ?*history_memo.Table,
         faults: PreparationFaults,
         retained: *?named_scratch.Owner,
@@ -921,7 +921,7 @@ pub const Preparation = struct {
                     self.state.memos = null;
                     self.writer.encoded_limit = max_ordered_request_bytes;
                 }
-                if (self.settings.output_schema != null and !providers.acceptsOutputSchema(protocol.routeOf(self.state.routes, self.settings.provider)))
+                if (self.settings.output_schema != null and !providers.acceptsOutputSchema(self.state.routes.route(@tagName(self.settings.provider))))
                     return error.UnsupportedOutputSchemaRoute;
                 const codec = self.settings.codec;
                 self.page.expectTools(if (codecs.declaresTools(codec)) .declared else .all);
@@ -1734,7 +1734,7 @@ test "real preparation consumes the configured allowance across multiple advance
         std.testing.io,
         root,
         .{ .used = &used, .limit = expected.len },
-        protocol.routesAll(.endpoint),
+        protocol.servedBuiltIns(.endpoint),
         null,
         .{},
         &retained,
@@ -1919,7 +1919,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(try admitted.permit.consume());
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     const result = try drainPreparation(&preparation, &setup.storage, 7, 3, 1 << 16);
     defer std.testing.allocator.free(result.bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
@@ -1998,7 +1998,7 @@ test "a prepared request carries the Responses codec's headers with its Session'
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     const request = try drainLivePreparation(&preparation, &setup.storage, preparation_byte_allowance, preparation_item_allowance, 4096);
     defer request.deinit(std.testing.io, preparation.writer.budget);
@@ -2363,7 +2363,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     var retained_provider: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(binding);
-    try preparation.init(io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained_provider);
+    try preparation.init(io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained_provider);
     defer preparation.cancel();
     if (Overlap.failure) |err| return err;
     if (!provider_first) try Overlap.admit(body[split..]);
@@ -2424,7 +2424,7 @@ test "request preparation minimal golden is exact across schedules" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         try std.testing.expect(retained == null);
         const result = try drainPreparation(&preparation, &setup.storage, schedule[0], schedule[1], preparationTestStepBound(full_expected.len));
@@ -2481,7 +2481,7 @@ test "request preparation retains the allocated ID across reopen and replacement
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         const result = try drainPreparation(&preparation, &setup.storage, 7, 3, 16384);
         defer std.testing.allocator.free(result.bytes);
@@ -2555,7 +2555,7 @@ test "request preparation escapes instructions and user content" {
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     const first = try drainPreparation(&preparation, &setup.storage, 2, 2, preparationTestStepBound(expected.len));
     defer std.testing.allocator.free(first.bytes);
@@ -2613,7 +2613,7 @@ test "request preparation escapes instructions and user content" {
     var retained_two: ?named_scratch.Owner = null;
     var preparation_two: Preparation = undefined;
     preparation_two.page.open(binding_two);
-    try preparation_two.init(std.testing.io, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained_two);
+    try preparation_two.init(std.testing.io, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained_two);
     defer if (preparation_two.state.active) preparation_two.cancel();
     const second = try drainPreparation(&preparation_two, &setup_two.storage, 1, 1, preparationTestStepBound(expected.len));
     defer std.testing.allocator.free(second.bytes);
@@ -2634,7 +2634,7 @@ test "request preparation frozen selection excludes later messages" {
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     var partial: usize = 0;
     while (partial < 2) : (partial += 1) {
         const progress = advanceTesting(&preparation, &setup.storage, 16, 2);
@@ -2709,7 +2709,7 @@ test "request preparation keeps the starting effort at the top and changes it at
             var retained: ?named_scratch.Owner = null;
             var preparation: Preparation = undefined;
             preparation.page.open(binding);
-            try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+            try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
             defer if (preparation.state.active) preparation.cancel();
             const sealed = try drainLivePreparation(&preparation, &setup.storage, 1, 1, step_bound);
             var owned = true;
@@ -2776,7 +2776,7 @@ test "request preparation freezes settings at admission" {
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     const result = try drainPreparation(&preparation, &setup.storage, 3, 2, 8192);
     defer std.testing.allocator.free(result.bytes);
     const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}," ++
@@ -2800,7 +2800,7 @@ test "a retry of an Operation prepares the output limit it froze after the catal
     var retained: ?named_scratch.Owner = null;
     var first: Preparation = undefined;
     first.page.open(binding);
-    try first.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try first.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     const first_result = try drainPreparation(&first, &setup.storage, 3, 2, 8192);
     defer std.testing.allocator.free(first_result.bytes);
     try std.testing.expectEqual(product_defaults.unlisted_output_limit, first.settings.output_limit);
@@ -2810,7 +2810,7 @@ test "a retry of an Operation prepares the output limit it froze after the catal
     var retry_retained: ?named_scratch.Owner = null;
     var retry: Preparation = undefined;
     retry.page.open(binding);
-    try retry.init(std.testing.io, setup.root, .{ .used = &retry_used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retry_retained);
+    try retry.init(std.testing.io, setup.root, .{ .used = &retry_used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retry_retained);
     const retry_result = try drainPreparation(&retry, &setup.storage, 3, 2, 8192);
     defer std.testing.allocator.free(retry_result.bytes);
     try std.testing.expectEqual(first.settings.output_limit, retry.settings.output_limit);
@@ -2833,7 +2833,7 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     try preparation.checkIntegrity(binding);
     try std.testing.expectEqual(@as(usize, 0), preparation.page.outstandingReaders());
@@ -2844,7 +2844,7 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
         var probe_used: std.atomic.Value(u64) = .init(0);
         var probe_retained: ?named_scratch.Owner = null;
         probe.page.open(binding);
-        try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &probe_retained);
+        try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &probe_retained);
         defer if (probe.state.active) probe.cancel();
         const probe_result = try drainPreparation(&probe, &setup.storage, 16, 2, 16384);
         defer std.testing.allocator.free(probe_result.bytes);
@@ -2895,14 +2895,14 @@ test "request preparation cancellation and failure release ownership" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         var probe: Preparation = undefined;
         {
             var probe_used: std.atomic.Value(u64) = .init(0);
             var probe_retained: ?named_scratch.Owner = null;
             probe.page.open(binding);
-            try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &probe_retained);
+            try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &probe_retained);
             defer if (probe.state.active) probe.cancel();
             const probe_result = try drainPreparation(&probe, &setup.storage, 16, 2, 16384);
             defer std.testing.allocator.free(probe_result.bytes);
@@ -2923,7 +2923,7 @@ test "request preparation cancellation and failure release ownership" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try std.testing.expectError(error.InjectedFirstPreparationFailure, preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{ .first_step = true }, &retained));
+        try std.testing.expectError(error.InjectedFirstPreparationFailure, preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{ .first_step = true }, &retained));
         try std.testing.expect(retained == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
@@ -2933,7 +2933,7 @@ test "request preparation cancellation and failure release ownership" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, faults, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, faults, &retained);
         var seen_failure: ?anyerror = null;
         var steps: usize = 0;
         while (steps < 4096) : (steps += 1) {
@@ -2962,7 +2962,7 @@ test "request preparation cancellation and failure release ownership" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try std.testing.expectError(error.InjectedRequestUnlinkFailure, preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{ .unlink = true, .unlink_removal = &gate }, &retained));
+        try std.testing.expectError(error.InjectedRequestUnlinkFailure, preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{ .unlink = true, .unlink_removal = &gate }, &retained));
         try std.testing.expect(retained != null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         var reclaimed = false;
@@ -2998,7 +2998,7 @@ test "request preparation completed request is fenced by later stop before hando
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     try preparation.checkIntegrity(binding);
     const request = try drainLivePreparation(&preparation, &setup.storage, preparation_byte_allowance, preparation_item_allowance, 4096);
@@ -3046,7 +3046,7 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         var probe_retained: ?named_scratch.Owner = null;
         var probe: Preparation = undefined;
         probe.page.open(binding);
-        try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &probe_retained);
+        try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &probe_retained);
         defer if (probe.state.active) probe.cancel();
         var count: usize = 0;
         while (count < 4096) {
@@ -3072,7 +3072,7 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         try stepPreparationToOffset(&preparation, &setup.storage, 1, 4096);
         try std.testing.expectError(error.TestUnexpectedResult, drainLivePreparation(&preparation, &setup.storage, probe_allowance[0], probe_allowance[1], 1));
@@ -3090,7 +3090,7 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         try std.testing.expectError(error.TestUnexpectedResult, drainLivePreparation(&preparation, &setup.storage, probe_allowance[0], probe_allowance[1], seal_steps - 1));
         try std.testing.expect(!preparation.state.active);
@@ -3117,7 +3117,7 @@ test "request preparation fences a saved provider bag whose bytes changed" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         if (drainLivePreparation(&preparation, &setup.storage, 1, 1, 16384)) |request| {
             request.deinit(std.testing.io, preparation.writer.budget);
@@ -3200,7 +3200,7 @@ test "request preparation replays a large private reasoning item within each adv
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         var turns: usize = 0;
         while (true) {
@@ -3242,7 +3242,7 @@ test "request preparation composes replay tool results and schema" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         const result = try drainPreparation(&preparation, &setup.storage, schedule[0], schedule[1], 16384);
         defer std.testing.allocator.free(result.bytes);
         const expected = try requestGolden(setup.workspace, history.session.slice(), composed_expected);
@@ -3461,7 +3461,7 @@ test "request preparation derives opaque replay from the producing Operation mod
     var retained: ?named_scratch.Owner = null;
     var prep: Preparation = undefined;
     prep.page.open(binding);
-    try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     defer if (prep.state.active) prep.cancel();
     const request = try drainPreparation(&prep, &setup.storage, 1, 1, 32768);
     defer std.testing.allocator.free(request.bytes);
@@ -3614,7 +3614,7 @@ test "request preparation replays reasoning continuation without its private rea
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         const result = try drainPreparation(&preparation, &setup.storage, schedule[0], schedule[1], 32768);
         defer std.testing.allocator.free(result.bytes);
@@ -3643,7 +3643,7 @@ test "request preparation cancellation yields inside history discovery" {
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     const expected = try requestGolden(setup.workspace, history.session.slice(), composed_expected);
     defer std.testing.allocator.free(expected);
@@ -3686,7 +3686,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
         prep.page.open(binding);
-        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), &memos, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
         const request = try drainPreparation(&prep, &setup.storage, 1, 1, 16384);
         defer std.testing.allocator.free(request.bytes);
@@ -3739,7 +3739,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
     var retained: ?named_scratch.Owner = null;
     var prep: Preparation = undefined;
     prep.page.open(next_binding);
-    try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
+    try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), &memos, .{}, &retained);
     defer if (prep.state.active) prep.cancel();
     const request = try drainPreparation(&prep, &setup.storage, 1, 1, 32768);
     defer std.testing.allocator.free(request.bytes);
@@ -3884,7 +3884,7 @@ test "a compaction that overflows makes room a level at a time, then the Turn en
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
         prep.page.open(binding);
-        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
         const request = try drainPreparation(&prep, &setup.storage, 64 * 1024, 64, 4096);
         defer std.testing.allocator.free(request.bytes);
@@ -3942,7 +3942,7 @@ test "compaction preparation rebuilds an old-model base and filters its suffix b
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
         prep.page.open(binding);
-        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
         const request = try drainPreparation(&prep, &setup.storage, 1, 1, 32768);
         defer std.testing.allocator.free(request.bytes);
@@ -3972,7 +3972,7 @@ test "request preparation cancels inside schema and replay emissions" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         try stepPreparationToOffset(&preparation, &setup.storage, target, 16384);
         try preparation.checkIntegrity(binding);
@@ -3996,7 +3996,7 @@ fn prepareMemoWithAllowanceForTesting(setup: *PreparationTestSetup, binding: sto
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), memos, faults, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), memos, faults, &retained);
     defer if (preparation.state.active) preparation.cancel();
     var steps: usize = 0;
     const request = while (true) : (steps += 1) {
@@ -5079,7 +5079,7 @@ test "a codec that declines fails provider_codec_failed before any request exist
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{ .codec_declines = kind }, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{ .codec_declines = kind }, &retained);
         defer if (preparation.state.active) preparation.cancel();
         try std.testing.expectError(error.CodecDeclined, drainLivePreparation(&preparation, &setup.storage, 16, 2, 1 << 16));
         preparation.cancel();
@@ -5206,7 +5206,7 @@ test "a cold history memo build yields under the preparation allowance" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), &memos, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         var final_advances: usize = 0;
         var final_work: usize = 0;
@@ -5255,7 +5255,7 @@ fn expectMemoStoreCancelForTesting(setup: *PreparationTestSetup, session: []cons
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), memos, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), memos, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     var final_advances: usize = 0;
     var steps: usize = 0;
@@ -5300,7 +5300,7 @@ test "a preparation cancelled while keeping its memo keeps nothing of it" {
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), &memos, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     while (preparation.memoCopied() == 0) try std.testing.expect(advanceTesting(&preparation, &setup.storage, 7, 3) == .pending);
     try std.testing.expect(preparation.memoCopied() < held);
@@ -5605,7 +5605,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         try sqlite.exec(database.sqliteDatabase(), "PRAGMA foreign_keys=ON");
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         while (true) {
             const progress = advanceTesting(&preparation, &database, 7, 2);
@@ -5666,7 +5666,7 @@ test "historical preparation fences a served call that does not match its certif
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         preparation.page.open(binding);
-        try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         while (true) {
             const progress = advanceTesting(&preparation, &database, 1, 1);
@@ -5756,7 +5756,7 @@ fn openRawImagePreparationWithDigestRecheck(
 ) !store.HistoricalContent {
     preparation.page.open(binding);
     var retained: ?named_scratch.Owner = null;
-    try preparation.init(std.testing.io, setup.root, .{ .used = used, .limit = limit }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = used, .limit = limit }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     errdefer preparation.cancel();
     try std.testing.expect(retained == null);
     while (true) {
@@ -6052,7 +6052,7 @@ test "request preparation streams exact built-in instructions across provider ro
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
         prep.page.open(binding);
-        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
         const result = try drainPreparation(&prep, &setup.storage, 7, 1, 1024 * 1024);
         defer std.testing.allocator.free(result.bytes);
@@ -6080,7 +6080,7 @@ fn pinnedRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: store
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     errdefer if (preparation.state.active) preparation.cancel();
     const request = try drainPreparation(&preparation, storage, byte_allowance, item_allowance, 1 << 24);
     defer std.testing.allocator.free(request.bytes);
@@ -6421,7 +6421,7 @@ test "canonical ordered Message cancellation inside each image releases readers 
             var retained: ?named_scratch.Owner = null;
             var prep: Preparation = undefined;
             prep.page.open(binding);
-            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
             defer if (prep.state.active) prep.cancel();
             try stepPreparationToOffset(&prep, &setup.storage, start + offset, 1 << 16);
             try prep.checkIntegrity(binding);
@@ -6527,7 +6527,7 @@ test "canonical ordered Message enforces the complete encoded request cap throug
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
         prep.page.open(binding);
-        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
         var steps: usize = 0;
         while (prep.writer.encoded_limit == null) : (steps += 1) {
@@ -6573,7 +6573,7 @@ test "canonical ordered Message payload corruption fences after cancellation and
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
         prep.page.open(binding);
-        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
         var steps: usize = 0;
         while (prep.state.emission != .base64) : (steps += 1) {
@@ -6595,7 +6595,7 @@ test "canonical ordered Message payload corruption fences after cancellation and
         try store.testing.zeroContent(&setup.storage, "SELECT part_content_id FROM content_part WHERE content_id=" ++
             "(SELECT primary_content_id FROM core_command WHERE command_key='ordered-payload') AND ordinal=1");
         prep.page.open(binding);
-        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
         try std.testing.expectError(error.CorruptStore, drainLivePreparation(&prep, &setup.storage, 7, 3, 1 << 16));
         try std.testing.expect(setup.storage.isFenced());
         prep.cancel();
@@ -6723,7 +6723,7 @@ test "canonical ordered Action Resolution bypasses Text memos and caps the compl
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
         prep.page.open(binding);
-        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), &memos, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
         var steps: usize = 0;
         while (prep.writer.encoded_limit == null) : (steps += 1) {
@@ -6797,7 +6797,7 @@ test "canonical ordered Action Resolution cancellation releases readers and reop
             var retained: ?named_scratch.Owner = null;
             var prep: Preparation = undefined;
             prep.page.open(binding);
-            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
             defer if (prep.state.active) prep.cancel();
             var steps: usize = 0;
             while (prep.state.emission != .base64) : (steps += 1) {
@@ -6820,7 +6820,7 @@ test "canonical ordered Action Resolution cancellation releases readers and reop
             try store.testing.zeroContent(&setup.storage, "SELECT part_content_id FROM content_part WHERE content_id=" ++
                 "(SELECT resolution_content_id FROM action_operation) AND ordinal=" ++ std.fmt.comptimePrint("{d}", .{ordinal}));
             prep.page.open(binding);
-            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
             try std.testing.expectError(error.CorruptStore, drainLivePreparation(&prep, &setup.storage, 7, 3, 1 << 16));
             try std.testing.expect(setup.storage.isFenced());
             prep.cancel();

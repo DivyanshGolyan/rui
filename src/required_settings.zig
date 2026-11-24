@@ -100,7 +100,7 @@ pub const Creation = struct {
     parent: bool,
     /// The provider the request names, or the parent's when `parent` is set.
     provider: ?Provider,
-    served: provider_route.Routes,
+    served: *const provider_route.Served,
 };
 
 pub const Outcome = union(enum) {
@@ -120,26 +120,26 @@ pub fn check(creation: Creation) Outcome {
 
 /// The provider a new Session gets: the named one, else the only served one, else the product
 /// default when the Host serves none. Null when the Host serves several and none was named.
-pub fn resolveProvider(named: ?Provider, served: provider_route.Routes) ?Provider {
+pub fn resolveProvider(named: ?Provider, served: *const provider_route.Served) ?Provider {
     if (named) |provider| return provider;
     var selected: ?Provider = null;
-    inline for (std.enums.values(Provider)) |provider| {
-        if (provider_route.of(served, provider) != .unserved) {
-            if (selected != null) return null;
-            selected = provider;
-        }
+    for (served.items()) |entry| {
+        // Served names are built-in providers until connection names arrive (commit 2).
+        const provider = std.meta.stringToEnum(Provider, entry.name.slice()) orelse unreachable;
+        if (selected != null) return null;
+        selected = provider;
     }
     return selected orelse comptime std.meta.stringToEnum(Provider, product_defaults.provider).?;
 }
 
 test "check names every missing setting over model, workspace, parent, provider and served providers" {
-    const none = provider_route.all(.unserved);
-    var one = none;
-    one.openai = .key_file;
+    const none: provider_route.Served = .{};
+    var one: provider_route.Served = .{};
+    try one.put(provider_route.builtIn(.openai, .key_file));
     var two = one;
-    two.codex = .endpoint;
-    const Served = enum { none, one, two };
-    const Case = struct { model: bool, workspace: bool, parent: bool, provider: ?Provider, served: Served, expected: []const u8 };
+    try two.put(provider_route.builtIn(.codex, .endpoint));
+    const Set = enum { none, one, two };
+    const Case = struct { model: bool, workspace: bool, parent: bool, provider: ?Provider, served: Set, expected: []const u8 };
     // Expected values are literals: a missing list, or "ok:<provider>".
     const cases = [_]Case{
         .{ .model = true, .workspace = true, .parent = false, .provider = null, .served = .none, .expected = "ok:codex" },
@@ -162,9 +162,9 @@ test "check names every missing setting over model, workspace, parent, provider 
         var buffer: [64]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         switch (check(.{ .model = case.model, .workspace = case.workspace, .parent = case.parent, .provider = case.provider, .served = switch (case.served) {
-            .none => none,
-            .one => one,
-            .two => two,
+            .none => &none,
+            .one => &one,
+            .two => &two,
         } })) {
             .missing => |missing| {
                 try missing.writeJson(&out);

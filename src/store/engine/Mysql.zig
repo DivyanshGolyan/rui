@@ -29,7 +29,7 @@ state: *State,
 pub const State = struct {
     connection: wire.Connection,
     testing_shape: if (is_test) QueryShape else void = if (is_test) .{} else {},
-    served: *const provider_route.Routes = &unserved,
+    served: *const provider_route.Served = &unserved,
     epoch: u64 = 0,
     commit_seq: u64 = 0,
     changes: i64 = 0,
@@ -76,7 +76,7 @@ const Begin = union(enum) {
 };
 
 const Replacement = enum { none, pending, buffered };
-const unserved = provider_route.all(.unserved);
+const unserved: provider_route.Served = .{};
 
 const Login = struct {
     address: enum { unix_socket, tcp_tls, tcp },

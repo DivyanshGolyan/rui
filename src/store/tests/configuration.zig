@@ -371,8 +371,8 @@ test "an omitted provider selects the Host's sole served provider" {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var routes = protocol.routesAll(.unserved);
-            routes.openai = .endpoint;
+            var routes: protocol.Served = .{};
+            try routes.put(protocol.servedEntry(.openai, .endpoint));
             var storage: Store = undefined;
             try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
             defer storage.close() catch unreachable;
@@ -396,9 +396,9 @@ test "an omitted provider is refused on a Host serving several" {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var routes = protocol.routesAll(.unserved);
-            routes.openai = .endpoint;
-            routes.codex = .endpoint;
+            var routes: protocol.Served = .{};
+            try routes.put(protocol.servedEntry(.openai, .endpoint));
+            try routes.put(protocol.servedEntry(.codex, .endpoint));
             var storage: Store = undefined;
             try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
             defer storage.close() catch unreachable;
@@ -1020,7 +1020,7 @@ test "capability-required configuration rejects on replacement and replays its s
             var command = try completeConfiguration("capability-guard", "", workspace, "model-a");
             command.require_model = true;
 
-            storage.served = protocol.routesAll(.unserved);
+            storage.servedSet().* = protocol.Served{};
             const rejected = try storage.configure(&command, .{});
             try std.testing.expect(rejected == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.model_capability_unavailable, rejected.rejected.code);
@@ -1031,9 +1031,9 @@ test "capability-required configuration rejects on replacement and replays its s
 
             var new_key = command;
             try new_key.key.set("capability-guard-next");
-            storage.served = protocol.routesAll(.endpoint);
+            storage.servedSet().* = protocol.servedBuiltIns(.endpoint);
             try std.testing.expect(try storage.configure(&new_key, .{}) == .accepted);
-            storage.served = protocol.routesAll(.unserved);
+            storage.servedSet().* = protocol.Served{};
             try std.testing.expect((try storage.configure(&new_key, .{})).accepted.replayed);
             var changed_intent = command;
             changed_intent.require_model = false;

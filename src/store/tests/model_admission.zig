@@ -888,13 +888,13 @@ test "model admission skips Sessions of a provider the Host does not serve" {
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
             {
                 var storage: Store = undefined;
-                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = protocol.routesAll(.unserved) });
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = protocol.Served{} });
                 defer storage.close() catch unreachable;
                 try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
                 try std.testing.expect(try storage.admitNextModelAttempt(.{}) == null);
             }
             var storage: Store = undefined;
-            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = protocol.routesAll(.endpoint) });
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = protocol.servedBuiltIns(.endpoint) });
             defer storage.close() catch unreachable;
             try std.testing.expect(try storage.admitNextModelAttempt(.{}) != null);
         }
