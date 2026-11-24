@@ -376,8 +376,6 @@
   "PermissionCard.test.PermissionCard decides the drawn request at tiny sizes and ignores pasted keys": 0.0005091749999905915,
   "PermissionCard.test.PermissionCard hover is quieter than the choice selection and changes neither consent nor focus": 0.0004895649999809848,
   "PermissionCard.test.PermissionCard takes no choice from a key handed inside a paste, across request replacement": 0.00017778800000201045,
-  "ReleaseWatch.test.SH-143 the watch reads at its first poll, again only once its gap has passed, and a failed read keeps the last offer": 0,
-  "ReleaseWatch.test.SH-144 only a release newer than this build is offered; equal, older or an unparsable build is not": 0,
   "ReleaseWatch.test.SH-145 settle stops a read in flight and the watch reads no more": 0,
   "ResponseTiming.test.positive progress renews mutation inactivity without a total response deadline": 0,
   "ResponseTiming.test.response policy separates mutation silence transfer inactivity and discovery": 0,
