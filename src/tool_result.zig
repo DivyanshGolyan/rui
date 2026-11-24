@@ -38,8 +38,6 @@ comptime {
         @compileError("result prefix cannot hold seekable samples");
 }
 
-/// One composition for text, images, bounded excerpt and optional retained output.
-/// The object, its capture, and any in-flight Source context must stay at stable addresses.
 /// The owner of result creation: the allocator, the I/O context and the
 /// retention queue that a tool result needs. Callers pass it by value.
 pub const Results = struct {
@@ -56,6 +54,8 @@ pub const Results = struct {
     }
 };
 
+/// One composition for text, images, bounded excerpt and optional retained output.
+/// The object, its capture, and any in-flight Source context must stay at stable addresses.
 pub const Result = struct {
     results: Results,
     action: u64,
