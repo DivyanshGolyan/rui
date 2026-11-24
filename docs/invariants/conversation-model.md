@@ -45,8 +45,8 @@
 
 | CM-42 | Module | Skill references in ordered Message input are read from each text part in order, excluding image bytes. | Skill reference scanner over sealed input | `CM-42 skill references are read from ordered text parts only` | src/session_skills.zig |
 | CM-45 | Module | Each Responses codec places the baseline according to its pinned version and emits valid input boundaries for each carry state. | Codec encoder API | `CM-45 input boundary transitions cover each version and carry state`: cross codec versions, input states and boundary items. | docs/contracts/model-io.md#history-memo; docs/contracts/model-io.md#codex-wire-binding |
-
 | CM-44 | Module | Each Responses codec encodes the complete request in its pinned wire form, including legacy tool output and regular or compaction requests. | Codec encoder API | `CM-44 complete request encoding preserves pinned wire bytes` in `src/codecs.zig`: cross codec versions and request kinds, and compare complete encoded bytes. | docs/contracts/model-io.md#history-memo; docs/contracts/model-io.md#codex-wire-binding |
+| CM-46 | Module | The client accepts bounded skill suggestion replies in Host relevance order and rejects rows that do not match the query or are out of order. | Skill suggestion reply decoder | `CM-46 inline skills suggestion replies preserve Host relevance order` | docs/contracts/conversation.md#skills |
 
 Owned elsewhere: ADM-3 (Label presentation and model input), ADM-4 (configuration field presence), ADM-21 (missing-tool catalog decisions), SES-1, SES-4–SES-7 and SES-17 (stop exclusion), SES-10 (queue survival after Turn failure), EXR-1 (provider candidate rejection), EXR-5 (Action permission snapshot), EXR-42 (loaded-tool narrowing and fallback), EXR-44 (allocation exhaustion during skill reload).
 
