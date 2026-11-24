@@ -4436,7 +4436,8 @@
                       "model_is_immutable",
                       "revision_exhausted",
                       "skills_unavailable",
-                      "preferences_on_update"
+                      "preferences_on_update",
+                      "connection_unserved"
                     ]
                   },
                   "message": {
@@ -7638,6 +7639,7 @@
                       "invalid_sender_handle",
                       "unsupported_permission_mode",
                       "unsupported_provider",
+                      "connection_unserved",
                       "invalid_model",
                       "model_capability_unavailable",
                       "invalid_output_schema",
@@ -7790,6 +7792,7 @@
                       "invalid_sender_handle",
                       "unsupported_permission_mode",
                       "unsupported_provider",
+                      "connection_unserved",
                       "invalid_model",
                       "model_capability_unavailable",
                       "invalid_output_schema",

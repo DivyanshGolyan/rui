@@ -1,5 +1,6 @@
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
+const connection = @import("../../connection.zig");
 const protocol = @import("../../protocol.zig");
 const wire_request = @import("../../wire_request.zig");
 const tool_defs = @import("../../tools.zig");
@@ -21,6 +22,8 @@ const testingBytesContent = shared_fixtures.testingBytesContent;
 const testingContent = shared_fixtures.testingContent;
 const testingHostToolRecords = shared_fixtures.testingHostToolRecords;
 const testingSessionReport = shared_fixtures.testingSessionReport;
+
+const served_builtins = @import("../../protocol.zig").servedBuiltIns(.endpoint);
 
 test "a configure whose instructions and output schema are the same new bytes imports one row and verifies both files" {
     try store_testing.forEachEngine(struct {
@@ -121,12 +124,12 @@ test "configuration pre-Workspace decisions allow model revisions" {
             .model_requested = null,
             .expected = null,
         },
-        .{ .name = "unknown provider is bounded", .has_current = true, .workspace_requested = false, .provider_requested = "other", .model_requested = null, .expected = .unsupported_provider },
+        .{ .name = "a different connection name is immutable on an existing Session", .has_current = true, .workspace_requested = false, .provider_requested = "other", .model_requested = null, .expected = .provider_is_immutable },
     };
 
     var existing: CurrentConfiguration = .{};
     try existing.workspace.set("/canonical/workspace");
-    existing.provider = .codex;
+    existing.provider = connection.Name.parse("codex").?;
     try existing.model.set("model-a");
     existing.instructions_id = 11;
     existing.revision = 1;
@@ -155,7 +158,7 @@ test "configuration pre-Workspace decisions allow model revisions" {
         const current: ?*const CurrentConfiguration = if (case.has_current) &existing else null;
         std.testing.expectEqual(
             case.expected,
-            configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, &tool_defs.built_in_tool_set, current, &requested, .codex),
+            configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, &tool_defs.built_in_tool_set, &served_builtins, current, &requested, connection.Name.parse("codex").?),
         ) catch |err| {
             std.debug.print("configuration pre-Workspace case failed: {s}\n", .{case.name});
             return err;
@@ -170,7 +173,7 @@ test "configure refuses a tool name the tool set lacks and a provider tool its p
     const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
     try std.testing.expect(host_tool_set.valid());
     var existing: CurrentConfiguration = .{};
-    existing.provider = .codex;
+    existing.provider = connection.Name.parse("codex").?;
     try existing.model.set("model-a");
     const Case = struct { names: []const []const u8, expected: ?protocol.ConfigurationRejection };
     for ([_]Case{
@@ -182,7 +185,8 @@ test "configure refuses a tool name the tool set lacks and a provider tool its p
     }) |case| {
         var requested: wire_request.Configuration = .{};
         requested.tools = try .of(case.names);
-        try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, &host_tool_set, &existing, &requested, .codex));
+        var served = protocol.servedBuiltIns(.endpoint);
+        try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, &host_tool_set, &served, &existing, &requested, connection.Name.parse("codex").?));
     }
 }
 
@@ -230,7 +234,7 @@ test "Store configuration requires Workspace and model and, on a Host serving se
             try std.testing.expect(initial_reply == .accepted);
             const session = initial_reply.accepted.session;
             const observation = try storage.inspectSessionForTesting(session.slice());
-            try std.testing.expectEqual(protocol.Provider.codex, observation.provider.?);
+            try std.testing.expectEqualStrings("codex", observation.provider.?.slice());
             try std.testing.expectEqualStrings("model-a", observation.model.slice());
 
             var equal: wire_request.ConfigureCommand = .{};
@@ -260,7 +264,7 @@ test "Store configuration requires Workspace and model and, on a Host serving se
     }.run);
 }
 
-test "unsupported provider rejects mixed configuration atomically and replays exact shape" {
+test "a different connection name rejects mixed configuration atomically and replays exact shape" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -291,7 +295,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
             const revision_count = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{});
             const rejected = try storage.configure(&update, .{});
             try std.testing.expect(rejected == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_provider, rejected.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.provider_is_immutable, rejected.rejected.code);
             try std.testing.expectEqual(content_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
             try std.testing.expectEqual(revision_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
             const current = try storage.inspectSessionForTesting(created_session_0.slice());
@@ -352,7 +356,7 @@ test "creation accepts omitted Host settings and preserves its supplied Workspac
             try std.testing.expect(reply == .accepted);
             const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
             try expectToolSetNames(&storage, observed.tool_set_id, &.{});
-            try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+            try std.testing.expectEqualStrings("codex", observed.provider.?.slice());
             try std.testing.expectEqualStrings(workspace, observed.workspace.slice());
             var enable: wire_request.ConfigureCommand = .{};
             try enable.key.set("enable-bash");
@@ -385,7 +389,7 @@ test "an omitted provider selects the Host's sole served provider" {
             const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
             const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
-            try std.testing.expectEqual(protocol.Provider.openai, observed.provider.?);
+            try std.testing.expectEqualStrings("openai", observed.provider.?.slice());
             try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort);
         }
     }.run);
@@ -659,7 +663,7 @@ test "configuration planning preserves sparse defaults and rejection precedence"
     for (cases) |case| {
         var existing: CurrentConfiguration = .{};
         try existing.workspace.set("/canonical/workspace");
-        existing.provider = .codex;
+        existing.provider = connection.Name.parse("codex").?;
         try existing.model.set("model-a");
         existing.instructions_id = 11;
         existing.tool_set_id = 1;
@@ -1038,7 +1042,14 @@ test "capability-required configuration rejects on replacement and replays its s
             var changed_intent = command;
             changed_intent.require_model = false;
             try std.testing.expect(try storage.configure(&changed_intent, .{}) == .conflict);
+            // Creating under an explicit name the Host does not serve is refused (connection_unserved).
+            var unserved = changed_intent;
+            try unserved.key.set("explicit-unserved-config");
+            const refused = try storage.configure(&unserved, .{});
+            try std.testing.expect(refused == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.connection_unserved, refused.rejected.code);
             try changed_intent.key.set("explicit-offline-config");
+            storage.servedSet().* = protocol.servedBuiltIns(.endpoint);
             try std.testing.expect(try storage.configure(&changed_intent, .{}) == .accepted);
         }
     }.run);
@@ -1250,7 +1261,7 @@ test "parent creation uses inherited provider for omitted compaction across save
                 const result = try storage.configure(&child, .{});
                 try std.testing.expect(result == .accepted);
                 const observed = try storage.inspectSessionForTesting(result.accepted.session.slice());
-                try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+                try std.testing.expectEqualStrings("codex", observed.provider.?.slice());
                 try std.testing.expectEqual(@as(?u64, 450000), observed.compaction_trigger);
                 try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
                 try std.testing.expect((try storage.configure(&child, .{})).accepted.replayed);

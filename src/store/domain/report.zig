@@ -1,3 +1,5 @@
+const provider_route = @import("../../provider_route.zig");
+const connection = @import("../../connection.zig");
 const std = @import("std");
 const obligation = @import("session_obligation.zig");
 const attempt = @import("../../attempt.zig");
@@ -1643,7 +1645,7 @@ const RevisionRow = struct {
     newest: rsql.Positive,
     command_key: Bounded(128),
     workspace: Bounded(workspace_path.max_bytes),
-    provider: provider_name.Provider,
+    provider: connection.Name,
     model: Bounded(model_capability.max_model_bytes),
     compaction_trigger: ?rsql.Positive,
     output_reservation: ?u64,
@@ -1786,7 +1788,7 @@ fn RevisionChunk(comptime Watcher: type) type {
                 .revision = row.revision.get(),
                 .command_key = row.command_key.slice(),
                 .workspace = row.workspace.slice(),
-                .provider = row.provider,
+                .provider = provider_route.builtInOf(row.provider) orelse unreachable,
                 .model = row.model.slice(),
                 .compaction_trigger = optional(row.compaction_trigger),
                 .output_reservation = row.output_reservation,

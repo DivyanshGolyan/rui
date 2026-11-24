@@ -886,11 +886,17 @@ test "model admission skips Sessions of a provider the Host does not serve" {
             try message.key.set("unserved");
             message.text = try testingBytesContent(&tmp, "unserved-message", "wait for a Host that serves me");
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            // Created while codex is served: creation refuses an unserved name.
+            {
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = protocol.servedBuiltIns(.endpoint) });
+                defer storage.close() catch unreachable;
+                try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
+            }
             {
                 var storage: Store = undefined;
                 try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = protocol.Served{} });
                 defer storage.close() catch unreachable;
-                try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
                 try std.testing.expect(try storage.admitNextModelAttempt(.{}) == null);
             }
             var storage: Store = undefined;

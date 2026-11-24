@@ -1,3 +1,4 @@
+const connection = @import("../connection.zig");
 const std = @import("std");
 const change_ring = @import("../change_ring.zig");
 const schema = @import("schema.zig");

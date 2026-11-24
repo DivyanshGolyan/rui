@@ -47,6 +47,12 @@ pub const Served = struct {
     pub fn route(self: *const Served, name: []const u8) Route {
         return if (self.of(name)) |entry| entry.route else .unserved;
     }
+
+    /// Whether the served name runs the tool. An absent name runs none.
+    pub fn runsTool(self: *const Served, name: []const u8, tool: []const u8) bool {
+        const entry = self.of(name) orelse return false;
+        return entry.web_search and std.mem.eql(u8, tool, "web_search");
+    }
 };
 
 /// A built-in provider as a served entry, named by its enum tag.
@@ -57,6 +63,13 @@ pub fn builtIn(provider: Provider, route: Route) Entry {
         .codec = provider.codec(),
         .web_search = provider.runsTool("web_search"),
     };
+}
+
+/// The built-in provider a name spells. Until the Host's provider enum gives
+/// way to connection names (commits 3-6), the boundary that hands a Session's
+/// provider to enum-typed code calls this; a name that is not built in has none.
+pub fn builtInOf(name: connection.Name) ?Provider {
+    return std.meta.stringToEnum(Provider, name.slice());
 }
 
 /// Every built-in provider served at one route, for test fixtures.

@@ -1,3 +1,4 @@
+const connection = @import("../../connection.zig");
 const std = @import("std");
 const replay_recipe = @import("../../replay_recipe.zig");
 const replay_binding = @import("../../replay_binding.zig");
@@ -152,7 +153,7 @@ const latest_turn = rsql.Read(.{
         operation_id: rsql.Positive,
         active: bool,
         first_admission_id: rsql.Positive,
-        provider: provider_name.Provider,
+        provider: connection.Name,
         codec: provider_name.Codec,
         model: Bounded(model_capability.max_model_bytes),
     },
@@ -177,7 +178,7 @@ pub const compaction_failures = .{
 pub const CompactionRead = struct {
     session: []const u8,
     boundary: u64,
-    provider: provider_name.Provider,
+    provider: connection.Name,
     codec: provider_name.Codec,
     model: []const u8,
     wire: replay_binding.Wire,
@@ -185,13 +186,19 @@ pub const CompactionRead = struct {
     stage: enum { latest, first, bytes, compound_bytes, done } = .latest,
     latest: latest_turn.Result = undefined,
     first: first_runnable.Result = undefined,
-    context: admission_context.Result = undefined,
+    context: ContextRow = undefined,
+    context_found: store_access.Found = .missing,
     bytes_args: context_bytes.Args = undefined,
     bytes: context_bytes.Result = undefined,
     compound_bytes: context_compound_bytes.Result = undefined,
     pressure: ?*const PartsPressure.Read = null,
 
-    pub fn init(session: []const u8, boundary: u64, provider: provider_name.Provider, codec: provider_name.Codec, model: []const u8, policy: model_capability.CompactionPolicy) CompactionRead {
+    /// The image cost rule of this read's provider and model, which a parts-pressure request is priced by.
+    pub fn imageCostRule(read: *const CompactionRead) ?model_catalog.ImageCostRule {
+        return model_catalog.imageCostRule(read.provider.slice(), read.model);
+    }
+
+    pub fn init(session: []const u8, boundary: u64, provider: connection.Name, codec: provider_name.Codec, model: []const u8, policy: model_capability.CompactionPolicy) CompactionRead {
         return .{ .session = session, .boundary = boundary, .provider = provider, .codec = codec, .model = model, .wire = replay_wire.wireOf(provider, codec), .facts = .{
             .trigger = policy.compaction_trigger,
             .compacts = codecs.compacts(codec),
@@ -207,7 +214,7 @@ pub const CompactionRead = struct {
         switch (read.stage) {
             .latest => {
                 a.read(latest_turn, .{ .session = read.session }, &read.latest);
-                a.read(admission_context, .{ .session = read.session, .boundary = read.boundary, .provider = read.provider, .codec = read.codec, .model = read.model }, &read.context);
+                a.readInto(admission_context, .{ .session = read.session, .boundary = read.boundary, .provider = read.provider, .codec = read.codec, .model = read.model }, &read.context, &read.context_found);
             },
             .first => a.read(first_runnable, .{ .session = read.session }, &read.first),
             .bytes => a.read(context_bytes, read.bytes_args, &read.bytes),
@@ -252,7 +259,7 @@ pub const CompactionRead = struct {
         const resolution: []const u8 = if (latest.resolution_code) |*code| code.slice() else "";
         read.facts.previous = previousTurn(latest.purpose == 1, resolution, latest.active, latest.first_admission_id.get(), next_first, replaysCompaction(replay_wire.bindingOf(replay_wire.wireOf(latest.provider, latest.codec), latest.model.slice()), replay_wire.bindingOf(read.wire, read.model)));
         if (turn_policy.forcedPurpose(read.facts.previous, read.facts.trigger, read.facts.compacts) != null) return .done;
-        const context = if (read.context) |*row| row else return error.CorruptStore;
+        const context = if (read.context_found.get()) &read.context else return error.CorruptStore;
         read.bytes_args = try takeContext(&read.facts, context, replay_wire.bindingOf(read.wire, read.model), read.session) orelse return .done;
         return .bytes;
     }
@@ -394,10 +401,10 @@ pub const context_changed = rsql.Read(.{
         changed: bool,
         base_position: ?rsql.Positive,
         base_floor: ?rsql.Positive,
-        base_provider: ?provider_name.Provider,
+        base_provider: ?connection.Name,
         base_codec: ?provider_name.Codec,
         base_model: ?Bounded(model_capability.max_model_bytes),
-        provider: provider_name.Provider,
+        provider: connection.Name,
         codec: provider_name.Codec,
         model: Bounded(model_capability.max_model_bytes),
     },
@@ -469,7 +476,7 @@ const ContextRow = struct {
     changed: bool,
     base_position: ?rsql.Positive,
     base_floor: ?rsql.Positive,
-    base_provider: ?provider_name.Provider,
+    base_provider: ?connection.Name,
     base_codec: ?provider_name.Codec,
     base_model: ?Bounded(model_capability.max_model_bytes),
     uncached: ?u64,
@@ -481,14 +488,14 @@ const ContextRow = struct {
     usage_floor: ?rsql.Positive,
     usage_base_position: ?rsql.Positive,
     usage_base_floor: ?rsql.Positive,
-    usage_base_provider: ?provider_name.Provider,
+    usage_base_provider: ?connection.Name,
     usage_base_codec: ?provider_name.Codec,
     usage_base_model: ?Bounded(model_capability.max_model_bytes),
 };
 
 const admission_context = rsql.Read(.{
     .sql = "WITH " ++ contextCtesSql("SELECT ?1 AS session_ref,?2 AS boundary,?3 AS provider,?4 AS model,?5 AS codec WHERE EXISTS(SELECT 1 FROM turn latest @index(turn_session_latest) WHERE latest.session_ref=?1)") ++ " SELECT ?4 AS model," ++ context_columns_sql ++ " FROM measured",
-    .Args = struct { session: []const u8, boundary: u64, provider: provider_name.Provider, model: []const u8, codec: provider_name.Codec },
+    .Args = struct { session: []const u8, boundary: u64, provider: connection.Name, model: []const u8, codec: provider_name.Codec },
     .Row = ContextRow,
     .cardinality = .optional,
 });
@@ -496,7 +503,7 @@ const admission_context = rsql.Read(.{
 const SelectedRow = struct {
     session: rsql.SessionHead,
     revision: rsql.Positive,
-    provider: provider_name.Provider,
+    provider: connection.Name,
     codec: provider_name.Codec,
     model: Bounded(model_capability.max_model_bytes),
     compaction_trigger: ?rsql.Positive,
@@ -512,14 +519,14 @@ const SelectedRow = struct {
     latest_operation: ?rsql.Positive,
     latest_compaction: ?bool,
     latest_resolution: ?Bounded(outcome_code.max_bytes),
-    latest_provider: ?provider_name.Provider,
+    latest_provider: ?connection.Name,
     latest_codec: ?provider_name.Codec,
     latest_model: ?Bounded(model_capability.max_model_bytes),
     instructions: u64,
     changed: bool,
     base_position: ?rsql.Positive,
     base_floor: ?rsql.Positive,
-    base_provider: ?provider_name.Provider,
+    base_provider: ?connection.Name,
     base_codec: ?provider_name.Codec,
     base_model: ?Bounded(model_capability.max_model_bytes),
     uncached: ?u64,
@@ -531,7 +538,7 @@ const SelectedRow = struct {
     usage_floor: ?rsql.Positive,
     usage_base_position: ?rsql.Positive,
     usage_base_floor: ?rsql.Positive,
-    usage_base_provider: ?provider_name.Provider,
+    usage_base_provider: ?connection.Name,
     usage_base_codec: ?provider_name.Codec,
     usage_base_model: ?Bounded(model_capability.max_model_bytes),
 };
@@ -616,9 +623,9 @@ pub const PartsPressure = struct {
     gpt41_unknown: u64 = 0,
     gpt41_tokens: u64 = 0,
 
-    fn apply(self: PartsPressure, facts: *turn_policy.CompactionFacts, provider: provider_name.Provider, model: []const u8) void {
+    fn apply(self: PartsPressure, facts: *turn_policy.CompactionFacts, provider: connection.Name, model: []const u8) void {
         facts.unknown_images = self.unknown_images;
-        if (model_catalog.imageCostRule(provider, model)) |rule| switch (rule) {
+        if (model_catalog.imageCostRule(provider.slice(), model)) |rule| switch (rule) {
             .astra_auto => {
                 facts.image_tokens = self.astra_tokens;
                 facts.unknown_images = self.astra_unknown;
@@ -804,7 +811,7 @@ pub const AdmissionPreparation = struct {
         self.resolution = facts.latest_resolution;
         self.read.init(&selection.session.ref, coverage.covered, coverage.frontier, coverage.results, selection.cutoff.get());
         self.read.boundary = facts.session.next_position.get();
-        self.read.rule = model_catalog.imageCostRule(facts.provider, facts.model.slice());
+        self.read.rule = model_catalog.imageCostRule(facts.provider.slice(), facts.model.slice());
         self.phase = .weighing;
     }
 

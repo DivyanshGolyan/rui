@@ -2,6 +2,7 @@ const std = @import("std");
 const Bounded = @import("../bounded.zig").Bounded;
 const isBounded = @import("../bounded.zig").isBounded;
 const provider_route = @import("../provider_route.zig");
+const connection = @import("../connection.zig");
 const provider_name = @import("../provider_name.zig");
 const rsql = @import("rsql.zig");
 
@@ -97,6 +98,7 @@ fn valueLength(comptime T: type, value: T) Error!usize {
     if (T == rsql.Bytes) return bytesLength(value.bytes.len);
     if (T == rsql.SessionHead) return textLength(value.ref.len);
     if (comptime isBounded(T)) return textLength(value.len);
+    if (T == connection.Name) return textLength(value.slice().len);
     return switch (@typeInfo(T)) {
         .optional => |optional| if (value) |present| valueLength(optional.child, present) else null_text.len,
         .bool => 1,
@@ -113,6 +115,7 @@ fn writeValue(comptime T: type, value: T, w: *std.Io.Writer) std.Io.Writer.Error
     if (T == rsql.Bytes) return writeBytes(value.bytes, w);
     if (T == rsql.SessionHead) return writeText(&value.ref, w);
     if (comptime isBounded(T)) return writeText(value.slice(), w);
+    if (T == connection.Name) return writeText(value.slice(), w);
     switch (@typeInfo(T)) {
         .optional => |optional| if (value) |present| try writeValue(optional.child, present, w) else try w.writeAll(null_text),
         .bool => try w.writeByte(if (value) '1' else '0'),

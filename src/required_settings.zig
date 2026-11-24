@@ -1,7 +1,7 @@
 //! Which settings a new Session still lacks. Every creation path (configure, a creating Message, and
 //! start_agent through them) asks this one owner, so a refusal names every missing setting at once.
 const std = @import("std");
-const Provider = @import("provider_name.zig").Provider;
+const connection = @import("connection.zig");
 const provider_route = @import("provider_route.zig");
 const product_defaults = @import("product_defaults.zig");
 
@@ -99,13 +99,13 @@ pub const Creation = struct {
     workspace: bool,
     parent: bool,
     /// The provider the request names, or the parent's when `parent` is set.
-    provider: ?Provider,
+    provider: ?connection.Name,
     served: *const provider_route.Served,
 };
 
 pub const Outcome = union(enum) {
     missing: Missing,
-    complete: struct { provider: Provider },
+    complete: struct { provider: connection.Name },
 };
 
 pub fn check(creation: Creation) Outcome {
@@ -120,16 +120,14 @@ pub fn check(creation: Creation) Outcome {
 
 /// The provider a new Session gets: the named one, else the only served one, else the product
 /// default when the Host serves none. Null when the Host serves several and none was named.
-pub fn resolveProvider(named: ?Provider, served: *const provider_route.Served) ?Provider {
+pub fn resolveProvider(named: ?connection.Name, served: *const provider_route.Served) ?connection.Name {
     if (named) |provider| return provider;
-    var selected: ?Provider = null;
+    var selected: ?connection.Name = null;
     for (served.items()) |entry| {
-        // Served names are built-in providers until connection names arrive (commit 2).
-        const provider = std.meta.stringToEnum(Provider, entry.name.slice()) orelse unreachable;
         if (selected != null) return null;
-        selected = provider;
+        selected = entry.name;
     }
-    return selected orelse comptime std.meta.stringToEnum(Provider, product_defaults.provider).?;
+    return selected orelse comptime connection.Name.parse(product_defaults.provider).?;
 }
 
 test "check names every missing setting over model, workspace, parent, provider and served providers" {
@@ -139,24 +137,24 @@ test "check names every missing setting over model, workspace, parent, provider 
     var two = one;
     try two.put(provider_route.builtIn(.codex, .endpoint));
     const Set = enum { none, one, two };
-    const Case = struct { model: bool, workspace: bool, parent: bool, provider: ?Provider, served: Set, expected: []const u8 };
+    const Case = struct { model: bool, workspace: bool, parent: bool, provider: ?connection.Name, served: Set, expected: []const u8 };
     // Expected values are literals: a missing list, or "ok:<provider>".
     const cases = [_]Case{
         .{ .model = true, .workspace = true, .parent = false, .provider = null, .served = .none, .expected = "ok:codex" },
         .{ .model = true, .workspace = true, .parent = false, .provider = null, .served = .one, .expected = "ok:openai" },
         .{ .model = true, .workspace = true, .parent = false, .provider = null, .served = .two, .expected = "[\"provider\"]" },
-        .{ .model = true, .workspace = true, .parent = false, .provider = .chatgpt, .served = .two, .expected = "ok:chatgpt" },
-        .{ .model = true, .workspace = true, .parent = false, .provider = .chatgpt, .served = .none, .expected = "ok:chatgpt" },
+        .{ .model = true, .workspace = true, .parent = false, .provider = connection.Name.parse("chatgpt").?, .served = .two, .expected = "ok:chatgpt" },
+        .{ .model = true, .workspace = true, .parent = false, .provider = connection.Name.parse("chatgpt").?, .served = .none, .expected = "ok:chatgpt" },
         .{ .model = true, .workspace = false, .parent = false, .provider = null, .served = .one, .expected = "[\"workspace\"]" },
-        .{ .model = true, .workspace = false, .parent = true, .provider = .codex, .served = .two, .expected = "ok:codex" },
-        .{ .model = true, .workspace = true, .parent = true, .provider = .openai, .served = .none, .expected = "ok:openai" },
+        .{ .model = true, .workspace = false, .parent = true, .provider = connection.Name.parse("codex").?, .served = .two, .expected = "ok:codex" },
+        .{ .model = true, .workspace = true, .parent = true, .provider = connection.Name.parse("openai").?, .served = .none, .expected = "ok:openai" },
         .{ .model = false, .workspace = true, .parent = false, .provider = null, .served = .one, .expected = "[\"model\"]" },
-        .{ .model = false, .workspace = false, .parent = true, .provider = .codex, .served = .two, .expected = "[\"model\"]" },
+        .{ .model = false, .workspace = false, .parent = true, .provider = connection.Name.parse("codex").?, .served = .two, .expected = "[\"model\"]" },
         .{ .model = false, .workspace = false, .parent = false, .provider = null, .served = .none, .expected = "[\"model\",\"workspace\"]" },
         .{ .model = false, .workspace = true, .parent = false, .provider = null, .served = .two, .expected = "[\"model\",\"provider\"]" },
         .{ .model = true, .workspace = false, .parent = false, .provider = null, .served = .two, .expected = "[\"workspace\",\"provider\"]" },
         .{ .model = false, .workspace = false, .parent = false, .provider = null, .served = .two, .expected = "[\"model\",\"workspace\",\"provider\"]" },
-        .{ .model = false, .workspace = false, .parent = false, .provider = .openai, .served = .two, .expected = "[\"model\",\"workspace\"]" },
+        .{ .model = false, .workspace = false, .parent = false, .provider = connection.Name.parse("openai").?, .served = .two, .expected = "[\"model\",\"workspace\"]" },
     };
     for (cases) |case| {
         var buffer: [64]u8 = undefined;
@@ -170,7 +168,7 @@ test "check names every missing setting over model, workspace, parent, provider 
                 try missing.writeJson(&out);
                 try std.testing.expect(missing.count() >= 1);
             },
-            .complete => |complete| try out.print("ok:{s}", .{@tagName(complete.provider)}),
+            .complete => |complete| try out.print("ok:{s}", .{complete.provider.slice()}),
         }
         try std.testing.expectEqualStrings(case.expected, out.buffered());
     }

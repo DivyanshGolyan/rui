@@ -10,6 +10,7 @@ const prefix_seal = @import("prefix_seal.zig");
 const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const provider_route = @import("provider_route.zig");
 const wire_request = @import("wire_request.zig");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
@@ -921,7 +922,7 @@ pub const Preparation = struct {
                     self.state.memos = null;
                     self.writer.encoded_limit = max_ordered_request_bytes;
                 }
-                if (self.settings.output_schema != null and !providers.acceptsOutputSchema(self.state.routes.route(@tagName(self.settings.provider))))
+                if (self.settings.output_schema != null and !providers.acceptsOutputSchema(self.state.routes.route(self.settings.provider.slice())))
                     return error.UnsupportedOutputSchemaRoute;
                 const codec = self.settings.codec;
                 self.page.expectTools(if (codecs.declaresTools(codec)) .declared else .all);
@@ -1081,7 +1082,7 @@ pub const Preparation = struct {
                     .text => self.loadItemHeader(.input_text, 0b1),
                     .image => |image| image: {
                         if (self.state.image_capability == .unsupported) return error.ModelImageUnsupported;
-                        if (model_catalog.imageCostRule(self.settings.provider, self.settings.model.slice()) == .astra_auto and
+                        if (model_catalog.imageCostRule(self.settings.provider.slice(), self.settings.model.slice()) == .astra_auto and
                             @import("input_media.zig").astraAuto(image.media.width, image.media.height) == .impossible)
                             return error.OrderedInputLimit;
                         if (self.state.replayed_images == max_replayed_images) return error.OrderedInputLimit;
@@ -1559,7 +1560,8 @@ pub const Preparation = struct {
         self.request.length = self.writer.offset;
         self.request.charged = self.writer.charged;
         self.request.structured_output = self.settings.output_schema != null;
-        self.request.provider = self.settings.provider;
+        // Until the Host takes connection names (commit 6), only built-in names reach a Preparation: the Store writes served names only.
+        self.request.provider = provider_route.builtInOf(self.settings.provider) orelse unreachable;
         self.request.codec = self.settings.codec;
         return .{ .prepared = &self.request };
     }

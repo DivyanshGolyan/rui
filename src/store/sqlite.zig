@@ -1,6 +1,7 @@
 const std = @import("std");
 const provider_route = @import("../provider_route.zig");
 const Bounded = @import("../bounded.zig").Bounded;
+const connection = @import("../connection.zig");
 const isBounded = @import("../bounded.zig").isBounded;
 const model_capability = @import("../model_capability.zig");
 const provider_name = @import("../provider_name.zig");
@@ -363,6 +364,7 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: 
     if (T == rsql.Positive) return bindU64(statement, index, value.get());
     if (T == rsql.Bytes) return bindBlob(statement, index, value.bytes);
     if (T == rsql.SessionHead) return bindCopied(statement, index, &value.ref, true);
+    if (T == connection.Name) return bindCopied(statement, index, value.slice(), true);
     if (comptime isBounded(T)) {
         comptime std.debug.assert(@typeInfo(@FieldType(T, "bytes")).array.len <= max_copied_bytes);
         return bindCopied(statement, index, if (value.len == 0) "" else value.slice(), true);
@@ -408,6 +410,10 @@ fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int, out:
         return;
     }
     if (comptime isBounded(T)) return out.set(try columnText(statement, column));
+    if (T == connection.Name) {
+        out.* = connection.Name.parse(try columnText(statement, column)) orelse return error.CorruptStore;
+        return;
+    }
     if (comptime isBlob(T)) {
         if (c.sqlite3_column_type(statement, column) != c.SQLITE_BLOB) return error.CorruptStore;
         const bytes = columnBytes(statement, column);

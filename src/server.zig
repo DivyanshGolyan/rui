@@ -4963,7 +4963,7 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expect(overridden == .accepted);
     try storage.inspectSession(overridden.accepted.session.slice(), &observed);
     try std.testing.expectEqualStrings("preset-override-model", observed.model.slice());
-    try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+    try std.testing.expectEqualStrings("codex", observed.provider.?.slice());
     try std.testing.expectEqualStrings(root, observed.workspace.slice());
     try std.testing.expectEqual(@as(?u64, 12000), observed.compaction_trigger_override);
     try std.testing.expectEqual(@import("configuration_defaults.zig").startEffort(@import("model_catalog.zig").shipped, "preset-override-model"), observed.reasoning_effort_override);
