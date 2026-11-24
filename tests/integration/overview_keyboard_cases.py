@@ -146,7 +146,7 @@ def creator_gestures():
         rows = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
         child, = (entry["reference"] for entry in rows if entry["creator"] == parent)
         w.run("session", "pin", "--store", w.store, "--session", child)
-        with w.overview(columns=46, rows=30) as screen:
+        with w.overview(columns=140, rows=30) as screen:
             screen.wait(lambda frame: task in frame and "Tree parent" in frame, "pinned child and parent")
             screen.keys(FIRST_ROW + DOWN)
             screen.wait(lambda _: screen.style("Tree parent").bold, "unpinned parent selected after pinned child")
