@@ -46,13 +46,6 @@ fn literalOf(source: connection.OAuth.LinkSource) []const u8 {
     };
 }
 
-fn claimOf(source: connection.Header.Source) []const u8 {
-    return switch (source) {
-        .claim => |name| name,
-        else => unreachable,
-    };
-}
-
 fn keyOf(c: connection.Connection) connection.Key {
     return switch (c.credential) {
         .key => |key| key,
@@ -136,7 +129,7 @@ test "the ChatGPT browser preset holds the owners' sign-in and endpoint facts" {
     try std.testing.expect(std.meta.activeTag(oauth.link[1].from) == .host_id);
 }
 
-test "the ChatGPT device preset holds the owners' client, endpoint and claim headers" {
+test "the ChatGPT device preset holds the owners' client and endpoint, and no host-owned header" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -149,12 +142,12 @@ test "the ChatGPT device preset holds the owners' client, endpoint and claim hea
     try std.testing.expectEqualStrings(provider_name.managed_endpoint, resolved.url);
     try std.testing.expectEqual(facts.codec, resolved.codec);
     try std.testing.expectEqualStrings(codex_token_wire.client_id, deviceOf(value).client_id);
+    // The owner's managed endpoint is the base plus the Responses path, and the audience is that base.
+    var base_buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(provider_name.managed_endpoint, try std.fmt.bufPrint(&base_buffer, "{s}/responses", .{value.base_url}));
     try std.testing.expectEqualStrings(value.base_url, deviceOf(value).audience);
-    // The claim names and header names are the preset's own spelling; no owner holds them as constants.
-    try std.testing.expectEqualStrings("chatgpt-account-id", value.headers[0].name);
-    try std.testing.expectEqualStrings("account_id", claimOf(value.headers[0].from));
-    try std.testing.expectEqualStrings("x-openai-fedramp", value.headers[1].name);
-    try std.testing.expectEqualStrings("fedramp", claimOf(value.headers[1].from));
+    // The ChatGPT account and FedRAMP headers stay host-owned (provider.host_request_fields) until the wiring PR.
+    try std.testing.expectEqual(@as(usize, 0), value.headers.len);
 }
 
 test "the bundled key presets hold the owners' endpoint and label, and name their placement" {

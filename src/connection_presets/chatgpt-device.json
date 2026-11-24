@@ -7,10 +7,7 @@
     "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
     "audience": "https://chatgpt.com/backend-api/codex"
   },
-  "headers": [
-    {"name": "chatgpt-account-id", "from": {"kind": "claim", "name": "account_id"}},
-    {"name": "x-openai-fedramp", "from": {"kind": "claim", "name": "fedramp"}}
-  ],
+  "headers": [],
   "refusals": [],
   "formats": [
     {"family": "responses", "dialect": "openai-responses/2", "web_search": true}

@@ -33,10 +33,7 @@ pub const PreparedRequest = struct {
 
 const content_type: h2.Field = .{ .name = "content-type", .value = "application/json", .borrowed = true };
 
-// The ChatGPT account and FedRAMP fields are connection headers now (the
-// device-code preset declares them from token claims), so they are not
-// host-owned names.
-pub const host_request_fields = [_][]const u8{ content_type.name, "authorization", "user-agent" } ++ routing_fields;
+pub const host_request_fields = [_][]const u8{ content_type.name, "authorization", "chatgpt-account-id", "user-agent", "x-openai-fedramp" } ++ routing_fields;
 
 const routing_fields = fields: {
     var names: []const []const u8 = &.{};
