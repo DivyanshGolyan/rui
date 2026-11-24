@@ -35,6 +35,15 @@ pub const entries = [_]Entry{
     .{ .field = "label", .spec = "label", .kind = .{ .text = 100 }, .nullable = true, .cli = .{ .name = "label" }, .column = "label" },
 };
 
+/// The CLI spelling of a Session setting: every grammar, requirement and
+/// repair line names the option through this, never a literal.
+pub fn cliName(comptime field: []const u8) []const u8 {
+    for (entries) |entry| if (std.mem.eql(u8, entry.field, field)) {
+        return (entry.cli orelse @compileError("setting has no CLI option: " ++ field)).name;
+    };
+    @compileError("unknown Session setting: " ++ field);
+}
+
 pub const relations = [_]Entry{
     .{ .field = "parent", .spec = "parent", .kind = .{ .text = 6 }, .changeable = false, .cli = null, .digest = .unless_omitted, .column = "parent_ref" },
 };
