@@ -1913,8 +1913,13 @@ fi
             ["admission-debug-integration"], ["check-full", "-Dcheck-part=callers"],
             ["test-full"],
         ])
-        with self.assertRaises(ValueError):
-            execution_batches(["test-logic"], "execution")
+        self.assertEqual(execution_batches(targets, "both"), [
+            ["check-full", "-Dcheck-part=execution"], ["admission-debug-integration"],
+            ["test-full"], ["check-full", "-Dcheck-part=callers"],
+        ])
+        for part in ("execution", "both"):
+            with self.assertRaises(ValueError):
+                execution_batches(["test-logic"], part)
 
     def test_a_dispatch_selects_from_its_explicit_base(self):
         workflow = Path('.github/workflows/check.yml').read_text()
