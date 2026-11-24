@@ -69,7 +69,10 @@ path = urllib.parse.urlsplit(url).path
 # Configuration and protocol confinement remain mandatory on every attempt.
 assert args[0] == "--disable", args
 assert args[args.index("--proto") + 1] == "=http", args
-assert args[args.index("--proto-redir") + 1] == ("=http" if path == "/releases/latest" else "=https"), args
+# Each redirect hop is its own attempt: one redirect_url probe with no --location.
+redirect_hop = "%{redirect_url}" in args
+assert ("--location" in args) != redirect_hop, args
+assert args[args.index("--proto-redir") + 1] == ("=http" if redirect_hop else "=https"), args
 previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 number = sum(row["path"] == path for row in previous)
 failures = plan["failures"].get(path, [])
@@ -268,7 +271,7 @@ def discovery_cases(root, binary, releases):
         assert f"Latest published stable: {releases.version}" in output, output
         assert "Selected managed release: 0.1.0" in output, output
         assert "No running Hosts discovered now" in output
-        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path]
+        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", releases.sums_path]
         c.assert_unchanged()
         c.assert_no_host()
         for args in (("--bogus",), ("unexpected-message",), ("--check", "--check")):
@@ -355,7 +358,7 @@ def install_cases(root, binary, releases):
         installing = output.index(f"Installing Rui {releases.version}...")
         verdict = output.index(f"Upgraded to Rui {releases.version}. Complete build: ")
         assert check_end < installing < verdict, output
-        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path, releases.archive_path]
+        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", releases.sums_path, releases.archive_path]
         assert c.link.resolve() != c.original
         assert c.original.exists(), "retained old complete build removed"
         assert c.run("--version").startswith("rui " + releases.version)
@@ -1598,14 +1601,14 @@ def terminal_download_recovery(root, binary, releases, artifacts):
         # of any other application-owned Hosts discovered for the fixture uid.
         shadow = c.build("recovery-shadowing-path", "0.1.0", managed=False) / "bin/rui"
         c.env["PATH"] = f"{shadow.parent}:{c.env['PATH']}"
-        # Background discovery's lookup succeeds; the request's own lookup then fails once.
+        # The TUI's background read (first attempt) succeeds; the request's own lookup then fails once.
         curl = CurlAttempts(c, {"/releases/latest": [0, 6]})
         gate = releases.gate_archive()
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.launch_overview()
-            screen.until(lambda: curl.log.exists() and any(row["path"] == releases.sums_path for row in curl.observed()),
-                         "background discovery read the release before the request")
+            screen.until(lambda: curl.log.exists() and any(row["path"] == "/releases/redirect" for row in curl.observed()),
+                         "background read finished its redirect before the request")
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "Settings download recovered and reached archive")
             screen.contains("preparing Upgrade")
@@ -1619,9 +1622,10 @@ def terminal_download_recovery(root, binary, releases, artifacts):
             proof_ready(c, previous, old_host)
             screen.save(artifacts, "download-recovered")
             curl.assert_attempts([("/releases/latest", "normal", 0),
-                                 (releases.sums_path, "normal", 0),
+                                 ("/releases/redirect", "normal", 0),
                                  ("/releases/latest", "normal", 6),
                                  ("/releases/latest", "ipv4", 0),
+                                 ("/releases/redirect", "ipv4", 0),
                                  (releases.sums_path, "ipv4", 0),
                                  (releases.archive_path, "ipv4", 0)])
             receipt = exit_on_sigint(screen, process, "recovered download report after terminal restoration")
@@ -1722,11 +1726,13 @@ def signal_during_check(root, binary, releases, artifacts):
         host, previous = c.start_host()
         _, credential = terminal_setup(c)
         gate = releases.gates["/releases/latest"] = Gate()
+        start = len(releases.requests)
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.launch_overview()
             screen.start_upgrade()
-            screen.until(gate.entered.is_set, "release check held before terminal signal")
+            screen.until(lambda: releases.requests[start:].count("/releases/latest") >= 2,
+                         "background read and release check both held before terminal signal")
             screen.contains("checking for updates")
             screen.save(artifacts, "signal-during-check")
             exit_on_sigint(screen, process, "terminal exit during held upgrade check")
@@ -1791,6 +1797,8 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
             try:
                 screen = TerminalScreen(master, process)
                 screen.launch_overview()
+                screen.until(lambda: "/releases/redirect" in releases.requests[start:], "background read finished before the selected check")
+                start = len(releases.requests)
                 screen.start_upgrade()
 
                 def child_started():

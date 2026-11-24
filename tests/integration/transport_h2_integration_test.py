@@ -334,15 +334,15 @@ class ManagedDescriptorTests(unittest.TestCase):
                             return SimpleNamespace(returncode=0)
                         if args[0] == "sh":
                             fixed, authentication = (10, 7) if platform == "darwin" else (9, 6)
-                            required = inherited + fixed + 503 + 10 + authentication + 2 + codex_h2.LINE_DESCRIPTORS
+                            required = inherited + fixed + codex_h2.DEFAULT_CLIENT_DESCRIPTORS + 10 + authentication + 2 + codex_h2.LINE_DESCRIPTORS
                             limit = int(args[4])
                             launches.append(limit)
-                            if limit >= required - 450:
+                            if limit >= required - codex_h2.ORDINARY_EXCHANGE_DESCRIPTORS * (100 - 10):
                                 return SimpleNamespace(returncode=0, stdout="ready ", stderr="")
                             return SimpleNamespace(returncode=1, stdout="", stderr=(
                                 "descriptor capacity insufficient: active_capacity=1 "
                                 f"required={required} soft_limit={limit} inherited={inherited} fixed_host={fixed} "
-                                f"clients=503 execution=10 authentication={authentication} self_wake=2 lines={codex_h2.LINE_DESCRIPTORS}"))
+                                f"clients={codex_h2.DEFAULT_CLIENT_DESCRIPTORS} execution=10 authentication={authentication} self_wake=2 lines={codex_h2.LINE_DESCRIPTORS}"))
                         clock[0] += 5.2 if late == "read" else 4.95
                         key = args[-1]
                         text = "managed-federal" if key == "federal" else f"managed-{key[-1]}"
@@ -350,14 +350,16 @@ class ManagedDescriptorTests(unittest.TestCase):
                         return SimpleNamespace(returncode=0, stdout=answer.encode(), stderr=b"")
 
                     def start(args, **kwargs):
-                        full = (533 if platform == "linux" else 535) + codex_h2.LINE_DESCRIPTORS + inherited - 3
-                        limit = full - (450 if intake == 10 else 0) + (2 if observed else 0)
+                        fixed, authentication = (10, 7) if platform == "darwin" else (9, 6)
+                        full = inherited + fixed + codex_h2.DEFAULT_CLIENT_DESCRIPTORS + 10 + authentication + 2 + codex_h2.LINE_DESCRIPTORS
+                        limit = full - (codex_h2.ORDINARY_EXCHANGE_DESCRIPTORS * (100 - 10) if intake == 10 else 0) + (2 if observed else 0)
                         self.assertEqual(int(args[4]), limit)
                         self.assertEqual(kwargs["required_fields"]["intake_capacity"], str(intake))
                         self.assertEqual(kwargs["required_fields"]["descriptor_requirement"], str(limit))
                         self.assertEqual(kwargs["required_fields"]["descriptor_limit"], str(limit))
-                        self.assertEqual(launches, [82 + codex_h2.LINE_DESCRIPTORS if platform == "linux" else 84 + codex_h2.LINE_DESCRIPTORS] +
-                                         ([85 + codex_h2.LINE_DESCRIPTORS] if inherited == 4 else []))
+                        # Each probe sits one below the minimum intake's requirement, first assuming 3 inherited descriptors.
+                        below_minimum = full - inherited - codex_h2.ORDINARY_EXCHANGE_DESCRIPTORS * (100 - 10) - 1
+                        self.assertEqual(launches, [below_minimum + 3] + ([below_minimum + 4] if inherited == 4 else []))
                         return SimpleNamespace(pid=1), {}
 
                     with contextlib.ExitStack() as stack:
@@ -388,20 +390,21 @@ class ManagedDescriptorTests(unittest.TestCase):
                                 codex_h2.run(observed=observed, intake=intake)
 
     def test_inherited_allocator_descriptor_preserves_exact_managed_boundary(self):
-        for inherited, required in ((3, 535 + codex_h2.LINE_DESCRIPTORS), (4, 536 + codex_h2.LINE_DESCRIPTORS)):
+        for inherited, required in ((3, 3 + 10 + codex_h2.DEFAULT_CLIENT_DESCRIPTORS + 10 + 7 + 2 + codex_h2.LINE_DESCRIPTORS), (4, 4 + 10 + codex_h2.DEFAULT_CLIENT_DESCRIPTORS + 10 + 7 + 2 + codex_h2.LINE_DESCRIPTORS)):
             with self.subTest(inherited=inherited):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=(
                     "rui: descriptor capacity insufficient: active_capacity=1 "
                     f"required={required} soft_limit=84 inherited={inherited} "
-                    f"fixed_host=10 clients=503 execution=10 authentication=7 self_wake=2 lines={codex_h2.LINE_DESCRIPTORS}\n"))
+                    f"fixed_host=10 clients={codex_h2.DEFAULT_CLIENT_DESCRIPTORS} execution=10 authentication=7 self_wake=2 lines={codex_h2.LINE_DESCRIPTORS}\n"))
                 with os_semantics.simulate("darwin"):
                     self.assertEqual(codex_h2.assert_managed_descriptor_rejection(rejected, 84), required)
 
     def test_wrong_owner_populations_cannot_be_accepted_as_inherited_variation(self):
+        required = 4 + 10 + codex_h2.DEFAULT_CLIENT_DESCRIPTORS + 10 + 7 + 2 + 16
         correct = ("rui: descriptor capacity insufficient: active_capacity=1 "
-                   "required=552 soft_limit=85 inherited=4 fixed_host=10 clients=503 "
+                   f"required={required} soft_limit=85 inherited=4 fixed_host=10 clients={codex_h2.DEFAULT_CLIENT_DESCRIPTORS} "
                    "execution=10 authentication=7 self_wake=2 lines=16\n")
-        for before, after in (("required=552", "required=551"), ("authentication=7", "authentication=6"),
+        for before, after in ((f"required={required}", f"required={required - 1}"), ("authentication=7", "authentication=6"),
                               ("inherited=4", "inherited=5"), ("soft_limit=85", "soft_limit=84")):
             with self.subTest(before=before):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=correct.replace(before, after))
