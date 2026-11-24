@@ -1393,6 +1393,49 @@ test "SUI-49 Message placement preserves provenance across pages" {
     try host.withHost(&domain);
 }
 
+test "CLI-35 an Activity read keeps its resolved Store across alias retarget" {
+    const Host = struct {
+        pub fn answer(_: *@This(), fd: std.posix.fd_t) !void {
+            var request_buffer: [8192]u8 = undefined;
+            const request = try fake_host.readRequest(fd, &request_buffer) orelse return;
+            try std.testing.expect(request.is("/v1/activity-page"));
+            var storage: [2048]u8 = undefined;
+            var arena = std.heap.FixedBufferAllocator.init(&storage);
+            const body = try std.json.parseFromSliceLeaky(struct { store: []const u8 }, arena.allocator(), request.body, .{ .ignore_unknown_fields = true });
+            var page: protocol.ActivityFacts = .{ .end = 0, .direction = .forward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+            try page.work.workspace.set(body.store);
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            try activity_reply.writePage(&output.writer, &page);
+            fake_host.respond(fd, "200 OK", "application/json", "", output.written());
+        }
+    };
+    const Action = struct {
+        pub fn run(_: *@This(), host: *Host, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            try dir.createDir(io, "other", .fromMode(0o700));
+            try dir.symLink(io, ".", "alias", .{ .is_directory = true });
+            var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias", .{root});
+            const paths = try client.resolveClientPaths(io, alias);
+            const initial = try (client.Requests{ .io = io }).activityPage(alias, "k7m2qx", .{});
+            try std.testing.expect(initial == .page);
+            try std.testing.expectEqualStrings(paths.store_identity.slice(), initial.page.facts.work.workspace.slice());
+            try dir.deleteFile(io, "alias");
+            try dir.symLink(io, "other", "alias", .{ .is_directory = true });
+            const retargeted = try client.resolveClientPaths(io, alias);
+            try std.testing.expect(!paths.store_identity.eql(retargeted.store_identity.slice()));
+            const reply = try (client.Requests{ .io = io }).activityPageAt(&paths, "k7m2qx", .{});
+            try std.testing.expect(reply == .page);
+            try std.testing.expectEqualStrings(paths.store_identity.slice(), reply.page.facts.work.workspace.slice());
+            _ = host;
+        }
+    };
+    var host: Host = .{};
+    var action: Action = .{};
+    try fake_host.withHost(&host, &action);
+}
+
 test "session_reads opening reads one Activity page whatever the history before it" {
     for ([_]u64{ 10, 10_000 }) |earlier| {
         var host: FakeHost = .{ .history = earlier, .tail = &.{}, .end = earlier };
