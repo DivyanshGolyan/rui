@@ -37,7 +37,7 @@ def run(run_id=10, **changes):
 
 
 def job(job_id=100, **changes):
-    return {"id": job_id, "run_id": 10, "run_attempt": 1, "name": "policy", "status": "completed", "conclusion": "success",
+    return {"id": job_id, "run_id": 10, "run_attempt": 1, "name": "admission", "status": "completed", "conclusion": "success",
             "started_at": BEFORE, **changes}
 
 
@@ -95,7 +95,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn(f"latest run 20 is {status}", selection.reason)
                 self.assertTrue(selection.waiting)
 
-    def test_newest_completed_run_selects_its_policy_not_the_old_run(self):
+    def test_newest_completed_run_selects_its_admission_not_the_old_run(self):
         self.assertEqual(self.select(runs=[run(), run(20)],
                                      jobs=[job(), job(200, run_id=20)]).job_id, 200)
 
@@ -121,7 +121,7 @@ class SelectionTest(unittest.TestCase):
         self.assertIsNone(self.select(pr=pull(head={"sha": "current-head", "repo": None}),
                                       runs=[run(head_repository=None)]).job_id)
 
-    def test_policy_started_at_or_after_publication_needs_no_wait_or_rerun(self):
+    def test_admission_started_at_or_after_publication_needs_no_wait_or_rerun(self):
         for status in ("completed", "in_progress"):
             for started in (AT, AFTER):
                 with self.subTest(status=status, started=started):
@@ -131,21 +131,21 @@ class SelectionTest(unittest.TestCase):
                     self.assertFalse(selection.waiting)
                     self.assertIn("checks after publication", selection.reason)
 
-    def test_policy_started_before_publication_waits_then_reruns(self):
+    def test_admission_started_before_publication_waits_then_reruns(self):
         waiting = self.select(runs=[run(status="in_progress")], jobs=[job(status="completed")])
         self.assertTrue(waiting.waiting)
         self.assertEqual(self.select(runs=[run()], jobs=[job()]).job_id, 100)
 
-    def test_unstarted_policy_uses_the_run_start(self):
-        for policy in ([], [job(status="queued", started_at=AFTER)], [job(status="waiting", started_at=AFTER)]):
-            with self.subTest(policy=policy):
-                before = self.select(runs=[run(status="in_progress")], jobs=policy)
+    def test_unstarted_admission_uses_the_run_start(self):
+        for admission in ([], [job(status="queued", started_at=AFTER)], [job(status="waiting", started_at=AFTER)]):
+            with self.subTest(admission=admission):
+                before = self.select(runs=[run(status="in_progress")], jobs=admission)
                 self.assertTrue(before.waiting)
-                after = self.select(runs=[run(status="in_progress", run_started_at=AT)], jobs=policy)
+                after = self.select(runs=[run(status="in_progress", run_started_at=AT)], jobs=admission)
                 self.assertFalse(after.waiting)
                 self.assertIn("checks after publication", after.reason)
 
-    def test_restarted_attempt_uses_its_own_policy_start(self):
+    def test_restarted_attempt_uses_its_own_admission_start(self):
         attempt = run(run_attempt=2, run_started_at=AFTER)
         self.assertIsNone(self.select(runs=[attempt], jobs=[job(run_attempt=2, started_at=AFTER)]).job_id)
         self.assertEqual(self.select(runs=[attempt], jobs=[job(run_attempt=2)]).job_id, 100)
@@ -164,26 +164,26 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 owner.timestamp(value)
 
-    def test_only_completed_non_skipped_policy_job_in_selected_run(self):
-        for jobs in ([], [job(name="admission")], [job(run_id=9)], [job(run_attempt=2)],
+    def test_only_completed_non_skipped_admission_job_in_selected_run(self):
+        for jobs in ([], [job(name="policy")], [job(name="linux pr")], [job(run_id=9)], [job(run_attempt=2)],
                      [job(status="in_progress")], [job(status="queued")], [job(conclusion="skipped")]):
             with self.subTest(jobs=jobs):
                 self.assertIsNone(self.select(jobs=jobs).job_id)
         for conclusion in ("success", "failure", "cancelled", "timed_out", "action_required"):
             with self.subTest(conclusion=conclusion):
                 self.assertEqual(self.select(jobs=[job(conclusion=conclusion)]).job_id, 100)
-        skipped_policy = job(conclusion="skipped")
-        for jobs, expected in (([skipped_policy, job(101, name="linux pr")], 101),
-                               ([job(101, name="linux pr", conclusion="skipped"), job()], 100),
-                               ([skipped_policy, job(101, name="linux pr", conclusion="skipped")], None),
-                               ([skipped_policy, job(101, name="linux pr", status="in_progress", conclusion=None)], None),
+        for jobs, expected in (([job(101, name="policy"), job()], 100),
                                ([job(101, name="linux suites (test-native)")], None)):
             with self.subTest(jobs=[(item["name"], item["conclusion"]) for item in jobs]):
                 self.assertEqual(self.select(jobs=jobs).job_id, expected)
 
-    def test_ambiguous_policy_jobs_fail_loudly(self):
-        with self.assertRaisesRegex(ValueError, "multiple latest policy"):
+    def test_ambiguous_admission_jobs_fail_loudly(self):
+        with self.assertRaisesRegex(ValueError, "multiple latest admission"):
             self.select(jobs=[job(), job(101)])
+
+    def test_policy_job_alone_does_not_stand_in_for_admission(self):
+        selection = self.select(runs=[run(status="in_progress")], jobs=[job(name="policy", status="completed")])
+        self.assertTrue(selection.waiting)
 
 
 class GitHub:
@@ -191,7 +191,7 @@ class GitHub:
         self.pulls = [pull()]
         self.files = {1: files("openapi.json")}
         self.runs = [run()]
-        self.jobs = [job(), job(101, name="admission")]
+        self.jobs = [job()]
         self.current = pull()
         self.currents = {}
         self.next_current = None
@@ -272,12 +272,11 @@ class AdapterTest(unittest.TestCase):
             owner.recheck(api, REPO, PUBLISHED, clock=clock.monotonic, sleep=clock.sleep, now=lambda: NOW)
         return output.getvalue()
 
-    def test_reruns_policy_and_logs_pr_and_job(self):
+    def test_reruns_admission_alone_and_logs_pr_and_job(self):
         api = GitHub()
         output = self.recheck(api)
         self.assertEqual(api.posts, ["actions/jobs/100/rerun"])
-        self.assertIn("Rerun PR #1: job 100", output)
-        self.assertIn("including admission", output)
+        self.assertIn("Rerun PR #1: job 100, admission in run 10", output)
         self.assertTrue(any("event=pull_request&head_sha=current-head" in path for _, path in api.calls))
 
     def test_nonqualifying_prs_do_not_read_runs_or_post(self):
@@ -297,7 +296,7 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(clock.sleeps, [])
         self.assertFalse(any("/jobs?" in path for _, path in api.calls))
 
-    def test_in_progress_run_completes_then_reruns_policy(self):
+    def test_in_progress_run_completes_then_reruns_admission(self):
         api = GitHub()
         api.runs = [run(status="in_progress")]
         def complete():
@@ -402,22 +401,22 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(api.posts, ["actions/jobs/100/rerun"])
 
     def test_active_run_checked_after_publication_is_neither_waited_on_nor_rerun(self):
-        for policy in ([job(status="in_progress", started_at=AFTER)], []):
-            with self.subTest(policy=policy):
+        for admission in ([job(status="in_progress", started_at=AFTER)], []):
+            with self.subTest(admission=admission):
                 api, clock = GitHub(), Clock()
-                api.runs = [run(status="in_progress", run_started_at=BEFORE if policy else AFTER)]
-                api.jobs = policy
+                api.runs = [run(status="in_progress", run_started_at=BEFORE if admission else AFTER)]
+                api.jobs = admission
                 self.assertIn("Skip PR #1: run 10 checks after publication", self.recheck(api, clock))
                 self.assertEqual(clock.sleeps, [])
                 self.assertEqual(api.posts, [])
 
-    def test_waiting_run_is_dropped_once_policy_starts_after_publication(self):
+    def test_waiting_run_is_dropped_once_admission_starts_after_publication(self):
         api = GitHub()
         api.runs = [run(status="in_progress")]
         api.jobs = [job(status="queued")]
-        def start_policy():
+        def start_admission():
             api.jobs = [job(status="in_progress", started_at=AFTER)]
-        clock = Clock(start_policy)
+        clock = Clock(start_admission)
         output = self.recheck(api, clock)
         self.assertEqual(clock.sleeps, [60])
         self.assertIn("Wait PR #1: latest run 10 is in_progress", output)
@@ -435,10 +434,10 @@ class AdapterTest(unittest.TestCase):
                 self.assertIn("::error::Cannot recheck wire PRs:", output.getvalue())
                 self.assertEqual(api.calls, [])
 
-    def test_no_policy_check_yet_logs_skip(self):
+    def test_no_admission_check_yet_logs_skip(self):
         api = GitHub()
         api.jobs = []
-        self.assertIn("no completed policy check yet", self.recheck(api))
+        self.assertIn("no completed admission check yet", self.recheck(api))
         self.assertEqual(api.posts, [])
 
     def test_every_collection_is_paginated(self):
@@ -588,12 +587,26 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(api.posts, ["actions/jobs/200/rerun"])
         self.assertEqual(clock.sleeps, [])
-        self.assertIn("could not recheck PRs: #1 (invalid data: run 10 has multiple latest policy jobs)",
+        self.assertIn("could not recheck PRs: #1 (invalid data: run 10 has multiple latest admission jobs)",
                       output.split("::error::")[-1])
 
-    def test_actual_workflow_keeps_gate_and_admission_dependency_and_fetches_tags(self):
+    def test_actual_workflow_admission_reads_the_newest_release_and_fails_without_it(self):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/check.yml").read_text()
-        policy, admission = workflow_job(workflow, "policy"), workflow_job(workflow, "admission")
+        admission = workflow_job(workflow, "admission")
+        self.assertIn("fetch-depth: 0", admission)
+        self.assertIn("sparse-checkout-cone-mode: false", admission)
+        for path in ("tests/ci", "openapi.json", "src/wire_version.zig", "src/protocol.zig"):
+            self.assertIn(f"            {path}\n", admission)
+        self.assertIn("test_wire_version.WireVersionTest.test_wire_contract_changes_bump_wire_version", admission)
+        self.assertIn("test_wire_version.WireVersionTest.test_wire_version_moves_once_per_release", admission)
+        self.assertIn("git rev-parse --verify -q origin/main", admission)
+        self.assertIn("::error::", admission)
+        self.assertIn("grep -q skipped", admission)
+
+    def test_actual_workflow_keeps_policy_gate_and_admission_dependency_and_fetches_tags(self):
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/check.yml").read_text()
+        policy = workflow_job(workflow, "policy")
+        admission = workflow_job(workflow, "admission")
         self.assertIn("fetch-depth: 0", policy)
         self.assertIn("uses: ./.github/actions/policy", policy)
         single = workflow_job(workflow, "pr_linux")

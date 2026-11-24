@@ -900,8 +900,35 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
-          sparse-checkout: tests/ci
+          # The wire check reads origin/main and every v0 tag when this job starts; the
+          # recheck reruns this job alone after a release is published.
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: |
+            tests/ci
+            openapi.json
+            src/wire_version.zig
+            src/protocol.zig
+          sparse-checkout-cone-mode: false
           persist-credentials: false
+      - name: Require the wire contract against the newest release
+        run: |
+          set -euo pipefail
+          # Each missing input fails here; the tests alone would skip and pass.
+          git rev-parse --verify -q origin/main >/dev/null || {
+            echo '::error::origin/main is missing, so the wire check has no merge base.'; exit 1; }
+          git tag --list 'v0.*' > "$RUNNER_TEMP/tags"
+          grep -qE '^v0\.[0-9]+\.[0-9]+$' "$RUNNER_TEMP/tags" || {
+            echo '::error::No v0 release tag is fetched, so the wire check has no release to compare.'; exit 1; }
+          cd tests/ci
+          python3 -B -m unittest -v \
+            test_wire_version.WireVersionTest.test_wire_contract_changes_bump_wire_version \
+            test_wire_version.WireVersionTest.test_wire_version_moves_once_per_release > "$RUNNER_TEMP/wire-version.log" 2>&1 || {
+            cat "$RUNNER_TEMP/wire-version.log"; exit 1; }
+          cat "$RUNNER_TEMP/wire-version.log"
+          if grep -q skipped "$RUNNER_TEMP/wire-version.log"; then
+            echo '::error::A wire-version test skipped, so the wire contract was not compared.'; exit 1
+          fi
       - name: Require screen evidence
         if: ${{ needs.plan.outputs.screens_required == 'true' }}
         env:

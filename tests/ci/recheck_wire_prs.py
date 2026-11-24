@@ -60,13 +60,14 @@ def latest_run(pr, runs):
     return max(matches, key=lambda run: run["run_number"], default=None)
 
 
-# The jobs that run the policy checks: `policy`, or on a ready PR the single `linux pr` job.
-POLICY_JOBS = ("policy", "linux pr")
+# The job that reads the release last: its wire check fetches the v0 tags and origin/main
+# when the job starts, and it merges the PR when it goes green. Rerunning it alone is cheap.
+ADMISSION_JOB = "admission"
 
 
-def checked_since(run, policy):
-    if policy is not None and policy["status"] in ("in_progress", "completed"):
-        return timestamp(policy["started_at"])
+def checked_since(run, admission):
+    if admission is not None and admission["status"] in ("in_progress", "completed"):
+        return timestamp(admission["started_at"])
     return timestamp(run["run_started_at"])
 
 
@@ -79,21 +80,20 @@ def select_rerun(pr, files, runs, jobs, published, now):
     if run is None:
         return Selection(None, "no check.yml PR run for the current head yet")
     latest = [job for job in jobs if job["run_id"] == run["id"]
-              and job["run_attempt"] == run["run_attempt"] and job["name"] in POLICY_JOBS]
-    policy = [job for job in latest if job["conclusion"] != "skipped"] or latest[:1]
-    if len(policy) > 1:
-        raise ValueError(f"run {run['id']} has multiple latest policy jobs")
-    policy = policy[0] if policy else None
-    if checked_since(run, policy) >= published:
-        return Selection(None, f"run {run['id']} checks after publication; it reads the new release itself")
+              and job["run_attempt"] == run["run_attempt"] and job["name"] == ADMISSION_JOB]
+    if len(latest) > 1:
+        raise ValueError(f"run {run['id']} has multiple latest admission jobs")
+    admission = latest[0] if latest else None
+    if checked_since(run, admission) >= published:
+        return Selection(None, f"run {run['id']} checks after publication; admission reads the new release itself")
     if now - timestamp(run["created_at"]) > RERUN_WINDOW:
         return Selection(None, f"run {run['id']} is older than GitHub's 30-day rerun limit; "
                                "push to the PR to start a fresh run", failed=True)
     if run["status"] != "completed":
         return Selection(None, f"latest run {run['id']} is {run['status']}", waiting=True)
-    if policy is None or policy["status"] != "completed" or policy["conclusion"] == "skipped":
-        return Selection(None, f"run {run['id']} has no completed policy check yet")
-    return Selection(policy["id"], f"{policy['name']} in run {run['id']} and its dependents (including admission)")
+    if admission is None or admission["status"] != "completed" or admission["conclusion"] == "skipped":
+        return Selection(None, f"run {run['id']} has no completed admission check yet")
+    return Selection(admission["id"], f"{ADMISSION_JOB} in run {run['id']}")
 
 
 def check_runs(api, repo, pr):
