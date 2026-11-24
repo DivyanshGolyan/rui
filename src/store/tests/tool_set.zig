@@ -1830,6 +1830,12 @@ test "SH-173 an app tool never shares a name with a Host tool: a clashing declar
             var shadow_digests: [shadow.len][32]u8 = undefined;
             for (&shadow, &shadow_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
             try storage.saveHostToolSet(&.{ .records = &shadow, .digests = &shadow_digests });
+            // The Host tool joins the root's selection by name: a profile does not offer every Host tool, only the ones named.
+            var takes_name: wire_request.ConfigureCommand = .{};
+            try takes_name.key.set("sh173-takes-name");
+            try takes_name.session.set(root);
+            takes_name.configuration.tools = try .of(&.{ "ask", "find_tools", "other" });
+            try expectAccepted("takes_name", try storage.configure(&takes_name, .{}));
             const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"};
             try settleItemsForTesting(&storage, &tmp, first, &items, "answer");
             var after: Offered = undefined;
