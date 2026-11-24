@@ -4916,10 +4916,10 @@ test "SUI-4 late activity inspection cannot cover Settings Keys" {
             try std.testing.expect(held.root.settings_page.keys_open);
             try std.testing.expect(!held.self.info_open);
             try std.testing.expect(std.mem.indexOf(u8, shown, "earlier message") != null);
-            // The shared Keys row legitimately says "fold tree · info actions".
+            // The shared Keys row legitimately says "open chat · info actions".
             // Only that occurrence of the info marker may appear here.
             const info_count = std.mem.count(u8, shown, " · info");
-            try std.testing.expectEqual(@intFromBool(std.mem.indexOf(u8, shown, "fold tree · info actions") != null), info_count);
+            try std.testing.expectEqual(@intFromBool(std.mem.indexOf(u8, shown, "open chat · info actions") != null), info_count);
             for ([_][]const u8{ "Copy last answer", "/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "ctrl+g", "ctrl+d", "ctrl+n", "ctrl+end", "ctrl+c/d", "pgup/pgdn", "first session", "latest / last", "scroll / select" }) |stale|
                 try std.testing.expect(std.mem.indexOf(u8, shown, stale) == null);
             return shown;
@@ -8234,7 +8234,7 @@ test "SessionFrontend capped answer Ctrl-O opens the whole authenticated source"
     try std.testing.expect(std.mem.indexOf(u8, held.screen.staging.text(), source) != null);
 }
 
-test "SessionFrontend tool row Ctrl-O opens saved output in place, closes it, and reloads it open" {
+test "SUI-126 SessionFrontend tool row Ctrl-O opens saved output in place, closes it, and reloads it open" {
     const io = std.testing.io;
     const held = try HeldFrontend.create();
     defer held.destroy();
@@ -8265,13 +8265,13 @@ test "SessionFrontend tool row Ctrl-O opens saved output in place, closes it, an
             else => @panic(@errorName(err)),
         };
     }
-    const saved = "README.md\nbad \x1b[2J\n";
+    const saved = "Bash failed. Exit code: 7.\nREADME.md\nbad \x1b[2J\n";
     const answer = "Listed.";
     var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
     try description.set("List project files");
     var facts: protocol.ActivityFacts = .{ .end = 2, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/");
-    const tool: protocol.ActivityItem = .{ .position = 1, .ordinal = 1, .at = 1, .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = saved.len, .digest = protocol.contentDigest(saved) } }, .presentation = .{ .description = description, .code = .succeeded, .publication_position = 1 } } } };
+    const tool: protocol.ActivityItem = .{ .position = 1, .ordinal = 1, .at = 1, .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = saved.len, .digest = protocol.contentDigest(saved) } }, .presentation = .{ .description = description, .code = .failed, .publication_position = 1 } } } };
     facts.items[0] = .{ .position = 2, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = .{ .length = answer.len, .digest = protocol.contentDigest(answer) }, .final = true } } };
     facts.items[1] = tool;
     facts.count = 2;
@@ -8313,6 +8313,8 @@ test "SessionFrontend tool row Ctrl-O opens saved output in place, closes it, an
     defer std.testing.allocator.free(closed);
     try std.testing.expect(std.mem.indexOf(u8, closed, "List project files") != null);
     try std.testing.expect(std.mem.indexOf(u8, closed, "README.md") == null);
+    try std.testing.expect(std.mem.indexOf(u8, closed, "exit 7") == null);
+    try std.testing.expect(std.mem.indexOf(u8, closed, "Exit code: 7") == null);
     var ctx = held.context();
     try appClick(self, &ctx, .{ .key = key, .offset = 0 });
     try std.testing.expectEqualDeep(reads.Target{ .tool = .{ .key = key, .open = true } }, self.expansion.queued.ready.target);
@@ -8326,6 +8328,7 @@ test "SessionFrontend tool row Ctrl-O opens saved output in place, closes it, an
     try std.testing.expect(window.document.toolIsOpen(window.entries[window.indexOf(key).?].offset));
     const opened = try std.testing.allocator.dupe(u8, try held.shown());
     defer std.testing.allocator.free(opened);
+    try std.testing.expect(std.mem.indexOf(u8, opened, "    Bash failed. Exit code: 7.") != null);
     try std.testing.expect(std.mem.indexOf(u8, opened, "    README.md") != null);
     try std.testing.expect(std.mem.indexOf(u8, opened, "    bad \\x1b[2J") != null);
     try std.testing.expect(std.mem.indexOf(u8, opened, "    README.md").? < std.mem.indexOf(u8, opened, answer).?);

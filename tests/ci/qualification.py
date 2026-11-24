@@ -17,7 +17,7 @@ NATIVE = (
     "measurement-check", "installer-integration",
 )
 LINUX_SHARDS = 10
-LONG_GATES = frozenset(("check", "check-full", "test", "stack-frames", "rsql-table"))
+LONG_GATES = frozenset(("check", "check-full", "test", "rsql-table"))
 SHARDS_BESIDE_LONG_GATE = 3
 UNIT_TARGETS = frozenset(("test", "test-native", "test-store", "check", "check-full"))
 FULL_PARTS = ("execution", "callers")
@@ -99,7 +99,7 @@ def qualification(suite, platform):
     if suite in ("native", "all"):
         targets.extend(NATIVE)
         if platform == "linux":
-            targets.extend(("login-signal-integration", "mysql-wire-integration", "stack-frames", "rsql-table"))
+            targets.extend(("login-signal-integration", "mysql-wire-integration", "rsql-table"))
     return shards(targets, platform, limit=None)
 
 

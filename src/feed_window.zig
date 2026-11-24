@@ -1224,10 +1224,10 @@ test "feed_window consecutive tool rows stay adjacent folded or open across ever
             var first: viewport.Sized(1024, true) = .{};
             var second: viewport.Sized(1024, true) = .{};
             try first.append(if (hosted) fold.row_marker else fold.heading_marker);
-            try View.toolResult(.{ .description = null, .code = a, .publication_position = null }, .{}, Sink{ .document = &first }, false);
+            try View.toolResult(.{ .description = null, .code = a, .publication_position = null }, Sink{ .document = &first }, false);
             if (open) try first.append(fold.output_marker ++ "    saved output\n");
             try second.append(fold.heading_marker);
-            try View.toolResult(.{ .description = null, .code = b, .publication_position = null }, .{}, Sink{ .document = &second }, false);
+            try View.toolResult(.{ .description = null, .code = b, .publication_position = null }, Sink{ .document = &second }, false);
             try first.prepare();
             try second.prepare();
             var window: Window = .{};

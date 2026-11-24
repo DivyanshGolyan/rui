@@ -4,8 +4,8 @@ Overview lists saved chats under **Chats**, with **+ New chat**, **Archived** an
 
 ## Sub-features
 
-- Up/Down select rows. Home selects **+ New chat**; End selects **Settings**. Enter opens the selection. Left collapses a selected Session's descendants and Right expands them.
-- Creator Sessions contain their attached and detached descendants. Left and Right fold and expand locally; hidden questions appear in the collapsed badge. Pointer presence or a list key holds ordering briefly while marks update and new siblings append; release highlights moved rows. Edge pills and Alt-? reach questions outside the viewport.
+- Up/Down select rows. Home selects **+ New chat**; End selects **Settings**. Enter opens the selection. Right opens or focuses a selected Session.
+- Creator Sessions contain their attached and detached descendants. Alt+Left folds, Alt+Right expands and double-click toggles the parent’s tree; hidden questions appear in the collapsed badge. Pointer presence or a list key holds ordering briefly while marks update and new siblings append; release highlights moved rows. Edge pills and Alt-? reach questions outside the viewport.
 - Long lists show **↑**, **↓** and **more**. Long names fit within their row.
 - Finished and working chats without a message from you appear dimmer. Chats needing approval stay prominent.
 - Left from an empty draft focuses the list beside a wide chat. Enter on the open row returns to its input. Clicking the list or chat also moves focus.

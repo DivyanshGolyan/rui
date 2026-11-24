@@ -2285,7 +2285,8 @@ def main(selected="all"):
             keys = keyed_frame(master, b"\x1b[B" * 6 + b"\r", lambda screen, x, y: "earlier message" in screen)
             for expected in ('enter    open / send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave'):
                 assert expected in keys, (expected, keys)
-            for key, meaning in (('tab', 'next focus'), ('⇧tab', 'previous focus'), ('←→', 'fold tree · info actions')):
+            for key, meaning in (('tab', 'next focus'), ('⇧tab', 'previous focus'),
+                                 ('←→', 'open chat · info actions'), ('alt+←→', 'fold / expand tree')):
                 assert any(key in row and meaning in row for row in keys.splitlines()), (key, meaning, keys)
             assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "shift+enter or ctrl+j", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select')), keys
             settings = keyed_frame(master, b"\x1b", lambda screen, x, y: "Notifications" in screen and "Version" in screen)
