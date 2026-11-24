@@ -958,12 +958,11 @@ test "start_agent and configure parse the same plain agent spec into the same Co
         try std.testing.expectEqual(a.state, b.state);
         if (a.state == .value) switch (entry.kind) {
             .text, .choice, .decimal_policy => try std.testing.expectEqualStrings(a.value.slice(), b.value.slice()),
-            .app_tools => try std.testing.expectEqual(a.count, b.count),
             .tools => {
                 try std.testing.expectEqual(a.count, b.count);
                 try std.testing.expectEqualStrings(a.names.slice(), b.names.slice());
             },
-            .content => {
+            .content, .app_tools => {
                 try std.testing.expectEqual(a.length, b.length);
                 try std.testing.expectEqualSlices(u8, &a.digest, &b.digest);
                 try std.testing.expect(b.hasFile());

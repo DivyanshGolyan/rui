@@ -17,14 +17,12 @@ const max_tool_names_bytes = tool_name.max_names_bytes;
 const max_tool_list_name_bytes = tool_name.max_list_name_bytes;
 const max_tools = tool_name.max_tools;
 const validToolName = tool_name.valid;
-const AppPolicy = @import("tool_record.zig").AppPolicy;
 pub const max_preset_name_bytes = 64;
 pub const max_sender_handle_bytes = 32;
 
 pub fn Commands(comptime Custody: type) type {
     return struct {
         pub const ContentField = ContentFieldOf(Custody);
-        pub const AppToolsField = AppToolsFieldOf(Custody, ContentField);
         pub const Configuration = ConfigurationOf(Custody);
         pub const ConfigureCommand = ConfigureCommandOf(Custody);
         pub const MessageCommand = MessageCommandOf(Custody);
@@ -86,39 +84,6 @@ fn ContentFieldOf(comptime Custody: type) type {
             self.file = null;
             self.borrowed = null;
             self.state = .omitted;
-        }
-    };
-}
-
-/// Most app tools one lane root may declare. Each declaration holds its description and input schema as
-/// file custody, so the field's size does not grow with their length.
-pub const max_app_tools = 16;
-
-fn AppToolsFieldOf(comptime Custody: type, comptime ContentField: type) type {
-    return struct {
-        const AppToolsField = @This();
-        pub const Declaration = struct {
-            name: Bounded(tool_name.max_bytes) = .{},
-            description: ContentField = .{},
-            input_schema: ContentField = .{},
-            policy: AppPolicy = .{},
-        };
-
-        state: FieldState = .omitted,
-        count: u8 = 0,
-        declarations: [max_app_tools]Declaration = @splat(.{}),
-
-        pub fn removeTemporaryContent(self: *AppToolsField, io: Custody.Io) !void {
-            var cleanup_error: ?anyerror = null;
-            for (&self.declarations) |*declaration| {
-                declaration.description.removeTemporaryContent(io) catch |err| {
-                    cleanup_error = err;
-                };
-                declaration.input_schema.removeTemporaryContent(io) catch |err| {
-                    cleanup_error = err;
-                };
-            }
-            if (cleanup_error) |err| return err;
         }
     };
 }
@@ -197,7 +162,6 @@ pub const Preferences = struct {
 
 fn ConfigurationOf(comptime Custody: type) type {
     const ContentField = Commands(Custody).ContentField;
-    const AppToolsField = Commands(Custody).AppToolsField;
     return struct {
         const Configuration = @This();
 
@@ -213,7 +177,8 @@ fn ConfigurationOf(comptime Custody: type) type {
         output_reservation: OptionalBounded(20) = .{},
         reasoning_effort: OptionalBounded(16) = .{},
         label: OptionalBounded(max_label_bytes) = .{},
-        app_tools: AppToolsField = .{},
+        // The declared app records as one JSON document in file custody, validated when the declaration is parsed.
+        app_tools: ContentField = .{},
         parent: OptionalBounded(6) = .{},
         preferences: ?Preferences = null,
 
@@ -229,7 +194,7 @@ fn ConfigurationOf(comptime Custody: type) type {
                     .decimal_policy => OptionalBounded(20),
                     .content => ContentField,
                     .tools => ToolsField,
-                    .app_tools => AppToolsField,
+                    .app_tools => ContentField,
                 };
                 if (Field != Expected) @compileError("Session setting kind/type mismatch: " ++ name);
             }
@@ -324,24 +289,7 @@ fn hashSetting(hash: *std.crypto.hash.sha2.Sha256, comptime entry: session_setti
         .content => hashContent(hash, field),
         .tools => hashTools(hash, field),
         .text, .choice, .decimal_policy => hashOptional(hash, field),
-        .app_tools => hashAppTools(hash, field),
-    }
-}
-
-fn hashAppTools(hash: *std.crypto.hash.sha2.Sha256, app_tools: anytype) void {
-    hash.update(&.{@backingInt(app_tools.state)});
-    if (app_tools.state == .value) {
-        hash.update(&.{app_tools.count});
-        for (app_tools.declarations[0..app_tools.count]) |declaration| {
-            hashField(hash, declaration.name.slice());
-            const policy = declaration.policy.canonical();
-            hash.update(&.{@intFromEnum(policy.replay), policy.restart_limit});
-            var wait: [4]u8 = undefined;
-            std.mem.writeInt(u32, &wait, policy.wait_ms, .big);
-            hash.update(&wait);
-            hashContentIdentity(hash, declaration.description.state, declaration.description.length, &declaration.description.digest);
-            hashContentIdentity(hash, declaration.input_schema.state, declaration.input_schema.length, &declaration.input_schema.digest);
-        }
+        .app_tools => hashContent(hash, field),
     }
 }
 
