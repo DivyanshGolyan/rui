@@ -5645,9 +5645,13 @@ fn activeRosterDuplicates() !void {
     defer state.deinit();
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc" });
     try std.testing.expect(state.find("bbbbbb".*).?.state == .finished);
-    const frame = try screenText(&state, 80, 24, .{});
-    defer std.testing.allocator.free(frame);
-    try std.testing.expect(std.mem.indexOf(u8, frame, " C ") != null);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const at = lineOfReference(&state, "cccccc".*) orelse return error.MissingRosterRow;
+    const drawn = (try Lines.at(arena.allocator(), &state, at, 80, .{}, 0)).?;
+    try std.testing.expect(for (drawn.segments) |segment| {
+        if (std.mem.eql(u8, segment.text, "C")) break true;
+    } else false);
     for (0..3) |_| {
         if (std.mem.eql(u8, &state.selected.session, "cccccc")) break;
         _ = try press(&state, .next);
