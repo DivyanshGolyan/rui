@@ -288,10 +288,11 @@ const ToolNames = struct {
 
 /// An app set holds at most `app_tools.max_records` names of `tool_name.max_bytes` each, joined by commas.
 const app_names_bytes = app_tools.max_records * tool_name.max_bytes + app_tools.max_records - 1;
+/// The lane root's declared set, read through the lane Session that holds it: a child's own app_tool_set_id is NULL.
 const app_names = rsql.Read(.{
-    .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names FROM tool_set s WHERE s.tool_set_id=?1",
-    .Args = struct { set: u64 },
-    .Row = struct { names: ?Bounded(app_names_bytes) },
+    .sql = "SELECT lane.app_tool_set_id AS set_id," ++ tool_set.namesSql("lane.app_tool_set_id") ++ " AS names FROM session lane WHERE lane.session_ref=?1",
+    .Args = struct { lane: []const u8 },
+    .Row = struct { set_id: ?u64, names: ?Bounded(app_names_bytes) },
     .cardinality = .optional,
 });
 
@@ -325,7 +326,8 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     _ = facts.work.queue(a);
     a.read(report_domain.person_message, .{ .session = session_ref }, &facts.person);
     a.readInto(set_names, .{ .set = current.tool_set_id, .loaded = current.loaded_tool_set_id orelse current.tool_set_id }, &facts.tools.row, &facts.tools_found);
-    if (current.app_tool_set_id) |app_set| a.readInto(app_names, .{ .set = app_set }, &facts.tools.app_row, &facts.tools.app_found);
+    if (current.app_lane == null) return error.CorruptStore;
+    a.readInto(app_names, .{ .lane = current.app_lane.?.slice() }, &facts.tools.app_row, &facts.tools.app_found);
     facts.first.queue(a, session_ref);
     a.readEach(selected_active, .{ .session = session_ref }, 1, &facts.active);
     try runCurrent(a);
@@ -358,10 +360,8 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
         tools
     else
         try report_domain.sortedToolNames(if (names.row.loaded_names) |*joined| joined.slice() else null, &names.loaded);
-    const declared = if (current.app_tool_set_id != null) blk: {
-        if (!facts.tools.app_found.get()) return error.CorruptStore;
-        break :blk try report_domain.sortedToolNames(if (names.app_row.names) |*joined| joined.slice() else null, &names.app);
-    } else &.{};
+    if (!facts.tools.app_found.get()) return error.CorruptStore;
+    const declared = if (names.app_row.set_id == null) &.{} else try report_domain.sortedToolNames(if (names.app_row.names) |*joined| joined.slice() else null, &names.app);
     const permission_mode = try configuration_domain.permissionMode(current.permission_mode);
     const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange;
     const work = try facts.work.work(current.created_at, now_ms);

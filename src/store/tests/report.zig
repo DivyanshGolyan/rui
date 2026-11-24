@@ -1,6 +1,7 @@
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const wire_request = @import("../../wire_request.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const action_domain = @import("../domain/action.zig");
@@ -824,6 +825,86 @@ test "Current reports preserve equal distinct and empty loaded tool names" {
                 for (loaded, expected) |actual, name| try std.testing.expectEqualStrings(name, actual.string);
                 try std.testing.expect(!storage.isFenced());
             }
+        }
+    }.run);
+}
+
+// SH-126: a Current report names the app tools its lane root declares, on the root, a child and a grandchild alike;
+// a re-declaration and a clear reach all three.
+fn expectReportedAppTools(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, expected: []const []const u8) !void {
+    const body = try testingSessionReport(storage, tmp, session, 1024 * 1024);
+    defer std.testing.allocator.free(body);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const declared = parsed.value.object.get("session").?.object.get("app_tools");
+    const items = if (declared) |value| value.array.items else &.{};
+    try std.testing.expectEqual(expected.len, items.len);
+    for (items, expected) |actual, name| try std.testing.expectEqualStrings(name, actual.string);
+}
+
+fn declareReportAppTools(configuration: *wire_request.Configuration, bytes: []const u8) void {
+    configuration.app_tools = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
+}
+
+test "SH-126 Current reports name the lane root's app tools on the root, a child and a grandchild" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace_path = try store_testing.canonicalCwd(std.testing.io, &workspace);
+            const first = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}},{\"name\":\"look\",\"description\":\"Look.\",\"input_schema\":{\"type\":\"object\"}}]";
+            const second = "[{\"name\":\"other\",\"description\":\"Other.\",\"input_schema\":{\"type\":\"object\"}}]";
+
+            var root_command = try store_testing.completeConfiguration("app-report-root", "", workspace_path, "model-a");
+            declareReportAppTools(&root_command.configuration, first);
+            const root_reply = try storage.configure(&root_command, .{});
+            try std.testing.expect(root_reply == .accepted);
+            const root = root_reply.accepted.session.slice();
+
+            var child: wire_request.ConfigureCommand = .{};
+            try child.key.set("app-report-child");
+            child.configuration = try shared_fixtures.testingAgentSpec(&.{}, "bypass");
+            child.configuration.parent.state = .value;
+            try child.configuration.parent.value.set(root);
+            const child_reply = try storage.configure(&child, .{});
+            try std.testing.expect(child_reply == .accepted);
+            const child_ref = child_reply.accepted.session.slice();
+
+            var grandchild: wire_request.ConfigureCommand = .{};
+            try grandchild.key.set("app-report-grandchild");
+            grandchild.configuration = try shared_fixtures.testingAgentSpec(&.{}, "bypass");
+            grandchild.configuration.parent.state = .value;
+            try grandchild.configuration.parent.value.set(child_ref);
+            const grandchild_reply = try storage.configure(&grandchild, .{});
+            try std.testing.expect(grandchild_reply == .accepted);
+            const grandchild_ref = grandchild_reply.accepted.session.slice();
+
+            try expectReportedAppTools(&storage, &tmp, root, &.{ "ask", "look" });
+            try expectReportedAppTools(&storage, &tmp, child_ref, &.{ "ask", "look" });
+            try expectReportedAppTools(&storage, &tmp, grandchild_ref, &.{ "ask", "look" });
+
+            var replace: wire_request.ConfigureCommand = .{};
+            try replace.key.set("app-report-replace");
+            try replace.session.set(root);
+            declareReportAppTools(&replace.configuration, second);
+            try std.testing.expect((try storage.configure(&replace, .{})) == .accepted);
+            try expectReportedAppTools(&storage, &tmp, root, &.{"other"});
+            try expectReportedAppTools(&storage, &tmp, child_ref, &.{"other"});
+            try expectReportedAppTools(&storage, &tmp, grandchild_ref, &.{"other"});
+
+            var clear: wire_request.ConfigureCommand = .{};
+            try clear.key.set("app-report-clear");
+            try clear.session.set(root);
+            declareReportAppTools(&clear.configuration, "[]");
+            try std.testing.expect((try storage.configure(&clear, .{})) == .accepted);
+            try expectReportedAppTools(&storage, &tmp, root, &.{});
+            try expectReportedAppTools(&storage, &tmp, child_ref, &.{});
+            try expectReportedAppTools(&storage, &tmp, grandchild_ref, &.{});
+            try std.testing.expect(!storage.isFenced());
         }
     }.run);
 }
