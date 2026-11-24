@@ -6321,14 +6321,14 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     middle.archive_seq = 14;
     var tail = session("eeeeee", .{ .finished = ago(5) }, .{ .label = "tail archived" });
     tail.archive_state = .archived;
-    tail.archive_seq = 11;
+    tail.archive_seq = 13;
     const next_page = try step(&views, .{ .viewport = .{ .first = 0, .end = 1 } });
     try std.testing.expectEqual(@as(usize, 1), next_page.len);
     try std.testing.expect(next_page.items[0] == .read_archived);
     try std.testing.expect(next_page.items[0].read_archived.from == .below);
     try std.testing.expectEqual(@as(u64, 20), next_page.items[0].read_archived.from.below);
     head_read = next_page.items[0].read_archived;
-    _ = try step(&views, .{ .archived = .{ .read = head_read, .page = .{ .rows = &.{ middle, tail }, .first = 14, .last = 11, .more_above = false, .more_below = false } } });
+    _ = try step(&views, .{ .archived = .{ .read = head_read, .page = .{ .rows = &.{ middle, tail }, .first = 14, .last = 13, .more_above = false, .more_below = false } } });
     try std.testing.expect(views.selected == .none);
     try std.testing.expectEqualStrings("aaaaaa", &views.conversing.?);
     try expectEffects(&.{}, try submit(&views));
