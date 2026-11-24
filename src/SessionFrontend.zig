@@ -1782,7 +1782,7 @@ test "SUI-113 clipboard paste stays in its originating composer until Enter" {
     try std.testing.expect(!imagePasteKey(.{ .codepoint = 'v', .mods = .{ .ctrl = true, .shift = true } }));
 }
 
-test "SUI-122 Ctrl-D detaches only an empty draft and otherwise deletes text at the caret" {
+test "SUI-129 Ctrl-D detaches only an empty draft and otherwise deletes text at the caret" {
     const image = try Input.Image.validate(@embedFile("codecs/fixtures/image-input/pixel.png"));
     for ([_][]const u8{ "\x04", "\x1b[100;5u", "\x1b[100;5;100u", "\x1b[27;5;100~" }) |key| {
         for ([_]bool{ false, true }) |attached| for ([_]bool{ false, true }) |captioned| {

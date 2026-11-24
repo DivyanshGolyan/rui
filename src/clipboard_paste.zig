@@ -415,7 +415,7 @@ fn testChunk(transaction: *Transaction, epoch: u64, header: []const u8, data: []
     try testInput(transaction, epoch, packet[0 .. header.len + body.len]);
 }
 
-test "SUI-116 clipboard offers request only a supported representation" {
+test "SUI-122 clipboard offers request only a supported representation" {
     {
         const cases = [_]struct { list: []const u8, type_payload: ?[]const u8 = null, local: bool = false }{
             .{ .list = "text/plain image/jpeg image/tiff image/png\n", .type_payload = "aW1hZ2UvcG5n" },

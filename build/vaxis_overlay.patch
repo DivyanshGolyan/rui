@@ -107,7 +107,7 @@
      try testing.expectEqual(@as(?Event, .cap_kitty_keyboard), next.event);
  }
 +
-+test "SUI-120 OSC 5522 transport accepts bounded frames and resumes ordinary input" {
++test "SUI-127 OSC 5522 transport accepts bounded frames and resumes ordinary input" {
 +    var osc: Osc5522 = .{};
 +    var parser: Parser = .{ .osc_5522 = &osc };
 +
@@ -367,7 +367,7 @@
      std.testing.refAllDecls(@This());
  }
 +
-+test "SUI-121 OSC 5522 transport dispatches copied frames and reports only to the App root" {
++test "SUI-128 OSC 5522 transport dispatches copied frames and reports only to the App root" {
 +    const testing = std.testing;
 +    const Observe = struct {
 +        capability: ?bool = null,

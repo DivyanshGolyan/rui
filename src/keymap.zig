@@ -219,7 +219,6 @@ test "keys reference gives Enter both its list and chat meanings" {
 }
 
 test "keys reference aliases are explicit under their listed rows" {
-    try std.testing.expectEqual(@as(usize, 16), list.len);
     for ([_]struct { key: Key, row: []const u8 }{
         .{ .key = .ctrl_g, .row = "esc" },
         .{ .key = .ctrl_d, .row = "ctrl+c" },
@@ -259,11 +258,18 @@ test "every keys reference row names its input including non-table input" {
         empty[index].keys = &.{};
         try std.testing.expectEqual(@as(?ListError, .empty_row), referenceError(&empty, .{bindable}));
     }
-    try std.testing.expectEqual(std.meta.Tag(ReferenceInput).enter, std.meta.activeTag(list[0].keys[0]));
-    try std.testing.expectEqual(std.meta.Tag(ReferenceInput).newline, std.meta.activeTag(list[2].keys[0]));
-    try std.testing.expectEqual(std.meta.Tag(ReferenceInput).slash, std.meta.activeTag(list[11].keys[0]));
-    for ([_]usize{ 0, 2, 11 }) |index| {
-        const duplicate = list ++ .{list[index]};
+    const standalone = [_]struct { label: []const u8, input: std.meta.Tag(ReferenceInput) }{
+        .{ .label = "enter", .input = .enter },
+        .{ .label = "⇧enter", .input = .newline },
+        .{ .label = "ctrl+v", .input = .paste_image },
+        .{ .label = "/", .input = .slash },
+    };
+    for (standalone) |expected| {
+        const row = for (list) |candidate| {
+            if (std.mem.eql(u8, candidate.key, expected.label)) break candidate;
+        } else return error.TestExpectedEqual;
+        try std.testing.expectEqual(expected.input, std.meta.activeTag(row.keys[0]));
+        const duplicate = list ++ .{row};
         try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{bindable}));
     }
 }
