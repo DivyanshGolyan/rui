@@ -2680,6 +2680,15 @@ class LinkedDependencySelectionTest(unittest.TestCase):
         for consumer in ("test-store", "test-native", "check", "check-full", "admission-integration", "dispatch-integration"):
             self.assertTrue(covers(consumer, set(result["targets"])), consumer)
 
+    def test_vaxis_repin_runs_clipboard_reader_tests(self):
+        entry = dependency_entries(MANIFEST)["vaxis"]
+        bumped = with_entry(MANIFEST, "vaxis", "        .vaxis = .{\n"
+                            f"            .url = {entry['url']},\n"
+                            '            .hash = "vaxis-repinned",\n        },\n')
+        result = self.manifest_change(MANIFEST, bumped)
+        self.assertIn("test-vaxis-clipboard", result["targets"])
+        self.assertIn("test-vaxis-clipboard", result["fast_targets"])
+
     def test_libyaml_bump_selects_its_consumers(self):
         yaml = dependency_entries(MANIFEST)["yaml"]
         bumped = with_entry(MANIFEST, "yaml", "        .yaml = .{\n"
