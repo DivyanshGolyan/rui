@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Ast = std.zig.Ast;
+const Bodies = @import("Bodies.zig");
 const Infer = @import("Infer.zig");
 const Items = @import("Items.zig");
 const Sources = @import("Sources.zig");
@@ -162,7 +163,8 @@ test "typeOf and bind give each form its type, and unknown otherwise" {
         const probe = probeCall(tree) orelse return error.TestNoProbe;
         const function = enclosingFunction(&items, tree, file, probe.token) orelse return error.TestNoFunction;
         var locals: Infer.Locals = .{};
-        try Infer.bind(a, &locals, &items, &sources, function);
+        const bodies = try Bodies.collect(a, &sources, &items);
+        try Infer.bind(a, &locals, &items, &sources, function, bodies.nodes[@backingInt(function)]);
         const scope = items.get(function).parent.?;
         const result: Types.TypeRef = if (row.result) |name| .{ .container = fileItem(&items, file, name) } else Types.unknown;
         const got = Infer.typeOf(&locals, &items, &sources, scope, file, probe.arg, result);

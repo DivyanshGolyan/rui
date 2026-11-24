@@ -36,8 +36,9 @@ pub const Locals = struct {
 };
 
 /// Gives each name that `function` declares a type: its parameters, then its
-/// declarations and captures in source order. `locals` must start empty.
-pub fn bind(arena: Allocator, locals: *Locals, items: *const Items.Items, sources: *const Sources, function: ItemId) Allocator.Error!void {
+/// declarations and captures in source order. `nodes` are the function's own nodes
+/// (Bodies.nodes). `locals` must start empty.
+pub fn bind(arena: Allocator, locals: *Locals, items: *const Items.Items, sources: *const Sources, function: ItemId, nodes: []const Ast.Node.Index) Allocator.Error!void {
     const item = items.get(function);
     if (item.kind != .function) return;
     const tree = &sources.files[@backingInt(item.file)].ast;
@@ -50,7 +51,7 @@ pub fn bind(arena: Allocator, locals: *Locals, items: *const Items.Items, source
         const t = if (param.type_expr) |type_node| Types.ofTypeExpr(items, sources, env.scope, env.file, type_node) else Types.unknown;
         try locals.put(arena, tree.tokenSlice(name_token), Values.known(t));
     }
-    for (try Captures.collect(arena, tree, item.decl)) |site| try env.bindSite(arena, locals, site);
+    for (try Captures.collect(arena, tree, nodes)) |site| try env.bindSite(arena, locals, site);
 }
 
 /// The type of the expression `node` in `file`, inside container `scope`, with the
@@ -59,6 +60,13 @@ pub fn bind(arena: Allocator, locals: *Locals, items: *const Items.Items, source
 pub fn typeOf(locals: *const Locals, items: *const Items.Items, sources: *const Sources, scope: ItemId, file: FileId, node: Ast.Node.Index, result: TypeRef) TypeRef {
     const env: Env = .{ .locals = locals, .items = items, .sources = sources, .scope = scope, .file = file };
     return env.value(node, result);
+}
+
+/// The function item that `node` names as a callee, in `scope` of `file`, with the locals
+/// of its function. `result` is the type the call's value is expected to have (see typeOf).
+pub fn calleeOf(locals: *const Locals, items: *const Items.Items, sources: *const Sources, scope: ItemId, file: FileId, node: Ast.Node.Index, result: TypeRef) ?ItemId {
+    const env: Env = .{ .locals = locals, .items = items, .sources = sources, .scope = scope, .file = file };
+    return env.callee(node, result);
 }
 
 /// What an expression is typed in: its function's locals, and the container and file
