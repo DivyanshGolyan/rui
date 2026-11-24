@@ -1343,7 +1343,7 @@ test "SH-99 upgrade Host observation reads the current wire in one exchange and 
         wrong_wire_without_directory,
         wrong_wire_explicit_deadline,
     };
-    const Phase = enum { temporary_store, store_permissions, store_path, lease, runtime, listener, peer_spawn, observation, verification, expired_current };
+    const Phase = enum { temporary_store, store_permissions, lease, runtime, listener, peer_spawn, observation, verification, expired_current };
     const responseWire = struct {
         fn of(mode: Mode) []const u8 {
             return switch (mode) {
@@ -1494,13 +1494,11 @@ test "SH-99 upgrade Host observation reads the current wire in one exchange and 
 
         fn execute(phase: *Phase, active_mode: *?Mode) !void {
             const io = std.testing.io;
-            var tmp = std.testing.tmpDir(.{ .iterate = true });
-            defer tmp.cleanup();
+            var store = try @import("socket_fixture.zig").Directory.init();
+            defer store.cleanup();
             phase.* = .store_permissions;
-            try tmp.dir.setPermissions(io, .fromMode(0o700));
-            var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            phase.* = .store_path;
-            const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+            try store.dir.setPermissions(io, .fromMode(0o700));
+            const root = store.root[0..store.root_len];
             phase.* = .lease;
             var lease = try platform.StoreLease.acquire(io, root);
             var lease_held = true;
