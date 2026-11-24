@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const url = @import("url");
+const provider_name = @import("provider_name.zig");
 
 pub const max_document_bytes = 16 * 1024;
 pub const max_name_bytes = 16;
@@ -54,20 +55,15 @@ pub const Family = enum {
     }
 };
 
-/// The exact dialect a Session pins. Each belongs to one family.
-pub const Codec = enum {
-    @"openai-responses/1",
-    @"openai-responses/2",
-    @"openai-responses/3",
-    @"anthropic-messages/1",
+/// The exact dialect a Session pins: the provider's codec owner, not a copy.
+pub const Codec = provider_name.Codec;
 
-    pub fn family(self: Codec) Family {
-        return switch (self) {
-            .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" => .responses,
-            .@"anthropic-messages/1" => .messages,
-        };
-    }
-};
+pub fn codecFamily(codec: Codec) Family {
+    return switch (codec) {
+        .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" => .responses,
+        .@"anthropic-messages/1" => .messages,
+    };
+}
 
 /// One wire format this server speaks. `path` is appended to the base URL;
 /// null means the family's default path.
@@ -282,7 +278,7 @@ pub fn validate(c: *const Connection) ?Refusal {
     }
     if (c.formats.len == 0) return refusal(.no_format, "formats");
     for (c.formats, 0..) |endpoint, index| {
-        if (endpoint.dialect.family() != endpoint.family) return refusal(.dialect_family_mismatch, "dialect");
+        if (codecFamily(endpoint.dialect) != endpoint.family) return refusal(.dialect_family_mismatch, "dialect");
         for (c.formats[0..index]) |earlier| {
             if (earlier.family == endpoint.family) return refusal(.duplicate_format, "formats");
         }
