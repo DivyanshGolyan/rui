@@ -17,7 +17,7 @@ pub const download_timeout_ns: i96 = @as(i96, download_timeout_seconds) * 1_000_
 /// A loopback `http://` URL is the fixture origin; every other URL is HTTPS.
 pub const Request = struct {
     url: []const u8,
-    output: union(enum) { body, effective_url, archive: []const u8 } = .body,
+    output: union(enum) { body, redirect_url, archive: []const u8 } = .body,
 };
 
 /// Storage for one attempt's argument list. The returned slice borrows it.
@@ -34,11 +34,11 @@ pub fn arguments(storage: *Arguments, executable: []const u8, request: Request, 
     const max_time = std.fmt.bufPrint(&storage.max_time, "{d}.{d:0>3}", .{ remaining_ms / 1000, remaining_ms % 1000 }) catch unreachable;
     const connect_time = std.fmt.comptimePrint("{d}", .{@divExact(connect_timeout_ns, 1_000_000_000)});
     const fixture = std.mem.startsWith(u8, request.url, "http://");
-    const discovery = request.output == .effective_url;
+    const hop = request.output == .redirect_url;
     const common = [_][]const u8{
-        executable,          "--disable",                        "--fail",        "--silent",                                       "--show-error", "--location",
-        "--connect-timeout", connect_time,                       "--max-time",    max_time,                                         "--max-redirs", if (fixture and !discovery) "0" else "5",
-        "--proto",           if (fixture) "=http" else "=https", "--proto-redir", if (fixture and discovery) "=http" else "=https",
+        executable,                         "--disable",     "--fail",                                   "--silent", "--show-error",
+        "--connect-timeout",                connect_time,    "--max-time",                               max_time,   "--proto",
+        if (fixture) "=http" else "=https", "--proto-redir", if (fixture and hop) "=http" else "=https",
     };
     const argv = &storage.list;
     argv[0..common.len].* = common;
@@ -47,10 +47,17 @@ pub fn arguments(storage: *Arguments, executable: []const u8, request: Request, 
         argv[count] = "--ipv4";
         count += 1;
     }
+    if (hop) {
+        argv[count..][0..2].* = .{ "--max-redirs", "0" };
+        count += 2;
+    } else {
+        argv[count..][0..3].* = .{ "--location", "--max-redirs", if (fixture) "0" else "5" };
+        count += 3;
+    }
     switch (request.output) {
         .body => {},
-        .effective_url => {
-            argv[count..][0..4].* = .{ "--output", "/dev/null", "--write-out", "%{url_effective}" };
+        .redirect_url => {
+            argv[count..][0..4].* = .{ "--output", "/dev/null", "--write-out", "%{redirect_url}" };
             count += 4;
         },
         .archive => |path| {
@@ -113,52 +120,40 @@ const sh61 = struct {
 
     const cases = [_]Case{
         .{ .request = .{ .url = release_url }, .family = .automatic, .expected = &.{
-            "curl", "--disable", "--fail", "--silent", "--show-error", "--location", "--connect-timeout", "10", "--max-time", "299.999", "--max-redirs", "5", "--proto", "=https", "--proto-redir", "=https",
-            "--",   release_url,
+            "curl", "--disable", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "299.999", "--proto", "=https", "--proto-redir", "=https", "--location", "--max-redirs", "5", "--", release_url,
         } },
-        .{ .request = .{ .url = release_url }, .family = .ipv4, .expected = &.{
-            "curl",   "--disable", "--fail",    "--silent", "--show-error", "--location", "--connect-timeout", "10", "--max-time", "299.999", "--max-redirs", "5", "--proto", "=https", "--proto-redir", "=https",
-            "--ipv4", "--",        release_url,
-        } },
-        .{ .request = .{ .url = release_url, .output = .effective_url }, .family = .automatic, .expected = &.{
-            "curl",     "--disable", "--fail",      "--silent",         "--show-error", "--location", "--connect-timeout", "10", "--max-time", "299.999", "--max-redirs", "5", "--proto", "=https", "--proto-redir", "=https",
-            "--output", "/dev/null", "--write-out", "%{url_effective}", "--",           release_url,
-        } },
-        .{ .request = .{ .url = release_url, .output = .effective_url }, .family = .ipv4, .expected = &.{
-            "curl",   "--disable", "--fail",    "--silent",    "--show-error",     "--location", "--connect-timeout", "10", "--max-time", "299.999", "--max-redirs", "5", "--proto", "=https", "--proto-redir", "=https",
-            "--ipv4", "--output",  "/dev/null", "--write-out", "%{url_effective}", "--",         release_url,
+        .{ .request = .{ .url = release_url, .output = .redirect_url }, .family = .automatic, .expected = &.{
+            "curl", "--disable", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "299.999", "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "0", "--output", "/dev/null", "--write-out", "%{redirect_url}", "--", release_url,
         } },
         .{ .request = .{ .url = release_url, .output = .{ .archive = archive_path } }, .family = .automatic, .expected = &.{
-            "curl",           "--disable", "--fail",   "--silent",   "--show-error", "--location", "--connect-timeout", "10", "--max-time", "299.999", "--max-redirs", "5", "--proto", "=https", "--proto-redir", "=https",
-            "--max-filesize", "268435456", "--output", archive_path, "--",           release_url,
+            "curl", "--disable", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "299.999", "--proto", "=https", "--proto-redir", "=https", "--location", "--max-redirs", "5", "--max-filesize", "268435456", "--output", archive_path, "--", release_url,
+        } },
+        .{ .request = .{ .url = release_url }, .family = .ipv4, .expected = &.{
+            "curl", "--disable", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "299.999", "--proto", "=https", "--proto-redir", "=https", "--ipv4", "--location", "--max-redirs", "5", "--", release_url,
+        } },
+        .{ .request = .{ .url = release_url, .output = .redirect_url }, .family = .ipv4, .expected = &.{
+            "curl", "--disable", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "299.999", "--proto", "=https", "--proto-redir", "=https", "--ipv4", "--max-redirs", "0", "--output", "/dev/null", "--write-out", "%{redirect_url}", "--", release_url,
         } },
         .{ .request = .{ .url = release_url, .output = .{ .archive = archive_path } }, .family = .ipv4, .expected = &.{
-            "curl",   "--disable",      "--fail",    "--silent", "--show-error", "--location", "--connect-timeout", "10", "--max-time", "299.999", "--max-redirs", "5", "--proto", "=https", "--proto-redir", "=https",
-            "--ipv4", "--max-filesize", "268435456", "--output", archive_path,   "--",         release_url,
+            "curl", "--disable", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "299.999", "--proto", "=https", "--proto-redir", "=https", "--ipv4", "--location", "--max-redirs", "5", "--max-filesize", "268435456", "--output", archive_path, "--", release_url,
         } },
         .{ .request = .{ .url = fixture_url }, .family = .automatic, .expected = &.{
-            "curl", "--disable", "--fail", "--silent", "--show-error", "--location", "--connect-timeout", "10", "--max-time", "299.999", "--max-redirs", "0", "--proto", "=http", "--proto-redir", "=https",
-            "--",   fixture_url,
+            "curl", "--disable", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "299.999", "--proto", "=http", "--proto-redir", "=https", "--location", "--max-redirs", "0", "--", fixture_url,
         } },
-        .{ .request = .{ .url = fixture_url }, .family = .ipv4, .expected = &.{
-            "curl",   "--disable", "--fail",    "--silent", "--show-error", "--location", "--connect-timeout", "10", "--max-time", "299.999", "--max-redirs", "0", "--proto", "=http", "--proto-redir", "=https",
-            "--ipv4", "--",        fixture_url,
-        } },
-        .{ .request = .{ .url = fixture_url, .output = .effective_url }, .family = .automatic, .expected = &.{
-            "curl",     "--disable", "--fail",      "--silent",         "--show-error", "--location", "--connect-timeout", "10", "--max-time", "299.999", "--max-redirs", "5", "--proto", "=http", "--proto-redir", "=http",
-            "--output", "/dev/null", "--write-out", "%{url_effective}", "--",           fixture_url,
-        } },
-        .{ .request = .{ .url = fixture_url, .output = .effective_url }, .family = .ipv4, .expected = &.{
-            "curl",   "--disable", "--fail",    "--silent",    "--show-error",     "--location", "--connect-timeout", "10", "--max-time", "299.999", "--max-redirs", "5", "--proto", "=http", "--proto-redir", "=http",
-            "--ipv4", "--output",  "/dev/null", "--write-out", "%{url_effective}", "--",         fixture_url,
+        .{ .request = .{ .url = fixture_url, .output = .redirect_url }, .family = .automatic, .expected = &.{
+            "curl", "--disable", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "299.999", "--proto", "=http", "--proto-redir", "=http", "--max-redirs", "0", "--output", "/dev/null", "--write-out", "%{redirect_url}", "--", fixture_url,
         } },
         .{ .request = .{ .url = fixture_url, .output = .{ .archive = archive_path } }, .family = .automatic, .expected = &.{
-            "curl",           "--disable", "--fail",   "--silent",   "--show-error", "--location", "--connect-timeout", "10", "--max-time", "299.999", "--max-redirs", "0", "--proto", "=http", "--proto-redir", "=https",
-            "--max-filesize", "268435456", "--output", archive_path, "--",           fixture_url,
+            "curl", "--disable", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "299.999", "--proto", "=http", "--proto-redir", "=https", "--location", "--max-redirs", "0", "--max-filesize", "268435456", "--output", archive_path, "--", fixture_url,
+        } },
+        .{ .request = .{ .url = fixture_url }, .family = .ipv4, .expected = &.{
+            "curl", "--disable", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "299.999", "--proto", "=http", "--proto-redir", "=https", "--ipv4", "--location", "--max-redirs", "0", "--", fixture_url,
+        } },
+        .{ .request = .{ .url = fixture_url, .output = .redirect_url }, .family = .ipv4, .expected = &.{
+            "curl", "--disable", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "299.999", "--proto", "=http", "--proto-redir", "=http", "--ipv4", "--max-redirs", "0", "--output", "/dev/null", "--write-out", "%{redirect_url}", "--", fixture_url,
         } },
         .{ .request = .{ .url = fixture_url, .output = .{ .archive = archive_path } }, .family = .ipv4, .expected = &.{
-            "curl",   "--disable",      "--fail",    "--silent", "--show-error", "--location", "--connect-timeout", "10", "--max-time", "299.999", "--max-redirs", "0", "--proto", "=http", "--proto-redir", "=https",
-            "--ipv4", "--max-filesize", "268435456", "--output", archive_path,   "--",         fixture_url,
+            "curl", "--disable", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "299.999", "--proto", "=http", "--proto-redir", "=https", "--ipv4", "--location", "--max-redirs", "0", "--max-filesize", "268435456", "--output", archive_path, "--", fixture_url,
         } },
     };
 };
@@ -191,7 +186,7 @@ test "SH-70 every download attempt confines curl" {
     for ([_]struct { u64, []const u8 }{ .{ 1, "0.001" }, .{ 10_000, "10.000" }, .{ 300_000, "300.000" }, .{ std.math.maxInt(u64), "18446744073709551.615" } }) |case| {
         var storage: Arguments = .{};
         const actual = arguments(&storage, "curl", .{ .url = sh61.release_url }, .automatic, case[0]);
-        try std.testing.expectEqualStrings(case[1], actual[9]);
+        try std.testing.expectEqualStrings(case[1], actual[8]);
     }
 }
 
