@@ -47,15 +47,15 @@ pub const Snapshot = struct {
         return self.resolveWith(self.intent.provider, readiness);
     }
 
-    pub fn resolveUnprompted(self: *const Snapshot) !Binding {
+    /// The binding when the caller does not prompt: `usable` names every served provider the caller may select.
+    pub fn resolveUnprompted(self: *const Snapshot, usable: *const provider_selection.Readinesses) !Binding {
         const provider = self.intent.provider orelse if (self.defaults.provider.len == 0) @as([]const u8, product_defaults.provider) else null;
-        const usable: provider_selection.Readinesses = .initFill(.configured);
-        return (try self.resolveWith(provider, &usable)).?;
+        return (try self.resolveWith(provider, usable)).?;
     }
 
     fn resolveWith(self: *const Snapshot, explicit_provider: ?[]const u8, readiness: *const provider_selection.Readinesses) !?Binding {
         const selection = try provider_selection.resolve(
-            &model_capability.capabilities(readiness),
+            model_capability.capabilities(readiness).slice(),
             explicit_provider,
             self.intent.model,
             if (self.defaults.provider.len == 0) null else self.defaults.provider.slice(),
@@ -174,38 +174,44 @@ test "new Session explicit choices bypass stale defaults without destination fal
     try std.testing.expectError(error.InvalidHome, snapshot.destination("relative-home", &fallback));
 }
 
-test "a saved provider picks among ready ones, and none saved with two ready asks" {
-    var snapshot: Snapshot = .{ .intent = .{}, .defaults = .{} };
-    const both: provider_selection.Readinesses = .initFill(.configured);
-    try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(&both));
-    try snapshot.defaults.provider.set("openai");
-    try std.testing.expectEqualStrings("openai", (try snapshot.resolve(&both)).?.provider.slice());
-    var key_missing = both;
-    key_missing.set(provider_route.nameOf(.openai), .missing);
-    try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(&key_missing));
-}
+test "CM-58 new Session binding takes a usable served name, and an unprompted caller takes its explicit, saved or product choice" {
+    const connection = @import("connection.zig");
+    const alpha = connection.Name.parse("alpha").?;
+    for (std.enums.values(provider_selection.Readiness)) |state| {
+        var readiness: provider_selection.Readinesses = .initFill(.missing);
+        readiness.set(alpha, state);
+        const explicit: Snapshot = .{ .intent = .{ .provider = "alpha" }, .defaults = .{} };
+        const bound = try explicit.resolve(&readiness);
+        if (state.usable()) try std.testing.expectEqualStrings("alpha", bound.?.provider.slice()) else try std.testing.expectEqual(@as(?Binding, null), bound);
 
-test "a caller that cannot ask gets the saved provider, else the product default" {
-    var snapshot: Snapshot = .{ .intent = .{}, .defaults = .{} };
-    try std.testing.expectEqualStrings(product_defaults.provider, (try snapshot.resolveUnprompted()).provider.slice());
-    try snapshot.defaults.provider.set("openai");
-    try std.testing.expectEqualStrings("openai", (try snapshot.resolveUnprompted()).provider.slice());
-    snapshot.intent.provider = "codex";
-    try std.testing.expectEqualStrings("codex", (try snapshot.resolveUnprompted()).provider.slice());
-}
+        var saved: Snapshot = .{ .intent = .{}, .defaults = .{} };
+        try saved.defaults.provider.set("alpha");
+        try saved.defaults.model.set("saved-model");
+        const saved_bound = try saved.resolve(&readiness);
+        if (state.usable()) {
+            try std.testing.expectEqualStrings("alpha", saved_bound.?.provider.slice());
+            try std.testing.expectEqualStrings("saved-model", saved_bound.?.model.slice());
+        } else try std.testing.expectEqual(@as(?Binding, null), saved_bound);
+    }
 
-test "unprompted selection fills the product binding unless saved or explicit choices replace it" {
-    var snapshot: Snapshot = .{ .intent = .{}, .defaults = .{} };
-    var binding = try snapshot.resolveUnprompted();
-    try std.testing.expectEqualStrings(product_defaults.provider, binding.provider.slice());
-    try std.testing.expectEqualStrings(product_defaults.recommended_model, binding.model.slice());
-    try snapshot.defaults.provider.set("openai");
-    try snapshot.defaults.model.set("saved-model");
-    binding = try snapshot.resolveUnprompted();
-    try std.testing.expectEqualStrings("openai", binding.provider.slice());
-    try std.testing.expectEqualStrings("saved-model", binding.model.slice());
-    snapshot.intent = .{ .provider = "codex", .model = "chosen-model" };
-    binding = try snapshot.resolveUnprompted();
-    try std.testing.expectEqualStrings("codex", binding.provider.slice());
-    try std.testing.expectEqualStrings("chosen-model", binding.model.slice());
+    // Ready and unready built-ins: a saved unready provider binds nothing, and no saved provider with two ready asks.
+    var both: provider_selection.Readinesses = .initFill(.configured);
+    var none_saved: Snapshot = .{ .intent = .{}, .defaults = .{} };
+    try std.testing.expectEqual(@as(?Binding, null), try none_saved.resolve(&both));
+    try none_saved.defaults.provider.set("openai");
+    try std.testing.expectEqualStrings("openai", (try none_saved.resolve(&both)).?.provider.slice());
+    both.set(provider_route.nameOf(.openai), .missing);
+    try std.testing.expectEqual(@as(?Binding, null), try none_saved.resolve(&both));
+
+    // Unprompted: the caller's usable set decides; explicit, then saved, then the product provider.
+    var usable: provider_selection.Readinesses = .initFill(.configured);
+    usable.set(alpha, .configured);
+    var snapshot: Snapshot = .{ .intent = .{ .provider = "alpha" }, .defaults = .{} };
+    try std.testing.expectEqualStrings("alpha", (try snapshot.resolveUnprompted(&usable)).provider.slice());
+    snapshot = .{ .intent = .{}, .defaults = .{} };
+    try std.testing.expectEqualStrings(product_defaults.provider, (try snapshot.resolveUnprompted(&usable)).provider.slice());
+    try snapshot.defaults.provider.set("alpha");
+    try std.testing.expectEqualStrings("alpha", (try snapshot.resolveUnprompted(&usable)).provider.slice());
+    try snapshot.defaults.provider.set("gone");
+    try std.testing.expectError(error.UnsupportedSelectionProvider, snapshot.resolveUnprompted(&usable));
 }

@@ -1,3 +1,4 @@
+const provider_selection = @import("provider_selection.zig");
 const credential_location = @import("credential_location.zig");
 const std = @import("std");
 const hs = @import("host_settings.zig");
@@ -479,20 +480,12 @@ fn servedOpenAi(init: std.process.Init, settings: *const hs.Settings, entry: *hs
     for (settings.connections.entries) |*item| {
         const served = &item.value;
         if (!std.mem.eql(u8, served.name.slice(), "openai")) continue;
-        const key = switch (served.credential) {
-            .key => |*key| key,
-            else => return error.ConnectionUnserved,
-        };
         var url_buffer: [providers.Connected.max_url_bytes]u8 = undefined;
         const resolved = served_connection.resolve(served, .{ .id = "", .native_family = .responses }, &url_buffer) catch return error.ConnectionUnserved;
         entry.endpoint = .{};
         try entry.endpoint.?.text.set(resolved.url);
         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        switch (key.source) {
-            .saved => {
-                entry.key.source = .{ .file = .{} };
-                try entry.key.source.file.text.set(try credential_location.connectionKeyFile(init.environ_map, "openai", &path_buffer));
-            },
+        switch (try connectionKeySource(init, served.name.slice(), &served.credential, &path_buffer)) {
             .file => |path| {
                 entry.key.source = .{ .file = .{} };
                 try entry.key.source.file.text.set(path);
@@ -501,7 +494,6 @@ fn servedOpenAi(init: std.process.Init, settings: *const hs.Settings, entry: *hs
                 entry.key.source = .{ .env = .{} };
                 try entry.key.source.env.set(name);
             },
-            .command => return error.ConnectionUnserved,
         }
         return true;
     }
@@ -528,6 +520,30 @@ fn defaultKeySource(init: std.process.Init, key: *hs.Secret(.provider_saved)) !v
     const path = credential_location.default(init.environ_map, .openai, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
     key.source = .{ .file = .{} };
     try key.source.file.text.set(path);
+}
+
+/// Sets each key connection the document names to its readiness: configured when its key loads and is
+/// valid, missing when no key is there, credential_error otherwise. Built-in readiness is left as it is.
+pub fn inspectConnections(init: std.process.Init, dir: []const u8, readiness: *provider_selection.Readinesses) !void {
+    const settings = try init.gpa.create(hs.Settings);
+    defer init.gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var problem: cli_args.Refusal = undefined;
+    const parsed = try cli_args.Command.host_serve.definition().parse(&.{}, init.arena.allocator(), &problem);
+    var failure: start_report.Failure = undefined;
+    try fillAt(init, &parsed, dir, settings, &failure);
+    for (settings.connections.entries) |*entry| {
+        const served = &entry.value;
+        readiness.set(served.name, connectionReadiness(init, served));
+    }
+}
+
+fn connectionReadiness(init: std.process.Init, served: *const served_connection.Connection) provider_selection.Readiness {
+    var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
+    defer std.crypto.secureZero(u8, &key_buffer);
+    _ = loadConnectionKey(init, served.name.slice(), &served.credential, &key_buffer) catch |err| return if (err == error.ApiKeyMissing) .missing else .credential_error;
+    return .configured;
 }
 
 pub fn inspectConnection(init: std.process.Init, dir: []const u8) !ConnectionInfo {
@@ -756,21 +772,9 @@ pub fn resolveConnections(init: std.process.Init, settings: *const hs.Settings, 
         // Model execution still reaches a provider through its built-in name, so this
         // version serves a connection only under one; any other name is refused at start.
         if (@import("provider_route.zig").builtInOf(served.name) == null) return unservedName(failure, name);
-        const key = switch (served.credential) {
-            .key => |*key| key,
-            else => return connectionFailure(failure, name, error.ConnectionUnserved),
-        };
-        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const source: KeySource = switch (key.source) {
-            .saved => .{ .file = credential_location.connectionKeyFile(init.environ_map, name, &path_buffer) catch |err| return connectionFailure(failure, name, err) },
-            .file => |path| .{ .file = path },
-            .env => |variable| .{ .env = variable },
-            .command => return connectionFailure(failure, name, error.ConnectionUnserved),
-        };
         var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
         defer std.crypto.secureZero(u8, &key_buffer);
-        const bytes = keyBytes(init, source, &key_buffer) catch |err| return connectionFailure(failure, name, err);
-        if (!api_key.valid(bytes)) return connectionFailure(failure, name, error.InvalidApiKey);
+        const bytes = loadConnectionKey(init, name, &served.credential, &key_buffer) catch |err| return connectionFailure(failure, name, err);
         var url_buffer: [providers.Connected.max_url_bytes]u8 = undefined;
         const resolved = served_connection.resolve(served, .{ .id = "", .native_family = .responses }, &url_buffer) catch |err| return connectionFailure(failure, name, err);
         const fixture = hs.fixtureEndpoint(settings, resolved.url);
@@ -901,6 +905,30 @@ fn keyBytes(init: std.process.Init, source: KeySource, buffer: []u8) ![]const u8
         .env => |name| init.environ_map.get(name) orelse error.ApiKeyMissing,
         .file => |path| api_key.trimNewline(try credentials.readPrivate(path, buffer) orelse return error.ApiKeyMissing),
     };
+}
+
+/// The one owner of a served connection's key policy: a saved, file or env source names where the key
+/// is. A command source and a non-key credential are not key sources and are refused.
+pub fn connectionKeySource(init: std.process.Init, name: []const u8, credential: *const served_connection.Credential, path_buffer: []u8) !KeySource {
+    const key = switch (credential.*) {
+        .key => |key| key,
+        else => return error.ConnectionUnserved,
+    };
+    return switch (key.source) {
+        .saved => .{ .file = try credential_location.connectionKeyFile(init.environ_map, name, path_buffer) },
+        .file => |path| .{ .file = path },
+        .env => |variable| .{ .env = variable },
+        .command => error.ConnectionUnserved,
+    };
+}
+
+/// Loads a served connection's key into buffer and checks that it is a valid API key. Start,
+/// readiness and the OpenAI connection read a connection's key only through here.
+pub fn loadConnectionKey(init: std.process.Init, name: []const u8, credential: *const served_connection.Credential, buffer: []u8) ![]const u8 {
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const bytes = try keyBytes(init, try connectionKeySource(init, name, credential, &path_buffer), buffer);
+    if (!api_key.valid(bytes)) return error.InvalidApiKey;
+    return bytes;
 }
 
 fn resolve(init: std.process.Init, secret: anytype) !void {
@@ -3350,4 +3378,76 @@ test "Host restart sources preserve current release provider semantics" {
         const entries = settings.providers.entries;
         try std.testing.expectEqual(case.served, Served{ .codex = entries.codex != null, .openai = entries.openai != null, .chatgpt = entries.chatgpt != null });
     }
+}
+
+test "SH-155 connection key sources load a valid key and refuse missing, invalid, command and non-key credentials" {
+    const gpa = std.testing.allocator;
+    const State = enum { valid, missing, invalid };
+    const Source = enum { saved, file, env };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    for (std.enums.values(Source)) |source_kind| for (std.enums.values(State)) |state| {
+        var environment: std.process.Environ.Map = .init(gpa);
+        defer environment.deinit();
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const sub = try std.fmt.allocPrint(a, "{s}-{s}", .{ @tagName(source_kind), @tagName(state) });
+        const config = try std.fmt.allocPrint(a, "{s}/.config/rui", .{sub});
+        var sub_dir = try tmp.dir.createDirPathOpen(std.testing.io, config, .{ .permissions = .fromMode(0o700) });
+        sub_dir.close(std.testing.io);
+        const dir = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, sub });
+        try environment.put("HOME", dir);
+        const key_file = try std.fmt.allocPrint(a, "{s}/key", .{dir});
+        const key_text: ?[]const u8 = switch (state) {
+            .valid => "sk-sh155-valid-key-0001",
+            .invalid => "not a key",
+            .missing => null,
+        };
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const location: []const u8 = switch (source_kind) {
+            .saved => try credential_location.connectionKeyFile(&environment, "alpha", &path_buffer),
+            .file => key_file,
+            .env => "",
+        };
+        if (key_text) |bytes| switch (source_kind) {
+            .env => try environment.put("SH155_KEY", bytes),
+            else => try credentials.publishPrivate(location, try std.fmt.allocPrint(a, "{s}\n", .{bytes})),
+        };
+        const credential: served_connection.Credential = .{ .key = .{ .source = switch (source_kind) {
+            .saved => .saved,
+            .file => .{ .file = key_file },
+            .env => .{ .env = "SH155_KEY" },
+        }, .placement = .bearer } };
+        const init = initForTest(&arena, &environment);
+
+        var source_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const source = try connectionKeySource(init, "alpha", &credential, &source_buffer);
+        const expected_tag: std.meta.Tag(KeySource) = if (source_kind == .env) .env else .file;
+        try std.testing.expectEqual(expected_tag, std.meta.activeTag(source));
+
+        var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
+        const loaded = loadConnectionKey(init, "alpha", &credential, &key_buffer);
+        switch (state) {
+            .valid => try std.testing.expectEqualStrings(key_text.?, try loaded),
+            .missing => try std.testing.expectError(error.ApiKeyMissing, loaded),
+            .invalid => try std.testing.expectError(error.InvalidApiKey, loaded),
+        }
+    };
+
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const command: served_connection.Credential = .{ .key = .{ .source = .{ .command = "printf sk-sh155-command-key" }, .placement = .bearer } };
+    try std.testing.expectError(error.ConnectionUnserved, loadConnectionKey(init, "alpha", &command, &key_buffer));
+    try std.testing.expectError(error.ConnectionUnserved, connectionKeySource(init, "alpha", &command, &path_buffer));
+    const device: served_connection.Credential = .{ .@"openai-device" = .{ .client_id = "app_sh155", .audience = "https://gateway.example/v1" } };
+    try std.testing.expectError(error.ConnectionUnserved, loadConnectionKey(init, "alpha", &device, &key_buffer));
+    try std.testing.expectError(error.ConnectionUnserved, connectionKeySource(init, "alpha", &device, &path_buffer));
 }

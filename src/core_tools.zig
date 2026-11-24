@@ -1,5 +1,6 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const connection = @import("connection.zig");
 const wire_request = @import("wire_request.zig");
 const utf8_validation = @import("utf8_validation.zig");
 
@@ -306,7 +307,7 @@ fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configu
         return .{ .rejected = reason };
     if (protocol.missingCreatingSetting(configuration)) |name|
         return .{ .rejected = try std.fmt.allocPrint(arena, "spec.{s} is required", .{name}) };
-    if (configuration.provider.state == .value and std.meta.stringToEnum(protocol.Provider, configuration.provider.value.slice()) == null)
+    if (configuration.provider.state == .value and connection.Name.parse(configuration.provider.value.slice()) == null)
         return refused("spec.provider must be a provider name");
     if (configuration.workspace.state == .value and configuration.workspace.value.len == 0)
         return refused("spec.workspace must be a Workspace path");
