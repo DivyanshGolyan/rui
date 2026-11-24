@@ -482,7 +482,7 @@ pub fn facts(code: Code) Facts {
         .loaded_tools_unreachable => .{ .act = .fix, .input = .loaded_tools, .accepted = .{ .grammar = "every tool in --tools, or a subset when find_tools is loaded" }, .says = "Some tools would never be reachable: the loaded tools leave some out without loading find_tools.", .next = "Add find_tools to --loaded-tools, or load every tool in --tools." },
         .invalid_label => .{ .act = .fix, .input = .label, .accepted = .{ .grammar = "one line of at most 100 UTF-8 bytes, or an empty string to clear it" }, .says = "The Label is too long or contains a line break or control character.", .next = "Shorten --label and remove line breaks and control characters." },
         .settings_on_reload => .{ .act = .fix, .input = .reload_skills, .accepted = .{ .grammar = "--reload-skills alone, with no setting, preset or model requirement" }, .says = "A Skills reload cannot change settings.", .next = "Reload Skills alone, then configure settings in a separate request." },
-        .missing_settings => .{ .act = .fix, .input = .missing_settings, .accepted = .{ .grammar = "a model, a Workspace or parent, and a provider when the Host serves several" }, .says = "A new Session is missing a required setting.", .next = "Supply each missing setting with its option, a preset or a parent." },
+        .missing_settings => .{ .act = .fix, .input = .missing_settings, .accepted = .{ .grammar = "a model, a Workspace or parent, and a connection when the Host serves several" }, .says = "A new Session is missing a required setting.", .next = "Supply each missing setting with its option, a preset or a parent." },
         .unknown_preset => .{ .act = .fix, .input = .preset, .accepted = .{ .grammar = "a preset name supplied when this Host was launched" }, .says = "The Host does not have that preset.", .next = "Use a preset supplied at connect, or supply a complete creation spec." },
         .preset_on_update => .{ .act = .fix, .input = .preset, .accepted = .{ .grammar = "a preset only when creating a Session" }, .says = "An existing Session cannot apply a preset.", .next = "Omit preset from the update, or create a new Session with it." },
         .preferences_on_update => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "preferences only on creation" }, .says = "An existing Session cannot apply creation preferences.", .next = "Omit preferences from the update." },
@@ -607,7 +607,7 @@ fn writeMissing(out: *std.Io.Writer, missing: required_settings.Missing) error{W
         try out.writeAll(switch (setting) {
             .model => comptime Input.model.spelling().?,
             .workspace => comptime Input.workspace.spelling().?,
-            .provider => comptime Input.provider.spelling().?,
+            .connection => comptime Input.provider.spelling().?,
         });
     }
     try out.writeAll(": A new Session is missing ");
@@ -619,7 +619,7 @@ fn writeMissing(out: *std.Io.Writer, missing: required_settings.Missing) error{W
         try out.writeAll(switch (setting) {
             .model => "a model",
             .workspace => "a Workspace",
-            .provider => "a provider",
+            .connection => "a connection",
         });
     }
     try out.writeByte('.');
@@ -790,12 +790,12 @@ test "a missing-settings line names each missing setting by flag and noun" {
     const cases = [_]struct { bits: u3, expected: []const u8 }{
         .{ .bits = 0b001, .expected = "rui session configure: --model: A new Session is missing a model." },
         .{ .bits = 0b010, .expected = "rui session configure: --workspace: A new Session is missing a Workspace." },
-        .{ .bits = 0b100, .expected = "rui session configure: --connection: A new Session is missing a provider." },
+        .{ .bits = 0b100, .expected = "rui session configure: --connection: A new Session is missing a connection." },
         .{ .bits = 0b011, .expected = "rui session configure: --model, --workspace: A new Session is missing a model and a Workspace." },
-        .{ .bits = 0b110, .expected = "rui session configure: --workspace, --connection: A new Session is missing a Workspace and a provider." },
-        .{ .bits = 0b111, .expected = "rui session configure: --model, --workspace, --connection: A new Session is missing a model, a Workspace and a provider." },
+        .{ .bits = 0b110, .expected = "rui session configure: --workspace, --connection: A new Session is missing a Workspace and a connection." },
+        .{ .bits = 0b111, .expected = "rui session configure: --model, --workspace, --connection: A new Session is missing a model, a Workspace and a connection." },
     };
-    const tail = " Accepted: a model, a Workspace or parent, and a provider when the Host serves several. Next: Supply each missing setting with its option, a preset or a parent. This rejection was saved and replays as saved; a resend needs a new key. [missing_settings]\n";
+    const tail = " Accepted: a model, a Workspace or parent, and a connection when the Host serves several. Next: Supply each missing setting with its option, a preset or a parent. This rejection was saved and replays as saved; a resend needs a new key. [missing_settings]\n";
     for (cases) |case| {
         var bytes: [1024]u8 = undefined;
         var out = std.Io.Writer.fixed(&bytes);

@@ -4454,7 +4454,7 @@
                           "enum": [
                             "model",
                             "workspace",
-                            "provider"
+                            "connection"
                           ]
                         },
                         "minItems": 1,
@@ -7678,7 +7678,7 @@
                           "enum": [
                             "model",
                             "workspace",
-                            "provider"
+                            "connection"
                           ]
                         },
                         "minItems": 1,
@@ -7831,7 +7831,7 @@
                           "enum": [
                             "model",
                             "workspace",
-                            "provider"
+                            "connection"
                           ]
                         },
                         "minItems": 1,

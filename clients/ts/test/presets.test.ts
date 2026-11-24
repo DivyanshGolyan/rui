@@ -110,7 +110,7 @@ test("the Host resolves omitted preset settings at creation and preserves explic
 		const fromPreset = await rui.sessions.create({ preset: "review" }, { idempotencyKey: "preset:sparse" });
 		const saved = await inspect(rui, fromPreset.id);
 		const directSettings = await inspect(rui, direct.id);
-		for (const field of ["model", "provider", "workspace", "tools", "loaded_tools", "permission_mode", "reasoning_effort", "compaction_trigger_override"]) {
+		for (const field of ["model", "connection", "workspace", "tools", "loaded_tools", "permission_mode", "reasoning_effort", "compaction_trigger_override"]) {
 			assert.deepEqual(saved[field], directSettings[field], field);
 		}
 		assert.equal(saved.model, "gpt-6.1-sol");
