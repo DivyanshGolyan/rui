@@ -35,3 +35,6 @@ remains parked until its test releases it or closes the control socket; a test
 that forgets to do so fails at its client watchdog.
 
 Known limit: a paused Action blocks other execution work until release; resumable polling will be added when an invariant test needs concurrent execution progress.
+| PAU-18 | Module | Cancellation before or during a pause unblocks the affected worker. | PauseController | `pause PAU-18 cancellation releases a parked worker` | `src/testing/pause.zig` |
+| PAU-19 | Module | Watcher expiry and one-shot test commands are bound to an Action. | PauseController | `pause PAU-19 watcher controls bind expiry and one-shot commands to an Action` | `src/testing/pause.zig` |
+| PAU-20 | Process | Watcher test commands require a started controller and a valid Action identity. | Socket protocol | `test_pau_20_action_controls_require_a_started_socket_and_valid_action` | `tests/integration/pause_socket_test.py` |

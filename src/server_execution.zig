@@ -1,6 +1,10 @@
 const std = @import("std");
 const tool_result = @import("tool_result.zig");
 const server_mcp = @import("server_mcp.zig");
+const server_github_pr_watch = @import("server_github_pr_watch.zig");
+const github_transport = @import("github_transport.zig");
+const watch_descriptor = @import("github_pr_watch_descriptor.zig");
+const model_settlement = @import("store/domain/model_settlement.zig");
 const server_mcp_relist = @import("server_mcp_relist.zig");
 const server_mcp_settings = @import("server_mcp_settings.zig");
 const tool_record = @import("tool_record.zig");
@@ -163,6 +167,17 @@ fn toolResults(run: *const Run) tool_result.Results {
     return .{ .allocator = run.shared.allocator, .io = run.shared.io, .retention = run.shared.retention };
 }
 
+fn watchContext(run: *const Run) server_github_pr_watch.Context {
+    return .{
+        .io = run.shared.io,
+        .allocator = run.shared.allocator,
+        .store = run.shared.store,
+        .lifecycle = run.shared.lifecycle,
+        .probes = run.shared.probes,
+        .github_environment = run.shared.github_environment,
+    };
+}
+
 /// The pointers and handles the execution thread shares with the rest of the Host process.
 pub const Shared = struct {
     io: std.Io,
@@ -175,6 +190,7 @@ pub const Shared = struct {
     model_lists: *ModelLists,
     environments: ?*SessionEnvironments,
     allowance_diagnostic: *server_host.AllowanceDiagnostic,
+    github_environment: ?*const std.process.Environ.Map = null,
 };
 
 /// Settings the execution thread reads for its whole life, passed in by the thread's spawn.
@@ -338,12 +354,69 @@ comptime {
         @compileError("pending overflow failure exceeds an existing provider slot");
 }
 
+const WatchPreflight = struct {
+    owner: AttemptOwner,
+    output: store_module.ValidatedOutput,
+    response: provider.SealedResponse,
+    metadata: output_format.OutputMetadataWriter,
+    data: output_decode.EventData,
+    http_status: u16,
+    io: std.Io,
+    environment: *const std.process.Environ.Map,
+    lifecycle: *server_host.Lifecycle,
+    cancelled: std.atomic.Value(bool) = .init(false),
+    done: std.atomic.Value(bool) = .init(false),
+    facts: watch_descriptor.AuthFacts = .discovery_required,
+    thread: std.Thread = undefined,
+
+    fn work(self: *WatchPreflight) void {
+        const allocator = std.heap.page_allocator;
+        const deadline: github_transport.Deadline = .fromNow(self.io, .{ .raw = .fromSeconds(5), .clock = .awake });
+        if (github_transport.discover(allocator, self.io, self.environment, deadline, &self.cancelled)) |result| {
+            var accounts = result;
+            defer accounts.deinit(allocator);
+            self.facts = watchPreflightFacts(accounts.names);
+        } else |err| {
+            self.facts = .{ .discovery_failed = if (err == error.GhUnavailable) .gh_unavailable else .account_discovery_failed };
+        }
+        self.done.store(true, .release);
+        self.lifecycle.wakeDispatch();
+    }
+
+    fn deinit(self: *WatchPreflight, allocator: std.mem.Allocator) void {
+        self.thread.join();
+        self.data.deinit();
+        self.metadata.deinit();
+        self.response.deinit();
+        allocator.destroy(self);
+    }
+};
+
+fn watchPreflightFacts(names: []const []u8) watch_descriptor.AuthFacts {
+    if (names.len != 1 or !watch_descriptor.validLogin(names[0])) return .discovery_required;
+    var login: protocol.Bounded(39) = .{};
+    login.set(names[0]) catch unreachable;
+    return .{ .sole_login = login };
+}
+
+test "PRW-21 watch preflight binds only one valid account" {
+    var alice = [_]u8{ 'a', 'l', 'i', 'c', 'e' };
+    var malformed = [_]u8{ '-', 'x' };
+    var bob = [_]u8{ 'b', 'o', 'b' };
+    try std.testing.expect(watchPreflightFacts(&.{}) == .discovery_required);
+    const sole = watchPreflightFacts(&.{&alice});
+    try std.testing.expectEqualStrings("alice", sole.sole_login.slice());
+    try std.testing.expect(watchPreflightFacts(&.{ &alice, &bob }) == .discovery_required);
+    try std.testing.expect(watchPreflightFacts(&.{&malformed}) == .discovery_required);
+}
+
 pub const ExecutionSlot = union(enum) {
     free,
     model_preparing: ModelPreparingSlot,
     model_authenticating: ModelAuthenticatingSlot,
     model_refreshing: ModelRefreshingSlot,
     model_failure_preparing: ModelFailurePreparingSlot,
+    model_watch_preflight: *WatchPreflight,
     provider: ProviderSlot,
     bash_preparing: BashPreparingSlot,
     bash: BashSlot,
@@ -356,7 +429,7 @@ const SlotCustody = enum { free, attached, detached };
 fn slotCustody(slot: *const ExecutionSlot) SlotCustody {
     return switch (slot.*) {
         .free => .free,
-        .model_preparing, .model_authenticating, .model_refreshing, .model_failure_preparing, .provider, .bash_preparing => .attached,
+        .model_preparing, .model_authenticating, .model_refreshing, .model_failure_preparing, .model_watch_preflight, .provider, .bash_preparing => .attached,
         .bash => |*active| switch (active.delivery) {
             .open => .attached,
             .closed => .detached,
@@ -372,6 +445,7 @@ fn slotToken(slot: *const ExecutionSlot) ?execution.CustodyToken {
         .model_authenticating => |*active| active.owner.token,
         .model_refreshing => |*active| active.owner.token,
         .model_failure_preparing => |*active| active.owner.token,
+        .model_watch_preflight => |active| active.owner.token,
         .provider => |*active| active.owner.token,
         .bash_preparing => |*active| active.attempt.token,
         .bash => |*active| active.attempt.token,
@@ -387,6 +461,7 @@ fn slotBinding(slot: *const ExecutionSlot) ?execution.CustodyBinding {
         .model_authenticating => |*active| .{ .model = active.owner.binding },
         .model_refreshing => |*active| .{ .model = active.owner.binding },
         .model_failure_preparing => |*active| .{ .model = active.owner.binding },
+        .model_watch_preflight => |active| .{ .model = active.owner.binding },
         .provider => |*active| .{ .model = active.owner.binding },
         .bash_preparing => |*active| .{ .action = active.attempt.binding },
         .bash => |*active| .{ .action = active.attempt.binding },
@@ -803,11 +878,16 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
     if (reactor != null) run.scratch_budget = budget;
     defer run.scratch_budget = null;
     var mcp_calls: server_mcp.Calls = .{};
+    var github_pr_watches: server_github_pr_watch.Calls = .{};
     const attempts: action_attempt.Parts = run.execution.attempts(run.shared.store, run.shared.probes);
     workspace.image_calls = .{};
     defer workspace.image_calls.shutdown(toolResults(&run));
-    defer shutdownExecution(&run, slots, workspace);
     defer mcp_calls.shutdown(toolResults(&run));
+    defer {
+        github_pr_watches.cancelAll();
+        shutdownExecution(&run, slots, workspace);
+        github_pr_watches.shutdown(watchContext(&run));
+    }
 
     workspace.turn_state = .{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
@@ -821,6 +901,7 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
             .workspace = workspace,
             .measurement = &measurement,
             .mcp = &mcp_calls,
+            .github_pr_watches = &github_pr_watches,
             .images = &workspace.image_calls,
             .attempts = attempts,
             .fenced = false,
@@ -893,6 +974,7 @@ const NativeTurn = struct {
     workspace: *Workspace,
     measurement: *LifecycleMeasurement,
     mcp: *server_mcp.Calls,
+    github_pr_watches: ?*server_github_pr_watch.Calls = null,
     images: ?*server_read_image.Calls = null,
     attempts: action_attempt.Parts,
     fenced: bool,
@@ -992,10 +1074,13 @@ const NativeTurn = struct {
                 break;
             }
         }
+        const preflight_progress = advanceWatchPreflight(self.run, self.slots);
+        const watch_progress = if (self.github_pr_watches) |watches| watches.service(watchContext(self.run)) else false;
+        if (watch_progress) self.run.slot_changes +%= 1;
         const mcp_progress = self.mcp.service(toolResults(self.run));
         const relist_progress = serviceRelist(self.run);
         const image_progress = if (self.images) |images| images.service(toolResults(self.run)) else false;
-        return advanceBash(self.run, self.slots, self.workspace) or mcp_progress or relist_progress or image_progress;
+        return advanceBash(self.run, self.slots, self.workspace) or preflight_progress or watch_progress or mcp_progress or relist_progress or image_progress;
     }
 
     pub noinline fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
@@ -1036,7 +1121,7 @@ const NativeTurn = struct {
     /// A model call, Bash command, MCP call or image read holds execution.
     /// Pooled provider connections and catalog listings are not Turn work.
     pub fn workInFlight(self: *const NativeTurn) bool {
-        if (hasOwnedSlots(self.slots) or self.mcp.any()) return true;
+        if (hasOwnedSlots(self.slots) or self.mcp.any() or (if (self.github_pr_watches) |watches| watches.any() else false)) return true;
         return if (self.images) |images| images.any() else false;
     }
 
@@ -1051,7 +1136,7 @@ const NativeTurn = struct {
     }
 
     pub noinline fn recoverUncertainAction(self: *NativeTurn) error{Fence}!bool {
-        const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp, .images = self.images };
+        const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp, .images = self.images, .github_pr_watches = self.github_pr_watches };
         const active_actions = store_module.ActiveOperationFilter{
             .context = &active_slots,
             .containsFn = activeActionContains,
@@ -1102,6 +1187,33 @@ const NativeTurn = struct {
         };
     }
 
+    pub noinline fn admitGithubPrWatch(self: *NativeTurn) execution_turn.Admission {
+        const watches = self.github_pr_watches orelse return .no_work;
+        const capacity = self.dispatchCapacity();
+        const allow_long_watch = self.run.custody.records.len <= 1 or capacity.free_credit == .multiple;
+        const observed_at = std.Io.Clock.Timestamp.now(self.run.shared.io, .awake);
+        if (!watches.selection_rescan.ready(observed_at, allow_long_watch)) return .retry_later;
+        const selection = self.run.shared.store.nextGithubPrWatch(capacity, allow_long_watch, &watches.selection_cursor) catch |err| {
+            self.run.shared.lifecycle.fenceDispatch("GitHub PR watch Action selection", err);
+            return .retry_later;
+        };
+        const selected = switch (selection) {
+            .selected => |action| action,
+            .more => return .yielded,
+            .dirty => {
+                watches.selection_rescan.postpone(std.Io.Clock.Timestamp.now(self.run.shared.io, .awake));
+                return .retry_later;
+            },
+            .exhausted => {
+                if (!allow_long_watch) self.run.shared.probes.traceSubject("github_watch_capacity_deferred", "runner", "github_pr_watch");
+                return .no_work;
+            },
+        };
+        const admitted = watches.admit(watchContext(self.run), self.attempts, selected);
+        if (admitted == .admitted) self.run.slot_changes +%= 1;
+        return admitted;
+    }
+
     pub noinline fn admitRetry(self: *NativeTurn) execution_turn.Admission {
         if (self.workspace.model_admission.pending()) return .no_work;
         const slot = self.firstFreeSlot() orelse return .no_work;
@@ -1137,7 +1249,7 @@ const NativeTurn = struct {
             self.fenced = true;
             return error.Fence;
         };
-        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry, .retry_waiting = found.retry_waiting };
+        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .github_pr_watch = found.github_pr_watch, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry, .retry_waiting = found.retry_waiting };
     }
 
     pub fn scheduledRetry(self: *const NativeTurn) execution_turn.ScheduledRetry {
@@ -1500,6 +1612,13 @@ fn cancelSupersededTransfers(
                 finishCustodyNow(run, slot);
             }
         },
+        .model_watch_preflight => |active| {
+            const superseded = run.shared.store.operationSupersededByControl(active.owner.binding) catch |err| {
+                run.shared.lifecycle.fenceDispatch("watch preflight control reconciliation", err);
+                return;
+            };
+            if (superseded != null) active.cancelled.store(true, .release);
+        },
         .provider => |*active| {
             const superseded = run.shared.store.operationSupersededByControl(active.owner.binding) catch |err| {
                 run.shared.lifecycle.fenceDispatch("control reconciliation", err);
@@ -1561,6 +1680,7 @@ const ActiveSlots = struct {
     slots: []ExecutionSlot,
     mcp: ?*const server_mcp.Calls = null,
     images: ?*const server_read_image.Calls = null,
+    github_pr_watches: ?*const server_github_pr_watch.Calls = null,
 };
 
 fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
@@ -1571,6 +1691,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
         .model_authenticating => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .model_refreshing => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .model_failure_preparing => |value| if (value.owner.binding.operation_id == operation_id) return true,
+        .model_watch_preflight => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
     return false;
@@ -1579,6 +1700,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
 fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
     const active: *const ActiveSlots = @ptrCast(@alignCast(context));
     if (active.mcp) |mcp| if (mcp.contains(action_id)) return true;
+    if (active.github_pr_watches) |watches| if (watches.contains(action_id)) return true;
     if (active.images) |images| if (images.contains(action_id)) return true;
     for (active.slots) |slot| switch (slot) {
         .bash_preparing => |value| if (value.attempt.binding.action_id == action_id) return true,
@@ -2699,6 +2821,7 @@ fn completeTransfer(
             var completed = completeSuccessfulTransfer(run, workspace, active, http_status.?);
             switch (completed) {
                 .cleanup => finishCustodyNow(run, slot),
+                .preflight => |pending| moveSlot(run, slot, .model_watch_preflight, pending),
                 .rejected => |*rejected| completeRejectedTransfer(run, workspace, slot, rejected, http_status.?),
                 .named_scratch => |scratch| {
                     moveSlot(run, slot, .named_scratch, .{
@@ -2777,6 +2900,7 @@ const RejectedCompletion = struct {
 
 const SuccessfulCompletion = union(enum) {
     cleanup,
+    preflight: *WatchPreflight,
     rejected: RejectedCompletion,
     named_scratch: named_scratch.Owner,
 };
@@ -2852,7 +2976,8 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
         answered.fail("response_metadata_exhausted", "", .ordinary);
         return .cleanup;
     };
-    defer metadata.deinit();
+    var metadata_owned = true;
+    defer if (metadata_owned) metadata.deinit();
     var data_name_buffer: [96]u8 = undefined;
     const data_name = named_scratch.NumericName.response.format(&data_name_buffer, owner.binding.operation_id, owner.binding.attempt_ordinal) catch unreachable;
     var retained_data: ?named_scratch.Owner = null;
@@ -2867,7 +2992,8 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
         answered.fail("response_data_exhausted", "", .ordinary);
         return .cleanup;
     };
-    defer event_data.deinit();
+    var event_data_owned = true;
+    defer if (event_data_owned) event_data.deinit();
     run.shared.probes.traceOperation("validation_started", owner.binding);
     const operation = owner.purpose;
     metadata.fail_writes = run.shared.probes.fails(.response_metadata);
@@ -2886,8 +3012,6 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
     run.shared.probes.traceOperation("validation_completed", owner.binding);
     if (comptime test_pause.enabled) reachModel(run, .model_result_ready, owner.binding);
     run.shared.probes.holdAt(.{ .model_result = owner.binding });
-    if (!run.custody.claimTerminalDelivery(owner.token)) return .cleanup;
-    var settlement_trace = SettlementTrace.init(run.shared.probes, owner.binding);
     workspace.settlement = .{
         .source = validated.source,
         .source_length = validated.source_length,
@@ -2901,6 +3025,34 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
         .model_evidence = accepted.model_evidence,
         .request_id = answered.request_id,
     };
+    const offered = run.shared.store.watchOffered(owner.binding) catch |err| {
+        if (err != error.SupersededByControl) run.shared.lifecycle.fenceDispatch("watch offer read", err);
+        return .cleanup;
+    };
+    if (offered and (model_settlement.needsWatchPreflight(run.shared.io, &workspace.settlement) catch |err| {
+        run.shared.lifecycle.fenceDispatch("watch preflight validation", err);
+        return .cleanup;
+    })) {
+        if (run.shared.github_environment) |gh_environment| {
+            const pending = run.shared.allocator.create(WatchPreflight) catch |err| {
+                run.shared.lifecycle.fenceDispatch("watch preflight allocation", err);
+                return .cleanup;
+            };
+            pending.* = .{ .owner = owner, .output = workspace.settlement, .response = response, .metadata = metadata, .data = event_data.*, .http_status = http_status, .io = run.shared.io, .environment = gh_environment, .lifecycle = run.shared.lifecycle };
+            pending.thread = signal_stack.spawn(.{}, WatchPreflight.work, .{pending}) catch |err| {
+                run.shared.allocator.destroy(pending);
+                run.shared.lifecycle.fenceDispatch("watch preflight worker initialization", err);
+                return .cleanup;
+            };
+            response_owned = false;
+            metadata_owned = false;
+            event_data_owned = false;
+            return .{ .preflight = pending };
+        }
+        workspace.settlement.watch_auth = .{ .discovery_failed = .gh_unavailable };
+    }
+    if (!run.custody.claimTerminalDelivery(owner.token)) return .cleanup;
+    var settlement_trace = SettlementTrace.init(run.shared.probes, owner.binding);
     run.shared.store.settleModelSuccess(owner.binding, &workspace.settlement, run.shared.probes.storeFaults(.{ .model_output = settlement_trace.storeTrace() })) catch |err| {
         if (err == error.SupersededByControl) {
             run.shared.probes.traceOperation("model_settlement_superseded", owner.binding);
@@ -2913,6 +3065,33 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
     };
     run.shared.probes.traceOperation("model_settlement_committed", owner.binding);
     return .cleanup;
+}
+
+fn advanceWatchPreflight(run: *Run, slots: []ExecutionSlot) bool {
+    var progress = false;
+    for (slots) |*slot| {
+        if (slot.* != .model_watch_preflight) continue;
+        const pending = slot.model_watch_preflight;
+        if (!pending.done.load(.acquire)) continue;
+        if (!pending.cancelled.load(.acquire) and run.custody.claimTerminalDelivery(pending.owner.token)) {
+            pending.output.watch_auth = pending.facts;
+            var trace = SettlementTrace.init(run.shared.probes, pending.owner.binding);
+            if (run.shared.store.settleModelSuccess(pending.owner.binding, &pending.output, run.shared.probes.storeFaults(.{ .model_output = trace.storeTrace() }))) |_| {
+                run.shared.probes.traceOperation("model_settlement_committed", pending.owner.binding);
+            } else |err| {
+                if (err == error.SupersededByControl) {
+                    run.shared.probes.traceOperation("model_settlement_superseded", pending.owner.binding);
+                } else if (err == error.InvalidProviderEnvelope) {
+                    const answered: AnsweredAttempt = .{ .run = run, .owner = pending.owner, .request_id = pending.output.request_id };
+                    rejectContradictoryOutput(run, .{ .file = pending.response.file, .length = pending.response.length, .transfer = .complete }, &answered, err, pending.http_status);
+                } else run.shared.lifecycle.fenceDispatch("model output import", err);
+            }
+        }
+        finishCustodyNow(run, slot);
+        pending.deinit(run.shared.allocator);
+        progress = true;
+    }
+    return progress;
 }
 
 // Diagnostic buffers and the failure's Store settlement live in these frames,
@@ -2989,6 +3168,7 @@ fn shutdownExecution(run: *Run, slots: []ExecutionSlot, workspace: *Workspace) v
             active.deinit();
             finishCustodyNow(run, slot);
         },
+        .model_watch_preflight => |active| active.cancelled.store(true, .release),
         .bash_preparing => discardBashResources(run, slot, workspace.bash_preparation.cancel()),
         .bash => |*active| active.execution.requestInfrastructureShutdown(.now(run.shared.io, .awake)),
         .bash_prepared_cleanup, .named_scratch => {},
@@ -3001,6 +3181,7 @@ fn shutdownExecution(run: *Run, slots: []ExecutionSlot, workspace: *Workspace) v
     var retained_cleanup_at = std.Io.Clock.Timestamp.now(run.shared.io, .awake);
     while (hasOwnedSlots(slots)) {
         var made_progress = advanceBash(run, slots, workspace);
+        made_progress = advanceWatchPreflight(run, slots) or made_progress;
         const now = std.Io.Clock.Timestamp.now(run.shared.io, .awake);
         made_progress = advanceRetainedCleanup(run, slots, now, &retained_cleanup_at) or made_progress;
         if (!made_progress) _ = run.shared.io.sleep(.fromMilliseconds(100), .awake) catch {};

@@ -28,6 +28,7 @@ pub const Call = union(Tool) {
     skill,
     start_agent,
     stop_action,
+    watch_github_pr,
     web_search: WebSearchCall,
 };
 
@@ -84,6 +85,11 @@ pub fn describe(call: Call) Description {
         .start_agent => blk: {
             var out: Description = .{};
             out.set("Start an agent") catch unreachable;
+            break :blk out;
+        },
+        .watch_github_pr => blk: {
+            var out: Description = .{};
+            out.set("Watch a GitHub pull request") catch unreachable;
             break :blk out;
         },
         .web_search => |search| describeWebSearch(search),
@@ -204,6 +210,7 @@ pub const CallFacts = struct {
     removed: bool = false,
     invalid_mcp_arguments: bool = false,
     read_image: ?bool = null,
+    github_pr_watch: ?bool = null,
     find_tools: bool = false,
     skill: bool = false,
     read_transcript: bool = false,
@@ -229,6 +236,7 @@ pub const CallFacts = struct {
         if (self.bashArguments()) |arguments| return describe(.{ .bash = arguments });
         if (self.messageAgentArguments()) |arguments| return describe(.{ .message_agent = arguments });
         if (self.read_image == true) return describe(.read_image);
+        if (self.github_pr_watch == true) return describe(.watch_github_pr);
         if (self.find_tools) return describe(.find_tools);
         if (self.skill) return describe(.skill);
         if (self.read_transcript) return describe(.{ .read_transcript = self.transcript_id });
@@ -294,6 +302,7 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
         .message_agent = if (messaging and (runner == null or runner == .core)) try core_tools.checkMessageAgent(arguments, &discard) else null,
         .removed = removed,
         .read_image = if (runner == .read_image) try @import("read_image_arguments.zig").valid(arguments) else null,
+        .github_pr_watch = if (runner == .github_pr_watch) (try @import("github_pr_watch_descriptor.zig").parseSource(arguments)) != null else null,
         .invalid_mcp_arguments = if (runner == .mcp) !try checkMcpArguments(arguments) else false,
         .read_transcript = transcript and (runner == null or runner == .core),
         .transcript_id = if (transcript and (runner == null or runner == .core)) try transcriptDescriptionId(arguments) else null,
@@ -405,6 +414,7 @@ pub const removed_tool_result = "This tool was removed.";
 pub fn rejectionResult(code: tool_proposal.Rejection, facts: *const CallFacts, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
     switch (code) {
         .invalid_arguments => {
+            if (facts.github_pr_watch == false) return "Invalid arguments for tool 'watch_github_pr': expected a GitHub.com pull request URL and optional GitHub login.";
             if (facts.read_image == false) return "Invalid arguments for tool 'read_image': expected only a nonempty Host-local path string of at most 4096 UTF-8 bytes.";
             if (facts.invalid_mcp_arguments) return std.fmt.bufPrint(buffer, "Invalid arguments for tool '{s}': the arguments are not one well-formed JSON object.", .{facts.tool.?.name});
             if (facts.message_agent) |check| return switch (check.rejected) {
@@ -432,7 +442,7 @@ pub fn rejectionResult(code: tool_proposal.Rejection, facts: *const CallFacts, n
 
 pub fn classifyCall(facts: *const CallFacts) ?tool_proposal.Rejection {
     if (facts.tool == null) return .unknown_tool;
-    if (facts.read_image == false) return .invalid_arguments;
+    if (facts.read_image == false or facts.github_pr_watch == false) return .invalid_arguments;
     if (facts.invalid_mcp_arguments) return .invalid_arguments;
     if (facts.bash) |check| if (check == .rejected) return .invalid_arguments;
     if (facts.message_agent) |check| if (check == .rejected) return .invalid_arguments;

@@ -846,6 +846,87 @@ fn declareReportAppTools(configuration: *wire_request.Configuration, bytes: []co
     configuration.app_tools = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
 }
 
+// PRW-58: A declaration saved before the watcher name became built-in remains
+// readable and can be resubmitted only with the identical app-set identity.
+test "PRW-58 a saved app declaration survives a newly reserved built-in name" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace_path = try store_testing.canonicalCwd(std.testing.io, &workspace);
+            const old_document = "[{\"name\":\"legacy_probe\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+            const retained = "[{\"name\":\"watch_github_pr\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+            const changed = "[{\"name\":\"watch_github_pr\",\"description\":\"Changed.\",\"input_schema\":{\"type\":\"object\"}}]";
+            var create = try store_testing.completeConfiguration("legacy-app-create", "", workspace_path, "model-a");
+            create.configuration.tools = try .of(&.{"bash"});
+            declareReportAppTools(&create.configuration, old_document);
+            const created = try storage.configure(&create, .{});
+            try std.testing.expect(created == .accepted);
+            const root = created.accepted.session.slice();
+            const set = try store_testing.queryU64(&storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root});
+
+            // Recreate the valid saved rows a previous binary could write before
+            // watch_github_pr became reserved. Recompute the set digest as that
+            // binary did; the Store's normal readers and Configure own the rest.
+            const app_tools = @import("../../tool_record.zig").app_tools;
+            const tool_record = @import("../../tool_record.zig");
+            const arena = try std.testing.allocator.alloc(u8, app_tools.arena_bytes);
+            defer std.testing.allocator.free(arena);
+            var fixed: std.heap.FixedBufferAllocator = .init(arena);
+            const declaration = app_tools.parse(fixed.allocator(), old_document).declared;
+            declaration.records[0].name = "watch_github_pr";
+            const record_digest = tool_record.recordDigest(&declaration.records[0]);
+            var digest: tool_record.SetDigest = .init();
+            digest.add(&record_digest);
+            const set_digest = digest.final();
+            try store_testing.exec(&storage, "UPDATE tool_record SET name='watch_github_pr' WHERE owner='app' AND name='legacy_probe'", .{});
+            try store_testing.exec(&storage, "UPDATE tool_set SET digest=?1 WHERE tool_set_id=?2", .{ store_testing.Blob{ .bytes = &set_digest }, set });
+
+            try expectReportedAppTools(&storage, &tmp, root, &.{"watch_github_pr"});
+            const report = try testingSessionReport(&storage, &tmp, root, 1024 * 1024);
+            defer std.testing.allocator.free(report);
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
+            defer parsed.deinit();
+            const offered = parsed.value.object.get("session").?.object.get("tools").?.array.items;
+            try std.testing.expectEqual(@as(usize, 1), offered.len);
+            try std.testing.expectEqualStrings("bash", offered[0].string);
+
+            var update: wire_request.ConfigureCommand = .{};
+            try update.session.set(root);
+            try update.key.set("legacy-app-omitted");
+            update.configuration.label.state = .value;
+            try update.configuration.label.value.set("retained");
+            try std.testing.expect((try storage.configure(&update, .{})) == .accepted);
+            try expectReportedAppTools(&storage, &tmp, root, &.{"watch_github_pr"});
+
+            try update.key.set("legacy-app-identical");
+            update.configuration.label.state = .omitted;
+            declareReportAppTools(&update.configuration, retained);
+            const identical = try storage.configure(&update, .{});
+            try std.testing.expect(identical == .accepted);
+            try std.testing.expect((try storage.configure(&update, .{})).accepted.replayed);
+            try std.testing.expectEqual(set, try store_testing.queryU64(&storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root}));
+
+            try update.key.set("legacy-app-changed");
+            declareReportAppTools(&update.configuration, changed);
+            const refused = try storage.configure(&update, .{});
+            try std.testing.expect(refused == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.app_tool_built_in_clash, refused.rejected.code);
+            try expectReportedAppTools(&storage, &tmp, root, &.{"watch_github_pr"});
+
+            var new_root = try store_testing.completeConfiguration("legacy-app-new", "", workspace_path, "model-a");
+            declareReportAppTools(&new_root.configuration, retained);
+            const rejected = try storage.configure(&new_root, .{});
+            try std.testing.expect(rejected == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.app_tool_built_in_clash, rejected.rejected.code);
+        }
+    }.run);
+}
+
 test "SH-146 Current reports name the lane root's app tools on the root, a child and a grandchild" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

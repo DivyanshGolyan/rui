@@ -10,6 +10,11 @@ pub const Point = enum {
     model_before_handoff,
     model_result_ready,
     action_bash_exit_observed,
+    watch_after_observation,
+    watch_receipt_dropped,
+    watch_receipt_replayed,
+    watch_values_filled,
+    watch_backlog_full,
     host_shutdown_signalled,
 
     pub fn wireName(self: Point) []const u8 {
@@ -22,6 +27,11 @@ pub const Point = enum {
             .model_before_handoff => "model.before_handoff",
             .model_result_ready => "model.result_ready",
             .action_bash_exit_observed => "action.bash_exit_observed",
+            .watch_after_observation => "watch.after_observation",
+            .watch_receipt_dropped => "watch.receipt_dropped",
+            .watch_receipt_replayed => "watch.receipt_replayed",
+            .watch_values_filled => "watch.values_filled",
+            .watch_backlog_full => "watch.backlog_full",
             .host_shutdown_signalled => "host.shutdown_signalled",
         };
     }
@@ -90,6 +100,29 @@ const DisabledController = struct {
     pub fn reach(_: *DisabledController, _: Point, _: Context) !Decision {
         return .proceed;
     }
+    pub fn reachCancelable(_: *DisabledController, _: Point, _: Context, cancelled: *const std.atomic.Value(bool)) !Decision {
+        if (cancelled.load(.acquire)) return error.Cancelled;
+        return .proceed;
+    }
+    pub fn notifyCancellation(_: *DisabledController) void {}
+    pub fn expireAction(_: *DisabledController, _: u64) !void {
+        return error.Disabled;
+    }
+    pub fn isActionExpired(_: *DisabledController, _: u64) bool {
+        return false;
+    }
+    pub fn dropWatchReceipt(_: *DisabledController, _: u64) !void {
+        return error.Disabled;
+    }
+    pub fn takeDroppedWatchReceipt(_: *DisabledController, _: u64) bool {
+        return false;
+    }
+    pub fn fillWatchValues(_: *DisabledController, _: u64) !void {
+        return error.Disabled;
+    }
+    pub fn takeWatchValueFill(_: *DisabledController, _: u64) bool {
+        return false;
+    }
     pub fn poll(_: *DisabledController, _: u64, _: Point, _: Context, _: Wake) !Poll {
         return .{ .ready = .proceed };
     }
@@ -103,6 +136,9 @@ const EnabledController = struct {
     selections: std.ArrayList(Armed) = .empty,
     arrivals: std.ArrayList(Entry) = .empty,
     counts: std.ArrayList(Count) = .empty,
+    expired_actions: std.ArrayList(u64) = .empty,
+    dropped_watch_receipts: std.ArrayList(u64) = .empty,
+    watch_value_fills: std.ArrayList(u64) = .empty,
     next_id: u64 = 1,
     closed: bool = false,
 
@@ -126,6 +162,9 @@ const EnabledController = struct {
         self.selections.deinit(self.allocator);
         self.arrivals.deinit(self.allocator);
         self.counts.deinit(self.allocator);
+        self.expired_actions.deinit(self.allocator);
+        self.dropped_watch_receipts.deinit(self.allocator);
+        self.watch_value_fills.deinit(self.allocator);
     }
     pub fn arm(self: *EnabledController, selection: Selection) !void {
         self.mutex.lockUncancelable(self.io);
@@ -270,6 +309,72 @@ const EnabledController = struct {
         if (self.closed) return error.Closed;
         self.arrivals.items[i].consumed = true;
         return self.arrivals.items[i].decision.?;
+    }
+    // The cancelling owner sets the flag, then calls notifyCancellation. Checking
+    // under the same mutex as the notification prevents a lost wake at arrival.
+    pub fn reachCancelable(self: *EnabledController, point: Point, context: Context, cancelled: *const std.atomic.Value(bool)) !Decision {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (cancelled.load(.acquire)) return error.Cancelled;
+        const i = (try self.register(point, context, null, null)) orelse return .proceed;
+        while (self.arrivals.items[i].decision == null and !self.closed and !cancelled.load(.acquire))
+            self.changed.waitUncancelable(self.io, &self.mutex);
+        if (cancelled.load(.acquire)) {
+            self.arrivals.items[i].decision = .proceed;
+            self.arrivals.items[i].consumed = true;
+            return error.Cancelled;
+        }
+        if (self.closed) return error.Closed;
+        self.arrivals.items[i].consumed = true;
+        return self.arrivals.items[i].decision.?;
+    }
+    pub fn notifyCancellation(self: *EnabledController) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.changed.broadcast(self.io);
+    }
+    fn markAction(self: *EnabledController, actions: *std.ArrayList(u64), action: u64) !void {
+        if (action == 0) return error.InvalidAction;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.Closed;
+        for (actions.items) |existing| if (existing == action) return;
+        if (actions.items.len >= 128) return error.Capacity;
+        try actions.append(self.allocator, action);
+        self.changed.broadcast(self.io);
+    }
+    pub fn expireAction(self: *EnabledController, action: u64) !void {
+        try self.markAction(&self.expired_actions, action);
+    }
+    pub fn isActionExpired(self: *EnabledController, action: u64) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.expired_actions.items) |existing| if (existing == action) return true;
+        return false;
+    }
+    pub fn dropWatchReceipt(self: *EnabledController, action: u64) !void {
+        try self.markAction(&self.dropped_watch_receipts, action);
+    }
+    pub fn takeDroppedWatchReceipt(self: *EnabledController, action: u64) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.dropped_watch_receipts.items, 0..) |existing, i| if (existing == action) {
+            _ = self.dropped_watch_receipts.swapRemove(i);
+            return true;
+        };
+        return false;
+    }
+    pub fn fillWatchValues(self: *EnabledController, action: u64) !void {
+        try self.markAction(&self.watch_value_fills, action);
+    }
+    pub fn takeWatchValueFill(self: *EnabledController, action: u64) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.watch_value_fills.items, 0..) |existing, i| if (existing == action) {
+            _ = self.watch_value_fills.swapRemove(i);
+            return true;
+        };
+        return false;
     }
     // Wake must schedule a level-triggered or latched continuation: release may
     // call it before this poll returns. It must not discard an early wake.
@@ -509,4 +614,64 @@ test "pause PAU-6 close releases parked workers with closed" {
     thread.join();
     joined = true;
     try std.testing.expectEqual(error.Closed, worker.result.?);
+}
+
+const CancelTestWorker = struct {
+    owner: *EnabledController,
+    cancelled: *const std.atomic.Value(bool),
+    result: ?anyerror = null,
+    fn run(self: *CancelTestWorker) void {
+        _ = self.owner.reachCancelable(.watch_after_observation, .{ .action = 42 }, self.cancelled) catch |err| {
+            self.result = err;
+            return;
+        };
+    }
+};
+
+test "pause PAU-18 cancellation releases a parked worker" {
+    var owner = EnabledController.init(std.testing.io, std.testing.allocator);
+    defer owner.deinit();
+    defer owner.close();
+    var cancelled: std.atomic.Value(bool) = .init(true);
+    try std.testing.expectError(error.Cancelled, owner.reachCancelable(.watch_after_observation, .{}, &cancelled));
+    cancelled.store(false, .release);
+    try owner.arm(.{ .point = .watch_after_observation });
+    var worker: CancelTestWorker = .{ .owner = &owner, .cancelled = &cancelled };
+    const thread = try std.Thread.spawn(.{}, CancelTestWorker.run, .{&worker});
+    var joined = false;
+    defer {
+        owner.close();
+        if (!joined) thread.join();
+    }
+    const arrival = try owner.wait(.{ .point = .watch_after_observation, .context = .{ .action = 42 } });
+    cancelled.store(true, .release);
+    owner.notifyCancellation();
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(?anyerror, error.Cancelled), worker.result);
+    try std.testing.expectError(error.AlreadyReleased, owner.release(arrival.id, .proceed));
+}
+
+test "pause PAU-19 watcher controls bind expiry and one-shot commands to an Action" {
+    var owner = EnabledController.init(std.testing.io, std.testing.allocator);
+    defer owner.deinit();
+    defer owner.close();
+    try std.testing.expectError(error.InvalidAction, owner.expireAction(0));
+    try std.testing.expectError(error.InvalidAction, owner.dropWatchReceipt(0));
+    try std.testing.expectError(error.InvalidAction, owner.fillWatchValues(0));
+    try owner.expireAction(1);
+    try owner.expireAction(1);
+    try std.testing.expect(owner.isActionExpired(1));
+    try std.testing.expect(!owner.isActionExpired(2));
+    try owner.dropWatchReceipt(1);
+    try owner.dropWatchReceipt(1);
+    try std.testing.expect(!owner.takeDroppedWatchReceipt(2));
+    try std.testing.expect(owner.takeDroppedWatchReceipt(1));
+    try std.testing.expect(!owner.takeDroppedWatchReceipt(1));
+    try owner.dropWatchReceipt(1);
+    try std.testing.expect(owner.takeDroppedWatchReceipt(1));
+    try owner.fillWatchValues(1);
+    try std.testing.expect(!owner.takeWatchValueFill(2));
+    try std.testing.expect(owner.takeWatchValueFill(1));
+    try std.testing.expect(!owner.takeWatchValueFill(1));
 }

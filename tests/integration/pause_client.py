@@ -163,6 +163,15 @@ class PauseClient:
     def wait(self, point, context=None, occurrence=None):
         return self._call("wait", point=point, context=context or {}, occurrence=occurrence)
 
+    def expire_action(self, action):
+        return self._call("expire_action", context={"action": int(action)})
+
+    def drop_watch_receipt(self, action):
+        return self._call("drop_watch_receipt", context={"action": int(action)})
+
+    def fill_watch_values(self, action):
+        return self._call("fill_watch_values", context={"action": int(action)})
+
     def release(self, id):
         return self._call("release", id=id)
 

@@ -302,7 +302,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** The arguments of one Action. */
+        /** The arguments or approved descriptor of one Action. */
         post: operations["readActionArguments"];
         delete?: never;
         options?: never;
@@ -3089,6 +3089,16 @@ export interface components {
             store: string;
             session: string;
             action: components["schemas"]["Decimal"];
+        } | {
+            /** @constant */
+            version: "27";
+            /** @constant */
+            kind: "read_action_arguments";
+            store: string;
+            session: string;
+            action: components["schemas"]["Decimal"];
+            /** @constant */
+            descriptor: true;
         };
         ReadActionCallIdRequest: {
             /** @constant */
@@ -3640,7 +3650,7 @@ export interface components {
             parent_operation: components["schemas"]["Decimal"];
             call_ordinal: components["schemas"]["Decimal"];
             /** @enum {string} */
-            tool: "bash" | "find_tools" | "message_agent" | "read_action" | "read_image" | "read_transcript" | "skill" | "start_agent" | "stop_action" | "web_search";
+            tool: "bash" | "find_tools" | "message_agent" | "read_action" | "read_image" | "read_transcript" | "skill" | "start_agent" | "stop_action" | "watch_github_pr" | "web_search";
             permission_revision: components["schemas"]["Decimal"];
             /** @enum {string} */
             authorization: "core" | "pending" | "bypass" | "allow_once";

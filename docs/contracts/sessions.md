@@ -32,6 +32,7 @@ Only a lane root declares app tools: create or configure with `appTools` on a ch
 An attached child and a detached child both take their creator's lane, and a grandchild takes its root's lane, so every Session in one tree shares one lane.
 The Store saves the lane at creation and never updates it: configuring a child after creation, or replaying its creation, leaves the lane as it was.
 The step that adds the columns saves every existing Session's lane from its root and declares no app tools.
+If a saved app declaration contains a name that later becomes built-in, omitted `appTools` preserves it and a declaration with the same app-set identity can be resubmitted. A new or changed declaration that clashes with a built-in is refused.
 `session.app_tool_set_id` is the content-addressed app tool set that a lane root declares; NULL means no declaration.
 [Store format and upgrades](store.md#store-format-and-upgrades) owns the step that adds the columns.
 

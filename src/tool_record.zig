@@ -434,6 +434,13 @@ pub const start_agent_record: Record = .{
 
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
+pub const watch_github_pr_record: Record = .{
+    .name = "watch_github_pr",
+    .owner = .rui,
+    .description = "Watch one GitHub.com pull request for changes. Select a stored GitHub CLI account with account; when omitted, one authenticated account is selected automatically, multiple accounts return account_required, and no account returns auth_required. A watch runs for at most one hour and polls about every 60 seconds. Each Session may have one watch and each Host may have eight; the Host reserves one execution credit for other work and rejects watches when its capacity is one. The watch can run in the background.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"maxLength\":256},\"account\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":39}},\"required\":[\"url\"],\"additionalProperties\":false}",
+};
+
 pub const read_image_record: Record = .{
     .name = "read_image",
     .owner = .rui,
@@ -449,6 +456,7 @@ pub const Profile = struct { excerpt_bytes: u32, retain: bool };
 pub const Runner = enum {
     bash,
     read_image,
+    github_pr_watch,
     core,
     mcp,
     provider,
@@ -460,6 +468,7 @@ pub const Runner = enum {
             .bash => .{ .excerpt_bytes = max_result_excerpt_bytes, .retain = true },
             .mcp => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
             .read_image => .{ .excerpt_bytes = 0, .retain = false },
+            .github_pr_watch => .{ .excerpt_bytes = 10_000, .retain = true },
             .core => .{ .excerpt_bytes = 0, .retain = false }, // Core pagers own their already-shaped windows.
             // An app result is model-facing text from the app, shaped like an MCP result.
             .app => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
@@ -470,7 +479,7 @@ pub const Runner = enum {
     pub fn beforeAdmissionStopText(self: Runner) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
-            .read_image => @import("action_text.zig").stopped_before_admission,
+            .read_image, .github_pr_watch => @import("action_text.zig").stopped_before_admission,
             .mcp => @import("mcp/action_text.zig").stopped_before_admission,
             .app => @import("action_text.zig").stopped_before_admission,
             .core => @import("action_text.zig").stopped_before_admission,
@@ -482,6 +491,7 @@ pub const Runner = enum {
         return switch (self) {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
             .read_image => "Stopped before this image read completed.",
+            .github_pr_watch => "Stopped before this pull request watch completed.",
             .mcp => result,
             .app => "Stopped before the app returned a result.",
             .core, .provider => unreachable,
@@ -492,6 +502,7 @@ pub const Runner = enum {
         return switch (self) {
             .bash => @import("bash_action_text.zig").indeterminate,
             .read_image => "The Host stopped before saving this image read result. The read may have completed; it was not automatically repeated.",
+            .github_pr_watch => "The Host stopped while watching this pull request. The watch was not automatically repeated.",
             .mcp => @import("mcp/action_text.zig").indeterminate,
             .app => "The Host stopped while this app call was running. The app may have run it; it was not automatically repeated.",
             .core, .provider => unreachable,
@@ -623,6 +634,7 @@ pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
     .skill = .{ .record = &skill_record, .runner = .core },
     .start_agent = .{ .record = &start_agent_record, .runner = .core },
     .stop_action = .{ .record = &stop_action_record, .runner = .core },
+    .watch_github_pr = .{ .record = &watch_github_pr_record, .runner = .github_pr_watch },
     .web_search = .{ .record = &web_search_record, .runner = .provider },
 });
 
@@ -886,7 +898,7 @@ test "all result profiles fit the shared excerpt maximum" {
     inline for (std.meta.tags(Runner)) |runner| {
         switch (runner) {
             .provider => {}, // Provider calls do not use the Result route.
-            .bash, .mcp, .app, .read_image, .core => {
+            .bash, .mcp, .app, .read_image, .github_pr_watch, .core => {
                 for ([_]bool{ false, true }) |offer| {
                     try std.testing.expect(runner.resultProfile(offer).excerpt_bytes <= max_result_excerpt_bytes);
                 }
@@ -937,8 +949,14 @@ pub const app_tools = struct {
     /// Validates `bytes` as a declaration. `arena` owns every slice the result points to and must outlive it.
     /// An arena that runs out is a refusal by size, never a partial declaration.
     pub fn parse(arena: std.mem.Allocator, bytes: []const u8) Parsed {
+        return parseRetaining(arena, bytes, null);
+    }
+
+    /// A saved declaration may retain a name that became built-in only when
+    /// every record still has the saved set identity.
+    pub fn parseRetaining(arena: std.mem.Allocator, bytes: []const u8, saved_digest: ?[32]u8) Parsed {
         if (bytes.len > max_document_bytes) return .{ .refused = .app_tools_too_large };
-        return parseInArena(arena, bytes) catch |err| switch (err) {
+        return parseInArena(arena, bytes, saved_digest) catch |err| switch (err) {
             error.OutOfMemory => .{ .refused = .app_tools_too_large },
             error.InvalidAppTools => .{ .refused = .invalid_app_tools },
             error.InvalidAppToolName => .{ .refused = .invalid_app_tool_name },
@@ -950,20 +968,28 @@ pub const app_tools = struct {
 
     const ParseError = error{ OutOfMemory, InvalidAppTools, InvalidAppToolName, DuplicateAppToolName, AppToolBuiltInClash, InvalidAppToolPolicy };
 
-    fn parseInArena(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
+    fn parseInArena(arena: std.mem.Allocator, bytes: []const u8, saved_digest: ?[32]u8) ParseError!Parsed {
         const value = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .allocate = .alloc_if_needed, .parse_numbers = false }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.InvalidAppTools,
         };
         if (value != .array or value.array.items.len > max_records) return error.InvalidAppTools;
         const records = try arena.alloc(Record, value.array.items.len);
-        for (value.array.items, records) |item, *entry| entry.* = try recordOf(arena, item);
+        var clashes = false;
+        for (value.array.items, records) |item, *entry| entry.* = try recordOf(arena, item, saved_digest != null, &clashes);
         std.mem.sort(Record, records, {}, byName);
         for (records, 0..) |entry, index| {
             if (index != 0 and std.mem.eql(u8, records[index - 1].name, entry.name)) return error.DuplicateAppToolName;
         }
         const digests = try arena.alloc([32]u8, records.len);
         for (records, digests) |*entry, *digest| digest.* = recordDigest(entry);
+        if (clashes) {
+            var set_digest: SetDigest = .init();
+            for (digests) |*digest| set_digest.add(digest);
+            const expected = saved_digest orelse return error.AppToolBuiltInClash;
+            const actual = set_digest.final();
+            if (!std.mem.eql(u8, &actual, &expected)) return error.AppToolBuiltInClash;
+        }
         const declaration: Declaration = .{ .records = records, .digests = digests };
         std.debug.assert(declaration.toolSet().valid());
         return .{ .declared = declaration };
@@ -973,7 +999,7 @@ pub const app_tools = struct {
         return std.mem.order(u8, a.name, b.name) == .lt;
     }
 
-    fn recordOf(arena: std.mem.Allocator, item: std.json.Value) ParseError!Record {
+    fn recordOf(arena: std.mem.Allocator, item: std.json.Value, retaining: bool, clashes: *bool) ParseError!Record {
         if (item != .object) return error.InvalidAppTools;
         var members = item.object.iterator();
         while (members.next()) |member| {
@@ -984,7 +1010,10 @@ pub const app_tools = struct {
         const name = item.object.get("name") orelse return error.InvalidAppTools;
         if (name != .string) return error.InvalidAppTools;
         if (!tool_name.valid(name.string)) return error.InvalidAppToolName;
-        if (built_in_tool_set.find(name.string) != null) return error.AppToolBuiltInClash;
+        if (built_in_tool_set.find(name.string) != null) {
+            if (!retaining) return error.AppToolBuiltInClash;
+            clashes.* = true;
+        }
         const description = item.object.get("description") orelse return error.InvalidAppTools;
         if (description != .string or !tool_presentation.ToolPresentation.validDescription(description.string)) return error.InvalidAppTools;
         const schema = item.object.get("input_schema") orelse return error.InvalidAppTools;
@@ -1111,4 +1140,16 @@ pub const app_tools = struct {
 
 test {
     _ = app_tools;
+}
+
+test "PRW-40 watcher catalog registers a Host action with a bounded schema" {
+    const row = built_in_rows.get(.watch_github_pr);
+    try std.testing.expectEqual(Runner.github_pr_watch, row.runner);
+    try std.testing.expectEqual(Owner.rui, row.record.owner);
+    try std.testing.expectEqualStrings("watch_github_pr", row.record.name);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const schema = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), row.record.input_schema, .{});
+    try std.testing.expectEqual(false, schema.object.get("additionalProperties").?.bool);
+    try std.testing.expectEqualStrings("url", schema.object.get("required").?.array.items[0].string);
 }

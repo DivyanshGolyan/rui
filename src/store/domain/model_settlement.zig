@@ -6,6 +6,7 @@ const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const tool_defs = @import("../../call_classification.zig");
+const watch_descriptor = @import("../../github_pr_watch_descriptor.zig");
 const tool_record = @import("../../tool_record.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const mcp_arguments = @import("../../mcp/arguments.zig");
@@ -111,6 +112,7 @@ const OutputMetadataReader = output_format.OutputMetadataReader;
 
 pub const ValidatedOutput = struct {
     source: std.Io.File,
+    watch_auth: watch_descriptor.AuthFacts = .discovery_required,
     source_length: u64,
     metadata: std.Io.File,
     item_count: u64,
@@ -802,9 +804,9 @@ const insert_call = rsql.Write(.{
 });
 
 const insert_action = rsql.Write(.{
-    .sql = "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at,approval_position) " ++
-        "VALUES(?1,?2,?3,@session(?4),1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN @now END,?8)",
-    .Args = struct { action_id: u64, operation_id: u64, call_ordinal: u64, session: rsql.SessionHead, revision: u64, authorized: bool, timeout_ms: ?u64, approval_position: ?u64 },
+    .sql = "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at,approval_position,approved_descriptor_content_id) " ++
+        "VALUES(?1,?2,?3,@session(?4),1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN @now END,?8,?9)",
+    .Args = struct { action_id: u64, operation_id: u64, call_ordinal: u64, session: rsql.SessionHead, revision: u64, authorized: bool, timeout_ms: ?u64, approval_position: ?u64, approved_descriptor_content_id: ?u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -1184,6 +1186,14 @@ noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.
                     if (provisional) {
                         batch.history_needed = true;
                         const fits = batch.add(.ofBytes(tool_defs.removed_tool_result, false));
+                        std.debug.assert(fits);
+                    }
+                    // An accepted watch adds one identity in place of a rejection or removed-tool result.
+                    if (facts.github_pr_watch == true and tool_defs.classifyCall(&facts) == null) {
+                        var buffer: [512]u8 = undefined;
+                        const descriptor = watchDescriptor(io, output, record) catch |err| return batch.stop(err, record_start);
+                        const bytes = watch_descriptor.encode(&descriptor, &buffer) catch |err| return batch.stop(err, record_start);
+                        const fits = batch.add(.ofBytes(bytes, false));
                         std.debug.assert(fits);
                     }
                     if (tool_defs.classifyCall(&facts)) |code| {
@@ -1697,10 +1707,22 @@ const Settlement = struct {
             }
             break :id row.id;
         } else null;
-        try s.recordCall(a, &fields, .{ name_content_id, call_id_content_id, arguments_content_id }, &call_facts, rejection_code, rejection_content_id);
+        const descriptor_id: ?u64 = if (call_facts.github_pr_watch == true and rejection_code == null) id: {
+            const descriptor = try watchDescriptor(s.io, s.output, record);
+            var buffer: [512]u8 = undefined;
+            const bytes = try watch_descriptor.encode(&descriptor, &buffer);
+            const value: content_domain.Import = .ofBytes(bytes, false);
+            const row = try content(a, batch, value);
+            if (try sinkFor(a, row, value.length)) |sink| {
+                defer sink.close();
+                try sink.write(bytes, 0);
+            }
+            break :id row.id;
+        } else null;
+        try s.recordCall(a, &fields, .{ name_content_id, call_id_content_id, arguments_content_id }, &call_facts, rejection_code, rejection_content_id, descriptor_id);
     }
 
-    noinline fn recordCall(s: *Settlement, a: anytype, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_defs.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64) !void {
+    noinline fn recordCall(s: *Settlement, a: anytype, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_defs.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64, descriptor_id: ?u64) !void {
         const record = fields[2];
         const name_content_id, const call_id_content_id, const arguments_content_id = content_ids;
         var field_metadata: FieldCertificate.Bytes = undefined;
@@ -1734,6 +1756,7 @@ const Settlement = struct {
             .authorized = authorized,
             .timeout_ms = if (call_facts.bashArguments()) |arguments| arguments.timeout_ms else null,
             .approval_position = if (authorized) null else s.first_item_position + record.ordinal,
+            .approved_descriptor_content_id = descriptor_id,
         });
         if (!authorized) try forward_domain.queue(a, &s.session.ref, &s.session.ref, .approval, action_id);
     }
@@ -1749,6 +1772,35 @@ noinline fn describeWebSearch(io: std.Io, source: std.Io.File, call: OutputMetad
         .target = try excerpt(io, source, call, &target),
         .pattern = if (pattern) |field| try excerpt(io, source, field, &found) else "",
     } });
+}
+
+fn watchArguments(io: std.Io, output: *const ValidatedOutput, arguments: OutputMetadataRecord) !watch_descriptor.Arguments {
+    var encoded: output_format.JsonStringSource = .{
+        .encoded = .{ .io = io, .file = output.source, .position = arguments.start, .end = try arguments.end() },
+    };
+    return (try watch_descriptor.parseSource(&encoded)) orelse error.CorruptOutputMetadata;
+}
+
+fn watchDescriptor(io: std.Io, output: *const ValidatedOutput, arguments: OutputMetadataRecord) !watch_descriptor.Descriptor {
+    return watch_descriptor.prepare(try watchArguments(io, output, arguments), output.watch_auth);
+}
+
+/// Scan only after the frozen offer has authorized the watcher capability probe.
+pub fn needsWatchPreflight(io: std.Io, output: *const ValidatedOutput) !bool {
+    var reader = try OutputMetadataReader.init(io, output.metadata);
+    const offered: tool_record.Offered = .{ .names = "watch_github_pr" };
+    var name: ?OutputMetadataRecord = null;
+    while (try reader.next()) |record| switch (record.tag) {
+        .name => name = record,
+        .arguments => {
+            const n = name orelse return error.CorruptOutputMetadata;
+            const facts = try inspectOutputCall(io, output.source, n, record, &offered);
+            if (facts.github_pr_watch == true and tool_defs.classifyCall(&facts) == null and (try watchArguments(io, output, record)).account == null) return true;
+            name = null;
+        },
+        else => {},
+    };
+    return false;
 }
 
 fn excerpt(io: std.Io, source: std.Io.File, record: OutputMetadataRecord, buffer: []u8) ![]const u8 {

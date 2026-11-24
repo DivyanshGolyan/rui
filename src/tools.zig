@@ -498,3 +498,22 @@ test "read_image classification uses offered built-in records and typed path arg
         }
     }
 }
+
+test "PRW-13 watcher classification honors the frozen offer and strict arguments" {
+    const Case = struct { text: []const u8, offered: bool = true, rejected: ?protocol.ProposalRejection = null };
+    const name_text = "watch_github_pr";
+    for ([_]Case{
+        .{ .text = "{\"url\":\"https://github.com/org/repo/pull/42\"}" },
+        .{ .text = "{\"url\":\"https://github.com/org/repo/pull/42\",\"account\":\"octocat\"}" },
+        .{ .text = "{\"url\":\"https://github.com/org/repo/pull/42\",\"account\":null}", .rejected = .invalid_arguments },
+        .{ .text = "{\"url\":\"https://github.com.evil/org/repo/pull/42\"}", .rejected = .invalid_arguments },
+        .{ .text = "{\"url\":\"https://github.com/org/repo/pull/42\"}", .offered = false, .rejected = .unknown_tool },
+    }) |case| {
+        var name: TestSource = .{ .bytes = name_text };
+        var arguments: TestSource = .{ .bytes = case.text };
+        const offered: Offered = .{ .names = if (case.offered) name_text else "" };
+        const facts = try inspectCall(&name, name_text.len, &arguments, &offered);
+        try std.testing.expectEqual(case.rejected, classifyCall(&facts));
+        if (case.rejected == null) try std.testing.expectEqual(Runner.github_pr_watch, facts.tool.?.runner());
+    }
+}

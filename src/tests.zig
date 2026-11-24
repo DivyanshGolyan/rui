@@ -71,6 +71,10 @@ test {
     _ = @import("stderr.zig");
     _ = @import("BashLifecycle.zig");
     _ = @import("word_search.zig");
+    _ = @import("github_observation_fetch.zig");
+    _ = @import("github_transport.zig");
+    _ = @import("github_watch_pressure.zig");
+    _ = @import("server_github_pr_watch.zig");
     _ = @import("server_mcp.zig");
     _ = @import("server_mcp_relist.zig");
     _ = @import("api_key.zig");

@@ -15,6 +15,11 @@ import time
 from collections import Counter
 
 from background_action_cases import prove_native_background, prove_model_action_read, prove_automatic_background, prove_background_action_values
+from github_pr_watch_fixture import prove_watcher_wakes_model, prove_account_discovery, prove_account_binding
+from github_pr_watch_lifecycle import prove_watch_stop_and_recovery
+from github_pr_watch_pressure import prove_watch_deadline, prove_watch_receipt_retry, prove_watch_backpressure
+from github_pr_watch_capacity import prove_capacity
+from github_pr_watch_gh import prove_public_discovery, prove_helper_cancellation
 import model_fixture as fixture
 import host_process
 from host_process import HostDiagnostics, assert_caller_error, PauseGate, canonical_fixture_root, dispose_all, retain_failure_state
@@ -882,6 +887,21 @@ def main():
     fixture_home = state / "home"
     fixture_home.mkdir()
     os.environ["HOME"] = str(fixture_home)
+    for name, case in (
+        ("watch-lifecycle", prove_watcher_wakes_model),
+        ("watch-accounts", prove_account_discovery),
+        ("watch-account-binding", prove_account_binding),
+        ("watch-recovery", prove_watch_stop_and_recovery),
+        ("watch-deadlines", prove_watch_deadline),
+        ("watch-receipt-retry", prove_watch_receipt_retry),
+        ("watch-backpressure", prove_watch_backpressure),
+        ("watch-capacity", prove_capacity),
+        ("watch-gh-discovery", prove_public_discovery),
+        ("watch-gh-cancel", prove_helper_cancellation),
+    ):
+        case_state = state / name
+        case_state.mkdir()
+        case(case_state)
     prove_native_background(state)
     prove_background_action_values(state)
     prove_model_action_read(state)

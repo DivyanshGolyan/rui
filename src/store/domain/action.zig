@@ -365,10 +365,12 @@ fn queueNextActionAttempt(a: anytype, capacity: Capacity, next: *next_action_att
 pub const WorkProbe = struct {
     selection: CoreSelection = .{},
     bash_action: next_action_attempt.Result = undefined,
+    github_pr_watch_action: next_github_pr_watch_action.Result = undefined,
 
     pub fn queue(probe: *WorkProbe, a: anytype, capacity: Capacity) void {
         probe.selection.queue(a, capacity);
         queueNextActionAttempt(a, capacity, &probe.bash_action);
+        a.read(next_github_pr_watch_action, .{ .foreground = capacity.hasCredit(), .background = capacity.hasCredit() }, &probe.github_pr_watch_action);
     }
 
     pub fn core(probe: *const WorkProbe) bool {
@@ -378,6 +380,10 @@ pub const WorkProbe = struct {
 
     pub fn mcp(probe: *const WorkProbe) bool {
         return probe.selection.mcp != null or (probe.selection.action != null and probe.selection.action.?.tool == .read_image);
+    }
+
+    pub fn githubPrWatch(probe: *const WorkProbe) bool {
+        return probe.github_pr_watch_action != null;
     }
 
     pub fn bash(probe: *const WorkProbe) bool {
@@ -475,6 +481,7 @@ pub const ActionExecutionInput = struct {
     runner: union(enum) {
         bash: struct { workspace: Bounded(workspace_path.max_bytes) },
         read_image: struct { workspace: Bounded(workspace_path.max_bytes) },
+        github_pr_watch: struct { workspace: Bounded(workspace_path.max_bytes) },
         mcp: struct {
             bash_offered: bool,
             parent: ?Bounded(session_id.max_reference_bytes),
@@ -528,6 +535,22 @@ pub fn actionContent(a: anytype, session_ref: []const u8, action_id: u64, field:
     const position = (found orelse return error.ActionNotFound).position.get();
     const reference = (try reads_domain.proposal(a, session_ref, position)).fields[@backingInt(field)];
     return .{ .length = reference.length, .digest = reference.digest };
+}
+
+const action_approved_descriptor = rsql.Read(.{
+    .sql = "SELECT content.byte_length AS length,content.digest,content.private,content.form FROM action_operation action JOIN content ON content.content_id=action.approved_descriptor_content_id WHERE action.action_id=?1 AND action.session_ref=?2",
+    .Args = struct { action_id: u64, session: []const u8 },
+    .Row = struct { length: u64, digest: [32]u8, private: bool, form: u64 },
+    .cardinality = .optional,
+});
+
+pub fn actionApprovedDescriptor(a: anytype, session_ref: []const u8, action_id: u64) !ContentReference {
+    var found: action_approved_descriptor.Result = undefined;
+    a.read(action_approved_descriptor, .{ .action_id = action_id, .session = session_ref }, &found);
+    try a.run();
+    const descriptor = found orelse return error.ActionNotFound;
+    if (descriptor.private or descriptor.form != 0) return error.CorruptStore;
+    return .{ .length = descriptor.length, .digest = descriptor.digest };
 }
 
 pub const AdmitNextAttempt = struct {
@@ -605,6 +628,17 @@ pub fn readImageExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *
     return readLocalExecutionInput(a, .read_image, binding, out);
 }
 
+const approved_watch_descriptor = rsql.Read(.{
+    .sql = "SELECT content.byte_length AS length,content.digest,content.private,content.form FROM action_operation action JOIN content ON content.content_id=action.approved_descriptor_content_id WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.authorized=1 AND action.resolution_code IS NULL AND action." ++ action_attempted_sql,
+    .Args = struct { action_id: u64, parent_operation_id: u64 },
+    .Row = struct { length: u64, digest: [32]u8, private: bool, form: u64 },
+    .cardinality = .optional,
+});
+
+pub fn readGithubPrWatchExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
+    return readLocalExecutionInput(a, .github_pr_watch, binding, out);
+}
+
 fn readLocalExecutionInput(a: anytype, comptime runner: tool_defs.Runner, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
     const input = localInput(runner);
     out.binding = binding;
@@ -618,8 +652,17 @@ fn readLocalExecutionInput(a: anytype, comptime runner: tool_defs.Runner, bindin
     // Corrupt proposal fields must fence the Store even when the runner no longer matches.
     const proposal = try reads_domain.proposal(a, out.session.slice(), position);
     if (!row.runner_matches) return error.StaleActionAttemptBinding;
-    const reference = proposal.fields[@backingInt(tool_proposal.Field.arguments)];
-    out.arguments = .{ .length = reference.length, .digest = reference.digest };
+    if (runner == .github_pr_watch) {
+        var descriptor: approved_watch_descriptor.Result = undefined;
+        a.read(approved_watch_descriptor, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &descriptor);
+        try a.run();
+        const approved = descriptor orelse return error.CorruptStore;
+        if (approved.private or approved.form != 0) return error.CorruptStore;
+        out.arguments = .{ .length = approved.length, .digest = approved.digest };
+    } else {
+        const reference = proposal.fields[@backingInt(tool_proposal.Field.arguments)];
+        out.arguments = .{ .length = reference.length, .digest = reference.digest };
+    }
     out.timeout_ms = row.timeout_ms.get();
 }
 
@@ -863,7 +906,7 @@ const resolve_uncertain = rsql.Write(.{
 
 fn recoveryContent(runner: tool_defs.Runner) error{CorruptStore}!content_domain.Import {
     return switch (runner) {
-        inline .bash, .mcp, .read_image => |kind| comptime blk: {
+        inline .bash, .mcp, .read_image, .github_pr_watch => |kind| comptime blk: {
             @setEvalBranchQuota(1_000_000);
             break :blk .ofBytes(kind.indeterminateText(), false);
         },
@@ -998,6 +1041,58 @@ const image_facts = rsql.Read(.{
     .cardinality = .optional,
 });
 
+const github_pr_watch_ready_sql = "action.authorized=1 AND action.attempt_ordinal=0 AND " ++ eligibleSql("action", "operation", "active") ++ " AND " ++ builtinCallSql(.github_pr_watch);
+const github_pr_watch_facts_sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position,action.background_position IS NOT NULL AS background,NULL AS timeout_override_ms " ++
+    "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+    "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
+    "WHERE " ++ github_pr_watch_ready_sql;
+const next_github_pr_watch_action = rsql.Read(.{
+    .sql = github_pr_watch_facts_sql ++ " AND " ++ capacity_sql ++ " ORDER BY action.action_id LIMIT 1",
+    .Args = struct { foreground: bool, background: bool },
+    .Row = ReadyFacts,
+    .cardinality = .optional,
+});
+const github_pr_watch_candidate = rsql.Read(.{
+    .sql = "SELECT action.action_id,action.background_position IS NOT NULL AS background,descriptor.byte_length AS length,descriptor.digest,descriptor.private,descriptor.form FROM action_operation action @index(action_operation_executable) JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id LEFT JOIN content descriptor ON descriptor.content_id=action.approved_descriptor_content_id WHERE " ++ github_pr_watch_ready_sql ++ " AND " ++ capacity_sql ++ " AND action.action_id>?3 AND action.action_id<=?4 ORDER BY action.action_id LIMIT 1",
+    .Args = struct { foreground: bool, background: bool, after: u64, through: u64 },
+    .Row = struct { action_id: rsql.Positive, background: bool, length: ?u64, digest: ?[32]u8, private: ?bool, form: ?u64 },
+    .cardinality = .optional,
+});
+
+const github_pr_watch_ceiling = rsql.Read(.{
+    .sql = "SELECT coalesce(max(action_id),0) AS ceiling FROM action_operation",
+    .Args = struct {},
+    .Row = struct { ceiling: u64 },
+    .cardinality = .one,
+});
+
+pub fn githubPrWatchCeiling(a: anytype) !u64 {
+    var row: github_pr_watch_ceiling.Result = undefined;
+    a.read(github_pr_watch_ceiling, .{}, &row);
+    try a.run();
+    return row.ceiling;
+}
+
+pub const GithubPrWatchCandidate = struct { selected: ReadyAction, descriptor: ContentReference };
+
+pub fn nextGithubPrWatchCandidate(a: anytype, capacity: Capacity, after: u64, through: u64) !?GithubPrWatchCandidate {
+    var next: github_pr_watch_candidate.Result = undefined;
+    a.read(github_pr_watch_candidate, .{ .foreground = capacity.hasCredit(), .background = capacity.hasCredit(), .after = after, .through = through }, &next);
+    try a.run();
+    const found = next orelse return null;
+    if (found.private == null or found.private.? or found.form == null or found.form.? != 0) return error.CorruptStore;
+    const length = found.length orelse return error.CorruptStore;
+    const digest = found.digest orelse return error.CorruptStore;
+    return .{ .selected = .{ .action_id = found.action_id.get(), .runner = .github_pr_watch, .background = found.background }, .descriptor = .{ .length = length, .digest = digest } };
+}
+
+const github_pr_watch_facts = rsql.Read(.{
+    .sql = github_pr_watch_facts_sql ++ " AND action.action_id=?1",
+    .Args = struct { action_id: u64 },
+    .Row = ReadyFacts,
+    .cardinality = .optional,
+});
+
 fn queueNextImageAction(a: anytype, capacity: Capacity, next: *next_image_action.Result) void {
     a.read(next_image_action, .{ .foreground = capacity.hasCredit(), .background = capacity.hasCredit() }, next);
 }
@@ -1015,6 +1110,13 @@ pub fn nextAction(a: anytype, comptime runner: tool_defs.Runner, capacity: Capac
         try a.run();
         const found = next orelse return null;
         return .{ .action_id = found.action_id.get(), .runner = .bash, .background = found.background };
+    }
+    if (runner == .github_pr_watch) {
+        var next: next_github_pr_watch_action.Result = undefined;
+        a.read(next_github_pr_watch_action, .{ .foreground = capacity.hasCredit(), .background = capacity.hasCredit() }, &next);
+        try a.run();
+        const found = next orelse return null;
+        return .{ .action_id = found.action_id.get(), .runner = .github_pr_watch, .background = found.background };
     }
     if (runner == .read_image) {
         var next: next_image_action.Result = undefined;
@@ -1052,6 +1154,7 @@ fn queueReadyFacts(a: anytype, selected: ReadyAction, facts: *mcp_facts.Result) 
         .bash => a.read(bash_facts, CoreNames.of().args(.{ .action_id = selected.action_id }), facts),
         .mcp => a.read(mcp_facts, .{ .action_id = selected.action_id }, facts),
         .read_image => a.read(image_facts, .{ .action_id = selected.action_id }, facts),
+        .github_pr_watch => a.read(github_pr_watch_facts, .{ .action_id = selected.action_id }, facts),
         .core, .provider, .app => unreachable,
     }
 }

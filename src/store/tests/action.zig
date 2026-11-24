@@ -246,6 +246,7 @@ test "core tool table routes every built-in and promotion excludes the full core
                 const expected: records.Runner = switch (tool) {
                     .bash => .bash,
                     .read_image => .read_image,
+                    .watch_github_pr => .github_pr_watch,
                     .web_search => .provider,
                     else => .core,
                 };
@@ -271,6 +272,7 @@ test "core tool table routes every built-in and promotion excludes the full core
                 const arguments = switch (tool) {
                     .bash => "{\"cmd\":\"true\",\"description\":\"Run table check\"}",
                     .read_image => "{\"path\":\"image.png\"}",
+                    .watch_github_pr => "{\"url\":\"https://github.com/example/repo/pull/42\",\"account\":\"example\"}",
                     .message_agent => "{\"id\":\"zzzzzz\",\"text\":\"hi\"}",
                     .stop_action => "{\"action\":\"1\"}",
                     else => "{}",
@@ -2009,6 +2011,149 @@ const ValueRowCounts = struct {
         };
     }
 };
+
+test "PRW-52 bounded discovery sweeps progress across commits and revisit newly authorized Actions" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |late_discovery| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var configure = try completeConfiguration("watch-scan-config", "", workspace, "model-a");
+                configure.configuration.tools = try .of(&.{"watch_github_pr"});
+                try configure.configuration.permission_mode.value.set("ask");
+                const configured = try storage.configure(&configure, .{});
+                try std.testing.expect(configured == .accepted);
+                const session = configured.accepted.session;
+                const unrelated = try shared_fixtures.configureTestSessionWithMode(&storage, "scan-unrelated", "bypass");
+                try submitTestMessage(&storage, &tmp, "watch-scan-input", "watch-scan-message", session.slice(), "Watch pull requests.");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const long = "{\"url\":\"https://github.com/example/repo/pull/42\",\"account\":\"example\"}";
+                const short = "{\"url\":\"https://github.com/example/repo/pull/42\"}";
+                const long_json = try std.json.Stringify.valueAlloc(std.testing.allocator, long, .{});
+                defer std.testing.allocator.free(long_json);
+                const short_json = try std.json.Stringify.valueAlloc(std.testing.allocator, short, .{});
+                defer std.testing.allocator.free(short_json);
+                var ids: [19][32]u8 = undefined;
+                var calls: [19]TestingCall = undefined;
+                for (&calls, &ids, 0..) |*call, *id_buffer, index| {
+                    const id = try std.fmt.bufPrint(id_buffer, "watch-{d}", .{index});
+                    const is_short = index == 0 or (late_discovery and index == 18);
+                    const arguments = if (is_short) short else long;
+                    const quoted = if (is_short) short_json else long_json;
+                    call.* = .{ .item_id = id, .name = "watch_github_pr", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = arguments };
+                }
+                try settleCallsForTesting(&storage, &tmp, model, "watch-scan-calls", &calls);
+                var action_ids: [19]u64 = undefined;
+                for (&action_ids, 0..) |*id, index| {
+                    id.* = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1 AND call_ordinal=?2", .{ model.operation_id, @as(u64, @intCast(index)) });
+                    if (index == 0) continue;
+                    var key_buffer: [32]u8 = undefined;
+                    var decision: protocol.PermissionDecisionCommand = .{ .action_id = id.*, .decision = .allow_once };
+                    try decision.key.set(try std.fmt.bufPrint(&key_buffer, "allow-watch-{d}", .{index}));
+                    try decision.session.set(session.slice());
+                    try std.testing.expect(storage.decidePermission(&decision, .{}) == .accepted);
+                }
+                var cursor: Store.GithubPrWatchCursor = .{};
+                const capacity = action_domain.Capacity.fromFree(1, true);
+                try std.testing.expect((try storage.nextGithubPrWatch(capacity, false, &cursor)) == .more);
+                var first: protocol.PermissionDecisionCommand = .{ .action_id = action_ids[0], .decision = .allow_once };
+                try first.key.set("allow-old-discovery");
+                try first.session.set(session.slice());
+                try std.testing.expect(storage.decidePermission(&first, .{}) == .accepted);
+                try submitTestMessage(&storage, &tmp, "scan-churn-input", "scan-churn-message", unrelated.slice(), "Unrelated work.");
+                const next = try storage.nextGithubPrWatch(capacity, false, &cursor);
+                if (late_discovery) {
+                    try std.testing.expect(next == .selected);
+                    try std.testing.expectEqual(action_ids[18], next.selected.action_id);
+                    var stop: @import("../../command_input.zig").ActionStopCommand = .{ .action_id = action_ids[18] };
+                    try stop.key.set("stop-selected-discovery");
+                    try stop.session.set(session.slice());
+                    try std.testing.expect(storage.requestActionStop(&stop, .{}) == .accepted);
+                    try std.testing.expect((try storage.admitActionAttempt(next.selected, 30_000, .{})) == null);
+                } else {
+                    try std.testing.expect(next == .dirty);
+                }
+                const old = try storage.nextGithubPrWatch(capacity, false, &cursor);
+                try std.testing.expect(old == .selected);
+                try std.testing.expectEqual(action_ids[0], old.selected.action_id);
+            }
+        }
+    }.run);
+}
+
+test "APV-14 Host publications require the current background Action attempt" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var configure = try completeConfiguration("host-values", "", workspace, "model-a");
+            configure.configuration.tools = try .of(&.{"watch_github_pr"});
+            configure.configuration.permission_mode.state = .value;
+            try configure.configuration.permission_mode.value.set("bypass");
+            const configured = try storage.configure(&configure, .{});
+            try std.testing.expect(configured == .accepted);
+            const session = configured.accepted.session;
+            try submitTestMessage(&storage, &tmp, "host-values-input", "host-values-message", session.slice(), "Watch the pull request.");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const arguments = "{\"url\":\"https://github.com/example/repo/pull/42\",\"account\":\"example\"}";
+            const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+            defer std.testing.allocator.free(encoded);
+            try settleCallsForTesting(&storage, &tmp, model, "host-values-calls", &.{.{
+                .item_id = "watch-item",
+                .name = "watch_github_pr",
+                .encoded_call_id = "watch-call",
+                .decoded_call_id = "watch-call",
+                .encoded_arguments = encoded[1 .. encoded.len - 1],
+                .decoded_arguments = arguments,
+            }});
+            const selected = (try storage.nextAction(.github_pr_watch, .fromFree(2, true))).?;
+            const binding = (try storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+            var stale = binding;
+            stale.turn_id += 1;
+            try std.testing.expect((try storage.publishHostActionValue(stale, "first", "one")).refused == .unknown_handle);
+            try std.testing.expect((try storage.publishHostActionValue(binding, "first", "one")).refused == .not_background);
+            try std.testing.expect(storage.backgroundAction(.{ .live_action = binding.action_id }, .{}) == .accepted);
+            const first = try storage.publishHostActionValue(binding, "first", "one");
+            try std.testing.expect(first == .accepted and first.accepted.admission_id != null and !first.accepted.replayed);
+            try std.testing.expect((try storage.publishHostActionValue(binding, "first", "one")).accepted.replayed);
+            try std.testing.expect((try storage.publishHostActionValue(binding, "first", "different")).refused == .conflict);
+            try std.testing.expect((try storage.publishHostActionValue(stale, "first", "one")).refused == .unknown_handle);
+            const oversized: [@import("../../action_value_limits.zig").max_value_bytes + 1]u8 = @splat('x');
+            try std.testing.expect((try storage.publishHostActionValue(binding, "large", &oversized)).refused == .too_large);
+            for (1..32) |index| {
+                var key_buffer: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "value-{d}", .{index});
+                try std.testing.expect((try storage.publishHostActionValue(binding, key, "pending")) == .accepted);
+            }
+            try std.testing.expect((try storage.publishHostActionValue(binding, "overflow", "value")).refused == .backlog_full);
+            // Hold model admission until the queue is full, then let the next request consume it.
+            _ = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value v JOIN message_admission m ON m.admission_id=v.admission_id WHERE v.action_id=?1 AND m.turn_id IS NULL", .{binding.action_id}));
+            try std.testing.expect((try storage.publishHostActionValue(binding, "overflow", "value")) == .accepted);
+            // A caller that loses a committed receipt retries the same key and bytes.
+            try std.testing.expect((try storage.publishHostActionValue(binding, "uncertain", "frozen")) == .accepted);
+            const replay = try storage.publishHostActionValue(binding, "uncertain", "frozen");
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+            try std.testing.expectEqual(@as(u64, 34), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{binding.action_id}));
+            var stop = try completeSessionStop("host-values-stop", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            try std.testing.expect((try storage.publishHostActionValue(binding, "next", "two")).refused == .stopped);
+            try std.testing.expect((try storage.publishHostActionValue(binding, "first", "one")).accepted.replayed);
+            try storage.revokeActionSender(binding);
+            try std.testing.expect((try storage.publishHostActionValue(binding, "first", "one")).accepted.replayed);
+        }
+    }.run);
+}
 
 test "APV-4 publication rollback leaves no partial rows" {
     try store_testing.forEachEngine(struct {

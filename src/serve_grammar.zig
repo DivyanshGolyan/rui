@@ -96,7 +96,7 @@ pub const definition: grammar.Definition = .{
     .resource = .host,
     .name = "serve",
     .description = "Run a foreground Host. Apply saved Host settings, then --settings FILE|- and repeated --set PATH=VALUE in order. Provider credentials belong to this Host, not its peer callers.",
-    .options = settings_options ++ serve_test ++ if (@import("build_options").test_pauses) &[_]Option{hiddenNumber("test-pause-fd", 0, std.math.maxInt(c_int))} else &[_]Option{},
+    .options = settings_options ++ serve_test ++ if (@import("build_options").test_pauses) &[_]Option{ hiddenNumber("test-pause-fd", 0, std.math.maxInt(c_int)), hiddenValue("test-github-api-origin") } else &[_]Option{},
 };
 
 comptime {

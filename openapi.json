@@ -947,7 +947,7 @@
     "/v1/read-action-arguments": {
       "post": {
         "operationId": "readActionArguments",
-        "summary": "The arguments of one Action.",
+        "summary": "The arguments or approved descriptor of one Action.",
         "parameters": [
           {
             "$ref": "#/components/parameters/WireVersion"
@@ -12951,36 +12951,76 @@
         "additionalProperties": false
       },
       "ReadActionArgumentsRequest": {
-        "type": "object",
-        "properties": {
-          "version": {
-            "const": "27"
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "27"
+              },
+              "kind": {
+                "const": "read_action_arguments"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "action": {
+                "$ref": "#/components/schemas/Decimal"
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "session",
+              "action"
+            ],
+            "additionalProperties": false
           },
-          "kind": {
-            "const": "read_action_arguments"
-          },
-          "store": {
-            "type": "string",
-            "maxLength": 492,
-            "x-rui-max-bytes": 492
-          },
-          "session": {
-            "type": "string",
-            "maxLength": 128,
-            "x-rui-max-bytes": 128
-          },
-          "action": {
-            "$ref": "#/components/schemas/Decimal"
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "27"
+              },
+              "kind": {
+                "const": "read_action_arguments"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "action": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "descriptor": {
+                "const": true
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "session",
+              "action",
+              "descriptor"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "version",
-          "kind",
-          "store",
-          "session",
-          "action"
-        ],
-        "additionalProperties": false
+        ]
       },
       "ReadActionCallIdRequest": {
         "type": "object",
@@ -15419,6 +15459,7 @@
                   "skill",
                   "start_agent",
                   "stop_action",
+                  "watch_github_pr",
                   "web_search"
                 ]
               },

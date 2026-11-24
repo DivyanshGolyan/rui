@@ -769,7 +769,47 @@ pub fn permissionForTool(requests: client.Requests, store: []const u8, session: 
         if (failure.err() == error.CanonicalStoreFailure) return error.CanonicalStoreFailure;
         return error.ActionReadFailed;
     }
-    return renderPermissionArguments(requests.io, scratch, sink, colour, unicode_script, tool);
+    try renderPermissionArguments(requests.io, scratch, sink, colour, unicode_script, tool);
+    if (try tool.runner() != .github_pr_watch) return;
+    try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
+    try scratch.setLength(requests.io, 0);
+    const descriptor = try requests.readActionDescriptor(store, session, action, scratch, &reply);
+    if (descriptor == .command) {
+        const failure = requests.captureReadFailure(descriptor.command) catch {
+            try protocol_reply.checkCanonicalFailure(descriptor.command);
+            return error.ActionReadFailed;
+        };
+        if (failure.err() == error.CanonicalStoreFailure) return error.CanonicalStoreFailure;
+        return error.ActionReadFailed;
+    }
+    var bytes: [1024]u8 = undefined;
+    if (descriptor.answer.bytes > bytes.len) return error.InvalidObservation;
+    const length: usize = @intCast(descriptor.answer.bytes);
+    if (try scratch.readPositionalAll(requests.io, bytes[0..length], 0) != length) return error.InvalidObservation;
+    try renderWatchDescriptor(sink, bytes[0..length]);
+}
+
+fn renderWatchDescriptor(sink: anytype, bytes: []const u8) !void {
+    var memory: [4096]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&memory);
+    const descriptor = @import("github_pr_watch_descriptor.zig").decodeDescriptor(fixed.allocator(), bytes) catch return error.InvalidObservation;
+    switch (descriptor) {
+        .watch => |watch| {
+            try sink.feed("\nPR: ");
+            try sink.feed(watch.url.slice());
+            try sink.feed("\nGitHub login: ");
+            try sink.feed(watch.login.slice());
+        },
+        .discover_accounts => |url| {
+            try sink.feed("\nAccount discovery for PR: ");
+            try sink.feed(url.slice());
+        },
+        .discovery_failed => |failure| {
+            try sink.feed("\nAccount discovery for PR: ");
+            try sink.feed(failure.url.slice());
+        },
+    }
+    try sink.feed("\n");
 }
 
 const ArgumentSource = struct {
@@ -789,7 +829,7 @@ pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype
     return switch (try tool.runner()) {
         .bash => request(io, scratch, sink, colour, unicode_script),
         // An app call needs ask-mode approval like an MCP call, so its card shows the tool request.
-        .mcp, .read_image, .app => toolRequest(io, scratch, sink, colour, unicode_script, tool),
+        .mcp, .read_image, .github_pr_watch, .app => toolRequest(io, scratch, sink, colour, unicode_script, tool),
         .core, .provider => error.InvalidObservation,
     };
 }
@@ -1744,4 +1784,51 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     const projection = Consent.project(screen.consent, .{ .action_page = true, .read = true }, false);
     try std.testing.expect(projection.approval == .preview);
     try std.testing.expect(Consent.offered(screen.consent, projection.approval) == null);
+}
+
+test "PRW-17 watch approval displays persisted canonical target and selected login" {
+    const Sink = struct {
+        bytes: [1024]u8 = undefined,
+        len: usize = 0,
+        pub fn feed(self: *@This(), value: []const u8) !void {
+            @memcpy(self.bytes[self.len..][0..value.len], value);
+            self.len += value.len;
+        }
+    };
+    var sink: Sink = .{};
+    try renderWatchDescriptor(&sink, "{\"kind\":\"watch\",\"url\":\"https://github.com/org/repo/pull/42\",\"login\":\"selected-user\"}");
+    try std.testing.expectEqualStrings("\nPR: https://github.com/org/repo/pull/42\nGitHub login: selected-user\n", sink.bytes[0..sink.len]);
+    sink.len = 0;
+    try renderWatchDescriptor(&sink, "{\"kind\":\"discover_accounts\",\"url\":\"https://github.com/org/repo/pull/42\"}");
+    try std.testing.expectEqualStrings("\nAccount discovery for PR: https://github.com/org/repo/pull/42\n", sink.bytes[0..sink.len]);
+    try std.testing.expectError(error.InvalidObservation, renderWatchDescriptor(&sink, "{\"kind\":\"watch\",\"url\":\"https://github.com/org/repo/pull/42\"}"));
+}
+
+test "PRW-43 watch approval keeps raw arguments and displays the full bound descriptor" {
+    const Sink = struct {
+        bytes: [4096]u8 = undefined,
+        len: usize = 0,
+        pub fn feed(self: *@This(), value: []const u8) !void {
+            @memcpy(self.bytes[self.len..][0..value.len], value);
+            self.len += value.len;
+        }
+    };
+    const url = "https://github.com/long-owner-name/repository-with-a-long-name/pull/1234567890123456789";
+    const raw = "{\"url\":\"" ++ url ++ "\"}";
+    const descriptor = "{\"kind\":\"watch\",\"url\":\"" ++ url ++ "\",\"login\":\"resolved-account\"}";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
+    defer scratch.close(std.testing.io);
+    try scratch.writeStreamingAll(std.testing.io, raw);
+    try std.testing.io.vtable.fileSeekTo(std.testing.io.userdata, scratch, 0);
+    var tool: ActionTool = .{ .name = .{}, .description = .{} };
+    try tool.name.set("watch_github_pr");
+    var sink: Sink = .{};
+    try renderPermissionArguments(std.testing.io, scratch, &sink, false, true, &tool);
+    try renderWatchDescriptor(&sink, descriptor);
+    const display = sink.bytes[0..sink.len];
+    try std.testing.expect(std.mem.indexOf(u8, display, raw) != null);
+    try std.testing.expect(std.mem.indexOf(u8, display, "PR: " ++ url) != null);
+    try std.testing.expect(std.mem.indexOf(u8, display, "GitHub login: resolved-account") != null);
 }

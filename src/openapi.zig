@@ -199,8 +199,8 @@ pub const routes = [_]Route{
     .{
         .path = "/v1/read-action-arguments",
         .kind = .read_action_arguments,
-        .summary = "The arguments of one Action.",
-        .variants = &.{variant(protocol.read_action_arguments_request, .{})},
+        .summary = "The arguments or approved descriptor of one Action.",
+        .variants = &.{ variant(protocol.read_action_arguments_request, .{}), variant(protocol.read_action_descriptor_request, .{}) },
         .reply = .text,
     },
     .{

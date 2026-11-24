@@ -44,6 +44,27 @@ class SocketTest(unittest.TestCase):
             self.process.kill()
             self.process.communicate()
 
+    def test_pau_20_action_controls_require_a_started_socket_and_valid_action(self):
+        with self.assertRaisesRegex(PauseError, "NotStarted"):
+            self.client.expire_action(1)
+        with self.assertRaisesRegex(PauseError, "NotStarted"):
+            self.client.drop_watch_receipt(1)
+        with self.assertRaisesRegex(PauseError, "NotStarted"):
+            self.client.fill_watch_values(1)
+        self.client.start()
+        with self.assertRaisesRegex(PauseError, "InvalidAction"):
+            self.client.expire_action(0)
+        with self.assertRaisesRegex(PauseError, "InvalidAction"):
+            self.client.drop_watch_receipt(0)
+        with self.assertRaisesRegex(PauseError, "InvalidAction"):
+            self.client.fill_watch_values(0)
+        self.client.expire_action(1)
+        self.client.expire_action(1)
+        self.client.drop_watch_receipt(1)
+        self.client.drop_watch_receipt(1)
+        self.client.fill_watch_values(1)
+        self.client.fill_watch_values(1)
+
     def test_pau_8_arm_ack_then_repeated_arrivals(self):
         self.client.arm(POINT)
         with self.assertRaisesRegex(PauseError, "AlreadyArmed"):

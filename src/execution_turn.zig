@@ -4,10 +4,33 @@ pub const DispatchCapacity = @import("execution.zig").DispatchCapacity;
 pub const retained_cleanup_retry_ms = 100;
 pub const retry_poll_interval_ns: u64 = std.time.ns_per_s;
 
-pub const Admission = enum { no_work, retry_later, progress, admitted };
+pub const Admission = enum { no_work, retry_later, progress, yielded, admitted };
+/// A dirty watcher sweep waits briefly before restarting, without delaying
+/// other work or losing the retry when no new Store commit occurs.
+pub const WatchRescan = struct {
+    retry_at: ?std.Io.Clock.Timestamp = null,
+    pub const delay_ns = 100 * std.time.ns_per_ms;
+
+    pub fn ready(self: *WatchRescan, now: std.Io.Clock.Timestamp, unrestricted: bool) bool {
+        if (unrestricted) {
+            self.retry_at = null;
+            return true;
+        }
+        if (self.retry_at) |retry| {
+            if (now.raw.nanoseconds < retry.raw.nanoseconds) return false;
+        }
+        self.retry_at = null;
+        return true;
+    }
+
+    pub fn postpone(self: *WatchRescan, now: std.Io.Clock.Timestamp) void {
+        self.retry_at = now.addDuration(.{ .raw = .fromMilliseconds(100), .clock = .awake });
+    }
+};
+
 pub const DeadlineRead = struct { generation: u64, next: ?u64 };
 pub const PendingModelAdmission = enum { message, tool_continuation };
-const Kind = enum { bash, retry, message, tool_continuation };
+const Kind = enum { bash, github_pr_watch, retry, message, tool_continuation };
 
 pub const Allowance = struct {
     bytes: usize,
@@ -28,6 +51,7 @@ pub const Work = struct {
     core: bool = true,
     mcp: bool = true,
     bash: bool = true,
+    github_pr_watch: bool = false,
     message: bool = true,
     tool_continuation: bool = true,
     retry: bool = true,
@@ -45,7 +69,7 @@ pub const ScheduledRetry = union(enum) {
 };
 
 pub const State = struct {
-    preference: [4]Kind = .{ .bash, .retry, .message, .tool_continuation },
+    preference: [5]Kind = .{ .bash, .github_pr_watch, .retry, .message, .tool_continuation },
     retry_admission_due: bool = true,
     last_retry_poll: ?std.Io.Clock.Timestamp = null,
     idle_exhausted: ?RetryKey = null,
@@ -177,7 +201,7 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
                 return true;
             },
             .retry_later => state.idle_core = null,
-            .progress => {
+            .progress, .yielded => {
                 state.idle_core = null;
                 return true;
             },
@@ -192,24 +216,26 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
         const pending_kind = switch (kind) {
             .message => pending_model == .message,
             .tool_continuation => pending_model == .tool_continuation,
-            .bash, .retry => false,
+            .bash, .github_pr_watch, .retry => false,
         };
         if (scanned and kind != .retry and !pending_kind) continue;
         switch (kind) {
             .bash => if (!work.bash) continue,
+            .github_pr_watch => if (!work.github_pr_watch) continue,
             .message => if (!work.message and !pending_kind) continue,
             .tool_continuation => if (!work.tool_continuation and !pending_kind) continue,
             .retry => {},
         }
         const admission = switch (kind) {
             .bash => if (context.bashPreparationOpen()) context.admitBash() else continue,
+            .github_pr_watch => context.admitGithubPrWatch(),
             .retry, .message, .tool_continuation => blk: {
                 if (!context.providerConfigured() or !context.modelPreparationOpen()) continue;
                 break :blk switch (kind) {
                     .retry => if (state.retry_admission_due and !retries_absent) context.admitRetry() else continue,
                     .message => context.admitNewModel(admission_key.paused),
                     .tool_continuation => context.admitToolContinuation(),
-                    .bash => unreachable,
+                    .bash, .github_pr_watch => unreachable,
                 };
             },
         };
@@ -233,7 +259,7 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
             state.idle_admission = null;
             return true;
         }
-        if (admission == .admitted) {
+        if (admission == .admitted or admission == .yielded) {
             std.mem.copyForwards(Kind, state.preference[index .. state.preference.len - 1], state.preference[index + 1 ..]);
             state.preference[state.preference.len - 1] = kind;
             state.idle_admission = null;
@@ -282,6 +308,7 @@ const Phase = enum {
     recover_action,
     run_core,
     admit_bash,
+    admit_github_pr_watch,
     recover_retry,
     admit_retry,
     admit_new,
@@ -331,6 +358,9 @@ const Recording = struct {
     recover_retry_fence: bool = false,
     drive_fence: bool = false,
     bash_admission: Admission = .no_work,
+    github_pr_watch_admission: Admission = .no_work,
+    watch_rescan: ?WatchRescan = null,
+    watch_selection_calls: usize = 0,
     core_admission: Admission = .no_work,
     retry_admission: Admission = .no_work,
     scheduled_retry: ScheduledRetry = .none,
@@ -513,6 +543,15 @@ const Recording = struct {
         return self.bash_admission;
     }
 
+    fn admitGithubPrWatch(self: *Recording) Admission {
+        self.record(.admit_github_pr_watch);
+        if (self.watch_rescan) |*rescan| {
+            if (!rescan.ready(timestamp(self.now_ns), self.dispatchCapacity().free_credit == .multiple)) return .retry_later;
+        }
+        self.watch_selection_calls += 1;
+        return self.github_pr_watch_admission;
+    }
+
     fn admitRetry(self: *Recording) Admission {
         self.record(.admit_retry);
         return self.retry_admission;
@@ -528,6 +567,7 @@ const Recording = struct {
             const eligible = capacity.hasCredit();
             found.mcp = found.mcp and eligible;
             found.bash = found.bash and eligible;
+            found.github_pr_watch = found.github_pr_watch and eligible;
         }
         if (self.release_during_scan) {
             self.custody_free = self.released_credits;
@@ -1304,7 +1344,7 @@ test "pending admission work yields a service turn without rotating or becoming 
         }
         if (continuation) context.continuation_admission = .admitted else context.new_admission = .admitted;
         try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
-        try std.testing.expectEqual(if (continuation) Kind.tool_continuation else Kind.message, state.preference[3]);
+        try std.testing.expectEqual(if (continuation) Kind.tool_continuation else Kind.message, state.preference[4]);
     }
 }
 
@@ -1355,4 +1395,98 @@ test "EXR-34 discovery_wakeup" {
         _ = run(&state, &context);
         try std.testing.expectEqual(@as(usize, 2), context.deadline_reads);
     }
+}
+
+test "PRW-11 watch admission participates in fair scheduling and waits for capacity" {
+    var context: Recording = .{
+        .provider = false,
+        .free = 0,
+        .github_pr_watch_admission = .admitted,
+        .work = .{ .core = false, .mcp = false, .bash = false, .github_pr_watch = true, .message = false, .tool_continuation = false, .retry = false },
+    };
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_github_pr_watch));
+    context.free = 1;
+    context.slot_changes += 1;
+    try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_github_pr_watch));
+    try std.testing.expectEqual(Kind.github_pr_watch, state.preference[state.preference.len - 1]);
+}
+
+test "PRW-51 deferred watch is reconsidered when another credit becomes free" {
+    var context: Recording = .{
+        .provider = false,
+        .free = 1,
+        .custody_free = 1,
+        .generation_advance = 0,
+        .github_pr_watch_admission = .no_work,
+        .work = .{ .core = false, .mcp = false, .bash = false, .github_pr_watch = true, .message = false, .tool_continuation = false, .retry = false },
+    };
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_github_pr_watch));
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_github_pr_watch));
+    context.free = 2;
+    context.custody_free = 2;
+    context.slot_changes += 1;
+    context.github_pr_watch_admission = .admitted;
+    try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_github_pr_watch));
+}
+
+
+test "PRW-55 bounded watcher scans yield to ready Messages across Store changes" {
+    var context: Recording = .{
+        .free = 2,
+        .custody_free = 1,
+        .generation_advance = 1,
+        .github_pr_watch_admission = .yielded,
+        .new_admission = .admitted,
+        .work = .{ .core = false, .mcp = false, .bash = false, .github_pr_watch = true, .message = true, .tool_continuation = false, .retry = false },
+    };
+    var state: State = .{};
+    // Each yielded result models a full 16-candidate page with more to scan.
+    // A Message stays ready even as every scheduling turn sees a new Store generation.
+    for (0..3) |page| {
+        try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+        try std.testing.expectEqual(page + 1, context.count(.admit_github_pr_watch));
+        try std.testing.expectEqual(page, context.count(.admit_new));
+        try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+        try std.testing.expectEqual(page + 1, context.count(.admit_new));
+    }
+}
+
+
+test "PRW-56 dirty watcher sweep waits without spinning and retries or bypasses on capacity" {
+    var rescan: WatchRescan = .{};
+    rescan.postpone(timestamp(0));
+    var context: Recording = .{
+        .provider = false,
+        .free = 2,
+        .custody_free = 1,
+        .generation_advance = 1,
+        .auto_advance = 0,
+        .github_pr_watch_admission = .admitted,
+        .watch_rescan = rescan,
+        .work = .{ .core = false, .mcp = false, .bash = false, .github_pr_watch = true, .message = false, .tool_continuation = false, .retry = false },
+    };
+    var state: State = .{};
+    try std.testing.expectEqual(Outcome{ .wait = .idle }, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 0), context.watch_selection_calls);
+    // Unrelated Store commits do not restart the scan before the deadline.
+    context.now_ns = WatchRescan.delay_ns - 1;
+    try std.testing.expectEqual(Outcome{ .wait = .idle }, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 0), context.watch_selection_calls);
+    context.generation_advance = 0;
+    context.now_ns = WatchRescan.delay_ns;
+    try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 1), context.watch_selection_calls);
+
+    context.watch_rescan.?.postpone(timestamp(context.now_ns));
+    context.custody_free = 2;
+    context.slot_changes += 1;
+    try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 2), context.watch_selection_calls);
 }

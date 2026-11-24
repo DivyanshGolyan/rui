@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 94;
+pub const schema_version: u32 = 95;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -74,6 +74,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 92, .digest = 0xdbe10b74e562edbd },
     .{ .schema_version = 93, .digest = 0x0028c239ba46341d },
     .{ .schema_version = 94, .digest = 0x9803d541a1a4945e },
+    .{ .schema_version = 95, .digest = 0x60046114badf1c6a },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -1045,6 +1046,15 @@ pub const migrations = [_]Migration{
             "PREPARE rui_field_check FROM @rui_field_ddl",
             "EXECUTE rui_field_check",
             "DEALLOCATE PREPARE rui_field_check",
+        },
+    },
+    .{
+        .from = 94,
+        .sqlite = &.{
+            "ALTER TABLE action_operation ADD COLUMN approved_descriptor_content_id INTEGER REFERENCES content(content_id)",
+        },
+        .mysql = &.{
+            "ALTER TABLE action_operation ADD COLUMN approved_descriptor_content_id BIGINT, ADD FOREIGN KEY(approved_descriptor_content_id) REFERENCES content(content_id)",
         },
     },
 };
@@ -2027,6 +2037,7 @@ pub const tables = [_]Table{
             .{ .name = "background_content_id", .type = .int, .nullable = true, .sqlite_added = true, .holds = .value },
             .{ .name = "background_position", .type = .int, .nullable = true, .check = "(background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))", .sqlite_added = true },
             .{ .name = "background_at", .type = .int, .nullable = true, .check = "(background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)", .sqlite_added = true },
+            .{ .name = "approved_descriptor_content_id", .type = .int, .nullable = true, .sqlite_added = true },
         },
         .primary_key = &.{"action_id"},
         .uniques = &.{&.{ "parent_operation_id", "call_ordinal" }},
@@ -2035,6 +2046,7 @@ pub const tables = [_]Table{
             references("session_ref", "session", session_reference),
             references("resolution_content_id", "content", content_reference),
             references("background_content_id", "content", content_reference),
+            references("approved_descriptor_content_id", "content", content_reference),
             .{ .columns = &.{ "parent_operation_id", "session_ref" }, .references = "model_operation", .referenced = &.{ "operation_id", "session_ref" } },
             .{ .columns = &.{ "parent_operation_id", "call_ordinal", "tool_kind" }, .references = "model_tool_call", .referenced = &.{ "operation_id", "call_ordinal", "action_kind" } },
             .{ .columns = &.{ "session_ref", "permission_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },

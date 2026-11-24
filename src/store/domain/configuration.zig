@@ -521,6 +521,7 @@ pub const ConfigurationReads = struct {
     missing: ?required_settings.Missing = null,
     /// The validated app declaration and the app tool set it saves as.
     apps: tool_set.AppSet = .{},
+    saved_app_digest: saved_app_set_digest.Result = null,
 
     fn instructionsValue(reads: *ConfigurationReads, configuration: *const content_custody.Configuration) *content_domain.Import {
         return if (configuration.instructions.state == .value) &reads.instructions else &reads.empty;
@@ -533,6 +534,13 @@ const saved_session = rsql.Read(.{
         reasoningEffortOverrideSql("session") ++ " AS reasoning_effort,label,created_at,workspace_key,parent_ref,app_tool_set_id,app_lane," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = CurrentConfiguration,
+    .cardinality = .optional,
+});
+
+const saved_app_set_digest = rsql.Read(.{
+    .sql = "SELECT tools.digest FROM session s JOIN tool_set tools ON tools.tool_set_id=s.app_tool_set_id WHERE s.session_ref=?1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { digest: [32]u8 },
     .cardinality = .optional,
 });
 
@@ -659,7 +667,10 @@ fn newReference(io: std.Io, reference: *[session_id.bytes]u8) !void {
 pub noinline fn prepareConfiguration(a: anytype, host_tool_set: *const tool_defs.HostToolSet, session: []const u8, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) void {
     const creating = session.len == 0;
     reads.configuration.init(configuration);
-    if (!creating) readSaved(a, session, &reads.next, &reads.found);
+    if (!creating) {
+        readSaved(a, session, &reads.next, &reads.found);
+        if (configuration.app_tools.state == .value) a.read(saved_app_set_digest, .{ .session = session }, &reads.saved_app_digest);
+    }
     if (creating and configuration.parent.state == .value) prepareParent(a, configuration.parent.value.slice(), reads);
     if (creating or configuration.tools.state == .value) {
         reads.tools = .of(host_tool_set, if (creating) configuration_defaults.creationTools(&configuration.tools, configuration.model.value.slice(), @import("../../os/read_image_file.zig").available) else &configuration.tools);
@@ -896,7 +907,8 @@ fn declareAppTools(request: *const Request, reads: *ConfigurationReads) !?config
     const field = &request.configuration.app_tools;
     if (field.length > app_tools.max_document_bytes) return .app_tools_too_large;
     const bytes = declarationBytes(request.io, field, request.declarations) catch return .invalid_app_tools;
-    const declaration = switch (app_tools.parse(request.declarations, bytes)) {
+    const saved_digest = if (reads.saved_app_digest) |saved| saved.digest else null;
+    const declaration = switch (app_tools.parseRetaining(request.declarations, bytes, saved_digest)) {
         .refused => |refusal| return switch (refusal) {
             inline else => |tag| @field(configuration_admission.Rejection, @tagName(tag)),
         },

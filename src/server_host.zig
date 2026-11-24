@@ -57,6 +57,7 @@ pub const Hooks = struct {
     observe_allowance: bool = false,
     phase_trace: bool = false,
     pause_fd: if (test_pause.enabled) ?c_int else void = if (test_pause.enabled) null else {},
+    github_api_origin: if (test_pause.enabled) ?[]const u8 else void = if (test_pause.enabled) null else {},
     observation_fd: ?c_int = null,
     observation_state_fd: ?c_int = null,
     observation_plan: ?TestObservation.Plan = null,
@@ -150,6 +151,7 @@ pub const Tuning = struct {
     /// Digest of the admitted settings frame, with `admitted_directory`.
     settings_digest: ?settings_handoff.Digest = null,
     home: ?[]const u8 = null,
+    github_environment: ?*const std.process.Environ.Map = null,
     limits: Limits = .{},
     hooks: Hooks = .{},
 
@@ -176,7 +178,14 @@ pub const Tuning = struct {
         if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| hooks.inspection_reply.delay_ms = delay;
         limits.client_send_buffer_bytes = try parsed.number(u32, "test-client-send-buffer-bytes");
         if (parsed.has("test-phase-trace")) hooks.phase_trace = true;
-        if (comptime test_pause.enabled) hooks.pause_fd = try parsed.number(c_int, "test-pause-fd");
+        if (comptime test_pause.enabled) {
+            hooks.pause_fd = try parsed.number(c_int, "test-pause-fd");
+            if (parsed.get("test-github-api-origin")) |origin| {
+                if (hooks.pause_fd == null) return error.TestGithubOriginNeedsPauseFd;
+                @import("github_watch_origin.zig").validateLoopback(origin) catch return error.InvalidTestGithubOrigin;
+                hooks.github_api_origin = origin;
+            }
+        }
         if (try parsed.number(c_int, "test-observation-fd")) |fd| {
             hooks.observation_fd = fd;
             hooks.phase_trace = true;
@@ -199,6 +208,19 @@ pub const Tuning = struct {
         return tuning;
     }
 };
+
+test "PRW-12 test GitHub origin requires a pause controller and numeric loopback" {
+    if (comptime test_pause.enabled) {
+        try std.testing.expectError(error.TestGithubOriginNeedsPauseFd, tuningFor(&.{ "--test-github-api-origin", "http://127.0.0.1:1234" }));
+        const valid = try tuningFor(&.{ "--test-pause-fd", "3", "--test-github-api-origin", "http://127.0.0.1:1234" });
+        try std.testing.expectEqualStrings("http://127.0.0.1:1234", valid.hooks.github_api_origin.?);
+        for ([_][]const u8{ "http://localhost:1234", "https://127.0.0.1:1234", "http://127.0.0.2:1234", "http://127.0.0.1:0", "http://127.0.0.1:65536", "http://127.0.0.1:1234/path", "http://127.0.0.1:1234@evil" }) |invalid| {
+            try std.testing.expectError(error.InvalidTestGithubOrigin, tuningFor(&.{ "--test-pause-fd", "3", "--test-github-api-origin", invalid }));
+        }
+    } else {
+        try std.testing.expectError(error.InvalidTestOrigin, @import("github_watch_origin.zig").validateLoopback("http://localhost:1234"));
+    }
+}
 
 fn parseRetryWaits(value: []const u8) !retry_policy.Waits {
     var waits: retry_policy.Waits = undefined;
@@ -486,6 +508,41 @@ pub const Probes = struct {
         if (comptime test_pause.enabled) if (self.pause_owner) |owner| {
             _ = owner.reach(point, context) catch {};
         };
+    }
+
+    pub fn githubFixtureOrigin(self: *const Probes) ?[]const u8 {
+        if (comptime test_pause.enabled) return self.hooks.github_api_origin;
+        return null;
+    }
+
+    pub fn reachCancelable(self: *Probes, point: test_pause.Point, context: test_pause.Context, cancelled: *const std.atomic.Value(bool)) !void {
+        if (comptime test_pause.enabled) if (self.pause_owner) |owner| {
+            _ = try owner.reachCancelable(point, context, cancelled);
+        };
+    }
+
+    pub fn notifyCancellation(self: *Probes) void {
+        if (comptime test_pause.enabled) if (self.pause_owner) |owner| owner.notifyCancellation();
+    }
+
+    pub fn watchActionExpired(self: *Probes, action: u64) bool {
+        if (comptime test_pause.enabled) if (self.pause_owner) |owner| return owner.isActionExpired(action);
+        return false;
+    }
+
+    pub fn takeWatchValueFill(self: *Probes, action: u64) bool {
+        if (comptime test_pause.enabled) if (self.pause_owner) |owner| return owner.takeWatchValueFill(action);
+        return false;
+    }
+
+    pub fn takeDroppedWatchReceipt(self: *Probes, action: u64) bool {
+        if (comptime test_pause.enabled) if (self.pause_owner) |owner| return owner.takeDroppedWatchReceipt(action);
+        return false;
+    }
+
+    pub fn pollWatchGate(self: *Probes, work: u64, point: test_pause.Point, context: test_pause.Context, wake: test_pause.Wake) !test_pause.Poll {
+        if (comptime test_pause.enabled) if (self.pause_owner) |owner| return owner.poll(work, point, context, wake);
+        return .{ .ready = .proceed };
     }
 
     /// Opens the observation writer that the harness's fds name, if it names one.

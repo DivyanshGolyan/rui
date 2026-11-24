@@ -1318,12 +1318,13 @@ pub const DispatchWork = struct {
     core: bool,
     mcp: bool,
     bash: bool,
+    github_pr_watch: bool,
     message: bool,
     tool_continuation: bool,
     retry: bool,
     retry_waiting: bool,
 
-    pub const unknown: DispatchWork = .{ .core = true, .mcp = true, .bash = true, .message = true, .tool_continuation = true, .retry = true, .retry_waiting = true };
+    pub const unknown: DispatchWork = .{ .core = true, .mcp = true, .bash = true, .github_pr_watch = true, .message = true, .tool_continuation = true, .retry = true, .retry_waiting = true };
 };
 
 pub const DispatchSurvey = struct {
@@ -1358,6 +1359,7 @@ pub const DispatchSurvey = struct {
             .core = survey.actions.core(),
             .mcp = survey.actions.mcp(),
             .bash = survey.actions.bash(),
+            .github_pr_watch = survey.actions.githubPrWatch(),
             .message = survey.message != null,
             .tool_continuation = survey.continuation != null,
             .retry = survey.retry != null,

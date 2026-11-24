@@ -638,6 +638,8 @@ pub const Replies = struct {
         const phase = if (call_id) "Action call identity observation" else "Action argument observation";
         const reference = if (call_id)
             self.store.actionCallId(command.session.slice(), command.action_id)
+        else if (command.descriptor)
+            self.store.actionApprovedDescriptor(command.session.slice(), command.action_id)
         else
             self.store.actionArguments(command.session.slice(), command.action_id);
         const resolved = reference catch |err| switch (err) {

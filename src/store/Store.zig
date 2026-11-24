@@ -908,7 +908,15 @@ pub const Store = struct {
     }
 
     fn publishActionValueHeld(self: *Store, handle: []const u8, key: []const u8, payload: []const u8, faults: Faults) !@import("domain/action_value.zig").Result {
-        return transition.apply(self, @import("domain/action_value.zig").Publish, .{ .handle = handle, .key = key, .bytes = payload }, faults);
+        return transition.apply(self, @import("domain/action_value.zig").Publish, .{ .source = .{ .handle = handle }, .key = key, .bytes = payload }, faults);
+    }
+
+    pub fn publishHostActionValue(self: *Store, binding: ActionAttemptBinding, key: []const u8, payload: []const u8) !@import("domain/action_value.zig").Result {
+        return self.queue().write(publishHostActionValueHeld, .{ self, binding, key, payload });
+    }
+
+    fn publishHostActionValueHeld(self: *Store, binding: ActionAttemptBinding, key: []const u8, payload: []const u8) !@import("domain/action_value.zig").Result {
+        return transition.apply(self, @import("domain/action_value.zig").Publish, .{ .source = .{ .host = binding }, .key = key, .bytes = payload }, .{});
     }
 
     pub fn backgroundAction(self: *Store, source: action_control_domain.Control.Source, faults: Faults) @import("../action_control.zig").Reply {
@@ -1210,6 +1218,19 @@ pub const Store = struct {
         return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, out));
     }
 
+    pub fn actionApprovedDescriptor(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
+        return self.queue().run(actionApprovedDescriptorHeld, .{ self, session_ref, action_id });
+    }
+
+    fn actionApprovedDescriptorHeld(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.action, action_domain.actionApprovedDescriptor(&access, session_ref, action_id));
+    }
+
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
         return self.actionContent(session_ref, action_id, .arguments);
     }
@@ -1363,6 +1384,7 @@ pub const Store = struct {
         return switch (runner) {
             .bash => self.queue().run(readBashExecutionInputHeld, .{ self, binding, out }),
             .read_image => self.queue().run(readImageExecutionInputHeld, .{ self, binding, out }),
+            .github_pr_watch => self.queue().run(readGithubPrWatchExecutionInputHeld, .{ self, binding, out }),
             .mcp => self.queue().run(readMcpExecutionInputHeld, .{ self, binding, out }),
             // An app call runs in its app; the Host hands it no execution input.
             .core, .provider, .app => @compileError("only Action runners have execution input"),
@@ -1375,6 +1397,14 @@ pub const Store = struct {
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.action_attempt, action_domain.readMcpExecutionInput(&access, binding, out));
+    }
+
+    fn readGithubPrWatchExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.action_attempt, action_domain.readGithubPrWatchExecutionInput(&access, binding, out));
     }
 
     fn readImageExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
@@ -1524,7 +1554,7 @@ pub const Store = struct {
         self.identities().survey.asked = asked;
         self.identities().survey.capacity = capacity;
         if (survey.kept == .ready and survey.asked == asked and std.meta.eql(survey.capacity.workInput(), capacity.workInput()) and !self.isFenced())
-            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry, .retry_waiting = survey.retry_waiting };
+            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .github_pr_watch = survey.github_pr_watch, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry, .retry_waiting = survey.retry_waiting };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
@@ -1631,8 +1661,75 @@ pub const Store = struct {
         return transition.apply(self, command_domain.ResolveCoreCall, .{ .binding = binding, .code = code, .result = result }, faults);
     }
 
+    pub const GithubPrWatchCursor = struct {
+        after: u64 = 0,
+        through: ?u64 = null,
+        generation: u64 = 0,
+    };
+    pub const GithubPrWatchSelection = union(enum) { selected: ReadyAction, more, dirty, exhausted };
+
+    pub fn nextGithubPrWatch(self: *Store, capacity: action_domain.Capacity, allow_long_watch: bool, cursor: *GithubPrWatchCursor) !GithubPrWatchSelection {
+        if (!capacity.hasCredit()) {
+            cursor.* = .{};
+            return .exhausted;
+        }
+        if (allow_long_watch) {
+            cursor.* = .{};
+            const selected = (try self.nextAction(.github_pr_watch, capacity)) orelse return .exhausted;
+            return .{ .selected = selected };
+        }
+        if (cursor.through == null) {
+            cursor.generation = self.commitGeneration();
+            cursor.through = try self.queue().run(githubPrWatchCeilingHeld, .{self});
+        }
+        for (0..16) |_| {
+            const candidate = (try self.queue().run(nextGithubPrWatchCandidateHeld, .{ self, capacity, cursor.after, cursor.through.? })) orelse {
+                const changed = self.commitGeneration() != cursor.generation;
+                cursor.* = .{};
+                return if (changed) .dirty else .exhausted;
+            };
+            cursor.after = candidate.selected.action_id;
+            var bytes: [2048]u8 = undefined;
+            const length = std.math.cast(usize, candidate.descriptor.length) orelse return error.CorruptStore;
+            if (length == 0 or length > bytes.len) return error.CorruptStore;
+            var reader: content_domain.ContentReader = undefined;
+            reader.open(try self.openContent(candidate.descriptor));
+            defer reader.close();
+            var offset: usize = 0;
+            while (offset < length) {
+                const count = try reader.read(offset, bytes[offset..length]);
+                if (count == 0) return error.CorruptStore;
+                offset += count;
+            }
+            var memory: [4096]u8 = undefined;
+            var fixed = std.heap.FixedBufferAllocator.init(&memory);
+            const descriptor = @import("../github_pr_watch_descriptor.zig").decodeDescriptor(fixed.allocator(), bytes[0..length]) catch return error.CorruptStore;
+            if (descriptor != .watch) {
+                cursor.* = .{};
+                return .{ .selected = candidate.selected };
+            }
+        }
+        return .more;
+    }
+
+    fn githubPrWatchCeilingHeld(self: *Store) !u64 {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, action_domain.githubPrWatchCeiling(&access));
+    }
+
+    fn nextGithubPrWatchCandidateHeld(self: *Store, capacity: action_domain.Capacity, after: u64, through: u64) !?action_domain.GithubPrWatchCandidate {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, action_domain.nextGithubPrWatchCandidate(&access, capacity, after, through));
+    }
+
     pub fn nextAction(self: *Store, comptime runner: tool_record.Runner, capacity: action_domain.Capacity) !?ReadyAction {
-        if (runner != .bash and runner != .mcp and runner != .read_image) @compileError("only Action runners can select Actions");
+        if (runner != .bash and runner != .mcp and runner != .read_image and runner != .github_pr_watch) @compileError("only Action runners can select Actions");
         return self.queue().run(nextActionHeld, .{ self, runner, capacity });
     }
     fn nextActionHeld(self: *Store, runner: tool_record.Runner, capacity: action_domain.Capacity) !?ReadyAction {
@@ -1644,6 +1741,7 @@ pub const Store = struct {
             .bash => action_domain.nextAction(&access, .bash, capacity),
             .mcp => action_domain.nextAction(&access, .mcp, capacity),
             .read_image => action_domain.nextAction(&access, .read_image, capacity),
+            .github_pr_watch => action_domain.nextAction(&access, .github_pr_watch, capacity),
             // App calls are claimed by their app (a later unit); execution never selects them.
             .core, .provider, .app => unreachable,
         });
@@ -1878,6 +1976,19 @@ pub const Store = struct {
         return transition.apply(self, historical_domain.RecordSeal, .{ .binding = binding, .seal = seal }, .{});
     }
 
+    /// Checks the frozen model offer before any watcher capability probe.
+    pub fn watchOffered(self: *Store, binding: AttemptBinding) !bool {
+        return self.queue().run(watchOfferedHeld, .{ self, binding });
+    }
+
+    fn watchOfferedHeld(self: *Store, binding: AttemptBinding) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.attempt_binding, @import("domain/watch_offer.zig").watchOffered(&access, binding));
+    }
+
     pub fn settleModelSuccess(
         self: *Store,
         binding: AttemptBinding,
@@ -2047,7 +2158,7 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 14352;
 
 comptime {
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 19248 or scratch_bytes != 19248)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 19280 or scratch_bytes != 19280)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (@sizeOf(model_settlement_domain.Batch) - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -2056,8 +2167,8 @@ comptime {
 /// which the kernel faults in only as they are written: an idle Host keeps
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
-/// resident for the Store's life: at most 19048 bytes, a settlement
-/// batch's size; a configure uses 14968.
+/// resident for the Store's life: at most 19280 bytes, the current
+/// Configure read size, including the saved app-set digest.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
@@ -2349,6 +2460,7 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype)
     kept.core = found.core;
     kept.mcp = found.mcp;
     kept.bash = found.bash;
+    kept.github_pr_watch = found.github_pr_watch;
     kept.message = found.message;
     kept.tool_continuation = found.tool_continuation;
     kept.retry = found.retry;
@@ -2552,12 +2664,13 @@ const Survey = packed struct(u16) {
     core: bool = false,
     mcp: bool = false,
     bash: bool = false,
+    github_pr_watch: bool = false,
     message: bool = false,
     tool_continuation: bool = false,
     retry: bool = false,
     retry_waiting: bool = false,
     capacity: action_domain.Capacity = .{ .free_credit = .none, .mcp_open = false },
-    _: u2 = 0,
+    _: u1 = 0,
 };
 
 const Admitted = struct {

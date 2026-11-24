@@ -834,3 +834,100 @@ test "retryable stream rejections retain only the settling Attempt diagnostic th
         }
     }.run);
 }
+
+test "PRW-18 frozen watcher offer and approved descriptor survive settlement and dispatch" {
+    try store_testing.forEachEngine(struct {
+        fn readBytes(storage: *Store, reference: content_domain.ContentReference, expected: []const u8) !void {
+            var reader: ContentReader = undefined;
+            reader.open(try storage.openContent(reference));
+            defer reader.close();
+            var bytes: [512]u8 = undefined;
+            const length = try reader.read(0, &bytes);
+            try std.testing.expectEqualStrings(expected, bytes[0..length]);
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            const watch = @import("../../github_pr_watch_descriptor.zig");
+            const scenarios = [_]struct {
+                offered: bool,
+                raw: []const u8,
+                encoded: []const u8,
+                auth: watch.AuthFacts,
+                descriptor: []const u8,
+                count: usize,
+            }{
+                .{ .offered = false, .raw = "{\"url\":\"https://github.com/o/r/pull/42\"}", .encoded = "{\\\"url\\\":\\\"https://github.com/o/r/pull/42\\\"}", .auth = .discovery_required, .descriptor = "", .count = 1 },
+                .{ .offered = true, .raw = "{\"url\":\"https://github.com/o/r/pull/42\",\"account\":\"alice\"}", .encoded = "{\\\"url\\\":\\\"https://github.com/o/r/pull/42\\\",\\\"account\\\":\\\"alice\\\"}", .auth = .discovery_required, .descriptor = "{\"kind\":\"watch\",\"url\":\"https://github.com/o/r/pull/42\",\"login\":\"alice\"}", .count = 1 },
+                .{ .offered = true, .raw = "{\"url\":\"https://github.com/o/r/pull/42\"}", .encoded = "{\\\"url\\\":\\\"https://github.com/o/r/pull/42\\\"}", .auth = .{ .sole_login = try @import("../../bounded.zig").Bounded(39).from("bob") }, .descriptor = "{\"kind\":\"watch\",\"url\":\"https://github.com/o/r/pull/42\",\"login\":\"bob\"}", .count = 65 },
+                .{ .offered = true, .raw = "{\"url\":\"https://github.com/o/r/pull/42\"}", .encoded = "{\\\"url\\\":\\\"https://github.com/o/r/pull/42\\\"}", .auth = .discovery_required, .descriptor = "{\"kind\":\"discover_accounts\",\"url\":\"https://github.com/o/r/pull/42\"}", .count = 1 },
+                .{ .offered = true, .raw = "{\"url\":\"https://github.com/o/r/pull/42\"}", .encoded = "{\\\"url\\\":\\\"https://github.com/o/r/pull/42\\\"}", .auth = .{ .discovery_failed = .gh_unavailable }, .descriptor = "{\"kind\":\"discovery_failed\",\"url\":\"https://github.com/o/r/pull/42\",\"reason\":\"gh_unavailable\"}", .count = 1 },
+                .{ .offered = true, .raw = "{\"url\":\"https://github.com/o/r/pull/42\"}", .encoded = "{\\\"url\\\":\\\"https://github.com/o/r/pull/42\\\"}", .auth = .{ .discovery_failed = .account_discovery_failed }, .descriptor = "{\"kind\":\"discovery_failed\",\"url\":\"https://github.com/o/r/pull/42\",\"reason\":\"account_discovery_failed\"}", .count = 1 },
+                .{ .offered = true, .raw = "{\"url\":\"https://github.com/o/r/pull/42\",\"account\":\"alice\"}", .encoded = "{\\\"url\\\":\\\"https://github.com/o/r/pull/42\\\",\\\"account\\\":\\\"alice\\\"}", .auth = .{ .discovery_failed = .gh_unavailable }, .descriptor = "{\"kind\":\"watch\",\"url\":\"https://github.com/o/r/pull/42\",\"login\":\"alice\"}", .count = 1 },
+            };
+            for (scenarios) |scenario| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var config = try completeConfiguration("watch-config", "", workspace, "model-a");
+                config.configuration.tools = try .of(if (scenario.offered) &.{"watch_github_pr"} else &.{});
+                try config.configuration.permission_mode.value.set("ask");
+                const configured = try storage.configure(&config, .{});
+                try std.testing.expect(configured == .accepted);
+                const session = configured.accepted.session;
+                try submitTestMessage(&storage, &tmp, "watch-message", "watch-message", session.slice(), "watch");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(scenario.offered, try storage.watchOffered(binding));
+                var changed: wire_request.ConfigureCommand = .{};
+                try changed.key.set("watch-changed-offer");
+                try changed.session.set(session.slice());
+                changed.configuration.tools = try .of(if (scenario.offered) &.{} else &.{"watch_github_pr"});
+                try std.testing.expect(try storage.configure(&changed, .{}) == .accepted);
+                try std.testing.expectEqual(scenario.offered, try storage.watchOffered(binding));
+                var invalid_binding = binding;
+                invalid_binding.attempt_ordinal += 1;
+                try std.testing.expectError(error.StaleAttemptBinding, storage.watchOffered(invalid_binding));
+                var items: [65][32]u8 = undefined;
+                var ids: [65][32]u8 = undefined;
+                var calls: [65]TestingCall = undefined;
+                for (calls[0..scenario.count], 0..) |*call, i| {
+                    const item = try std.fmt.bufPrint(&items[i], "item-{d}", .{i});
+                    const id = try std.fmt.bufPrint(&ids[i], "call-{d}", .{i});
+                    call.* = .{ .item_id = item, .name = "watch_github_pr", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = scenario.encoded, .decoded_arguments = scenario.raw };
+                }
+                try shared_fixtures.settleCallsWithWatchAuthForTesting(&storage, &tmp, binding, "watch-output", calls[0..scenario.count], .{}, null, scenario.auth);
+                try std.testing.expectError(error.StaleAttemptBinding, storage.watchOffered(binding));
+                if (!scenario.offered) {
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+                    continue;
+                }
+                try std.testing.expectEqual(@as(u64, @intCast(scenario.count)), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE approved_descriptor_content_id IS NOT NULL AND authorized=0", .{}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content descriptor ON descriptor.content_id=action.approved_descriptor_content_id WHERE descriptor.form<>0 OR descriptor.private<>0", .{}));
+                for (0..scenario.count) |i| {
+                    const action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE call_ordinal=?1", .{i});
+                    try readBytes(&storage, try storage.actionArguments(session.slice(), action_id), scenario.raw);
+                    try readBytes(&storage, try storage.actionApprovedDescriptor(session.slice(), action_id), scenario.descriptor);
+                }
+                const first = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE call_ordinal=0", .{});
+                const capacity = @import("../../execution.zig").DispatchCapacity.fromFree(1, true);
+                try std.testing.expect(!(try storage.dispatchWork(false, capacity)).github_pr_watch);
+                var allow: protocol.PermissionDecisionCommand = .{ .action_id = first, .decision = .allow_once };
+                try allow.key.set("watch-allow");
+                try allow.session.set(session.slice());
+                try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+                const before = storage.testingAccessPasses().*;
+                try std.testing.expect((try storage.dispatchWork(false, capacity)).github_pr_watch);
+                try std.testing.expectEqual(before, storage.testingAccessPasses().*);
+                const selected = (try storage.nextAction(.github_pr_watch, capacity)).?;
+                const action = (try storage.admitActionAttempt(selected, 300_000, .{})).?.permit.binding;
+                try std.testing.expectEqual(first, action.action_id);
+                var input: @import("../domain/action.zig").ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.github_pr_watch, action, &input);
+                try readBytes(&storage, input.arguments, scenario.descriptor);
+            }
+        }
+    }.run);
+}

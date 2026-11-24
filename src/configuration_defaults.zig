@@ -151,9 +151,8 @@ fn checkParent(parent: Parent, tools: *const input.ToolsField, permission: *cons
     return null;
 }
 
-// Golden values below come from 3ebdd8b's completeCreation/client_defaults,
-// rather than the resolver or product defaults being tested.
-const golden_tools = "bash find_tools message_agent read_action read_transcript skill start_agent stop_action web_search";
+// Golden tool names independently specify the current text-only creation profile.
+const golden_tools = "bash find_tools message_agent read_action read_transcript skill start_agent stop_action watch_github_pr web_search";
 
 fn choice(state: input.FieldState, text: []const u8) Choice {
     var value: Choice = .{ .state = state };
@@ -213,7 +212,7 @@ fn creationFieldCases() !void {
             const compact = tokenField(compact_state, "00042");
             const resolved = resolve(catalog.shipped, .{
                 .creating = true,
-                .parent = if (has_parent) .{ .tools = "bash,find_tools,lookup,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search", .permission_mode = .ask } else null,
+                .parent = if (has_parent) .{ .tools = "bash,find_tools,lookup,message_agent,read_action,read_transcript,skill,start_agent,stop_action,watch_github_pr,web_search", .permission_mode = .ask } else null,
                 .provider = provider,
                 .model = model.id,
                 .can_read_images = false,
@@ -387,7 +386,7 @@ test "parent creation uses inherited provider for omitted compaction regardless 
         try std.testing.expectEqual(binding.saved_compact_at, compactionTrigger(catalog.shipped, binding.saved_provider, "gpt-6.1-sol"));
         const resolved = resolve(catalog.shipped, .{
             .creating = true,
-            .parent = .{ .tools = "bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search", .permission_mode = .bypass },
+            .parent = .{ .tools = "bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,watch_github_pr,web_search", .permission_mode = .bypass },
             .provider = testName("codex"),
             .model = "gpt-6.1-sol",
             .can_read_images = false,
@@ -481,10 +480,10 @@ fn toolProfileCases() !void {
         .{ .model = "unlisted-model", .accepts_images = true },
         .{ .model = "gpt-3.5-turbo-next", .accepts_images = true },
     };
-    const text_allowed = "bash find_tools message_agent read_action read_transcript skill start_agent stop_action web_search";
-    const image_allowed = "bash find_tools message_agent read_action read_image read_transcript skill start_agent stop_action web_search";
-    const parent_text = "bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search";
-    const parent_image = "bash,find_tools,message_agent,read_action,read_image,read_transcript,skill,start_agent,stop_action,web_search";
+    const text_allowed = "bash find_tools message_agent read_action read_transcript skill start_agent stop_action watch_github_pr web_search";
+    const image_allowed = "bash find_tools message_agent read_action read_image read_transcript skill start_agent stop_action watch_github_pr web_search";
+    const parent_text = "bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,watch_github_pr,web_search";
+    const parent_image = "bash,find_tools,message_agent,read_action,read_image,read_transcript,skill,start_agent,stop_action,watch_github_pr,web_search";
     const mode = choice(.value, "ask");
     const effort = choice(.omitted, "");
     const compact = tokenField(.omitted, "");
@@ -523,6 +522,26 @@ fn toolProfileCases() !void {
             try std.testing.expect(update.parent_refusal == null);
         };
     };
+}
+
+test "a parent with an explicit older tool set cannot authorize the fresh profile" {
+    const omitted_tools: input.ToolsField = .{};
+    const mode = choice(.value, "ask");
+    const effort = choice(.omitted, "");
+    const compact = tokenField(.omitted, "");
+    const result = resolve(catalog.shipped, .{
+        .creating = true,
+        .parent = .{ .tools = "bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search", .permission_mode = .ask },
+        .provider = testName("codex"),
+        .model = "gpt-6.1-sol",
+        .can_read_images = false,
+        .tools = &omitted_tools,
+        .loaded_tools = &omitted_tools,
+        .permission_mode = &mode,
+        .reasoning_effort = &effort,
+        .compaction_trigger = &compact,
+    });
+    try std.testing.expectEqualStrings("watch_github_pr", result.parent_refusal.?.tools_not_in_parent);
 }
 
 test "ADM-28 configuration default resolution" {

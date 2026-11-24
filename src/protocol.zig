@@ -236,6 +236,7 @@ pub const PublicPartContent = struct {
 };
 
 pub const ReadActionArguments = struct {
+    descriptor: bool = false,
     store: Bounded(max_store_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
     action_id: u64 = 0,
@@ -1555,11 +1556,12 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseReadActionArguments(self: *Parser, out: *ReadActionArguments, members: *Members) !void {
-            const Field = enum { session, action };
+            const Field = enum { session, action, descriptor };
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
                 .action => out.action_id = try self.readCanonicalU64(),
+                .descriptor => out.descriptor = try self.readBoolean(),
             };
             try require(Field, seen, &.{ .session, .action });
         }
@@ -2297,6 +2299,7 @@ pub const read_action_request = struct {
 };
 
 pub const read_action_arguments_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_arguments\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
+pub const read_action_descriptor_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_arguments\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"descriptor\":true}" };
 pub const read_action_call_id_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_call_id\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
 pub const conversation_content_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"start\":\"0\"" };
@@ -2484,6 +2487,7 @@ pub const max_inspect_session_request_bytes = inspect_session_request.max_bytes;
 pub const max_list_sessions_request_bytes = shapeBytes(list_sessions_request.all);
 pub const max_read_action_request_bytes = shapeBytes(read_action_request.all);
 pub const max_read_action_arguments_request_bytes = shapeBytes(read_action_arguments_request);
+pub const max_read_action_descriptor_request_bytes = shapeBytes(read_action_descriptor_request);
 pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id_request);
 pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request.all);
 pub const max_conversation_page_request_bytes = shapeBytes(conversation_page_request);
@@ -2492,7 +2496,7 @@ pub const max_activity_content_request_bytes = shapeBytes(activity_content_reque
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
     observe_command_request.all,       host_info_request,                   host_stop_request,
     host_drain_request,                host_pause_request,                  read_result_request,
-    list_sessions_request.all,         read_action_request.all,             read_action_arguments_request,
+    list_sessions_request.all,         read_action_request.all,             read_action_descriptor_request,
     read_action_call_id_request,       conversation_content_request.all,    conversation_page_request,
     activity_search_request.all,       activity_page_request.all,           activity_content_request,
     skill_suggestions_session_request, skill_suggestions_workspace_request, model_list_request,
@@ -4113,4 +4117,15 @@ test "MCP tool reload and status replies bound one entry per configured server" 
     try status.append(tools_status_reply.tail);
     try std.testing.expect(try std.json.validate(std.testing.allocator, status.slice()));
     try std.testing.expect(tools_status_reply.maxBytes(2) > tools_status_reply.maxBytes(1));
+}
+
+test "PRW-44 Action arguments descriptor selector preserves raw default" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_arguments\",\"store\":\"s\",\"session\":\"k7m2qx\",\"action\":\"42\"";
+    inline for (.{ "}", ",\"descriptor\":false}", ",\"descriptor\":true}" }, .{ false, false, true }) |tail, expected| {
+        var source: MetadataSource = .{ .input = head ++ tail };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).read_action_arguments;
+        try std.testing.expectEqual(expected, request.descriptor);
+        try std.testing.expectEqual(@as(u64, 42), request.action_id);
+    }
 }

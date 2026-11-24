@@ -311,12 +311,15 @@ test "production turn preserves skipped continuation preference through actual S
                     self.action = admission.permit.consume() catch unreachable;
                     return .admitted;
                 }
+                pub fn admitGithubPrWatch(_: *@This()) turn.Admission {
+                    return .no_work;
+                }
                 pub fn scanWork(self: *@This(), paused: bool, capacity: turn.DispatchCapacity) error{Fence}!turn.Work {
                     const found = self.storage.dispatchWork(paused, capacity) catch |err| {
                         self.failure = err;
                         return error.Fence;
                     };
-                    return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry, .retry_waiting = found.retry_waiting };
+                    return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .github_pr_watch = found.github_pr_watch, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry, .retry_waiting = found.retry_waiting };
                 }
                 pub fn scheduledRetry(_: *const @This()) turn.ScheduledRetry {
                     return .unknown;

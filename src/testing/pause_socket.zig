@@ -122,6 +122,15 @@ pub const Adapter = struct {
         } else if (std.mem.eql(u8, req.op, "arm")) {
             if (self.started) return error.AlreadyStarted;
             try self.owner.arm(try req.selection());
+        } else if (std.mem.eql(u8, req.op, "expire_action")) {
+            if (!self.started) return error.NotStarted;
+            try self.owner.expireAction(req.context.action orelse return error.InvalidAction);
+        } else if (std.mem.eql(u8, req.op, "drop_watch_receipt")) {
+            if (!self.started) return error.NotStarted;
+            try self.owner.dropWatchReceipt(req.context.action orelse return error.InvalidAction);
+        } else if (std.mem.eql(u8, req.op, "fill_watch_values")) {
+            if (!self.started) return error.NotStarted;
+            try self.owner.fillWatchValues(req.context.action orelse return error.InvalidAction);
         } else if (std.mem.eql(u8, req.op, "release")) {
             try self.owner.release(req.id orelse return error.InvalidId, .proceed);
         } else if (std.mem.eql(u8, req.op, "wait")) {

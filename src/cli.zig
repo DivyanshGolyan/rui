@@ -2136,6 +2136,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     defer settings.deinit();
     var tuning = try server.Tuning.fromOptions(parsed);
     tuning.home = init.environ_map.get("HOME");
+    tuning.github_environment = init.environ_map;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var preparation_failure: start_report.Failure = undefined;
@@ -4532,11 +4533,23 @@ fn inspectAction(init: std.process.Init, requester: client.Requests, store: ?[]c
         try writeCommandReply(io, arguments.command, .stdout);
         return error.ActionReadFailed;
     }
+    const descriptor = requester.readActionDescriptor(selected, reference, target, file, &buffer) catch |err| return readTransportFailure(io, selected, err);
+    if (descriptor == .command) {
+        const failure = try protocol_reply.decodeReadFailure(descriptor.command, false);
+        if (failure.status != 404 or !failure.diagnostic.type.eql("action_unavailable") or !failure.diagnostic.code.eql("action_not_found")) {
+            try writeCommandReply(io, descriptor.command, .stdout);
+            return error.ActionReadFailed;
+        }
+    }
     var line: [96]u8 = undefined;
     try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"action\":\"{d}\",\"call_id\":\"", .{target}));
     try writeJsonFileAt(io, file, 0, call_bytes, true);
     try std.Io.File.stdout().writeStreamingAll(io, "\",\"arguments\":\"");
     try writeJsonFileAt(io, file, call_bytes, arguments.answer.bytes, true);
+    if (descriptor == .answer) {
+        try std.Io.File.stdout().writeStreamingAll(io, "\",\"approved_descriptor\":\"");
+        try writeJsonFileAt(io, file, call_bytes + arguments.answer.bytes, descriptor.answer.bytes, true);
+    }
     return std.Io.File.stdout().writeStreamingAll(io, "\"}\n");
 }
 

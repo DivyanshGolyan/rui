@@ -263,6 +263,19 @@ pub fn settleCallsForTestingWithFaults(
     faults: Faults,
     usage_json: ?[]const u8,
 ) !void {
+    return settleCallsWithWatchAuthForTesting(storage, tmp, binding, file_prefix, calls, faults, usage_json, .discovery_required);
+}
+
+pub fn settleCallsWithWatchAuthForTesting(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    binding: AttemptBinding,
+    file_prefix: []const u8,
+    calls: []const TestingCall,
+    faults: Faults,
+    usage_json: ?[]const u8,
+    watch_auth: @import("../github_pr_watch_descriptor.zig").AuthFacts,
+) !void {
     var capacity: usize = if (usage_json) |bytes| bytes.len else 0;
     for (calls) |call| capacity += 128 + 6 * (call.item_id.len + call.name.len) +
         call.encoded_call_id.len + call.encoded_arguments.len;
@@ -319,6 +332,7 @@ pub fn settleCallsForTestingWithFaults(
     try metadata.sealForRead();
     try storage.settleModelSuccess(binding, &.{
         .source = source,
+        .watch_auth = watch_auth,
         .source_length = source_bytes.len,
         .metadata = metadata.file,
         .item_count = calls.len,
