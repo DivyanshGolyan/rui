@@ -14574,6 +14574,15 @@
                 },
                 "left_out": {
                   "$ref": "#/components/schemas/Decimal"
+                },
+                "listen": {
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "opening",
+                    "open",
+                    "unsupported"
+                  ]
                 }
               },
               "required": [
@@ -14582,7 +14591,8 @@
                 "last",
                 "finished",
                 "tools",
-                "left_out"
+                "left_out",
+                "listen"
               ],
               "additionalProperties": false
             },

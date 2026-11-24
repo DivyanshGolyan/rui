@@ -111,7 +111,7 @@
     "test_double": 1
   },
   "tests/ci/test_import_architecture.py": {
-    "test_double": 5
+    "test_double": 2
   },
   "tests/ci/test_installer_boundary.py": {
     "test_double": 2

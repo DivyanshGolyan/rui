@@ -7,6 +7,8 @@ const tools = @import("tools.zig");
 const stderr = @import("stderr.zig");
 const store_module = @import("store.zig");
 const server_mcp_settings = @import("server_mcp_settings.zig");
+const Listen = @import("server_mcp_listen.zig").Listen;
+const listen_core = @import("mcp/listen.zig");
 
 comptime {
     std.debug.assert(hs.max_mcp_servers <= tools.HostToolSet.max_servers);
@@ -17,8 +19,8 @@ comptime {
 /// complete list is published in one Store step. A list is never refused over its
 /// tools' names or count: tools the merge cannot offer are left out and logged.
 pub const Relist = struct {
-    /// `status` packed into one atomic word: state (2 bits), last (2 bits), tools (28 bits).
-    const Packed = packed struct(u64) { state: u2, last: u2, tools: u28, left_out: u32 };
+    /// `status` packed into one atomic word: state (2 bits), last (2 bits), listen (2 bits), tools (26 bits).
+    const Packed = packed struct(u64) { state: u2, last: u2, listen: u2, tools: u26, left_out: u32 };
 
     /// What `publishView` writes for one server. Intake threads read it lock-free.
     const View = struct {
@@ -48,6 +50,11 @@ pub const Relist = struct {
     /// Each server's last complete list, which every publish merges, so a server's offered names follow the
     /// lists now in force rather than the set saved before. Only the execution thread touches it.
     kept: [hs.max_mcp_servers]Kept = @splat(.{}),
+    /// Each server's `asks` generation the stream owner last saw, so a client ask reprobes a refusing stream once.
+    /// Only the execution thread touches it.
+    reprobed: [hs.max_mcp_servers]u64 = @splat(0),
+    /// Each server's `subscriptions/listen` stream. Only the execution thread touches it.
+    listen: Listen,
 
     /// One server's kept list: its entries and listing-level left-out count, copied into `arena`.
     const Kept = struct {
@@ -77,10 +84,11 @@ pub const Relist = struct {
 
     /// `servers` must outlive the owner.
     pub fn init(allocator: std.mem.Allocator, servers: []const server_mcp_settings.Server, seed: u64) Relist {
-        return .{ .allocator = allocator, .servers = servers, .seed = seed };
+        return .{ .allocator = allocator, .servers = servers, .seed = seed, .listen = Listen.init(allocator, servers, seed) };
     }
 
     pub fn deinit(self: *Relist) void {
+        self.listen.deinit();
         for (&self.pending) |*slot_pending| {
             if (slot_pending.*) |pending| pending.finish();
             slot_pending.* = null;
@@ -119,12 +127,18 @@ pub const Relist = struct {
         return .{ .state = @fromBackingInt(@intCast(packed_status.state)), .last = @fromBackingInt(@intCast(packed_status.last)), .finished = finished, .tools = packed_status.tools, .left_out = packed_status.left_out };
     }
 
+    /// Reads server `index`'s `subscriptions/listen` state from any thread, from the same word as `status`.
+    pub fn streamState(self: *const Relist, index: usize) listen_core.State {
+        const packed_status: Packed = @bitCast(self.views[index].status.load(.acquire));
+        return @fromBackingInt(@intCast(packed_status.listen));
+    }
+
     /// Publishes server `index`'s slot and tool count for intake reads. The execution thread calls it
     /// after every change to that slot. The status is stored before `finished`, which `status` relies on.
     fn publishView(self: *Relist, index: usize) void {
         const slot = &self.slots[index];
         const view = &self.views[index];
-        const packed_status: Packed = .{ .state = @backingInt(slot.state), .last = @backingInt(slot.last), .tools = self.tools[index], .left_out = self.left_out[index] };
+        const packed_status: Packed = .{ .state = @backingInt(slot.state), .last = @backingInt(slot.last), .listen = @backingInt(self.listen.state(index)), .tools = @intCast(self.tools[index]), .left_out = self.left_out[index] };
         view.status.store(@bitCast(packed_status), .release);
         view.finished.store(slot.finished, .release);
     }
@@ -135,9 +149,9 @@ pub const Relist = struct {
         return false;
     }
 
-    /// The earliest awake-clock millisecond the owner needs service again, or null.
+    /// The earliest awake-clock millisecond the owner needs service again, or null: a slot's, or a stream's reopen.
     pub fn wakeAt(self: *const Relist) ?u64 {
-        var earliest: ?u64 = null;
+        var earliest: ?u64 = self.listen.wakeAt();
         for (&self.slots) |*slot| {
             const at = slot.wakeAt() orelse continue;
             earliest = if (earliest) |current| @min(current, at) else at;
@@ -197,6 +211,8 @@ pub const Relist = struct {
                 if (drive.failure != null) return true;
                 if (drive.owner.listing()) return false;
                 for (drive.owner.slots[0..drive.owner.servers.len]) |*slot| if (slot.due(drive.now_ms)) return false;
+                // A stream still opening has not yet been acknowledged or refused: settle once it has.
+                for (drive.owner.listen.lines[0..drive.owner.servers.len]) |line| if (line.state == .opening) return false;
                 return true;
             }
         };
@@ -209,6 +225,25 @@ pub const Relist = struct {
     /// anything progressed. A failed publish is written to `failure` and stops the pass.
     pub fn service(self: *Relist, store: *store_module.Store, now_ms: u64, failure: *?anyerror) bool {
         var progress = false;
+        // A client ask reprobes a stream that refused the subscription.
+        for (0..self.servers.len) |index| {
+            const want = self.asks[index].load(.acquire);
+            if (want != self.reprobed[index]) {
+                self.reprobed[index] = want;
+                self.listen.reprobe(index);
+            }
+        }
+        // Streams wait for startup's first attempts; then each acknowledgment and list change asks one re-list
+        // through `ask`, the same generation counter a client ask uses.
+        if (self.held == null) {
+            var asked = self.listen.service(now_ms);
+            while (asked.findFirstSet()) |index| {
+                asked.unset(index);
+                _ = self.ask(index);
+            }
+            for (0..self.servers.len) |index| self.publishView(index);
+        }
+        // The only caller of `Slot.want`: every ask, client or stream, reaches its slot here.
         for (0..self.servers.len) |index| {
             const want = self.asks[index].load(.acquire);
             while (self.slots[index].asked < want) {
@@ -264,6 +299,8 @@ pub const Relist = struct {
     /// Settles a list that landed at `now_ms`: its ttl and this list's jitter seed set when it goes stale. Reads the
     /// ttl before `settle` frees the pending list.
     fn settleListed(self: *Relist, index: usize, now_ms: u64) void {
+        // A server that refused its list may have recovered: its stream is probed again.
+        if (self.slots[index].last == .failed) self.listen.reprobe(index);
         const pending = self.pending[index].?;
         const outcome: relist.Outcome = .{ .listed = .{
             .ttl_ms = pending.ttlMs(),
@@ -757,4 +794,290 @@ test "EXR-70 a publish that fails leaves the retry to backoff" {
     try std.testing.expectEqual(@as(?u64, null), owner.slots[0].stale_at_ms);
     try std.testing.expectEqual(relist.State.waiting, owner.slots[0].state);
     try std.testing.expectEqual(owner.slots[0].retry_at_ms, owner.wakeAt().?);
+}
+
+/// What a listen test waits for: the server's requests answered, its stream's openings and state, and a tool it offers.
+const ListenWant = struct {
+    requests: usize,
+    opens: ?u64 = null,
+    state: ?listen_core.State = null,
+    tool: ?[]const u8 = null,
+};
+
+/// Drives `owner` at `now_ms` until the server's list and stream reach `want` and no list is in flight or due.
+fn listenUntil(owner: *Relist, storage: *store_module.Store, now_ms: u64, script: *const @import("mcp/test_server.zig"), listening: *const @import("mcp/test_server.zig").Listening, want: ListenWant) !void {
+    const poll = @import("test_poll");
+    const Drive = struct {
+        owner: *Relist,
+        storage: *store_module.Store,
+        script: *const @import("mcp/test_server.zig"),
+        listening: *const @import("mcp/test_server.zig").Listening,
+        now_ms: u64,
+        want: ListenWant,
+        failure: ?anyerror = null,
+        fn reached(drive: *@This()) bool {
+            _ = drive.owner.service(drive.storage, drive.now_ms, &drive.failure);
+            if (drive.failure != null) return true;
+            if (drive.owner.listing()) return false;
+            for (drive.owner.slots[0..drive.owner.servers.len]) |*slot| if (slot.due(drive.now_ms)) return false;
+            if (drive.script.requests.load(.acquire) != drive.want.requests) return false;
+            if (drive.want.opens) |opens| if (drive.listening.opens.load(.acquire) != opens) return false;
+            if (drive.want.state) |state| if (drive.owner.listen.state(0) != state) return false;
+            if (drive.want.tool) |tool| if (drive.storage.hostTools().host_tool_set.find(tool) == null) return false;
+            return true;
+        }
+    };
+    var drive: Drive = .{ .owner = owner, .storage = storage, .script = script, .listening = listening, .now_ms = now_ms, .want = want };
+    try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(30)), &drive, Drive.reached);
+    try std.testing.expectEqual(@as(?anyerror, null), drive.failure);
+}
+
+test "EXR-88 a pushed list_changed leads to exactly one re-list that lands" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    var listening: Script.Listening = .{};
+    var script: Script = .{
+        .reply = listReply(&.{"alpha"}),
+        .more = &.{
+            listReply(&.{"alpha"}), // the first acknowledgment asks one re-list
+            listReply(&.{ "alpha", "beta" }), // the pushed notice
+        },
+        .listening = &listening,
+    };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+    defer storage.close() catch unreachable;
+
+    _ = owner.ask(0);
+    try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 2, .opens = 1, .state = .open });
+
+    listening.push("data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n");
+    try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 3, .tool = "beta" });
+    try std.testing.expectEqual(owner.asks[0].load(.acquire), owner.status(0).finished);
+    listening.finish();
+}
+
+test "EXR-89 a dropped listen stream reopens after its backoff, and its new acknowledgment asks one re-list" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    var listening: Script.Listening = .{};
+    var script: Script = .{ .reply = listReply(&.{"alpha"}), .more = &.{ listReply(&.{"alpha"}), listReply(&.{"alpha"}) }, .listening = &listening };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+    defer storage.close() catch unreachable;
+
+    _ = owner.ask(0);
+    try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 2, .opens = 1, .state = .open });
+    // A stream that is open holds no wake time of its own: the list has no ttl.
+    try std.testing.expectEqual(@as(?u64, null), owner.wakeAt());
+
+    listening.drop();
+    try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 2, .state = .off });
+    const reopen = owner.wakeAt().?;
+    try std.testing.expect(reopen >= 1_000);
+
+    // No reopen before the backoff runs out, and the owner waits until then.
+    var early_failure: ?anyerror = null;
+    _ = owner.service(&storage, reopen - 1, &early_failure);
+    try std.testing.expectEqual(@as(u64, 1), listening.opens.load(.acquire));
+    try std.testing.expectEqual(reopen, owner.wakeAt().?);
+
+    try listenUntil(&owner, &storage, reopen, &script, &listening, .{ .requests = 3, .opens = 2, .state = .open });
+    listening.finish();
+}
+
+test "EXR-90 a refusing listen stream is not reopened by time, and a client reload probes it again" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const cases = [_]Script.Listening.Opening{ .{ .status = 405 }, .{ .acknowledge = .{ .tools = false } } };
+    for (cases) |opening| {
+        var listening: Script.Listening = .{ .opening = opening };
+        var script: Script = .{ .reply = listReply(&.{"alpha"}), .more = &.{listReply(&.{"alpha"})}, .listening = &listening };
+        try script.start();
+        defer script.stop();
+        const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+        var owner = Relist.init(std.testing.allocator, &servers, 1);
+        defer owner.deinit();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: store_module.Store = undefined;
+        try store_module_testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+        defer storage.close() catch unreachable;
+
+        _ = owner.ask(0);
+        try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 1, .state = .unsupported });
+        try std.testing.expectEqual(@as(?u64, null), owner.wakeAt());
+        var failure: ?anyerror = null;
+        _ = owner.service(&storage, std.math.maxInt(u64), &failure);
+        try std.testing.expectEqual(@as(u64, 1), owner.listen.lines[0].opens);
+
+        // A client's reload asks the server again: its stream is probed once more, and refused again.
+        _ = owner.ask(0);
+        try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 2, .state = .unsupported });
+        try std.testing.expectEqual(@as(u64, 2), owner.listen.lines[0].opens);
+    }
+}
+
+test "EXR-91 a held listen stream is not a list in flight, and a dropped one wakes the owner at its reopen time" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    var listening: Script.Listening = .{};
+    var script: Script = .{ .reply = listReply(&.{"alpha"}), .more = &.{listReply(&.{"alpha"})}, .listening = &listening };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+    defer storage.close() catch unreachable;
+
+    _ = owner.ask(0);
+    try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 2, .opens = 1, .state = .open });
+    try std.testing.expect(!owner.listing());
+
+    listening.drop();
+    try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 2, .state = .off });
+    try std.testing.expectEqual(owner.listen.lines[0].retry_at_ms, owner.wakeAt().?);
+    listening.finish();
+}
+
+test "EXR-94 a client ask after a stream-driven re-list lists the server again, and its generation finishes" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    var listening: Script.Listening = .{};
+    var script: Script = .{ .reply = listReply(&.{"alpha"}), .more = &.{ listReply(&.{"alpha"}), listReply(&.{ "alpha", "beta" }) }, .listening = &listening };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+    defer storage.close() catch unreachable;
+
+    // The acknowledgment asks one re-list, which lands and leaves the server's list unchanged.
+    _ = owner.ask(0);
+    try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 2, .opens = 1, .state = .open });
+
+    // The server's list now has `beta`. A client asks for a list, and that list lands with the new tool.
+    const generation = owner.ask(0);
+    try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 3, .tool = "beta" });
+    try std.testing.expectEqual(generation, owner.status(0).finished);
+    listening.finish();
+}
+
+test "EXR-90 a list that recovers probes a refusing stream again, once" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    var listening: Script.Listening = .{ .opening = .{ .status = 405 } };
+    const failing = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    // The spare reply keeps the server accepting the subscribe that follows the recovered list.
+    var script: Script = .{ .reply = failing, .more = &.{ listReply(&.{"alpha"}), listReply(&.{"alpha"}) }, .listening = &listening };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+    defer storage.close() catch unreachable;
+
+    // The first list fails and the stream is refused: the server is unsupported and its list is backing off.
+    _ = owner.ask(0);
+    try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 1, .state = .unsupported });
+    try std.testing.expect(owner.status(0).last == .failed);
+    const opens_before = owner.listen.lines[0].opens;
+    const retry_at = owner.slots[0].retry_at_ms;
+
+    // The retry lands. Its landing probes the refusing stream once: one new subscribe, refused again.
+    try listenUntil(&owner, &storage, retry_at, &script, &listening, .{ .requests = 2, .tool = "alpha", .state = .unsupported });
+    try std.testing.expectEqual(opens_before + 1, owner.listen.lines[0].opens);
+    try std.testing.expectEqual(@as(u64, 0), listening.opens.load(.acquire));
+}
+
+test "EXR-88 two notices that arrive while a list is in flight fold into one more list" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    var listening: Script.Listening = .{};
+    var script: Script = .{
+        .reply = listReply(&.{"alpha"}),
+        .more = &.{
+            listReply(&.{"alpha"}), // the first acknowledgment asks one re-list
+            listReply(&.{"alpha"}), // the client ask's list, held until the test releases it
+            listReply(&.{ "alpha", "beta", "gamma" }), // one list for the two notices
+        },
+        .listening = &listening,
+        .gate_request = 3,
+    };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+    defer storage.close() catch unreachable;
+
+    _ = owner.ask(0);
+    try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 2, .opens = 1, .state = .open });
+
+    // A client ask starts a list that the server holds. Wait until the server has it in hand.
+    const generation = owner.ask(0);
+    const Wait = struct {
+        owner: *Relist,
+        storage: *store_module.Store,
+        script: *const Script,
+        requests: usize,
+        asks_at_least: u64,
+        failure: ?anyerror = null,
+        fn reached(wait: *@This()) bool {
+            _ = wait.owner.service(wait.storage, 0, &wait.failure);
+            if (wait.failure != null) return true;
+            return wait.script.requests.load(.acquire) == wait.requests and wait.owner.asks[0].load(.acquire) >= wait.asks_at_least;
+        }
+    };
+    const poll = @import("test_poll");
+    var held: Wait = .{ .owner = &owner, .storage = &storage, .script = &script, .requests = 3, .asks_at_least = 0 };
+    try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(30)), &held, Wait.reached);
+    try std.testing.expectEqual(@as(?anyerror, null), held.failure);
+
+    // Two notices arrive while that list is in flight. Each one asks, one at a time so that each ask is seen;
+    // neither starts a second list.
+    const notice = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n";
+    for (1..3) |count| {
+        listening.push(notice);
+        var noticed: Wait = .{ .owner = &owner, .storage = &storage, .script = &script, .requests = 3, .asks_at_least = generation + count };
+        try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(30)), &noticed, Wait.reached);
+        try std.testing.expectEqual(@as(?anyerror, null), noticed.failure);
+    }
+    try std.testing.expect(owner.listing());
+
+    // Releasing the held list lands it, and the two notices fold into exactly one more list.
+    try std.testing.expect(script.releaseGated(listReply(&.{"alpha"})));
+    try listenUntil(&owner, &storage, 0, &script, &listening, .{ .requests = 4, .tool = "gamma" });
+    try std.testing.expectEqual(owner.asks[0].load(.acquire), owner.status(0).finished);
+    listening.finish();
 }

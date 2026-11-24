@@ -492,6 +492,41 @@ class BuildModuleTest(unittest.TestCase):
                 self.assertTrue(all(covers(target, selected) for target in required), (module, required, selected))
 
 
+class DeepModulesSelectionTest(unittest.TestCase):
+    """The module lint reads every production source, so no src/ change may skip it (sketch-a risk 6)."""
+
+    def test_every_production_source_selects_deep_modules_on_the_pr_tier_and_in_promotion(self):
+        from ci_plan import plan
+        from docs_only import ChangeKind
+        from select_tests import covers
+        sources = sorted(path.relative_to(ROOT).as_posix() for path in (ROOT / "src").rglob("*.zig"))
+        self.assertGreater(len(sources), 100)
+        for path in sources:
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertIn("deep-modules", result["fast_targets"])
+                self.assertTrue(covers("deep-modules", set(result["targets"])))
+                ready = plan(result, event_name="pull_request", draft=False, promotion=False,
+                             change_kind=ChangeKind.NORMAL).outputs
+                self.assertIn("deep-modules", ready["targets"])
+                promoted = plan(result, event_name="workflow_dispatch", draft=False, promotion=True,
+                                change_kind=ChangeKind.NORMAL).outputs
+                self.assertIn("deep-modules", promoted["targets"])
+
+    def test_the_tool_files_select_its_steps_and_other_files_do_not(self):
+        cases = {
+            "tests/ci/deep_modules/Lints.zig": {"deep-modules", "deep-modules-test"},
+            "build/deep_modules.zig": {"deep-modules", "deep-modules-test"},
+            "tests/ci/deep_modules.allow": {"deep-modules"},
+            "build.zig.zon": {"deep-modules"},
+            "README.md": set(),
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                fast = set(select([path], "review", AVAILABLE)["fast_targets"])
+                self.assertEqual(fast & {"deep-modules", "deep-modules-test"}, expected)
+
+
 class SelectionTest(unittest.TestCase):
     def test_ordered_message_capture_selects_provider_and_capture_witnesses(self):
         # CI-75: touched Message capture owners select their real provider witness.
@@ -776,11 +811,11 @@ class SelectionTest(unittest.TestCase):
 
     def test_logic_root_selects_its_executable_root(self):
         for path in ("src/logic_tests.zig", "src/core_boundary.zig"):
-            self.assertEqual(select([path], "review", AVAILABLE)["targets"], ["test-logic"])
+            self.assertEqual(select([path], "review", AVAILABLE)["targets"], ["deep-modules", "test-logic"])
 
     def test_native_unit_aggregate_selects_its_root_not_check(self):
         alone = select(["src/tests.zig"], "review", AVAILABLE)
-        self.assertEqual((alone["targets"], alone["native_targets"]), (["test-native"], ["test-native"]))
+        self.assertEqual((alone["targets"], alone["native_targets"]), (["deep-modules", "test-native"], ["test-native"]))
         owned = select(["src/tests.zig", "src/mcp/Running.zig"], "review", AVAILABLE)["targets"]
         self.assertTrue({"settings-integration", "test-native"} <= set(owned))
         self.assertNotIn("check", owned)
@@ -879,7 +914,7 @@ class SelectionTest(unittest.TestCase):
         self.assertIn("test-logic", select(["src/h2/policy.zig"], "review", AVAILABLE)["targets"])
 
     def test_postgres_wire_client_selects_its_own_tests_and_shared_trust_reaches_them(self):
-        self.assertEqual(select(["src/store/wire/pg.zig"], "review", AVAILABLE)["targets"], ["test-pg"])
+        self.assertEqual(select(["src/store/wire/pg.zig"], "review", AVAILABLE)["targets"], ["deep-modules", "test-pg"])
         shared = set(select(["src/tls_client/tls_client.zig"], "review", AVAILABLE)["targets"])
         self.assertTrue({"test-h2", "test-pg", "mysql-wire-integration"} <= shared)
         for path in ("src/h2/tls.zig", "src/h2/Engine.zig", "src/h2/Connection.zig", "src/h2/Stream.zig"):
@@ -1156,7 +1191,7 @@ class SelectionTest(unittest.TestCase):
             native = sorted(["bash-integration", "bash-lifecycle-integration", "bash-owner-integration",
                              "bash-recovery-integration", "test", "test-logic"])
             self.assertEqual(result["native_targets"], native, path)
-            self.assertEqual(result["targets"], sorted(native + ["stack-frames"]), path)
+            self.assertEqual(result["targets"], sorted(native + ["deep-modules", "stack-frames"]), path)
 
     def test_codex_credential_values_keep_portable_and_native_owner_checks(self):
         for path in ("src/codex_credential_policy.zig", "src/codex_token_wire.zig"):
@@ -1165,7 +1200,7 @@ class SelectionTest(unittest.TestCase):
             native = sorted(["chatgpt-login-integration", "chatgpt-plan-integration", "codex-credential-integration",
                              "codex-h2-integration", "codex-integration", "test", "test-logic"])
             self.assertEqual(result["native_targets"], native)
-            self.assertEqual(result["targets"], sorted(native + ["stack-frames"]))
+            self.assertEqual(result["targets"], sorted(native + ["deep-modules", "stack-frames"]))
 
     def test_union_deduplicates_only_checks_owned_by_broad_gate(self):
         result = select(["tests/integration/host_process.py", "src/codex_credentials.zig"], "review", AVAILABLE)
@@ -2625,8 +2660,8 @@ class PolicySelfCheckTableTest(unittest.TestCase):
 
 MANIFEST = (ROOT / "build.zig.zon").read_text()
 PR_ROOTS = sorted(PR_UNIT_ROOTS)
-# build.zig.zon is a frame gate input, so a manifest change also runs stack-frames on the PR.
-MANIFEST_PR_SET = sorted(PR_UNIT_ROOTS | {"stack-frames"})
+# build.zig.zon is a frame gate input and a deep-modules input, so a manifest change also runs both on the PR.
+MANIFEST_PR_SET = sorted(PR_UNIT_ROOTS | {"deep-modules", "stack-frames"})
 BUILD_MODULE_PATHS = tuple(BUILD_MODULES)
 CONTENT_RULE_PATHS = tuple(pattern for patterns, _ in CONTENT_RULES.values() for pattern in patterns)
 
@@ -2704,7 +2739,7 @@ class LinkedDependencySelectionTest(unittest.TestCase):
     def test_manifest_edit_outside_dependencies_keeps_bootstrap_selection(self):
         after = MANIFEST.replace('.version = "0.1.0"', '.version = "0.1.1"', 1)
         self.assertEqual(changed_dependencies(MANIFEST, after), [])
-        self.assertEqual(self.manifest_change(MANIFEST, after)["fast_targets"], ["stack-frames", "test-logic"])
+        self.assertEqual(self.manifest_change(MANIFEST, after)["fast_targets"], ["deep-modules", "stack-frames", "test-logic"])
 
     def test_every_manifest_dependency_is_linked_by_some_target(self):
         linked = {name for packages in tree_graph().links.values() for name in packages}
