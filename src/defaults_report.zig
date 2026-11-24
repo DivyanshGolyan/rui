@@ -510,7 +510,7 @@ test "CLI-30 the defaults report is a function of its facts" {
             var table = names;
             if (silent) table.login[@backingInt(protocol.Provider.openai)] = "";
             inline for (@typeInfo(protocol.Provider).@"enum".field_names) |name| {
-                var routes: std.enums.EnumFieldStruct(protocol.Provider, protocol.Route, .endpoint) = .{};
+                var routes: std.enums.EnumFieldStruct(protocol.Provider, protocol.Route, null) = .{ .codex = .endpoint, .openai = .endpoint, .chatgpt = .endpoint };
                 @field(routes, name) = .unserved;
                 const provider = std.meta.stringToEnum(protocol.Provider, name).?;
                 const said = hostProvidersLine(protocol.connectionsOfRoutes(routes), &table, &buffer);

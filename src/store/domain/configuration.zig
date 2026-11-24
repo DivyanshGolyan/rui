@@ -1127,8 +1127,8 @@ fn accept(reads: *ConfigurationReads, head: rsql.SessionHead, target: []const u8
 }
 
 pub fn servesProviderOf(served: anytype, configuration: ?*const content_custody.Configuration, saved: ?connection.Name) bool {
-    const provider = if (configuration != null and configuration.?.connection.state == .value)
-        connection.Name.parse(configuration.?.connection.value.slice()) orelse return true
+    const provider = if (configuration != null and configuration.?.provider.state == .value)
+        connection.Name.parse(configuration.?.provider.value.slice()) orelse return true
     else
         saved orelse (if (configuration != null) required_settings.resolveProvider(null, served) orelse return true else return true);
     return served.route(provider.slice()) != .unserved;

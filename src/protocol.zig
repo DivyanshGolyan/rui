@@ -83,7 +83,7 @@ pub const HostCapabilities = struct {
 };
 
 /// Fixture helper: the built-in connections served at each route, in provider order, and no others.
-pub fn connectionsOfRoutes(routes: anytype) Connections {
+pub fn connectionsOfRoutes(routes: std.enums.EnumFieldStruct(Provider, Route, null)) Connections {
     var out: Connections = .{};
     inline for (@typeInfo(Provider).@"enum".field_names) |field| {
         const route: Route = @field(routes, field);

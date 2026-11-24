@@ -6609,7 +6609,7 @@ test "SessionFrontend names the unserved provider when the Host refuses a chat M
     const original = self.input.submitText("original model input");
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .rejected, .key = @splat('K') };
     defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
-    self.line.provider = .openai;
+    self.line.provider = @import("connection.zig").Name.parse("openai");
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
     try code.set("model_capability_unavailable");
     try self.presentAdmission(.{ .rejected = .{ .kind = .message, .code = code } });

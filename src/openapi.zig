@@ -134,7 +134,7 @@ pub const routes = [_]Route{
         .kind = .host_info,
         .summary = "The Host's identity, capacity and provider routes. Also the readiness probe.",
         .variants = &.{variant(protocol.host_info_request, .{})},
-        .reply = jsonReply(.{protocol.host_info_reply.head ++ .{ Optional(protocol.host_info_reply.doublewrite), Optional(protocol.host_info_reply.settings_digest) } ++ protocol.host_info_reply.tail}),
+        .reply = jsonReply(.{protocol.host_info_reply.head ++ .{ Optional(protocol.host_info_reply.doublewrite), Optional(protocol.host_info_reply.settings_digest) } ++ .{ protocol.host_info_reply.connections_head, ListOf(ConnectionEntry), protocol.host_info_reply.connections_tail }}),
     },
     .{
         .path = "/v1/control/host-stop",
@@ -303,7 +303,7 @@ pub const routes = [_]Route{
     .{
         .path = "/v1/model-list",
         .kind = .model_list,
-        .summary = "The models each served provider offers.",
+        .summary = "The models each served connection offers.",
         .variants = &.{variant(protocol.model_list_request, .{})},
         .reply = jsonReply(.{.{ protocol.model_list_reply.head, ListOf(ModelListEntry), protocol.model_list_reply.tail }}),
     },
@@ -541,8 +541,12 @@ const ConversationItem = struct {
     }
 };
 
+const ConnectionEntry = struct {
+    pub const openapi_shape = protocol.host_info_reply.connection_entry;
+};
+
 const ModelListEntry = struct {
-    pub const openapi_shape = .{ "{\"provider\":\"", Hole{ .tag = protocol.Provider }, "\",\"source\":\"", Hole{ .tag = model_list.Source }, "\",\"models\":", ListOf(.{ "{\"id\":", Hole{ .string = protocol.max_model_bytes }, ",\"known\":", Hole.boolean, "}" }), "}" };
+    pub const openapi_shape = .{ "{\"connection\":\"", Hole{ .text = @import("connection.zig").max_name_bytes }, "\",\"source\":\"", Hole{ .tag = model_list.Source }, "\",\"models\":", ListOf(.{ "{\"id\":", Hole{ .string = protocol.max_model_bytes }, ",\"known\":", Hole.boolean, "}" }), "}" };
 };
 
 const ToolNames = struct {
@@ -906,7 +910,7 @@ pub const Document = struct {
         }
         try spec.object.put(d.arena, "required", .{ .array = required });
         const spec_properties = spec.object.getPtr("properties").?;
-        try spec_properties.object.put(d.arena, "provider", try d.enumeration(protocol.Provider, false));
+        try spec_properties.object.put(d.arena, "connection", try d.boundedString(@import("connection.zig").max_name_bytes));
         try spec_properties.object.put(d.arena, "workspace", try d.wireSchema([]const u8));
         try d.schemas.put(d.arena, "AgentSpec", spec);
         var visitor: SettingsSchema = .{ .document = d };

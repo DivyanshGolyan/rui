@@ -1621,7 +1621,7 @@ fn creationInput(self: *const Self, snapshot: *const CreationSnapshot) !configur
         .session = .create,
         .require_model = true,
         .workspace = .{ .present = true, .value = self.options.workspace },
-        .provider = if (binding.*) |value| .{ .present = true, .value = @tagName(value.provider) } else .{},
+        .provider = if (binding.*) |value| .{ .present = true, .value = value.provider.slice() } else .{},
         .model = if (binding.*) |*value| .{ .present = true, .value = value.model.slice() } else .{},
     };
     configuration.applySavedCreation(saved.effort, saved.permission);

@@ -77,7 +77,7 @@ pub const Line = struct {
     first: ?First = null,
     folder: ?Bounded(protocol.max_workspace_bytes) = null,
     model: Bounded(protocol.max_model_bytes) = .{},
-    provider: ?protocol.Provider = null,
+    provider: ?@import("connection.zig").Name = null,
     effort: ?protocol.ReasoningEffort = null,
     left: ?u8 = null,
     archive_state: protocol.SessionArchiveState = .active,
@@ -100,7 +100,7 @@ pub const Line = struct {
             .first = if (first) |message| .{ .position = message.value.position, .content = message.value.content } else null,
             .folder = if (first == null) plain(protocol.max_workspace_bytes, settings.workspace.slice()) else null,
             .model = plain(protocol.max_model_bytes, settings.model.slice()),
-            .provider = settings.provider.value,
+            .provider = @import("connection.zig").Name.parse(settings.connection.value.slice()),
             .effort = if (settings.reasoning_effort) |effort| effort.value else null,
             .left = if (trigger != null and estimate != null) session_line.left(trigger.?.value, estimate.?.value) else null,
             .archive_state = current.archive_state,
@@ -213,7 +213,7 @@ pub const Job = struct {
     status_actions: std.Io.File = undefined,
     line_read: ?Moment = null,
     hint_wanted: bool = false,
-    provider: ?protocol.Provider = null,
+    provider: ?@import("connection.zig").Name = null,
     result: struct {
         work: protocol.PageWork = .{},
         line: ?Line = null,
@@ -243,7 +243,7 @@ pub const Job = struct {
         retry: ?Retry = null,
     } = .{},
 
-    fn sessionProvider(self: *const Job) ?protocol.Provider {
+    fn sessionProvider(self: *const Job) ?@import("connection.zig").Name {
         return if (self.result.line) |line| line.provider else self.provider;
     }
 
@@ -574,7 +574,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
 }
 
-fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: []const u8, provider: ?protocol.Provider) void {
+fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: []const u8, provider: ?@import("connection.zig").Name) void {
     const key: Key = .{ .position = item.position, .ordinal = item.ordinal };
     if (latest.*) |old| if (key.order(old.key) != .gt) return;
     const marks = @import("marks.zig");

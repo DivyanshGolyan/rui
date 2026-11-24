@@ -4854,7 +4854,9 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     try response.render(host_reply.renderHostInfo, .{info});
     try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
     const shape = protocol.host_info_reply;
-    try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.doublewrite) + protocol.shapeBytes(shape.settings_digest) + protocol.shapeBytes(shape.tail), protocol.max_host_info_response_bytes);
+    const optional_bytes = protocol.shapeBytes(shape.doublewrite) + protocol.shapeBytes(shape.settings_digest);
+    try std.testing.expect(response.slice().len <= protocol.max_host_info_response_bytes);
+    try std.testing.expect(protocol.shapeBytes(shape.head) + optional_bytes <= protocol.max_host_info_response_bytes);
 }
 
 test "MCP socket capacity is reserved beside model and Bash descriptors" {
@@ -6282,7 +6284,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             initial.accepted.configuration = &configuration;
             response = .{};
             try response.render(render, .{ @as([]const u8, ""), initial });
-            const config_json = ",\"configuration\":{\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"115200\"}";
+            const config_json = ",\"configuration\":{\"connection\":\"openai\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"115200\"}";
             const expected_creation = if (kind == .configure)
                 "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"13\",\"created\":true" ++ config_json ++ "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}"
             else
