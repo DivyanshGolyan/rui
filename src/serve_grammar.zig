@@ -75,6 +75,7 @@ const serve_test = &[_]Option{
     hiddenValue("test-inspection-reply-gate-path"),
     hiddenNumber("test-inspection-reply-delay-ms", 0, 60_000),
     hiddenNumber("test-client-send-buffer-bytes", 1, std.math.maxInt(c_int)),
+    hiddenFlag("observe-allowance"),
     hiddenFlag("test-phase-trace"),
     hiddenNumber("test-observation-fd", 0, std.math.maxInt(c_int)),
     hiddenNumber("test-observation-state-fd", 0, std.math.maxInt(c_int)),
@@ -134,6 +135,7 @@ test "running Host sources have one syntax owner" {
         .{ .argv = &.{ "rui", "host", "serve", "--settings", "-" }, .settings = "-" },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", "relative.json" }, .settings = "relative.json" },
         .{ .argv = &.{ "rui", "host", "serve", "--store", "/host", "--fault", "injected" }, .dir = "/host", .restartable = false },
+        .{ .argv = &.{ "rui", "host", "serve", "--observe-allowance" }, .restartable = false },
         .{ .argv = &.{ "rui", "host", "serve", "--help" }, .restartable = false },
     };
     for (cases, 0..) |case, index| {
@@ -163,4 +165,12 @@ test "running Host sources have one syntax owner" {
     }
     try std.testing.expect(!(try runningSources(arena.allocator(), &full)).restartable);
     try std.testing.expect((try runningSources(arena.allocator(), full[0 .. full.len - 2])).restartable);
+}
+
+test "CM-52 allowance observer flag is explicit and defaults off" {
+    var problem: grammar.Refusal = undefined;
+    const absent = try definition.parseSyntax(&.{}, std.testing.allocator, &problem);
+    try std.testing.expect(!absent.has("observe-allowance"));
+    const enabled = try definition.parseSyntax(&.{"--observe-allowance"}, std.testing.allocator, &problem);
+    try std.testing.expect(enabled.has("observe-allowance"));
 }

@@ -57,6 +57,7 @@ pub const Hooks = struct {
     inspection_reply: Hold = .{},
     control_gate: ?ControlGate = null,
     suppress_first_control_hint: bool = false,
+    observe_allowance: bool = false,
     phase_trace: bool = false,
     pause_fd: if (test_pause.enabled) ?c_int else void = if (test_pause.enabled) null else {},
     observation_fd: ?c_int = null,
@@ -225,7 +226,7 @@ pub const Tuning = struct {
     hooks: Hooks = .{},
 
     pub fn fromOptions(parsed: *const cli_grammar.Parsed) !Tuning {
-        var tuning: Tuning = .{};
+        var tuning: Tuning = .{ .hooks = .{ .observe_allowance = parsed.has("observe-allowance") } };
         const limits = &tuning.limits;
         const hooks = &tuning.hooks;
         if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| limits.bash_scratch_limit_bytes = limit;
@@ -378,10 +379,20 @@ pub const Host = struct {
     settings_digest: ?settings_handoff.Digest = null,
     trace_sequence: u64 = 0,
     trace_lost: std.atomic.Value(bool) = .init(false),
+    allowance_lost: std.atomic.Value(bool) = .init(false),
     test_observation: ?*TestObservation = null,
     /// Attached after readiness, when the Host's stderr may be /dev/null; launch_mutex guards writes.
     diagnostics: ?*HostDiagnostics = null,
     last_unprocessed_completions: ?u64 = null,
+
+    pub fn writeAllowance(self: *Host, observation: provider.AllowanceObservation) void {
+        var buffer: [1024]u8 = undefined;
+        const line = formatAllowance(observation, self.allowance_lost.load(.acquire), &buffer) catch {
+            self.allowance_lost.store(true, .release);
+            return;
+        };
+        if (!stderr.write(line)) self.allowance_lost.store(true, .release);
+    }
 
     pub fn launchAllowed(self: *const Host) bool {
         return self.phase.load(.acquire) == .open;
@@ -674,6 +685,55 @@ pub fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
 
 pub fn nowNs(host: *Host) u64 {
     return @intCast(std.Io.Clock.Timestamp.now(host.io, .awake).raw.nanoseconds);
+}
+
+fn allowanceField(comptime T: type, field: provider.AllowanceField(T), buffer: []u8) []const u8 {
+    return switch (field) {
+        .missing => "missing",
+        .invalid => "invalid",
+        .value => |value| if (T == f64)
+            std.fmt.bufPrint(buffer, "{e}", .{value}) catch "format_unavailable"
+        else
+            std.fmt.bufPrint(buffer, "{d}", .{value}) catch "format_unavailable",
+    };
+}
+
+fn formatAllowance(observation: provider.AllowanceObservation, lost: bool, buffer: []u8) ![]const u8 {
+    var values: [6][64]u8 = undefined;
+    return std.fmt.bufPrint(buffer, "rui: allowance source_account=unconfirmed provider={s} turn={d} operation={d} attempt={d} status={d} observed_at={d} delivery=completion prior_loss={s} primary_used={s} primary_minutes={s} primary_reset_at={s} secondary_used={s} secondary_minutes={s} secondary_reset_at={s}\n", .{ @tagName(observation.provider), observation.binding.turn_id, observation.binding.operation_id, observation.binding.attempt_ordinal, observation.status, observation.observed_at, if (lost) "true" else "false", allowanceField(f64, observation.primary.used, &values[0]), allowanceField(u64, observation.primary.minutes, &values[1]), allowanceField(u64, observation.primary.reset_at, &values[2]), allowanceField(f64, observation.secondary.used, &values[3]), allowanceField(u64, observation.secondary.minutes, &values[4]), allowanceField(u64, observation.secondary.reset_at, &values[5]) });
+}
+
+test "CM-50 allowance diagnostic contains fixed typed fields only" {
+    var buffer: [1024]u8 = undefined;
+    const line = try formatAllowance(.{
+        .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 3 },
+        .provider = .codex,
+        .status = 200,
+        .observed_at = 123,
+        .primary = .{ .used = .{ .value = 9.5 } },
+    }, false, &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, line, "source_account=unconfirmed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "primary_used=9.5e0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "secondary_used=missing") != null);
+    try std.testing.expect(line.len < buffer.len);
+    const extreme = try formatAllowance(.{
+        .binding = .{ .turn_id = std.math.maxInt(u64), .operation_id = std.math.maxInt(u64), .attempt_ordinal = std.math.maxInt(u64) },
+        .provider = .chatgpt,
+        .status = 599,
+        .observed_at = std.math.maxInt(i64),
+        .primary = .{ .used = .{ .value = std.math.floatMax(f64) }, .minutes = .{ .value = std.math.maxInt(u64) } },
+    }, true, &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, extreme, "primary_used=1.7976931348623157e308") != null);
+    try std.testing.expect(std.mem.indexOf(u8, extreme, "primary_minutes=18446744073709551615") != null);
+    try std.testing.expect(std.mem.indexOf(u8, extreme, "prior_loss=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, extreme, "format_unavailable") == null);
+    var tiny: [8]u8 = undefined;
+    try std.testing.expectError(error.NoSpaceLeft, formatAllowance(.{
+        .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 3 },
+        .provider = .codex,
+        .status = 200,
+        .observed_at = 123,
+    }, false, &tiny));
 }
 
 pub fn beginTestObservation(host: *Host, phase: []const u8, subject: ?[]const u8) ?TestObservation.Publication {
@@ -1507,4 +1567,12 @@ test "each provider's model list is published and rendered on its own" {
     lists.publish(.openai, "{\"data\":[{\"id\":\"gpt-6-mare\"}]}");
     try std.testing.expectEqualStrings("gpt-6-mare\n", lists.live.get(.openai).live.bytes);
     try std.testing.expect(lists.live.get(.codex) == .catalog);
+}
+
+test "CM-51 allowance observer Host tuning is default off and explicitly enabled" {
+    var refusal: cli_grammar.Refusal = undefined;
+    const absent = try serve_grammar.definition.parseSyntax(&.{}, std.testing.allocator, &refusal);
+    const enabled = try serve_grammar.definition.parseSyntax(&.{"--observe-allowance"}, std.testing.allocator, &refusal);
+    try std.testing.expect(!(try Tuning.fromOptions(&absent)).hooks.observe_allowance);
+    try std.testing.expect((try Tuning.fromOptions(&enabled)).hooks.observe_allowance);
 }
