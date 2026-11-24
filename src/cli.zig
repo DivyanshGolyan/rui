@@ -1,5 +1,6 @@
 const credential_location = @import("credential_location.zig");
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const host_endpoint = @import("host_endpoint.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const model_catalog = @import("model_catalog.zig");
@@ -408,7 +409,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         .access_failure => .access_failure,
     } else .store_unavailable;
     var shown: codex_auth.Shown = undefined;
-    const account = if (reader != .command_line and readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
+    const account = if (reader != .command_line and readiness.get(provider_route.nameOf(.chatgpt)).usable()) accountDetails(init, &shown) else null;
     const facts: defaults_report.Facts = .{
         .changed = changed,
         .values = values,
@@ -464,7 +465,7 @@ fn signInNames() defaults_report.Names {
 
 fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Readinesses) !void {
     var shown: codex_auth.Shown = undefined;
-    const account = if (readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
+    const account = if (readiness.get(provider_route.nameOf(.chatgpt)).usable()) accountDetails(init, &shown) else null;
     var buffer: [1024]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const names = signInNames();
@@ -2014,7 +2015,7 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
         if (intent.model == null and std.mem.eql(u8, entry.binding.?.provider.slice(), "openai")) entry.binding = null;
     } else {
         const connection_info = try host_start.inspectConnection(init, destination.path);
-        readiness.set(.openai, connection_info.readiness);
+        readiness.set(provider_route.nameOf(.openai), connection_info.readiness);
         entry.binding = try snapshot.resolve(&readiness);
         if (connection_info.custom() and intent.model == null) {
             if (entry.binding) |*binding| if (std.mem.eql(u8, binding.provider.slice(), "openai")) {
@@ -2108,7 +2109,7 @@ fn joinedProviders(comptime separator: []const u8) []const u8 {
 fn localReadiness(init: std.process.Init) provider_selection.Readinesses {
     var readiness: provider_selection.Readinesses = undefined;
     for (std.enums.values(protocol.Provider)) |provider|
-        readiness.set(provider, providerReadiness(init, provider) catch .credential_error);
+        readiness.set(provider_route.nameOf(provider), providerReadiness(init, provider) catch .credential_error);
     return readiness;
 }
 

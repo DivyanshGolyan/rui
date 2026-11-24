@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const c = @import("posix");
 const model_capability = @import("model_capability.zig");
 const platform = @import("platform.zig");
@@ -241,7 +242,7 @@ fn validateOwner(handle: anytype) !void {
 
 fn codexOnly(state: provider_selection.Readiness) Readinesses {
     var readiness: Readinesses = .initFill(.missing);
-    readiness.set(.codex, state);
+    readiness.set(provider_route.nameOf(.codex), state);
     return readiness;
 }
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const core = @import("sign_in.zig");
@@ -1068,7 +1069,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             try append(&rows, a, "Browser", "Recommended. Paste callback if needed.", .browser, .{ .method = .browser });
             try append(&rows, a, "Device code", "Copy a code and approve in a browser.", .device, .{ .method = .device });
             const readiness = if (self.init != null and self.ready != null) self.ready.?(self.init.?, self.target.slice()) else core.Readinesses.initFill(.missing);
-            const usable: ?core.Provider = if (readiness.get(.chatgpt).usable()) .chatgpt else if (readiness.get(.codex).usable()) .codex else null;
+            const usable: ?core.Provider = if (readiness.get(provider_route.nameOf(.chatgpt)).usable()) .chatgpt else if (readiness.get(provider_route.nameOf(.codex)).usable()) .codex else null;
             try append(&rows, a, "Use saved login", if (usable != null) "Reuse this account's local sign-in" else "No usable saved ChatGPT sign-in", .reuse, if (usable) |provider| .{ .reuse = provider } else null);
             try button(&buttons, a, "Back", .back, .back);
         },
@@ -2386,7 +2387,7 @@ test "Sign-in replacement retains whole prior launch and cleanup receipts across
     const Hooks = struct {
         fn ready(_: std.process.Init, _: []const u8) core.Readinesses {
             var result: core.Readinesses = .initFill(.missing);
-            result.set(.codex, .configured);
+            result.set(provider_route.nameOf(.codex), .configured);
             return result;
         }
         fn activate(init_: std.process.Init, _: selection.Intent, _: ?*const host_start.Connection) !Activation {

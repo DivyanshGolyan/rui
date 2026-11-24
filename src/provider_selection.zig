@@ -1,5 +1,6 @@
 const std = @import("std");
-const provider_name = @import("provider_name.zig");
+const connection = @import("connection.zig");
+const provider_route = @import("provider_route.zig");
 
 pub const Readiness = enum {
     configured,
@@ -13,7 +14,28 @@ pub const Readiness = enum {
     }
 };
 
-pub const Readinesses = std.enums.EnumArray(provider_name.Provider, Readiness);
+/// One readiness per built-in provider, keyed by connection name. A name
+/// that is not built in has no readiness here, and reads as missing.
+pub const Readinesses = struct {
+    states: [provider_route.built_in_names.len]Readiness,
+
+    pub fn initFill(state: Readiness) Readinesses {
+        return .{ .states = @splat(state) };
+    }
+
+    pub fn get(self: *const Readinesses, name: connection.Name) Readiness {
+        return self.states[slot(name) orelse return .missing];
+    }
+
+    pub fn set(self: *Readinesses, name: connection.Name, state: Readiness) void {
+        self.states[slot(name).?] = state;
+    }
+
+    fn slot(name: connection.Name) ?usize {
+        for (provider_route.built_in_names, 0..) |built_in, at| if (built_in.eql(name)) return at;
+        return null;
+    }
+};
 
 pub const Capability = struct {
     name: []const u8,
