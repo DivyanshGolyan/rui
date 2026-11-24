@@ -957,13 +957,13 @@ pub const app_tools = struct {
         };
         if (value != .array or value.array.items.len > max_records) return error.InvalidAppTools;
         const records = try arena.alloc(Record, value.array.items.len);
-        for (value.array.items, records) |item, *record| record.* = try recordOf(arena, item);
+        for (value.array.items, records) |item, *entry| entry.* = try recordOf(arena, item);
         std.mem.sort(Record, records, {}, byName);
-        for (records, 0..) |record, index| {
-            if (index != 0 and std.mem.eql(u8, records[index - 1].name, record.name)) return error.DuplicateAppToolName;
+        for (records, 0..) |entry, index| {
+            if (index != 0 and std.mem.eql(u8, records[index - 1].name, entry.name)) return error.DuplicateAppToolName;
         }
         const digests = try arena.alloc([32]u8, records.len);
-        for (records, digests) |*record, *digest| digest.* = recordDigest(record);
+        for (records, digests) |*entry, *digest| digest.* = recordDigest(entry);
         const declaration: Declaration = .{ .records = records, .digests = digests };
         std.debug.assert(declaration.toolSet().valid());
         return .{ .declared = declaration };
