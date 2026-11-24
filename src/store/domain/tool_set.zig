@@ -53,16 +53,10 @@ pub fn appNamesSql(comptime set_column: []const u8) []const u8 {
 
 /// True when the Host set (its records, MCP ones included) has the name of the app record `alias`. The Host record
 /// is the one a name resolves to (`HostToolSet.resolve` checks the Host first), so such an app record is never offered:
-/// the offer, its stale check and settlement's app names all read this one rule.
+/// the offer and its stale check read this one rule; settlement reads the frozen offer's owners, never this rule.
 pub fn hostShadowsSql(comptime alias: []const u8) []const u8 {
     return "EXISTS(SELECT 1 FROM host_tool_set host_s JOIN tool_set_member host_m ON host_m.tool_set_id=host_s.tool_set_id " ++
         "JOIN tool_record host_t ON host_t.tool_record_id=host_m.tool_record_id WHERE host_s.slot=1 AND host_t.name=" ++ alias ++ ".name)";
-}
-
-/// The app names a frozen set offers: its app members the Host set does not shadow.
-pub fn offeredAppNamesSql(comptime set_column: []const u8) []const u8 {
-    return "(SELECT @list(tool.name) FROM tool_set_member member " ++
-        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=" ++ set_column ++ " AND tool.owner='app' AND NOT " ++ hostShadowsSql("tool") ++ ")";
 }
 
 pub const max_names_bytes = tool_name.max_names_bytes;
