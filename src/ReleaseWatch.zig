@@ -89,7 +89,7 @@ fn hour(_: std.Io) u64 {
     return 60 * std.time.ms_per_min;
 }
 
-test "SH-145 settle stops a read in flight and the watch reads no more" {
+test "SH-151 settle stops a read in flight and the watch reads no more" {
     const Blocked = struct {
         var calls: std.atomic.Value(usize) = .init(0);
         fn started(count: *const std.atomic.Value(usize)) bool {

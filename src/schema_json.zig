@@ -1,17 +1,25 @@
 const std = @import("std");
 const max_depth = @import("json_limits.zig").max_depth;
 
+/// The JSON value a captured document must be: a schema is an object, an app tools declaration an array.
+pub const Root = enum { object, array };
+
 pub const Encoder = struct {
     scanner: std.json.Scanner,
     containers: [max_depth]Container = undefined,
     depth: usize = 0,
     fragment: enum { none, string, number } = .none,
     done: bool = false,
+    root: Root = .object,
 
     const Container = struct { object: bool, key: bool = true, empty: bool = true };
 
     pub fn init(allocator: std.mem.Allocator) Encoder {
-        return .{ .scanner = std.json.Scanner.initStreaming(allocator) };
+        return initRoot(allocator, .object);
+    }
+
+    pub fn initRoot(allocator: std.mem.Allocator, root: Root) Encoder {
+        return .{ .scanner = std.json.Scanner.initStreaming(allocator), .root = root };
     }
 
     pub fn deinit(self: *Encoder) void {
@@ -28,7 +36,8 @@ pub const Encoder = struct {
             };
             switch (token) {
                 .object_begin, .array_begin => {
-                    if (self.depth == 0 and token != .object_begin) return error.InvalidJsonShape;
+                    const opens_root = if (self.root == .object) token == .object_begin else token == .array_begin;
+                    if (self.depth == 0 and !opens_root) return error.InvalidJsonShape;
                     if (self.depth == self.containers.len) return error.JsonTooDeep;
                     try self.prefix(sink);
                     const object = token == .object_begin;
@@ -98,6 +107,26 @@ pub const Encoder = struct {
         };
     }
 };
+
+test "app tool arrays normalize incrementally like DOM serialization" {
+    const input = "[{ \"name\" : \"a\", \"input_schema\": {\"enum\":[null,1.5,\"x\\n\"]}}, {}]";
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    const Sink = struct {
+        writer: *std.Io.Writer,
+        pub fn write(self: @This(), bytes: []const u8) !void {
+            try self.writer.writeAll(bytes);
+        }
+    };
+    var encoder = Encoder.initRoot(std.testing.allocator, .array);
+    defer encoder.deinit();
+    for (input, 0..) |byte, index| try std.testing.expectEqual(index == input.len - 1, try encoder.feed(byte, Sink{ .writer = &output.writer }));
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, input, .{ .parse_numbers = false });
+    defer parsed.deinit();
+    const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, parsed.value, .{});
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, output.written());
+}
 
 test "schema objects normalize incrementally like DOM serialization" {
     const inputs = [_][]const u8{

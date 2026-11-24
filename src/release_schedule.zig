@@ -64,7 +64,7 @@ fn offerOf(running: ?Version, found: Version) ?Version {
     return if (build.order(found) == .lt) found else null;
 }
 
-test "SH-143 the watch reads at its first poll, again only once its gap has passed, and a failed read keeps the last offer" {
+test "SH-149 the watch reads at its first poll, again only once its gap has passed, and a failed read keeps the last offer" {
     const hour: u64 = 60 * minute_ms;
     const running: Version = .{ .schema = 80, .patch = 1 };
     const newer: Version = .{ .schema = 80, .patch = 2 };
@@ -94,7 +94,7 @@ test "SH-143 the watch reads at its first poll, again only once its gap has pass
     try std.testing.expectEqual(longest_gap_ms, gap(longest_gap_ms - shortest_gap_ms));
 }
 
-test "SH-144 only a release newer than this build is offered; equal, older or an unparsable build is not" {
+test "SH-150 only a release newer than this build is offered; equal, older or an unparsable build is not" {
     const v = struct {
         fn of(schema: u32, patch: u32) Version {
             return .{ .schema = schema, .patch = patch };

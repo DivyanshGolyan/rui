@@ -82,6 +82,8 @@ test "Session settings Current report and typed Settings round trip every settin
     defer command.removeTemporaryContent(io) catch unreachable;
     command.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
     command.configuration.loaded_tools = try .of(&.{ "bash", "find_tools" });
+    const app_declaration = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+    command.configuration.app_tools = .{ .state = .value, .borrowed = app_declaration.ptr, .length = app_declaration.len, .digest = protocol.contentDigest(app_declaration) };
     try command.configuration.permission_mode.value.set("ask");
     try command.configuration.compaction_trigger.value.set("1000");
     command.configuration.output_reservation.state = .value;

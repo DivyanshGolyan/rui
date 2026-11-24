@@ -278,7 +278,7 @@ pub fn versionTail(run: ?Run, available: ?Version, buffer: *[max_line_bytes]u8) 
     return std.fmt.bufPrint(buffer, " · update to {f}", .{version}) catch unreachable;
 }
 
-test "SH-146 the Version row shows a run's own words while one shows, otherwise the offered release" {
+test "SH-152 the Version row shows a run's own words while one shows, otherwise the offered release" {
     var buffer: [max_line_bytes]u8 = undefined;
     const offer: Version = .{ .schema = 80, .patch = 2 };
     const runs = [_]?Run{ null, .checking, .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 80, .patch = 1 } }, .outcome = .unchanged } }, .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } };

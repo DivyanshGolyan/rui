@@ -38,7 +38,7 @@ pub fn writeSchema(writer: *std.Io.Writer, input_schema: []const u8) Error!void 
     try writer.writeAll("\"" ++ description_property ++ "\"]}");
 }
 
-fn check(input_schema: []const u8) Error!void {
+pub fn check(input_schema: []const u8) Error!void {
     if (document.member(input_schema, "properties")) |properties| {
         if (document.kind(properties) != .object) return error.Malformed;
         var own = document.Members.init(properties);
