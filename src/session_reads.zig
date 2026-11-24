@@ -42,7 +42,8 @@ pub const RenderedRow = struct {
     message_key: ?[36]u8 = null,
 };
 
-pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ChatInfo.Edit) anyerror!bool;
+pub const ConfigureAttempt = union(enum) { edit: ChatInfo.Edit, slash: []u8 };
+pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ConfigureAttempt) anyerror!@import("configure_outcome.zig").Outcome;
 pub const Command = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, []u8) anyerror!void;
 pub const Requests = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, *std.Io.Writer, *SavedRequests) anyerror!void;
 pub const SavedRequests = slash_commands.Requests(protocol.max_key_bytes);
@@ -188,6 +189,9 @@ pub const Job = struct {
     command: Command = undefined,
     configure: ?Configure = null,
     info_edit: ?ChatInfo.Edit = null,
+    info_slash: bool = false,
+    configure_keys: [@import("overview_view.zig").max_requests][36]u8 = undefined,
+    configure_count: usize = 0,
     requests: Requests = undefined,
     status: Status = undefined,
     phase: ReadPhase = .activity,
@@ -233,7 +237,9 @@ pub const Job = struct {
         cursor: protocol_reply.ActivityCursor = .{},
         rendering: bool = false,
         command_stderr_restored: bool = false,
-        info_saved: bool = false,
+        info_outcome: ?@import("configure_outcome.zig").Outcome = null,
+        configure_resolved: [@import("overview_view.zig").max_requests][36]u8 = undefined,
+        configure_resolved_count: usize = 0,
         action: ?u64 = null,
         output_length: u64 = 0,
         copied: Copied = .no_answer,
@@ -401,7 +407,7 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     var read = task.readContext();
     read.cancellation = job.interrupted;
-    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = read, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length], .configure = job.configure, .edit = job.info_edit, .saved = &job.result.info_saved };
+    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = read, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length], .configure = job.configure, .edit = job.info_edit, .slash = job.info_slash, .outcome = &job.result.info_outcome };
     const ended = run.into(job.files.inspection);
     job.result.rendering = ended.rendering;
     job.result.command_stderr_restored = ended.stderr_restored;
@@ -417,12 +423,14 @@ pub const CommandRun = struct {
     line: []u8,
     configure: ?Configure = null,
     edit: ?ChatInfo.Edit = null,
-    saved: ?*bool = null,
+    slash: bool = false,
+    outcome: ?*?@import("configure_outcome.zig").Outcome = null,
 
     fn execute(self: CommandRun) !void {
-        if (self.edit) |edit| {
+        if (self.edit != null or self.slash) {
             const configure = self.configure orelse return error.ConfigureUnavailable;
-            self.saved.?.* = try configure(self.init, self.requests, self.store, self.session, edit);
+            const attempt: ConfigureAttempt = if (self.edit) |edit| .{ .edit = edit } else .{ .slash = self.line };
+            self.outcome.?.* = try configure(self.init, self.requests, self.store, self.session, attempt);
         } else try self.command(self.init, self.requests, self.store, self.session, self.line);
     }
 
@@ -506,7 +514,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         const line_stale = Line.stale(job.line_read, &page.facts);
         if (job.open_status or job.watch_status or line_stale) {
             const current = try View.current(requests, job.store, job.session, job.files.scratch);
-            if (line_stale) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
+            if (line_stale or job.open_status) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
             if (job.open_status or job.watch_status) {
                 job.result.status = try job.status(task.io, &current, job.files.scratch, job.status_taken, if (job.open_status) null else job.status_shown, job.status_actions);
             }
@@ -962,6 +970,45 @@ fn lastAnswer(requests: client.Requests, store: []const u8, session: []const u8)
     }
 }
 
+const ConfigureObservation = enum { resolved, absent, invalid };
+
+fn configureObservation(reply: protocol_reply.ObservationReply, key: [36]u8, session: []const u8) ConfigureObservation {
+    return switch (reply) {
+        .observation => |observation| blk: {
+            const facts = observation.facts;
+            if (!facts.key.eql(&key)) break :blk .invalid;
+            if (facts.status == .absent) break :blk .absent;
+            if (facts.kind != .configure or facts.target == null or !facts.target.?.eql(session)) break :blk .invalid;
+            break :blk .resolved;
+        },
+        .failure, .not_modified => .invalid,
+    };
+}
+
+test "SUI-137 Configure observations settle only the exact saved key and Session" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const other: [36]u8 = "01234567-89ab-4cde-8012-0123456789ac".*;
+    var facts: protocol_reply.CommandObservation = .{ .key = .{}, .status = .absent };
+    try facts.key.set(&key);
+    const reply = struct {
+        fn make(value: protocol_reply.CommandObservation) protocol_reply.ObservationReply {
+            return .{ .observation = .{ .facts = value, .since = null } };
+        }
+    }.make;
+    try std.testing.expectEqual(ConfigureObservation.absent, configureObservation(reply(facts), key, "k7m2qx"));
+    for ([_]@TypeOf(facts.status){ .accepted, .rejected }) |status| {
+        facts.status = status;
+        facts.kind = .configure;
+        facts.target = .{};
+        try facts.target.?.set("k7m2qx");
+        try std.testing.expectEqual(ConfigureObservation.resolved, configureObservation(reply(facts), key, "k7m2qx"));
+        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), other, "k7m2qx"));
+        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), key, "a1b2c3"));
+        facts.kind = .message;
+        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), key, "k7m2qx"));
+    }
+}
+
 pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     try job.files.inspection.setLength(task.io, 0);
@@ -970,6 +1017,24 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     var output = job.files.inspection.writerStreaming(task.io, &buffer);
     std.debug.assert(job.inspection_kind == .requests);
     try job.requests(job.init, task.readContext(), job.store, job.session, &output.interface, &job.result.requests);
+    var unable = false;
+    for (job.configure_keys[0..job.configure_count]) |key| {
+        var response_buffer: client.ObservationBuffer = .{};
+        const response = task.requests().observeCommand(job.store, &key, null, &response_buffer) catch |err| {
+            if (@as(anyerror, err) == error.Cancelled or @as(anyerror, err) == error.Canceled) return err;
+            unable = true;
+            continue;
+        };
+        switch (configureObservation(response, key, job.session)) {
+            .resolved => {
+                job.result.configure_resolved[job.result.configure_resolved_count] = key;
+                job.result.configure_resolved_count += 1;
+            },
+            .absent => {},
+            .invalid => unable = true,
+        }
+    }
+    if (unable) try output.interface.writeAll("Some Configure receipts could not be refreshed; their original keys remain unconfirmed.\n");
     try writeSubmission(job.inspection_submission, null, &output.interface);
     try output.flush();
 }

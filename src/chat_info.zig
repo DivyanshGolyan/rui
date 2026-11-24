@@ -19,7 +19,7 @@ const widget_style = @import("widget_style.zig");
 const Self = @This();
 const focus = @import("chat_info_focus.zig");
 
-pub const SaveState = enum { idle, pending, saved, failed };
+pub const SaveState = enum { idle, pending, saved, failed, unconfirmed };
 pub const Edit = union(enum) {
     effort: ?catalog.ReasoningEffort,
     permission: @FieldType(status.Session, "permission"),
@@ -35,6 +35,7 @@ pub const Backend = struct {
     archive: *const fn (*anyopaque) anyerror!view.IntentAdmission,
     copy_last_answer: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     state: *const fn (*anyopaque) SaveState,
+    unconfirmed_key: ?*const fn (*anyopaque) ?[36]u8 = null,
     models: *const fn (*anyopaque) ModelChoice.Snapshot,
     caps: *const fn (*anyopaque) view.Caps,
     copied: *const fn (*anyopaque) bool,
@@ -56,6 +57,7 @@ panel: Panel = .{ .title = "Chat", .action_gap = 1, .natural_height = true, .top
 fields: [6]Panel.Field = undefined,
 actions: [3][]const u8 = undefined,
 failures: [9]?[]const u8 = @splat(null),
+unconfirmed_keys: [9]?[36]u8 = @splat(null),
 pending: ?usize = null,
 effort_labels: [std.enums.values(catalog.ReasoningEffort).len + 1][]const u8 = undefined,
 effort_count: usize = 0,
@@ -66,6 +68,24 @@ renaming: bool = false,
 rename_bytes: [status.max_label_bytes]u8 = undefined,
 rename_editor: Editor = .initLocked(&.{}, .line_refusals_release),
 pasting: bool = false,
+
+pub fn clearUnconfirmed(self: *Self, key: [36]u8) void {
+    for (&self.unconfirmed_keys, &self.failures) |*saved, *failure| {
+        if (saved.*) |value| if (std.mem.eql(u8, &value, &key)) {
+            saved.* = null;
+            failure.* = null;
+        };
+    }
+}
+
+fn clearUnconfirmedPresentation(self: *Self) void {
+    for (&self.unconfirmed_keys, &self.failures) |*saved, *failure| {
+        if (saved.* != null) {
+            saved.* = null;
+            failure.* = null;
+        }
+    }
+}
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -100,6 +120,7 @@ pub fn standaloneField(self: *const Self) ?Row {
 pub fn closeStandaloneChoice(self: *Self) void {
     self.standalone = null;
     self.cancelEdit();
+    self.clearUnconfirmedPresentation();
 }
 
 pub fn standaloneWidget(self: *Self) vxfw.Widget {
@@ -220,6 +241,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
         return;
     }
     self.failures[row] = null;
+    self.unconfirmed_keys[row] = null;
     switch (row) {
         0 => {
             self.effort_labels[0] = "model default";
@@ -302,6 +324,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize, choice: usize) !vo
 
 fn save(self: *Self, ctx: *vxfw.EventContext, row: usize, edit: Edit) !void {
     self.failures[row] = null;
+    self.unconfirmed_keys[row] = null;
     self.backend.configure(self.backend.context, edit) catch {
         self.failures[row] = " · couldn't save";
         if (self.standalone) |*shown| shown.phase = .failed;
@@ -319,12 +342,15 @@ fn poll(self: *Self) void {
     const state = self.backend.state(self.backend.context);
     if (state == .idle or state == .pending) return;
     self.readSession();
-    if (state == .failed or self.read_failed) {
+    if (state == .failed or state == .unconfirmed or self.read_failed) {
         if (self.standalone) |*shown| shown.phase = .failed;
     } else {
         self.closeStandaloneChoice();
     }
-    self.failures[row] = if (state == .failed) switch (row) {
+    if (state == .unconfirmed) if (self.backend.unconfirmed_key) |read| {
+        self.unconfirmed_keys[row] = read(self.backend.context);
+    };
+    self.failures[row] = if (state == .unconfirmed) " · not confirmed · /requests" else if (state == .failed) switch (row) {
         7 => " · couldn't archive",
         8 => " · couldn't copy",
         else => " · couldn't save",
@@ -1729,6 +1755,22 @@ test "Chat info standalone effort checks the actual Session effort without chang
             for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (actual == row) "✓" else " ", drawn.readCell(3, @intCast(row + 1)).char.grapheme);
         }
     };
+}
+
+test "SUI-136 field notices clear only for the observed Configure key" {
+    const a: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const b: [36]u8 = "01234567-89ab-4cde-8012-0123456789ac".*;
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    page.unconfirmed_keys[0] = a;
+    page.unconfirmed_keys[1] = b;
+    page.failures[0] = " · not confirmed · /requests";
+    page.failures[1] = " · not confirmed · /requests";
+    page.clearUnconfirmed(a);
+    try std.testing.expect(page.failures[0] == null and page.unconfirmed_keys[0] == null);
+    try std.testing.expectEqual(b, page.unconfirmed_keys[1].?);
+    try std.testing.expectEqualStrings(" · not confirmed · /requests", page.failures[1].?);
 }
 
 test "Chat info standalone failure retry preserves field-only presentation and the actual effort check" {

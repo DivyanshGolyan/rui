@@ -507,7 +507,9 @@ pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes
     while (at > 0) {
         at -= 1;
         const request = &state.requests[at];
-        if (request.kind != .send or request.status != .unknown) continue;
+        if (request.status != .unknown) continue;
+        if (request.kind == .configure) return std.fmt.bufPrint(buffer, "! Config unconfirmed · /requests: keys · exit: intent", .{}) catch unreachable;
+        if (request.kind != .send) continue;
         return switch (request.sent) {
             .saved => |saved| std.fmt.bufPrint(buffer, "! Not confirmed · rui request recover {s}", .{&saved.original.key}),
             else => std.fmt.bufPrint(buffer, "! {s}: send not confirmed; details on exit", .{&request.session.?}),
@@ -581,6 +583,17 @@ pub fn noticeSegments(arena: Allocator, state: *const State, width: u16, caps: C
     return try std.mem.concat(arena, Segment, parts[0..count]);
 }
 
+pub fn unknownConfigureKeys(state: *const State, reference: Reference, out_keys: *[max_requests][36]u8) usize {
+    var count: usize = 0;
+    for (state.requests[0..state.request_count]) |*request| {
+        if (request.kind != .configure or request.status != .unknown or request.session == null or
+            !std.mem.eql(u8, &request.session.?, &reference) or request.text.len != 36) continue;
+        out_keys[count] = request.text.slice()[0..36].*;
+        count += 1;
+    }
+    return count;
+}
+
 pub fn canHoldSend(state: *const State) bool {
     return state.request_count < max_requests;
 }
@@ -610,6 +623,11 @@ pub const ConversationInput = union(enum) {
     archive: ArchiveState,
     unarchive,
     pin: bool,
+    configure: union(enum) {
+        reserve: []const u8,
+        completed: @import("configure_outcome.zig").Outcome,
+        observed: [36]u8,
+    },
 
     cancel_upgrade,
 
@@ -764,7 +782,7 @@ fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line
 }
 
 pub const Request = struct {
-    kind: enum { create, stop, archive, unarchive, pin, unpin, send },
+    kind: enum { create, stop, archive, unarchive, pin, unpin, send, configure },
 
     session: ?Reference = null,
     status: enum { pending, done, failed, unknown } = .pending,
@@ -772,6 +790,7 @@ pub const Request = struct {
     text: Bounded(@max(max_handle_bytes, session_work.max_code_bytes)) = .{},
 
     sent: submission.Recovery = .none,
+    configure_intent: Bounded(1024) = .{},
 };
 
 pub const Notice = struct {
@@ -1597,6 +1616,28 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .archive => |archive| archiveIntent(state, .{ .ask = .{ .reference = input.reference, .work = input.work, .archive = archive } }, &effects),
                 .unarchive => archiveIntent(state, .{ .restore = input.reference }, &effects),
                 .pin => |pinned| pinIntent(state, .{ .reference = input.reference, .pinned = pinned }, &effects),
+                .configure => |configure_event| switch (configure_event) {
+                    .reserve => |intent| {
+                        if (intent.len <= 1024 and std.unicode.utf8ValidateSlice(intent) and state.pendingAt(.configure, input.reference) == null and state.request(.configure, input.reference)) {
+                            state.requests[state.request_count - 1].configure_intent.set(intent) catch unreachable;
+                            effects.intent_admission = .admitted;
+                        }
+                    },
+                    .completed => |outcome| {
+                        if (state.pendingAt(.configure, input.reference)) |at| switch (outcome) {
+                            .accepted, .rejected, .not_sent => state.answer(at, .done, ""),
+                            .unconfirmed => |key| state.answer(at, .unknown, &key),
+                        };
+                    },
+                    .observed => |key| {
+                        for (state.requests[0..state.request_count], 0..) |*request, at| {
+                            if (request.kind != .configure or request.status != .unknown or request.session == null or
+                                !std.mem.eql(u8, &request.session.?, &input.reference) or !request.text.eql(&key)) continue;
+                            state.answer(at, .done, "");
+                            break;
+                        }
+                    },
+                },
                 .cancel_upgrade => if (state.upgrade.takesEscape()) effects.add(.cancel_upgrade),
                 .upgrade_failed => {
                     state.upgrade.block();
@@ -1846,6 +1887,11 @@ pub fn writeDeparture(state: *const State, _: ?ReasoningEffort, writer: *std.Io.
                 .done => try writer.print("rui: Stopped {s}.\n", .{&request.session.?}),
             },
             .send => try submission.writeGuide(request.sent, writer),
+            .configure => switch (request.status) {
+                .pending => try writer.print("rui: Configure for {s} did not finish.\n", .{&request.session.?}),
+                .unknown => try writer.print("rui: Configure for {s} is not confirmed: {s}. Original: ~/.config/rui/requests/{s}.json. Recovery with rui request recover {s} may apply this older setting.\n", .{ &request.session.?, request.configure_intent.slice(), text, text }),
+                .done, .failed => {},
+            },
         }
     }
 }
@@ -5284,6 +5330,63 @@ test "only a Host handshake rebases read revisions and rejects old traversals an
     _ = try respond(&state, .full, next, &.{session(&ref, finished.state, .{})});
     try std.testing.expectEqualDeep(next, state.token.?);
     try std.testing.expectEqualDeep(finished, state.workOf(state.find(ref).?));
+}
+
+test "SUI-135 Configure ledger retains each unknown through later edits and Session switches" {
+    const ref = "k7m2qx".*;
+    const a: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const b: [36]u8 = "01234567-89ab-4cde-8012-0123456789ac".*;
+    for ([_]bool{ false, true }) |second_unknown| {
+        var state = try opened(&.{session(&ref, .{ .idle = ago(0) }, .{})});
+        defer state.deinit();
+        const first = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .reserve = "effort medium" } } } });
+        try std.testing.expectEqual(IntentAdmission.admitted, first.intent_admission);
+        _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .completed = .{ .unconfirmed = a } } } } });
+        const next = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .reserve = "effort high" } } } });
+        try std.testing.expectEqual(IntentAdmission.admitted, next.intent_admission);
+        const second: @import("configure_outcome.zig").Outcome = if (second_unknown) .{ .unconfirmed = b } else .accepted;
+        _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .completed = second } } } });
+        _ = try step(&state, .{ .conversation = null });
+        _ = try step(&state, .{ .conversation = ref });
+        try std.testing.expectEqual(@as(usize, if (second_unknown) 2 else 1), state.request_count);
+        try std.testing.expect(state.requests[0].text.eql(&a));
+        if (second_unknown) try std.testing.expect(state.requests[1].text.eql(&b));
+        var guidance: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer guidance.deinit();
+        try writeDeparture(&state, null, &guidance.writer);
+        try std.testing.expect(std.mem.indexOf(u8, guidance.written(), &a) != null);
+        try std.testing.expect(std.mem.indexOf(u8, guidance.written(), "effort medium") != null);
+        try std.testing.expectEqual(second_unknown, std.mem.indexOf(u8, guidance.written(), &b) != null);
+        var status: [max_unconfirmed_line_bytes]u8 = undefined;
+        try std.testing.expect(unconfirmedLine(&state, &status) != null);
+        _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .observed = a } } } });
+        try std.testing.expectEqual(@as(usize, @intFromBool(second_unknown)), state.request_count);
+        if (second_unknown) try std.testing.expect(state.requests[0].text.eql(&b));
+    }
+}
+
+test "SUI-135 Configure ledger capacity is released only by the matching observed receipt" {
+    const ref = "k7m2qx".*;
+    var state = try opened(&.{session(&ref, .{ .idle = ago(0) }, .{})});
+    defer state.deinit();
+    var first: [36]u8 = undefined;
+    for (0..max_requests) |at| {
+        var key: [36]u8 = "01234567-89ab-4cde-8012-0123456789a0".*;
+        key[35] = '0' + @as(u8, @intCast(at));
+        if (at == 0) first = key;
+        const reserved = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .reserve = "effort: high" } } } });
+        try std.testing.expectEqual(IntentAdmission.admitted, reserved.intent_admission);
+        _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .completed = .{ .unconfirmed = key } } } } });
+    }
+    const refused = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .reserve = "effort: low" } } } });
+    try std.testing.expectEqual(IntentAdmission.refused, refused.intent_admission);
+    const unrelated: [36]u8 = "01234567-89ab-4cde-8012-0123456789af".*;
+    _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .observed = unrelated } } } });
+    try std.testing.expectEqual(@as(usize, max_requests), state.request_count);
+    _ = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .observed = first } } } });
+    try std.testing.expectEqual(@as(usize, max_requests - 1), state.request_count);
+    const next = try step(&state, .{ .conversed = .{ .reference = ref, .work = .idle, .input = .{ .configure = .{ .reserve = "effort: low" } } } });
+    try std.testing.expectEqual(IntentAdmission.admitted, next.intent_admission);
 }
 
 test "an original Esc left unconfirmed is named at once and recovered on departure, until the ledger is full" {

@@ -725,7 +725,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     }
     const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .details = opened[3], .actions = opened[4..6].*, .parts = opened[6] };
     const frontend = try self.init.gpa.create(SessionFrontend);
-    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
+    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .configure_keys = configureKeys, .models = modelsSnapshot };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
     const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .startable = hostStartable, .start = requestHostStart, .notice = hostNotice } }, self.caps);
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
@@ -1697,6 +1697,11 @@ fn modelsSnapshot(raw: *anyopaque) @import("model_choice.zig").Snapshot {
     const self: *Self = @ptrCast(@alignCast(raw));
     const state = &self.state;
     return .{ .menu = if (state.menu_read == .read or state.menu.entries.len > 0) &state.menu else null, .revision = state.menu_revision, .ready = state.modelsReady() };
+}
+
+fn configureKeys(raw: *anyopaque, out_keys: *[view.max_requests][36]u8) usize {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return view.unknownConfigureKeys(&self.state, self.opened, out_keys);
 }
 
 fn archiveState(raw: *anyopaque) @import("chat_info.zig").SaveState {
@@ -7474,7 +7479,8 @@ const EmptySessionOwner = struct {
         unreachable;
     }
 
-    fn configure(_: std.process.Init, _: client.ReadContext, _: []const u8, reference: []const u8, edit: @import("chat_info.zig").Edit) !bool {
+    fn configure(_: std.process.Init, _: client.ReadContext, _: []const u8, reference: []const u8, attempt: session_reads.ConfigureAttempt) !@import("configure_outcome.zig").Outcome {
+        const edit = attempt.edit;
         const row = canonical(reference);
         switch (edit) {
             .model => |model| try row.model.set(model),
@@ -7488,7 +7494,7 @@ const EmptySessionOwner = struct {
         }
         row.revision += 1;
         configurations += 1;
-        return true;
+        return .accepted;
     }
 
     fn frontend(self: *EmptySessionOwner) *SessionFrontend {
