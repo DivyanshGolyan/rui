@@ -763,7 +763,7 @@ test "the served set holds the longest connections list beside every built-in, a
         settings.providers.entries.codex.?.credential_file = .{};
         settings.providers.entries.chatgpt.?.credential_file = .{};
         const served = fromSettings(&settings, &connected).served();
-        try std.testing.expectEqual(connection.max_list + 3 - @intFromBool(replace_openai), served.items().len);
+        try std.testing.expectEqual(@as(usize, connection.max_list + 3) - @intFromBool(replace_openai), served.items().len);
         try std.testing.expectEqual(protocol.Route.key_file, served.route("openai"));
     }
 }
