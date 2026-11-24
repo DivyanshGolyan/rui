@@ -153,6 +153,7 @@ pub const Key = union(enum) {
     other,
     paste_start,
     paste_end,
+    paste_image,
 };
 
 pub const Input = struct {
@@ -255,6 +256,7 @@ pub const Take = union(enum) {
     card: ActionConsent.Input,
     needs_decision,
     consent_draft,
+    paste_image,
     take_row,
     back_to_list,
     edit: struct { send: bool },
@@ -303,6 +305,7 @@ pub fn step(state: State, facts: Facts, input: Input) Take {
         .blocked => if (input.key == .enter) .needs_decision else .taken,
         .draft => .consent_draft,
     };
+    if (!input.pasted and input.key == .paste_image and state.focus.field == .input) return .paste_image;
     const draft_key: @import("app_input.zig").DraftKey = if (input.key == .named and input.key.named == .left and state.focus.field == .input) .left else .other;
     if (!input.pasted and @import("app_input.zig").draftKey(facts.draft_empty, draft_key) == .list) return .back_to_list;
     if (input.key == .enter and !input.pasted and facts.shown_row) return .take_row;
@@ -317,7 +320,7 @@ pub fn rowKey(input: Input) ActionConsent.RowKey {
         .named => |name| if (name == .left or name == .right) .arrows else .other,
         .text, .host_start => .printable,
         .paste_start => .paste,
-        .info, .details, .other, .paste_end => .other,
+        .info, .details, .other, .paste_end, .paste_image => .other,
     };
 }
 
