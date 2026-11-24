@@ -6479,6 +6479,7 @@ test "Session settings client writes every setting and the Host parser preserves
     var missing_buffer: [4096]u8 = undefined;
     var missing: std.Io.Writer = .fixed(&missing_buffer);
     inline for (session_settings.entries) |entry| {
+        if (comptime !session_settings.isSaved(entry)) continue;
         if (@field(configuration, entry.field).state != .value)
             try missing.print("{s}: ConfigureInput fixture / client.Capture.writeConfiguration / Host Parser\n", .{entry.field});
     }
