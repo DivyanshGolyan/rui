@@ -1,5 +1,5 @@
 {
-  "inputs": "d915b6d5a12a54de90702ac7863c4d37",
+  "inputs": "f4e9996b69b4c307e6689c33ec35011d",
   "targets": {
     "activity-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "admission-debug-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
@@ -32,7 +32,6 @@
     "dispatch-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "host-allocator-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "host-launch-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
-    "host-memory": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "host-status-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "host-stop-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "human-cli-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
@@ -64,6 +63,8 @@
     "session-list-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "settings-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "skills-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
+    "start-handover-fixtures": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
+    "start-handover-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "terminal-restoration-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "test": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "test-full": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
