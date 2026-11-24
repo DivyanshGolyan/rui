@@ -11,22 +11,28 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 3
+          fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
           targets: '["rsql-table"]'
           check-part: compiled
           publish-caches: 'false'
-      - name: Compile only the Store collector with the self-hosted backend
+      - name: Compare Store collector records across both backends
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/rsql-backend-evidence"
           source=744f1e879de2caf376efa129861d0679bc3d7ee7
           git rev-parse HEAD "$source^{commit}" | tee "$RUNNER_TEMP/rsql-backend-evidence/source.txt"
-          git diff --exit-code "$source" HEAD -- build.zig build.zig.zon build src tests
+          git diff --exit-code "$source" HEAD -- build.zig build.zig.zon build src tests screen-emulator
           uname -a | tee -a "$RUNNER_TEMP/rsql-backend-evidence/source.txt"
           zig version | tee -a "$RUNNER_TEMP/rsql-backend-evidence/source.txt"
+          compiler_hash=$(sha256sum "$(command -v zig)" | cut -d ' ' -f 1)
+          printf 'compiler_sha256=%s\n' "$compiler_hash" | tee -a "$RUNNER_TEMP/rsql-backend-evidence/source.txt"
+          /usr/bin/time -v zig build ci-build -Dpr-ci=true -Drsql-collect=true \
+            -Dci-targets=test-store -Dci-part=unit --prefix "$RUNNER_TEMP/rsql-llvm" \
+            --summary all --verbose 2>&1 | tee "$RUNNER_TEMP/rsql-backend-evidence/llvm.log"
+          git diff --exit-code -- build.zig build.zig.zon build src tests screen-emulator
           python3 - <<'PY'
           from pathlib import Path
           p = Path('build/unit.zig')
@@ -39,23 +45,34 @@ jobs:
           PY
           git diff -- build/unit.zig > "$RUNNER_TEMP/rsql-backend-evidence/backend.patch"
           /usr/bin/time -v zig build ci-build -Dpr-ci=true -Drsql-collect=true \
-            -Dci-targets=test-store -Dci-part=unit --prefix "$RUNNER_TEMP/rsql-backend-output" \
-            --summary all 2>&1 | tee "$RUNNER_TEMP/rsql-backend-evidence/build.log"
-          python3 - <<'PY' | tee "$RUNNER_TEMP/rsql-backend-evidence/records.txt"
+            -Dci-targets=test-store -Dci-part=unit --prefix "$RUNNER_TEMP/rsql-self" \
+            --summary all --verbose 2>&1 | tee "$RUNNER_TEMP/rsql-backend-evidence/self.log"
+          test "$(sha256sum "$(command -v zig)" | cut -d ' ' -f 1)" = "$compiler_hash"
+          python3 - <<'PY' | tee "$RUNNER_TEMP/rsql-backend-evidence/parity.txt"
           import hashlib, os, pathlib, sys
           sys.path.insert(0, 'tests/ci')
           from rsql_table import elf_records
-          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'rsql-backend-output' / 'bin'
-          binaries = sorted(root.iterdir())
-          if len(binaries) != 1:
-              raise SystemExit(f'Expected one Store root, got {len(binaries)}')
-          data = binaries[0].read_bytes()
-          records = set(elf_records(data))
-          if not records:
-              raise SystemExit('Store collector exported no records')
-          print(f'binary={binaries[0].name} sha256={hashlib.sha256(data).hexdigest()} unique_records={len(records)}')
-          for record in sorted(records):
-              print(hashlib.sha256(record).hexdigest())
+
+          def load(name):
+              binaries = sorted((pathlib.Path(os.environ['RUNNER_TEMP']) / name / 'bin').iterdir())
+              if len(binaries) != 1:
+                  raise SystemExit(f'{name}: expected one Store root, got {len(binaries)}')
+              data = binaries[0].read_bytes()
+              records = set(elf_records(data))
+              if not records:
+                  raise SystemExit(f'{name}: Store collector exported no records')
+              print(f'{name}: binary={binaries[0].name} sha256={hashlib.sha256(data).hexdigest()} records={len(records)}')
+              return records
+
+          llvm, self_hosted = load('rsql-llvm'), load('rsql-self')
+          if llvm != self_hosted:
+              print(f'LLVM-only={len(llvm - self_hosted)} self-only={len(self_hosted - llvm)}')
+              raise SystemExit('Collector record sets differ')
+          mutant = set(self_hosted)
+          mutant.remove(next(iter(mutant)))
+          if llvm == mutant:
+              raise SystemExit('Missing-record negative control was not detected')
+          print(f'All {len(llvm)} complete records match byte-for-byte; missing-record control detected')
           PY
       - name: Retain diagnostic evidence
         if: ${{ always() }}
