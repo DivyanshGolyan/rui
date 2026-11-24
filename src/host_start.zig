@@ -751,9 +751,6 @@ pub fn resolveConnections(init: std.process.Init, settings: *const hs.Settings, 
     for (settings.connections.entries) |*entry| {
         const served = &entry.value;
         const name = served.name.slice();
-        // Model execution still reaches a provider through its built-in name, so this
-        // version serves a connection only under one; any other name is refused at start.
-        if (@import("provider_route.zig").builtInOf(served.name) == null) return unservedName(failure, name);
         const key = switch (served.credential) {
             .key => |*key| key,
             else => return connectionFailure(failure, name, error.ConnectionUnserved),
@@ -779,15 +776,6 @@ pub fn resolveConnections(init: std.process.Init, settings: *const hs.Settings, 
         };
         _ = connected.add(served.name, presentation, resolved.url, bytes, fixture) catch |err| return connectionFailure(failure, name, err);
     }
-}
-
-/// The automatic OpenAI connection a document without a connections list serves: OpenAI's own
-/// endpoint with the key in the saved key file, HOME/.config/rui/openai.key unless RUI_OPENAI_KEY_FILE names
-/// another. This is the one OpenAI served in that case; the built-in entry is not served beside it.
-fn unservedName(failure: *start_report.Failure, name: []const u8) anyerror {
-    var message: [start_report.max_refusal_message_bytes]u8 = undefined;
-    failure.* = .init(.settings_invalid, std.fmt.bufPrint(&message, "connections.{s}: this version serves a connection only under a built-in name (codex, openai, chatgpt)", .{name}) catch "connections: this version serves a connection only under a built-in name");
-    return error.SettingsInvalid;
 }
 
 fn connectionFailure(failure: *start_report.Failure, name: []const u8, err: anyerror) anyerror {
@@ -1647,29 +1635,33 @@ test "a document without connections adds none: OpenAI stays with the built-in s
     try std.testing.expectEqual(@as(usize, 0), connected.len);
 }
 
-test "a connection under a non-built-in name is refused at start, and one under a built-in name supersedes that provider's entry" {
+test "a connection under a non-built-in name is served at its own URL and key, and one under a built-in name supersedes that provider's entry" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
     defer environment.deinit();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     try environment.put("HOME", "/nonexistent-home");
+    try environment.put("RUI_TEST_CONNECTION_KEY", "sk-synthetic-connection-key-0001");
     const init = initForTest(&arena, &environment);
-    const connection_text = "{{\"name\":\"{s}\",\"label\":\"Alpha\",\"base_url\":\"https://alpha.example/v1\",\"credential\":{{\"kind\":\"key\",\"source\":{{\"kind\":\"env\",\"name\":\"RUI_TEST_UNSET_CONNECTION_KEY\"}},\"placement\":\"bearer\"}},\"headers\":[],\"refusals\":[],\"formats\":[{{\"family\":\"responses\",\"dialect\":\"openai-responses/3\",\"web_search\":false}}],\"assign\":[],\"models\":{{\"list\":\"openai\"}}}}";
+    const connection_text = "{{\"name\":\"{s}\",\"label\":\"Alpha\",\"base_url\":\"https://alpha.example/v1\",\"credential\":{{\"kind\":\"key\",\"source\":{{\"kind\":\"env\",\"name\":\"RUI_TEST_CONNECTION_KEY\"}},\"placement\":\"bearer\"}},\"headers\":[],\"refusals\":[],\"formats\":[{{\"family\":\"responses\",\"dialect\":\"openai-responses/3\",\"web_search\":false}}],\"assign\":[],\"models\":{{\"list\":\"openai\"}}}}";
     inline for (.{ "alpha", "openai" }) |name| {
         const settings = try gpa.create(hs.Settings);
         defer gpa.destroy(settings);
         settings.* = .{};
         defer settings.deinit();
         var failure: start_report.Failure = undefined;
+        // The built-in openai entry names a key that is unset: it is superseded, so its key is never read.
         const document = try std.fmt.allocPrint(arena.allocator(), "{{\"providers\":{{\"openai\":{{\"key\":{{\"env\":\"RUI_TEST_UNSET_PROVIDER_KEY\"}}}}}},\"connections\":[" ++ connection_text ++ "]}}", .{name});
         try hs.apply(settings, arena.allocator(), document, .file, checks, &failure);
         var connected: providers.Connected = .{};
         defer connected.wipe();
-        try std.testing.expectError(error.SettingsInvalid, resolveConnections(init, settings, &connected, &failure));
-        // alpha: refused by name; openai: reaches its own key, which this test leaves unset.
-        try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "connections." ++ name) != null);
-        try std.testing.expectEqual(std.mem.eql(u8, name, "alpha"), std.mem.indexOf(u8, failure.message.slice(), "built-in name") != null);
+        try resolveConnections(init, settings, &connected, &failure);
+        try std.testing.expectEqual(@as(usize, 1), connected.len);
+        const entry = &connected.entries[0];
+        try std.testing.expectEqualStrings(name, entry.name.slice());
+        try std.testing.expectEqualStrings("https://alpha.example/v1/responses", entry.url[0..entry.url_len]);
+        try std.testing.expectEqualStrings("sk-synthetic-connection-key-0001", entry.key.bytes[0..entry.key.len]);
         supersedeProviders(settings);
         try std.testing.expectEqual(std.mem.eql(u8, name, "openai"), settings.providers.entries.openai == null);
     }
