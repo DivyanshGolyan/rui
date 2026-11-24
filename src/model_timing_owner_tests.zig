@@ -2,6 +2,7 @@ const std = @import("std");
 const execution = @import("execution.zig");
 const provider = @import("provider.zig");
 const protocol = @import("protocol.zig");
+const provider_route = @import("provider_route.zig");
 const store_module = @import("store.zig");
 
 test "model resolution owner captures timings for success failure interruption stop and archive" {
@@ -83,7 +84,7 @@ test "model resolution owner captures timings for success failure interruption s
                 var used: std.atomic.Value(u64) = .init(0);
                 var reactor: provider.Reactor = undefined;
                 try reactor.init(std.testing.allocator, io, .{
-                    .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
+                    .endpoints = provider.builtInEndpoints(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
                     .capacity = 1,
                     .inactivity_seconds = 1,
                     .scratch_path = "/nonexistent",
@@ -100,7 +101,7 @@ test "model resolution owner captures timings for success failure interruption s
                 transfer.allowance = null;
                 var sink: [1]u8 = undefined;
                 try reactor.client.prepare(&transfer.stream, .{
-                    .endpoint = reactor.endpoints.get(.codex).?,
+                    .endpoint = reactor.endpoints.get(provider_route.nameOf(.codex)).?,
                     .fields = &.{},
                     .body = .{ .bytes = "" },
                     .sink = .{ .buffer = &sink },
@@ -156,7 +157,7 @@ test "model resolution owner captures timings for success failure interruption s
                         transfer.headers = .{};
                         transfer.credential = null;
                         try reactor.client.prepare(&transfer.stream, .{
-                            .endpoint = reactor.endpoints.get(.codex).?,
+                            .endpoint = reactor.endpoints.get(provider_route.nameOf(.codex)).?,
                             .fields = &.{},
                             .body = .{ .bytes = "" },
                             .sink = .{ .buffer = &sink },

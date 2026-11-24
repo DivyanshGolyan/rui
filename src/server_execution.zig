@@ -1,5 +1,6 @@
 const std = @import("std");
 const provider_route = @import("provider_route.zig");
+const connection_names = @import("connection_names.zig");
 const tool_result = @import("tool_result.zig");
 const server_mcp = @import("server_mcp.zig");
 const server_mcp_relist = @import("server_mcp_relist.zig");
@@ -153,7 +154,7 @@ const Run = struct {
     custody: *execution.CustodyPool,
     auth_worker: ?*AuthWorker = null,
     scratch_budget: ?provider.ScratchBudget = null,
-    turn_states: turn_states_module.PerProvider = .{},
+    turn_states: turn_states_module.PerConnection = .{},
     history_memos: model_adapter.HistoryMemos = .{},
     bash_work: []BashWork = &.{},
     slot_changes: u64 = 0,
@@ -698,11 +699,12 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
         return;
     };
     defer unmapZeroed(slots);
-    const turn_states = mapZeroed(turn_states_module.TurnStates.Entry, slots.len * std.enums.values(protocol.Provider).len) catch |err| {
+    const served_names = run.settings.providers.table.names[0..run.settings.providers.table.len];
+    const turn_states = mapZeroed(turn_states_module.TurnStates.Entry, slots.len * served_names.len) catch |err| {
         run.shared.lifecycle.fenceDispatch("execution workspace allocation", err);
         return;
     };
-    run.turn_states = .init(turn_states);
+    run.turn_states = .init(served_names, turn_states);
     defer {
         run.turn_states.deinit();
         run.turn_states = .{};
@@ -750,10 +752,9 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
             if (url != null) break true;
         } else false;
         if (slots.len == 0 and !any_listing) break :reactor null;
-        var endpoints: std.EnumArray(protocol.Provider, ?[]const u8) = .initFill(null);
-        for (run.settings.providers.table.names[0..run.settings.providers.table.len], run.settings.providers.table.values[0..run.settings.providers.table.len]) |name, served| {
-            const built_in = provider_route.builtInOf(name) orelse continue;
-            endpoints.set(built_in, served.endpoint);
+        var endpoints: connection_names.NameArray([]const u8) = .{};
+        for (served_names, run.settings.providers.table.values[0..run.settings.providers.table.len]) |name, served| {
+            endpoints.set(name, served.endpoint) catch unreachable;
         }
         reactor_storage.init(run.shared.allocator, run.shared.io, .{
             .endpoints = endpoints,
@@ -2389,7 +2390,7 @@ fn advanceModelPreparation(
             owner.purpose = preparation.settings.operation;
             run.shared.probes.tracePreparationAdvance("preparation_advance_completed", stats, owner.binding);
             run.shared.probes.traceOperation("preparation_completed", owner.binding);
-            const leased = run.settings.providers.get(provider_route.nameOf(request.provider)).?.credential.leased();
+            const leased = run.settings.providers.get(request.provider).?.credential.leased();
             switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = leased } })) {
                 .authenticate => {
                     moveSlot(run, slot, .model_authenticating, .{ .owner = owner });
@@ -2420,7 +2421,7 @@ fn advanceCredentialWork(run: *Run, reactor: *provider.Reactor, slots: []Executi
                 finishCustodyNow(run, slot);
             } else {
                 active.requested = true;
-                worker.request(run.settings.providers.get(provider_route.nameOf(request.provider)).?.credential.signIn().?);
+                worker.request(run.settings.providers.get(request.provider).?.credential.signIn().?);
             }
             return true;
         },
@@ -2565,7 +2566,7 @@ fn launchPreparedRequest(
     }
     var retained_response: ?named_scratch.Owner = null;
     if (failedAtProviderPrepare(run, slot, token, binding, request)) return;
-    const served = run.settings.providers.get(provider_route.nameOf(request.provider)).?;
+    const served = run.settings.providers.get(request.provider).?;
     var headers: providers.Headers = .{};
     defer headers.deinit();
     served.credential.fields(served.endpoint, run.settings.providers.ca_file, lease, &reactor.credentials, &headers) catch |err| {
@@ -3293,7 +3294,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
             .length = 4,
             .charged = 4,
             .structured_output = false,
-            .provider = .codex,
+            .provider = provider_route.nameOf(.codex),
             .codec = .@"openai-responses/1",
             .headers = .{ .count = 0 },
         };
@@ -3381,7 +3382,7 @@ test "a leased model list waits behind every model slot, and its lease always go
     urls.set(provider.providerListing(.chatgpt).?, models_url);
     var reactor: provider.Reactor = undefined;
     try reactor.init(std.testing.allocator, io, .{
-        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = "http://127.0.0.1:1/v1/responses" }),
+        .endpoints = provider.builtInEndpoints(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = "http://127.0.0.1:1/v1/responses" }),
         .capacity = 1,
         .inactivity_seconds = 1,
         .scratch_path = "/nonexistent",
@@ -3395,7 +3396,7 @@ test "a leased model list waits behind every model slot, and its lease always go
     const work = listings.getPtr(kind);
     defer endListing(&reactor, kind, work);
     var request: provider.PreparedRequest = undefined;
-    request.provider = .codex;
+    request.provider = provider_route.nameOf(.codex);
     const waiting: ExecutionSlot = .{ .model_authenticating = .{ .owner = .{ .token = undefined, .binding = undefined } } };
     var slots = [_]ExecutionSlot{waiting};
 
@@ -3596,7 +3597,7 @@ test "HTTP error capture retires before execution custody" {
         try std.testing.expect(budget.charge(2));
         var reactor: provider.Reactor = undefined;
         try reactor.init(std.testing.allocator, io, .{
-            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
+            .endpoints = provider.builtInEndpoints(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
             .capacity = 1,
             .inactivity_seconds = 1,
             .scratch_path = root,
@@ -3609,7 +3610,7 @@ test "HTTP error capture retires before execution custody" {
             .length = 2,
             .charged = 2,
             .structured_output = false,
-            .provider = .codex,
+            .provider = provider_route.nameOf(.codex),
             .codec = .@"openai-responses/1",
             .headers = .{ .count = 0 },
         }, binding, .{}, &retained);
@@ -3728,7 +3729,7 @@ test "forced refresh captures retire before custody publication across Store cla
             } },
         } };
         try fixture.reactor.init(std.testing.allocator, io, .{
-            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
+            .endpoints = provider.builtInEndpoints(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
             .capacity = 1,
             .inactivity_seconds = 1,
             .scratch_path = root,
@@ -3744,7 +3745,7 @@ test "forced refresh captures retire before custody publication across Store cla
             .length = 2,
             .charged = 2,
             .structured_output = false,
-            .provider = .codex,
+            .provider = provider_route.nameOf(.codex),
             .codec = .@"openai-responses/1",
             .headers = .{ .count = 0 },
         }, binding, .{ .response_workspace_bytes = @sizeOf(PendingFailure) }, &retained);
@@ -5116,7 +5117,7 @@ test "an encode failure settles unanswered and releases request scratch" {
             });
             errdefer self.peer.stop();
             try self.reactor.initForTesting(std.testing.allocator, std.testing.io, .{
-                .endpoints = .init(.{ .codex = self.peer.url(), .openai = null, .chatgpt = null }),
+                .endpoints = provider.builtInEndpoints(.{ .codex = self.peer.url(), .openai = null, .chatgpt = null }),
                 .capacity = 1,
                 .inactivity_seconds = 5,
                 .scratch_path = root,
@@ -5150,7 +5151,7 @@ test "an encode failure settles unanswered and releases request scratch" {
                 .length = 2,
                 .charged = 2,
                 .structured_output = false,
-                .provider = .codex,
+                .provider = provider_route.nameOf(.codex),
                 .codec = .@"openai-responses/1",
                 .headers = .{ .count = 0 },
             };
@@ -5395,7 +5396,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .length = 2,
             .charged = 2,
             .structured_output = false,
-            .provider = .codex,
+            .provider = provider_route.nameOf(.codex),
             .codec = .@"openai-responses/1",
             .headers = .{ .count = 0 },
         };
@@ -6285,13 +6286,13 @@ test "pending compound overflow advances round robin while another completion se
     // independent compound floor walks still retain their response owners.
     const normal = try fixture.admit(2, "pending-normal", false);
     var reactor: provider.Reactor = undefined;
-    try reactor.initForTesting(std.testing.allocator, std.testing.io, .{ .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }), .capacity = 1, .inactivity_seconds = 1, .scratch_path = fixture.path(), .budget = fixture.budget() });
+    try reactor.initForTesting(std.testing.allocator, std.testing.io, .{ .endpoints = provider.builtInEndpoints(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }), .capacity = 1, .inactivity_seconds = 1, .scratch_path = fixture.path(), .budget = fixture.budget() });
     defer reactor.deinit();
     const item = "{\"type\":\"message\",\"id\":\"normal-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"normal completed\"}]}";
     const body = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"normal-response\",\"status\":\"completed\",\"output\":[" ++ item ++ "]}}\n\n";
     var retained: ?named_scratch.Owner = null;
     const request_file = try fixture.tmp.dir.createFile(std.testing.io, "normal-request", .{ .read = true });
-    const request: provider.PreparedRequest = .{ .file = request_file, .length = 0, .charged = 0, .structured_output = false, .provider = .codex, .codec = .@"openai-responses/2", .headers = .{ .count = 0 } };
+    const request: provider.PreparedRequest = .{ .file = request_file, .length = 0, .charged = 0, .structured_output = false, .provider = provider_route.nameOf(.codex), .codec = .@"openai-responses/2", .headers = .{ .count = 0 } };
     var transfer: provider.Transfer = undefined;
     try transfer.start(&reactor, &request, normal.binding, .{ .response_workspace_bytes = body.len }, &retained);
     moveSlot(&fixture.run, &fixture.slots[2], .provider, .{ .owner = normal, .transfer = transfer });
@@ -6384,7 +6385,7 @@ test "pending compound overflow from HTTP and SSE retains original failure throu
         const owner = try fixture.admit(0, if (transport == .http) "pending-http" else "pending-sse", true);
         var reactor: provider.Reactor = undefined;
         try reactor.initForTesting(std.testing.allocator, std.testing.io, .{
-            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
+            .endpoints = provider.builtInEndpoints(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
             .capacity = 1,
             .inactivity_seconds = 1,
             .scratch_path = fixture.path(),
@@ -6404,7 +6405,7 @@ test "pending compound overflow from HTTP and SSE retains original failure throu
         const status: u16 = if (transport == .http) 400 else 200;
         var retained: ?named_scratch.Owner = null;
         const request_file = try fixture.tmp.dir.createFile(std.testing.io, "pending-overflow-request", .{ .read = true });
-        const request: provider.PreparedRequest = .{ .file = request_file, .length = 0, .charged = 0, .structured_output = false, .provider = .codex, .codec = .@"openai-responses/2", .headers = .{ .count = 0 } };
+        const request: provider.PreparedRequest = .{ .file = request_file, .length = 0, .charged = 0, .structured_output = false, .provider = provider_route.nameOf(.codex), .codec = .@"openai-responses/2", .headers = .{ .count = 0 } };
         var transfer: provider.Transfer = undefined;
         try transfer.start(&reactor, &request, owner.binding, .{ .response_workspace_bytes = @sizeOf(PendingFailure) }, &retained);
         const slot = &fixture.slots[0];

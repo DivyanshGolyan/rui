@@ -1,40 +1,46 @@
 const std = @import("std");
-const protocol = @import("protocol.zig");
+const connection = @import("connection.zig");
+const connection_names = @import("connection_names.zig");
 const provider = @import("provider.zig");
 
-pub const PerProvider = struct {
-    tables: std.EnumArray(protocol.Provider, TurnStates) = .initFill(.{}),
+/// One TurnStates table per served connection name, keyed by name through the
+/// served set's table. Each name's table takes an equal share of the entries.
+pub const PerConnection = struct {
+    tables: connection_names.NameArray(TurnStates) = .{},
 
-    pub fn init(entries: []TurnStates.Entry) PerProvider {
-        const providers = std.enums.values(protocol.Provider).len;
-        std.debug.assert(entries.len % providers == 0);
-        const per_table = entries.len / providers;
-        var self: PerProvider = .{};
-        for (&self.tables.values, 0..) |*table, index| table.* = .{ .entries = entries[index * per_table ..][0..per_table] };
+    pub fn init(names: []const connection.Name, entries: []TurnStates.Entry) PerConnection {
+        std.debug.assert(names.len <= connection.max_served);
+        std.debug.assert(if (names.len == 0) entries.len == 0 else entries.len % names.len == 0);
+        const per_table = if (names.len == 0) 0 else entries.len / names.len;
+        var self: PerConnection = .{};
+        for (names, 0..) |name, index| {
+            self.tables.set(name, .{ .entries = entries[index * per_table ..][0..per_table] }) catch unreachable;
+        }
         return self;
     }
 
-    pub fn get(self: *PerProvider, served: protocol.Provider) *TurnStates {
-        return self.tables.getPtr(served);
+    /// The table of a served name; a name the served set does not hold has none.
+    pub fn get(self: *PerConnection, name: connection.Name) *TurnStates {
+        return self.tables.findMut(name).?;
     }
 
-    pub fn sink(self: *PerProvider) provider.TurnStateSink {
+    pub fn sink(self: *PerConnection) provider.TurnStateSink {
         return .{ .context = self, .capture = observe, .replay = replayFor };
     }
 
     fn observe(context: *anyopaque, key: provider.TurnStateKey, value: []const u8) void {
-        const self: *PerProvider = @ptrCast(@alignCast(context));
+        const self: *PerConnection = @ptrCast(@alignCast(context));
         self.get(key.provider).capture(key.turn_id, key.epoch, value);
     }
 
-    fn replayFor(context: *anyopaque, served: protocol.Provider, turn_id: u64, owner: TurnStates.Owner) provider.TurnStateSink.Replay {
-        const self: *PerProvider = @ptrCast(@alignCast(context));
+    fn replayFor(context: *anyopaque, served: connection.Name, turn_id: u64, owner: TurnStates.Owner) provider.TurnStateSink.Replay {
+        const self: *PerConnection = @ptrCast(@alignCast(context));
         const replayed = self.get(served).replay(turn_id, owner);
         return .{ .epoch = replayed.epoch, .value = replayed.value };
     }
 
-    pub fn deinit(self: *PerProvider) void {
-        for (&self.tables.values) |*table| table.deinit();
+    pub fn deinit(self: *PerConnection) void {
+        for (self.tables.values[0..self.tables.len]) |*table| table.deinit();
         self.* = undefined;
     }
 };
@@ -189,19 +195,24 @@ test "owner changes invalidate paused Turns and stale completions" {
     }
 }
 
-test "two providers' Turns keep their values while their different owners launch in turn" {
-    var storage: [2 * std.enums.values(protocol.Provider).len]TurnStates.Entry = @splat(.{});
-    var states: PerProvider = .init(&storage);
+test "two connections' Turns keep their values while their different owners launch in turn" {
+    const names = [_]connection.Name{ connection.Name.parse("codex").?, connection.Name.parse("openai").?, connection.Name.parse("alpha").? };
+    var storage: [2 * names.len]TurnStates.Entry = @splat(.{});
+    var states: PerConnection = .init(&names, &storage);
     defer states.deinit();
     const chatgpt: TurnStates.Owner = @splat(1);
     const key: TurnStates.Owner = @splat(0);
     const sink = states.sink();
-    const first = states.get(.codex).replay(1, chatgpt);
-    sink.capture(sink.context, .{ .provider = .codex, .turn_id = 1, .epoch = first.epoch }, "sticky");
-    const keyed = states.get(.openai).replay(2, key);
+    const codex = names[0];
+    const openai = names[1];
+    const first = states.get(codex).replay(1, chatgpt);
+    sink.capture(sink.context, .{ .provider = codex, .turn_id = 1, .epoch = first.epoch }, "sticky");
+    const keyed = states.get(openai).replay(2, key);
     try std.testing.expectEqualStrings("", keyed.value);
-    sink.capture(sink.context, .{ .provider = .openai, .turn_id = 2, .epoch = keyed.epoch }, "proxy-sticky");
-    try std.testing.expectEqualStrings("sticky", states.get(.codex).replay(1, chatgpt).value);
-    try std.testing.expectEqualStrings("proxy-sticky", states.get(.openai).replay(2, key).value);
-    try std.testing.expectEqualStrings("", states.get(.openai).replay(1, key).value);
+    sink.capture(sink.context, .{ .provider = openai, .turn_id = 2, .epoch = keyed.epoch }, "proxy-sticky");
+    try std.testing.expectEqualStrings("sticky", states.get(codex).replay(1, chatgpt).value);
+    try std.testing.expectEqualStrings("proxy-sticky", states.get(openai).replay(2, key).value);
+    try std.testing.expectEqualStrings("", states.get(openai).replay(1, key).value);
+    // A custom name has its own table: the built-in codex Turn's value is not replayed to it.
+    try std.testing.expectEqualStrings("", states.get(names[2]).replay(1, chatgpt).value);
 }

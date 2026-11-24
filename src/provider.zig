@@ -2,6 +2,9 @@ const std = @import("std");
 const h2 = @import("h2");
 const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
+const connection = @import("connection.zig");
+const connection_names = @import("connection_names.zig");
+const provider_route = @import("provider_route.zig");
 const host_headers = @import("host_headers.zig");
 const attempt = @import("attempt.zig");
 const transport_policy = @import("transport_policy.zig");
@@ -21,7 +24,7 @@ pub const PreparedRequest = struct {
     length: u64,
     charged: u64,
     structured_output: bool,
-    provider: protocol.Provider,
+    provider: connection.Name,
     codec: protocol.Codec,
     headers: codec_abi.Headers,
 
@@ -50,7 +53,7 @@ pub const max_turn_state_bytes = 4096;
 pub const TurnStateSink = struct {
     context: *anyopaque,
     capture: *const fn (context: *anyopaque, key: TurnStateKey, value: []const u8) void,
-    replay: *const fn (context: *anyopaque, served: protocol.Provider, turn_id: u64, owner: RoutingOwner) Replay,
+    replay: *const fn (context: *anyopaque, served: connection.Name, turn_id: u64, owner: RoutingOwner) Replay,
 
     pub const Replay = struct { epoch: u64, value: []const u8 };
 };
@@ -60,7 +63,7 @@ pub const RoutingOwner = [32]u8;
 pub const Routing = struct { turn_id: u64, owner: RoutingOwner };
 
 pub const TurnStateKey = struct {
-    provider: protocol.Provider,
+    provider: connection.Name,
     turn_id: u64,
     epoch: u64,
 };
@@ -95,7 +98,7 @@ pub const AllowanceWindow = struct {
 
 pub const AllowanceObservation = struct {
     binding: attempt.AttemptBinding,
-    provider: protocol.Provider,
+    provider: connection.Name,
     status: u16,
     observed_at: i64,
     primary: AllowanceWindow = .{},
@@ -135,7 +138,7 @@ pub const AllowanceObservation = struct {
     }
 };
 
-pub const AllowanceSource = struct { binding: attempt.AttemptBinding, provider: protocol.Provider };
+pub const AllowanceSource = struct { binding: attempt.AttemptBinding, provider: connection.Name };
 
 /// The Reactor-wide observation. Header names belong to each Transfer's codec (its manifest).
 pub const HeaderObservation = struct {
@@ -143,7 +146,7 @@ pub const HeaderObservation = struct {
 };
 
 pub const Options = struct {
-    endpoints: std.EnumArray(protocol.Provider, ?[]const u8),
+    endpoints: connection_names.NameArray([]const u8),
     ca_file: ?[]const u8 = null,
     capacity: usize,
     inactivity_seconds: i64,
@@ -290,7 +293,7 @@ pub const Reactor = struct {
     }
 
     client: h2.Client,
-    endpoints: std.EnumArray(protocol.Provider, ?h2.Endpoint),
+    endpoints: connection_names.NameArray(h2.Endpoint),
     io: std.Io,
     observation: HeaderObservation,
     scratch_path: []const u8,
@@ -322,7 +325,7 @@ pub const Reactor = struct {
             return error.InvalidProviderCaFile;
         self.* = .{
             .client = undefined,
-            .endpoints = .initFill(null),
+            .endpoints = .{},
             .io = io,
             .observation = options.observation,
             .scratch_path = options.scratch_path,
@@ -344,8 +347,8 @@ pub const Reactor = struct {
             .proxy = proxy,
         });
         errdefer self.client.deinit();
-        for (options.endpoints.values, &self.endpoints.values) |url, *endpoint| {
-            if (url) |value| endpoint.* = try self.client.addEndpoint(value);
+        for (options.endpoints.names[0..options.endpoints.len], options.endpoints.values[0..options.endpoints.len]) |name, url| {
+            try self.endpoints.set(name, try self.client.addEndpoint(url));
         }
         for (options.listing_urls.values, &self.listing_endpoints.values, std.enums.values(ListingKind)) |url, *endpoint, kind| {
             if (url) |value| endpoint.* = self.client.addEndpoint(value) catch |err| {
@@ -807,7 +810,7 @@ pub const Transfer = struct {
             .headers = .{},
             .credential = options.credential,
             .timing = options.timing,
-            .allowance_source = if (options.observe_allowance and (request.provider == .codex or request.provider == .chatgpt))
+            .allowance_source = if (options.observe_allowance)
                 .{ .binding = binding, .provider = request.provider }
             else
                 null,
@@ -938,7 +941,7 @@ test "idle reactor reports zero finished transfers and no completion" {
     var used: std.atomic.Value(u64) = .init(0);
     var reactor: Reactor = undefined;
     try reactor.init(std.testing.allocator, std.testing.io, .{
-        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
+        .endpoints = builtInEndpoints(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
         .capacity = 1,
         .inactivity_seconds = 1,
         .scratch_path = "/nonexistent",
@@ -968,14 +971,14 @@ test "Reactor registers every provider and independent listing subset without en
         var used: std.atomic.Value(u64) = .init(0);
         var reactor: Reactor = undefined;
         var options: Options = .{
-            .endpoints = .initFill(null),
+            .endpoints = .{},
             .capacity = 1,
             .inactivity_seconds = 1,
             .scratch_path = "/nonexistent",
             .budget = .{ .used = &used, .limit = 1 },
         };
-        for (&options.endpoints.values, request_urls, 0..) |*url, value, bit| {
-            if (served_mask & (@as(usize, 1) << @intCast(bit)) != 0) url.* = value;
+        for (request_urls, provider_route.built_in_names, 0..) |value, name, bit| {
+            if (served_mask & (@as(usize, 1) << @intCast(bit)) != 0) try options.endpoints.set(name, value);
         }
         for (&options.listing_urls.values, listing_urls, 0..) |*url, value, bit| {
             if (listing_mask & (@as(usize, 1) << @intCast(bit)) != 0) url.* = value;
@@ -983,8 +986,8 @@ test "Reactor registers every provider and independent listing subset without en
         try reactor.init(std.testing.allocator, std.testing.io, options);
         defer reactor.deinit();
         try std.testing.expectEqual(@as(?h2.EndpointError, null), reactor.catalog_endpoint_error);
-        for (reactor.endpoints.values, 0..) |endpoint, bit| {
-            try std.testing.expectEqual(served_mask & (@as(usize, 1) << @intCast(bit)) != 0, endpoint != null);
+        for (provider_route.built_in_names, 0..) |name, bit| {
+            try std.testing.expectEqual(served_mask & (@as(usize, 1) << @intCast(bit)) != 0, reactor.endpoints.get(name) != null);
         }
         for (reactor.listing_endpoints.values, 0..) |endpoint, bit| {
             try std.testing.expectEqual(listing_mask & (@as(usize, 1) << @intCast(bit)) != 0, endpoint != null);
@@ -992,11 +995,23 @@ test "Reactor registers every provider and independent listing subset without en
     };
 }
 
+/// The endpoint table a test names by built-in provider; a null field serves nothing.
+pub fn builtInEndpoints(fields: anytype) connection_names.NameArray([]const u8) {
+    if (!@import("builtin").is_test) @compileError("test-only endpoint table");
+    var endpoints: connection_names.NameArray([]const u8) = .{};
+    inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |name| {
+        if (@as(?[]const u8, @field(fields, name))) |url| {
+            endpoints.set(connection.Name.parse(name).?, url) catch unreachable;
+        }
+    }
+    return endpoints;
+}
+
 test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
     var used: std.atomic.Value(u64) = .init(0);
     var reactor: Reactor = undefined;
     const options: Options = .{
-        .endpoints = .init(.{ .codex = null, .openai = "http://127.0.0.1:1/responses", .chatgpt = null }),
+        .endpoints = builtInEndpoints(.{ .codex = null, .openai = "http://127.0.0.1:1/responses", .chatgpt = null }),
         .ca_file = "/nonexistent/rui-catalog-ca.pem",
         .capacity = 1,
         .inactivity_seconds = 1,
@@ -1013,7 +1028,7 @@ test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
     {
         defer reactor.deinit();
         try std.testing.expectEqual(error.InvalidCaFile, reactor.catalog_endpoint_error.?);
-        try std.testing.expect(reactor.endpoints.get(.openai) != null);
+        try std.testing.expect(reactor.endpoints.get(provider_route.nameOf(.openai)) != null);
         try std.testing.expect(reactor.listing_endpoints.get(.catalog) == null);
         var fetch: ListingFetch = undefined;
         var response: [1]u8 = undefined;
@@ -1022,7 +1037,7 @@ test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
         try std.testing.expectEqual(@as(?Completion, null), try reactor.nextCompletion(false));
     }
     var required = options;
-    required.endpoints.set(.openai, "https://example.com/responses");
+    try required.endpoints.set(provider_route.nameOf(.openai), "https://example.com/responses");
     try std.testing.expectError(error.InvalidCaFile, reactor.init(std.testing.allocator, std.testing.io, required));
 }
 
@@ -1077,7 +1092,7 @@ test "a Transfer that fails to start releases its credential use" {
     var transfer: Transfer = undefined;
     var retained: ?named_scratch.Owner = null;
     var request: PreparedRequest = undefined;
-    request.provider = .codex;
+    request.provider = provider_route.nameOf(.codex);
     request.codec = .@"openai-responses/1";
     const settings: codec_abi.Settings = .{ .effort = null, .session_affinity = @splat(0), .model_length = 0 };
     codecs.requestHeaders(request.codec, &settings, &request.headers);
@@ -1178,15 +1193,15 @@ test "turn state observation keeps only the first value of a successful final bl
     for (cases) |case| {
         var record: TurnStateRecord = .{};
         const names: codec_abi.ObservedHeaders = .{ .turn_state = name };
-        var context: HeaderContext = .{ .turn_state = .{ .provider = .openai, .turn_id = 7, .epoch = 3 } };
+        var context: HeaderContext = .{ .turn_state = .{ .provider = provider_route.nameOf(.openai), .turn_id = 7, .epoch = 3 } };
         try observeLines(&context, &names, record.sink(), case.lines);
         try std.testing.expectEqualStrings(case.expected, record.value.slice());
         try std.testing.expectEqual(@intFromBool(case.expected.len != 0), record.captures);
-        if (record.captures != 0) try std.testing.expectEqual(TurnStateKey{ .provider = .openai, .turn_id = 7, .epoch = 3 }, record.key.?);
+        if (record.captures != 0) try std.testing.expectEqual(TurnStateKey{ .provider = provider_route.nameOf(.openai), .turn_id = 7, .epoch = 3 }, record.key.?);
     }
     var record: TurnStateRecord = .{};
     const names: codec_abi.ObservedHeaders = .{ .turn_state = name };
-    const key: TurnStateKey = .{ .provider = .codex, .turn_id = 1, .epoch = 1 };
+    const key: TurnStateKey = .{ .provider = provider_route.nameOf(.codex), .turn_id = 1, .epoch = 1 };
     var trailers: HeaderContext = .{ .turn_state = key };
     trailers.block(.final, 200);
     trailers.block(.trailers, 0);
@@ -1210,7 +1225,7 @@ const TurnStateRecord = struct {
         return .{ .context = self, .capture = capture, .replay = replay };
     }
 
-    fn replay(_: *anyopaque, _: protocol.Provider, _: u64, _: RoutingOwner) TurnStateSink.Replay {
+    fn replay(_: *anyopaque, _: connection.Name, _: u64, _: RoutingOwner) TurnStateSink.Replay {
         unreachable;
     }
 
@@ -1279,7 +1294,7 @@ test "model timings start at handoff and capture only the first HTTP response ev
     var used: std.atomic.Value(u64) = .init(0);
     var reactor: Reactor = undefined;
     try reactor.init(std.testing.allocator, io, .{
-        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
+        .endpoints = builtInEndpoints(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
         .capacity = 1,
         .inactivity_seconds = 1,
         .scratch_path = "/nonexistent",
@@ -1303,7 +1318,7 @@ test "model timings start at handoff and capture only the first HTTP response ev
     for (0..4) |ordinal| {
         Clock.awake_ns = @as(i96, @intCast(ordinal + 1)) * std.time.ns_per_s;
         try reactor.client.prepare(&transfer.stream, .{
-            .endpoint = reactor.endpoints.get(.codex).?,
+            .endpoint = reactor.endpoints.get(provider_route.nameOf(.codex)).?,
             .fields = &.{},
             .body = .{ .bytes = "" },
             .sink = .{ .buffer = &sink },
@@ -1470,9 +1485,9 @@ test "CM-50 allowance final head stays bound to its issued attempt" {
     const other_names: codec_abi.ObservedHeaders = .{ .primary_used = "example-usage" };
     b.observe = &other_names;
     var issued: attempt.AttemptBinding = .{ .turn_id = 1, .operation_id = 11, .attempt_ordinal = 1 };
-    a.allowance_source = .{ .binding = issued, .provider = .codex };
+    a.allowance_source = .{ .binding = issued, .provider = provider_route.nameOf(.codex) };
     issued.operation_id = 99;
-    b.allowance_source = .{ .binding = .{ .turn_id = 2, .operation_id = 22, .attempt_ordinal = 2 }, .provider = .chatgpt };
+    b.allowance_source = .{ .binding = .{ .turn_id = 2, .operation_id = 22, .attempt_ordinal = 2 }, .provider = provider_route.nameOf(.chatgpt) };
     const fields = [_]h2.Field{
         .{ .name = "x-codex-primary-used-percent", .value = "25.5" },
         .{ .name = "x-codex-primary-window-minutes", .value = "300" },
@@ -1490,9 +1505,9 @@ test "CM-50 allowance final head stays bound to its issued attempt" {
     try std.testing.expectEqual(@as(f64, 12), b.allowance.?.primary.used.value);
     try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&a.stream, .{ .head = .{ .kind = .final, .status = 429, .fields = &fields } }));
     try std.testing.expectEqual(@as(u64, 11), a.allowance.?.binding.operation_id);
-    try std.testing.expectEqual(protocol.Provider.codex, a.allowance.?.provider);
+    try std.testing.expect(provider_route.nameOf(.codex).eql(a.allowance.?.provider));
     try std.testing.expectEqual(@as(u64, 22), b.allowance.?.binding.operation_id);
-    try std.testing.expectEqual(protocol.Provider.chatgpt, b.allowance.?.provider);
+    try std.testing.expect(provider_route.nameOf(.chatgpt).eql(b.allowance.?.provider));
     try std.testing.expectEqual(@as(f64, 25.5), a.allowance.?.primary.used.value);
     try std.testing.expectEqual(@as(u64, 300), a.allowance.?.primary.minutes.value);
     try std.testing.expectEqual(@as(f64, 101), a.allowance.?.secondary.used.value);
@@ -1524,7 +1539,7 @@ test "CM-51 allowance numeric fields reject invalid and conflicting values witho
     transfer.credential = null;
     transfer.observe = &codecs.manifest(.@"openai-responses/2").observe;
     transfer.allowance = null;
-    transfer.allowance_source = .{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 }, .provider = .codex };
+    transfer.allowance_source = .{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 }, .provider = provider_route.nameOf(.codex) };
     const fields = [_]h2.Field{
         .{ .name = "x-codex-primary-used-percent", .value = "NaN" },
         .{ .name = "x-codex-primary-used-percent", .value = "4" },
@@ -1549,23 +1564,28 @@ test "CM-52 allowance Transfer start freezes native attempt and defaults off" {
     var used: std.atomic.Value(u64) = .init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 4096 };
     var reactor: Reactor = undefined;
+    var endpoints = builtInEndpoints(.{
+        .codex = "http://127.0.0.1:1/codex",
+        .chatgpt = "http://127.0.0.1:1/chatgpt",
+        .openai = "http://127.0.0.1:1/openai",
+    });
+    try endpoints.set(connection.Name.parse("alpha").?, "http://127.0.0.1:1/alpha");
     try reactor.initForTesting(std.testing.allocator, io, .{
-        .endpoints = .init(.{
-            .codex = "http://127.0.0.1:1/codex",
-            .chatgpt = "http://127.0.0.1:1/chatgpt",
-            .openai = "http://127.0.0.1:1/openai",
-        }),
+        .endpoints = endpoints,
         .capacity = 1,
         .inactivity_seconds = 1,
         .scratch_path = root,
         .budget = budget,
     });
     defer reactor.deinit();
-    const cases = [_]struct { served: protocol.Provider, enabled: bool, expected: bool }{
-        .{ .served = .codex, .enabled = true, .expected = true },
-        .{ .served = .chatgpt, .enabled = true, .expected = true },
-        .{ .served = .openai, .enabled = true, .expected = false },
-        .{ .served = .codex, .enabled = false, .expected = false },
+    // The caller decides whether a Transfer observes allowance (a sign-in credential); the
+    // Reactor observes exactly when it is asked, whatever the connection's name.
+    const cases = [_]struct { served: connection.Name, enabled: bool, expected: bool }{
+        .{ .served = provider_route.nameOf(.codex), .enabled = true, .expected = true },
+        .{ .served = provider_route.nameOf(.chatgpt), .enabled = true, .expected = true },
+        .{ .served = connection.Name.parse("alpha").?, .enabled = true, .expected = true },
+        .{ .served = provider_route.nameOf(.openai), .enabled = false, .expected = false },
+        .{ .served = provider_route.nameOf(.codex), .enabled = false, .expected = false },
     };
     for (cases, 0..) |case, index| {
         const file = try tmp.dir.createFile(io, "request", .{ .read = true });
@@ -1586,13 +1606,13 @@ test "CM-52 allowance Transfer start freezes native attempt and defaults off" {
         const options: Transfer.StartOptions = if (case.enabled) .{ .observe_allowance = true } else .{};
         try transfer.start(&reactor, &request, binding, options, &retained);
         defer transfer.deinit();
-        request.provider = .openai;
+        request.provider = provider_route.nameOf(.openai);
         binding.operation_id = 999;
         const fields = [_]h2.Field{.{ .name = "x-codex-primary-used-percent", .value = "14" }};
         try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&transfer.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &fields } }));
         try std.testing.expectEqual(case.expected, transfer.allowance != null);
         if (transfer.allowance) |snapshot| {
-            try std.testing.expectEqual(case.served, snapshot.provider);
+            try std.testing.expect(case.served.eql(snapshot.provider));
             try std.testing.expectEqual(@as(u64, @intCast(index + 1)), snapshot.binding.operation_id);
             try std.testing.expectEqual(@as(f64, 14), snapshot.primary.used.value);
         }
@@ -1619,7 +1639,7 @@ test "CM-53 allowance callback handles extreme and sparse final heads" {
         transfer.credential = null;
         transfer.observe = &codecs.manifest(.@"openai-responses/2").observe;
         transfer.allowance = null;
-        transfer.allowance_source = .{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 }, .provider = .codex };
+        transfer.allowance_source = .{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 }, .provider = provider_route.nameOf(.codex) };
         const fields = [_]h2.Field{.{ .name = "x-codex-primary-used-percent", .value = case.value }};
         try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&transfer.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &fields } }));
         try std.testing.expectEqual(case.invalid, transfer.allowance.?.primary.used == .invalid);
@@ -1632,7 +1652,7 @@ test "CM-53 allowance callback handles extreme and sparse final heads" {
     sparse.credential = null;
     sparse.observe = &codecs.manifest(.@"openai-responses/2").observe;
     sparse.allowance = null;
-    sparse.allowance_source = .{ .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 }, .provider = .chatgpt };
+    sparse.allowance_source = .{ .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 }, .provider = provider_route.nameOf(.chatgpt) };
     const reset = [_]h2.Field{.{ .name = "x-codex-primary-reset-at", .value = "42" }};
     try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&sparse.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &reset } }));
     try std.testing.expect(sparse.allowance.?.primary.used == .missing);

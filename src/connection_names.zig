@@ -68,6 +68,12 @@ pub fn NameArray(comptime T: type) type {
             return null;
         }
 
+        /// The stored value for a name, by mutable pointer, for an owner that updates it in place.
+        pub fn findMut(self: *Self, name: connection.Name) ?*T {
+            for (self.names[0..self.len], 0..) |*one, index| if (one.eql(name)) return &self.values[index];
+            return null;
+        }
+
         pub fn get(self: *const Self, name: connection.Name) ?T {
             for (self.names[0..self.len], self.values[0..self.len]) |*one, value| {
                 if (one.eql(name)) return value;
@@ -96,4 +102,7 @@ test "NameSet and NameArray key by exact name within the served bound" {
     try std.testing.expectEqual(@as(usize, 2), array.len);
     try std.testing.expectEqual(@as(?u8, 3), array.get(connection.Name.parse("alpha").?));
     try std.testing.expectEqual(@as(?u8, null), array.get(connection.Name.parse("openai").?));
+    array.findMut(connection.Name.parse("beta").?).?.* = 9;
+    try std.testing.expectEqual(@as(?u8, 9), array.get(connection.Name.parse("beta").?));
+    try std.testing.expectEqual(@as(?*u8, null), array.findMut(connection.Name.parse("openai").?));
 }
