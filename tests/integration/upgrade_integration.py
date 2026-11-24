@@ -1866,13 +1866,13 @@ def first_click_watch_cases(root, binary, releases):
                         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
                         credential = directory / "codex.json"
                         credentials(credential)
-                        c.run("defaults", "configure", "--provider", "codex", "--model", "gpt-6-terra")
+                        c.run("defaults", "configure", "--connection", "codex", "--model", "gpt-6-terra")
                         session = c.json("session", "configure", "--store", c.store, "--workspace", c.root,
-                                         "--provider", "codex", "--model", "gpt-6-terra")["answer"]["session"]
+                                         "--connection", "codex", "--model", "gpt-6-terra")["answer"]["session"]
                         before_session = c.json("session", "inspect", "--store", c.store, "--session", session)["session"]
                         credential_before = credential.read_bytes()
                         saved_settings = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
-                        args = [str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-terra"]
+                        args = [str(binary), "--store", str(c.store), "--connection", "codex", "--model", "gpt-6-terra"]
                         with terminal_process(args, env=c.env, cwd=c.root, columns=columns) as (process, master):
                             screen = TerminalScreen(master, process)
                             if columns == 140:
