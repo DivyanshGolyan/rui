@@ -787,65 +787,6 @@ fn renderModelList(out: protocol.JsonOut, self: *Replies, facts: []const @import
     out.writer.writeAll(protocol.model_list_reply.tail) catch return error.BufferTooLarge;
 }
 
-test "Session report capture releases its heap state after sealing or scratch exhaustion" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var lease: platform.StoreLease = undefined;
-    lease.paths = .{};
-    try lease.paths.scratch.set(root);
-    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
-    var storage: store_module.Store = undefined;
-    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
-    defer storage.close() catch unreachable;
-    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
-    var host_parts: TestParts = undefined;
-    host_parts.attach(&host, &lease);
-    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
-    host.retention = &retention;
-    var request: protocol.InspectSession = .{};
-    try request.session.set("k7m2qx");
-    var state: SessionReportState = undefined;
-    {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-        host.allocator = failing.allocator();
-        defer host.allocator = std.testing.allocator;
-        var reply = Reply.init(host.io, std.testing.allocator, null);
-        defer reply.deinit();
-        var replies = Replies.init(&host);
-        try Replies.replyInspectSession(&replies, &reply, &request, 0);
-        try std.testing.expect(std.meta.activeTag(reply.body) == .json);
-        const sent = try server_reply.sentWire(host.io, std.testing.allocator, &reply);
-        defer std.testing.allocator.free(sent);
-        try std.testing.expect(std.mem.startsWith(u8, sent, "HTTP/1.1 500 "));
-        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
-        try std.testing.expect(!storage.isFenced());
-    }
-    {
-        var replies = Replies.init(&host);
-        var report = try (ReportScratch{ .replies = &replies }).capture(&state.capture, 1, SessionReportExport{ .replies = &replies, .request = &request, .reply = &state.reply });
-        defer report.deinit();
-        try std.testing.expect(report.length != 0);
-        try std.testing.expectEqual(report.length, host.scratch_used.load(.acquire));
-        var bytes: [1024]u8 = undefined;
-        const length = try report.read(0, &bytes);
-        try std.testing.expectEqual(report.length, length);
-        try std.testing.expect(std.mem.indexOf(u8, bytes[0..length], "session_not_found") != null);
-    }
-    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
-    retention.budget.limit = 1;
-    var replies = Replies.init(&host);
-    try std.testing.expectError(error.ReportScratchExhausted, (ReportScratch{ .replies = &replies }).capture(&state.capture, 2, SessionReportExport{ .replies = &replies, .request = &request, .reply = &state.reply }));
-    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
-    try std.testing.expect(!storage.isFenced());
-    retention.budget.limit = 9000;
-    host.probes.arm(.report_unlink);
-    try std.testing.expectError(error.ReportScratchCleanupFailed, (ReportScratch{ .replies = &replies }).capture(&state.capture, 3, SessionReportExport{ .replies = &replies, .request = &request, .reply = &state.reply }));
-    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
-    try std.testing.expect(!storage.isFenced());
-}
-
 fn renderActionValueReceipt(out: protocol.JsonOut, receipt: anytype) !void {
     try out.appendShape(protocol.action_publish_reply, .{ receipt.action_id, receipt.ordinal, receipt.admission_id, receipt.replayed });
 }
@@ -1643,33 +1584,41 @@ test "SH-123 report scratch is sealed whole or discarded whole within the shared
     try inspect.session.set("k7m2qx");
     const Row = struct {
         budget: u64,
-        armed_unlink: bool,
-        /// Status the answer carries, or null when only the scratch accounting is asserted.
-        status: ?u16,
-        fenced: bool,
+        armed_unlink: bool = false,
+        /// The Replies heap fails its first allocation.
+        heap_fails: bool = false,
+        status: u16,
+        /// Text the sealed report carries, when one is delivered.
+        carries: ?[]const u8 = null,
+        fenced: bool = false,
     };
     const rows = [_]Row{
-        .{ .budget = 1, .armed_unlink = false, .status = 507, .fenced = false },
+        .{ .budget = 9000, .status = 200, .carries = "session_not_found" },
+        .{ .budget = 1, .status = 507 },
+        .{ .budget = 9000, .heap_fails = true, .status = 500 },
         .{ .budget = 9000, .armed_unlink = true, .status = 500, .fenced = true },
-        .{ .budget = 9000, .armed_unlink = false, .status = null, .fenced = false },
     };
     for (rows) |row| {
         var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = row.budget }, &.{});
         host.retention = &retention;
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        host.allocator = if (row.heap_fails) failing.allocator() else std.testing.allocator;
+        defer host.allocator = std.testing.allocator;
         host_parts.attach(&host, &lease);
         var replies = Replies.init(&host);
         var request: wire_request.Request = .{ .inspect_session = inspect };
-        var reply = Reply.init(host.io, std.testing.allocator, null);
-        defer reply.deinit();
-        if (row.armed_unlink) host.probes.arm(.report_unlink);
-        try replies.prepare(&reply, .{ .socket = -1, .drop = .none, .instance = null, .needs_instance = false, .number = 1, .accepted_at_ns = 0, .request = &request, .environment = null, .parts = null });
-        const wire = try server_reply.sentWire(host.io, std.testing.allocator, &reply);
-        defer std.testing.allocator.free(wire);
-        if (row.status) |status| {
+        {
+            var reply = Reply.init(host.io, std.testing.allocator, null);
+            defer reply.deinit();
+            if (row.armed_unlink) host.probes.arm(.report_unlink);
+            try replies.prepare(&reply, .{ .socket = -1, .drop = .none, .instance = null, .needs_instance = false, .number = 1, .accepted_at_ns = 0, .request = &request, .environment = null, .parts = null });
+            // A sealed report holds its whole scratch until the reply releases it.
+            try std.testing.expectEqual(row.carries != null, host.scratch_used.load(.acquire) != 0);
+            const wire = try server_reply.sentWire(host.io, std.testing.allocator, &reply);
+            defer std.testing.allocator.free(wire);
             var status_line: [32]u8 = undefined;
-            try std.testing.expect(std.mem.startsWith(u8, wire, try std.fmt.bufPrint(&status_line, "HTTP/1.1 {d} ", .{status})));
-        } else {
-            try std.testing.expect(!std.mem.startsWith(u8, wire, "HTTP/1.1 507 "));
+            try std.testing.expect(std.mem.startsWith(u8, wire, try std.fmt.bufPrint(&status_line, "HTTP/1.1 {d} ", .{row.status})));
+            if (row.carries) |text| try std.testing.expect(std.mem.indexOf(u8, server_reply.bodyOf(wire), text) != null);
         }
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
         try std.testing.expectEqual(row.fenced, !host.lifecycle.launchAllowed());
