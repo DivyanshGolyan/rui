@@ -788,11 +788,18 @@ fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line
     return null;
 }
 
+const StopBaseline = struct {
+    version: Token,
+    work: session_work.Work,
+};
+
 pub const Request = struct {
     kind: enum { create, stop, archive, unarchive, pin, unpin, send },
 
     session: ?Reference = null,
     status: enum { pending, done, failed, unknown } = .pending,
+    stop_baseline: ?StopBaseline = null,
+    stop_overlay: bool = true,
 
     text: Bounded(@max(max_handle_bytes, session_work.max_code_bytes)) = .{},
 
@@ -1139,6 +1146,11 @@ pub const State = struct {
             if (held.kind == .stop and std.mem.eql(u8, &held.session.?, &ref) and (held.status == .pending or held.status == .unknown)) return held;
         }
         return null;
+    }
+
+    fn stopOverlays(self: *const State, ref: Reference) bool {
+        const held = self.openStop(ref) orelse return false;
+        return held.stop_overlay;
     }
 
     fn pendingAt(self: *const State, kind: @FieldType(Request, "kind"), ref: ?Reference) ?usize {
@@ -2350,14 +2362,48 @@ fn reconcileSelection(state: *State, selected_at: ?usize, opening: bool) void {
     }
 }
 
-fn settleRow(state: *const State, row: *Row, read: session_list.Snapshot) void {
+fn workChanged(old: session_work.Work, work: session_work.Work) bool {
+    if (std.meta.activeTag(old.state) != std.meta.activeTag(work.state) or old.state.since() != work.state.since()) return true;
+    if (!std.meta.eql(old.turn, work.turn) or !std.meta.eql(old.operation, work.operation) or
+        !std.meta.eql(old.first_action, work.first_action) or !std.meta.eql(old.actions, work.actions) or
+        !std.meta.eql(old.served_attention, work.served_attention) or !std.meta.eql(old.served_group, work.served_group)) return true;
+    return switch (old.state) {
+        .retrying => |value| value.due_at_ms != work.state.retrying.due_at_ms or value.attempt != work.state.retrying.attempt or !value.cause.eql(work.state.retrying.cause.slice()),
+        .bash => |value| changed: {
+            const other = work.state.bash;
+            const description_changed = if (value.description) |description|
+                if (other.description) |text| !description.eql(text.slice()) else true
+            else
+                other.description != null;
+            break :changed value.call != other.call or value.running != other.running or value.approvals != other.approvals or description_changed;
+        },
+        .failed => |value| value.resets_at != work.state.failed.resets_at or !value.code.eql(work.state.failed.code.slice()),
+        .stopped => |value| value.cause != work.state.stopped.cause,
+        .idle, .pending, .working, .approval, .stopping, .finished => |value| value.compaction != switch (work.state) {
+            .idle, .pending, .working, .approval, .stopping, .finished => |other| other.compaction,
+            else => unreachable,
+        },
+    };
+}
+
+fn settleRow(state: *State, row: *Row, read: session_list.Snapshot) void {
     row.state = row.state.asOf(state.now_ms);
     if (!state.accepts(read.read_version)) return;
     if (row.read_version) |known| {
         if (std.mem.eql(u8, &known.instance, &read.read_version.instance) and read.read_version.generation <= known.generation) return;
     }
+    var next = read.work;
+    next.state = next.state.asOf(state.now_ms);
+    for (state.requests[0..state.request_count]) |*held| {
+        if (held.kind != .stop or !held.stop_overlay or !std.mem.eql(u8, &held.session.?, &row.reference)) continue;
+        const baseline = held.stop_baseline orelse continue;
+        const later = !std.mem.eql(u8, &baseline.version.instance, &read.read_version.instance) or read.read_version.generation > baseline.version.generation;
+        var original = baseline.work;
+        original.state = original.state.asOf(state.now_ms);
+        if (later and workChanged(original, next)) held.stop_overlay = false;
+    }
     row.read_version = read.read_version;
-    row.state = read.work.state.asOf(state.now_ms);
+    row.state = next.state;
     row.turn = read.work.turn;
     row.operation = read.work.operation;
     row.first_action = read.work.first_action;
@@ -2703,7 +2749,7 @@ fn counts(state: *const State) Counts {
 
 // Only this viewer's unanswered stop overlays the Host's group.
 fn ordering(state: *const State, row: *const Row) OrderClass {
-    const group = if (state.openStop(row.reference) != null) session_work.Group.working else row.group;
+    const group = if (state.stopOverlays(row.reference)) session_work.Group.working else row.group;
     return switch (group) {
         .needs_you => .needs_you,
         .working => .working,
@@ -2773,7 +2819,12 @@ fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
     const ref = target.reference;
     const kind = kindShown(state, ref, target.work);
     if (!target.can_stop or state.openStop(ref) != null) return refuseStop(state, ref, kind);
-    if (state.request(.stop, ref)) effects.add(.{ .stop = ref });
+    if (state.request(.stop, ref)) {
+        if (state.find(ref)) |row| if (row.read_version) |version| {
+            if (state.accepts(version)) state.requests[state.request_count - 1].stop_baseline = .{ .version = version, .work = row.work() };
+        };
+        effects.add(.{ .stop = ref });
+    }
 }
 
 fn refuseStop(state: *State, ref: Reference, kind: Kind) void {
@@ -2785,11 +2836,11 @@ fn refuseStop(state: *State, ref: Reference, kind: Kind) void {
 }
 
 fn kindShown(state: *const State, ref: Reference, work: Kind) Kind {
-    return if (state.openStop(ref) != null) .stopping else work;
+    return if (state.stopOverlays(ref)) .stopping else work;
 }
 
 fn shownKind(state: *const State, row: *const Row) Kind {
-    if (state.openStop(row.reference) == null and row.actions.decide != null) return .approval;
+    if (!state.stopOverlays(row.reference) and row.actions.decide != null) return .approval;
     return kindShown(state, row.reference, (&row.state).asOf(state.now_ms));
 }
 
@@ -2799,7 +2850,7 @@ fn shownSince(state: *const State, row: *const Row) u64 {
 
 fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *const Row) ?work_line.Line {
     if (row.archive_state == .archived) return null;
-    return if (state.openStop(row.reference) != null) work_line.stopping else work_line.of(words, (&row.state), null, state.now_ms);
+    return if (state.stopOverlays(row.reference)) work_line.stopping else work_line.of(words, (&row.state), null, state.now_ms);
 }
 
 fn clickOpen(state: *State, reference: Reference, effects: *Effects) error{OutOfMemory}!void {
@@ -10493,7 +10544,189 @@ test "SUI-3 overview_projection" {
     try projectionCase3();
 }
 
+fn stopLaterObservationCase() !void {
+    const ref = "k7m2qx".*;
+    const cases = [_]struct { work: WorkState, mark: []const u8, action: ?u64 }{
+        .{ .work = .{ .approval = ago(0) }, .mark = "●", .action = 42 },
+        .{ .work = .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .mark = "▪", .action = null },
+    };
+    for (cases) |case| for ([_]u16{ 46, 80 }) |width| {
+        var state = try opened(&.{session(&ref, .{ .working = ago(10) }, .{ .label = "Later work", .turn = 7 })});
+        defer state.deinit();
+        try expectEffects(&.{.{ .stop = ref }}, try press(&state, .stop));
+        _ = try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .unconfirmed = "original-stop-key" } } });
+        var later = session(&ref, case.work, .{ .label = "Later work", .turn = 8, .first_action = case.action });
+        later.read_version = testToken(2);
+        _ = try refresh(&state, .changed, testToken(2), &.{later});
+        var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer departure.deinit();
+        try writeDeparture(&state, null, &departure.writer);
+        try std.testing.expect(std.mem.indexOf(u8, departure.written(), "rui request recover original-stop-key") != null);
+        const text = try screenText(&state, width, 24, .{});
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqualStrings(case.mark, markOf(text, "Later work"));
+    };
+}
+
+fn stopObservationFreshnessCase() !void {
+    const ref = "k7m2qx".*;
+    for ([_]bool{ false, true }) |unconfirmed| {
+        var state = try opened(&.{session(&ref, .{ .working = ago(10) }, .{ .label = "Later work", .turn = 7, .read_version = testToken(10) })});
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = ref });
+        try expectEffects(&.{.{ .stop = ref }}, try press(&state, .stop));
+        if (unconfirmed) _ = try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .unconfirmed = "original-stop-key" } } });
+        var foreign = testToken(12);
+        foreign.instance = @splat(0xcd);
+        _ = try step(&state, .{ .observed = .{
+            .reference = ref,
+            .read_version = foreign,
+            .work = fixtureWork(.{ .state = .{ .approval = ago(0) }, .turn = 8, .first_action = 42 }),
+            .opening = false,
+        } });
+        const foreign_text = try screenText(&state, 80, 24, .{});
+        defer std.testing.allocator.free(foreign_text);
+        try std.testing.expectEqualStrings("◝", markOf(foreign_text, "Later work"));
+        const reads = [_]struct { generation: u64, changed: bool, mark: []const u8 }{
+            .{ .generation = 9, .changed = true, .mark = "◝" },
+            .{ .generation = 10, .changed = true, .mark = "◝" },
+            .{ .generation = 11, .changed = false, .mark = "◝" },
+            .{ .generation = 12, .changed = true, .mark = "●" },
+            .{ .generation = 10, .changed = false, .mark = "●" },
+        };
+        for (reads) |read| {
+            _ = try step(&state, .{ .observed = .{
+                .reference = ref,
+                .read_version = testToken(read.generation),
+                .work = if (read.changed)
+                    fixtureWork(.{ .state = .{ .approval = ago(0) }, .turn = 8, .first_action = 42 })
+                else
+                    fixtureWork(.{ .state = .{ .working = ago(10) }, .turn = 7 }),
+                .opening = false,
+            } });
+            const text = try screenText(&state, 80, 24, .{});
+            defer std.testing.allocator.free(text);
+            try std.testing.expectEqualStrings(read.mark, markOf(text, "Later work"));
+        }
+        try std.testing.expect(!conversation(&state, ref, true).stoppable);
+        try expectEffects(&.{}, try press(&state, .stop));
+        if (unconfirmed) {
+            var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer departure.deinit();
+            try writeDeparture(&state, null, &departure.writer);
+            try std.testing.expect(std.mem.indexOf(u8, departure.written(), "rui request recover original-stop-key") != null);
+        }
+    }
+}
+
+fn stopHostReplacementCase() !void {
+    const ref = "k7m2qx".*;
+    var state = try opened(&.{session(&ref, .{ .working = ago(10) }, .{ .label = "Later work", .turn = 7 })});
+    defer state.deinit();
+    _ = try step(&state, .{ .conversation = ref });
+    try expectEffects(&.{.{ .stop = ref }}, try press(&state, .stop));
+    _ = try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .unconfirmed = "original-stop-key" } } });
+    const instance: [16]u8 = @splat(0x11);
+    _ = try step(&state, .{ .host = .{ .instance = instance, .started_at = test_now_s + 1, .slots = 2, .slots_in_use = 0 } });
+    _ = try step(&state, .{ .observed = .{
+        .reference = ref,
+        .read_version = .{ .instance = instance, .generation = 1 },
+        .work = fixtureWork(.{ .state = .{ .working = ago(10) }, .turn = 7 }),
+        .opening = false,
+    } });
+    _ = try step(&state, .{ .observed = .{
+        .reference = ref,
+        .read_version = testToken(50),
+        .work = fixtureWork(.{ .state = .{ .approval = ago(0) }, .turn = 8, .first_action = 42 }),
+        .opening = false,
+    } });
+    const before = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(before);
+    try std.testing.expectEqualStrings("◝", markOf(before, "Later work"));
+    _ = try step(&state, .{ .observed = .{
+        .reference = ref,
+        .read_version = .{ .instance = instance, .generation = 2 },
+        .work = fixtureWork(.{ .state = .{ .approval = ago(0) }, .turn = 8, .first_action = 42 }),
+        .opening = false,
+    } });
+    const after = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings("●", markOf(after, "Later work"));
+    try std.testing.expect(!conversation(&state, ref, true).stoppable);
+    var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer departure.deinit();
+    try writeDeparture(&state, null, &departure.writer);
+    try std.testing.expect(std.mem.indexOf(u8, departure.written(), "rui request recover original-stop-key") != null);
+}
+
+fn stopUnlistedConversationCase() !void {
+    const ref = "k7m2qx".*;
+    var state = try opened(&.{});
+    defer state.deinit();
+    _ = try step(&state, .{ .conversation = ref });
+    _ = try step(&state, .{ .observed = .{
+        .reference = ref,
+        .read_version = testToken(2),
+        .work = fixtureWork(.{ .state = .{ .working = ago(10) }, .turn = 7 }),
+        .opening = false,
+    } });
+    try expectEffects(&.{.{ .stop = ref }}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .{ .stop = true } } }));
+    _ = try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .unconfirmed = "original-stop-key" } } });
+    _ = try step(&state, .{ .observed = .{
+        .reference = ref,
+        .read_version = testToken(3),
+        .work = fixtureWork(.{ .state = .{ .approval = ago(0) }, .turn = 8, .first_action = 42 }),
+        .opening = false,
+    } });
+    const later = session(&ref, .{ .approval = ago(0) }, .{ .label = "Later work", .turn = 8, .first_action = 42 });
+    _ = try refresh(&state, .changed, testToken(4), &.{later});
+    const text = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("●", markOf(text, "Later work"));
+    try std.testing.expect(!conversation(&state, ref, true).stoppable);
+    var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer departure.deinit();
+    try writeDeparture(&state, null, &departure.writer);
+    try std.testing.expect(std.mem.indexOf(u8, departure.written(), "rui request recover original-stop-key") != null);
+}
+
+fn stopRestoredRowCase() !void {
+    const ref = "k7m2qx".*;
+    for ([_]bool{ false, true }) |open| for ([_]bool{ false, true }) |changed| {
+        const original = session(&ref, .{ .working = ago(10) }, .{ .label = "Later work", .turn = 7 });
+        var state = try opened(&.{original});
+        defer state.deinit();
+        try expectEffects(&.{.{ .stop = ref }}, try press(&state, .stop));
+        _ = try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .unconfirmed = "original-stop-key" } } });
+        if (open) _ = try step(&state, .{ .conversation = ref });
+        var archived = original;
+        archived.archive_state = .archived;
+        archived.archive_seq = 10;
+        _ = try refresh(&state, .changed, testToken(2), &.{archived});
+        var restored = if (changed)
+            session(&ref, .{ .approval = ago(0) }, .{ .label = "Later work", .turn = 8, .first_action = 42 })
+        else
+            original;
+        restored.read_version = testToken(3);
+        _ = try refresh(&state, .changed, testToken(3), &.{restored});
+        const text = try screenText(&state, 80, 24, .{});
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqualStrings(if (changed) "●" else "◝", markOf(text, "Later work"));
+        try std.testing.expect(!conversation(&state, ref, true).stoppable);
+        try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .{ .stop = true } } }));
+        var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer departure.deinit();
+        try writeDeparture(&state, null, &departure.writer);
+        try std.testing.expect(std.mem.indexOf(u8, departure.written(), "rui request recover original-stop-key") != null);
+    };
+}
+
 test "SUI-5 stop_intent" {
+    try stopRestoredRowCase();
+    try stopUnlistedConversationCase();
+    try stopHostReplacementCase();
+    try stopLaterObservationCase();
+    try stopObservationFreshnessCase();
     try stopCase2();
     try stopCase3();
     try stopCase4();
