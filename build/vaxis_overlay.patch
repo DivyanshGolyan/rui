@@ -181,7 +181,7 @@
                                  read_start = 0;
                                  continue :read_loop;
                              };
-+                            if (result.n == 0 and result.event == .osc_5522_invalid) {
++                            if (result.n == 0 and result.event != null and result.event.? == .osc_5522_invalid) {
 +                                // The next escape unframed the OSC and still belongs to the decoder.
 +                                try handleEventGeneric(self, self.vaxis, &self.cache, Event, .osc_5522_invalid, paste_allocator);
 +                                continue;
