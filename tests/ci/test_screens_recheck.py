@@ -59,6 +59,7 @@ class ScreensRecheckTest(unittest.TestCase):
                  self.case_other_heads_branches_and_dispatches_never_choose_retry,
                  self.case_draft_and_success_do_not_retry,
                  self.case_new_run_appearing_before_retry_takes_precedence,
+                 self.case_new_attempt_appearing_before_retry_takes_precedence,
                  self.case_ready_transition_prevents_retrying_prior_draft_run,
                  self.case_same_second_transition_uses_run_trigger_state,
                  self.case_run_must_belong_to_the_published_pr,
@@ -128,6 +129,22 @@ class ScreensRecheckTest(unittest.TestCase):
                     if self.reads == 2:
                         self.runs.append(run(2, "in_progress"))
                         self.jobs[2] = [job(22, "queued", None)]
+                return super().__call__(method, path)
+        api = Changed([run(1)], {1: [job(11)]})
+        self.execute(api)
+        self.assertEqual(api.posts, [])
+
+    def case_new_attempt_appearing_before_retry_takes_precedence(self):
+        class Changed(FakeGitHub):
+            reads = 0
+            def __call__(self, method, path):
+                if "/workflows/" in path:
+                    self.reads += 1
+                    if self.reads == 2:
+                        fresh = run(1, "in_progress")
+                        fresh["run_attempt"] = 2
+                        self.runs = [fresh]
+                        self.jobs[1] = [job(12, "queued", None)]
                 return super().__call__(method, path)
         api = Changed([run(1)], {1: [job(11)]})
         self.execute(api)
