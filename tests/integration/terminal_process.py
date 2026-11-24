@@ -81,6 +81,12 @@ def open_pty(columns=COLUMNS, rows=ROWS):
     return master, slave
 
 
+def pending_pty_input(master):
+    with PTY_LOCK:
+        slave = next(fd for fd, owner in MASTERS.items() if owner == master)
+        return struct.unpack("i", fcntl.ioctl(slave, termios.FIONREAD, b"\0" * 4))[0]
+
+
 def close_pty(*fds):
     with PTY_LOCK:
         for fd in fds:
