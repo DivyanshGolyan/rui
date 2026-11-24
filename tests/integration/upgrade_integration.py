@@ -1831,7 +1831,7 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
 
 
 def first_click_watch_cases(root, binary, releases):
-    """SH-153: an explicit Settings check reads the release after the version-only offer."""
+    """SH-177: an explicit Settings check reads the release after the version-only offer."""
     from codex_fixture import credentials
 
     global TERMINAL_COLUMNS
