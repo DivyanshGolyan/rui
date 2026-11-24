@@ -8,6 +8,7 @@ const command_input = @import("../../command_input.zig");
 const tool_offer_domain = @import("../domain/tool_offer.zig");
 const tool_set_domain = @import("../domain/tool_set.zig");
 const store_core = @import("../Store.zig");
+const app_tools = @import("../../app_tools.zig");
 const Store = store_core.Store;
 const command_domain = @import("../domain/command.zig");
 const historical_domain = @import("../domain/historical.zig");
@@ -1174,6 +1175,18 @@ test "SH-122 a lane root saves its app tools as one set; replacing, clearing and
             try std.testing.expect(first_set > 0);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM tool_set WHERE tool_set_id=?1", .{first_set}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE owner='app' AND name='ask' AND replay='safe' AND restart_limit=2 AND wait_ms=5000", .{}));
+            // The saved set's digest is the set digest of the declared record, as the offer and selection rebuild it.
+            const decl_arena = try std.testing.allocator.alloc(u8, app_tools.arena_bytes);
+            defer std.testing.allocator.free(decl_arena);
+            var decl_fixed: std.heap.FixedBufferAllocator = .init(decl_arena);
+            const declared = app_tools.parse(decl_fixed.allocator(), first).declared;
+            var expected_set: tool_record.SetDigest = .init();
+            expected_set.add(&tool_record.recordDigest(&declared.records[0]));
+            const set_names = try command_input.ToolsField.of(&.{"ask"});
+            var offer: tool_offer_domain.Freeze = .{};
+            var selection: tool_set_domain.SavedSelection = .{ .names = &set_names };
+            try storage.readToolDigestsForTesting(first_set, &set_names, &offer, &selection);
+            try std.testing.expectEqualSlices(u8, &expected_set.final(), &(try selection.selection()).digest);
             // A replayed create answers the same Session and keeps its set.
             const replay = try storage.configure(&create, .{});
             try std.testing.expect(replay.accepted.replayed);
@@ -1208,6 +1221,10 @@ test "SH-122 a lane root saves its app tools as one set; replacing, clearing and
             declareAppTools(&child.configuration, second);
             const refused = try storage.configure(&child, .{});
             try std.testing.expectEqual(protocol.ConfigurationRejection.app_tools_on_child, refused.rejected.code);
+            // An empty list is a declaration too: a child refuses it as well.
+            declareAppTools(&child.configuration, "[]");
+            const refused_empty = try storage.configure(&child, .{});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.app_tools_on_child, refused_empty.rejected.code);
         }
     }.run);
 }

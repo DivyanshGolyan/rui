@@ -23,6 +23,7 @@ const model_admission_domain = @import("model_admission.zig");
 const reads_domain = @import("reads.zig");
 const report_domain = @import("report.zig");
 const tool_set = @import("tool_set.zig");
+const app_tools = @import("../../app_tools.zig");
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
 const ReadAccess = reads_domain.ReadAccess;
 const FirstCandidates = report_domain.FirstCandidates;
@@ -279,7 +280,20 @@ const ToolNames = struct {
     row: set_names.Row,
     tools: [tool_defs.max_tools][]const u8,
     loaded: [tool_defs.max_tools][]const u8,
+    /// The app tool set the Session declares (its lane root's appTools): names only, as the other lists.
+    app_row: app_names.Row = undefined,
+    app_found: store_access.Found = undefined,
+    app: [app_tools.max_records][]const u8 = undefined,
 };
+
+/// An app set holds at most `app_tools.max_records` names of `tool_name.max_bytes` each, joined by commas.
+const app_names_bytes = app_tools.max_records * tool_name.max_bytes + app_tools.max_records - 1;
+const app_names = rsql.Read(.{
+    .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names FROM tool_set s WHERE s.tool_set_id=?1",
+    .Args = struct { set: u64 },
+    .Row = struct { names: ?Bounded(app_names_bytes) },
+    .cardinality = .optional,
+});
 
 const set_names = rsql.Read(.{
     .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names,CASE WHEN ?2=s.tool_set_id THEN NULL ELSE " ++ tool_set.namesSql("?2") ++ " END AS loaded_names FROM tool_set s WHERE s.tool_set_id=?1",
@@ -311,6 +325,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     _ = facts.work.queue(a);
     a.read(report_domain.person_message, .{ .session = session_ref }, &facts.person);
     a.readInto(set_names, .{ .set = current.tool_set_id, .loaded = current.loaded_tool_set_id orelse current.tool_set_id }, &facts.tools.row, &facts.tools_found);
+    if (current.app_tool_set_id) |app_set| a.readInto(app_names, .{ .set = app_set }, &facts.tools.app_row, &facts.tools.app_found);
     facts.first.queue(a, session_ref);
     a.readEach(selected_active, .{ .session = session_ref }, 1, &facts.active);
     try runCurrent(a);
@@ -343,6 +358,10 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
         tools
     else
         try report_domain.sortedToolNames(if (names.row.loaded_names) |*joined| joined.slice() else null, &names.loaded);
+    const declared = if (current.app_tool_set_id != null) blk: {
+        if (!facts.tools.app_found.get()) return error.CorruptStore;
+        break :blk try report_domain.sortedToolNames(if (names.app_row.names) |*joined| joined.slice() else null, &names.app);
+    } else &.{};
     const permission_mode = try configuration_domain.permissionMode(current.permission_mode);
     const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange;
     const work = try facts.work.work(current.created_at, now_ms);
@@ -364,6 +383,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
         .revision = current.revision,
         .tools = tools,
         .loaded_tools = loaded_tools,
+        .app_tools = declared,
         .permission_mode = permission_mode,
         .instructions = .{ .length = facts.instructions.byte_length, .digest = facts.instructions.digest },
         .output_schema = if (current.output_schema_id != null) .{ .length = facts.output_schema.byte_length, .digest = facts.output_schema.digest } else null,

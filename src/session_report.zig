@@ -31,6 +31,8 @@ pub const Current = struct {
     revision: u64,
     tools: []const []const u8,
     loaded_tools: []const []const u8,
+    /// The app tool names the Session's lane root declares; empty when none.
+    app_tools: []const []const u8 = &.{},
     permission_mode: cli_value.PermissionMode,
     instructions: Content,
     output_schema: ?Content,

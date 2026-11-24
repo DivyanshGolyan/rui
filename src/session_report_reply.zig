@@ -53,6 +53,8 @@ pub fn Reply(comptime Capture: type) type {
             try reply.appendTools(values.tools);
             try reply.capture.append(CurrentJson.Settings.loaded_tools);
             try reply.appendTools(values.loaded_tools);
+            try reply.capture.append(CurrentJson.Settings.app_tools);
+            try reply.appendTools(values.app_tools);
             try appendShape(reply.capture, CurrentJson.Settings.tail, .{
                 values.permission_mode,
                 reference(values.instructions),
@@ -435,7 +437,8 @@ pub const CurrentJson = struct {
             ",\"created_at\":\"",      H.decimal,
             "\"}",
         };
-        pub const json_shape = head ++ .{ ToolNames, loaded_tools, ToolNames } ++ tail;
+        const app_tools = ",\"app_tools\":";
+        pub const json_shape = head ++ .{ ToolNames, loaded_tools, ToolNames, app_tools, ToolNames } ++ tail;
     };
     pub const Outcome = struct {
         pub const openapi_name = "domainreportCurrentJsonOutcome";
