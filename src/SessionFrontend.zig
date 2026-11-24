@@ -85,7 +85,6 @@ status: Status = undefined,
 screen: *Screen = undefined,
 app_content: FeedView = .{ .window = undefined, .anchor = undefined },
 feed_origin: SurfaceOrigin = .{},
-cancelled_copy_release: bool = false,
 app_document: DocumentView = .{ .document = undefined },
 app_body: AppScreen.Content = undefined,
 app_input: InputArea = undefined,
@@ -368,12 +367,13 @@ pub const AppHooks = struct {
 
 fn cancelPointerSelection(raw: *anyopaque) void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.cancelCopySelection() or self.app_content.cancelSelection()) self.dirty = true;
+    if (self.app_content.cancelSelection()) self.dirty = true;
 }
 
 fn focusChanged(raw: *anyopaque) void {
     const self: *Self = @ptrCast(@alignCast(raw));
     cancelPointerSelection(raw);
+    if (self.app_document.cancelSelection()) self.dirty = true;
     self.footer.pending = null;
     self.shown_notice.dismiss();
     self.dirty = true;
@@ -686,48 +686,15 @@ fn selectionContextActive(self: *const Self) bool {
         @import("app_input.zig").mainPane(root.input, root.session != null, root.size.width >= Root.split_at) == .session;
 }
 
-fn cancelCopySelection(self: *Self) bool {
-    if (!self.app_content.capturesCopySelection()) return false;
-    self.cancelled_copy_release = true;
-    return self.app_content.cancelSelection();
-}
-
 fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const mouse = if (event == .mouse) event.mouse else return;
-    switch (mouse.type) {
-        .press => {
-            if (self.cancelCopySelection()) ctx.redraw = true;
-            if (self.cancelled_copy_release) {
-                self.cancelled_copy_release = false;
-                if (self.app_content.finishCancelledSelection()) ctx.redraw = true;
-            }
-            return;
-        },
-        .motion => {
-            var changed = self.cancelCopySelection();
-            self.cancelled_copy_release = false;
-            changed = self.app_content.finishCancelledSelection() or changed;
-            if (changed) ctx.redraw = true;
-            return;
-        },
-        .drag, .release => {},
-    }
-    if (self.cancelled_copy_release or self.app_content.copySelectionCancelled()) {
-        if (mouse.type == .release) {
-            self.cancelled_copy_release = false;
-            _ = self.app_content.finishCancelledSelection();
-        }
-        ctx.consumeAndRedraw();
-        return;
-    }
+    if (self.app_content.capturePointerLifecycle(ctx, mouse)) return;
+    if (mouse.type == .press or mouse.type == .motion) return;
     if (!self.app_content.capturesCopySelection()) return;
     if (!self.selectionContextActive()) {
-        _ = self.cancelCopySelection();
-        if (mouse.type == .release) {
-            self.cancelled_copy_release = false;
-            _ = self.app_content.finishCancelledSelection();
-        }
+        if (self.app_content.cancelSelection()) ctx.redraw = true;
+        if (self.app_content.capturePointerLifecycle(ctx, mouse)) return;
         ctx.consumeAndRedraw();
         return;
     }
@@ -1168,8 +1135,7 @@ fn surfaceOrigin(surface: vxfw.Surface, target: vxfw.Widget, row: i32, col: i32)
 fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const screen = self.screen;
-    const copy_selection_held = self.app_content.capturesCopySelection();
-    if (!self.selectionContextActive()) _ = self.cancelCopySelection();
+    if (!self.selectionContextActive()) _ = self.app_content.cancelSelection();
     if (!self.quoteReady()) _ = self.app_content.cancelQuote();
     const normal = style.of(self.app_caps, .{});
     const quiet = style.of(self.app_caps, .{ .colour = .quiet });
@@ -1330,7 +1296,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
             surface = try self.app_screen.widget().draw(ctx);
         };
     }
-    if (copy_selection_held and self.app_content.copySelectionCancelled()) self.cancelled_copy_release = true;
     if (screen.view == .feed) self.feed_origin = surfaceOrigin(surface, self.app_content.widget(), 0, 0) orelse .{};
     const size = if (self.app_consent.request != null) self.app_preview.size else if (screen.view == .feed) self.app_content.size else self.app_document.size;
     screen.height = size.height;
@@ -4051,6 +4016,14 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
     try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .release, .mods = .{} });
     try std.testing.expectEqual(@as(usize, 1), actions.opened);
     try std.testing.expectEqualStrings(url, actions.uri[0..actions.uri_len]);
+    try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+
+    // A link release after focus leaves the feed is still captured, not
+    // delivered as a second activation to the newly focused target.
+    try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .press, .mods = .{} });
+    try held.self.app_content.widget().handleEvent(&ctx, .focus_out);
+    try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .release, .mods = .{} });
+    try std.testing.expectEqual(@as(usize, 1), actions.opened);
     try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
 
     try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .press, .mods = .{} });
