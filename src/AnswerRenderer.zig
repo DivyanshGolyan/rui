@@ -18,6 +18,10 @@ const InlineKind = enum { none, emphasis, strong, code };
 const InlineRetention = enum { candidate, literal };
 const Link = enum { none, text, text_closed, target, bare, local, local_literal };
 const Boundary = enum { word, prose, other };
+const Citation = enum { none, opening, body, separator_second, separator_third };
+const citation_open = "\u{e200}cite\u{e202}";
+const citation_label = "[source unavailable]";
+const citation_limit = 256;
 
 pub const Destination = display_text.Target;
 
@@ -65,6 +69,10 @@ active_style: Style = .{},
 line_start: bool = true,
 literal_line: bool = false,
 terminal_text: TerminalText = .{ .mode = .multiline },
+citation: Citation = .none,
+citation_len: u16 = 0,
+citation_label_written: bool = false,
+literal_block: bool = false,
 
 pub fn feed(self: *Renderer, bytes: []const u8) !void {
     for (bytes) |byte| {
@@ -152,6 +160,7 @@ pub fn finish(self: *Renderer) !void {
     try self.endLink();
     try self.flushSpan();
     if (self.line_style) try self.transition(.{});
+    try self.finishCitation();
     try self.terminal_text.finish(self.out);
 }
 
@@ -433,6 +442,7 @@ fn tableCell(self: *Renderer, bytes: []const u8, forward: bool) !u16 {
     try self.proseSlice(bytes);
     try self.endLink();
     try self.flushSpan();
+    try self.finishCitation();
     try self.transition(.{});
     try self.terminal_text.finish(self.out);
     self.escape_next = false;
@@ -514,6 +524,10 @@ fn codeBlock(self: *Renderer, bytes: []const u8) !void {
 }
 
 fn literalBlock(self: *Renderer, bytes: []const u8) !void {
+    try self.finishCitation();
+    const previous = self.literal_block;
+    self.literal_block = true;
+    defer self.literal_block = previous;
     for (bytes) |byte| {
         try self.safe(byte);
         self.line_start = byte == '\n';
@@ -908,6 +922,7 @@ fn showText(self: *Renderer) !void {
 }
 
 fn openLocal(self: *Renderer, parts: LocalParts) !void {
+    try self.finishCitation();
     try self.terminal_text.finish(self.out);
     try self.out.writeAll(TerminalText.link_open ++ "file://");
     try writeEncoded(self.out, parts.home);
@@ -918,6 +933,7 @@ fn openLocal(self: *Renderer, parts: LocalParts) !void {
 }
 
 fn openLink(self: *Renderer, address: []const u8) !void {
+    try self.finishCitation();
     try self.terminal_text.finish(self.out);
     try self.out.writeAll(TerminalText.link_open);
     try self.out.writeAll(address);
@@ -943,6 +959,7 @@ fn addressEnds(byte: u8) bool {
 
 fn transition(self: *Renderer, requested: Style) !void {
     if (std.meta.eql(self.active_style, requested)) return;
+    try self.finishCitation();
     try self.terminal_text.finish(self.out);
     var previous = self.active_style;
     var next = requested;
@@ -994,6 +1011,7 @@ fn starWidth(self: *const Renderer) u2 {
 }
 
 fn flushLiteralSpan(self: *Renderer) !void {
+    if (self.inline_kind == .code and !self.code_closer) self.inline_kind = .none;
     try self.safeSlice(self.span[0..self.span_len]);
     self.resetInline();
 }
@@ -1002,8 +1020,89 @@ fn safeSlice(self: *Renderer, bytes: []const u8) !void {
     for (bytes) |byte| try self.safe(byte);
 }
 
-fn safe(self: *Renderer, byte: u8) !void {
-    try self.terminal_text.feed(self.out, &.{byte});
+fn finishCitation(self: *Renderer) !void {
+    if (self.citation == .none) return;
+    if (self.citation == .opening and self.citation_len < "\u{e200}cite".len) {
+        try self.terminal_text.feed(self.out, citation_open[0..self.citation_len]);
+    } else if (!self.citation_label_written) {
+        try self.terminal_text.feed(self.out, citation_label);
+    }
+    self.citation = .none;
+    self.citation_len = 0;
+    self.citation_label_written = false;
+}
+
+fn safe(self: *Renderer, byte: u8) (std.Io.Writer.Error || error{NoSpaceLeft})!void {
+    if (self.literal_block or self.active_style.code or self.inline_kind == .code or self.in_link) {
+        try self.finishCitation();
+        return self.terminal_text.feed(self.out, &.{byte});
+    }
+    switch (self.citation) {
+        .none => {
+            if (byte != citation_open[0]) return self.terminal_text.feed(self.out, &.{byte});
+            self.citation = .opening;
+            self.citation_len = 1;
+        },
+        .opening => {
+            if (byte != citation_open[self.citation_len]) {
+                if (self.citation_len == "\u{e200}cite".len and (std.ascii.isAlphanumeric(byte) or byte == '_')) {
+                    try self.terminal_text.feed(self.out, citation_open[0..self.citation_len]);
+                    self.citation = .none;
+                    self.citation_len = 0;
+                } else {
+                    const matched = self.citation_len;
+                    try self.finishCitation();
+                    if (matched == "\u{e200}cite".len + 2 and byte == 0x80) {
+                        try self.safe(0xee);
+                        try self.safe(0x88);
+                    } else if (matched > "\u{e200}cite".len) {
+                        try self.terminal_text.feed(self.out, citation_open["\u{e200}cite".len..matched]);
+                    }
+                }
+                return self.safe(byte);
+            }
+            self.citation_len += 1;
+            if (self.citation_len == citation_open.len) {
+                self.citation = .body;
+                self.citation_len = 0;
+            }
+        },
+        .body => {
+            if (std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '-') {
+                if (self.citation_len < citation_limit) self.citation_len += 1;
+                if (self.citation_len == citation_limit and !self.citation_label_written) {
+                    try self.terminal_text.feed(self.out, citation_label);
+                    self.citation_label_written = true;
+                }
+            } else if (byte == 0xee) {
+                self.citation = .separator_second;
+            } else {
+                try self.finishCitation();
+                return self.safe(byte);
+            }
+        },
+        .separator_second => {
+            if (byte == 0x88) self.citation = .separator_third else {
+                try self.finishCitation();
+                try self.terminal_text.feed(self.out, "\xee");
+                return self.safe(byte);
+            }
+        },
+        .separator_third => {
+            if (byte == 0x82) {
+                self.citation = .body;
+            } else if (byte == 0x81) {
+                try self.finishCitation();
+            } else {
+                try self.finishCitation();
+                if (byte == 0x80) {
+                    try self.safe(0xee);
+                    try self.safe(0x88);
+                } else try self.terminal_text.feed(self.out, "\xee\x88");
+                return self.safe(byte);
+            }
+        },
+    }
 }
 
 test "outer code closer owns its complete run at retained and streaming bounds" {
@@ -1709,6 +1808,61 @@ fn visible(output: []const u8, shown: *std.Io.Writer) !void {
             try shown.writeByte(output[index]);
             index += 1;
         }
+    }
+}
+
+test "SUI-132 unresolved citation markers in prose use an unlinked fallback" {
+    const marker = "\u{e200}cite\u{e202}turn123search0\u{e202}turn123search4\u{e201}";
+    const long = "\u{e200}cite\u{e202}" ++ @as([300]u8, @splat('x')) ++ "\u{e201}";
+    const cases = [_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "Before " ++ marker ++ " after.", .expected = "Before [source unavailable] after." },
+        .{ .input = "Before \u{e200}cite\u{e202}turn123search0 after.", .expected = "Before [source unavailable] after." },
+        .{ .input = "Before \u{e200}cite\u{e202}unknown\u{e201} after.", .expected = "Before [source unavailable] after." },
+        .{ .input = "Before \u{e200}cite", .expected = "Before [source unavailable]" },
+        .{ .input = "Before \u{e200}cite" ++ marker ++ " after.", .expected = "Before [source unavailable][source unavailable] after." },
+        .{ .input = "Before \u{e200}cite\u{e202}unfinished" ++ marker ++ " after.", .expected = "Before [source unavailable][source unavailable] after." },
+        .{ .input = "Before \u{e200}cite\u{e202}unknown\u{e000} after.", .expected = "Before [source unavailable]\u{e000} after." },
+        .{ .input = "Before \u{e200}cite\u{e000} after.", .expected = "Before [source unavailable]\u{e000} after." },
+        .{ .input = "Before \u{e200}cite\u{e203} after.", .expected = "Before [source unavailable]\u{e203} after." },
+        .{ .input = "Before \u{e200}cite_identifier after.", .expected = "Before \u{e200}cite_identifier after." },
+        .{ .input = "Before " ++ long ++ " after.", .expected = "Before [source unavailable] after." },
+        .{ .input = "Before \u{e200}cite\u{e202}unknown\u{e203} after.", .expected = "Before [source unavailable]\u{e203} after." },
+        .{ .input = "Before \u{e200}citizen after.", .expected = "Before \u{e200}citizen after." },
+        .{ .input = "Before `" ++ marker ++ "` after.", .expected = "Before " ++ marker ++ " after." },
+        .{ .input = "Before `" ++ marker ++ " after.", .expected = "Before `[source unavailable] after." },
+        .{ .input = "*Before " ++ marker ++ " after.*", .expected = "Before [source unavailable] after." },
+        .{ .input = "*Before `" ++ marker ++ "` after.*", .expected = "Before " ++ marker ++ " after." },
+        .{ .input = "| Head |\n| --- |\n| " ++ marker ++ " |\n", .expected = "  Head\n  [source unavailable]\n" },
+        .{ .input = "Before " ++ marker ++ " [label](https://example.test/a)", .expected = "Before [source unavailable] label" },
+        .{ .input = "```\n" ++ marker ++ "\n```\n", .expected = "  " ++ marker ++ "\n" },
+    };
+    for (cases) |case| for (0..case.input.len + 1) |split| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: Renderer = .{ .out = &output.writer, .colour = false };
+        try renderer.feed(case.input[0..split]);
+        for (case.input[split..]) |byte| try renderer.feed(&.{byte});
+        try renderer.finish();
+        var shown = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer shown.deinit();
+        try visible(output.written(), &shown.writer);
+        try std.testing.expectEqualStrings(case.expected, shown.written());
+        if (std.mem.indexOf(u8, case.input, "https://example.test/a") != null)
+            try std.testing.expect(std.mem.indexOf(u8, output.written(), "https://example.test/a") != null);
+        if (std.mem.indexOf(u8, case.input, marker) != null and
+            std.mem.indexOfScalar(u8, case.input, '`') == null and std.mem.indexOf(u8, case.input, "https://") == null)
+        {
+            try std.testing.expect(std.mem.indexOf(u8, output.written(), TerminalText.link_open) == null);
+        }
+    };
+    for (0..marker.len + 1) |end| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: Renderer = .{ .out = &output.writer };
+        try renderer.feed("Before ");
+        try renderer.feed(marker[0..end]);
+        try renderer.finish();
+        try std.testing.expect(std.mem.indexOf(u8, output.written(), "turn123") == null);
     }
 }
 
