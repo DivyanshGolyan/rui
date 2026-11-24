@@ -6934,7 +6934,7 @@ test "Sign-in completion applies the core default and restores only a visible fo
             try std.testing.expect(std.mem.indexOf(u8, text, "couldn't save default") != null);
             try std.testing.expect(std.mem.indexOfAny(u8, text, "\r\n\x1b") == null);
         }
-        try std.testing.expectEqual(protocol.Provider.openai, overview.state.default.?.provider);
+        try std.testing.expectEqualStrings("openai", overview.state.default.?.provider.slice());
         try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
         const next_creation = overview.creationSnapshot(overview.state.default);
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), (try next_creation.settings).effort);
@@ -7548,7 +7548,7 @@ const EmptySessionOwner = struct {
             .result = .{
                 .status = true,
                 .work = .{ .read_version = .{ .instance = @splat(1), .generation = generation }, .work = row.work.core() },
-                .line = .{ .read = .{ .revision = row.revision, .end = row.end }, .model = row.model, .provider = .codex, .folder = row.workspace, .effort = effort },
+                .line = .{ .read = .{ .revision = row.revision, .end = row.end }, .model = row.model, .provider = view.pn(.codex), .folder = row.workspace, .effort = effort },
                 .hint = .absent,
                 .cursor = .{ .position = row.end },
                 .at_start = true,
@@ -8556,7 +8556,7 @@ test "overview redraw deadline includes quota header with failed row off screen"
             row.work.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = test_now_s + 200 } };
             try row.work.state.failed.code.set("provider_quota");
             row.work = fixtureSessionWork(row.work.core());
-            row.provider = .codex;
+            row.provider = view.pn(.codex);
             return failure;
         }
     };
@@ -8843,7 +8843,7 @@ test "named launch waits for sign-in before choosing its binding" {
             row.* = .{ .created_at = 10, .read_version = page.since, .work = .{ .state = .{ .idle = .{ .since = test_now_s } } } };
             row.reference.set(listed_references[0]) catch unreachable;
             row.workspace.set("/work") catch unreachable;
-            row.provider = .codex;
+            row.provider = view.pn(.codex);
             row.model.set("gpt-6-luna") catch unreachable;
             return null;
         }

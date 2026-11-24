@@ -2727,7 +2727,7 @@ test "initial Message reply binds its allocated Session and original input befor
     const protocol_reply = @import("protocol_reply.zig");
     const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
     const configuration: @import("creation_receipt.zig").Configuration = .{
-        .provider = .codex,
+        .connection = @import("connection.zig").Name.parse("codex").?,
         .model = try .from("model-a"),
         .reasoning_effort = null,
         .workspace = try .from("/workspace"),
@@ -6103,9 +6103,9 @@ const MutationWitness = struct {
                         else => null,
                     };
                     if (configuration) |item| {
-                        comptime requireFields(@TypeOf(item), &.{ "provider", "model", "reasoning_effort", "workspace", "tools", "loaded_tools", "permission_mode", "compaction_trigger" });
+                        comptime requireFields(@TypeOf(item), &.{ "connection", "model", "reasoning_effort", "workspace", "tools", "loaded_tools", "permission_mode", "compaction_trigger" });
                         const receipt = try std.json.Stringify.valueAlloc(std.testing.allocator, .{
-                            .provider = item.provider,
+                            .connection = item.connection.slice(),
                             .model = item.model.slice(),
                             .reasoning_effort = item.reasoning_effort,
                             .workspace = item.workspace.slice(),
@@ -6268,7 +6268,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             // Creation now requires a resolved receipt. Keep the legacy missing
             // receipt probe above and witness a valid creation independently.
             var configuration: @import("creation_receipt.zig").Configuration = .{
-                .provider = .openai,
+                .connection = @import("connection.zig").Name.parse("openai").?,
                 .model = .{},
                 .reasoning_effort = .low,
                 .workspace = .{},

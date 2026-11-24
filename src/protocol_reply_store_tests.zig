@@ -109,7 +109,7 @@ test "Session settings Current report and typed Settings round trip every settin
             try missing.print("{s}: session_report.Current / Store session_report_read current producer\n", .{entry.field});
         if (comptime !@hasField(reply.Current.Settings, settingsField(entry)))
             try missing.print("{s}: protocol_reply.Current.Settings\n", .{entry.field});
-        if (original.get(entry.spec)) |value| {
+        if (original.get(settingsField(entry))) |value| {
             if (value == .null) try missing.print("{s}: all-settings configure fixture / Store report read\n", .{entry.field});
         } else try missing.print("{s}: Store report current producer / session_report_reply.CurrentJson.Settings\n", .{entry.field});
     }
@@ -129,7 +129,7 @@ test "Session settings Current report and typed Settings round trip every settin
         if (value == null) {
             try missing.print("{s}: protocol_reply.Current.Settings round trip\n", .{entry.field});
         } else {
-            const before = try std.json.Stringify.valueAlloc(std.testing.allocator, original.get(entry.spec).?, .{});
+            const before = try std.json.Stringify.valueAlloc(std.testing.allocator, original.get(settingsField(entry)).?, .{});
             defer std.testing.allocator.free(before);
             const after = try std.json.Stringify.valueAlloc(std.testing.allocator, value.?, .{});
             defer std.testing.allocator.free(after);

@@ -1819,9 +1819,9 @@ fn relaunchArguments(executable: []const u8, store: []const u8, selectors: new_s
     buffer[1] = "--store";
     buffer[2] = store;
     var count: usize = 3;
-    inline for (.{ "connection", "model" }) |name| {
-        if (@field(selectors, name)) |value| {
-            buffer[count] = "--" ++ name;
+    inline for (.{ .{ "provider", "connection" }, .{ "model", "model" } }) |pair| {
+        if (@field(selectors, pair[0])) |value| {
+            buffer[count] = "--" ++ pair[1];
             buffer[count + 1] = value;
             count += 2;
         }
@@ -1860,8 +1860,8 @@ test "relaunch argv pins the actual Store with every explicit selector subset" {
         try std.testing.expectEqualStrings("--store", args[1]);
         try std.testing.expectEqualStrings("/canonical/original-store", args[2]);
         var at: usize = 3;
-        inline for (.{ "connection", "model" }) |name| if (@field(selectors, name)) |value| {
-            try std.testing.expectEqualStrings("--" ++ name, args[at]);
+        inline for (.{ .{ "provider", "connection" }, .{ "model", "model" } }) |pair| if (@field(selectors, pair[0])) |value| {
+            try std.testing.expectEqualStrings("--" ++ pair[1], args[at]);
             try std.testing.expectEqualStrings(value, args[at + 1]);
             at += 2;
         };
@@ -2488,7 +2488,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     const admitted = (try reply.answer).result.accepted.message.configuration orelse return error.InvalidResponse;
     const receipt = configuration.?.receipt.observed(
-        @tagName(admitted.provider),
+        admitted.connection.slice(),
         admitted.model.slice(),
         if (admitted.reasoning_effort) |effort| @tagName(effort) else null,
     );
@@ -2637,7 +2637,7 @@ fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Curren
     taken.label.len = 0;
     if (settings.label) |label| try taken.label.set(label.slice());
     try taken.workspace.set(settings.workspace.slice());
-    taken.provider = settings.provider.value;
+    taken.provider = @import("connection.zig").Name.parse(settings.connection.value.slice()) orelse return error.InvalidSession;
     try taken.model.set(settings.model.slice());
     taken.effort = if (settings.reasoning_effort) |effort| effort.value else null;
     taken.effort_override = settings.reasoning_effort_override != null;
@@ -4074,7 +4074,7 @@ test "CLI-6 start_receipt_configuration" {
     try checkStartEffortSources();
     try checkStartHostSettings();
 
-    const config = ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"reasoning_effort\":\"high\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"100\"}";
+    const config = ",\"configuration\":{\"connection\":\"codex\",\"model\":\"gpt-5.5\",\"reasoning_effort\":\"high\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"100\"}";
     const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"" ++ config ++ "},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
     const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = 3, .digest = @splat(0), .creates_session = true } };
     const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "", target);

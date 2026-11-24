@@ -940,7 +940,7 @@ test "explicit native and preset restrictions survive reopen and resumed model r
                     try request.preset.?.set("reader");
                     const arena = memory.allocator();
                     const bytes = try std.json.Stringify.valueAlloc(arena, .{
-                        .provider = "codex",
+                        .connection = "codex",
                         .workspace = workspace,
                         .model = create.configuration.model.value.slice(),
                         .effort = create.configuration.reasoning_effort.value.slice(),
