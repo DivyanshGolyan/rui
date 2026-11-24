@@ -159,7 +159,7 @@ fn printMarked(line: vaxis.Window, text: []const u8, span: ?commands.Span, plain
 }
 
 test "Palette keeps the selected command visible at one row and hides closed or clipped choices" {
-    var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 7, commands.conversation.listed()) };
+    var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 7, commands.conversation.listedForTests()) };
     const shown = &menu.shown.?;
     shown.highlight = shown.list.count - 1;
     var palette: Self = .{ .menu = &menu };
@@ -201,7 +201,7 @@ test "Palette hover is transient and clicks activate only visible command rows" 
         }
     };
     var selected: Selected = .{};
-    var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 7, commands.conversation.listed()) };
+    var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 7, commands.conversation.listedForTests()) };
     const shown = &menu.shown.?;
     var palette: Self = .{ .menu = &menu, .userdata = &selected, .on_select = Selected.select, .style = .{ .fg = .{ .index = 3 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -263,7 +263,7 @@ test "Palette selection uses the shared ink wash for plain and matching cells in
     for ([_]?overview.Rgb{ .{ 255, 255, 255 }, null }) |terminal| {
         for ([_]overview.Caps.Depth{ .direct, .indexed, .none }) |depth| for ([_]bool{ true, false }) |unicode| {
             const caps: overview.Caps = .{ .background = terminal, .depth = depth, .unicode = unicode };
-            var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 1, commands.conversation.listed()) };
+            var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 1, commands.conversation.listedForTests()) };
             const shown = &menu.shown.?;
             shown.list.count = 2;
             shown.list.entries[0].description = "retained description";
@@ -337,7 +337,7 @@ test "Palette description clipping ends with the list row ellipsis at every widt
     for ([_]bool{ true, false }) |unicode| {
         for (0..2) |selected| {
             for (0..81) |width| {
-                var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 1, commands.conversation.listed()) };
+                var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 1, commands.conversation.listedForTests()) };
                 const shown = &menu.shown.?;
                 shown.list.count = 2;
                 shown.highlight = selected;
@@ -387,7 +387,7 @@ test "Palette description fitting keeps whole wide and combining clusters" {
     };
     for (std.enums.values(vaxis.gwidth.Method)) |method| {
         for (cases) |case| {
-            var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 1, commands.conversation.listed()) };
+            var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 1, commands.conversation.listedForTests()) };
             const shown = &menu.shown.?;
             shown.list.count = 1;
             shown.list.entries[0].description = case.text;
@@ -421,7 +421,7 @@ test "Palette panel keeps every selected row visible across tiny bounds budgets 
         for (0..14) |width_index| {
             const width: u16 = if (width_index == 13) 80 else @intCast(width_index);
             for (0..13) |height| for (0..13) |budget| {
-                var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 7, commands.conversation.listed()) };
+                var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 7, commands.conversation.listedForTests()) };
                 const shown = &menu.shown.?;
                 for (0..shown.list.count) |selected| {
                     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -493,7 +493,7 @@ test "Palette full-width rows activate and overflow consumes clicks" {
     };
     for ([_]bool{ false, true }) |unicode| for ([_]u16{ 140, 46 }) |width| {
         var selected: Selected = .{};
-        var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 7, commands.conversation.listed()) };
+        var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 7, commands.conversation.listedForTests()) };
         const shown = &menu.shown.?;
         shown.highlight = shown.list.count - 1;
         var palette: Self = .{ .menu = &menu, .caps = .{ .unicode = unicode }, .userdata = &selected, .on_select = Selected.select };
@@ -534,7 +534,7 @@ test "Palette publishes menu picks and keeps the drawn identity across wheel mov
         }
     };
     var selected: Selected = .{};
-    var menu: slash_menu.Menu = .{ .shown = commands.Shown.nextOf(null, 7, 23, commands.conversation.listed()) };
+    var menu: slash_menu.Menu = .{ .shown = commands.Shown.nextOf(null, 7, 23, commands.conversation.listedForTests()) };
     const shown = &menu.shown.?;
     var palette: Self = .{ .menu = &menu, .userdata = &selected, .on_select = Selected.select };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

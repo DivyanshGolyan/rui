@@ -5,6 +5,7 @@ const skill_suggestions = @import("skill_suggestions.zig");
 const model_capability = @import("model_capability.zig");
 const TerminalText = @import("TerminalText.zig");
 const ReasoningEffort = model_capability.ReasoningEffort;
+const ArchiveState = @import("session_archive.zig").State;
 
 pub const Argument = union(enum) {
     none,
@@ -43,6 +44,7 @@ pub const Options = struct {
 pub const Context = struct {
     model: ?[]const u8 = null,
     effort: ?ReasoningEffort = null,
+    archive_state: ?ArchiveState = null,
 };
 
 pub const Copy = enum { answer, code, file };
@@ -103,6 +105,14 @@ pub const conversation = Commands(ConversationName, .{
     .unarchive = .{ .description = "restore this chat" },
     .unpin = .{ .description = "" },
 });
+
+pub fn conversationArchiveEligible(name: conversation.Name, state: ?ArchiveState) bool {
+    return switch (name) {
+        .archive => state != null and state.? == .active,
+        .unarchive => state != null and state.? == .archived,
+        else => true,
+    };
+}
 
 fn slashed(text: []const u8) bool {
     return text.len != 0 and text[0] == '/' and !std.mem.startsWith(u8, text, "//");
@@ -224,11 +234,22 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             return if (std.mem.indexOfAny(u8, text, " \t\n") == null) .word else .message;
         }
 
-        pub fn listed() List {
+        pub fn listedFor(context: Context) List {
+            return listedWith(context, true);
+        }
+
+        pub fn listedForTests() List {
+            return listedWith(.{}, false);
+        }
+
+        fn listedWith(context: Context, filter_archive: bool) List {
             var list: List = .{ .typed = "", .column = description_column };
             for (names) |name| {
                 const command = table.get(name);
                 if (!command.listed) continue;
+                if (comptime N == ConversationName) {
+                    if (filter_archive and !conversationArchiveEligible(name, context.archive_state)) continue;
+                }
                 list.add(.{ .word = spaced.get(name)[1 .. spaced.get(name).len - @intFromBool(command.argument == .none)], .shown = spaced.get(name)[0 .. spaced.get(name).len - 1], .description = if (command.description.len != 0) command.description else choices_text.get(name), .runs = !requires(command.argument) });
             }
             return list;
@@ -689,7 +710,7 @@ test "a command's list names the choices its word starts, and Tab puts the highl
 }
 
 test "listed commands are every listed name in order, and reload runs immediately" {
-    const listed = conversation.listed();
+    const listed = conversation.listedForTests();
     const expected = [_][]const u8{ "archive", "clear", "copy ", "effort ", "model", "new", "pin", "reload-skills", "reload-tools", "rename ", "requests", "result ", "setup ", "unarchive", "unpin" };
     try std.testing.expectEqual(expected.len, listed.count);
     for (expected, listed.shown()) |word, entry| try std.testing.expectEqualStrings(word, entry.word);
@@ -869,4 +890,40 @@ test "overflow labels are count only" {
     var buffer: [32]u8 = undefined;
     try std.testing.expectEqualStrings("5 more", try std.fmt.bufPrint(&buffer, more, .{5}));
     try std.testing.expectEqualStrings("1 more", try std.fmt.bufPrint(&buffer, more, .{1}));
+}
+
+test "archive command eligibility follows the exact archive state" {
+    const cases = .{
+        .{ ArchiveState.active, true, false },
+        .{ ArchiveState.archiving, false, false },
+        .{ ArchiveState.archived, false, true },
+    };
+    inline for (cases) |case| {
+        try std.testing.expectEqual(case[1], conversationArchiveEligible(.archive, case[0]));
+        try std.testing.expectEqual(case[2], conversationArchiveEligible(.unarchive, case[0]));
+        try std.testing.expect(conversationArchiveEligible(.clear, case[0]));
+    }
+    try std.testing.expect(!conversationArchiveEligible(.archive, null));
+    try std.testing.expect(!conversationArchiveEligible(.unarchive, null));
+}
+
+test "conversation first-word catalogue exposes only the state-eligible archive verb" {
+    const Case = struct { state: ?ArchiveState, archive: bool, unarchive: bool };
+    const cases = [_]Case{
+        .{ .state = null, .archive = false, .unarchive = false },
+        .{ .state = .active, .archive = true, .unarchive = false },
+        .{ .state = .archiving, .archive = false, .unarchive = false },
+        .{ .state = .archived, .archive = false, .unarchive = true },
+    };
+    for (cases) |case| {
+        const list = conversation.listedFor(.{ .archive_state = case.state });
+        var archive = false;
+        var unarchive = false;
+        for (list.shown()) |entry| {
+            archive = archive or std.mem.eql(u8, entry.shown, "/archive");
+            unarchive = unarchive or std.mem.eql(u8, entry.shown, "/unarchive");
+        }
+        try std.testing.expectEqual(case.archive, archive);
+        try std.testing.expectEqual(case.unarchive, unarchive);
+    }
 }

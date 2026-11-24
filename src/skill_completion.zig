@@ -153,11 +153,18 @@ pub const Reads = struct {
             return slash_commands.Shown.nextOf(previous, revision, source, slash_commands.conversation.suggest(draft, context));
         };
         const typed = word.name(draft);
+        if (word.slash == 0) {
+            const exact = slash_commands.conversation.nameOf(typed);
+            if (exact) |name| if (!slash_commands.conversationArchiveEligible(name, context.archive_state)) return null;
+        }
         const held = if (self.held) |*kept| (if (std.mem.startsWith(u8, typed, kept.prefix.slice())) kept else null) else null;
         const none: skill_suggestions.Page = .{};
         const page = if (held) |kept| &kept.page else &none;
-        const source = ((if (held) |kept| kept.read else 0) << 32) | (@as(u32, @intCast(word.slash)) + 1);
-        const commands = if (word.slash == 0) slash_commands.conversation.listed() else null;
+        var source = ((if (held) |kept| kept.read else 0) << 32) | (@as(u32, @intCast(word.slash)) + 1);
+        if (word.slash == 0) {
+            source = std.hash.Wyhash.hash(source, if (context.archive_state) |state| @tagName(state) else "unavailable");
+        }
+        const commands = if (word.slash == 0) slash_commands.conversation.listedFor(context) else null;
         var listed = rows.list(typed, commands, page) orelse return null;
         listed.source_word = .{ .start = word.slash, .len = word.end - word.slash };
         return slash_commands.Shown.nextOf(previous, revision, source, listed);
@@ -464,7 +471,7 @@ test "leading skill collisions use the complete grammar including hidden command
             const shown = reads.shown(&rows, draft, draft.len, 1, .{}, null);
             // The listed commands whose name or description holds the name.
             var expected: usize = 0;
-            for (slash_commands.conversation.listed().shown()) |command| {
+            for (slash_commands.conversation.listedFor(.{ .archive_state = null }).shown()) |command| {
                 if (std.mem.indexOf(u8, command.shown, name[0..length]) != null or std.mem.indexOf(u8, command.description, name[0..length]) != null) expected += 1;
             }
             try std.testing.expectEqual(expected, if (shown) |found| found.list.count else 0);
@@ -859,5 +866,33 @@ test "a transport-interrupted skills read is retryable without discarding the he
         try std.testing.expect(next.read > pending.read);
         reads.fail(next.read);
         try std.testing.expect(reads.ask("re") == null);
+    }
+}
+
+test "first word archive suggestions follow state and exact unavailable names never fuzzy match" {
+    const ArchiveState = @import("session_archive.zig").State;
+    const entries = [_]skill_suggestions.Entry{.{ .name = "archiver", .description = "Archive notes" }};
+    var reads: Reads = .{};
+    var rows: Rows = .{};
+    _ = reads.answer(reads.ask("").?.read, testPage(&entries), "");
+
+    var active = reads.shown(&rows, "/arch", "/arch".len, 1, .{ .archive_state = .active }, null).?;
+    try std.testing.expectEqualStrings("/archive", active.list.entries[0].shown);
+    active.drew(true);
+    const archiving = reads.shown(&rows, "/arch", "/arch".len, 1, .{ .archive_state = .archiving }, active).?;
+    try std.testing.expectEqualStrings("hidden", @tagName(archiving.seen));
+    try std.testing.expectEqualStrings("/archiver", archiving.list.entries[0].shown);
+    try std.testing.expect(reads.shown(&rows, "/archive", "/archive".len, 1, .{ .archive_state = .archiving }, active) == null);
+
+    const restored = reads.shown(&rows, "/unarch", "/unarch".len, 1, .{ .archive_state = .archived }, null).?;
+    try std.testing.expectEqualStrings("/unarchive", restored.list.entries[0].shown);
+    const unavailable = [_]struct { state: ArchiveState, draft: []const u8 }{
+        .{ .state = .archived, .draft = "/archive" },
+        .{ .state = .active, .draft = "/unarchive" },
+        .{ .state = .archiving, .draft = "/archive" },
+        .{ .state = .archiving, .draft = "/unarchive" },
+    };
+    for (unavailable) |case| {
+        try std.testing.expect(reads.shown(&rows, case.draft, case.draft.len, 2, .{ .archive_state = case.state }, null) == null);
     }
 }

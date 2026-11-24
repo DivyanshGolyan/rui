@@ -1788,8 +1788,12 @@ fn slashCommand(self: *Self, text: []const u8) !void {
     switch (parsed) {
         .new_session => self.newChat(),
         .model => self.requestFooterChoice(.model),
-        .archive => try self.perform(.archive),
-        .unarchive => try self.converse(.unarchive),
+        .archive => if (!slash_commands_shared.conversationArchiveEligible(.archive, self.commandArchiveState())) {
+            self.notice = archiveCommandRefusal(self.commandArchiveState(), true);
+        } else try self.perform(.archive),
+        .unarchive => if (!slash_commands_shared.conversationArchiveEligible(.unarchive, self.commandArchiveState())) {
+            self.notice = archiveCommandRefusal(self.commandArchiveState(), false);
+        } else try self.converse(.unarchive),
         .pin => |pinned| try self.converse(.{ .pin = pinned }),
         .inspection => self.input.queueCommand(text),
         .discard => {
@@ -2355,8 +2359,23 @@ fn update(self: *Self) !Updated {
     return .active;
 }
 
+fn commandArchiveState(self: *const Self) ?protocol.SessionArchiveState {
+    if (self.reading.opening or self.line.read == null) return null;
+    return self.line.archive_state;
+}
+
+fn archiveCommandRefusal(state: ?protocol.SessionArchiveState, archiving: bool) []const u8 {
+    if (state == null) return "Archive actions are available once the chat opens.";
+    if (state.? == .archiving) return "This chat is still archiving.";
+    return if (archiving) "This chat is already archived." else "Unarchive requires an archived chat.";
+}
+
 fn menuSource(self: *Self) slash_menu.Source {
-    const context: slash_commands_shared.Context = if (self.line.read != null) .{ .model = self.line.model.slice(), .effort = self.line.effort } else .{};
+    const context: slash_commands_shared.Context = .{
+        .model = if (self.line.read != null) self.line.model.slice() else null,
+        .effort = if (self.line.read != null) self.line.effort else null,
+        .archive_state = self.commandArchiveState(),
+    };
     const draft = self.input.composition();
     if (draft.bytes.len != 0) return .{ .draft = .{ .bytes = draft.bytes, .caret = draft.cursor, .revision = self.input.revision, .context = context, .skills = &self.skills } };
     const rows = self.requestList() orelse return .none;
@@ -5346,6 +5365,7 @@ test "conversation slash archive archives a busy Session at once and consumes on
         try overview.init();
         defer overview.deinit();
         held.self.lender = overview.lender();
+        held.self.line.read = .{ .revision = 1, .end = 1 };
         held.self.command = UnusedArchiveCommand.command;
         UnusedArchiveCommand.calls = 0;
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
@@ -5377,6 +5397,8 @@ test "conversation slash and shortcut archive restore share one pending or unkno
         try overview.init();
         defer overview.deinit();
         held.self.lender = overview.lender();
+        held.self.line.read = .{ .revision = 1, .end = 1 };
+        held.self.line.archive_state = if (restore) .archived else .active;
         held.self.command = UnusedArchiveCommand.command;
         UnusedArchiveCommand.calls = 0;
         try sendKeys(&held.self, if (restore) "/unarchive\r" else "/archive\r");
@@ -5385,6 +5407,7 @@ test "conversation slash and shortcut archive restore share one pending or unkno
         try std.testing.expectEqualStrings("k7m2qx", &overview.archived.?);
         try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
         if (unknown) _ = try overview_view.step(&overview.state, .{ .archive = .{ .request = .{ .reference = "k7m2qx".*, .archived = !restore }, .outcome = .{ .unconfirmed = "saved-archive-handle" } } });
+        held.self.line.archive_state = if (restore) .active else .archived;
         try sendKeys(&held.self, if (restore) "/archive\r" else "/unarchive\r");
         try sendKeys(&held.self, "\x1ba");
         try std.testing.expectEqual(@as(usize, 1), overview.archives);
@@ -5410,6 +5433,7 @@ test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives
         try overview.init();
         defer overview.deinit();
         held.self.lender = overview.lender();
+        held.self.line.read = .{ .revision = 1, .end = 1 };
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         held.self.live.work.actions.stop = true;
         try sendKeys(&held.self, "/archive\x18");
@@ -5420,6 +5444,93 @@ test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives
         try std.testing.expectEqual(@as(usize, 1), overview.archives);
         try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
     }
+}
+
+test "SUI-25 archive slash verbs follow observed chat state and preserve opening refusal" {
+    const ArchiveState = protocol.SessionArchiveState;
+    const Case = struct { state: ?ArchiveState, command: []const u8, accepted: bool, refusal: ?[]const u8 = null };
+    const cases = [_]Case{
+        .{ .state = .active, .command = "/archive", .accepted = true },
+        .{ .state = .active, .command = "/unarchive", .accepted = false, .refusal = "Unarchive requires an archived chat." },
+        .{ .state = .archiving, .command = "/archive", .accepted = false, .refusal = "This chat is still archiving." },
+        .{ .state = .archiving, .command = "/unarchive", .accepted = false, .refusal = "This chat is still archiving." },
+        .{ .state = .archived, .command = "/archive", .accepted = false, .refusal = "This chat is already archived." },
+        .{ .state = .archived, .command = "/unarchive", .accepted = true },
+        .{ .state = null, .command = "/archive", .accepted = false, .refusal = "Archive actions are available once the chat opens." },
+        .{ .state = null, .command = "/unarchive", .accepted = false, .refusal = "Archive actions are available once the chat opens." },
+    };
+    for (cases) |case| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.init();
+        defer overview.deinit();
+        held.self.lender = overview.lender();
+        held.self.reading.opening = case.state == null;
+        if (case.state) |state| {
+            held.self.line.read = .{ .revision = 1, .end = 1 };
+            held.self.line.archive_state = state;
+        }
+        try sendKeys(&held.self, case.command);
+        try sendKeys(&held.self, "\r");
+        try std.testing.expectEqual(@as(usize, @intFromBool(case.accepted)), overview.archives);
+        try std.testing.expectEqual(@as(usize, @intFromBool(case.accepted)), overview.host_inputs);
+        if (case.accepted) try std.testing.expectEqual(std.mem.eql(u8, case.command, "/archive"), overview.requested);
+        if (case.refusal) |expected| try std.testing.expectEqualStrings(expected, held.self.notice.?);
+        try std.testing.expect(held.self.submission.view() == null);
+    }
+}
+
+test "SUI-24 archive state changes invalidate drawn Tab and pointer picks before repaint" {
+    const InputPath = enum { tab, click };
+    for (std.enums.values(InputPath)) |path| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.init();
+        defer overview.deinit();
+        held.self.lender = overview.lender();
+        held.self.line.read = .{ .revision = 1, .end = 1 };
+        held.self.line.archive_state = .active;
+        try sendKeys(&held.self, "/arch");
+        _ = try held.draw();
+        const pick = held.self.menu.drawn_pick.?;
+        try std.testing.expectEqualStrings("/archive", held.self.menu.shown.?.list.entries[pick.index].shown);
+        held.self.line.archive_state = .archived;
+        switch (path) {
+            .tab => try sendKeys(&held.self, "\t"),
+            .click => {
+                var ctx = held.context();
+                try appSelectCommand(&held.self, &ctx, pick);
+            },
+        }
+        try std.testing.expectEqual(@as(usize, 0), overview.archives);
+        try std.testing.expectEqual(@as(usize, 0), overview.host_inputs);
+        try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
+        try std.testing.expectEqualStrings("/arch", held.self.input.composition().bytes);
+        try std.testing.expect(held.self.submission.intent == null);
+    }
+}
+
+test "SUI-25 exact archive command refuses after its chat state changes" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    var overview: ArchiveOverview = .{ .state = undefined };
+    try overview.init();
+    defer overview.deinit();
+    held.self.lender = overview.lender();
+    held.self.line.read = .{ .revision = 1, .end = 1 };
+    held.self.line.archive_state = .active;
+    try sendKeys(&held.self, "/archive");
+    _ = try held.draw();
+    try std.testing.expect(held.self.menu.drawn_pick != null);
+    held.self.line.archive_state = .archived;
+    try sendKeys(&held.self, "\r");
+    try std.testing.expectEqual(@as(usize, 0), overview.archives);
+    try std.testing.expectEqual(@as(usize, 0), overview.host_inputs);
+    try std.testing.expectEqualStrings("This chat is already archived.", held.self.notice.?);
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+    try std.testing.expect(held.self.submission.intent == null);
 }
 
 test "conversation slash archive errors propagate and consume only the submitted line" {
@@ -5433,6 +5544,8 @@ test "conversation slash archive errors propagate and consume only the submitted
         const held = try HeldFrontend.create();
         defer held.destroy();
         held.self.lender.step = Failed.step;
+        held.self.line.read = .{ .revision = 1, .end = 1 };
+        held.self.line.archive_state = if (std.mem.startsWith(u8, command, "/unarchive")) .archived else .active;
         const original = held.self.input.submitText("original");
         try std.testing.expectError(error.TestArchiveDispatchFailed, sendKeys(&held.self, command));
         try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
@@ -5470,12 +5583,14 @@ test "upgrade holds refuse archive shortcuts and slash commands without consumin
         try overview.init();
         defer overview.deinit();
         held.self.lender = overview.lender();
+        held.self.line.read = .{ .revision = 1, .end = 1 };
         held.self.live.work.state = switch (work) {
             .idle => .{ .idle = .{ .since = 1 } },
             .working => .{ .working = .{ .since = 1 } },
             .approval => .{ .approval = .{ .since = 1 } },
             else => unreachable,
         };
+        if (path == .slash_unarchive) held.self.line.archive_state = .archived;
         const original = held.self.input.submitText("original request");
         held.self.submission.intent = .{ .message = original };
         held.self.submission.state = .unconfirmed;
@@ -5520,6 +5635,8 @@ test "upgrade reobservation retains a refused archive command from the completio
         try overview.init();
         defer overview.deinit();
         held.self.lender = overview.lender();
+        held.self.line.read = .{ .revision = 1, .end = 1 };
+        held.self.line.archive_state = if (std.mem.startsWith(u8, line, "/unar")) .archived else .active;
         try sendKeys(&held.self, line);
         try held.settle();
         overview.state.upgrade.after = .reobserving;
