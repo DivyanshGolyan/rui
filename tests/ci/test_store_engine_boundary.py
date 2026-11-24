@@ -89,7 +89,7 @@ FORMAT_TOKEN = re.compile(
 
 def format_code(source, suffix):
     if suffix == ".sql":
-        return re.sub(r"--[^\n]*", " ", source)
+        return " ".join(re.sub(r"--[^\n]*", " ", source).split())
     return " ".join(match.group() for match in FORMAT_TOKEN.finditer(source) if not match.group().startswith("//"))
 
 
@@ -304,6 +304,24 @@ class FormatWriteTest(unittest.TestCase):
             self.assertEqual(format_violations(root), [
                 f"src/store/tests/planted.sql writes the Store format (drop column) 1 times, 0 allowed; {FORMAT_RULE}",
                 f"src/store/tests/planted.sql writes the Store format (user_version) 1 times, 0 allowed; {FORMAT_RULE}"])
+
+    def test_a_planted_multiline_sql_format_insert_fails(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            shutil.copytree(ROOT / FORMAT_SOURCES, root / FORMAT_SOURCES)
+            (root / "src/store/tests/planted_insert.sql").write_text(
+                "INSERT INTO store_meta(meta_key,meta_value)\nVALUES('format','74');\n")
+            self.assertEqual(format_violations(root), [
+                f"src/store/tests/planted_insert.sql writes the Store format (format insert) 1 times, 0 allowed; {FORMAT_RULE}"])
+
+    def test_a_planted_multiline_sql_format_update_fails(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            shutil.copytree(ROOT / FORMAT_SOURCES, root / FORMAT_SOURCES)
+            (root / "src/store/tests/planted_update.sql").write_text(
+                "UPDATE store_meta SET meta_value='74'\nWHERE meta_key='format';\n")
+            self.assertEqual(format_violations(root), [
+                f"src/store/tests/planted_update.sql writes the Store format (format update) 1 times, 0 allowed; {FORMAT_RULE}"])
 
     def test_a_planted_drop_column_or_format_update_in_a_new_file_fails(self):
         with tempfile.TemporaryDirectory() as scratch:

@@ -1358,7 +1358,11 @@ const fresh_74_core_command_mysql =
 
 test "schema 75 MySQL pin migration handles fresh and historically upgraded kind checks" {
     const io = std.testing.io;
-    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    }
     defer {
         mutex.lockUncancelable(io);
         defer mutex.unlock(io);
