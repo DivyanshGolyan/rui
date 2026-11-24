@@ -477,8 +477,15 @@ pub const Probes = struct {
         return .{ .io = io, .hooks = hooks, .trace_run_ns = nowNs(io) };
     }
 
-    pub fn attachPauseOwner(self: *Probes, owner: *test_pause.PauseController) void {
+    pub fn attachPauseOwner(self: *Probes, owner: ?*test_pause.PauseController) void {
         if (comptime test_pause.enabled) self.pause_owner = owner;
+    }
+
+    /// Reaches the armed test pause `point` with `context`; an unarmed point proceeds at once.
+    pub fn reach(self: *Probes, point: test_pause.Point, context: test_pause.Context) void {
+        if (comptime test_pause.enabled) if (self.pause_owner) |owner| {
+            _ = owner.reach(point, context) catch {};
+        };
     }
 
     /// Opens the observation writer that the harness's fds name, if it names one.
@@ -624,7 +631,7 @@ pub const Probes = struct {
     }
 
     /// Holds retry recovery at its gate, returning the gate path when this call took the hold.
-    pub fn holdRetryRecovery(self: *Probes) ?[]const u8 {
+    fn holdRetryRecovery(self: *Probes) ?[]const u8 {
         if (self.hook_progress.retry_recovery != .initial) return null;
         const path = self.hooks.retry_recovery_gate_path orelse return null;
         if (!testGateActive(path)) return null;
@@ -641,14 +648,41 @@ pub const Probes = struct {
     }
 
     /// Whether the bash cleanup gate is present; null when no cleanup gate is configured.
-    pub fn bashReclaimGatePresent(self: *const Probes) ?bool {
+    fn bashReclaimGatePresent(self: *const Probes) ?bool {
         const path = self.hooks.bash_reclaim_gate_path orelse return null;
         return testGateActive(path);
     }
 
     /// The delay a test hold adds at `point`, 0 when none is configured.
-    pub fn pauseDelayMs(self: *const Probes, point: Hooks.Pause) i64 {
+    fn pauseDelayMs(self: *const Probes, point: Hooks.Pause) i64 {
         return self.hooks.pauses.get(point).delay_ms;
+    }
+
+    /// Holds `point` for its configured delay, tracing the point once before the wait; no delay returns at once.
+    pub fn holdAt(self: *Probes, point: Hooks.Pause) void {
+        const delay_ms = self.pauseDelayMs(point);
+        if (delay_ms == 0) return;
+        switch (point) {
+            .action_launch => |binding| self.traceAction("prepared_before_handoff", binding),
+            .model_launch => |binding| self.traceOperation("prepared_before_handoff", binding),
+            .action_result => |binding| self.traceAction("sealed_before_settlement", binding),
+            .model_result => |binding| self.traceOperation("sealed_before_settlement", binding),
+        }
+        self.io.sleep(.fromMilliseconds(delay_ms), .awake) catch {};
+    }
+
+    /// Retry recovery that the test gate holds back: the recovery waits, traced once, while its gate is present.
+    pub fn retryRecovered(self: *Probes) void {
+        const path = self.holdRetryRecovery() orelse return;
+        self.traceSubject("exhausted_retry_recovery_held", "path", path);
+    }
+
+    /// Whether a Bash reclaim waits at its test gate; once the gate is gone, a reclaim nothing attempted traces its release.
+    pub fn bashReclaimHeld(self: *Probes, binding: store_module.ActionAttemptBinding, attempted: bool) bool {
+        const present = self.bashReclaimGatePresent() orelse return false;
+        if (present) return true;
+        if (!attempted) self.traceAction("cleanup_release_observed", binding);
+        return false;
     }
 
     pub inline fn traceSubject(self: *Probes, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
@@ -1190,31 +1224,6 @@ test "CM-54 allowance diagnostic delivers bounded typed records and reports loss
     try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=codex turn=1 operation=2 attempt=3 status=200 observed_at=123 delivery=completion prior_loss=true primary_used=9.5e0 primary_minutes=missing primary_reset_at=invalid secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
 }
 
-pub fn pause(host: *Host, point: Hooks.Pause) void {
-    const delay_ms = host.probes.pauseDelayMs(point);
-    if (delay_ms == 0) return;
-    switch (point) {
-        .action_launch => |binding| host.probes.traceAction("prepared_before_handoff", binding),
-        .model_launch => |binding| host.probes.traceOperation("prepared_before_handoff", binding),
-        .action_result => |binding| host.probes.traceAction("sealed_before_settlement", binding),
-        .model_result => |binding| host.probes.traceOperation("sealed_before_settlement", binding),
-    }
-    host.io.sleep(.fromMilliseconds(delay_ms), .awake) catch {};
-}
-
-/// Retry recovery that the test gate holds back: the recovery waits, traced once, while its gate is present.
-pub fn retryRecovered(host: *Host) void {
-    const path = host.probes.holdRetryRecovery() orelse return;
-    host.probes.traceSubject("exhausted_retry_recovery_held", "path", path);
-}
-
-pub fn bashReclaimHeld(host: *Host, binding: store_module.ActionAttemptBinding, attempted: bool) bool {
-    const present = host.probes.bashReclaimGatePresent() orelse return false;
-    if (present) return true;
-    if (!attempted) host.probes.traceAction("cleanup_release_observed", binding);
-    return false;
-}
-
 pub fn testGateActive(path: []const u8) bool {
     // Presence gates may be FIFOs; opening must not wait for a writer during
     // the release/unlink race. No descriptor survives this synchronous probe.
@@ -1248,21 +1257,21 @@ fn appendOptionalSigned(
 }
 
 pub const SettlementTrace = struct {
-    host: *Host,
+    probes: *Probes,
     binding: store_module.AttemptBinding,
 
-    pub fn init(host: *Host, binding: store_module.AttemptBinding) SettlementTrace {
-        return .{ .host = host, .binding = binding };
+    pub fn init(probes: *Probes, binding: store_module.AttemptBinding) SettlementTrace {
+        return .{ .probes = probes, .binding = binding };
     }
 
     pub fn storeTrace(self: *SettlementTrace) ?store_module.SettlementTrace {
-        if (!self.host.probes.hooks.phase_trace) return null;
+        if (!self.probes.hooks.phase_trace) return null;
         return .{ .context = self, .mark_fn = markStore };
     }
 
     fn markStore(context: *anyopaque, phase: store_module.SettlementTracePhase) void {
         const self: *SettlementTrace = @ptrCast(@alignCast(context));
-        self.host.probes.traceOperation(switch (phase) {
+        self.probes.traceOperation(switch (phase) {
             .lock_requested => "settlement_lock_requested",
             .lock_acquired => "settlement_lock_acquired",
             .transaction_active => "settlement_transaction_active",
@@ -1315,24 +1324,15 @@ test "required Bash observations publish while optional stderr custody is held" 
         try std.testing.expectEqual(@as(c_int, 0), native.ftruncate(native.fileno(backing), TestObservation.state_bytes));
         var observation = try TestObservation.init(descriptors[1], native.dup(native.fileno(backing)), plan, 37);
         defer observation.close();
-        var host = Host{
-            .io = std.testing.io,
-            .allocator = std.testing.allocator,
-            .lease = undefined,
-            .store = undefined,
-        };
         var probes: Probes = .{ .io = std.testing.io, .hooks = .{ .phase_trace = true }, .observation = observation };
-        host.probes = &probes;
-        var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-        host.lifecycle = &host_lifecycle;
         try std.testing.expect(stderr.tryAcquire());
         defer stderr.release();
         var count: u64 = 0;
         inline for (.{ "cleanup_started", "cleanup_release_observed", "cleanup_completed", "inspection_captured", "bash_leader_observed_with_open_pipes", "control_store_complete" }) |phase| {
             if (std.mem.eql(u8, phase, "inspection_captured") or std.mem.eql(u8, phase, "control_store_complete")) {
-                host.probes.traceSubject(phase, "command_key", "required");
+                probes.traceSubject(phase, "command_key", "required");
             } else {
-                host.probes.traceAction(phase, .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 });
+                probes.traceAction(phase, .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 });
             }
             const selected = if (plan == .bash_cleanup)
                 std.mem.startsWith(u8, phase, "cleanup_") or std.mem.eql(u8, phase, "inspection_captured")
@@ -1361,6 +1361,89 @@ fn tempStorePath(tmp: *std.testing.TmpDir, out: []u8) ![]const u8 {
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     return std.fmt.bufPrint(out, "{s}/store", .{root});
+}
+
+/// Runs `body` with Probes built from `hooks` and a test observation pipe for `plan`; `body` gets the pipe's read end.
+fn withTraceSink(plan: TestObservation.Plan, hooks: Hooks, dir: std.Io.Dir, body: *const fn (*Probes, c_int, std.Io.Dir) anyerror!void) !void {
+    const native = @import("posix");
+    var descriptors: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
+    defer _ = native.close(descriptors[0]);
+    for (descriptors) |fd| {
+        try std.testing.expectEqual(@as(c_int, 0), native.fcntl(fd, native.F_SETFL, @as(c_int, native.O_NONBLOCK)));
+    }
+    const backing = native.tmpfile() orelse return error.TestUnexpectedResult;
+    defer _ = native.fclose(backing);
+    try std.testing.expectEqual(@as(c_int, 0), native.ftruncate(native.fileno(backing), TestObservation.state_bytes));
+    var observation = try TestObservation.init(descriptors[1], native.dup(native.fileno(backing)), plan, 37);
+    defer observation.close();
+    // Holding the stderr lock keeps traces off stderr; the observation pipe still records each one.
+    try std.testing.expect(stderr.tryAcquire());
+    defer stderr.release();
+    var traced = hooks;
+    traced.phase_trace = true;
+    var probes: Probes = .{ .io = std.testing.io, .hooks = traced, .observation = observation };
+    try body(&probes, descriptors[0], dir);
+}
+
+/// Counts the trace frames naming `phase` that were written since the last count, draining the pipe.
+fn countTraces(read_fd: c_int, phase: []const u8) usize {
+    const native = @import("posix");
+    var count: usize = 0;
+    var bytes: [TestObservation.record_bytes]u8 = undefined;
+    while (true) {
+        const length = native.read(read_fd, &bytes, bytes.len);
+        if (length <= 0) return count;
+        if (std.mem.indexOf(u8, bytes[0..@intCast(length)], phase) != null) count += 1;
+    }
+}
+
+fn holdCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    _ = dir;
+    const binding: store_module.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
+    const before = nowNs(probes.io);
+    probes.holdAt(.{ .action_launch = binding });
+    // The hold waits at least its delay; only the lower bound is deterministic.
+    try std.testing.expect(nowNs(probes.io) - before >= std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(usize, 1), countTraces(read_fd, "prepared_before_handoff"));
+}
+
+fn retryCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try dir.writeFile(std.testing.io, .{ .sub_path = "retry-gate", .data = "" });
+    probes.retryRecovered();
+    probes.retryRecovered();
+    try std.testing.expectEqual(@as(usize, 1), countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try std.testing.expect(probes.releaseRetryRecovery());
+    try dir.deleteFile(std.testing.io, "retry-gate");
+    try std.testing.expect(!probes.releaseRetryRecovery());
+}
+
+fn bashCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    const binding: store_module.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
+    try dir.writeFile(std.testing.io, .{ .sub_path = "bash-gate", .data = "" });
+    try std.testing.expect(probes.bashReclaimHeld(binding, false));
+    try std.testing.expect(probes.bashReclaimHeld(binding, true));
+    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "cleanup_release_observed"));
+    try dir.deleteFile(std.testing.io, "bash-gate");
+    try std.testing.expect(!probes.bashReclaimHeld(binding, true));
+    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "cleanup_release_observed"));
+    try std.testing.expect(!probes.bashReclaimHeld(binding, false));
+    try std.testing.expectEqual(@as(usize, 1), countTraces(read_fd, "cleanup_release_observed"));
+}
+
+test "SH-128 a test hold traces once then waits, and the retry and Bash reclaim gates hold while present" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var retry_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var bash_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var hold_hooks: Hooks = .{};
+    hold_hooks.pauses.getPtr(.action_launch).delay_ms = 1;
+    try withTraceSink(.recovery, hold_hooks, tmp.dir, holdCase);
+    try withTraceSink(.dispatch, .{ .retry_recovery_gate_path = try std.fmt.bufPrint(&retry_buffer, "{s}/retry-gate", .{root}) }, tmp.dir, retryCase);
+    try withTraceSink(.bash_cleanup, .{ .bash_reclaim_gate_path = try std.fmt.bufPrint(&bash_buffer, "{s}/bash-gate", .{root}) }, tmp.dir, bashCase);
 }
 
 test "SH-124 Host phases only move forward and the phase readers follow them" {
