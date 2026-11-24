@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 93;
+pub const schema_version: u32 = 94;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -73,6 +73,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 91, .digest = 0xc92515d104a290dd },
     .{ .schema_version = 92, .digest = 0xdbe10b74e562edbd },
     .{ .schema_version = 93, .digest = 0x0028c239ba46341d },
+    .{ .schema_version = 94, .digest = 0x9803d541a1a4945e },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -1017,6 +1018,35 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session DROP COLUMN codec, DROP COLUMN codec_options",
         },
     },
+    .{
+        .from = 93,
+        .sqlite = &.{
+            // Declarations and lanes: a Session names the app records it declares (NULL: none) and the lane it runs on
+            // (itself for a root, its parent's for a child). Each existing Session takes the lane of its root, derived
+            // from parent_ref by one recursive read.
+            "ALTER TABLE session ADD COLUMN app_tool_set_id INTEGER REFERENCES tool_set(tool_set_id) CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0)",
+            "ALTER TABLE session ADD COLUMN app_lane TEXT REFERENCES session(session_ref) CHECK(app_lane IS NULL OR length(CAST(app_lane AS BLOB))=6)",
+            // A revision keeps the declaration its configure set, so the revision history reads like tool_set_id.
+            "ALTER TABLE session_revision ADD COLUMN app_tool_set_id INTEGER REFERENCES tool_set(tool_set_id) CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0)",
+            "WITH RECURSIVE lanes(child,root) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT s.session_ref,l.root FROM session s JOIN lanes l ON s.parent_ref=l.child) UPDATE session SET app_lane=(SELECT root FROM lanes WHERE child=session.session_ref)",
+            // The field CHECK is generated from revision_fields, so the app_tools tag rebuilds session_change.
+            "ALTER TABLE session_change RENAME TO session_change_before_94",
+            "CREATE TABLE session_change(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n position INTEGER NOT NULL CHECK(position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0),\n revision INTEGER NOT NULL CHECK(revision>1),\n field TEXT NOT NULL CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label' OR field='reasoning_effort_refused' OR field='app_tools')),\n changed_at INTEGER NOT NULL CHECK(changed_at>0),\n provider_text TEXT CHECK(provider_text IS NULL OR length(CAST(provider_text AS BLOB))<=520),\n refused_operation_id INTEGER,\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n FOREIGN KEY(refused_operation_id,session_ref,revision) REFERENCES model_operation(operation_id,session_ref,effort_source_revision),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL)),\n CHECK((field='reasoning_effort_refused')=(refused_operation_id IS NOT NULL))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) SELECT session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id FROM session_change_before_94",
+            "DROP TABLE session_change_before_94",
+            "CREATE INDEX session_change_refused_operation ON session_change(refused_operation_id,session_ref,revision)",
+        },
+        .mysql = &.{
+            "ALTER TABLE session ADD COLUMN app_tool_set_id BIGINT AFTER archive_seq, ADD CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0), ADD FOREIGN KEY(app_tool_set_id) REFERENCES tool_set(tool_set_id)",
+            "ALTER TABLE session ADD COLUMN app_lane VARCHAR(6) AFTER app_tool_set_id, ADD CHECK(app_lane IS NULL OR OCTET_LENGTH(app_lane)=6), ADD FOREIGN KEY(app_lane) REFERENCES session(session_ref)",
+            "ALTER TABLE session_revision ADD COLUMN app_tool_set_id BIGINT, ADD CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0), ADD FOREIGN KEY(app_tool_set_id) REFERENCES tool_set(tool_set_id)",
+            "WITH RECURSIVE lanes(child,root) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT s.session_ref,l.root FROM session s JOIN lanes l ON s.parent_ref=l.child) UPDATE session s JOIN (SELECT child,root FROM lanes) l ON l.child=s.session_ref SET s.app_lane=l.root",
+            "SET @rui_field_ddl=(SELECT CONCAT('ALTER TABLE session_change DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK((field=''provider'' OR field=''model'' OR field=''instructions'' OR field=''tools'' OR field=''loaded_tools'' OR field=''permission_mode'' OR field=''output_schema'' OR field=''compaction_trigger'' OR field=''output_reservation'' OR field=''reasoning_effort'' OR field=''label'' OR field=''reasoning_effort_refused'' OR field=''app_tools''))') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session_change' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('''provider''',cc.CHECK_CLAUSE)>0 AND LOCATE('provider_text',cc.CHECK_CLAUSE)=0)",
+            "PREPARE rui_field_check FROM @rui_field_ddl",
+            "EXECUTE rui_field_check",
+            "DEALLOCATE PREPARE rui_field_check",
+        },
+    },
 };
 
 comptime {
@@ -1461,6 +1491,8 @@ pub const tables = [_]Table{
             .{ .name = "obligation_since", .type = .int, .nullable = true, .sqlite_added = true, .check = "obligation_since IS NULL OR obligation_since>0" },
             .{ .name = "creator_ref", .type = .{ .text = null }, .nullable = true, .sqlite_added = true, .check = "creator_ref IS NULL OR creator_ref<>session_ref" },
             .{ .name = "archive_seq", .type = .int, .nullable = true, .sqlite_added = true, .check = "archive_seq IS NULL OR archive_seq>0" },
+            .{ .name = "app_tool_set_id", .type = .int, .nullable = true, .sqlite_added = true, .check = "app_tool_set_id IS NULL OR app_tool_set_id>0" },
+            .{ .name = "app_lane", .type = .{ .text = null }, .nullable = true, .sqlite_added = true, .check = "app_lane IS NULL OR @octets(app_lane)=6" },
         },
         .primary_key = &.{"session_ref"},
         .uniques = &.{&.{"created_seq"}},
@@ -1473,6 +1505,8 @@ pub const tables = [_]Table{
             references("parent_ref", "session", session_reference),
             references("creator_ref", "session", session_reference),
             references("archive_seq", "core_command", &.{"command_seq"}),
+            references("app_tool_set_id", "tool_set", &.{"tool_set_id"}),
+            references("app_lane", "session", session_reference),
         },
     },
     .{
@@ -1521,6 +1555,7 @@ pub const tables = [_]Table{
             reasoning_effort_column,
             label_column,
             .{ .name = "effort_source_revision", .type = .int, .default = "1", .check = "effort_source_revision>0 AND effort_source_revision<=revision" },
+            .{ .name = "app_tool_set_id", .type = .int, .nullable = true, .sqlite_added = true, .check = "app_tool_set_id IS NULL OR app_tool_set_id>0" },
         },
         .primary_key = &.{ "session_ref", "revision" },
         .uniques = &.{&.{"command_key"}},
@@ -1530,6 +1565,7 @@ pub const tables = [_]Table{
             references("instructions_content_id", "content", content_reference),
             references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("loaded_tool_set_id", "tool_set", &.{"tool_set_id"}),
+            references("app_tool_set_id", "tool_set", &.{"tool_set_id"}),
             .{ .columns = &.{ "session_ref", "effort_source_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
             references("output_schema_content_id", "content", content_reference),
         },
@@ -3741,8 +3777,9 @@ test "schema 80 creator migration retains all prior session facts and backfills 
         for (tables) |table| {
             if (!std.mem.eql(u8, table.name, "session")) continue;
             for (table.columns) |column| {
-                // creator_ref (80) and archive_seq (85) are added after format 79.
-                if (std.mem.eql(u8, column.name, "creator_ref") or std.mem.eql(u8, column.name, "archive_seq")) continue;
+                // creator_ref (80), archive_seq (85), app_tool_set_id and app_lane (94) are added after format 79.
+                if (std.mem.eql(u8, column.name, "creator_ref") or std.mem.eql(u8, column.name, "archive_seq") or
+                    std.mem.eql(u8, column.name, "app_tool_set_id") or std.mem.eql(u8, column.name, "app_lane")) continue;
                 if (names.len != 0) names = names ++ ",";
                 names = names ++ column.name;
             }
@@ -4050,6 +4087,69 @@ test "SH-119 schema 92 migration gives every saved tool record the zero app poli
     try sqlite.exec(database, app_row ++ "1013,'ask','','app','','safe',3,3600000,1,1)");
     try sqlite.exec(database, app_row ++ "1014,'ask','','app','','unsafe',0,900000,1,1)");
     try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record WHERE owner='app'"));
+}
+
+test "SH-142 schema 94 migration gives every Session no app declaration and its root lane, on SQLite" {
+    const step = migrations[93 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 93), step.from);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |migration| {
+        if (migration.from >= 92) break;
+        for (migration.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    // A root with a child and a grandchild, so the lane walk crosses two parent links.
+    try sqlite.exec(database, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key,parent_ref) " ++
+        "SELECT 'ch0001',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,10,workspace_digest,workspace_key,'d8mv7p' FROM session WHERE session_ref='d8mv7p'");
+    try sqlite.exec(database, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key,parent_ref) " ++
+        "SELECT 'gc0002',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,11,workspace_digest,workspace_key,'ch0001' FROM session WHERE session_ref='d8mv7p'");
+    for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    // No Session declares app records, and every Session takes its root's lane.
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE app_tool_set_id IS NOT NULL"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE app_lane IS NULL"));
+    try std.testing.expectEqual(@as(u32, 3), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE app_lane='d8mv7p'"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    // The rebuilt session_change takes the app_tools tag in its field CHECK and keeps its refused-operation index.
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_change' AND sql LIKE '%field=''app_tools''%'"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='session_change_refused_operation'"));
+    try sqlite.exec(database, "UPDATE session SET app_tool_set_id=4 WHERE session_ref='d8mv7p'");
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET app_tool_set_id=0 WHERE session_ref='d8mv7p'"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET app_lane='nope' WHERE session_ref='ch0001'"));
+}
+
+test "SH-142 schema 94 MySQL step adds each lane column where the bootstrap has it, with its CHECK and key" {
+    const step = migrations[93 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 93), step.from);
+    const canonical_session_mysql = comptime blk: {
+        for (objects(.mysql)) |object| if (std.mem.eql(u8, object.name, "session")) break :blk object.sql;
+        unreachable;
+    };
+    // The step reproduces the bootstrap's column order, CHECK text and foreign keys, so a fresh and a migrated Store match.
+    const archive_position = std.mem.indexOf(u8, canonical_session_mysql, "archive_seq BIGINT").?;
+    const tool_set_position = std.mem.indexOf(u8, canonical_session_mysql, "app_tool_set_id BIGINT").?;
+    const lane_position = std.mem.indexOf(u8, canonical_session_mysql, "app_lane VARCHAR(6)").?;
+    try std.testing.expect(archive_position < tool_set_position and tool_set_position < lane_position);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "ADD COLUMN app_tool_set_id BIGINT AFTER archive_seq") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[1], "ADD COLUMN app_lane VARCHAR(6) AFTER app_tool_set_id") != null);
+    const tool_set_check = "CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0)";
+    const lane_check = "CHECK(app_lane IS NULL OR OCTET_LENGTH(app_lane)=6)";
+    try std.testing.expect(std.mem.indexOf(u8, canonical_session_mysql, tool_set_check) != null);
+    try std.testing.expect(std.mem.indexOf(u8, canonical_session_mysql, lane_check) != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], tool_set_check) != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[1], lane_check) != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "FOREIGN KEY(app_tool_set_id) REFERENCES tool_set(tool_set_id)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[1], "FOREIGN KEY(app_lane) REFERENCES session(session_ref)") != null);
+    // The revision column comes after the Session columns, and the lanes are read after every column is added.
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[2], "ALTER TABLE session_revision ADD COLUMN app_tool_set_id BIGINT, ADD CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[3], "WITH RECURSIVE lanes") != null);
+    // The field tag: the CHECK on session_change is swapped for one that names app_tools, found by its text.
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[4], "ALTER TABLE session_change DROP CHECK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[4], "field=''app_tools''") != null);
 }
 
 test "every MySQL migration statement closes its parentheses and quotes" {

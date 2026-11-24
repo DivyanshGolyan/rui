@@ -8,6 +8,7 @@ const command_input = @import("../../command_input.zig");
 const tool_offer_domain = @import("../domain/tool_offer.zig");
 const tool_set_domain = @import("../domain/tool_set.zig");
 const store_core = @import("../Store.zig");
+const app_tools = @import("../../tool_record.zig").app_tools;
 const Store = store_core.Store;
 const command_domain = @import("../domain/command.zig");
 const historical_domain = @import("../domain/historical.zig");
@@ -1142,6 +1143,187 @@ test "SH-118 a tool record read back from the Store through the offer, the selec
             expected_set.add(&saved_digest);
             const expected_selection = expected_set.final();
             try std.testing.expectEqualSlices(u8, &expected_selection, &(try selection.selection()).digest);
+        }
+    }.run);
+}
+
+// SH-144: a lane root's configure saves its declared app tools as one tool set that the Session names; replacing the
+// declaration changes that set, an empty list clears it, a child refuses a declaration by name, and a replayed
+// create keeps one set. Both engines run the same Store API calls.
+fn declareAppTools(configuration: *wire_request.Configuration, bytes: []const u8) void {
+    configuration.app_tools = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
+}
+
+test "SH-144 a lane root saves its app tools as one set; replacing, clearing and a child's refusal hold on both engines" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const first = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"},\"replay\":\"safe\",\"restart_limit\":2,\"wait_ms\":5000}]";
+            const second = "[{\"name\":\"other\",\"description\":\"Other.\",\"input_schema\":{\"type\":\"object\"}}]";
+            var create = try store_testing.completeConfiguration("app-root", "", workspace, "model-a");
+            declareAppTools(&create.configuration, first);
+            const root_reply = try storage.configure(&create, .{});
+            try std.testing.expect(root_reply == .accepted);
+            const root = root_reply.accepted.session.slice();
+            const first_set = try store_testing.queryU64(&storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root});
+            try std.testing.expect(first_set > 0);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM tool_set WHERE tool_set_id=?1", .{first_set}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE owner='app' AND name='ask' AND replay='safe' AND restart_limit=2 AND wait_ms=5000", .{}));
+            // The saved set's digest is the set digest of the declared record, as the offer and selection rebuild it.
+            const decl_arena = try std.testing.allocator.alloc(u8, app_tools.arena_bytes);
+            defer std.testing.allocator.free(decl_arena);
+            var decl_fixed: std.heap.FixedBufferAllocator = .init(decl_arena);
+            const declared = app_tools.parse(decl_fixed.allocator(), first).declared;
+            var expected_set: tool_record.SetDigest = .init();
+            expected_set.add(&tool_record.recordDigest(&declared.records[0]));
+            const set_names = try command_input.ToolsField.of(&.{"ask"});
+            var offer: tool_offer_domain.Freeze = .{};
+            var selection: tool_set_domain.SavedSelection = .{ .names = &set_names };
+            try storage.readToolDigestsForTesting(first_set, &set_names, &offer, &selection);
+            try std.testing.expectEqualSlices(u8, &expected_set.final(), &(try selection.selection()).digest);
+            // A replayed create answers the same Session and keeps its set.
+            const replay = try storage.configure(&create, .{});
+            try std.testing.expect(replay.accepted.replayed);
+            try std.testing.expectEqual(first_set, try store_testing.queryU64(&storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root}));
+
+            // A configure with a new declaration replaces the set and records the change once.
+            var replace: wire_request.ConfigureCommand = .{};
+            try replace.key.set("app-root-replace");
+            try replace.session.set(root);
+            declareAppTools(&replace.configuration, second);
+            try std.testing.expect((try storage.configure(&replace, .{})) == .accepted);
+            const second_set = try store_testing.queryU64(&storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root});
+            try std.testing.expect(second_set != first_set);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND field='app_tools'", .{root}));
+
+            // An empty list clears the declaration: the Session names no set.
+            var clear: wire_request.ConfigureCommand = .{};
+            try clear.key.set("app-root-clear");
+            try clear.session.set(root);
+            declareAppTools(&clear.configuration, "[]");
+            try std.testing.expect((try storage.configure(&clear, .{})) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND app_tool_set_id IS NULL", .{root}));
+
+            // A child, attached to the root, may not declare app tools.
+            var child: wire_request.ConfigureCommand = .{};
+            try child.key.set("app-child");
+            child.configuration = try shared_fixtures.testingAgentSpec(&.{}, "bypass");
+            child.configuration.parent.state = .value;
+            try child.configuration.parent.value.set(root);
+            child.configuration.model.state = .value;
+            try child.configuration.model.value.set("model-a");
+            declareAppTools(&child.configuration, second);
+            const refused = try storage.configure(&child, .{});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.app_tools_on_child, refused.rejected.code);
+            // An empty list is a declaration too: a child refuses it as well.
+            try child.key.set("app-child-empty");
+            declareAppTools(&child.configuration, "[]");
+            const refused_empty = try storage.configure(&child, .{});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.app_tools_on_child, refused_empty.rejected.code);
+        }
+    }.run);
+}
+
+// SH-145: a lane root's configure or create saves a declared app tool set of any supported size in one transaction,
+// whether its texts are fresh or already stored, and the set reads back with every declared record.
+const declared_counts = [_]usize{ 1, 8, app_tools.max_records };
+
+/// One declaration of `count` tools whose texts carry `tag`; `wait_ms` changes each record's digest without changing its texts.
+fn writeAppDeclaration(buffer: []u8, count: usize, tag: []const u8, wait_ms: u32) ![]const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    try writer.writeByte('[');
+    for (0..count) |index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print(
+            "{{\"name\":\"tool-{d:0>2}\",\"description\":\"Tool {s} {d}.\",\"input_schema\":{{\"type\":\"object\"}},\"wait_ms\":{d}}}",
+            .{ index, tag, index, wait_ms },
+        );
+    }
+    try writer.writeByte(']');
+    return writer.buffered();
+}
+
+fn expectAppSetReadsBack(storage: *Store, root: []const u8, document: []const u8, count: usize) !void {
+    const set = try store_testing.queryU64(storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root});
+    try std.testing.expect(set > 0);
+    try std.testing.expectEqual(@as(u64, count), try store_testing.queryU64(storage, "SELECT member_count FROM tool_set WHERE tool_set_id=?1", .{set}));
+    const decl_arena = try std.testing.allocator.alloc(u8, app_tools.arena_bytes);
+    defer std.testing.allocator.free(decl_arena);
+    var decl_fixed: std.heap.FixedBufferAllocator = .init(decl_arena);
+    const declared = app_tools.parse(decl_fixed.allocator(), document).declared;
+    var expected_set: tool_record.SetDigest = .init();
+    var names: [app_tools.max_records][]const u8 = undefined;
+    for (declared.records, 0..) |*record, index| {
+        expected_set.add(&tool_record.recordDigest(record));
+        names[index] = record.name;
+    }
+    const set_names = try command_input.ToolsField.of(names[0..count]);
+    var offer: tool_offer_domain.Freeze = .{};
+    var selection: tool_set_domain.SavedSelection = .{ .names = &set_names };
+    try storage.readToolDigestsForTesting(set, &set_names, &offer, &selection);
+    try std.testing.expectEqualSlices(u8, &expected_set.final(), &(try selection.selection()).digest);
+}
+
+test "SH-145 a lane root saves a declared app tool set of every supported size on create and configure, fresh or with stored texts" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var document: [app_tools.max_document_bytes]u8 = undefined;
+            var tag_buffer: [32]u8 = undefined;
+            var key_buffer: [64]u8 = undefined;
+            for (declared_counts) |count| {
+                // Fresh texts are tagged per count and operation, so no earlier declaration has stored them. The
+                // stored-texts declaration repeats the tag with another wait_ms: its records differ, its texts do not.
+                const fresh_create = try writeAppDeclaration(&document, count, try std.fmt.bufPrint(&tag_buffer, "c{d}-create", .{count}), 1000);
+                var create = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh125-create-fresh-{d}", .{count}), "", workspace, "model-a");
+                declareAppTools(&create.configuration, fresh_create);
+                const created = try storage.configure(&create, .{});
+                try std.testing.expect(created == .accepted);
+                try expectAppSetReadsBack(&storage, created.accepted.session.slice(), fresh_create, count);
+
+                const stored_create = try writeAppDeclaration(&document, count, try std.fmt.bufPrint(&tag_buffer, "c{d}-create", .{count}), 2000);
+                var repeat = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh125-create-stored-{d}", .{count}), "", workspace, "model-a");
+                declareAppTools(&repeat.configuration, stored_create);
+                const repeated = try storage.configure(&repeat, .{});
+                try std.testing.expect(repeated == .accepted);
+                try expectAppSetReadsBack(&storage, repeated.accepted.session.slice(), stored_create, count);
+
+                const fresh_configure = try writeAppDeclaration(&document, count, try std.fmt.bufPrint(&tag_buffer, "c{d}-configure", .{count}), 1000);
+                var plain = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh125-plain-fresh-{d}", .{count}), "", workspace, "model-a");
+                const plain_root = try storage.configure(&plain, .{});
+                try std.testing.expect(plain_root == .accepted);
+                const fresh_root = plain_root.accepted.session.slice();
+                var configure: wire_request.ConfigureCommand = .{};
+                try configure.key.set(try std.fmt.bufPrint(&key_buffer, "sh125-configure-fresh-{d}", .{count}));
+                try configure.session.set(fresh_root);
+                declareAppTools(&configure.configuration, fresh_configure);
+                try std.testing.expect((try storage.configure(&configure, .{})) == .accepted);
+                try expectAppSetReadsBack(&storage, fresh_root, fresh_configure, count);
+
+                const stored_configure = try writeAppDeclaration(&document, count, try std.fmt.bufPrint(&tag_buffer, "c{d}-configure", .{count}), 2000);
+                var plain_again = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh125-plain-stored-{d}", .{count}), "", workspace, "model-a");
+                const stored_plain_root = try storage.configure(&plain_again, .{});
+                try std.testing.expect(stored_plain_root == .accepted);
+                const stored_root = stored_plain_root.accepted.session.slice();
+                var stored: wire_request.ConfigureCommand = .{};
+                try stored.key.set(try std.fmt.bufPrint(&key_buffer, "sh125-configure-stored-{d}", .{count}));
+                try stored.session.set(stored_root);
+                declareAppTools(&stored.configuration, stored_configure);
+                try std.testing.expect((try storage.configure(&stored, .{})) == .accepted);
+                try expectAppSetReadsBack(&storage, stored_root, stored_configure, count);
+            }
         }
     }.run);
 }

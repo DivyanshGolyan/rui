@@ -21,7 +21,6 @@ gate: std.atomic.Value(enum(u8) { open, cancelled, committed }) = .init(.open),
 operation: Operation = .check,
 candidate: ?release_candidate.ReleaseCandidate = null,
 discovery_attempted: bool = false,
-discovery_adopted: bool = false,
 checked: ?upgrade.Check = null,
 result: ?upgrade.Result = null,
 cleanup: upgrade.CleanupReceipts = .{},
@@ -43,24 +42,14 @@ pub fn discovering(self: *const Self) bool {
     return self.operation == .discover;
 }
 
-pub fn retireDiscovery(self: *Self, cancelled: bool) !bool {
+/// Ends background discovery so a requested run can start. The run never
+/// takes discovery's release: it may be hours old, so the check reads the
+/// release itself. A read still in flight is stopped, not waited out.
+pub fn retireDiscovery(self: *Self) !bool {
     std.debug.assert(self.discovering() and self.started);
-    self.discovery_adopted = self.discovery_adopted or !self.finished;
-    if (cancelled) {
-        self.cancel();
-        self.cancelling = true;
-    }
+    self.cancel();
     if (!try self.advance()) return false;
-    if (cancelled or self.cancelling or (self.discovery_adopted and self.failure != null)) {
-        if (self.candidate) |*candidate| candidate.deinit(self.allocator);
-        self.candidate = null;
-        self.operation = .check;
-    } else if (self.failure != null or self.candidate == null) {
-        self.deinit();
-    } else {
-        std.debug.assert(self.checked == null and self.result == null and self.task.thread == null);
-        self.* = .{ .allocator = self.allocator, .candidate = self.candidate, .download = self.download, .discovery_attempted = true };
-    }
+    self.deinit();
     return true;
 }
 
@@ -89,7 +78,7 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (self.operation) {
         .discover => self.candidate = try upgrade.discoverRelease(self.init, self.allocator, &task.cancellation, &self.download),
-        .check => self.checked = try upgrade.checkDiscovered(self.init, self.allocator, self.store, &task.cancellation, &self.download, &self.candidate),
+        .check => self.checked = try upgrade.check(self.init, self.allocator, self.store, &task.cancellation, &self.download),
         .install => self.result = try upgrade.install(self.init, self.allocator, &self.checked.?, &task.cancellation, .{ .context = self, .report = progress }, &self.cleanup, &self.download),
     }
 }
@@ -259,7 +248,7 @@ fn failureWords(err: anyerror) []const u8 {
 
 const test_result: upgrade.Result = .{
     .installation = .{ .installed = .{ .operation_build = "/synthetic/installed", .selected_after = "/synthetic/installed", .selected_version = .{ .schema = 60, .patch = 1 } } },
-    .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/synthetic/store", .state = .{ .outcome = .cancelled } }}) },
+    .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "/synthetic/store", .state = .{ .outcome = .cancelled } }}) },
     .store = "/synthetic/store",
 };
 
@@ -478,7 +467,7 @@ test "the run's status: checking, the release found, each restart step, then how
     job.phase.store(.preparing, .release);
     const found: upgrade_status.Found = .{ .host = .none };
     try std.testing.expectEqualDeep(upgrade_status.Run{ .installing = .{ .found = found } }, job.status());
-    job.checked.?.hosts = .{ .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .{ .unsupported = .incompatible } } }}) };
+    job.checked.?.hosts = .{ .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .{ .unsupported = .incompatible } } }}) };
     try std.testing.expectEqual(upgrade_status.Host{ .running = 1 }, job.status().installing.found.host);
     job.checked.?.hosts = .{};
     for ([_]struct { upgrade.Phase, upgrade_status.Step }{
@@ -487,7 +476,7 @@ test "the run's status: checking, the release found, each restart step, then how
         job.phase.store(case[0], .release);
         try std.testing.expectEqualDeep(upgrade_status.Run{ .installing = .{ .found = found, .step = case[1] } }, job.status());
     }
-    job.result = .{ .installation = .{ .installed = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 1 } } }, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .{ .ready = .{ .instance = @splat(0), .pid = 1 } } } }}) }, .store = "/s" };
+    job.result = .{ .installation = .{ .installed = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 1 } } }, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .{ .ready = .{ .instance = @splat(0), .pid = 1 } } } }}) }, .store = "/s" };
     job.finish();
     try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 1 }, .restarted = true } }, .outcome = .compatible } }, job.status());
     job.result = null;
@@ -514,7 +503,7 @@ test "a stop asked for shows until the run ends, before the worker starts and wh
 test "a selected release still shows the census while its Hosts are checked for restart" {
     var job: Self = .{ .started = true, .operation = .install, .checked = news_check };
     job.checked.?.selected = .{ .released = .{ .build = "/synthetic/build", .version = .{ .schema = 60, .patch = 1 } } };
-    job.checked.?.hosts = .{ .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .not_needed } }}) };
+    job.checked.?.hosts = .{ .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .not_needed } }}) };
     job.phase.store(.stopping, .release);
     try std.testing.expectEqualDeep(upgrade_status.Run{ .installing = .{ .found = .{ .host = .{ .running = 1 } }, .step = .restarting } }, job.status());
     job.checked = null;
@@ -525,7 +514,7 @@ test "a newer build already selected installs quietly: no older release found, t
     job.checked.?.selected.released.version = .{ .schema = 60, .patch = 2 };
     job.phase.store(.publishing, .release);
     try std.testing.expectEqual(upgrade_status.Run.checking, job.status());
-    job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 2 } } }, .hosts = .{ .version = .{ .schema = 60, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .superseded } }}) }, .store = "" };
+    job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 2 } } }, .hosts = .{ .version = .{ .schema = 60, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .superseded } }}) }, .store = "" };
     job.finish();
     try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .{ .superseded = .{ .schema = 60, .patch = 2 } }, .outcome = .compatible } }, job.status());
     job.result = null;
@@ -537,7 +526,7 @@ test "the selected build already current installs quietly: no found release, the
     job.checked.?.selected.released.version = .{ .schema = 60, .patch = 1 };
     job.phase.store(.publishing, .release);
     try std.testing.expectEqual(upgrade_status.Run.checking, job.status());
-    job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 1 } } }, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .not_needed } }}) }, .store = "" };
+    job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 1 } } }, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .not_needed } }}) }, .store = "" };
     job.finish();
     try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 1 } }, .outcome = .compatible } }, job.status());
     job.result = null;
@@ -548,7 +537,7 @@ test "relaunch uses only an installed receipt selection and keeps every guidance
     const Installation = @import("Installation.zig");
     const receipt: Installation.Receipt = .{ .operation_build = "/downloaded/target", .selected_after = "/published/selection", .selected_version = .{ .schema = 60, .patch = 1 } };
     for ([_]bool{ false, true }) |installed| {
-        var job: Self = .{ .finished = true, .result = .{ .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt }, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/store", .state = .{ .outcome = .not_needed } }}) }, .store = "/store" } };
+        var job: Self = .{ .finished = true, .result = .{ .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt }, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "/store", .state = .{ .outcome = .not_needed } }}) }, .store = "/store" } };
         if (installed) try std.testing.expectEqualStrings("/published/selection", job.relaunchBuild().?) else try std.testing.expect(job.relaunchBuild() == null);
         try std.testing.expect(!job.hasGuidance());
         job.failure = error.ConnectionRefused;
@@ -580,7 +569,7 @@ test "relaunch job retains the result owner's guidance for every activation and 
         for ([_]bool{ false, true }) |installed| {
             const result: upgrade.Result = .{
                 .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt },
-                .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/store", .state = .{ .outcome = activation } }}) },
+                .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "/store", .state = .{ .outcome = activation } }}) },
                 .store = "/store",
             };
             const job: Self = .{ .finished = true, .result = result };
@@ -614,7 +603,7 @@ test "#1792 Esc while preparing ends cancelled without failure guidance" {
 }
 
 test "the Upgrade ending uses every Host result not the selected Store supersession" {
-    var entries = [_]@import("host_restart_all.zig").Entry{
+    var entries = [_]@import("host_restart_report.zig").Entry{
         .{ .socket = "", .store = "/selected", .state = .{ .outcome = .superseded } },
         .{ .socket = "", .store = "/other", .state = .{ .outcome = .{ .ready = .{ .instance = @splat(1), .pid = 42 } } } },
     };
@@ -687,65 +676,46 @@ test "background discovery domain covers version order publication failure cance
     }
 }
 
-test "discovery handoff domain retains validated candidate and transport only for its accepted attempt" {
+test "SH-129 a requested run never acts on discovery's release" {
     const Worker = struct {
-        var release_worker: std.atomic.Value(bool) = .init(false);
         var fail: bool = false;
 
-        fn run(raw: *anyopaque, _: *ClientTask) !void {
+        /// A read in flight ends only when retirement asks it to stop.
+        fn inFlight(raw: *anyopaque, task: *ClientTask) !void {
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &task.cancellation.stopped, test_poll.isSet);
+            return found(raw, task);
+        }
+
+        fn found(raw: *anyopaque, _: *ClientTask) !void {
             const job: *Self = @ptrCast(@alignCast(raw));
-            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &release_worker, test_poll.isSet);
-            job.download.family = .ipv4;
-            if (fail) {
-                job.download.stderr = try job.allocator.dupe(u8, "curl fixture final");
-                return error.ReleaseDownloadFailed;
-            }
+            if (fail) return error.ReleaseDownloadFailed;
             job.candidate = try release_candidate.fromEffectiveUrl(job.allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64");
-            job.candidate.?.sha256 = @splat(7);
         }
     };
     for ([_]bool{ false, true }) |background_finished| for ([_]bool{ false, true }) |discovery_failed| for ([_]bool{ false, true }) |cancelled| {
         var init: std.process.Init = undefined;
         init.io = std.testing.io;
+        init.gpa = std.testing.allocator;
         var job: Self = .{ .init = init, .allocator = std.testing.allocator, .started = true, .operation = .discover, .discovery_attempted = true };
         defer job.deinit();
-        Worker.release_worker.store(background_finished, .release);
         Worker.fail = discovery_failed;
-        defer Worker.release_worker.store(true, .release);
-        try job.task.start(init.io, &job, Worker.run);
+        try job.task.start(init.io, &job, if (background_finished) Worker.found else Worker.inFlight);
         if (background_finished) {
             try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
             try std.testing.expect(try job.advance());
-        } else {
-            try std.testing.expect(!try job.retireDiscovery(cancelled));
-            try std.testing.expect(job.discovering() and job.task.thread != null and job.discovery_adopted);
-            Worker.release_worker.store(true, .release);
-            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
         }
-        const candidate_url = if (job.candidate) |candidate| candidate.archive_url.ptr else null;
-        try std.testing.expect(try job.retireDiscovery(cancelled));
-        try std.testing.expect(!job.discovering() and job.task.thread == null and job.result == null and job.checked == null);
-        if (cancelled or (!background_finished and discovery_failed)) {
-            try std.testing.expect(job.started and job.finished and job.candidate == null);
-            const ended = job.status().ended;
-            try std.testing.expectEqual(Outcome.unchanged, ended.outcome);
-            try std.testing.expectEqualDeep(if (cancelled) upgrade_status.Ended.cancelled else upgrade_status.Ended{ .failed = .download }, ended.how);
-            if (!cancelled) try std.testing.expectEqualStrings("curl fixture final", job.download.stderr.?);
-        } else if (discovery_failed) {
-            try std.testing.expect(!job.started and !job.finished and job.candidate == null);
-            try std.testing.expectEqual(.automatic, job.download.family);
-            try std.testing.expect(job.download.stderr == null);
+        // Retirement ends only once the read has stopped; an in-flight read stops only when asked.
+        while (!try job.retireDiscovery()) try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
+        try std.testing.expect(!job.discovering());
+        try std.testing.expectEqual(@as(?upgrade_status.Version, null), job.availability());
+        if (cancelled) {
+            job.cancel();
+            try job.begin(init, "/fixture");
+            try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, job.status());
         } else {
-            try std.testing.expect(!job.started and !job.finished and !job.cancelling);
-            try std.testing.expectEqual(candidate_url.?, job.candidate.?.archive_url.ptr);
-            try std.testing.expectEqual(.ipv4, job.download.family);
-            try std.testing.expectEqual(@as([32]u8, @splat(7)), job.candidate.?.sha256);
-            try std.testing.expect(!job.task.cancellation.stopped.load(.acquire));
-            try std.testing.expectEqual(.open, job.gate.load(.acquire));
+            // The run starts from nothing: its check, not discovery, reads the release.
+            try std.testing.expectEqual(upgrade_status.Run.checking, job.status());
         }
-        job.deinit();
-        try std.testing.expect(job.candidate == null and job.download.stderr == null and !job.started);
-        try std.testing.expectEqual(.automatic, job.download.family);
     };
 }
 
