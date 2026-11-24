@@ -100,6 +100,7 @@
 | SUI-119 | Module | Local image capture preserves a supported clipboard representation and returns no image without an eligible local clipboard. | Local clipboard adapter | `SUI-119 clipboard image reads the supported local clipboard` | `src/os/clipboard_image.zig` |
 | SUI-120 | Module | The terminal decoder bounds clipboard frames, handles fragmentation and resumes ordinary input after malformed or oversized frames. | Vaxis parser | `SUI-120 OSC 5522 transport accepts bounded frames and resumes ordinary input` | `build/vaxis_overlay.patch` |
 | SUI-121 | Module | Terminal clipboard reports and owned frame payloads reach only the App root and outlive parser scratch until dispatch. | Vaxis event loop and App | `SUI-121 OSC 5522 transport dispatches copied frames and reports only to the App root` | `build/vaxis_overlay.patch` |
+| SUI-122 | Surface | Ctrl-D detaches only a draft with neither text nor an image. With text it deletes the following grapheme, and with an image alone it keeps the draft. | Session frontend keys and draft | `SUI-122 Ctrl-D detaches only an empty draft and otherwise deletes text at the caret` | `src/SessionFrontend.zig` |
 | DIA-10 | Host | Host readiness is delivered even when optional diagnostics contend or fail. | Host startup wire with stderr fault injection | `readiness_before_diagnostics`: vary aliased output, diagnostic failure and backpressure; check readiness and later bounded notice. | docs/contracts/diagnostics.md:10 |
 
 ## Seams the harness must provide

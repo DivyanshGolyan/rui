@@ -1769,14 +1769,22 @@ test "SUI-113 clipboard paste stays in its originating composer until Enter" {
     try std.testing.expect(!imagePasteKey(.{ .codepoint = 'v', .mods = .{ .ctrl = true, .shift = true } }));
 }
 
-test "Ctrl-D leaves the Session detached with no notice" {
-    for ([_][]const u8{ "\x04", "\x1b[100;5u" }) |key| {
-        const held = try HeldFrontend.create();
-        defer held.destroy();
-        try held.settle();
-        try held.keys(key);
-        try std.testing.expectEqual(@as(?Outcome, .detached), held.left);
-        try std.testing.expect(held.self.notice == null);
+test "SUI-122 Ctrl-D detaches only an empty draft and otherwise deletes text at the caret" {
+    const image = try Input.Image.validate(@embedFile("codecs/fixtures/image-input/pixel.png"));
+    for ([_][]const u8{ "\x04", "\x1b[100;5u", "\x1b[100;5;100u", "\x1b[27;5;100~" }) |key| {
+        for ([_]bool{ false, true }) |attached| for ([_]bool{ false, true }) |captioned| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            try held.settle();
+            const input = &held.self.input;
+            if (attached) input.setImage(try image.clone());
+            if (captioned) try held.keys("abc\x1b[D");
+            try held.keys(key);
+            try std.testing.expectEqual(if (attached or captioned) null else @as(?Outcome, .detached), held.left);
+            try std.testing.expectEqualStrings(if (captioned) "ab" else "", input.composition().bytes);
+            try std.testing.expectEqual(attached, input.image() != null);
+            try std.testing.expect(held.self.notice == null);
+        };
     }
 }
 

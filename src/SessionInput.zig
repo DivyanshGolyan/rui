@@ -161,6 +161,8 @@ pub fn restoreWithImage(self: *Self, draft: Snapshot, attachment: ?Image) void {
 
 pub fn appEvent(self: *Self, comptime keys: anytype, event: @import("vaxis").vxfw.Event, pasting: bool, selected: bool) Event(@TypeOf(keys).Action) {
     const outcome = self.tracked(keymap.Outcome(@TypeOf(keys).Action), Editor.appEvent, .{ keys, event, pasting });
+    if (outcome == .action and self.image() != null and event == .key_press and @import("keypress.zig").named(event.key_press) == .ctrl_d)
+        return .{ .editor = .none };
     return self.accept(@TypeOf(keys).Action, outcome, selected);
 }
 

@@ -285,7 +285,7 @@ Its caller supplies storage: up to 65,536 UTF-8 bytes for a Message.
 Validated submission borrows complete bytes; [staged persistent input](#staged-persistent-input) owns sealing, next-draft custody and Admission.
 The editor retains no message history or approval.
 Strict UTF-8 and stateful extended-grapheme segmentation govern edits, including deletion joining previously separate clusters; byte count governs the limit, and uncertain cell widths cannot justify cursor movement.
-Ctrl-D exits only an empty draft; otherwise it deletes the following grapheme or does nothing at the end.
+Ctrl-D exits only when the draft has neither text nor an image. Otherwise it deletes the following grapheme or does nothing at the end.
 Marked multiline paste is one Message; ordinary Enter submits when permitted by the submission owner.
 The focused chat composer negotiates terminal clipboard paste events when the terminal supports them. The terminal's paste gesture can add one PNG or JPEG attachment or insert ordinary text through the marked paste transaction. Losing the originating draft or focus discards a pending paste result. Ctrl-V explicitly reads an image from a local clipboard when a platform adapter is available. This action never sends a Message or decides an Action.
 An attachment appears as `[Image 1]`. Backspace at the start of the draft removes it. Pasting another valid image replaces it. An image may be up to 16 MiB. Enter sends optional text followed by the image under the same submission ticket. Chat switches and inline Upgrade retain unsent images. Recovery of a held submission preserves its multipart identity and original key.
