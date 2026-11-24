@@ -592,24 +592,20 @@ def pre_freeze_target_case(root, binary, releases, pre_freeze_binary):
 
 @contextlib.contextmanager
 def unprovable_socket(runtime_socket, label):
-    """Listen on `rui.sock` in a derived interface directory with no `rui.lock`.
+    """Plant a regular file at `rui.sock` in a derived interface directory.
 
-    The census reads only derived directories, and one without a lock is unprovable: restart fails
-    with its path and never removes it. `runtime_socket` is any Host socket of the same runtime.
-    Yields (path, listener); the caller may close the listener, and the path and its directory
-    are removed on exit.
+    A lock on D proves a socket there dead, so a socket is never unprovable any more: the census
+    reclaims it once nothing holds D. A node Rui did not make is the unprovable case: restart
+    fails with its path and never removes it. `runtime_socket` is any Host socket of the same
+    runtime. Yields (path, handle); the caller may close the handle, and the path and its
+    directory are removed on exit.
     """
     directory = pathlib.Path(runtime_socket).parent.parent / hashlib.sha256(label.encode()).hexdigest()[:32]
     unreadable = directory / "rui.sock"
     directory.mkdir(mode=0o700)
     try:
-        with os_semantics.unix_stream() as listener:
-            listener.bind(str(unreadable))
-            # Never accepted, every census probe stays queued. A backlog of 1 fills
-            # after the first probe on Darwin, which then refuses the post-publication
-            # census and makes this live listener look like a leftover socket.
-            listener.listen(16)
-            yield unreadable, listener
+        with unreadable.open("x") as handle:
+            yield unreadable, handle
     finally:
         unreadable.unlink(missing_ok=True)
         directory.rmdir()
@@ -1229,7 +1225,7 @@ def restart_all_cases(root, binary, releases):
         assert first.status()["instance"] == current_first["instance"]
         assert second.status()["instance"] == current_second["instance"]
 
-        # A socket in a derived interface directory with no rui.lock is unprovable: it fails, and
+        # A regular file at rui.sock in a derived interface directory is unprovable: it fails, and
         # discovery never removes it. The probe is the rui.sock of another derived directory.
         with unprovable_socket(first.ready["socket"], "restart-unreadable") as (unreadable, listener):
             output = first.run("host", "restart", "--all", expect=6)
@@ -1238,7 +1234,7 @@ def restart_all_cases(root, binary, releases):
             assert "[host_restart_failed]" in output, output
             assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
             listener.close()
-            # Once nothing listens, the socket still has no lock, so it stays unprovable and fails.
+            # Closing the handle changes nothing: a regular file is never a socket, so it stays unprovable.
             output = first.run("host", "restart", "--all", expect=6)
             assert str(unreadable) in output and "failed at discovery:" in output, output
             assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output

@@ -6,6 +6,7 @@ const validStoreId = @import("store_id.zig").valid;
 const c = @import("posix");
 const hs = @import("host_settings.zig");
 const start_report = @import("start_report.zig");
+const host_endpoint = @import("host_endpoint.zig");
 
 pub const database_suffix = store_path.database_suffix;
 pub const scratch_suffix = "/scratch";
@@ -73,8 +74,14 @@ pub const StoreLease = struct {
             error.FileNotFound => .unowned,
             else => .access_failure,
         };
-        const mysql = paths.kind == .mysql;
-        var store_dir = std.Io.Dir.cwd().openDir(io, if (mysql) paths.runtimeHint().? else paths.store_identity.slice(), .{}) catch |err| return switch (err) {
+        // A MySQL Store is owned by the Host that holds its interface directory;
+        // host_endpoint owns that lock, so observation asks it rather than reading the lock.
+        if (paths.kind == .mysql) return switch (host_endpoint.occupancy(io, paths.runtimeHint().?)) {
+            .held => .{ .owned = paths },
+            .free, .absent => .unowned,
+            .unusable => .access_failure,
+        };
+        var store_dir = std.Io.Dir.cwd().openDir(io, paths.store_identity.slice(), .{}) catch |err| return switch (err) {
             error.FileNotFound => .unowned,
             else => .access_failure,
         };
@@ -82,7 +89,7 @@ pub const StoreLease = struct {
         validatePrivateDirectory(store_dir, io) catch return .access_failure;
         // A hostile FIFO must not wait for a writer; never follow or create
         // a replacement lock node during observation.
-        const fd = std.posix.openat(store_dir.handle, if (mysql) "rui.lock" else "host.lock", .{
+        const fd = std.posix.openat(store_dir.handle, "host.lock", .{
             .ACCMODE = .RDONLY,
             .NONBLOCK = true,
             .NOFOLLOW = true,
