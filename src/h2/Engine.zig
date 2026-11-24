@@ -144,9 +144,13 @@ fn streamsRetireBody(context: *anyopaque, record: *Record) void {
     self.retireBody(record);
 }
 
-fn streamsSettle(context: *anyopaque, record: *Record, settle: policy.Settle) void {
+fn streamsSettle(context: *anyopaque, record: *Record, outcome: policy.Settle) void {
     const self: *Engine = @ptrCast(@alignCast(context));
-    switch (settle) {
+    self.settle(record, outcome);
+}
+
+fn settle(self: *Engine, record: *Record, outcome: policy.Settle) void {
+    switch (outcome) {
         .end => |cause| self.endStream(record, cause),
         .replay => self.requeue(record, true),
         .reroute => self.requeue(record, false),
@@ -406,27 +410,12 @@ fn pollReadiness(self: *Engine) h2.DriveError!void {
         if (result >= 0) break;
         if (std.posix.errno(result) != .INTR) return error.PollFailed;
     }
-    for (self.active()) |*connection| {
-        if (connection.poll_slot == 0) continue;
-        connection.revents = self.pollfds[connection.poll_slot].revents;
-        if (connection.earlierAttempt() != null) connection.earlier_revents = self.pollfds[connection.poll_slot + 1].revents;
-    }
+    for (self.active()) |*connection| connection.collect(self.pollfds);
 }
 
 fn fillPollfds(self: *Engine) usize {
     var count: usize = 0;
-    for (self.active()) |*connection| {
-        connection.revents = 0;
-        connection.earlier_revents = 0;
-        connection.poll_slot = 0;
-        const events = connection.pollEvents() orelse continue;
-        count += 1;
-        self.pollfds[count] = .{ .fd = connection.socket, .events = events, .revents = 0 };
-        connection.poll_slot = @intCast(count);
-        const earlier = connection.earlierAttempt() orelse continue;
-        count += 1;
-        self.pollfds[count] = .{ .fd = earlier, .events = std.c.POLL.OUT, .revents = 0 };
-    }
+    for (self.active()) |*connection| count = connection.register(self.pollfds, count);
     return count;
 }
 
@@ -435,11 +424,11 @@ fn advanceSetups(self: *Engine) void {
     for (self.active()) |*connection| {
         if (!connection.settingUp()) continue;
         switch (connection.state) {
-            .resolving => connection.finishLookup(),
-            .connecting => connection.advanceConnect(time),
-            .tunneling => if (connection.revents != 0) connection.continueTunnel(),
-            .handshaking => if (connection.revents != 0) connection.continueHandshake(),
-            .verifying => connection.finishVerification(),
+            .resolving => self.settleFailure(connection, connection.finishLookup()),
+            .connecting => self.settleFailure(connection, connection.advanceConnect(time)),
+            .tunneling => if (connection.revents != 0) self.settleFailure(connection, connection.continueTunnel()),
+            .handshaking => if (connection.revents != 0) self.settleFailure(connection, connection.continueHandshake()),
+            .verifying => self.settleFailure(connection, connection.finishVerification()),
             else => {},
         }
         if (connection.settingUp() and time >= connection.setup_deadline_ns)
@@ -447,7 +436,26 @@ fn advanceSetups(self: *Engine) void {
     }
 }
 
-pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) void {
+fn settleFailure(self: *Engine, connection: *Connection, failure: ?Connection.Failure) void {
+    const applied = failure orelse return;
+    switch (applied) {
+        .setup => |cause| self.setupFailed(connection, cause),
+        .lost => |lost| self.lose(connection, lost),
+    }
+}
+
+fn lose(self: *Engine, connection: *Connection, lost: Connection.Lost) void {
+    var next = self.timers.head;
+    while (next) |record| {
+        next = record.next;
+        if (record.state != .open or record.route.open.connection != connection.index + 1) continue;
+        const stream_id: u32 = @intCast(record.route.open.stream_id);
+        self.settle(record, policy.connectionLost(lost.cause, stream_id, lost.goaway_last_stream_id, record.facts()));
+    }
+    connection.close(.abrupt);
+}
+
+fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) void {
     const origin_index = connection.origin;
     connection.close(.abrupt);
     var setting_up: u32 = 0;
@@ -463,11 +471,7 @@ pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) 
 }
 
 fn readAll(self: *Engine) void {
-    for (self.active()) |*connection| {
-        connection.read_capped = false;
-        if (!connection.hasSession() or (connection.revents == 0 and !connection.tlsPending())) continue;
-        if (connection.receive() == .capped) connection.read_capped = true;
-    }
+    for (self.active()) |*connection| self.settleFailure(connection, connection.readReady());
 }
 
 fn submitPending(self: *Engine) void {
@@ -490,7 +494,7 @@ fn submitPending(self: *Engine) void {
         while (opening > 0 and pending.len > 0) : (opening -= 1) {
             const connection = self.freeConnection() orelse break;
             self.connection_serial += 1;
-            connection.open(origin, @intCast(origin_index), self.connection_serial);
+            self.settleFailure(connection, connection.open(origin, @intCast(origin_index), self.connection_serial));
         }
     }
 }
@@ -509,7 +513,7 @@ fn freeConnection(self: *Engine) ?*Connection {
     }
     if (self.connections_len < self.connections.len) {
         const connection = &self.connections[self.connections_len];
-        connection.* = .vacant(self, &self.env, self.connections_len);
+        connection.* = .vacant(&self.env, self.connections_len);
         self.connections_len += 1;
         return connection;
     }
@@ -528,9 +532,7 @@ pub fn retireConnections(self: *Engine, endpoint: h2.Endpoint) void {
     for (self.active()) |*connection| {
         if (connection.origin != origin) continue;
         switch (connection.state) {
-            .ready, .draining => {
-                if (connection.streams == 0) connection.close(.goaway) else connection.state = .draining;
-            },
+            .ready, .draining => connection.retire(),
             .free => {},
             else => {
                 if (self.pending[origin].len == 0) connection.close(.abrupt);
@@ -542,7 +544,7 @@ pub fn retireConnections(self: *Engine, endpoint: h2.Endpoint) void {
 
 fn sendAll(self: *Engine) void {
     for (self.active()) |*connection| {
-        if (connection.hasSession()) connection.send();
+        if (connection.hasSession()) self.settleFailure(connection, connection.send());
     }
 }
 
@@ -557,7 +559,7 @@ fn checkLiveness(self: *Engine) void {
         switch (self.options.liveness.action(self.livenessFacts(connection, time))) {
             .none => {},
             .ping => connection.ping(time),
-            .dead => connection.lose(.peer_silent),
+            .dead => self.lose(connection, connection.lost(.peer_silent)),
             .close => connection.close(.goaway),
         }
     }
