@@ -440,7 +440,7 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 fn factsColumnsSql(comptime session: []const u8) []const u8 {
     return "s.revision,s.provider,(SELECT r.codec FROM session_revision r WHERE r.session_ref=s.session_ref AND r.revision=s.revision) AS codec,s.model,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
-        "s.tool_set_id,s.loaded_tool_set_id," ++ tool_offer.stale_sql ++ " AS offer_stale," ++
+        "s.tool_set_id,s.loaded_tool_set_id," ++ tool_offer.laneAppSetSql("s") ++ " AS app_tool_set_id," ++ tool_offer.stale_sql ++ " AS offer_stale," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
         "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution," ++ replay_wire.operationBindingAsSql("latest_revision", "latest") ++ "," ++
         "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql(session, "s.revision") ++ ") AS instructions";
@@ -512,6 +512,7 @@ const SelectedRow = struct {
     previous_reasoning_effort: ?model_capability.ReasoningEffort,
     tool_set_id: rsql.Positive,
     loaded_tool_set_id: ?rsql.Positive,
+    app_tool_set_id: ?rsql.Positive,
     offer_stale: bool,
     latest_turn: ?rsql.Positive,
     latest_active: bool,
@@ -1071,6 +1072,7 @@ pub const AdmitModel = struct {
         instructions: u64,
         tool_set_id: u64,
         loaded_tool_set_id: ?u64,
+        app_tool_set_id: ?u64,
         offer_stale: bool,
         compaction: bool,
         weighed: ?PressureGuard,
@@ -1199,6 +1201,7 @@ pub const AdmitModel = struct {
             .instructions = if (purpose == .compaction) 0 else facts.instructions,
             .tool_set_id = facts.tool_set_id.get(),
             .loaded_tool_set_id = if (facts.loaded_tool_set_id) |id| id.get() else null,
+            .app_tool_set_id = if (facts.app_tool_set_id) |id| id.get() else null,
             .offer_stale = facts.offer_stale,
             .compaction = purpose == .compaction,
             .weighed = weighed,
@@ -1225,7 +1228,7 @@ pub const AdmitModel = struct {
             return t.queueAdmission(r);
         }
         t.input.scratch.read = .{ .offer = .{} };
-        t.input.scratch.read.offer.project(r, admitting.tool_set_id, admitting.loaded_tool_set_id);
+        t.input.scratch.read.offer.project(r, admitting.tool_set_id, admitting.loaded_tool_set_id, admitting.app_tool_set_id orelse 0);
         return .{ .round = .offer_project };
     }
 
