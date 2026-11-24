@@ -102,6 +102,8 @@ CI policy is a caller-facing interface to contributors and release operators; ch
 | CI-94 | Module | A manual bisect of the memory step replays `host-memory` alone: `bisect-targets` returns that build target through the function and the subcommand. | `promotion.bisect_targets` and the `bisect-targets` subcommand | `BisectTargetTest.test_host_memory_bisects_as_its_own_target` in `tests/ci/test_promotion.py` | tests/ci/promotion.py (`bisect_targets`); issue #2113 |
 | CI-95 | Module | Release publishes the Host memory section from the qualification tier's `rui-host-memory` artifact without measuring, and says `Not measured` when that artifact is absent. | Publish workflow text over its steps, which the policy reads as its only measurement boundary | `InstallerTemplateTest.test_publication_pastes_the_promotion_table_without_measuring` in `tests/ci/test_release.py` | .github/workflows/release.yml; issue #2113 |
 
+| CI-99 | Module | A fixture retains its root while an owned descendant can still write and removes it only after the whole driver group retires. | Full-check driver cleanup over held fixture processes | `FullCheckPartitionTest.test_root_disposal_requires_the_whole_group_to_retire` in `tests/ci/test_selection.py`: delayed and lost stop delivery keep a real held descendant until release. | CODING_STANDARDS.md#evidence; docs/verification/testing.md#flake-sources-and-their-root-fixes |
+
 Owned elsewhere: SH-21 (installer archive and version validation).
 
 Existing owner names in CI-30–CI-65 identify current tests, not a claim that each already covers its entire invariant. Consolidate and extend them during migration; retain legacy checks until replacement coverage exists. CI-1–CI-28 name existing checks, often partial; CI-29 has no located test and requires one.
@@ -132,3 +134,4 @@ Existing owner names in CI-30–CI-65 identify current tests, not a claim that e
 | Id | Level | Invariant | Seam | Owner test | Source |
 | --- | --- | --- | --- | --- | --- |
 | CI-97 | Module | A successful unit shard reports its five slowest completed tests by observed duration, while a failed shard retains its existing failure attribution. | `store_shards.report` over completed result records | `StoreTimingReportTest.test_ci_97_only_successful_shards_report_slowest_completed_tests` in `tests/ci/test_store_shards_timing.py` | tests/ci/store_shards.py (`TerminalTimes`, `report`) |
+| CI-98 | Module | The SQL collector reports its compile-step summary while retaining all collected records and failing on a failed build. | `rsql_table.collect` through a controlled compiler command | `CollectorSummaryTest.test_ci_98_collector_reports_summary_and_preserves_records` in `tests/ci/test_rsql_collector_summary.py` | tests/ci/rsql_table.py (`collect`) |

@@ -26,6 +26,8 @@ const PreparationFailure = union(enum) { ordinary: result_fault.Failure, result_
 
 const Active = struct {
     attempt: action_attempt.Attempt = undefined,
+    /// Taken from the admitted Parts, so later settlement never reaches through Host.
+    store: *store.Store = undefined,
     profile: @import("tool_record.zig").Profile = undefined,
     preparation_failure: ?PreparationFailure = null,
     source: ?std.Io.File = null,
@@ -48,11 +50,11 @@ const Active = struct {
         return err;
     }
 
-    fn destroy(self: *Active, host: *Host) void {
+    fn destroy(self: *Active, results: tool_result.Results) void {
         const closing = self.attempt.close();
         if (self.result) |result| result.destroy();
-        if (self.source) |source| source.close(host.io);
-        host.allocator.destroy(self);
+        if (self.source) |source| source.close(results.io);
+        results.allocator.destroy(self);
         closing.finish();
     }
 };
@@ -72,42 +74,42 @@ pub const Calls = struct {
         return false;
     }
 
-    pub noinline fn admit(self: *Calls, host: *Host, parts: action_attempt.Parts, call: store.ReadyAction) @import("execution_turn.zig").Admission {
+    pub noinline fn admit(self: *Calls, parts: action_attempt.Parts, results: tool_result.Results, call: store.ReadyAction) @import("execution_turn.zig").Admission {
         const entry = for (&self.entries) |*entry| {
             if (entry.* == null) break entry;
         } else return .retry_later;
-        const active = host.allocator.create(Active) catch return .retry_later;
-        active.* = .{};
+        const active = results.allocator.create(Active) catch return .retry_later;
+        active.* = .{ .store = parts.store };
         active.attempt = switch (action_attempt.admit(parts, call, 300_000, labels)) {
             .attempt => |attempt| attempt,
             .busy, .refused => {
-                host.allocator.destroy(active);
+                results.allocator.destroy(active);
                 return .retry_later;
             },
             .none, .unattached => {
-                host.allocator.destroy(active);
+                results.allocator.destroy(active);
                 return .admitted;
             },
         };
-        prepare(host, active) catch |err| {
+        prepare(results, active) catch |err| {
             switch (active.preparation_failure orelse PreparationFailure{ .ordinary = .{ .source = err } }) {
-                .ordinary => |fault| fail(host, active, fault),
-                .result_creation => |fault| failInput(host, active, fault),
+                .ordinary => |fault| fail(active, fault),
+                .result_creation => |fault| failInput(active, fault),
             }
-            active.destroy(host);
+            active.destroy(results);
             return .admitted;
         };
         entry.* = active;
         return .admitted;
     }
 
-    pub fn service(self: *Calls, host: *Host) bool {
+    pub fn service(self: *Calls, results: tool_result.Results) bool {
         var progress = false;
         for (&self.entries) |*entry| if (entry.*) |active| {
             switch (active.attempt.stopped()) {
                 .fenced => return progress,
                 .stopped => settleText(active, .cancelled, "Stopped before this image read completed."),
-                .running => if (std.Io.Clock.Timestamp.now(host.io, .awake).raw.nanoseconds >= active.deadline.raw.nanoseconds) {
+                .running => if (std.Io.Clock.Timestamp.now(results.io, .awake).raw.nanoseconds >= active.deadline.raw.nanoseconds) {
                     settleText(active, .timed_out, "Image read timed out before its result was saved.");
                 } else {
                     const progress_result = active.result.?.stepImage();
@@ -115,35 +117,35 @@ pub const Calls = struct {
                     switch (progress_result) {
                         .pending => continue,
                         .failed => |fault| {
-                            failInput(host, active, fault);
-                            active.destroy(host);
+                            failInput(active, fault);
+                            active.destroy(results);
                             entry.* = null;
                             continue;
                         },
                         .kept => {},
                         .rejected => |rejection| {
                             switch (rejection) {
-                                .failure => |fault| failInput(host, active, fault),
+                                .failure => |fault| failInput(active, fault),
                                 .reason => unreachable,
                             }
-                            active.destroy(host);
+                            active.destroy(results);
                             entry.* = null;
                             continue;
                         },
                     }
-                    publish(host, active);
+                    publish(active);
                 },
             }
-            active.destroy(host);
+            active.destroy(results);
             entry.* = null;
             progress = true;
         };
         return progress;
     }
 
-    pub fn shutdown(self: *Calls, host: *Host) void {
+    pub fn shutdown(self: *Calls, results: tool_result.Results) void {
         for (&self.entries) |*entry| if (entry.*) |active| {
-            active.destroy(host);
+            active.destroy(results);
             entry.* = null;
         };
     }
@@ -151,7 +153,7 @@ pub const Calls = struct {
 
 /// A completed read cannot be relabelled as a file failure when sealing or
 /// publication fails. Recovery reports the original Attempt as indeterminate.
-fn publish(host: *Host, active: *Active) void {
+fn publish(active: *Active) void {
     const result = active.result.?;
     const value = switch (result.finish()) {
         .value => |value| value,
@@ -159,7 +161,7 @@ fn publish(host: *Host, active: *Active) void {
             if (failure.seal) {
                 _ = active.attempt.settle(.{ .fence = .{ .phase = "image snapshot sealing", .fault = failure.failure } });
             } else {
-                failInput(host, active, failure.failure);
+                failInput(active, failure.failure);
             }
             return;
         },
@@ -175,11 +177,11 @@ fn failedText(buffer: *[256]u8, err: anyerror) []const u8 {
     return std.fmt.bufPrint(buffer, "Image read failed: {s}.", .{@errorName(err)}) catch unreachable;
 }
 
-fn fail(host: *Host, active: *Active, fault: result_fault.Failure) void {
+fn fail(active: *Active, fault: result_fault.Failure) void {
     const err = switch (fault) {
         inline else => |value| value,
     };
-    if (host.store.isFenced()) {
+    if (active.store.isFenced()) {
         _ = active.attempt.settle(.{ .fence = .{ .phase = "image read canonical input", .fault = fault } });
     } else if (err == error.HostDispatchSuppressed) {
         return;
@@ -193,8 +195,8 @@ fn fail(host: *Host, active: *Active, fault: result_fault.Failure) void {
     }
 }
 
-fn failInput(host: *Host, active: *Active, fault: result_fault.Failure) void {
-    if (host.store.isFenced()) {
+fn failInput(active: *Active, fault: result_fault.Failure) void {
+    if (active.store.isFenced()) {
         _ = active.attempt.settle(.{ .fence = .{ .phase = "image read canonical input", .fault = fault } });
         return;
     }
@@ -237,28 +239,28 @@ const Source = struct {
 };
 
 fn openSource(context: anytype) !void {
-    context.active.source = source_file.open(context.host.io, context.active.input.runner.read_image.workspace.slice(), context.active.path.slice()) catch |err| return context.active.recordFailure(.{ .source = err });
+    context.active.source = source_file.open(context.io, context.active.input.runner.read_image.workspace.slice(), context.active.path.slice()) catch |err| return context.active.recordFailure(.{ .source = err });
 }
 
-noinline fn prepare(host: *Host, active: *Active) !void {
-    host.store.readActionExecutionInput(.read_image, active.attempt.binding, &active.input) catch |err| return active.recordFailure(.{ .store = err });
+noinline fn prepare(results: tool_result.Results, active: *Active) !void {
+    active.store.readActionExecutionInput(.read_image, active.attempt.binding, &active.input) catch |err| return active.recordFailure(.{ .store = err });
     active.profile = @import("tool_record.zig").Runner.read_image.resultProfile(false);
     var reader: store.ContentReader = undefined;
-    reader.open(host.store.openContent(active.input.arguments) catch |err| return active.recordFailure(.{ .store = err }));
+    reader.open(active.store.openContent(active.input.arguments) catch |err| return active.recordFailure(.{ .store = err }));
     defer reader.close();
     var source: Source = .{ .reader = &reader, .length = active.input.arguments.length };
     if (!(arguments.parse(&source, &active.path) catch |err| return active.recordFailure(.{ .store = err }))) return active.recordFailure(.{ .source = error.InvalidImageArguments });
-    const now = std.Io.Clock.Timestamp.now(host.io, .awake);
+    const now = std.Io.Clock.Timestamp.now(results.io, .awake);
     active.deadline = now.addDuration(.{ .raw = .fromMilliseconds(@intCast(active.input.timeout_ms)), .clock = .awake });
-    switch (active.attempt.launch(.effect, now, .{ .host = host, .active = active }, openSource)) {
+    switch (active.attempt.launch(.effect, now, .{ .io = results.io, .active = active }, openSource)) {
         .started => {},
         .authority, .handoff => |err| return if (active.preparation_failure != null) err else active.recordFailure(.{ .store = err }),
     }
-    active.length = (active.source.?.stat(host.io) catch |err| return active.recordFailure(.{ .source = err })).size;
+    active.length = (active.source.?.stat(results.io) catch |err| return active.recordFailure(.{ .source = err })).size;
     // Keep declared-size rejection ahead of Result allocation and scratch.
     _ = image_intake.preflight(active.length, null, .{}) catch |err| return active.recordFailure(.{ .source = err });
-    active.file_source = .{ .io = host.io, .file = active.source.?, .length = active.length };
-    active.result = tool_result.Result.create(host, active.attempt.binding.action_id, active.profile) catch |err| return active.recordResultCreationFailure(err);
+    active.file_source = .{ .io = results.io, .file = active.source.?, .length = active.length };
+    active.result = results.create(active.attempt.binding.action_id, active.profile) catch |err| return active.recordResultCreationFailure(err);
     switch (active.result.?.beginImage(active.file_source.source(), true)) {
         .pending => {},
         .failed => |fault| return active.recordFailure(fault),
@@ -355,13 +357,14 @@ fn testReadImage(cases: []const TestCase) !void {
         var host: Host = .{ .io = std.testing.io, .allocator = if (case == .result_allocation or case == .empty_allocation or case == .oversized_allocation) failing.allocator() else std.testing.allocator, .lease = undefined, .store = &storage, .retention = &queue };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, undefined);
+        const results: tool_result.Results = .{ .io = std.testing.io, .allocator = host.allocator, .retention = &queue };
         var execution_state: execution_owner.Execution = undefined;
         execution_state.init(&records, null, &host_parts.lifecycle, &host.scratch_used, null);
         const parts: action_attempt.Parts = execution_state.attempts(&storage, host.probes);
         var capture_vtable = std.testing.io.vtable.*;
         var calls: Calls = .{};
-        defer calls.shutdown(&host);
-        try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, calls.admit(&host, parts, selected));
+        defer calls.shutdown(results);
+        try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, calls.admit(parts, results, selected));
         if (case == .missing or case == .oversized or case == .result_allocation or case == .empty_allocation or case == .oversized_allocation) {
             try std.testing.expect(!calls.any());
         } else {
@@ -374,7 +377,7 @@ fn testReadImage(cases: []const TestCase) !void {
             }
             if (case == .payload_capacity or case == .stop_between_ticks) {
                 // A real multi-window file must yield before a second read.
-                try std.testing.expect(calls.service(&host));
+                try std.testing.expect(calls.service(results));
                 try std.testing.expect(calls.any());
                 try std.testing.expectEqual(@as(u64, InputCapture.window_bytes), active.file_source.offset);
                 try std.testing.expectEqual(baseline + InputCapture.window_bytes, used.load(.acquire));
@@ -411,20 +414,20 @@ fn testReadImage(cases: []const TestCase) !void {
                 const outcome = active.result.?.stepImage();
                 try std.testing.expect(outcome == .failed);
                 try std.testing.expect(outcome.failed == .source);
-                failInput(&host, active, outcome.failed);
-                active.destroy(&host);
+                failInput(active, outcome.failed);
+                active.destroy(results);
                 calls.entries[0] = null;
                 try std.testing.expect(parts.lifecycle.launchAllowed());
             } else if (case == .seal) {
                 const complete = active.result.?.stepImage();
                 try std.testing.expect(complete == .kept);
                 try active.result.?.capture.?.resources.?.index.setLength(std.testing.io, 0);
-                publish(&host, active);
-                calls.shutdown(&host);
+                publish(active);
+                calls.shutdown(results);
             } else if (case == .shutdown) {
                 _ = parts.lifecycle.advance(.stopping);
-                calls.shutdown(&host);
-            } else try std.testing.expect(calls.service(&host));
+                calls.shutdown(results);
+            } else try std.testing.expect(calls.service(results));
         }
         try std.testing.expect(!calls.any());
         try std.testing.expectEqual(@as(usize, 0), parts.custody.occupied());
