@@ -269,7 +269,7 @@ fn runSeed(seed: u64, totals: *Totals) !void {
         .cut = percents[random.uintLessThan(usize, percents.len)],
         .cut_span = spans[random.uintLessThan(usize, spans.len)],
     });
-    engineOf(&client).faults = &faults;
+    engineOf(&client).env.faults = &faults;
     defer for (requests[0..count]) |*request| {
         if (recordOf(&request.stream).state != .idle) client.cancel(&request.stream);
         request.stream.deinit();

@@ -13,14 +13,42 @@ const tls = @import("tls.zig");
 const proxy = @import("proxy.zig");
 const sec_trust = @import("sec_trust.zig");
 const socket_os = @import("os").socket;
+const Clock = @import("Clock.zig");
+const Faults = @import("testing/Faults.zig");
+const Waker = @import("os").Waker;
 const Connection = @This();
 
 pub const State = enum(u8) { free = 0, resolving, connecting, tunneling, handshaking, verifying, awaiting_settings, ready, draining };
 
+pub const Scratch = struct {
+    pub const max_chunks = 256;
+    read_buffer: [h2.read_buffer_bytes]u8,
+    chunks: [max_chunks]Chunk,
+    chunk_count: u16,
+    iovecs: [max_chunks]std.posix.iovec_const,
+
+    pub const Chunk = struct { record: ?*Record, bytes: []const u8 };
+};
+
+pub const Env = struct {
+    allocator: std.mem.Allocator,
+    clock: *const Clock,
+    waker: *Waker,
+    callbacks: *c.nghttp2_session_callbacks,
+    session_options: *c.nghttp2_option,
+    scratch: *Scratch,
+    tls: *?tls.Context,
+    connect_timeout_ns: u64,
+    stream_capacity: u32,
+    faults: if (builtin.is_test) ?*Faults else void = if (builtin.is_test) null else {},
+};
+
 engine: *Engine,
+env: *const Env,
 index: u32,
 state: State,
 origin: u8,
+origin_state: *Origin = undefined,
 carried_any: bool,
 received_any: bool,
 read_capped: bool,
@@ -66,9 +94,10 @@ pub const Head = struct {
     refs: std.ArrayList(*c.nghttp2_rcbuf) = .empty,
 };
 
-pub fn vacant(engine: *Engine, index: u32) Connection {
+pub fn vacant(engine: *Engine, env: *const Env, index: u32) Connection {
     return .{
         .engine = engine,
+        .env = env,
         .index = index,
         .state = .free,
         .origin = 0,
@@ -150,33 +179,29 @@ pub fn pollEvents(self: *const Connection) ?i16 {
     };
 }
 
-fn originRef(self: *const Connection) *Origin {
-    return &self.engine.origins[self.origin];
-}
-
-pub fn open(self: *Connection, origin_index: u8, serial: u64) void {
+pub fn open(self: *Connection, origin: *Origin, origin_index: u8, serial: u64) void {
     std.debug.assert(self.state == .free);
     const engine = self.engine;
     self.origin = origin_index;
+    self.origin_state = origin;
     self.serial = serial;
-    self.setup_deadline_ns = engine.now() +| engine.options.connect_timeout_ns;
-    const origin = self.originRef();
-    if (origin.target.literal != null) return self.advanceAttempts(false, engine.now());
+    self.setup_deadline_ns = self.env.clock.now() +| self.env.connect_timeout_ns;
+    if (origin.target.literal != null) return self.advanceAttempts(false, self.env.clock.now());
     self.state = .resolving;
-    if (!origin.lookup.acquire(&engine.waker, origin.target)) return engine.setupFailed(self, .local_failure);
+    if (!origin.lookup.acquire(self.env.waker, origin.target)) return engine.setupFailed(self, .local_failure);
     self.uses_lookup = true;
 }
 
 pub fn finishLookup(self: *Connection) void {
-    const lookup = self.originRef().lookup.result() orelse return;
+    const lookup = self.origin_state.lookup.result() orelse return;
     if (lookup.found().len == 0) return self.engine.setupFailed(self, .resolve_failed);
-    self.advanceAttempts(false, self.engine.now());
+    self.advanceAttempts(false, self.env.clock.now());
 }
 
 fn stopUsingLookup(self: *Connection) void {
     if (!self.uses_lookup) return;
     self.uses_lookup = false;
-    self.originRef().lookup.release();
+    self.origin_state.lookup.release();
 }
 
 pub fn advanceConnect(self: *Connection, time: u64) void {
@@ -212,7 +237,7 @@ fn advanceAttempts(self: *Connection, failed: bool, time: u64) void {
     while (true) {
         switch (dial_policy.nextAttempt(.{
             .in_flight = @as(u8, @intFromBool(self.socket >= 0)) + @intFromBool(self.earlier >= 0),
-            .more_addresses = self.originRef().address(self.address_index) != null,
+            .more_addresses = self.origin_state.address(self.address_index) != null,
             .failed = failure,
             .delay_passed = self.next_attempt_ns != 0 and time >= self.next_attempt_ns,
         })) {
@@ -232,9 +257,9 @@ fn advanceAttempts(self: *Connection, failed: bool, time: u64) void {
 
 fn attempt(self: *Connection, time: u64) enum { connected, in_flight, refused, local_failure } {
     std.debug.assert(self.earlier < 0);
-    const address = self.originRef().address(self.address_index).?;
+    const address = self.origin_state.address(self.address_index).?;
     self.address_index += 1;
-    self.next_attempt_ns = if (self.originRef().address(self.address_index) != null) time +| dial_policy.attempt_delay_ns else 0;
+    self.next_attempt_ns = if (self.origin_state.address(self.address_index) != null) time +| dial_policy.attempt_delay_ns else 0;
     const fd = std.c.socket(address.family, std.c.SOCK.STREAM, 0);
     if (fd < 0) return .local_failure;
     self.earlier = self.socket;
@@ -278,7 +303,7 @@ fn connected(self: *Connection) void {
     self.dropEarlier();
     self.next_attempt_ns = 0;
     self.stopUsingLookup();
-    const origin = self.originRef();
+    const origin = self.origin_state;
     if (origin.scheme == .http) return self.startSession();
     if (origin.via != null) return self.startTunnel();
     self.startTls();
@@ -295,7 +320,7 @@ fn startTunnel(self: *Connection) void {
 }
 
 fn tunnelRequest(self: *const Connection, buffer: *[proxy.max_request_bytes]u8) []const u8 {
-    const origin = self.originRef();
+    const origin = self.origin_state;
     return proxy.connectRequest(buffer, origin.host, origin.port, origin.via.?.credentials);
 }
 
@@ -330,8 +355,8 @@ pub fn continueTunnel(self: *Connection) void {
 }
 
 fn startTls(self: *Connection) void {
-    const origin = self.originRef();
-    const context = &self.engine.tls_context.?;
+    const origin = self.origin_state;
+    const context = &self.env.tls.*.?;
     self.ssl = context.newSession(self.socket, origin.server_name, if (origin.literal != null) .ip_literal else .dns_name) orelse
         return self.engine.setupFailed(self, .local_failure);
     self.state = .handshaking;
@@ -342,7 +367,7 @@ pub fn continueHandshake(self: *Connection) void {
     switch (tls.handshake(self.ssl.?)) {
         .done => {
             self.tls_wants_write = false;
-            if (sec_trust.enabled and self.engine.tls_context.?.deferred) return self.startVerification();
+            if (sec_trust.enabled and self.env.tls.*.?.deferred) return self.startVerification();
             self.startTrustedSession();
         },
         .want_read => self.tls_wants_write = false,
@@ -353,8 +378,8 @@ pub fn continueHandshake(self: *Connection) void {
 
 fn startVerification(self: *Connection) void {
     std.debug.assert(self.verification == null);
-    const server_name = self.originRef().server_name;
-    self.verification = sec_trust.Verification.start(&self.engine.waker, self.ssl.?, server_name) orelse
+    const server_name = self.origin_state.server_name;
+    self.verification = sec_trust.Verification.start(self.env.waker, self.ssl.?, server_name) orelse
         return self.engine.setupFailed(self, .local_failure);
     self.state = .verifying;
 }
@@ -384,7 +409,7 @@ fn startTrustedSession(self: *Connection) void {
 fn startSession(self: *Connection) void {
     const engine = self.engine;
     var session: ?*c.nghttp2_session = null;
-    if (c.nghttp2_session_client_new3(&session, engine.callbacks, self, engine.session_options, null) != 0)
+    if (c.nghttp2_session_client_new3(&session, self.env.callbacks, self, self.env.session_options, null) != 0)
         return engine.setupFailed(self, .local_failure);
     self.session = session;
     const settings = [_]c.nghttp2_settings_entry{
@@ -399,15 +424,14 @@ fn startSession(self: *Connection) void {
 }
 
 fn becomeReady(self: *Connection) void {
-    const engine = self.engine;
-    const time = engine.now();
+    const time = self.env.clock.now();
     self.state = .ready;
     self.idle_since_ns = time;
     self.last_inbound_ns = time;
 }
 
 fn sizeWindow(self: *Connection) void {
-    const carried: u64 = @min(self.peer_max_streams, self.engine.options.stream_capacity);
+    const carried: u64 = @min(self.peer_max_streams, self.env.stream_capacity);
     const window: i32 = @intCast(@min(@as(u64, h2.stream_window_bytes) * @max(carried, 1), std.math.maxInt(i32)));
     self.check(c.nghttp2_session_set_local_window_size(self.session, c.NGHTTP2_FLAG_NONE, 0, window));
 }
@@ -504,7 +528,7 @@ pub const ReadOutcome = enum { drained, capped, closed };
 
 pub fn receive(self: *Connection) ReadOutcome {
     const engine = self.engine;
-    const buffer = &engine.scratch.read_buffer;
+    const buffer = &self.env.scratch.read_buffer;
     var total: usize = 0;
     self.tls_wants_write = false;
     while (total < h2.read_allowance_bytes) {
@@ -516,7 +540,7 @@ pub fn receive(self: *Connection) ReadOutcome {
                 return .closed;
             },
         };
-        self.last_inbound_ns = engine.now();
+        self.last_inbound_ns = self.env.clock.now();
         self.ping_sent_ns = null;
         if (!self.received_any and self.state == .awaiting_settings and self.ssl == null) {
             self.received_any = true;
@@ -575,8 +599,8 @@ fn writeSome(self: *Connection, bytes: []const u8) Transfer {
     return self.withFaults(.write, bytes, writeSocket);
 }
 
-fn withFaults(self: *Connection, comptime direction: Engine.Faults.Direction, bytes: anytype, transfer: fn (*Connection, @TypeOf(bytes)) Transfer) Transfer {
-    const faults = self.engine.faults orelse return transfer(self, bytes);
+fn withFaults(self: *Connection, comptime direction: Faults.Direction, bytes: anytype, transfer: fn (*Connection, @TypeOf(bytes)) Transfer) Transfer {
+    const faults = self.env.faults orelse return transfer(self, bytes);
     const allowed = switch (faults.admit(self.serial, direction, bytes.len, self.ssl != null)) {
         .pass => |count| count,
         .again => return .again,
@@ -676,10 +700,10 @@ pub fn close(self: *Connection, mode: enum { goaway, abrupt }) void {
     if (self.socket >= 0) closeSocket(self.socket);
     self.dropEarlier();
     self.releaseHead();
-    self.head.fields.deinit(self.engine.allocator);
-    self.head.refs.deinit(self.engine.allocator);
+    self.head.fields.deinit(self.env.allocator);
+    self.head.refs.deinit(self.env.allocator);
     const verification = self.verification;
-    self.* = .vacant(self.engine, self.index);
+    self.* = .vacant(self.engine, self.env, self.index);
     self.verification = verification;
 }
 
@@ -751,7 +775,7 @@ fn onFrameSend(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
 fn responseStarted(self: *Connection, record: *Record) void {
     if (record.flags.response_started) return;
     record.flags.response_started = true;
-    record.releaseFields(self.engine.allocator);
+    record.releaseFields(self.env.allocator);
     if (record.flags.body_done) self.engine.retireBody(record);
 }
 
@@ -785,7 +809,7 @@ fn onHeader(
     }
     if (name.len > 0 and name[0] == ':') return 0;
     self.head.bytes += name.len + value.len;
-    const allocator = self.engine.allocator;
+    const allocator = self.env.allocator;
     if (self.head.bytes > h2.max_field_block_bytes) {
         self.releaseHead();
         self.endOpen(record, .rejected_headers);
@@ -818,7 +842,7 @@ fn onFrameRecv(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
         c.NGHTTP2_SETTINGS => {
             if (frame.*.hd.flags & c.NGHTTP2_FLAG_ACK != 0) return 0;
             self.peer_max_streams = c.nghttp2_session_get_remote_settings(self.session, c.NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS);
-            self.originRef().learned_max_streams = self.peer_max_streams;
+            self.origin_state.learned_max_streams = self.peer_max_streams;
             if (self.state == .awaiting_settings) self.becomeReady();
             self.sizeWindow();
         },
@@ -883,7 +907,7 @@ fn onStreamClose(_: ?*c.nghttp2_session, stream_id: i32, error_code: u32, user_d
     const self = of(user_data);
     const engine = self.engine;
     self.streams -= 1;
-    if (self.streams == 0) self.idle_since_ns = engine.now();
+    if (self.streams == 0) self.idle_since_ns = self.env.clock.now();
     const closing = self.recordOf(stream_id) orelse return 0;
     self.closing_stream_id = stream_id;
     defer self.closing_stream_id = 0;

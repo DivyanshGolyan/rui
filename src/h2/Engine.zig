@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const c = @import("h2_c");
 const h2 = @import("h2.zig");
 const policy = @import("policy.zig");
@@ -7,13 +6,13 @@ const dial_policy = @import("dial_policy.zig");
 const liveness = @import("liveness.zig");
 const Record = @import("Stream.zig");
 const Connection = @import("Connection.zig");
+const Clock = @import("Clock.zig");
 const Origin = @import("Origin.zig");
 const Waker = @import("os").Waker;
 const tls = @import("tls.zig");
 const Engine = @This();
 
 allocator: std.mem.Allocator,
-io: std.Io,
 options: h2.Options,
 callbacks: *c.nghttp2_session_callbacks,
 session_options: *c.nghttp2_option,
@@ -29,16 +28,14 @@ pollfds: []std.c.pollfd,
 timers: Record.List,
 finished: Record.List,
 finished_count: usize,
-scratch: *Scratch,
+scratch: *Connection.Scratch,
 receiver: ?Receiver,
-stall_ns: u64,
+clock: Clock,
 connection_serial: u64,
 waker: Waker,
 tls_context: ?tls.Context,
 proxy_route: ?Origin.Route,
-faults: if (builtin.is_test) ?*Faults else void = if (builtin.is_test) null else {},
-
-pub const Faults = @import("testing/Faults.zig");
+env: Connection.Env,
 
 pub const size = @sizeOf(Engine);
 pub const alignment = @alignOf(Engine);
@@ -52,16 +49,6 @@ pub const Endpoint = struct {
     url: []u8,
     origin: u8,
     path: []const u8,
-};
-
-pub const Scratch = struct {
-    pub const max_chunks = 256;
-    read_buffer: [h2.read_buffer_bytes]u8,
-    chunks: [max_chunks]Chunk,
-    chunk_count: u16,
-    iovecs: [max_chunks]std.posix.iovec_const,
-
-    pub const Chunk = struct { record: ?*Record, bytes: []const u8 };
 };
 
 pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2.Options) h2.InitError!void {
@@ -84,15 +71,14 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
     errdefer freeUnwritten(allocator, policy.ConnectionView, views);
     const pollfds = try allocUnwritten(allocator, std.c.pollfd, dial_policy.max_attempts * capacity + 1);
     errdefer freeUnwritten(allocator, std.c.pollfd, pollfds);
-    const scratch = &(try allocUnwritten(allocator, Scratch, 1))[0];
-    errdefer freeUnwritten(allocator, Scratch, scratch[0..1]);
+    const scratch = &(try allocUnwritten(allocator, Connection.Scratch, 1))[0];
+    errdefer freeUnwritten(allocator, Connection.Scratch, scratch[0..1]);
     scratch.chunk_count = 0;
     var waker = try Waker.init();
     errdefer waker.deinit();
 
     self.* = .{
         .allocator = allocator,
-        .io = io,
         .options = blk: {
             var kept = options;
             kept.proxy = null;
@@ -111,11 +97,23 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
         .finished_count = 0,
         .scratch = scratch,
         .receiver = null,
-        .stall_ns = 0,
+        .clock = Clock.init(io),
         .connection_serial = 0,
         .waker = waker,
         .tls_context = null,
         .proxy_route = proxy_route,
+        .env = undefined,
+    };
+    self.env = .{
+        .allocator = allocator,
+        .clock = &self.clock,
+        .waker = &self.waker,
+        .callbacks = self.callbacks,
+        .session_options = self.session_options,
+        .scratch = self.scratch,
+        .tls = &self.tls_context,
+        .connect_timeout_ns = options.connect_timeout_ns,
+        .stream_capacity = options.stream_capacity,
     };
 }
 
@@ -156,7 +154,7 @@ pub fn deinit(self: *Engine) void {
     for (self.endpoints[0..self.endpoint_count]) |endpoint| self.allocator.free(endpoint.url);
     if (self.tls_context) |*context| context.deinit();
     if (self.proxy_route) |*via| via.deinit(self.allocator);
-    freeUnwritten(self.allocator, Scratch, self.scratch[0..1]);
+    freeUnwritten(self.allocator, Connection.Scratch, self.scratch[0..1]);
     freeUnwritten(self.allocator, std.c.pollfd, self.pollfds);
     freeUnwritten(self.allocator, policy.ConnectionView, self.views);
     freeUnwritten(self.allocator, Connection, self.connections);
@@ -261,7 +259,7 @@ pub fn launch(self: *Engine, record: *Record) void {
     std.debug.assert(self.receiver == null);
     std.debug.assert(record.state == .prepared);
     record.state = .pending;
-    record.last_activity_ns = self.now();
+    record.last_activity_ns = self.clock.now();
     self.timers.pushTail(record);
     self.pendingOf(record).pushTail(record);
 }
@@ -337,11 +335,6 @@ fn connectionOf(self: *Engine, record: *const Record) *Connection {
     return &self.connections[record.route.open.connection - 1];
 }
 
-pub fn now(self: *const Engine) u64 {
-    const awake: u64 = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds);
-    return awake - self.stall_ns;
-}
-
 pub fn wake(self: *Engine) void {
     self.waker.wake();
 }
@@ -402,7 +395,7 @@ fn fillPollfds(self: *Engine) usize {
 }
 
 fn advanceSetups(self: *Engine) void {
-    const time = self.now();
+    const time = self.clock.now();
     for (self.active()) |*connection| {
         if (!connection.settingUp()) continue;
         switch (connection.state) {
@@ -461,7 +454,7 @@ fn submitPending(self: *Engine) void {
         while (opening > 0 and pending.len > 0) : (opening -= 1) {
             const connection = self.freeConnection() orelse break;
             self.connection_serial += 1;
-            connection.open(@intCast(origin_index), self.connection_serial);
+            connection.open(origin, @intCast(origin_index), self.connection_serial);
         }
     }
 }
@@ -480,7 +473,7 @@ fn freeConnection(self: *Engine) ?*Connection {
     }
     if (self.connections_len < self.connections.len) {
         const connection = &self.connections[self.connections_len];
-        connection.* = .vacant(self, self.connections_len);
+        connection.* = .vacant(self, &self.env, self.connections_len);
         self.connections_len += 1;
         return connection;
     }
@@ -518,7 +511,7 @@ fn sendAll(self: *Engine) void {
 }
 
 fn checkLiveness(self: *Engine) void {
-    const time = self.now();
+    const time = self.clock.now();
     for (self.active()) |*connection| {
         if (connection.state != .ready and connection.state != .draining) continue;
         if (connection.state == .draining and connection.streams == 0) {
@@ -550,7 +543,7 @@ fn livenessFacts(self: *Engine, connection: *const Connection, time: u64) livene
 }
 
 fn expireInactive(self: *Engine) void {
-    const time = self.now();
+    const time = self.clock.now();
     var next = self.timers.head;
     while (next) |record| {
         if (time -| record.last_activity_ns < self.options.inactivity_ns) break;
@@ -598,7 +591,7 @@ pub fn flush(self: *Engine, connection: *Connection, only: ?*Record) void {
             continue;
         }
         record.sink_written += total;
-        record.last_activity_ns = self.now();
+        record.last_activity_ns = self.clock.now();
         self.timers.moveToTail(record);
         connection.consume(stream_id, total);
     }
@@ -614,8 +607,8 @@ fn writeSink(self: *Engine, record: *Record, iovecs: []std.posix.iovec_const, to
         }
         return true;
     }
-    const before: u64 = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds);
-    defer self.stall_ns += @as(u64, @intCast(std.Io.Clock.awake.now(self.io).nanoseconds)) - before;
+    const before = self.clock.awake();
+    defer self.clock.charge(before);
     const fd: std.posix.fd_t = @intCast(record.sink_target);
     var remaining = iovecs;
     var offset = record.sink_written;
@@ -643,7 +636,7 @@ fn writeSink(self: *Engine, record: *Record, iovecs: []std.posix.iovec_const, to
 
 pub fn gather(self: *Engine, connection: *Connection, record: *Record, bytes: []const u8) void {
     const scratch = self.scratch;
-    if (scratch.chunk_count == Scratch.max_chunks) self.flush(connection, null);
+    if (scratch.chunk_count == Connection.Scratch.max_chunks) self.flush(connection, null);
     scratch.chunks[scratch.chunk_count] = .{ .record = record, .bytes = bytes };
     scratch.chunk_count += 1;
 }
@@ -673,7 +666,7 @@ pub fn armWait(self: *Engine, timeout_ms: u32) Armed {
         if (connection.tlsPending()) timeout = 0;
     }
     if (self.nextDeadline()) |deadline| {
-        const time = self.now();
+        const time = self.clock.now();
         const until = std.math.divCeil(u64, deadline -| time, std.time.ns_per_ms) catch unreachable;
         timeout = @intCast(@min(timeout, until));
     }
@@ -681,7 +674,7 @@ pub fn armWait(self: *Engine, timeout_ms: u32) Armed {
 }
 
 fn nextDeadline(self: *Engine) ?u64 {
-    const time = self.now();
+    const time = self.clock.now();
     var earliest: ?u64 = if (self.timers.head) |head| head.last_activity_ns +| self.options.inactivity_ns else null;
     for (self.active()) |*connection| {
         const deadline: ?u64 = switch (connection.state) {
