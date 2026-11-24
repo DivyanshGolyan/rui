@@ -70,6 +70,7 @@ const Selection = struct {
     size: vxfw.Size = .{},
     anchor: Spot,
     head: Spot,
+    cancelled: bool = false,
     dragging: bool = false,
     edge: enum { none, up, down } = .none,
     ticking: bool = false,
@@ -109,7 +110,7 @@ pub fn scroll(self: *Self, rows: i32) void {
 }
 
 pub fn dragging(self: *const Self) bool {
-    return self.selection != null;
+    return if (self.selection) |held| !held.cancelled else false;
 }
 
 pub fn capturesCopySelection(self: *const Self) bool {
@@ -117,10 +118,32 @@ pub fn capturesCopySelection(self: *const Self) bool {
 }
 
 pub fn cancelSelection(self: *Self) bool {
-    const held = self.selection != null;
+    const held = self.selection orelse {
+        self.retry_press = null;
+        return false;
+    };
+    self.retry_press = null;
+    if (held.purpose == .copy) {
+        if (self.selection) |*selection| {
+            _ = selection.link.step(.cancel);
+            selection.cancelled = true;
+            selection.dragging = false;
+            selection.edge = .none;
+            selection.ticking = false;
+        }
+    } else self.selection = null;
+    return true;
+}
+
+pub fn copySelectionCancelled(self: *const Self) bool {
+    return if (self.selection) |held| held.purpose == .copy and held.cancelled else false;
+}
+
+pub fn finishCancelledSelection(self: *Self) bool {
+    if (!self.copySelectionCancelled()) return false;
     self.selection = null;
     self.retry_press = null;
-    return held;
+    return true;
 }
 
 pub fn cancelQuote(self: *Self) bool {
@@ -330,6 +353,22 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
 fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
     const handler = self.handler orelse return;
     const at: Cell = .{ .row = value.row, .col = value.col };
+    if (self.copySelectionCancelled()) switch (value.type) {
+        .drag => {
+            ctx.consumeEvent();
+            return;
+        },
+        .release => {
+            _ = self.finishCancelledSelection();
+            ctx.consumeAndRedraw();
+            return;
+        },
+        .press => _ = self.finishCancelledSelection(),
+        .motion => {
+            _ = self.finishCancelledSelection();
+            return;
+        },
+    };
     if (self.selection) |held| if (!self.current(held.purpose)) {
         _ = self.cancelSelection();
         ctx.consumeAndRedraw();
@@ -404,6 +443,7 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
             var held = self.selection orelse return;
             self.selection = null;
             ctx.consumeAndRedraw();
+            if (held.cancelled) return;
             if (held.purpose == .copy and (held.dragging or !std.meta.eql(at, held.press))) {
                 held.dragging = true;
                 held.head = try self.spotAt(ctx.alloc, at) orelse held.head;
@@ -558,12 +598,13 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     try self.drawnLinks(ctx.arena, surface);
     try self.drawHover(ctx, surface);
     if (self.selection) |*held| {
+        if (held.cancelled) return surface;
         const anchor = self.resolved(held.anchor) orelse {
-            self.selection = null;
+            _ = self.cancelSelection();
             return surface;
         };
         _ = self.resolved(held.head) orelse {
-            self.selection = null;
+            _ = self.cancelSelection();
             return surface;
         };
         if (held.dragging and self.size.width > 0 and self.size.height > 0) {
@@ -679,33 +720,6 @@ fn activityScrollRoundTrip() !void {
     const short = try testFrame(&view, arena.allocator(), 12, 5);
     try std.testing.expectEqualStrings("s", testCell(short, 2, 0));
     try std.testing.expectEqual(@as(i17, 3), short.children[0].origin.row);
-}
-
-test "FeedView copy selection survives leave and takes the release endpoint" {
-    const gpa = std.testing.allocator;
-    const window = try testWindow();
-    defer gpa.destroy(window);
-    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "alpha beta\n" } }});
-    var anchor: Feed = .{};
-    var actions: RetryClicks = .{};
-    var view: Self = .{ .window = window, .anchor = &anchor, .handler = actions.handler() };
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    _ = try testFrame(&view, alloc, 20, 3);
-    const start = (try view.spotAt(alloc, .{ .row = 0, .col = 0 })).?;
-    view.selection = .{ .press = .{ .row = 0, .col = 0 }, .size = view.size, .anchor = start, .head = start };
-    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = alloc, .cmds = .empty };
-    defer {
-        for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) gpa.free(command.copy_to_clipboard);
-        ctx.cmds.deinit(gpa);
-    }
-    try view.widget().handleEvent(&ctx, .mouse_leave);
-    try std.testing.expect(view.capturesCopySelection());
-    try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = 0, .col = 5, .button = .left, .mods = .{}, .type = .release } });
-    try std.testing.expectEqual(@as(usize, 1), clipboardCommands(&ctx));
-    for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) try std.testing.expectEqualStrings("alpha", command.copy_to_clipboard);
-    try std.testing.expect(!view.dragging());
 }
 
 test "FeedView selection endpoints survive prepends and edits but not eviction" {

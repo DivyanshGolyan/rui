@@ -342,10 +342,12 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
 }
 
 fn captureSelection(self: *Self, ctx: *vxfw.EventContext, mouse: vaxis.Mouse) !bool {
-    if ((mouse.type != .drag and mouse.type != .release) or
-        (mouse.button != .left and mouse.button != .none) or self.session == null or
-        self.chooseLayout().pane != .session or self.input.layer.signInOpen() or self.input.layer.settingsOpen())
-        return false;
+    if (self.session == null) return false;
+    const route = switch (mouse.type) {
+        .press, .motion => true,
+        .drag, .release => mouse.button == .left or mouse.button == .none,
+    };
+    if (!route) return false;
     var captured = mouse;
     if (self.size.width >= split_at) captured.col -= @intCast(list_width + 1);
     try self.session.?.captureEvent(ctx, .{ .mouse = captured });
@@ -1400,7 +1402,7 @@ test "A faded screen holds what rendering shows: children above their parents in
     try std.testing.expectEqualStrings("nabb" ++ "aabc", &text);
 }
 
-test "Root routes captured selection through divider and footer as the sole hit" {
+test "SUI-130 Root routes captured selection through divider and footer as the sole hit" {
     const Probe = struct {
         count: usize = 0,
         last: vaxis.Mouse = undefined,

@@ -26,16 +26,6 @@ pub const Range = struct {
     }
 };
 
-test "selection ranges exclude point cells at endpoints and include interior blank boundaries" {
-    const range: Range = .{ .from = 4, .to = 9 };
-    try std.testing.expect(!range.covers(Spot.point(4)));
-    try std.testing.expect(range.covers(Spot.point(5)));
-    try std.testing.expect(range.covers(Spot.point(8)));
-    try std.testing.expect(!range.covers(Spot.point(9)));
-    try std.testing.expect(range.covers(.{ .start = 3, .end = 5 }));
-    try std.testing.expect(range.covers(.{ .start = 8, .end = 10 }));
-}
-
 pub const Row = RowFor(Document);
 
 // Selection composes with an existing reverse-video band in either theme.
@@ -215,7 +205,7 @@ fn layOut(document: anytype, first: viewport.Position, width: u16, count: u16, c
     _ = document.draw(window, first, true, false, .{}, .{});
 }
 
-test "a row's columns map to the clusters they show, indents and wide cells included" {
+fn rowColumnsMap() !void {
     const document = try std.testing.allocator.create(Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
@@ -247,7 +237,8 @@ test "a row's columns map to the clusters they show, indents and wide cells incl
     try std.testing.expectEqualSlices(bool, &@as([10]bool, @splat(false)), &columns);
 }
 
-test "selection leaves generated user gutter alone and includes authored blank rows" {
+test "SUI-133 transcript projection leaves generated gutters and preserves authored blank rows" {
+    try rowColumnsMap();
     const testing = std.testing;
     const DocumentType = viewport.Sized(256, true);
     var document: DocumentType = .{};
@@ -290,6 +281,13 @@ test "selection leaves generated user gutter alone and includes authored blank r
         }
     }
     try testing.expect(saw_marker and saw_blank);
+    const range: Range = .{ .from = 4, .to = 9 };
+    try testing.expect(!range.covers(Spot.point(4)));
+    try testing.expect(range.covers(Spot.point(5)));
+    try testing.expect(range.covers(Spot.point(8)));
+    try testing.expect(!range.covers(Spot.point(9)));
+    try testing.expect(range.covers(.{ .start = 3, .end = 5 }));
+    try testing.expect(range.covers(.{ .start = 8, .end = 10 }));
 }
 
 test "a release copies the shown text with its line count, within the clipboard limit" {
