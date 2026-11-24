@@ -9,8 +9,8 @@ A collect build (-Drsql-collect=true) compiles the product and the unit roots on
 statement, Store test fixture text and schema value exports what that path produced. This script reads the records back from the binaries
 and writes them as the table rsql.Read and rsql.Write look statements up in. Linux only: it reads ELF symbols.
 Per-binary record digests are diagnostic observations, not acceptance or provenance receipts. Compare them only after
-binding the successful run, source, compiler, target, flags and per-binary backend. A PATH candidate may not execute;
-a wrapper's digest names the wrapper, not its delegate.
+binding a successful run/attempt, source and changes, compiler and dependencies, target, flags and per-binary backend.
+A PATH candidate may not execute; a wrapper's digest names the wrapper, not its delegate.
 """
 import hashlib
 import os
