@@ -48,9 +48,8 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None, 
         return {"include": rows}
 
     if platform == "macos":
-        # One hosted job runs every native target: check-full whole (its parts run in one
-        # isolated batch), the remaining targets beside it, and test-logic when selected.
-        # Each extra job paid its own queue, setup and artifact restore.
+        # One hosted job runs every native target. Promotion can run both check-full
+        # partitions in that job; standalone qualification retains the unsplit gate.
         rows = []
         remaining = [t for t in targets if t not in RESOURCES]
         if remaining:
