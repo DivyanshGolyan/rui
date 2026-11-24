@@ -693,7 +693,9 @@ pub const Store = struct {
                 else => reply = .infrastructure_failure,
             }
         };
-        if (reply == .rejected)
+        // A fresh refusal's detail comes from the lane round (Configure.committed). A replayed refusal reaches no lane
+        // round, so its detail is read from the Host set alone.
+        if (reply == .rejected and reply.rejected.replayed)
             reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &command.configuration.tools);
         return reply;
     }
@@ -2044,10 +2046,10 @@ const Scratch = [scratch_bytes]u8;
 const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @sizeOf(model_settlement_domain.Batch));
 const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch));
 
-const accepted_settlement_growth = 14352;
+const accepted_settlement_growth = 15208;
 
 comptime {
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 19248 or scratch_bytes != 19248)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 23744 or scratch_bytes != 23744)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (@sizeOf(model_settlement_domain.Batch) - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -2056,8 +2058,8 @@ comptime {
 /// which the kernel faults in only as they are written: an idle Host keeps
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
-/// resident for the Store's life: at most 19048 bytes, a settlement
-/// batch's size; a configure uses 14968.
+/// resident for the Store's life: at most 23744 bytes, a configure's
+/// reads; a settlement batch uses 20096.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {

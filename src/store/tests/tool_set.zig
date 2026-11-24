@@ -1327,3 +1327,192 @@ test "SH-145 a lane root saves a declared app tool set of every supported size o
         }
     }.run);
 }
+
+// SH-160: configure and start_agent resolve a lane's names alike. A Host tool and a lane app tool are accepted and an
+// unknown name is refused by name. The app tool reaches a child through its parent's own tools, so the lane round,
+// not an earlier Host-only check, decides on both paths.
+const lane_declaration = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+const LaneCase = struct { name: []const u8, refused: bool };
+const lane_cases = [_]LaneCase{
+    .{ .name = "start_agent", .refused = false },
+    .{ .name = "ask", .refused = false },
+    .{ .name = "nope", .refused = true },
+};
+
+test "SH-160 configure and start_agent resolve a lane's names alike: a Host tool and a lane app tool are accepted, an unknown name is refused" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var key_buffer: [96]u8 = undefined;
+            var text_buffer: [256]u8 = undefined;
+            for (lane_cases, 0..) |lane_case, index| {
+                // The root declares the app tool, then names it once the lane holds it: configure reads the lane on update.
+                var create = try completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh160-root-{d}", .{index}), "", workspace, "model-a");
+                declareAppTools(&create.configuration, lane_declaration);
+                create.configuration.tools = try .of(&.{ "find_tools", "start_agent" });
+                const root_reply = try storage.configure(&create, .{});
+                try std.testing.expect(root_reply == .accepted);
+                const root = root_reply.accepted.session.slice();
+                var names: wire_request.ConfigureCommand = .{};
+                try names.key.set(try std.fmt.bufPrint(&key_buffer, "sh160-names-{d}", .{index}));
+                try names.session.set(root);
+                names.configuration.tools = try .of(&.{ "ask", "find_tools", "start_agent" });
+                try std.testing.expect((try storage.configure(&names, .{})) == .accepted);
+
+                // configure: a child of the root names the case's tool on create.
+                var child: wire_request.ConfigureCommand = .{};
+                try child.key.set(try std.fmt.bufPrint(&key_buffer, "sh160-child-{d}", .{index}));
+                child.configuration = try testingAgentSpec(&.{lane_case.name}, "ask");
+                child.configuration.parent.state = .value;
+                try child.configuration.parent.value.set(root);
+                const configured = try storage.configure(&child, .{});
+                if (lane_case.refused) {
+                    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, configured.rejected.code);
+                } else try std.testing.expect(configured == .accepted);
+
+                // start_agent refuses an unknown name by name. Its acceptance of a Host or lane name is covered elsewhere (the MCP
+                // missing-tool test starts a child). An app-only name reaches the model's offer, which this branch does not project
+                // yet (pr-b2b does), so this check runs only for the unknown name.
+                if (!lane_case.refused) continue;
+                var start_root_command = try completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh160-start-root-{d}", .{index}), "", workspace, "model-a");
+                declareAppTools(&start_root_command.configuration, lane_declaration);
+                start_root_command.configuration.tools = try .of(&.{"start_agent"});
+                const start_root_reply = try storage.configure(&start_root_command, .{});
+                try std.testing.expect(start_root_reply == .accepted);
+                const start_root = start_root_reply.accepted.session.slice();
+                var file_buffer: [48]u8 = undefined;
+                try submitTestMessage(&storage, &tmp, try std.fmt.bufPrint(&file_buffer, "sh160-file-{d}", .{index}), try std.fmt.bufPrint(&key_buffer, "sh160-message-{d}", .{index}), start_root, "start a child");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const call: TestingCall = .{ .item_id = "lane-call", .name = "start_agent", .encoded_call_id = "lane-call", .decoded_call_id = "lane-call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
+                try settleCallsForTesting(&storage, &tmp, model, try std.fmt.bufPrint(&key_buffer, "sh160-calls-{d}", .{index}), &.{call});
+                const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+                var spec = try testingAgentSpec(&.{lane_case.name}, "ask");
+                const started = try storage.startAgent(action.binding, start_root, "read", true, &spec, null, .{});
+                if (lane_case.refused) {
+                    try std.testing.expectEqual(command_domain.AgentStart.failed, started);
+                    const text = try std.fmt.bufPrint(&text_buffer, "spec.tools: {s} is not a known tool (unknown_tool). Nothing was started.", .{lane_case.name});
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ action.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+                } else try std.testing.expectEqual(command_domain.AgentStart.started, started);
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
+const ask_and_other_declaration = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}},{\"name\":\"other\",\"description\":\"Other.\",\"input_schema\":{\"type\":\"object\"}}]";
+const lookup_and_ask_declaration = "[{\"name\":\"lookup\",\"description\":\"App lookup.\",\"input_schema\":{\"type\":\"object\"}},{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+
+/// The Session reference a configure returned, copied out of the reply so a later configure cannot overwrite it.
+fn keepRef(buffer: []u8, ref: []const u8) []const u8 {
+    @memcpy(buffer[0..ref.len], ref);
+    return buffer[0..ref.len];
+}
+
+// SH-175: one lane resolver decides a configure's names: the declaration the request carries (create, replace or clear),
+// else the saved lane, with Host precedence. A parent narrows its children's app tools only by naming app tools the Host
+// does not shadow. start_agent resolves the same names through the same lane round; its acceptance of an app-only
+// name needs the model offer projecting app tools, which pr-b2b adds, so it is not checked on this branch.
+/// A configure that must be accepted: a refusal fails the test by naming the step and the code it returned.
+fn expectAccepted(step: []const u8, reply: anytype) !void {
+    switch (reply) {
+        .accepted => {},
+        .rejected => |refused| try std.testing.expectEqualStrings(step, @tagName(refused.code)),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "SH-175 configure resolves names through the lane's effective declaration, and a Host-shadowed app tool narrows no parent" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // An MCP tool named `lookup` is in the Host set, so an app tool of that name is shadowed by it.
+            const shadow = comptime testingHostToolRecords(&.{.{ .name = "lookup", .owner = .mcp, .server = "notes", .description = "Lookup.", .input_schema = "{\"type\":\"object\"}" }});
+            var shadow_digests: [shadow.len][32]u8 = undefined;
+            for (&shadow, &shadow_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            try storage.saveHostToolSet(&.{ .records = &shadow, .digests = &shadow_digests });
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var refs: [4][128]u8 = undefined;
+
+            // Create: the declaration and a selection of its name in one request.
+            var created = try completeConfiguration("sh175-create", "", workspace, "model-a");
+            declareAppTools(&created.configuration, ask_and_other_declaration);
+            created.configuration.tools = try .of(&.{ "ask", "find_tools" });
+            const created_reply = try storage.configure(&created, .{});
+            try expectAccepted("created", created_reply);
+            const root = keepRef(&refs[0], created_reply.accepted.session.slice());
+
+            // Replace: the new declaration drops `other`, so naming it is refused; naming the kept `ask` is accepted.
+            var replace_other: wire_request.ConfigureCommand = .{};
+            try replace_other.key.set("sh175-replace-other");
+            try replace_other.session.set(root);
+            declareAppTools(&replace_other.configuration, ask_only_declaration);
+            replace_other.configuration.tools = try .of(&.{"other"});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, (try storage.configure(&replace_other, .{})).rejected.code);
+            var replace_ask: wire_request.ConfigureCommand = .{};
+            try replace_ask.key.set("sh175-replace-ask");
+            try replace_ask.session.set(root);
+            declareAppTools(&replace_ask.configuration, ask_only_declaration);
+            replace_ask.configuration.tools = try .of(&.{ "ask", "find_tools" });
+            try expectAccepted("replace_ask", try storage.configure(&replace_ask, .{}));
+
+            // Clear: an empty declaration leaves the lane no app tools, so naming `ask` is refused.
+            var clear: wire_request.ConfigureCommand = .{};
+            try clear.key.set("sh175-clear");
+            try clear.session.set(root);
+            declareAppTools(&clear.configuration, "[]");
+            clear.configuration.tools = try .of(&.{"ask"});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, (try storage.configure(&clear, .{})).rejected.code);
+
+            // Omitted: an update without appTools keeps the saved declaration, so the name resolves.
+            var omitted: wire_request.ConfigureCommand = .{};
+            try omitted.key.set("sh175-omitted");
+            try omitted.session.set(root);
+            omitted.configuration.tools = try .of(&.{ "ask", "find_tools" });
+            try expectAccepted("omitted", try storage.configure(&omitted, .{}));
+
+            // Host precedence: a declaration whose `lookup` the Host shadows creates, and the Host name is selected.
+            var shadowed = try completeConfiguration("sh175-shadowed", "", workspace, "model-a");
+            declareAppTools(&shadowed.configuration, lookup_and_ask_declaration);
+            shadowed.configuration.tools = try .of(&.{"lookup"});
+            const shadowed_reply = try storage.configure(&shadowed, .{});
+            try expectAccepted("shadowed", shadowed_reply);
+            const shadow_root = keepRef(&refs[1], shadowed_reply.accepted.session.slice());
+
+            // A child of that root names `ask`: the shadowed `lookup` narrows nothing, so `ask` is offered to it.
+            // A child inherits its parent's workspace, so its spec names none.
+            var child_ask: wire_request.ConfigureCommand = .{};
+            try child_ask.key.set("sh175-child-ask");
+            child_ask.configuration = try testingAgentSpec(&.{"ask"}, "ask");
+            child_ask.configuration.parent.state = .value;
+            try child_ask.configuration.parent.value.set(shadow_root);
+            try expectAccepted("child_ask", try storage.configure(&child_ask, .{}));
+
+            // A real subset: the root names `ask` alone of its two app tools, so its child may not name `other`.
+            var subset_root_command = try completeConfiguration("sh175-subset-root", "", workspace, "model-a");
+            declareAppTools(&subset_root_command.configuration, ask_and_other_declaration);
+            subset_root_command.configuration.tools = try .of(&.{ "ask", "find_tools" });
+            const subset_reply = try storage.configure(&subset_root_command, .{});
+            try expectAccepted("subset", subset_reply);
+            const subset_root = keepRef(&refs[2], subset_reply.accepted.session.slice());
+            var child_other: wire_request.ConfigureCommand = .{};
+            try child_other.key.set("sh175-child-other");
+            child_other.configuration = try testingAgentSpec(&.{"other"}, "ask");
+            child_other.configuration.parent.state = .value;
+            try child_other.configuration.parent.value.set(subset_root);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.tools_not_in_parent, (try storage.configure(&child_other, .{})).rejected.code);
+        }
+    }.run);
+}
+
+const ask_only_declaration = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
