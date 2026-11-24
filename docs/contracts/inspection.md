@@ -251,7 +251,7 @@ Otherwise an asked server has landed when the status reply's `instance` equals t
 A status reply with no row for an asked server, or a `last` of `never` once that server has landed, is an invalid reply.
 A landed server's outcome is its `last` outcome, which may come from a list that began after the ask.
 
-`POST /v1/model-list` takes `kind:"model_list"` and returns `providers`: for each provider the Host serves, in Provider order, its `provider`, `source` and `models`, each an `id` with `known`, whether Rui's model catalog knows its facts.
+`POST /v1/model-list` takes `kind:"model_list"` and returns `connections`: for each connection the Host serves, in Provider order, its `connection`, `source` and `models`, each an `id` with `known`, whether Rui's model catalog knows its facts.
 A model the catalog does not list runs with default limits (see compaction).
 The ChatGPT device sign-in (`codex`) has no list, so its `source` is always `catalog` and its models are the catalog's OpenAI IDs in catalog order.
 At Host start and on every model-list request, the execution owner's HTTP/2 Client starts an OpenAI key's `GET BASE/models` (when served), a ChatGPT plan's `GET https://api.openai.com/v1/models` (when served) and an unauthenticated `GET https://models.dev/api.json`, each unless that fetch is already in flight.
