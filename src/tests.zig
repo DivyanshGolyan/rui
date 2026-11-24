@@ -65,6 +65,7 @@ test {
     _ = @import("upgrade.zig");
     _ = @import("installation_path.zig");
     _ = @import("UpgradeJob.zig");
+    _ = @import("ReleaseWatch.zig");
     _ = @import("stderr.zig");
     _ = @import("BashLifecycle.zig");
     _ = @import("word_search.zig");

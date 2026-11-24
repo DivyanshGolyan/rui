@@ -166,19 +166,35 @@ fn causeOfCode(code: caller_error.Code) upgrade_run.Cause {
     };
 }
 
-pub fn discoverRelease(init: std.process.Init, allocator: std.mem.Allocator, cancellation: ?*client.Cancellation, diagnostic: *Download) !release.ReleaseCandidate {
-    try process.check(cancellation);
-    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-    var selected = try Installation.inspectCancellable(allocator, init.io, home, cancellation);
-    defer selected.deinit(allocator);
-    return fetchRelease(init, allocator, cancellation, diagnostic);
+/// The release endpoint: the fixture's `/latest` when a test names one, else the published one.
+const Endpoint = struct {
+    owned: ?[]u8 = null,
+    url: []const u8,
+
+    fn deinit(self: Endpoint, allocator: std.mem.Allocator) void {
+        if (self.owned) |bytes| allocator.free(bytes);
+    }
+};
+
+fn releaseEndpoint(init: std.process.Init, allocator: std.mem.Allocator) !Endpoint {
+    const base = init.environ_map.get("RUI_TEST_UPGRADE_RELEASES_URL") orelse return .{ .url = release.default_endpoint };
+    const owned = try std.fmt.allocPrint(allocator, "{s}/latest", .{base});
+    return .{ .owned = owned, .url = owned };
 }
 
 fn fetchRelease(init: std.process.Init, allocator: std.mem.Allocator, cancellation: ?*client.Cancellation, diagnostic: *Download) !release.ReleaseCandidate {
     try process.check(cancellation);
-    const endpoint = if (init.environ_map.get("RUI_TEST_UPGRADE_RELEASES_URL")) |base| try std.fmt.allocPrint(allocator, "{s}/latest", .{base}) else null;
-    defer if (endpoint) |url| allocator.free(url);
-    return release.discover(allocator, init.io, endpoint orelse release.default_endpoint, cancellation, diagnostic);
+    const endpoint = try releaseEndpoint(init, allocator);
+    defer endpoint.deinit(allocator);
+    return release.discover(allocator, init.io, endpoint.url, cancellation, diagnostic);
+}
+
+/// The newest stable release's version, read from the redirect chain alone.
+pub fn latestVersion(init: std.process.Init, allocator: std.mem.Allocator, cancellation: ?*client.Cancellation, diagnostic: *Download) !release.Version {
+    try process.check(cancellation);
+    const endpoint = try releaseEndpoint(init, allocator);
+    defer endpoint.deinit(allocator);
+    return release.latestVersion(allocator, init.io, endpoint.url, cancellation, diagnostic);
 }
 
 pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download) !Check {
