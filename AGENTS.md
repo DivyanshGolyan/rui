@@ -31,7 +31,7 @@ Fix its errors from first principles, holistically; never make a mechanical move
   Hide them behind a narrow interface, and fix a type's leaks together rather than one at a time.
 - Draw the structure before and after the proposed fix so the user can judge it.
 
-The allow file holds existing debt and only shrinks: delete an entry when its finding is fixed; CI's policy job (`tests/ci/deep_modules_allowance.py`) refuses growth past main's copy by entry and circle-member count, so a new finding is fixed, not allowed. A rename keeps both counts and passes.
+The allow file holds existing debt and only shrinks: delete an entry when its finding is fixed; CI's policy job (`tests/ci/deep_modules_allowance.py`) refuses growth past main's copy (entries per lint; members for `module-cycle` and `tangle`), so a new finding is fixed, not allowed. A rename keeps the counts and passes, and splitting a circle into smaller ones passes.
 
 ## Authority
 

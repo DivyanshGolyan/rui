@@ -89,7 +89,7 @@ fn refuse(arena: Allocator, usage: *Usage, comptime format: []const u8, args: an
 
 const Error = error{ Fault, OutOfMemory, WriteFailed };
 
-/// The I/O of one run: the io handle the files and git go through, and the message of a fault.
+/// The I/O of one run: the io handle the files go through, and the message of a fault.
 const Run = struct {
     io: std.Io,
     arena: Allocator,

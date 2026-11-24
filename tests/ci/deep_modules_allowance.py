@@ -40,7 +40,7 @@ def entries(text):
 
 
 def sizes(text):
-    """Per lint: (entry count, member count). Members count only for the circle lints."""
+    """Per lint: (entry count, member count). Circle lints are judged by members only, so splitting a circle passes."""
     totals = {}
     for lint, key in entries(text):
         count, members = totals.get(lint, (0, 0))
@@ -59,7 +59,7 @@ def growth(trusted, current):
     for lint, (count, members) in sorted(after.items()):
         base_count, base_members = before.get(lint, (0, 0))
         grew = []
-        if count > base_count:
+        if lint not in CIRCLES and count > base_count:
             grew.append(f"entries {base_count} -> {count}")
         if lint in CIRCLES and members > base_members:
             grew.append(f"members {base_members} -> {members}")

@@ -39,8 +39,12 @@ class GrowthTest(unittest.TestCase):
         failures = allowance.growth("tangle a,b\n", "tangle a,b\ntangle c,d\n")
         self.assertEqual(len(failures), 1)
         self.assertIn("tangle", failures[0])
-        self.assertIn("entries 1 -> 2", failures[0])
+        self.assertNotIn("entries", failures[0])
         self.assertIn("members 2 -> 4", failures[0])
+
+    def test_splitting_a_circle_into_smaller_ones_passes(self):
+        self.assertEqual(allowance.growth("tangle a,b,c,d,e,f\n", "tangle a,b\ntangle c,d\n"), [])
+        self.assertEqual(allowance.growth("module-cycle a,b,c,d\n", "module-cycle a,b\nmodule-cycle c,d\n"), [])
 
     def test_circle_that_gains_a_member_fails_even_with_the_same_entries(self):
         failures = allowance.growth("tangle a,b\n", "tangle a,b,c\n")
