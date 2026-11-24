@@ -468,7 +468,7 @@ const AppToolNameList = struct {
             .maxItems = Value{ .integer = app_tools.max_records },
             .uniqueItems = Value{ .bool = true },
             .@"x-rui-max-bytes" = Value{ .integer = protocol.max_tool_list_name_bytes },
-            .description = Value{ .string = "None repeated; the names' bytes total at most x-rui-max-bytes. The app tools this Session's lane declared." },
+            .description = Value{ .string = "None repeated; the names' bytes total at most x-rui-max-bytes. Current: the app tools this Session's lane declares. Full revision: the app tools that revision itself declared (empty on a child)." },
         });
     }
 };

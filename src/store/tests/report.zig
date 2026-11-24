@@ -909,8 +909,8 @@ test "SH-126 Current reports name the lane root's app tools on the root, a child
     }.run);
 }
 
-// SH-127: a Full report names the app tools each revision of a lane root declared, across a declaration,
-// a re-declaration and a clear, and agrees with the Current report at the newest revision.
+// SH-127: a Full report names the app tools each revision itself declared, across a declaration, a re-declaration
+// and a clear, and agrees with the Current report at a lane root's newest revision; a child's revisions declare none.
 fn expectFullRevisionAppTools(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, expected: []const []const []const u8) !void {
     const body = try testingSessionReportWithProfile(storage, tmp, session, 1024 * 1024, .full);
     defer std.testing.allocator.free(body);
@@ -946,6 +946,18 @@ test "SH-127 Full reports name each revision's app tools across a declaration, a
             try std.testing.expect(root_reply == .accepted);
             const root = root_reply.accepted.session.slice();
             try expectFullRevisionAppTools(&storage, &tmp, root, &.{&.{ "ask", "look" }});
+
+            // A child declares nothing: its revisions are empty while its Current names its lane's tools.
+            var child: wire_request.ConfigureCommand = .{};
+            try child.key.set("app-full-child");
+            child.configuration = try shared_fixtures.testingAgentSpec(&.{}, "bypass");
+            child.configuration.parent.state = .value;
+            try child.configuration.parent.value.set(root);
+            const child_reply = try storage.configure(&child, .{});
+            try std.testing.expect(child_reply == .accepted);
+            const child_ref = child_reply.accepted.session.slice();
+            try expectFullRevisionAppTools(&storage, &tmp, child_ref, &.{&.{}});
+            try expectReportedAppTools(&storage, &tmp, child_ref, &.{ "ask", "look" });
 
             var replace: wire_request.ConfigureCommand = .{};
             try replace.key.set("app-full-replace");

@@ -3626,7 +3626,7 @@ export interface components {
             tools: string[];
             /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
             loaded_tools: string[];
-            /** @description None repeated; the names' bytes total at most x-rui-max-bytes. The app tools this Session's lane declared. */
+            /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Current: the app tools this Session's lane declares. Full revision: the app tools that revision itself declared (empty on a child). */
             app_tools: string[];
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
@@ -3813,7 +3813,7 @@ export interface components {
             tools: string[];
             /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
             loaded_tools: string[];
-            /** @description None repeated; the names' bytes total at most x-rui-max-bytes. The app tools this Session's lane declared. */
+            /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Current: the app tools this Session's lane declares. Full revision: the app tools that revision itself declared (empty on a child). */
             app_tools: string[];
             /** @enum {string} */
             permission_mode: "ask" | "bypass";

@@ -21,7 +21,7 @@ Explicit **Full** contains Current plus the following closed inventory:
 A Message or Action Resolution with parts appears in both profiles as its `parts` content value with its owner, where text would be inlined; Full Conversation entries carry the same content value as Conversation pages.
 
 Full model Operations include `offered_tools`, the sorted tool names in the effective offer frozen at that Operation’s admission.
-Current settings and Full revision settings expose configured allowed intent as `tools` and loaded intent as `loaded_tools`, and the names of the app tools their lane declared as `app_tools`; none reconstructs an existing Operation’s offer.
+Current settings and Full revision settings expose configured allowed intent as `tools` and loaded intent as `loaded_tools`, and app tool names as `app_tools`: Current settings name the app tools the Session's lane declares now, and a Full revision names the app tools that revision itself declared, so a child's revisions are empty and the lane root's revisions carry the declaration history; none reconstructs an existing Operation’s offer.
 An allowed or loaded edit, later discovery, or a changed Host tool set cannot change that Operation’s `offered_tools`.
 The field reads the existing frozen tool-set identity; no stored copy or Store-format change is needed.
 

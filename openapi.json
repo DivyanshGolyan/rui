@@ -15330,7 +15330,7 @@
             "maxItems": 16,
             "uniqueItems": true,
             "x-rui-max-bytes": 4096,
-            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. The app tools this Session's lane declared."
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Current: the app tools this Session's lane declares. Full revision: the app tools that revision itself declared (empty on a child)."
           },
           "permission_mode": {
             "type": "string",
@@ -16405,7 +16405,7 @@
             "maxItems": 16,
             "uniqueItems": true,
             "x-rui-max-bytes": 4096,
-            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. The app tools this Session's lane declared."
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Current: the app tools this Session's lane declares. Full revision: the app tools that revision itself declared (empty on a child)."
           },
           "permission_mode": {
             "type": "string",
