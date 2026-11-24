@@ -31,6 +31,7 @@ pub const FocusOwner = struct {
     context: *anyopaque,
     /// Non-focus side effects of app navigation (pending choice, notices).
     changed: *const fn (*anyopaque) void,
+    cancel_pointer: ?*const fn (*anyopaque) void = null,
     accepts_tab: ?*const fn (*anyopaque) bool = null,
     /// Live event custody; unlike the candidate order this is not draw state.
     modal: ?*const fn (*anyopaque) bool = null,
@@ -251,10 +252,11 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
             self.settings_page.keys_open = false;
         },
     }
-    // The retained Session must also retire a pending footer read when the
-    // transition hides it (for example Tab/click to a narrow list). A mouse
-    // motion, wheel, modal click or pasted click has no focus effect.
-    if (effects.field != null or (effects.focus != null and routed != null)) if (self.session_focus) |owner| owner.changed(owner.context);
+    // Retire UI holds owned by a Session when focus or a footer field moves.
+    if (effects.field != null or effects.focus != null) if (self.session_focus) |owner| {
+        if (owner.cancel_pointer) |cancel| cancel(owner.context);
+        if (effects.field != null or routed != null) owner.changed(owner.context);
+    };
     if (effects.activate) |target| for (self.drawn_focus[0..self.focus_frame.len]) |candidate| {
         if (candidate.target == target) {
             if (candidate.activate) |activate| try activate(candidate.activation_context orelse candidate.widget.userdata, ctx);

@@ -364,9 +364,14 @@ pub const AppHooks = struct {
     on_open: *const fn (*anyopaque, *vxfw.EventContext, *const [session_id.bytes]u8) anyerror!void,
 };
 
-fn focusChanged(raw: *anyopaque) void {
+fn cancelPointerSelection(raw: *anyopaque) void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.cancelCopySelection() or self.app_content.cancelSelection()) self.dirty = true;
+}
+
+fn focusChanged(raw: *anyopaque) void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    cancelPointerSelection(raw);
     self.footer.pending = null;
     self.shown_notice.dismiss();
     self.dirty = true;
@@ -403,7 +408,7 @@ fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
     self.app_input.bottom = &hooks.root.bottom;
-    hooks.root.session_focus = .{ .context = self, .changed = focusChanged, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates, .clipboard = .{ .target = clipboardTarget, .paste = pasteClipboard } };
+    hooks.root.session_focus = .{ .context = self, .changed = focusChanged, .cancel_pointer = cancelPointerSelection, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates, .clipboard = .{ .target = clipboardTarget, .paste = pasteClipboard } };
     self.app_info = .{ .backend = self.infoBackend(), .home = self.home };
     if (hooks.drafts) |drafts| if (drafts.take(self.init.gpa, self.session)) |draft| {
         defer self.init.gpa.free(draft.snapshot.bytes);
@@ -4004,7 +4009,7 @@ test "SUI-132 SessionFrontend cancels copy selection when its feed context is co
             .settings => held.root.input.layer = .settings,
             .message => held.screen.view = .message,
             .paste => held.root.input.pasting = true,
-            .focus => held.root.input.area = .list,
+            .focus => try std.testing.expect(try held.root.focusList(&ctx)),
             .resize => {
                 held.size.width += 1;
                 _ = try held.self.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
