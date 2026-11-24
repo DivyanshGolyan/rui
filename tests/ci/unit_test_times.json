@@ -1612,7 +1612,7 @@
   "model_adapter.test.a peer Message leads with its recorded sender facts apart from its text": 0.036837892999983524,
   "model_adapter.test.a preparation cancelled while keeping its memo keeps nothing of it": 0.6086815660000013,
   "model_adapter.test.a prepared request carries the Responses codec's headers with its Session's affinity": 0.027038014999988036,
-  "model_adapter.test.a prepared request's bytes stay as pinned over pages, tool results and page bounds": 0.5244408320000105,
+  "model_adapter.test.CM-47 a prepared request's bytes stay as pinned over pages, tool results, page bounds and peer Messages": 0.5244408320000105,
   "model_adapter.test.a refused effort change retries without the update and later Operations keep the effective effort": 0.7432058409999911,
   "model_adapter.test.a refused top-level effort remains an ordinary provider failure without a change retry": 0.4364990969999951,
   "model_adapter.test.a tool change keeps each request's input a prefix of the next": 0.49767543600000863,

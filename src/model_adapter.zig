@@ -4994,7 +4994,7 @@ test "late completion after stop preserves cancelled bytes in provider continuat
     try std.testing.expectEqual(@as(usize, 1), count);
 }
 
-test "a full rebuild replaces a prefix seal its span no longer begins with" {
+test "CM-46 a full rebuild replaces a prefix seal its span no longer begins with and never fails the request" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
     defer setup.close();
@@ -6103,7 +6103,7 @@ fn pinnedRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: store
     return std.mem.replaceOwned(u8, std.testing.allocator, named, session, "SESSION");
 }
 
-test "a prepared request's bytes stay as pinned over pages, tool results and page bounds" {
+test "CM-47 a prepared request's bytes stay as pinned over pages, tool results, page bounds and peer Messages" {
     const Scenario = enum { pages, tool_results, bounds, peer };
     const Pinned = struct {
         const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
