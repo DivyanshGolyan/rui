@@ -245,12 +245,57 @@ fn openHistoryDatabase(case: *const store_testing.Case, storage: *store_core.Sto
     storage.engine.mysql.state.testing_drop_armed = case.rerun;
 }
 
+/// Every format from the baseline up to, not including, the current one. Comptime, for schema.mysqlMigration.
+fn formatsBeforeCurrent() [schema.schema_version - schema.migration_baseline]u32 {
+    var formats: [schema.schema_version - schema.migration_baseline]u32 = undefined;
+    for (&formats, 0..) |*format, index| format.* = schema.migration_baseline + @as(u32, @intCast(index));
+    return formats;
+}
+
+/// The database-free MySQL check over every format N: mysqlMigrationFrom(N) is the MySQL text of each shipped step
+/// from N, in order, then the metadata move; each step's statements build() replays are its mysqlMigration text;
+/// and every upgrade text is the step text of its format followed by the next format's upgrade text.
+fn expectMysqlUpgradeTexts() !void {
+    var format: u32 = schema.migration_baseline;
+    while (format <= schema.schema_version) : (format += 1) {
+        var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer expected.deinit();
+        for (schema.migrations) |step| if (step.from >= format) for (step.mysql) |statement| {
+            try expected.writer.writeAll(statement);
+            try expected.writer.writeAll(";\n");
+        };
+        if (format < schema.schema_version) try expected.writer.print("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format';\n", .{schema.schema_version});
+        try std.testing.expectEqualStrings(expected.written(), schema.mysqlMigrationFrom(format).?);
+    }
+    try std.testing.expectEqualStrings("", schema.mysqlMigrationFrom(schema.schema_version).?);
+    inline for (comptime formatsBeforeCurrent()) |from| {
+        const step_text = schema.mysqlMigration(from);
+        const upgrade_text = schema.mysqlMigrationFrom(from).?;
+        try std.testing.expect(std.mem.startsWith(u8, upgrade_text, step_text));
+        // The last step's tail is the metadata move; every earlier step's tail is the next format's upgrade text.
+        const tail = if (from + 1 < schema.schema_version) schema.mysqlMigrationFrom(from + 1).? else std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format';\n", .{schema.schema_version});
+        try std.testing.expectEqualStrings(tail, upgrade_text[step_text.len..]);
+    }
+    inline for (schema.migrations) |step| {
+        var replayed: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer replayed.deinit();
+        for (step.mysql) |statement| {
+            try replayed.writer.writeAll(statement);
+            try replayed.writer.writeAll(";\n");
+        }
+        try std.testing.expectEqualStrings(replayed.written(), schema.mysqlMigration(step.from));
+    }
+}
+
 test "a Store built at every format from the baseline to the current one upgrades to a current Store" {
+    try expectMysqlUpgradeTexts();
     inline for (comptime std.enums.values(Engine)) |engine| {
         // The same skip rule as store_testing.forEachEngine: MySQL runs only when a server is configured.
         if (engine != .mysql or try mysql_testing.available()) {
             var format: u32 = schema.migration_baseline;
             while (format <= schema.schema_version) : (format += 1) {
+                // MySQL runs live at two formats only: the text check above proves every other format's upgrade is a suffix of the baseline's.
+                if (engine == .mysql and format != schema.migration_baseline and format != schema.schema_version) continue;
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 const start: Start = .{ .format = format };
