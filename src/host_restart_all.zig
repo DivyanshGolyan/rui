@@ -37,14 +37,14 @@ pub const Target = struct {
 };
 
 /// Replace an identified older managed Host on an ordinary detached start.
-pub fn activateOlderHostForStart(init: std.process.Init, directory: []const u8) !?HostLifecycle.ActivationOutcome {
+pub fn activateOlderHostForStart(init: std.process.Init, directory: []const u8) !?activation.Execution {
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
     const allocator = init.gpa;
     var observation = try HostLifecycle.observe(allocator, init.io, home, directory, null);
     defer observation.deinit(allocator);
     switch (observation) {
-        .absent => return .not_needed,
-        .unsupported => |reason| return .{ .unsupported = reason },
+        .absent => return .{ .outcome = .not_needed },
+        .unsupported => |reason| return .{ .outcome = .{ .unsupported = reason } },
         .managed => {},
     }
     const target = Target.init(init, allocator, home, null, null) catch |err| switch (err) {
@@ -57,7 +57,7 @@ pub fn activateOlderHostForStart(init: std.process.Init, directory: []const u8) 
     const actual = try std.Io.Dir.cwd().realPathFileAlloc(init.io, binary, allocator);
     defer allocator.free(actual);
     if (!activation.startHandoverEligible(observation.managed.observed.foreign, observation.managed.version.order(target.version), std.mem.eql(u8, actual, try @import("self_executable.zig").path(init.io)))) return null;
-    return try HostLifecycle.activate(init, allocator, &observation, .same, target.build, target.version, null, null);
+    return HostLifecycle.activate(init, allocator, &observation, .same, target.build, target.version, null, null);
 }
 
 test "SH-123 absent Store owner is not started by handover observation" {
@@ -72,7 +72,7 @@ test "SH-123 absent Store owner is not started by handover observation" {
     try environment.put("HOME", root);
     const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
     const result = (try activateOlderHostForStart(init, root)).?;
-    try std.testing.expectEqual(std.meta.Tag(activation.Outcome).not_needed, std.meta.activeTag(result));
+    try std.testing.expectEqual(std.meta.Tag(activation.Outcome).not_needed, std.meta.activeTag(result.outcome));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "host.lock", .{}));
 }
 
@@ -89,9 +89,19 @@ pub const Stage = enum { discovery, observation, selection };
 pub const Failure = struct {
     stage: Stage,
     cause: []const u8,
+    cause_owned: bool = false,
 
-    fn of(allocator: std.mem.Allocator, stage: Stage, err: anyerror) !Failure {
-        return .{ .stage = stage, .cause = try allocator.dupe(u8, @errorName(err)) };
+    fn of(stage: Stage, err: anyerror) Failure {
+        return .{ .stage = stage, .cause = @errorName(err) };
+    }
+};
+pub const Fault = struct {
+    effect: std.meta.Tag(activation.Effect),
+    cause: []const u8,
+    cause_owned: bool = false,
+
+    fn of(fault: activation.Fault) Fault {
+        return .{ .effect = fault.effect, .cause = @errorName(fault.cause) };
     }
 };
 pub const Entry = struct {
@@ -105,13 +115,15 @@ pub const Entry = struct {
         observed: client.HostControlObservation,
         outcome: HostLifecycle.ActivationOutcome,
         failed: Failure,
+        fault: Fault,
     },
 
     pub fn deinit(self: Entry, allocator: std.mem.Allocator) void {
         if (self.socket) |socket| allocator.free(socket);
         if (self.directory) |directory| allocator.free(directory);
         if (self.store) |store| allocator.free(store);
-        if (self.state == .failed) allocator.free(self.state.failed.cause);
+        if (self.state == .failed and self.state.failed.cause_owned) allocator.free(self.state.failed.cause);
+        if (self.state == .fault and self.state.fault.cause_owned) allocator.free(self.state.fault.cause);
     }
 };
 
@@ -128,6 +140,18 @@ pub const Batch = struct {
 
     pub fn selectedOutcome(self: *const Batch, store: []const u8) HostLifecycle.ActivationOutcome {
         return self.summary(store).own;
+    }
+
+    /// The aggregate exit retains uncertainty if any Host may have been stopped.
+    pub fn result(self: *const Batch) !void {
+        for (self.entries) |entry| switch (entry.state) {
+            .fault => |fault| if (fault.effect.stage() != null) return error.HostRestartUnconfirmed,
+            .outcome => |outcome| if (outcome == .unconfirmed) return error.HostRestartUnconfirmed,
+            .observed => return error.HostRestartUnconfirmed,
+            .failed => {},
+        };
+        if (self.failure) |err| if (err == error.HostRestartUnconfirmed) return error.HostRestartUnconfirmed;
+        if (self.totals().failed != 0) return error.HostRestartFailed;
     }
 
     pub fn hasGuidance(self: *const Batch) bool {
@@ -151,6 +175,7 @@ pub const Batch = struct {
                 .unlocated,
             .state = switch (entry.state) {
                 .outcome => |outcome| .{ .outcome = outcome },
+                .fault => |fault| if (fault.effect.stage()) |stage| .{ .outcome = .{ .unconfirmed = stage } } else .{ .outcome = .{ .pre_stop_failed = fault.effect } },
                 .failed, .observed => .failed,
             },
         });
@@ -167,6 +192,7 @@ pub const Batch = struct {
         for (self.entries) |entry| switch (entry.state) {
             .observed => unreachable,
             .failed => |failure| try writeEntryFailure(writer, &entry, failure),
+            .fault => |fault| try writeEntryFault(writer, &entry, fault),
             .outcome => |outcome| _ = try writeOutcome(writer, entry.directory orelse entry.store.?, outcome, self.version),
         };
         try writeTotals(self.totals(), writer);
@@ -184,6 +210,7 @@ pub const Batch = struct {
             },
             .outcome => |outcome| _ = try writeOutcome(writer, entry.directory orelse entry.store.?, outcome, self.version),
             .failed => |failure| try writeEntryFailure(writer, &entry, failure),
+            .fault => |fault| try writeEntryFault(writer, &entry, fault),
         };
     }
 };
@@ -215,10 +242,10 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
         entry.directory = if (candidate.directory) |path| try allocator.dupe(u8, path) else null;
         entry.state = switch (candidate.result) {
             .unanswered => unreachable,
-            .failed => |err| .{ .failed = try .of(allocator, .discovery, err) },
+            .failed => |err| .{ .failed = .of(.discovery, err) },
             .observed => |facts| state: {
                 entry.store = try allocator.dupe(u8, facts.facts.store.slice());
-                var observation = HostLifecycle.observe(allocator, init.io, home, facts.directory(), cancellation) catch |err| break :state .{ .failed = try .of(allocator, .observation, err) };
+                var observation = HostLifecycle.observe(allocator, init.io, home, facts.directory(), cancellation) catch |err| break :state .{ .failed = .of(.observation, err) };
                 defer observation.deinit(allocator);
                 break :state switch (observation) {
                     .absent => .{ .outcome = .not_needed },
@@ -248,22 +275,21 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
     for (batch.entries) |*entry| {
         if (entry.state != .observed) continue;
         const facts = entry.state.observed;
-        // Errors `activate` returns are allocation failures or failures after the stop, so both map to an unconfirmed start.
-        entry.state = .{ .outcome = outcome: {
-            process.check(options.cancellation) catch break :outcome .cancelled;
+        entry.state = state: {
+            process.check(options.cancellation) catch break :state .{ .outcome = .cancelled };
             var observation = HostLifecycle.observe(allocator, init.io, options.home, facts.directory(), options.cancellation) catch |err| {
-                entry.state = .{ .failed = try .of(allocator, .observation, err) };
+                entry.state = .{ .failed = .of(.observation, err) };
                 continue;
             };
             defer observation.deinit(allocator);
             switch (observation) {
-                .absent => break :outcome .not_needed,
-                .unsupported => |reason| break :outcome .{ .unsupported = reason },
+                .absent => break :state .{ .outcome = .not_needed },
+                .unsupported => |reason| break :state .{ .outcome = .{ .unsupported = reason } },
                 .managed => {},
             }
             if (options.target == null and selected == null) {
                 selected = Target.init(init, allocator, options.home, null, options.cancellation) catch |err| {
-                    entry.state = .{ .failed = try .of(allocator, .selection, err) };
+                    entry.state = .{ .failed = .of(.selection, err) };
                     continue;
                 };
                 batch.version = selected.?.version;
@@ -272,8 +298,11 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
             const current = observation.managed.observed;
             const census: @FieldType(activation.Facts, "census") = if (current.pid != facts.pid or !std.mem.eql(u8, &current.facts.instance, &facts.facts.instance) or
                 !std.mem.eql(u8, current.facts.store.slice(), entry.store.?)) .replaced else .same;
-            break :outcome HostLifecycle.activate(init, allocator, &observation, census, target.build, target.version, options.cancellation, options.progress) catch .{ .unconfirmed = .starting };
-        } };
+            break :state switch (HostLifecycle.activate(init, allocator, &observation, census, target.build, target.version, options.cancellation, options.progress)) {
+                .outcome => |outcome| .{ .outcome = outcome },
+                .fault => |fault| .{ .fault = .of(fault) },
+            };
+        };
     }
     return batch;
 }
@@ -284,9 +313,24 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
     defer batch.deinit(allocator);
     var buffer: [2048]u8 = undefined;
     var output = OptionalOutput.init(init.io, .stdout(), &buffer);
-    try batch.write(&output.writer);
-    try output.writer.flush();
-    if (batch.totals().failed != 0) return error.HostRestartFailed;
+    batch.write(&output.writer) catch |err| {
+        batch.result() catch |result_err| if (result_err == error.HostRestartUnconfirmed) return result_err;
+        return err;
+    };
+    output.writer.flush() catch |err| {
+        batch.result() catch |result_err| if (result_err == error.HostRestartUnconfirmed) return result_err;
+        return err;
+    };
+    try batch.result();
+}
+
+fn writeEntryFault(writer: *std.Io.Writer, entry: *const Entry, fault: Fault) !void {
+    try field(writer, entry.directory orelse entry.store orelse "Store unknown");
+    if (fault.effect.stage()) |stage| {
+        try writer.print(": unconfirmed at {s} during {s} ({s}); inspect with its owning client, then retry.\n", .{ @tagName(stage), @tagName(fault.effect), fault.cause });
+    } else {
+        try writer.print(": failed during {s} ({s}); inspect with its owning client, then retry.\n", .{ @tagName(fault.effect), fault.cause });
+    }
 }
 
 fn writeEntryFailure(writer: *std.Io.Writer, entry: *const Entry, failure: Failure) !void {
@@ -356,6 +400,7 @@ test "SH-50 restart all reports every activation outcome and limitation with exi
         .{ .outcome = .not_needed, .text = "no longer running; no Host started", .result = .skipped },
         .{ .outcome = .replacement_observed, .text = "failed at verifying: a replacement Host was observed; inspect with its owning client, then retry", .result = .failed },
         .{ .outcome = .cancelled, .text = "failed at activation: cancelled; inspect Host status, then retry", .result = .failed },
+        .{ .outcome = .{ .pre_stop_failed = .resolve_target }, .text = "failed before stopping during resolve_target; Host left running", .result = .failed },
         .{ .outcome = .{ .target_unusable = .resolving }, .text = "failed at resolving the target: the target build could not be resolved; Host left running; check the installation, then retry", .result = .failed },
         .{ .outcome = .{ .target_unusable = .checking }, .text = "failed at checking the target: the target build could not be checked; Host left running; check the installation, then retry", .result = .failed },
     };
@@ -495,4 +540,56 @@ test "restart reports a positively identified Host without a socket or directory
     try writeEntryFailure(&writer, &entry, entry.state.failed);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Host process 42") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "HostServeStoreMissing") != null);
+}
+
+test "SH-125 lifecycle faults report the exact effect and cause at every stage" {
+    const cases = [_]struct { effect: std.meta.Tag(activation.Effect), expected: []const u8 }{
+        .{ .effect = .resolve_target, .expected = "failed during resolve_target (OutOfMemory)" },
+        .{ .effect = .confirm_current, .expected = "failed during confirm_current (OutOfMemory)" },
+        .{ .effect = .reconstruct_sources, .expected = "failed during reconstruct_sources (OutOfMemory)" },
+        .{ .effect = .check_target, .expected = "failed during check_target (OutOfMemory)" },
+        .{ .effect = .reobserve, .expected = "failed during reobserve (OutOfMemory)" },
+        .{ .effect = .snapshot, .expected = "failed during snapshot (OutOfMemory)" },
+        .{ .effect = .stop, .expected = "unconfirmed at stopping during stop (OutOfMemory)" },
+        .{ .effect = .await_retirement, .expected = "unconfirmed at awaiting_retirement during await_retirement (OutOfMemory)" },
+        .{ .effect = .start, .expected = "unconfirmed at starting during start (OutOfMemory)" },
+        .{ .effect = .verify, .expected = "unconfirmed at verifying during verify (OutOfMemory)" },
+    };
+    try std.testing.expectEqual(std.meta.tags(std.meta.Tag(activation.Effect)).len - 1, cases.len);
+    for (cases) |case| {
+        const fault = Fault.of(.{ .effect = case.effect, .cause = error.OutOfMemory });
+        const entries = [_]Entry{.{ .directory = "/store", .state = .{ .fault = fault } }};
+        const batch: Batch = .{ .entries = @constCast(&entries) };
+        var bytes: [1024]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&bytes);
+        try batch.write(&writer);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), case.expected) != null);
+        try std.testing.expectEqual(@as(usize, 1), batch.totals().failed);
+        if (case.effect.stage()) |stage| {
+            try std.testing.expectEqual(stage, batch.selectedOutcome("/store").unconfirmed);
+        } else {
+            try std.testing.expectEqual(case.effect, batch.selectedOutcome("/store").pre_stop_failed);
+        }
+    }
+}
+
+test "SH-127 batch exit preserves uncertainty across mixed Host results" {
+    const pre: Entry = .{ .state = .{ .fault = .{ .effect = .check_target, .cause = "OutOfMemory" } } };
+    const post: Entry = .{ .state = .{ .fault = .{ .effect = .verify, .cause = "OutOfMemory" } } };
+    const unconfirmed: Entry = .{ .state = .{ .outcome = .{ .unconfirmed = .stopping } } };
+    const success: Entry = .{ .state = .{ .outcome = .not_needed } };
+    const cases = [_]struct { entries: []const Entry, failure: ?anyerror = null, expected: ?anyerror }{
+        .{ .entries = &.{success}, .expected = null },
+        .{ .entries = &.{pre}, .expected = error.HostRestartFailed },
+        .{ .entries = &.{post}, .expected = error.HostRestartUnconfirmed },
+        .{ .entries = &.{unconfirmed}, .expected = error.HostRestartUnconfirmed },
+        .{ .entries = &.{ pre, post, success }, .expected = error.HostRestartUnconfirmed },
+        .{ .entries = &.{ post, pre }, .expected = error.HostRestartUnconfirmed },
+        .{ .entries = &.{}, .failure = error.HostRestartUnconfirmed, .expected = error.HostRestartUnconfirmed },
+        .{ .entries = &.{}, .failure = error.OutOfMemory, .expected = error.HostRestartFailed },
+    };
+    for (cases) |case| {
+        const batch: Batch = .{ .entries = @constCast(case.entries), .failure = case.failure };
+        if (case.expected) |err| try std.testing.expectError(err, batch.result()) else try batch.result();
+    }
 }

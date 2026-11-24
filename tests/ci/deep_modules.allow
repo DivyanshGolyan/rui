@@ -570,7 +570,6 @@ shallow-module execution
 shallow-module feed_window
 shallow-module history_memo
 shallow-module host_reply
-shallow-module host_restart_all
 shallow-module mcp/document
 shallow-module os
 shallow-module output_format

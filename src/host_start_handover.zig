@@ -5,7 +5,7 @@ const activation = @import("host_activation.zig");
 
 pub const Handover = struct {
     context: ?*anyopaque = null,
-    activate: *const fn (?*anyopaque, std.process.Init, []const u8) anyerror!?activation.Outcome,
+    activate: *const fn (?*anyopaque, std.process.Init, []const u8) anyerror!?activation.Execution,
     spawn: *const fn (std.process.Init, host_start.Spawn, host_start.Ops, ?host_start.Progress, *host_launch.Result) void = host_start.spawn,
 };
 
@@ -13,10 +13,18 @@ pub const Handover = struct {
 pub fn spawn(init: std.process.Init, request: host_start.Spawn, ops: host_start.Ops, progress: ?host_start.Progress, result: *host_launch.Result, handover: Handover) void {
     handover.spawn(init, request, ops, progress, result);
     if (result.outcome != .failed or result.outcome.failed.cause.kind != .incompatible or request.frozen != null) return;
-    const outcome = handover.activate(handover.context, init, request.dir) catch |err| {
+    const execution = handover.activate(handover.context, init, request.dir) catch |err| {
         host_start.launchFailure(result, .setup, err, null);
         return;
     } orelse return;
+    const outcome = switch (execution) {
+        .outcome => |value| value,
+        .fault => |fault| {
+            host_start.launchFailure(result, .setup, fault.cause, null);
+            result.outcome.failed.detail = .{ .handover_fault = fault };
+            return;
+        },
+    };
     if (outcome == .ready) {
         handover.spawn(init, request, ops, progress, result);
         return;
@@ -34,6 +42,7 @@ pub fn spawn(init: std.process.Init, request: host_start.Spawn, ops: host_start.
 const Fixture = struct {
     initial: host_launch.Result.Cause.Kind = .incompatible,
     answer: ?activation.Outcome = null,
+    fault: ?activation.Fault = null,
     failure: ?anyerror = null,
     spawns: usize = 0,
     activations: usize = 0,
@@ -46,12 +55,13 @@ const Fixture = struct {
         self.directory = request.dir;
         result.* = if (self.spawns == 1) .failed(self.initial, error.IncompatibleHost) else .failed(.worker, error.TestSecondSpawn);
     }
-    fn activate(raw: ?*anyopaque, _: std.process.Init, directory: []const u8) !?activation.Outcome {
+    fn activate(raw: ?*anyopaque, _: std.process.Init, directory: []const u8) !?activation.Execution {
         const self: *Fixture = @ptrCast(@alignCast(raw.?));
         self.activations += 1;
         self.directory = directory;
         if (self.failure) |err| return err;
-        return self.answer;
+        if (self.fault) |fault| return .{ .fault = fault };
+        return if (self.answer) |answer| .{ .outcome = answer } else null;
     }
     fn run(self: *Fixture, init: std.process.Init, frozen: ?[]const u8) host_launch.Result {
         var result: host_launch.Result = .failed(.setup, error.HostLaunchFailed);
@@ -86,6 +96,50 @@ test "SH-120 ordinary start hands over only eligible incompatible Hosts and pres
         try std.testing.expect(failed_result.outcome.failed.detail == .none);
         try std.testing.expectEqual(@as(usize, 1), failed.activations);
     }
+    const faults = [_]struct { effect: std.meta.Tag(activation.Effect), cause: anyerror, stage: ?activation.Stage }{
+        .{ .effect = .resolve_target, .cause = error.TestResolve, .stage = null },
+        .{ .effect = .confirm_current, .cause = error.TestConfirm, .stage = null },
+        .{ .effect = .reconstruct_sources, .cause = error.TestReconstruct, .stage = null },
+        .{ .effect = .check_target, .cause = error.AccessDenied, .stage = null },
+        .{ .effect = .reobserve, .cause = error.TestReobserve, .stage = null },
+        .{ .effect = .snapshot, .cause = error.TestSnapshot, .stage = null },
+        .{ .effect = .stop, .cause = error.BrokenPipe, .stage = .stopping },
+        .{ .effect = .await_retirement, .cause = error.TestRetire, .stage = .awaiting_retirement },
+        .{ .effect = .start, .cause = error.FileNotFound, .stage = .starting },
+        .{ .effect = .verify, .cause = error.OutOfMemory, .stage = .verifying },
+    };
+    try std.testing.expectEqual(std.meta.tags(std.meta.Tag(activation.Effect)).len - 1, faults.len);
+    for (faults) |case| {
+        const fault: activation.Fault = .{ .effect = case.effect, .cause = case.cause };
+        var fixture: Fixture = .{ .fault = fault };
+        const result = fixture.run(init, null);
+        try std.testing.expectEqual(@as(usize, 1), fixture.activations);
+        try std.testing.expectEqual(@as(usize, 1), fixture.spawns);
+        try std.testing.expectEqual(case.cause, result.outcome.failed.cause.err);
+        try std.testing.expectEqualDeep(fault, result.outcome.failed.detail.handover_fault);
+        try std.testing.expectEqual(case.stage, fault.effect.stage());
+        var bytes: [host_launch.max_report_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try host_launch.writeDiagnostics(&result, &writer, 0);
+        const cause_text = if (case.cause == error.OutOfMemory) "Memory was exhausted during Host handover." else @import("caller_error.zig").facts(@import("caller_error.zig").of(case.cause)).says;
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), cause_text) != null);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), @errorName(case.cause)) != null);
+        const words = result.summary().failed.words();
+        var signin_bytes: [512]u8 = undefined;
+        var signin = std.Io.Writer.fixed(&signin_bytes);
+        try host_launch.writeSignIn(&signin, result.summary(), false, true);
+        try std.testing.expect(std.mem.indexOf(u8, signin.buffered(), words) != null);
+        if (case.stage) |stage| {
+            try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), @tagName(stage)) != null);
+            try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "unconfirmed") != null);
+            try std.testing.expectEqualStrings(@import("host_activation_report.zig").summary(.{ .unconfirmed = stage }), words);
+            try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "inspect Host status") != null);
+        } else {
+            try std.testing.expectEqualStrings("handover failed", words);
+            try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "before stopping") != null);
+            try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "unconfirmed") == null);
+        }
+    }
     var long_directory: [@import("protocol.zig").max_store_bytes + 1]u8 = @splat('x');
     var long_fixture: Fixture = .{ .requested = &long_directory, .failure = error.TestActivation };
     const long_result = long_fixture.run(init, null);
@@ -102,6 +156,7 @@ test "SH-120 ordinary start hands over only eligible incompatible Hosts and pres
         .{ .outcome = .{ .client_incompatible = 23 }, .summary = "restarted; client incompatible", .diagnostic = "restarted with a different Host protocol" },
         .{ .outcome = .replacement_observed, .summary = "replacement Host observed", .diagnostic = "a replacement Host was observed" },
         .{ .outcome = .cancelled, .summary = "activation cancelled", .diagnostic = "failed at activation: cancelled" },
+        .{ .outcome = .{ .pre_stop_failed = .resolve_target }, .summary = "handover failed", .diagnostic = "failed before stopping during resolve_target" },
         .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = refusal } }, .summary = "settings refused", .diagnostic = "these settings would not start a Host: specific refusal [settings_invalid]" },
         .{ .outcome = .{ .refused = .{ .stage = .starting, .failure = refusal } }, .summary = "refused to start", .diagnostic = "the Host did not start: specific refusal [settings_invalid]" },
         .{ .outcome = .{ .target_unusable = .resolving }, .summary = "target resolution failed", .diagnostic = "failed at resolving the target" },

@@ -66,6 +66,7 @@ test "CLI-32 unconfirmed handover preserves exit certainty" {
         .{ .outcome = .{ .client_incompatible = 1 }, .status = null },
         .{ .outcome = .replacement_observed, .status = null },
         .{ .outcome = .cancelled, .status = null },
+        .{ .outcome = .{ .pre_stop_failed = .resolve_target }, .status = null },
         .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "check refused") } }, .status = null },
         .{ .outcome = .{ .refused = .{ .stage = .starting, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "start refused") } }, .status = null },
     };

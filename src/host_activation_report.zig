@@ -54,6 +54,9 @@ pub fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: activati
         .cancelled => {
             try writer.writeAll("failed at activation: cancelled; inspect Host status, then retry");
         },
+        .pre_stop_failed => |effect| {
+            try writer.print("failed before stopping during {s}; Host left running", .{@tagName(effect)});
+        },
         .target_unusable => |step| {
             const doing: []const u8 = switch (step) {
                 .resolving => "resolving the target",
@@ -100,6 +103,7 @@ pub fn summary(outcome: activation.Outcome) []const u8 {
         },
         .replacement_observed => "replacement Host observed",
         .cancelled => "activation cancelled",
+        .pre_stop_failed => "handover failed",
         .target_unusable => |step| switch (step) {
             .resolving => "target resolution failed",
             .checking => "target check failed",
@@ -121,4 +125,34 @@ pub fn summary(outcome: activation.Outcome) []const u8 {
             .verifying => "verify unconfirmed",
         },
     };
+}
+
+/// A lifecycle fault keeps its original cause and says whether a stop may have happened.
+pub fn writeFault(writer: *std.Io.Writer, fault: activation.Fault) !void {
+    const action: []const u8 = switch (fault.effect) {
+        .resolve_target => "resolving the target",
+        .confirm_current => "confirming the current Host",
+        .reconstruct_sources => "reconstructing launch settings",
+        .check_target => "checking the target",
+        .reobserve => "reobserving the Host",
+        .snapshot => "checking the Host process",
+        .stop => "stopping the Host",
+        .await_retirement => "awaiting retirement",
+        .start => "starting the replacement",
+        .verify => "verifying the replacement",
+        .done => "finishing activation",
+    };
+    const cause: []const u8 = if (fault.cause == error.OutOfMemory)
+        "Memory was exhausted during Host handover."
+    else
+        @import("caller_error.zig").facts(@import("caller_error.zig").of(fault.cause)).says;
+    if (fault.effect.stage()) |stage| {
+        try writer.print("Host handover: {s} is unconfirmed while {s}; inspect Host status before retrying. Cause: {s} [{s}]\n", .{ @tagName(stage), action, cause, @errorName(fault.cause) });
+    } else {
+        try writer.print("Host handover: failed while {s} before stopping the Host. Cause: {s} [{s}]\n", .{ action, cause, @errorName(fault.cause) });
+    }
+}
+
+pub fn faultSummary(fault: activation.Fault) []const u8 {
+    return if (fault.effect.stage()) |stage| summary(.{ .unconfirmed = stage }) else "handover failed";
 }

@@ -238,7 +238,7 @@ fn mapped(err: anyerror) ?Code {
         error.OutOfMemory => .memory_exhausted,
         error.SavedRequestWireVersionMismatch => .request_wire_incompatible,
         error.HostNotServing => .host_not_serving,
-        error.HostRestartFailed, error.UnsupportedHostConfiguration => .host_restart_failed,
+        error.HostRestartFailed, error.HostRestartUnconfirmed, error.UnsupportedHostConfiguration => .host_restart_failed,
         error.IncompatibleHost => .host_incompatible,
         error.InvalidHostInfo, error.HostPeerNotServing, error.HostServeArgumentsUnreadable, error.HostServeStoreMissing, error.HostServeStoreRelative, error.HostSocketStoreMismatch, error.HostPeerPidMismatch, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot, error.HostDirectoryUnavailable, error.ForeignHostStatusFailed, error.InvalidForeignHostStatus => .host_identity_unconfirmed,
         error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
@@ -877,6 +877,7 @@ test "settings admission has a caller refusal fallback outside startup reporting
 
 test "an escaped replay preflight failure keeps the restart repair" {
     try std.testing.expectEqual(Code.host_restart_failed, of(error.UnsupportedHostConfiguration));
+    try std.testing.expectEqual(Code.host_restart_failed, of(error.HostRestartUnconfirmed));
 }
 
 test "guided sign-in native caller outcomes keep truthful repair without reclassifying context-free I/O" {
