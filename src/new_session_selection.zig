@@ -47,10 +47,10 @@ pub const Snapshot = struct {
         return self.resolveWith(self.intent.provider, readiness);
     }
 
-    pub fn resolveUnprompted(self: *const Snapshot) !Binding {
+    /// The binding when the caller does not prompt: `usable` names every served provider the caller may select.
+    pub fn resolveUnprompted(self: *const Snapshot, usable: *const provider_selection.Readinesses) !Binding {
         const provider = self.intent.provider orelse if (self.defaults.provider.len == 0) @as([]const u8, product_defaults.provider) else null;
-        const usable: provider_selection.Readinesses = .initFill(.configured);
-        return (try self.resolveWith(provider, &usable)).?;
+        return (try self.resolveWith(provider, usable)).?;
     }
 
     fn resolveWith(self: *const Snapshot, explicit_provider: ?[]const u8, readiness: *const provider_selection.Readinesses) !?Binding {
@@ -186,26 +186,28 @@ test "a saved provider picks among ready ones, and none saved with two ready ask
 }
 
 test "a caller that cannot ask gets the saved provider, else the product default" {
+    const usable: provider_selection.Readinesses = .initFill(.configured);
     var snapshot: Snapshot = .{ .intent = .{}, .defaults = .{} };
-    try std.testing.expectEqualStrings(product_defaults.provider, (try snapshot.resolveUnprompted()).provider.slice());
+    try std.testing.expectEqualStrings(product_defaults.provider, (try snapshot.resolveUnprompted(&usable)).provider.slice());
     try snapshot.defaults.provider.set("openai");
-    try std.testing.expectEqualStrings("openai", (try snapshot.resolveUnprompted()).provider.slice());
+    try std.testing.expectEqualStrings("openai", (try snapshot.resolveUnprompted(&usable)).provider.slice());
     snapshot.intent.provider = "codex";
-    try std.testing.expectEqualStrings("codex", (try snapshot.resolveUnprompted()).provider.slice());
+    try std.testing.expectEqualStrings("codex", (try snapshot.resolveUnprompted(&usable)).provider.slice());
 }
 
 test "unprompted selection fills the product binding unless saved or explicit choices replace it" {
+    const usable: provider_selection.Readinesses = .initFill(.configured);
     var snapshot: Snapshot = .{ .intent = .{}, .defaults = .{} };
-    var binding = try snapshot.resolveUnprompted();
+    var binding = try snapshot.resolveUnprompted(&usable);
     try std.testing.expectEqualStrings(product_defaults.provider, binding.provider.slice());
     try std.testing.expectEqualStrings(product_defaults.recommended_model, binding.model.slice());
     try snapshot.defaults.provider.set("openai");
     try snapshot.defaults.model.set("saved-model");
-    binding = try snapshot.resolveUnprompted();
+    binding = try snapshot.resolveUnprompted(&usable);
     try std.testing.expectEqualStrings("openai", binding.provider.slice());
     try std.testing.expectEqualStrings("saved-model", binding.model.slice());
     snapshot.intent = .{ .provider = "codex", .model = "chosen-model" };
-    binding = try snapshot.resolveUnprompted();
+    binding = try snapshot.resolveUnprompted(&usable);
     try std.testing.expectEqualStrings("codex", binding.provider.slice());
     try std.testing.expectEqualStrings("chosen-model", binding.model.slice());
 }

@@ -139,3 +139,18 @@ test "renewal due selects a sole provider and resolves only absent model pins" {
         try std.testing.expectEqual(unavailable, (try resolve(&.{capability}, null, null, "codex", null)).selected.readiness);
     }
 }
+
+test "Readinesses lists the built-ins first, then connections in order, and reads absent names as missing" {
+    var readiness: Readinesses = .initFill(.configured);
+    const built_ins = provider_route.built_in_names.len;
+    try std.testing.expectEqual(built_ins, readiness.names().len);
+    try std.testing.expectEqual(Readiness.missing, readiness.get(connection.Name.parse("alpha").?));
+    readiness.set(connection.Name.parse("alpha").?, .missing);
+    readiness.set(connection.Name.parse("beta").?, .configured);
+    try std.testing.expectEqual(built_ins + 2, readiness.names().len);
+    try std.testing.expectEqualStrings("alpha", readiness.names()[built_ins].slice());
+    try std.testing.expectEqualStrings("beta", readiness.names()[built_ins + 1].slice());
+    readiness.set(connection.Name.parse("beta").?, .refresh_required);
+    try std.testing.expectEqual(built_ins + 2, readiness.names().len);
+    try std.testing.expectEqual(Readiness.refresh_required, readiness.get(connection.Name.parse("beta").?));
+}
