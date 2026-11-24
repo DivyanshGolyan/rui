@@ -66,7 +66,7 @@ accepted: ?Accepted = null,
 retry: ?[36]u8 = null,
 retain_message: bool = false,
 projected: bool = false,
-settled_message: ?struct { ticket: Input.Ticket, key: [36]u8 } = null,
+settled_message: ?struct { ticket: Input.Ticket, key: [36]u8, admission: ?u64 = null } = null,
 
 pub fn view(self: *const Self) ?View {
     const intent = self.intent orelse return null;
@@ -317,7 +317,7 @@ fn apply(self: *Self, result: anyerror!void) !End {
         const denies: ?u64 = if (intent == .message_then_deny) intent.message_then_deny.action else null;
         if (self.retain_message and intent.ticket() != null and !self.projected) {
             std.debug.assert(self.settled_message == null);
-            self.settled_message = .{ .ticket = intent.ticket().?, .key = self.key };
+            self.settled_message = .{ .ticket = intent.ticket().?, .key = self.key, .admission = admission };
             self.retire();
             return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission, .denies = denies } };
         }
@@ -360,6 +360,10 @@ pub fn observeMessage(self: *Self, key: [36]u8) void {
 pub fn messageKey(self: *const Self) ?[36]u8 {
     if (self.intent) |intent| if (intent.ticket() != null) return self.key;
     return if (self.settled_message) |settled| settled.key else null;
+}
+
+pub fn messageAdmission(self: *const Self) ?u64 {
+    return if (self.settled_message) |settled| settled.admission else null;
 }
 
 pub fn messageProjected(self: *const Self) bool {

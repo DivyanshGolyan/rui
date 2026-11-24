@@ -245,7 +245,7 @@ rui session unarchive --session SESSION_REF
 
 ## Paste an image into chat
 
-Copy an image and use your terminal's usual paste shortcut, such as Cmd+V on macOS. Rui detects support for terminal clipboard paste events automatically. If no image appears, press Ctrl+V in the composer. The fallback uses the macOS clipboard or `wl-paste` or `xclip` on a local Linux desktop.
+Copy an image and use your terminal's usual paste shortcut, such as Cmd+V on macOS. Rui detects support for terminal clipboard paste events automatically. If no image appears, press Ctrl+V in the composer, or Alt+V where the terminal keeps Ctrl+V for its own paste, as Windows Terminal does. The fallback uses the macOS clipboard, `wl-paste` or `xclip` on a local Linux desktop, or the Windows clipboard through `powershell.exe` under WSL, where a copied image file also works.
 
 `[Image 1]` shows that the draft has an image. Press Enter to send it with any text you typed. To remove the image, move the caret to the start of the draft and press Backspace. Pasting another image replaces it. Rui accepts PNG and JPEG images up to 16 MiB.
 

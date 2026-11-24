@@ -41,6 +41,7 @@ pub const RenderedRow = struct {
     collapsed_count: usize = 0,
     message_key: ?[36]u8 = null,
     queue_terminal: bool = false,
+    excluded_key: ?[36]u8 = null,
 };
 
 pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ChatInfo.Edit) anyerror!bool;
@@ -149,28 +150,7 @@ fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, valu
     };
 }
 
-fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
-    var value: Bounded(limit) = .{ .len = 0 };
-    var text: TerminalText = .{ .mode = .multiline };
-    var room: usize = 0;
-    for (bytes, 1..) |byte, count| {
-        var storage: [32]u8 = undefined;
-        var piece = std.Io.Writer.fixed(&storage);
-        text.feed(&piece, &.{byte}) catch unreachable;
-        if (count == bytes.len) text.finish(&piece) catch unreachable;
-        const shown = piece.buffered();
-        if (value.len + shown.len > limit) {
-            value.len = room;
-            @memcpy(value.bytes[room..][0..session_line.ellipsis.len], session_line.ellipsis);
-            value.len += session_line.ellipsis.len;
-            return value;
-        }
-        for (shown, value.bytes[value.len..][0..shown.len]) |from, *to| to.* = if (from == '\n' or from == '\t') ' ' else from;
-        value.len += shown.len;
-        if (value.len + session_line.ellipsis.len <= limit) room = value.len;
-    }
-    return value;
-}
+const plain = session_line.plain;
 
 pub const Target = union(enum) {
     message: View.Collapsed,
@@ -201,6 +181,7 @@ pub const Job = struct {
     latest_ending: ?LatestEnding = null,
     retry: ?Key = null,
     queued_line: u64 = 0,
+    local_message_key: ?[36]u8 = null,
     inspection_kind: Inspection = .requests,
     interrupted: *client.Cancellation = undefined,
     command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
@@ -229,6 +210,7 @@ pub const Job = struct {
         new_rows: usize = 0,
         queued: protocol.Queued = .{},
         queue_cutoff: ?u64 = null,
+        attached_pending: ?struct { key: [36]u8, row: Key } = null,
         page_host: ?[16]u8 = null,
         queued_line: ?queued_line.Shown = null,
         live: View.Live = .{},
@@ -560,7 +542,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         };
         if (toggled != null and toggled.?.key.order(key) != .eq) continue;
         const open = if (toggled) |one| one.open else job.opened.has(key);
-        var capture: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .cap_target = switch (item.value) {
+        var capture: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .watch_key = job.local_message_key, .cap_target = switch (item.value) {
             .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = .{ .text = answer.content } },
             else => null,
         } };
@@ -568,6 +550,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         row.tight = View.tight(item.value);
         try capture.finish();
         row.length = capture.length;
+        row.excluded_key = capture.excluded_key;
         if (row.length != 0 or pending) switch (item.value) {
             .admission, .received, .user => |message| {
                 const key_bytes = message.key.slice();
@@ -659,6 +642,8 @@ const RowCapture = struct {
     cut: bool = false,
     in_body: bool = false,
     cap_target: ?View.Collapsed = null,
+    watch_key: ?[36]u8 = null,
+    excluded_key: ?[36]u8 = null,
     omitted_summaries: u64 = 0,
     boundary: u64 = 0,
     scalar_left: u3 = 0,
@@ -729,6 +714,12 @@ const RowCapture = struct {
     }
 
     pub fn excluding(_: *@This(), _: u64) void {}
+
+    pub fn excludedMessage(self: *@This(), key: []const u8) void {
+        const watched = self.watch_key orelse return;
+        if (!std.mem.eql(u8, &watched, key)) return;
+        self.excluded_key = watched;
+    }
 
     fn retainSummary(self: *@This(), value: View.Collapsed, bytes: []const u8, limit: u64) !bool {
         if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
@@ -1908,6 +1899,45 @@ test "session_reads row caps never split UTF-8 scalars or presentation controls"
     }
 }
 
+test "capped stop row reports the exact excluded identity without changing its prefix" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "stopped-row", .{ .read = true });
+    defer file.close(io);
+    const bytes = try std.testing.allocator.alloc(u8, feed_window.row_capacity + 100);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'x');
+    var task: Task = .{ .io = io };
+    const earlier: View.Collapsed = .{ .source = .activity, .position = 1, .ordinal = 0, .content = FakeHost.textValue(), .row = false };
+    var baseline_row: RenderedRow = .{ .key = .{ .position = 9 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
+    var baseline: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &baseline_row };
+    try baseline.feed("earlier stopped input\n");
+    try baseline.collapsedSummary(earlier, View.Mark.summary ++ "┄ Earlier full message" ++ View.Mark.reset ++ "\n");
+    try baseline.feed(bytes);
+    try baseline.finish();
+    const expected = try std.testing.allocator.alloc(u8, @intCast(baseline.length));
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqual(expected.len, try file.readPositionalAll(io, expected, 0));
+    try file.setLength(io, 0);
+    var row: RenderedRow = .{ .key = .{ .position = 9 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
+    var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row, .watch_key = @splat('K') };
+    try capture.feed("earlier stopped input\n");
+    try capture.collapsedSummary(earlier, View.Mark.summary ++ "┄ Earlier full message" ++ View.Mark.reset ++ "\n");
+    try capture.feed(bytes);
+    try std.testing.expect(capture.cut);
+    capture.excludedMessage(&@as([36]u8, @splat('J')));
+    try std.testing.expect(capture.excluded_key == null);
+    capture.excludedMessage(&@as([36]u8, @splat('K')));
+    try capture.finish();
+    const shown = bytes[0..try file.readPositionalAll(io, bytes, 0)];
+    try std.testing.expectEqualStrings(expected, shown);
+    try std.testing.expectEqual(baseline_row.collapsed_count, row.collapsed_count);
+    try std.testing.expectEqualDeep(baseline_row.collapsed_targets[0], row.collapsed_targets[0]);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "More content omitted") != null);
+    try std.testing.expectEqual(@as(?[36]u8, @as([36]u8, @splat('K'))), capture.excluded_key);
+}
+
 test "session_reads stopped collapsed Messages retain their exact ordered identities up to the metadata bound" {
     const text = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\nthirteen";
     for ([_]usize{ 3, 15, 16, 17 }) |count| {
@@ -1915,15 +1945,17 @@ test "session_reads stopped collapsed Messages retain their exact ordered identi
         var texts: [18][]const u8 = @splat(text);
         for (tail[0..count], 1..) |*row, position| {
             var message = FakeHost.message(position).admission;
+            if (position == count) try message.key.set(&@as([36]u8, @splat('K')));
             message.content = .{ .text = .{ .length = text.len, .digest = protocol.contentDigest(text) } };
             row.* = .{ .value = .{ .admission = message }, .excluded_at = count + 1 };
         }
         tail[count] = .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = count, .completion = .completed } } };
         var host: FakeHost = .{ .history = 0, .tail = tail[0 .. count + 1], .content_texts = &texts, .end = count + 1 };
-        var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = count + 1 } };
+        var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = count + 1 }, .local_message_key = @splat('K') };
         try host.read(&job);
         try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
         const row = &job.result.rows[0];
+        try std.testing.expectEqual(@as(?[36]u8, @as([36]u8, @splat('K'))), row.excluded_key);
         try std.testing.expectEqual(@min(count, 16), row.collapsed_count);
         try std.testing.expectEqual(@min(count, 16) + @intFromBool(count > 16), std.mem.count(u8, host.shown, "┄"));
         try std.testing.expectEqual(@as(u64, count + 1), row.key.position);

@@ -22,7 +22,7 @@ pub const Range = struct {
     }
 
     fn covers(self: Range, spot: Spot) bool {
-        return if (spot.start == spot.end) self.from <= spot.start and spot.start < self.to else spot.start < self.to and spot.end > self.from;
+        return if (spot.start == spot.end) self.from < spot.start and spot.start < self.to else spot.start < self.to and spot.end > self.from;
     }
 };
 
@@ -72,14 +72,29 @@ pub fn RowFor(comptime Doc: type) type {
             covered: usize = 0,
             cover: Hit = undefined,
             column: usize = 0,
+            decorated_prefix: usize = 0,
 
             fn init(row: Self) Spots {
                 const document = row.document;
+                var result: Spots = .{
+                    .row = row,
+                    .boundary = document.origin + (row.line orelse document.text().len),
+                };
+                for (row.cells, 0..) |cell, column| {
+                    const offset = document.cellOffset(cell) orelse continue;
+                    if (document.inlineDecoration(offset)) {
+                        result.decorated_prefix = column;
+                        break;
+                    }
+                }
                 for (row.cells) |cell| {
                     const offset = document.cellOffset(cell) orelse continue;
-                    if (document.selectable(offset)) return .{ .row = row, .boundary = document.origin + offset };
+                    if (document.selectable(offset)) {
+                        result.boundary = document.origin + offset;
+                        break;
+                    }
                 }
-                return .{ .row = row, .boundary = document.origin + (row.line orelse document.text().len) };
+                return result;
             }
 
             fn next(self: *Spots) ?Hit {
@@ -100,7 +115,7 @@ pub fn RowFor(comptime Doc: type) type {
                     return self.cover;
                 }
                 if (self.column < self.covered) return self.cover;
-                return .{ .spot = Spot.point(self.boundary) };
+                return .{ .spot = Spot.point(self.boundary), .paint = self.column >= self.decorated_prefix };
             }
         };
     };
@@ -190,7 +205,7 @@ fn layOut(document: anytype, first: viewport.Position, width: u16, count: u16, c
     _ = document.draw(window, first, true, false, .{}, .{});
 }
 
-test "a row's columns map to the clusters they show, indents and wide cells included" {
+fn rowColumnsMap() !void {
     const document = try std.testing.allocator.create(Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
@@ -220,6 +235,73 @@ test "a row's columns map to the clusters they show, indents and wide cells incl
     try std.testing.expectEqualSlices(bool, &.{ true, true, true, false, false, false, false, false, false, false }, &columns);
     empty.covered(range, &columns);
     try std.testing.expectEqualSlices(bool, &@as([10]bool, @splat(false)), &columns);
+}
+
+test "SUI-145 transcript projection leaves generated gutters and preserves authored blank rows" {
+    try rowColumnsMap();
+    const testing = std.testing;
+    const DocumentType = viewport.Sized(256, true);
+    var document: DocumentType = .{};
+    const marker = TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off;
+    try document.append(TerminalText.user_message_on ++ marker ++ "UserAlpha\n\nAnswerBeta" ++ TerminalText.user_message_off);
+    try document.prepare();
+    const SelectionRow = RowFor(@TypeOf(document));
+    const width: u16 = 46;
+    const height: u16 = 8;
+    const layout: viewport.Layout = .{ .width = width, .method = .unicode };
+    var cells: [46 * 8]vaxis.Cell = @splat(.{});
+    var screen: vaxis.Screen = .{ .width = width, .height = height, .width_method = .unicode, .buf = &cells };
+    const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+    _ = document.draw(window, .{}, true, false, .{}, .{});
+    const blank_line = document.lineEnd(0) + 1;
+    var rows = document.rowsFrom(layout, .{});
+    const all: Range = .{ .from = document.origin, .to = document.origin + document.text().len };
+    var saw_marker = false;
+    var saw_blank = false;
+    var columns: [46]bool = undefined;
+    for (0..height) |row_index| {
+        const position = rows.next() orelse break;
+        const row_cells = cells[row_index * width ..][0..width];
+        const row: SelectionRow = .{ .document = &document, .cells = row_cells, .line = document.selectionLine(layout, position) };
+        row.covered(all, &columns);
+        if (position.offset == 0 and std.mem.indexOf(u8, document.text(), "UserAlpha") != null) {
+            var marker_column: ?usize = null;
+            for (row_cells, 0..) |cell, column| if (std.mem.eql(u8, cell.char.grapheme, "›")) {
+                marker_column = column;
+                break;
+            };
+            if (marker_column) |column| {
+                saw_marker = true;
+                try testing.expect(column >= 2);
+                const marker_at = document.cellOffset(row_cells[column]) orelse return error.MissingMarkerOffset;
+                const space_at = document.cellOffset(row_cells[column + 1]) orelse return error.MissingMarkerSpaceOffset;
+                try testing.expect(document.inlineDecoration(marker_at));
+                try testing.expect(!document.selectable(marker_at));
+                try testing.expect(document.inlineDecoration(space_at));
+                try testing.expect(!document.selectable(space_at));
+                const decorated_space = row.spot(@intCast(column + 1));
+                try testing.expectEqual(Spot.point(document.origin + space_at), decorated_space);
+                try testing.expect(all.covers(decorated_space));
+                try testing.expect(!columns[column + 1]);
+                for (columns[0 .. column + 2]) |selected| try testing.expect(!selected);
+            }
+        }
+        if (position.offset == blank_line) {
+            saw_blank = true;
+            const blank_boundary = row.spot(0);
+            try testing.expectEqual(Spot.point(document.origin + blank_line), blank_boundary);
+            try testing.expect(all.covers(blank_boundary));
+            try testing.expect(columns[0]);
+        }
+    }
+    try testing.expect(saw_marker and saw_blank);
+    const range: Range = .{ .from = 4, .to = 9 };
+    try testing.expect(!range.covers(Spot.point(4)));
+    try testing.expect(range.covers(Spot.point(5)));
+    try testing.expect(range.covers(Spot.point(8)));
+    try testing.expect(!range.covers(Spot.point(9)));
+    try testing.expect(range.covers(.{ .start = 3, .end = 5 }));
+    try testing.expect(range.covers(.{ .start = 8, .end = 10 }));
 }
 
 test "a release copies the shown text with its line count, within the clipboard limit" {
@@ -315,22 +397,46 @@ test "selection contrasts with sent bands and padding at both widths" {
         const colours: viewport.Colours = .{ .user_band = .{ .index = 2 }, .no_depth = !colour };
         _ = document.draw(window, .{}, true, true, .{}, colours);
         var positions = document.rowsFrom(layout, .{});
+        const all: Range = .{ .from = document.origin, .to = document.origin + document.text().len };
         var columns: [140]bool = undefined;
         for (0..height) |row_index| {
             const position = positions.next().?;
             const row_cells = cells[row_index * width ..][0..width];
             const row: RowFor(@TypeOf(document)) = .{ .document = &document, .cells = row_cells, .line = document.selectionLine(layout, position) };
-            row.covered(.{ .from = 0, .to = document.text().len }, columns[0..width]);
+            row.covered(all, columns[0..width]);
             const old = row_cells[0].style.reverse;
-            const old_text = row_cells[4].style.reverse;
-            const old_unselected = row_cells[1].style.reverse;
             try testing.expectEqual(!colour, old);
-            try testing.expect(columns[0] and columns[4]);
+            if (position.row == 0) {
+                try testing.expectEqual(@as(?usize, null), document.cellOffset(row_cells[0]));
+                try testing.expectEqual(@as(?usize, null), document.cellOffset(row_cells[4]));
+                const cap_point = row.spot(0);
+                try testing.expectEqual(Spot.point(document.origin), cap_point);
+                try testing.expect(!all.covers(cap_point));
+                try testing.expect(!columns[0] and !columns[4]);
+            } else if (position.row == 1) {
+                try testing.expectEqual(@as(?usize, null), document.cellOffset(row_cells[0]));
+                const first_body_cell = document.cellOffset(row_cells[4]) orelse return error.MissingFirstBodyCell;
+                try testing.expectEqual(@as(usize, "› ".len), first_body_cell);
+                try testing.expect(document.selectable(first_body_cell));
+                const inset_point = row.spot(0);
+                try testing.expectEqual(Spot.point(document.origin), inset_point);
+                try testing.expect(!all.covers(inset_point));
+                try testing.expect(all.covers(row.spot(4)));
+                try testing.expect(!columns[0] and columns[4]);
+            } else {
+                const interior_point = row.spot(0);
+                try testing.expect(interior_point.start > all.from and interior_point.start < all.to);
+                try testing.expect(all.covers(interior_point));
+                try testing.expect(columns[0] and columns[4]);
+            }
+            var reverse_before: [140]bool = undefined;
+            for (row_cells, 0..) |cell, column| reverse_before[column] = cell.style.reverse;
             columns[1] = false;
             highlight(row_cells, columns[0..width]);
-            try testing.expectEqual(!old, row_cells[0].style.reverse);
-            try testing.expectEqual(!old_text, row_cells[4].style.reverse);
-            try testing.expectEqual(old_unselected, row_cells[1].style.reverse);
+            for (row_cells, 0..) |cell, column| {
+                const expected = if (columns[column]) !reverse_before[column] else reverse_before[column];
+                try testing.expectEqual(expected, cell.style.reverse);
+            }
         }
     };
 }

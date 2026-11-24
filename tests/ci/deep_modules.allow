@@ -250,8 +250,7 @@ field-leak feed_window.Window.opened
 field-leak feed_window.Window.tail_rows
 field-leak history_memo.Table.entries
 field-leak host_drain.Watch.until_ns
-field-leak host_restart_all.OptionalOutput.writer
-field-leak host_restart_all.Target.version
+field-leak host_restart_report.OptionalOutput.writer
 field-leak host_settings.Secret.source
 field-leak host_start.LeafName.len
 field-leak json_ascii.Escaping.writer
@@ -382,8 +381,6 @@ field-leak provider.Reactor.wake
 field-leak read_transcript.StoreParts.next_index
 field-leak request_encoding.TestSink.output
 field-leak result_layout.Layout.run_open
-field-leak server.ControlTiming.command_key
-field-leak server.Intake.Exchange.host
 field-leak server.Intake.Exchange.ingress
 field-leak server.Intake.Exchange.request
 field-leak server.Intake.Exchange.retained_scratch
@@ -392,11 +389,6 @@ field-leak server.Intake.lines
 field-leak server.Intake.polls
 field-leak server.Intake.stdin
 field-leak server.Intake.wake
-field-leak server.Reply.body
-field-leak server.Reply.end
-field-leak server.Reply.parts_capture
-field-leak server.Reply.timing
-field-leak server_execution.ProviderSlot.transfer
 field-leak server_mcp_relist.Relist.pending
 field-leak session_chrome.FooterSpans.text
 field-leak session_follow.Follow.pending
@@ -523,7 +515,6 @@ shallow-module execution
 shallow-module feed_window
 shallow-module history_memo
 shallow-module host_reply
-shallow-module host_restart_all
 shallow-module mcp/document
 shallow-module output_format
 shallow-module platform

@@ -1,4 +1,5 @@
 const std = @import("std");
+const TerminalText = @import("TerminalText.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const utf8_validation = @import("utf8_validation.zig");
 const first_line = @import("first_line.zig");
@@ -25,6 +26,29 @@ pub fn name(label: ?[]const u8, line: ?[]const u8, reference: []const u8) Name {
 
 pub const firstLine = first_line.firstLine;
 pub const cut = first_line.cut;
+
+pub fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
+    var value: Bounded(limit) = .{ .len = 0 };
+    var text: TerminalText = .{ .mode = .multiline };
+    var room: usize = 0;
+    for (bytes, 1..) |byte, count| {
+        var storage: [32]u8 = undefined;
+        var piece = std.Io.Writer.fixed(&storage);
+        text.feed(&piece, &.{byte}) catch unreachable;
+        if (count == bytes.len) text.finish(&piece) catch unreachable;
+        const shown = piece.buffered();
+        if (value.len + shown.len > limit) {
+            value.len = room;
+            @memcpy(value.bytes[room..][0..ellipsis.len], ellipsis);
+            value.len += ellipsis.len;
+            return value;
+        }
+        for (shown, value.bytes[value.len..][0..shown.len]) |from, *to| to.* = if (from == '\n' or from == '\t') ' ' else from;
+        value.len += shown.len;
+        if (value.len + ellipsis.len <= limit) room = value.len;
+    }
+    return value;
+}
 
 pub fn left(trigger: u64, pressure: u64) u8 {
     std.debug.assert(trigger != 0);

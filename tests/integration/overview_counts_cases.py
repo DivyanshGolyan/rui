@@ -114,10 +114,10 @@ def unconfirmed_status():
                 screen.keys(b"\r")
                 note = "Not confirmed · ctrl+r retries original"
                 frame = screen.wait(lambda f: note in conversation_text(f)
-                    and conversation_text(f).count("› lost") == 1,
-                    "unconfirmed note attached to the original sent Message", timeout=15)
+                    and conversation_text(f).count("◌ lost") == 1,
+                    "unconfirmed note attached to the queued preview", timeout=15)
                 transcript = conversation_text(frame)
-                assert transcript.count(note) == 1 and transcript.index("› lost") < transcript.index(note), frame
+                assert transcript.count(note) == 1 and transcript.index("◌ lost") < transcript.index(note), frame
                 assert "! Not confirmed" not in frame and "Sending" not in frame, frame
                 footer = chat_footer_row(frame)
                 assert note not in "\n".join(composer_line(frame, index)

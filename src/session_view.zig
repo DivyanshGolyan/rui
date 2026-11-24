@@ -1545,6 +1545,7 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
             if (wrote) try sink.feed("\n");
             wrote = true;
             try message(requests, store, session, scratch, item, value, .lasting(false), sink, colour);
+            if (@hasDecl(std.meta.Child(@TypeOf(sink)), "excludedMessage")) sink.excludedMessage(value.key.slice());
         }
         cursor = page.continuation() orelse return wrote;
     }

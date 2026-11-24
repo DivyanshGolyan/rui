@@ -22,6 +22,9 @@ pub const Styles = struct {
 live: session_view.Live = .{},
 work: ?work_line.Line = null,
 queued: ?queued_line.Waiting = null,
+local_queued: ?queued_line.Waiting = null,
+queued_note: ?[]const u8 = null,
+note_drawn: bool = false,
 method: vaxis.gwidth.Method = .unicode,
 styles: Styles = .{},
 more: Chip,
@@ -44,18 +47,52 @@ const Plan = struct {
     more: bool,
     work_row: bool,
     queued: bool,
+    local_queued: bool,
+    queued_note_rows: usize,
 
     fn rows(self: Plan) usize {
-        return self.shown + @intFromBool(self.more) + @intFromBool(self.work_row) + @intFromBool(self.queued);
+        return self.shown + @intFromBool(self.more) + @intFromBool(self.work_row) + @intFromBool(self.queued) + @intFromBool(self.local_queued) + self.queued_note_rows;
     }
 };
 
-fn plan(self: *const Self, height: usize) Plan {
+fn noteIndent(width: usize) usize {
+    return if (width >= 4) 2 else 0;
+}
+
+fn notePiece(self: *const Self, text: []const u8, width: usize) usize {
+    const length = session_line.fit(text, width, self.method).len;
+    if (length == 0 or length == text.len) return length;
+    if (text[length] == ' ') return length + 1;
+    if (std.mem.lastIndexOfScalar(u8, text[0..length], ' ')) |space| {
+        if (space != 0) return space + 1;
+    }
+    return length;
+}
+
+fn noteRows(self: *const Self, width: usize) ?usize {
+    const note = self.queued_note orelse return 0;
+    const room = width -| noteIndent(width);
+    if (room == 0) return null;
+    var remaining = note;
+    var count: usize = 0;
+    while (remaining.len != 0) {
+        const length = self.notePiece(remaining, room);
+        if (length == 0) return null;
+        remaining = remaining[length..];
+        count += 1;
+    }
+    return count;
+}
+
+fn plan(self: *const Self, height: usize, width: usize) Plan {
     const clock_call = self.clockCall();
     const beyond = self.live.total > self.live.count;
-    var result: Plan = .{ .shown = 0, .more = false, .work_row = self.work != null and clock_call == null, .queued = self.queued != null };
+    var result: Plan = .{ .shown = 0, .more = false, .work_row = self.work != null and clock_call == null, .queued = self.queued != null, .local_queued = self.local_queued != null, .queued_note_rows = 0 };
     for (0..2) |_| {
-        const room = height -| (@as(usize, @intFromBool(result.work_row)) + @intFromBool(result.queued));
+        const priority = @as(usize, @intFromBool(result.work_row)) + @intFromBool(result.queued) + @intFromBool(result.local_queued);
+        const note_rows = if (result.queued or result.local_queued) self.noteRows(width) orelse 0 else 0;
+        result.queued_note_rows = if (note_rows <= height -| priority) note_rows else 0;
+        const room = height -| (priority + result.queued_note_rows);
         const all_fit = self.live.count + @intFromBool(beyond) <= room;
         result.shown = if (all_fit) self.live.count else room -| 1;
         result.more = if (all_fit) beyond else room >= 1;
@@ -66,14 +103,15 @@ fn plan(self: *const Self, height: usize) Plan {
 }
 
 pub fn rows(self: *const Self) u16 {
-    return @intCast(self.plan(std.math.maxInt(u16)).rows());
+    return @intCast(self.plan(std.math.maxInt(u16), std.math.maxInt(u16)).rows());
 }
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const max = ctx.max.size();
     const clock_call = self.clockCall();
-    const kept = self.plan(max.height);
+    const kept = self.plan(max.height, max.width);
+    self.note_drawn = kept.queued_note_rows != 0;
     const shown = kept.shown;
     const more = kept.more;
     const work_row = kept.work_row;
@@ -136,6 +174,23 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (index >= skip) {
             const buffer = try ctx.arena.create([queued_line.waiting_capacity]u8);
             _ = Chip.print(surface, self.method, 0, index - skip, queued_line.waitingRow(buffer, waiting.line, waiting.count, width, self.method), self.styles.quiet, width);
+        }
+    }
+    if (self.local_queued) |waiting| {
+        defer index += 1;
+        if (index >= skip) {
+            const buffer = try ctx.arena.create([queued_line.waiting_capacity]u8);
+            _ = Chip.print(surface, self.method, 0, index - skip, queued_line.waitingRow(buffer, waiting.line, waiting.count, width, self.method), self.styles.quiet, width);
+        }
+    }
+    if (kept.queued_note_rows != 0) {
+        var remaining = self.queued_note.?;
+        const indent: u16 = @intCast(noteIndent(width));
+        while (remaining.len != 0) {
+            defer index += 1;
+            const length = self.notePiece(remaining, width - indent);
+            if (index >= skip) _ = Chip.print(surface, self.method, indent, index - skip, remaining[0..length], self.styles.quiet, width);
+            remaining = remaining[length..];
         }
     }
     surface.children = children;
@@ -317,4 +372,54 @@ test "a narrow or short activity tail keeps the clock and the oldest calls" {
         const tiny = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);
     }
+}
+
+test "queued recovery note follows its preview without displacing work on short screens" {
+    var click: Click = .{};
+    var block: Self = .{
+        .more = .{ .label = "", .userdata = &click, .on_click = Click.status },
+        .work = .{ .mark = "◝", .tone = .normal, .words = "Thinking", .clock = .{ .elapsed = 1 } },
+        .queued = .{ .line = "original", .count = 1 },
+        .queued_note = "Rejected · /discard",
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 2, 3 }) |height| {
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = height }, .cell_size = .{} };
+        const frame = try block.widget().draw(ctx);
+        try std.testing.expect(std.mem.indexOf(u8, try rowText(frame, 0), "Thinking") != null);
+        try std.testing.expectEqualStrings("◌ original", try rowText(frame, 1));
+        if (height == 3) try std.testing.expectEqualStrings("  Rejected · /discard", try rowText(frame, 2));
+    }
+}
+
+test "separate queue previews retain their counts and wrap recovery without displacing priority rows" {
+    var click: Click = .{};
+    var block: Self = .{
+        .more = .{ .label = "", .userdata = &click, .on_click = Click.status },
+        .work = .{ .mark = "◝", .tone = .normal, .words = "Thinking", .clock = .{ .elapsed = 1 } },
+        .queued = .{ .line = "durable", .count = 3 },
+        .local_queued = .{ .line = "local", .count = 1 },
+        .queued_note = "Not confirmed · ctrl+r retries original",
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const full = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 6 }, .cell_size = .{} });
+    try std.testing.expectEqual(@as(u16, 6), full.size.height);
+    try std.testing.expectEqualStrings("◝ Thinking · 1s", try rowText(full, 0));
+    try std.testing.expectEqualStrings("◌ 3 · durable", try rowText(full, 1));
+    try std.testing.expectEqualStrings("◌ local", try rowText(full, 2));
+    try std.testing.expectEqualStrings("  Not confirmed ·", try rowText(full, 3));
+    try std.testing.expectEqualStrings("  ctrl+r retries", try rowText(full, 4));
+    try std.testing.expectEqualStrings("  original", try rowText(full, 5));
+    const short = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 5 }, .cell_size = .{} });
+    try std.testing.expectEqual(@as(u16, 3), short.size.height);
+    try std.testing.expectEqualStrings("◝ Thinking · 1s", try rowText(short, 0));
+    try std.testing.expectEqualStrings("◌ 3 · durable", try rowText(short, 1));
+    try std.testing.expectEqualStrings("◌ local", try rowText(short, 2));
+    block.queued = null;
+    block.queued_note = "Rejected · /discard";
+    const rejected = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 12, .height = 5 }, .cell_size = .{} });
+    try std.testing.expectEqualStrings("  Rejected ·", try rowText(rejected, 2));
+    try std.testing.expectEqualStrings("  /discard", try rowText(rejected, 3));
 }

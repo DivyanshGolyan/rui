@@ -71,15 +71,20 @@ pub fn dragging(self: *const Self) bool {
     return self.selection != null;
 }
 
+pub fn cancelSelection(self: *Self) bool {
+    if (self.selection == null) return false;
+    self.selection = null;
+    return true;
+}
+
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.hover.handleEvent(ctx, input);
     switch (input) {
         .mouse => |value| try self.mouse(ctx, value),
-        // vxfw sends no release once the pointer has left: a press or drag
-        // ends there, copying nothing, so no highlight stays behind.
-        .mouse_leave => if (self.selection != null) {
-            self.selection = null;
+        // vxfw sends no release once the pointer has left; focus loss likewise
+        // cancels the held gesture without copying.
+        .mouse_leave, .focus_out => if (self.cancelSelection()) {
             ctx.redraw = true;
         },
         .tick => {
@@ -537,6 +542,24 @@ test "a press and release on one cell is a click, and only a peer's name opens" 
     try h.send(.motion, 27, 0);
     try std.testing.expect(!h.transcript.dragging());
     try std.testing.expectEqualStrings("", h.copies(&copied));
+}
+
+test "SUI-156 DocumentView focus loss cancels a held Session link gesture" {
+    const peer = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "Plan" ++ TerminalText.link_close;
+    for ([_][]const u8{ peer, TerminalText.body_on ++ peer ++ TerminalText.body_off }) |content| {
+        const h = try Harness.init(content, .{ .width = 40, .height = 3 });
+        defer h.deinit();
+        _ = try h.frame();
+        try h.send(.press, 2, 0);
+        try std.testing.expect(h.transcript.dragging());
+        try h.transcript.widget().handleEvent(&h.ctx, .focus_out);
+        try std.testing.expect(!h.transcript.dragging());
+        try h.send(.release, 2, 0);
+        try std.testing.expectEqualStrings("", h.opened.items);
+        try h.send(.press, 2, 0);
+        try h.send(.release, 2, 0);
+        try std.testing.expectEqualStrings("k7m2qx", h.opened.items);
+    }
 }
 
 test "DocumentView continuation click never follows the link in the last text row" {
