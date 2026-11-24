@@ -644,7 +644,7 @@ test "the stop record reads asked only when present as a file, and unknown when 
     try tmp.dir.deleteFile(io, "store/" ++ stop_record_name);
 }
 
-test "SH-124 canonical Store paths derive current and legacy endpoints" {
+test "SH-134 canonical Store paths derive current and legacy endpoints" {
     const cases = [_]struct { canonical: []const u8, hash: []const u8 }{
         .{ .canonical = "/tmp/rui-stdlib-hex", .hash = "043ea4efef72c68973ebffcb0927e537" },
         .{ .canonical = "/", .hash = "8a5edab282632443219e051e4ade2d1d" },

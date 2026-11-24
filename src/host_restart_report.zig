@@ -420,7 +420,7 @@ test "restart reports a positively identified Host without a socket or directory
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "HostServeStoreMissing") != null);
 }
 
-test "SH-127 lifecycle faults report the exact effect and cause at every stage" {
+test "SH-137 lifecycle faults report the exact effect and cause at every stage" {
     const cases = [_]struct { effect: std.meta.Tag(activation.Effect), expected: []const u8 }{
         .{ .effect = .resolve_target, .expected = "failed during resolve_target (OutOfMemory); Host left running; inspect with its owning client, then retry" },
         .{ .effect = .confirm_current, .expected = "failed during confirm_current (OutOfMemory); Host left running; inspect with its owning client, then retry" },
@@ -448,7 +448,7 @@ test "SH-127 lifecycle faults report the exact effect and cause at every stage" 
     }
 }
 
-test "SH-127 a failed Store entry keeps its stage, cause and certainty across every answer" {
+test "SH-137 a failed Store entry keeps its stage, cause and certainty across every answer" {
     const Certainty = enum { ok, failed, unconfirmed };
     const refusal: activation.Outcome = .{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "cannot start") } };
     const cases = [_]struct { name: []const u8, state: ?@FieldType(Entry, "state"), selected: activation.Selected, text: []const u8, certainty: Certainty }{
@@ -482,7 +482,7 @@ test "SH-127 a failed Store entry keeps its stage, cause and certainty across ev
     }
 }
 
-test "SH-127 a launch diagnostic renders a failed entry after its Batch is destroyed" {
+test "SH-137 a launch diagnostic renders a failed entry after its Batch is destroyed" {
     const host_launch = @import("host_launch.zig");
     const host_start = @import("host_start.zig");
     const allocator = std.testing.allocator;
@@ -500,7 +500,7 @@ test "SH-127 a launch diagnostic renders a failed entry after its Batch is destr
     try std.testing.expectEqualStrings("Host handover: failed at observation (OutOfMemory): could not confirm this Host; inspect with its owning client, then retry.\n", writer.buffered());
 }
 
-test "SH-129 batch exit preserves uncertainty across mixed Host results" {
+test "SH-139 batch exit preserves uncertainty across mixed Host results" {
     const pre: Entry = .{ .state = .{ .outcome = .{ .faulted = .{ .effect = .check_target, .cause = try .from("OutOfMemory") } } } };
     const post: Entry = .{ .state = .{ .outcome = .{ .faulted = .{ .effect = .verify, .cause = try .from("OutOfMemory") } } } };
     const unconfirmed: Entry = .{ .state = .{ .outcome = .{ .unconfirmed = .stopping } } };

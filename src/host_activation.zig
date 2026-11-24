@@ -99,7 +99,7 @@ pub fn startHandoverEligible(foreign: bool, order: std.math.Order, selected_matc
     return foreign and order == .lt and selected_matches;
 }
 
-test "SH-123 start activation requires an older foreign Host and the selected client" {
+test "SH-133 start activation requires an older foreign Host and the selected client" {
     const rows = [_]struct { foreign: bool, order: std.math.Order, selected: bool, eligible: bool }{
         .{ .foreign = false, .order = .lt, .selected = false, .eligible = false },
         .{ .foreign = false, .order = .lt, .selected = true, .eligible = false },
@@ -140,7 +140,7 @@ pub fn startStep(selected: Selected) StartStep {
     };
 }
 
-test "SH-122 an ordinary start hands over only an incompatible start and attaches, keeps or reports each outcome" {
+test "SH-132 an ordinary start hands over only an incompatible start and attaches, keeps or reports each outcome" {
     const wanted = [_]struct { incompatible: bool, frozen: bool, expected: bool }{
         .{ .incompatible = true, .frozen = false, .expected = true },
         .{ .incompatible = true, .frozen = true, .expected = false },

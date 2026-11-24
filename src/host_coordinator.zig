@@ -369,7 +369,7 @@ test "coordinator task routing preserves OS bytes through the existing JSON slic
     try expectRoundTrip(Task{ .home = "/home/\xff", .target = .{ .build = "/target/\xfe", .version = .{ .schema = 75, .patch = 1 } }, .report = .events });
 }
 
-test "SH-128 coordinator round-trips every faulted effect and keeps later Host outcomes" {
+test "SH-138 coordinator round-trips every faulted effect and keeps later Host outcomes" {
     for (std.meta.tags(@import("host_activation.zig").EffectTag)) |effect| {
         if (effect == .done) continue;
         try expectRoundTrip(outcomeEvent(.{ .faulted = .{ .effect = effect, .cause = try .from("OutOfMemory") } }));
@@ -403,7 +403,7 @@ test "SH-128 coordinator round-trips every faulted effect and keeps later Host o
     try std.testing.expectError(error.HostRestartUnconfirmed, batch.result());
 }
 
-test "SH-130 coordinator exit preserves certainty across the child boundary" {
+test "SH-140 coordinator exit preserves certainty across the child boundary" {
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try waitResult(.{ .exited = 0 }));
     try std.testing.expectError(error.HostRestartUnconfirmed, waitResult(error.AccessDenied));
     try lineResult(.{ .exited = 0 });

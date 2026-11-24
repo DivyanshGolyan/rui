@@ -46,7 +46,7 @@ pub const Target = struct {
     }
 };
 
-test "SH-125 absent Store owner is not started by handover observation" {
+test "SH-135 absent Store owner is not started by handover observation" {
     const io = std.testing.io;
     var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();
@@ -66,7 +66,7 @@ test "SH-125 absent Store owner is not started by handover observation" {
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "host.lock", .{}));
 }
 
-test "SH-125 a Store scope names only its own directory, however many other Stores exist" {
+test "SH-135 a Store scope names only its own directory, however many other Stores exist" {
     const io = std.testing.io;
     var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();

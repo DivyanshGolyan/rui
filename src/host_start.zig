@@ -1604,7 +1604,7 @@ pub fn handoverFailed(result: *HostLaunchResult, selected: @import("host_activat
     result.outcome.failed.detail = .{ .handover = selected };
 }
 
-test "SH-122 a failed Store entry reports its stage and cause as an ordinary failure" {
+test "SH-132 a failed Store entry reports its stage and cause as an ordinary failure" {
     const host_launch = @import("host_launch.zig");
     var result: HostLaunchResult = .failed(.setup, error.HostRestartUnconfirmed);
     handoverFailed(&result, .{ .failed = .of(.observation, error.OutOfMemory) });

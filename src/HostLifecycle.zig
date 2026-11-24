@@ -521,7 +521,7 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
     return runActivation(facts, &driver);
 }
 
-test "SH-126 lifecycle preserves the effect and cause of every unexpected failure" {
+test "SH-136 lifecycle preserves the effect and cause of every unexpected failure" {
     const effects = [_]std.meta.Tag(activation.Effect){
         .resolve_target, .confirm_current, .reconstruct_sources, .check_target,
         .reobserve,      .snapshot,        .stop,                .await_retirement,

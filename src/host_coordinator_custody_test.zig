@@ -44,8 +44,8 @@ fn readByte(fd: c_int) !u8 {
     return byte[0];
 }
 
-// SH-131 uses real process groups and pipes; the injected activation stops at a controlled barrier.
-test "SH-131 detached start coordinator retains custody after caller departure" {
+// SH-141 uses real process groups and pipes; the injected activation stops at a controlled barrier.
+test "SH-141 detached start coordinator retains custody after caller departure" {
     const task = "{\"home\":\"/scratch\",\"scope\":{\"store\":\"/scratch/store\"},\"report\":\"events\"}";
     for ([_]enum { independent, host_owned, caller_departs, closed_reply, incomplete }{ .independent, .host_owned, .caller_departs, .closed_reply, .incomplete }) |scenario| {
         const input = try pipe();
