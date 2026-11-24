@@ -4591,7 +4591,7 @@ test "overview Archived window effect runs one job and its reply becomes the win
     try std.testing.expectEqual(@as(u64, 3), Seen.now.line.position);
 }
 
-test "SUI-25 overview archive effects preserve server filter, pending visibility, and restore intent" {
+test "overview archive effects preserve server filter, pending visibility, and restore intent (SUI-25)" {
     const Listing = struct {
         var archive_state: protocol.SessionArchiveState = .active;
         fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
