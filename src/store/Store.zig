@@ -693,7 +693,9 @@ pub const Store = struct {
                 else => reply = .infrastructure_failure,
             }
         };
-        if (reply == .rejected)
+        // A fresh refusal's detail comes from the lane round (Configure.committed). A replayed refusal reaches no lane
+        // round, so its detail is read from the Host set alone.
+        if (reply == .rejected and reply.rejected.replayed)
             reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &command.configuration.tools);
         return reply;
     }
