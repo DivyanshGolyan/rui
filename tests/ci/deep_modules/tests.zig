@@ -3,11 +3,15 @@
 test {
     _ = @import("Allow.zig");
     _ = @import("Bodies.zig");
+    _ = @import("Circle.zig");
+    _ = @import("Components.zig");
     _ = @import("Diagnostic.zig");
+    _ = @import("Graph.zig");
     _ = @import("Imports.zig");
     _ = @import("ItemSyntax.zig");
     _ = @import("Items.zig");
     _ = @import("Lints.zig");
+    _ = @import("ModuleCycle.zig");
     _ = @import("Names.zig");
     _ = @import("References.zig");
     _ = @import("ReferencesTest.zig");
@@ -15,6 +19,7 @@ test {
     _ = @import("WrappersTest.zig");
     _ = @import("Report.zig");
     _ = @import("Sources.zig");
+    _ = @import("Tangle.zig");
     _ = @import("Types.zig");
     _ = @import("InferTest.zig");
     _ = @import("main.zig");

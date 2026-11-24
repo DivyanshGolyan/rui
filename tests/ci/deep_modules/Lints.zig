@@ -1,19 +1,27 @@
-//! The deep-modules lints (deep-modules U12 to U15). Each lint is a pure function over the
-//! loaded sources and their declarations; `run` gathers them. No lint is ported yet, so
-//! `run` reports nothing.
+//! The deep-modules lints. Each lint is a pure function over the loaded sources, their
+//! declarations and their references; `run` gathers them. `module-cycle` and `tangle` are
+//! ported here; `field-leak` and `shallow-module` are not yet, so `run` reports only those.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Sources = @import("Sources.zig");
 const Items = @import("Items.zig");
 const Diagnostic = @import("Diagnostic.zig");
+const Graph = @import("Graph.zig");
+const ModuleCycle = @import("ModuleCycle.zig");
+const References = @import("References.zig");
+const Tangle = @import("Tangle.zig");
+const Wrappers = @import("Wrappers.zig");
 
 /// Every lint's findings over `sources`, limited to `scope` when it is set, sorted by lint and then by key.
 pub fn run(arena: Allocator, sources: *const Sources, items: *const Items.Items, scope: ?Sources.NodeId) Allocator.Error![]Diagnostic.Diagnostic {
-    _ = sources;
-    _ = items;
-    _ = scope;
-    return sorted(arena, &.{});
+    const refs = try References.collect(arena, sources, items);
+    var wrappers = try Wrappers.find(arena, items, sources, refs);
+    const graph = try Graph.build(arena, items, refs, &wrappers);
+    var found: std.ArrayList(Diagnostic.Diagnostic) = .empty;
+    try found.appendSlice(arena, try ModuleCycle.check(arena, sources, items, refs, scope));
+    try found.appendSlice(arena, try Tangle.check(arena, sources, items, refs, &graph, scope));
+    return sorted(arena, found.items);
 }
 
 /// A copy of `found` in the order reports and the allow file use: by lint, then by key.
