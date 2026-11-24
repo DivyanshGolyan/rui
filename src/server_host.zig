@@ -1357,154 +1357,132 @@ test "required Bash observations publish while optional stderr custody is held" 
     }
 }
 
-test "effect launch gate rechecks every Host phase" {
+fn tempStorePath(tmp: *std.testing.TmpDir, out: []u8) ![]const u8 {
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    return std.fmt.bufPrint(out, "{s}/store", .{root});
+}
+
+test "SH-124 Host phases only move forward and the phase readers follow them" {
+    for (std.enums.values(Phase)) |start| {
+        for (std.enums.values(Phase)) |target| {
+            errdefer std.debug.print("phases: {t} then {t}\n", .{ start, target });
+            var lifecycle = Lifecycle.init(std.testing.io, undefined, false, null);
+            try std.testing.expectEqual(Phase.open, lifecycle.advance(start));
+            try std.testing.expectEqual(start, lifecycle.advance(target));
+            const later = if (@backingInt(target) > @backingInt(start)) target else start;
+            // Together the three readers name the phase: open alone launches, stopping alone stops,
+            // and ending or stopping ends execution.
+            try std.testing.expectEqual(later == .open, lifecycle.launchAllowed());
+            try std.testing.expectEqual(later == .stopping, lifecycle.stopping());
+            try std.testing.expectEqual(later == .ending or later == .stopping, lifecycle.executionEnding());
+        }
+    }
+}
+
+test "SH-125 an effect launch runs only while open, is refused in every other phase, and releases its lock after a failed launch" {
     const Launch = struct {
         fn run(calls: *usize) !void {
             calls.* += 1;
         }
-    };
-    for (std.enums.values(Phase)) |phase| {
-        var host = Host{
-            .io = std.testing.io,
-            .allocator = std.testing.allocator,
-            .lease = undefined,
-            .store = undefined,
-        };
-        var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-        host.lifecycle = &host_lifecycle;
-        try std.testing.expect(host.lifecycle.launchAllowed());
-        _ = host.lifecycle.advance(phase);
-        var calls: usize = 0;
-        if (phase == .open) {
-            try host.lifecycle.withEffectLaunch(&calls, Launch.run);
-            try std.testing.expectEqual(@as(usize, 1), calls);
-        } else {
-            try std.testing.expectError(error.HostDispatchSuppressed, host.lifecycle.withEffectLaunch(&calls, Launch.run));
-            try std.testing.expectEqual(@as(usize, 0), calls);
-        }
-    }
-}
 
-test "Host phases only move forward" {
-    for (std.enums.values(Phase)) |start| {
-        for (std.enums.values(Phase)) |target| {
-            var host = Host{
-                .io = std.testing.io,
-                .allocator = std.testing.allocator,
-                .lease = undefined,
-                .store = undefined,
-            };
-            var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-            host.lifecycle = &host_lifecycle;
-            try std.testing.expectEqual(Phase.open, host.lifecycle.advance(start));
-            try std.testing.expectEqual(start, host.lifecycle.advance(target));
-            const later = if (@backingInt(target) > @backingInt(start)) target else start;
-            try std.testing.expectEqual(later, host.lifecycle.phase.load(.acquire));
-            try std.testing.expectEqual(later == .open, host.lifecycle.launchAllowed());
-            try std.testing.expectEqual(later == .stopping, host.lifecycle.stopping());
-            try std.testing.expectEqual(later == .ending or later == .stopping, host.lifecycle.executionEnding());
-        }
-    }
-}
-
-test "effect launch gate releases its mutex after native failure" {
-    var host = Host{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .lease = undefined,
-        .store = undefined,
-    };
-    var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-    host.lifecycle = &host_lifecycle;
-    const Launch = struct {
         fn fail(calls: *usize) !void {
             calls.* += 1;
             return error.TestLaunchFailure;
         }
-
-        fn succeed(calls: *usize) !void {
-            calls.* += 1;
-        }
     };
+    const rows = [_]struct { phase: Phase, runs: bool }{
+        .{ .phase = .open, .runs = true },
+        .{ .phase = .fenced, .runs = false },
+        .{ .phase = .ending, .runs = false },
+        .{ .phase = .stopping, .runs = false },
+    };
+    for (rows) |row| {
+        errdefer std.debug.print("phase: {t}\n", .{row.phase});
+        var lifecycle = Lifecycle.init(std.testing.io, undefined, false, null);
+        _ = lifecycle.advance(row.phase);
+        try std.testing.expectEqual(row.runs, lifecycle.launchAllowed());
+        var calls: usize = 0;
+        if (row.runs) {
+            try lifecycle.withEffectLaunch(&calls, Launch.run);
+        } else {
+            try std.testing.expectError(error.HostDispatchSuppressed, lifecycle.withEffectLaunch(&calls, Launch.run));
+        }
+        try std.testing.expectEqual(@as(usize, if (row.runs) 1 else 0), calls);
+    }
+    // A launch that fails still releases the launch lock for the next one.
+    var lifecycle = Lifecycle.init(std.testing.io, undefined, false, null);
     var calls: usize = 0;
-    try std.testing.expectError(error.TestLaunchFailure, host.lifecycle.withEffectLaunch(&calls, Launch.fail));
-    try host.lifecycle.withEffectLaunch(&calls, Launch.succeed);
+    try std.testing.expectError(error.TestLaunchFailure, lifecycle.withEffectLaunch(&calls, Launch.fail));
+    try lifecycle.withEffectLaunch(&calls, Launch.run);
     try std.testing.expectEqual(@as(usize, 2), calls);
 }
 
-test "an asked stop leaves the stop record only when it is what stops the Host, and the next start removes it" {
+test "SH-126 an asked stop leaves the stop record only when it is what stops the Host, and the next start removes it" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
+    const path = try tempStorePath(&tmp, &path_buffer);
     for (std.enums.values(Phase)) |before| {
         errdefer std.debug.print("phase before the ask: {t}\n", .{before});
         var lease = try platform.StoreLease.acquire(io, path);
         defer lease.release();
         try lease.prepareForServing(false);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
-        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
-        var host_lifecycle = Lifecycle.init(host.io, &lease, false, null);
-        host.lifecycle = &host_lifecycle;
-        _ = host.lifecycle.advance(before);
+        var lifecycle = Lifecycle.init(io, &lease, false, null);
+        _ = lifecycle.advance(before);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
+        // A stop asked while already stopping changes nothing.
         const stopped = before != .stopping;
-        try std.testing.expectEqual(stopped, host.lifecycle.stopAsked());
-        try std.testing.expect(host.lifecycle.stopping());
+        try std.testing.expectEqual(stopped, lifecycle.stopAsked());
+        try std.testing.expect(lifecycle.stopping());
         try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
-        try std.testing.expect(!host.lifecycle.stopAsked());
+        try std.testing.expect(!lifecycle.stopAsked());
         try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
         try lease.prepareForServing(false);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
     }
 }
 
-test "a draining stop holds new Turns, only tightens, and records how it ended" {
+test "SH-127 a draining stop holds new Turns, only tightens, outlives an operator release, and records how it ended" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
-    const host_drain_test = @import("host_drain.zig");
+    const path = try tempStorePath(&tmp, &path_buffer);
     // How the drain ends: the execution owner's judgement, or a plain stop first.
-    for ([_]?host_drain_test.Outcome{ .finished, .deadline, null }) |ending| {
+    for ([_]?host_drain.Outcome{ .finished, .deadline, null }) |ending| {
         errdefer std.debug.print("ending: {?t}\n", .{ending});
         var lease = try platform.StoreLease.acquire(io, path);
         defer lease.release();
         try lease.prepareForServing(false);
-        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
-        var host_lifecycle = Lifecycle.init(host.io, &lease, false, null);
-        host.lifecycle = &host_lifecycle;
-        try std.testing.expect(!host.lifecycle.turnsHeld());
-        const first = host.lifecycle.askStop(try .seconds(60));
+        var lifecycle = Lifecycle.init(io, &lease, false, null);
+        try std.testing.expect(!lifecycle.turnsHeld());
+        const first = lifecycle.askStop(try .seconds(60));
         try std.testing.expect(first == .drain and first.drain.changed);
-        try std.testing.expect(host.lifecycle.turnsHeld() and !host.lifecycle.stopping());
-        try std.testing.expectEqual(host_drain_test.Record.draining, platform.StoreLease.stopRecord(io, path));
+        try std.testing.expect(lifecycle.turnsHeld() and !lifecycle.stopping());
+        try std.testing.expectEqual(host_drain.Record.draining, platform.StoreLease.stopRecord(io, path));
         // A longer repeat leaves the deadline; a shorter one brings it in.
-        const longer = host.lifecycle.askStop(try .seconds(600));
-        try std.testing.expectEqual(host_drain_test.Ask{ .drain = .{ .until_ns = first.drain.until_ns, .changed = false } }, longer);
-        const shorter = host.lifecycle.askStop(try .seconds(1));
+        const longer = lifecycle.askStop(try .seconds(600));
+        try std.testing.expectEqual(host_drain.Ask{ .drain = .{ .until_ns = first.drain.until_ns, .changed = false } }, longer);
+        const shorter = lifecycle.askStop(try .seconds(1));
         try std.testing.expect(shorter == .drain and shorter.drain.changed and shorter.drain.until_ns < first.drain.until_ns);
-        try std.testing.expectEqual(shorter.drain.until_ns, host.lifecycle.drainUntil().?);
+        try std.testing.expectEqual(shorter.drain.until_ns, lifecycle.drainUntil().?);
         // The operator's release does not end a drain's hold.
-        host.lifecycle.setTurnsPaused(false);
-        try std.testing.expect(host.lifecycle.turnsHeld());
+        lifecycle.setTurnsPaused(false);
+        try std.testing.expect(lifecycle.turnsHeld());
         if (ending) |outcome| {
-            try std.testing.expect(host.lifecycle.finishDrain(outcome));
-            try std.testing.expectEqual(host_drain_test.Record.of(outcome), platform.StoreLease.stopRecord(io, path));
-            try std.testing.expect(!host.lifecycle.stopAsked());
+            try std.testing.expect(lifecycle.finishDrain(outcome));
+            try std.testing.expectEqual(host_drain.Record.of(outcome), platform.StoreLease.stopRecord(io, path));
+            try std.testing.expect(!lifecycle.stopAsked());
         } else {
-            try std.testing.expect(host.lifecycle.stopAsked());
-            try std.testing.expectEqual(host_drain_test.Record.superseded, platform.StoreLease.stopRecord(io, path));
-            try std.testing.expect(!host.lifecycle.finishDrain(.finished));
+            try std.testing.expect(lifecycle.stopAsked());
+            try std.testing.expectEqual(host_drain.Record.superseded, platform.StoreLease.stopRecord(io, path));
+            try std.testing.expect(!lifecycle.finishDrain(.finished));
         }
-        try std.testing.expect(host.lifecycle.stopping());
-        try std.testing.expectEqual(host_drain_test.Ask.already_stopping, host.lifecycle.askStop(try .seconds(60)));
+        try std.testing.expect(lifecycle.stopping());
+        try std.testing.expectEqual(host_drain.Ask.already_stopping, lifecycle.askStop(try .seconds(60)));
         try std.testing.expectEqual(platform.StoreLease.LastStop.asked, platform.StoreLease.lastStop(io, path));
     }
 }
