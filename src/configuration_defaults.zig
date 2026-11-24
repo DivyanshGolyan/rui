@@ -3,7 +3,7 @@ const input = @import("command_input.zig");
 const catalog = @import("model_catalog.zig");
 const capability = @import("model_capability.zig");
 const product = @import("product_defaults.zig");
-const Provider = @import("provider_name.zig").Provider;
+const connection = @import("connection.zig");
 
 const Choice = input.OptionalBounded(16);
 const Tokens = input.OptionalBounded(20);
@@ -32,13 +32,13 @@ fn creationPermission(requested: *const Choice) *const Choice {
     return if (requested.state == .omitted) &product_permission else requested;
 }
 
-pub fn compactionTrigger(facts: []const catalog.Entry, provider: Provider, model: []const u8) u64 {
+pub fn compactionTrigger(facts: []const catalog.Entry, provider: connection.Name, model: []const u8) u64 {
     const model_trigger = capability.contextWindow(facts, model) * product.compaction_trigger_percent / 100;
     const provider_trigger = for (product.provider_compaction_triggers) |entry| {
-        if (std.mem.eql(u8, entry.provider, @tagName(provider))) break entry.tokens;
+        if (std.mem.eql(u8, entry.provider, provider.slice())) break entry.tokens;
     } else model_trigger;
     const trigger = for (product.model_compaction_triggers) |entry| {
-        if (std.mem.eql(u8, entry.provider, @tagName(provider)) and std.mem.eql(u8, entry.model, model)) break entry.tokens;
+        if (std.mem.eql(u8, entry.provider, provider.slice()) and std.mem.eql(u8, entry.model, model)) break entry.tokens;
     } else provider_trigger;
     return @min(trigger, model_trigger);
 }
@@ -55,7 +55,7 @@ pub fn startEffort(facts: []const catalog.Entry, model: []const u8) ?catalog.Rea
 pub const Request = struct {
     creating: bool,
     parent: ?Parent = null,
-    provider: Provider,
+    provider: connection.Name,
     model: []const u8,
     can_read_images: bool,
     tools: *const input.ToolsField,
@@ -167,26 +167,30 @@ fn tokenField(state: input.FieldState, text: []const u8) Tokens {
     return value;
 }
 
+fn testName(comptime text: []const u8) connection.Name {
+    return connection.Name.parse(text).?;
+}
+
 test "CM-39 default compaction trigger" {
-    const cases = [_]struct { provider: Provider, model: []const u8, tokens: u64 }{
-        .{ .provider = .codex, .model = "gpt-6.1-sol", .tokens = 450000 },
-        .{ .provider = .codex, .model = "gpt-6.1-terra", .tokens = 450000 },
-        .{ .provider = .codex, .model = "gpt-6.2-sol", .tokens = 450000 },
-        .{ .provider = .codex, .model = "gpt-6.2-astra", .tokens = 244800 },
-        .{ .provider = .codex, .model = "gpt-6-sol", .tokens = 244800 },
-        .{ .provider = .codex, .model = "gpt-6.1-terra@eu", .tokens = 244800 },
-        .{ .provider = .codex, .model = "openai/gpt-6.1-terra", .tokens = 244800 },
-        .{ .provider = .codex, .model = "gpt-6.1-terra-extra", .tokens = 115200 },
-        .{ .provider = .codex, .model = "gpt-5.3-codex-spark", .tokens = 115200 },
-        .{ .provider = .codex, .model = "unlisted-model", .tokens = 115200 },
-        .{ .provider = .openai, .model = "gpt-6.1-terra", .tokens = 945000 },
-        .{ .provider = .openai, .model = "gpt-6.2-sol", .tokens = 945000 },
-        .{ .provider = .openai, .model = "gpt-5.3-codex-spark", .tokens = 115200 },
-        .{ .provider = .openai, .model = "unlisted-model", .tokens = 115200 },
+    const cases = [_]struct { provider: connection.Name, model: []const u8, tokens: u64 }{
+        .{ .provider = testName("codex"), .model = "gpt-6.1-sol", .tokens = 450000 },
+        .{ .provider = testName("codex"), .model = "gpt-6.1-terra", .tokens = 450000 },
+        .{ .provider = testName("codex"), .model = "gpt-6.2-sol", .tokens = 450000 },
+        .{ .provider = testName("codex"), .model = "gpt-6.2-astra", .tokens = 244800 },
+        .{ .provider = testName("codex"), .model = "gpt-6-sol", .tokens = 244800 },
+        .{ .provider = testName("codex"), .model = "gpt-6.1-terra@eu", .tokens = 244800 },
+        .{ .provider = testName("codex"), .model = "openai/gpt-6.1-terra", .tokens = 244800 },
+        .{ .provider = testName("codex"), .model = "gpt-6.1-terra-extra", .tokens = 115200 },
+        .{ .provider = testName("codex"), .model = "gpt-5.3-codex-spark", .tokens = 115200 },
+        .{ .provider = testName("codex"), .model = "unlisted-model", .tokens = 115200 },
+        .{ .provider = testName("openai"), .model = "gpt-6.1-terra", .tokens = 945000 },
+        .{ .provider = testName("openai"), .model = "gpt-6.2-sol", .tokens = 945000 },
+        .{ .provider = testName("openai"), .model = "gpt-5.3-codex-spark", .tokens = 115200 },
+        .{ .provider = testName("openai"), .model = "unlisted-model", .tokens = 115200 },
     };
     for (cases) |case| try std.testing.expectEqual(case.tokens, compactionTrigger(catalog.shipped, case.provider, case.model));
     const narrow = [_]catalog.Entry{.{ .id = "gpt-6.1-sol", .context_window = 1000, .efforts = .empty, .openai_listed = true }};
-    try std.testing.expectEqual(@as(u64, 900), compactionTrigger(&narrow, .codex, "gpt-6.1-sol"));
+    try std.testing.expectEqual(@as(u64, 900), compactionTrigger(&narrow, testName("codex"), "gpt-6.1-sol"));
 }
 
 fn creationFieldCases() !void {
@@ -195,7 +199,7 @@ fn creationFieldCases() !void {
         .{ .id = "kimi-k2.6", .effort = null, .compact = .{ "235929", "235929", "235929" } },
         .{ .id = "unlisted-model", .effort = "low", .compact = .{ "115200", "115200", "115200" } },
     };
-    const providers = [_]Provider{ .codex, .chatgpt, .openai };
+    const providers = [_]connection.Name{ testName("codex"), testName("chatgpt"), testName("openai") };
     const states = [_]input.FieldState{ .omitted, .value, .explicit_null };
     var count: usize = 0;
     for (models) |model| for (providers, 0..) |provider, provider_index| for ([_]bool{ false, true }) |has_parent| {
@@ -262,7 +266,7 @@ fn updateFieldCases() !void {
         const compact = tokenField(compact_state, "00042");
         const resolved = resolve(catalog.shipped, .{
             .creating = false,
-            .provider = .codex,
+            .provider = testName("codex"),
             .model = "gpt-6.1-sol",
             .can_read_images = false,
             .tools = &tools,
@@ -307,7 +311,7 @@ fn selectedModelCases() !void {
             const explicit = choice(.value, @tagName(effort));
             const resolved = resolve(catalog.shipped, .{
                 .creating = true,
-                .provider = .openai,
+                .provider = testName("openai"),
                 .model = row.id,
                 .can_read_images = false,
                 .tools = &tools,
@@ -372,9 +376,9 @@ test "ADM-29 configuration field wire grammar" {
 }
 
 test "parent creation uses inherited provider for omitted compaction regardless of saved provider binding" {
-    const bindings = [_]struct { saved_provider: Provider, saved_compact_at: u64 }{
-        .{ .saved_provider = .openai, .saved_compact_at = 945000 },
-        .{ .saved_provider = .codex, .saved_compact_at = 450000 },
+    const bindings = [_]struct { saved_provider: connection.Name, saved_compact_at: u64 }{
+        .{ .saved_provider = testName("openai"), .saved_compact_at = 945000 },
+        .{ .saved_provider = testName("codex"), .saved_compact_at = 450000 },
     };
     const omitted_tools: input.ToolsField = .{};
     const omitted_choice = choice(.omitted, "");
@@ -384,7 +388,7 @@ test "parent creation uses inherited provider for omitted compaction regardless 
         const resolved = resolve(catalog.shipped, .{
             .creating = true,
             .parent = .{ .tools = "bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search", .permission_mode = .bypass },
-            .provider = .codex,
+            .provider = testName("codex"),
             .model = "gpt-6.1-sol",
             .can_read_images = false,
             .tools = &omitted_tools,
@@ -410,7 +414,7 @@ fn preferenceCases() !void {
     for (0..catalog.shipped.len + 1) |index| {
         const row = if (index < catalog.shipped.len) &catalog.shipped[index] else null;
         const model = if (row) |r| r.id else "unlisted-model";
-        for (std.enums.values(Provider)) |provider| for (parents) |parent| for (states) |mode_state| for (states) |effort_state| {
+        for ([_]connection.Name{ testName("codex"), testName("chatgpt"), testName("openai") }) |provider| for (parents) |parent| for (states) |mode_state| for (states) |effort_state| {
             const mode = choice(mode_state, "ask");
             const effort = choice(effort_state, "high");
             const base: Request = .{ .creating = true, .parent = parent, .provider = provider, .model = model, .can_read_images = false, .tools = &tools, .loaded_tools = &tools, .permission_mode = &mode, .reasoning_effort = &effort, .compaction_trigger = &compact };
@@ -454,7 +458,7 @@ fn selectedPreferenceCases() !void {
     const compact = tokenField(.omitted, "");
     var selected = catalog.shipped[0];
     selected.id = "custom-model";
-    const request: Request = .{ .creating = true, .provider = .openai, .model = "custom-model", .can_read_images = false, .tools = &tools, .loaded_tools = &tools, .permission_mode = &omitted, .reasoning_effort = &omitted, .compaction_trigger = &compact, .preferences = .{ .reasoning_effort = "max" } };
+    const request: Request = .{ .creating = true, .provider = testName("openai"), .model = "custom-model", .can_read_images = false, .tools = &tools, .loaded_tools = &tools, .permission_mode = &omitted, .reasoning_effort = &omitted, .compaction_trigger = &compact, .preferences = .{ .reasoning_effort = "max" } };
     selected.efforts = .initMany(&.{ .low, .max });
     const accepted = resolve(&.{selected}, request);
     try std.testing.expectEqualStrings("max", accepted.reasoning_effort.value.slice());
@@ -494,7 +498,7 @@ fn toolProfileCases() !void {
             var request: Request = .{
                 .creating = true,
                 .parent = .{ .tools = if (parent_has_image) parent_image else parent_text, .permission_mode = .ask },
-                .provider = .codex,
+                .provider = testName("codex"),
                 .model = case.model,
                 .can_read_images = can_read,
                 .tools = &tools,

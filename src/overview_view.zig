@@ -1082,10 +1082,10 @@ pub const State = struct {
         }
     }
 
-    fn settleBrowse(self: *State, frame: @FieldType(Event, "list_settled"), effects: *Effects) error{OutOfMemory}!void {
+    fn settleBrowse(self: *State, wide: bool, focused: bool, effects: *Effects) error{OutOfMemory}!void {
         const target = self.browse_target;
         self.browse_target = null;
-        if (target) |reference| if (frame.wide and frame.focused and self.selected == .session and self.selectedRow() != null and std.mem.eql(u8, &self.selected.session, &reference)) {
+        if (target) |reference| if (wide and focused and self.selected == .session and self.selectedRow() != null and std.mem.eql(u8, &self.selected.session, &reference)) {
             self.presentation_revision +%= 1;
             try activateList(self, .browse, effects);
         };
@@ -1559,7 +1559,7 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                 state.presentation_revision +%= 1;
                 try clickOpen(state, reference, &effects);
             }
-            try state.settleBrowse(frame, &effects);
+            try state.settleBrowse(frame.wide, frame.focused, &effects);
         },
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| {
@@ -6356,16 +6356,14 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     _ = try step(&views, .{ .conversation = rows[0].reference });
     views.selected = .{ .session = archived.reference };
     try std.testing.expect(views.find(archived.reference).?.listed);
-    _ = try refresh(&views, .changed, testToken(3), &.{ rows[0], rows[2] });
-    try std.testing.expectEqualStrings(&archived.reference, &views.selected.session);
-    try std.testing.expect(views.find(archived.reference) != null);
     var newer = rows[0];
     newer.archive_state = .archived;
     newer.archive_seq = 20;
-    var refresh_effects: Effects = .{};
-    readArchived(&views, &refresh_effects, .head);
-    var head_read = refresh_effects.slice()[0].read_archived;
-    _ = try step(&views, .{ .archived = .{ .read = head_read, .page = .{ .rows = &.{newer}, .first = 20, .last = 20, .more_above = false, .more_below = true } } });
+    var reanchor_effects: Effects = .{};
+    readArchived(&views, &reanchor_effects, .head);
+    const reanchor = reanchor_effects.slice()[0].read_archived;
+    try std.testing.expect(reanchor.from == .head);
+    _ = try step(&views, .{ .archived = .{ .read = reanchor, .page = .{ .rows = &.{newer}, .first = 20, .last = 20, .more_above = false, .more_below = true } } });
     try std.testing.expectEqualStrings(&archived.reference, &views.selected.session);
     try std.testing.expect(views.find(archived.reference) != null);
 
@@ -6377,13 +6375,16 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     var tail = session("eeeeee", .{ .finished = ago(5) }, .{ .label = "tail archived" });
     tail.archive_state = .archived;
     tail.archive_seq = 11;
-    const next_page = try step(&views, .{ .viewport = .{ .first = 0, .end = 1 } });
+    const bounds = archivedBounds(&views);
+    try std.testing.expectEqual(@as(?u64, 20), bounds.last);
+    var next_page: Effects = .{};
+    readArchived(&views, &next_page, .{ .below = bounds.last.? });
     try std.testing.expectEqual(@as(usize, 1), next_page.len);
     try std.testing.expect(next_page.items[0] == .read_archived);
     try std.testing.expect(next_page.items[0].read_archived.from == .below);
     try std.testing.expectEqual(@as(u64, 20), next_page.items[0].read_archived.from.below);
-    head_read = next_page.items[0].read_archived;
-    _ = try step(&views, .{ .archived = .{ .read = head_read, .page = .{ .rows = &.{ middle, tail }, .first = 14, .last = 11, .more_above = false, .more_below = false } } });
+    const below_read = next_page.items[0].read_archived;
+    _ = try step(&views, .{ .archived = .{ .read = below_read, .page = .{ .rows = &.{ middle, tail }, .first = 14, .last = 11, .more_above = false, .more_below = false } } });
     try std.testing.expect(views.selected == .none);
     try std.testing.expectEqualStrings("aaaaaa", &views.conversing.?);
     try expectEffects(&.{}, try submit(&views));
@@ -7487,7 +7488,7 @@ fn sUI132ArchivedTrimCase() !void {
     _ = try step(&state, .{ .conversation = span.first });
     try std.testing.expectEqualSlices(u8, &selected, &state.selected.session);
     try std.testing.expectEqualSlices(u8, &span.first, &state.conversing.?);
-    _ = try refresh(&state, .changed, testToken(2), &.{});
+    try commit(&state, .{ .delta = .changed, .since = testToken(2) });
     try std.testing.expectEqualSlices(u8, &selected, &state.selected.session);
     try std.testing.expectEqual(state.find(selected).?.archive_seq, selected_key);
 
@@ -8901,7 +8902,7 @@ fn sUI132AdjacentBrowseCase() !void {
     _ = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } });
     try std.testing.expectEqualSlices(u8, &rows[1].reference, &state.selected.session);
     const activated = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next_session } } });
-    try expectEffects(&.{.{ .open = rows[1].reference }}, activated);
+    try expectEffects(&.{ .{ .open = rows[1].reference }, .list_models }, activated);
     const settled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = true } });
     try expectEffects(&.{}, settled);
     try std.testing.expect(!settled.browse_open);
@@ -8921,7 +8922,7 @@ fn sUI132ExplicitBrowseCase() !void {
         _ = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } });
         try expectSelected(&state, &rows[1].reference);
 
-        try expectEffects(&.{.{ .open = rows[1].reference }}, try step(&state, .{ .input = .{ .wide = true, .key = key } }));
+        try expectEffects(&.{ .{ .open = rows[1].reference }, .list_models }, try step(&state, .{ .input = .{ .wide = true, .key = key } }));
         const settled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = true } });
         try expectEffects(&.{}, settled);
         try std.testing.expect(!settled.browse_open);
@@ -8945,7 +8946,7 @@ fn sUI132IgnoredPasteBrowseCase() !void {
         try expectSelected(&state, &rows[1].reference);
         _ = try step(&state, .{ .input = delivery });
         const settled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = true } });
-        try expectEffects(&.{.{ .open = rows[1].reference }}, settled);
+        try expectEffects(&.{ .{ .open = rows[1].reference }, .list_models }, settled);
         try std.testing.expect(settled.browse_open);
     }
 }

@@ -32,8 +32,8 @@ test "settings presets resolve MCP tools through the same tool set as configure"
             var digests: [records.len][32]u8 = undefined;
             for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
             const offered: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
-            var routes = protocol.routesAll(.unserved);
-            routes.openai = .endpoint;
+            var routes: protocol.Served = .{};
+            try routes.put(protocol.servedEntry(.openai, .endpoint));
             for ([_]bool{ false, true }) |available| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();

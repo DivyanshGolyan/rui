@@ -71,6 +71,78 @@ pub const TurnStateKey = struct {
     epoch: u64,
 };
 
+pub fn AllowanceField(comptime T: type) type {
+    return union(enum) {
+        missing,
+        invalid,
+        value: T,
+
+        fn add(self: *@This(), value: ?T) void {
+            const parsed = value orelse {
+                self.* = .invalid;
+                return;
+            };
+            switch (self.*) {
+                .missing => self.* = .{ .value = parsed },
+                .invalid => {},
+                .value => |previous| if (previous != parsed) {
+                    self.* = .invalid;
+                },
+            }
+        }
+    };
+}
+
+pub const AllowanceWindow = struct {
+    used: AllowanceField(f64) = .missing,
+    minutes: AllowanceField(u64) = .missing,
+    reset_at: AllowanceField(u64) = .missing,
+};
+
+pub const AllowanceObservation = struct {
+    binding: attempt.AttemptBinding,
+    provider: protocol.Provider,
+    status: u16,
+    observed_at: i64,
+    primary: AllowanceWindow = .{},
+    secondary: AllowanceWindow = .{},
+
+    fn field(self: *AllowanceObservation, names: *const codec_abi.ObservedHeaders, name: []const u8, value: []const u8) void {
+        const fields = .{
+            .{ names.primary_used, &self.primary.used },
+            .{ names.secondary_used, &self.secondary.used },
+        };
+        inline for (fields) |entry| {
+            if (entry[0].len != 0 and std.mem.eql(u8, name, entry[0])) {
+                const number = std.fmt.parseFloat(f64, value) catch {
+                    entry[1].add(null);
+                    return;
+                };
+                entry[1].add(if (std.math.isFinite(number) and number >= 0) number else null);
+                return;
+            }
+        }
+        const integers = .{
+            .{ names.primary_minutes, &self.primary.minutes },
+            .{ names.primary_reset_at, &self.primary.reset_at },
+            .{ names.secondary_minutes, &self.secondary.minutes },
+            .{ names.secondary_reset_at, &self.secondary.reset_at },
+        };
+        inline for (integers) |entry| {
+            if (entry[0].len != 0 and std.mem.eql(u8, name, entry[0])) {
+                const number = std.fmt.parseUnsigned(u64, value, 10) catch {
+                    entry[1].add(null);
+                    return;
+                };
+                entry[1].add(if (number > 0) number else null);
+                return;
+            }
+        }
+    }
+};
+
+pub const AllowanceSource = struct { binding: attempt.AttemptBinding, provider: protocol.Provider };
+
 /// The Reactor-wide observation. Header names belong to each Transfer's codec (its manifest).
 pub const HeaderObservation = struct {
     turn_state: ?TurnStateSink = null,
@@ -447,6 +519,16 @@ pub const Reactor = struct {
                         return .refuse;
                     };
                 }
+                if (head.kind == .final and transfer.allowance == null) if (transfer.allowance_source) |source| {
+                    var snapshot: AllowanceObservation = .{
+                        .binding = source.binding,
+                        .provider = source.provider,
+                        .status = head.status,
+                        .observed_at = now_seconds,
+                    };
+                    for (head.fields) |field| snapshot.field(transfer.observe, field.name, field.value);
+                    transfer.allowance = snapshot;
+                };
                 return .accept;
             },
             .body => |length| {
@@ -676,6 +758,8 @@ pub const Transfer = struct {
     response_owned: bool = true,
     headers: HeaderContext,
     credential: ?*SharedCredential,
+    allowance_source: ?AllowanceSource = null,
+    allowance: ?AllowanceObservation = null,
 
     pub const StartOptions = struct {
         fields: []const h2.Field = &.{},
@@ -684,6 +768,7 @@ pub const Transfer = struct {
         faults: Faults = .{},
         timing: ?*AttemptTiming = null,
         response_workspace_bytes: usize = 0,
+        observe_allowance: bool = false,
     };
 
     const RetainedRequest = struct {
@@ -728,6 +813,10 @@ pub const Transfer = struct {
             .headers = .{},
             .credential = options.credential,
             .timing = options.timing,
+            .allowance_source = if (options.observe_allowance and (request.provider == .codex or request.provider == .chatgpt))
+                .{ .binding = binding, .provider = request.provider }
+            else
+                null,
         };
         errdefer {
             self.response.deinit(reactor.io, reactor.budget);
@@ -967,9 +1056,12 @@ test "a Transfer's credential use ends at its first response head, once" {
     var reactor: Reactor = undefined;
     reactor.io = std.testing.io;
     reactor.observation = .{};
+    reactor.listings = .initFill(null);
     reactor.credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     var transfer: Transfer = undefined;
     transfer.reactor = &reactor;
+    transfer.allowance_source = null;
+    transfer.allowance = null;
     var timing: AttemptTiming = .{};
     transfer.timing = &timing;
     transfer.headers = .{};
@@ -1203,6 +1295,8 @@ test "model timings start at handoff and capture only the first HTTP response ev
     var transfer: Transfer = undefined;
     transfer.stream = .idle;
     transfer.reactor = &reactor;
+    transfer.allowance_source = null;
+    transfer.allowance = null;
     var timing: AttemptTiming = .{};
     transfer.timing = &timing;
     transfer.headers = .{};
@@ -1361,4 +1455,194 @@ test "response continuation reservation rejects a mismatched semantic body lengt
     try transfer.response.seal(std.testing.io, false, 3);
     try std.testing.expectEqual(@as(u64, 3), transfer.response.length);
     try std.testing.expectEqual(@as(u64, 128), transfer.response.charged);
+}
+
+test "CM-50 allowance final head stays bound to its issued attempt" {
+    var reactor: Reactor = undefined;
+    reactor.io = std.testing.io;
+    reactor.observation = .{};
+    reactor.listings = .initFill(null);
+    reactor.credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    var a: Transfer = undefined;
+    var b: Transfer = undefined;
+    for ([_]*Transfer{ &a, &b }) |transfer| {
+        transfer.reactor = &reactor;
+        transfer.timing = null;
+        transfer.headers = .{};
+        transfer.credential = null;
+        transfer.observe = &codecs.manifest(.@"openai-responses/2").observe;
+        transfer.allowance = null;
+    }
+    const other_names: codec_abi.ObservedHeaders = .{ .primary_used = "example-usage" };
+    b.observe = &other_names;
+    var issued: attempt.AttemptBinding = .{ .turn_id = 1, .operation_id = 11, .attempt_ordinal = 1 };
+    a.allowance_source = .{ .binding = issued, .provider = .codex };
+    issued.operation_id = 99;
+    b.allowance_source = .{ .binding = .{ .turn_id = 2, .operation_id = 22, .attempt_ordinal = 2 }, .provider = .chatgpt };
+    const fields = [_]h2.Field{
+        .{ .name = "x-codex-primary-used-percent", .value = "25.5" },
+        .{ .name = "x-codex-primary-window-minutes", .value = "300" },
+        .{ .name = "x-codex-primary-reset-at", .value = "1700000000" },
+        .{ .name = "x-codex-secondary-used-percent", .value = "101" },
+        .{ .name = "x-codex-secondary-window-minutes", .value = "bad" },
+        .{ .name = "x-codex-secondary-reset-at", .value = "7" },
+        .{ .name = "x-codex-secondary-reset-at", .value = "8" },
+        .{ .name = "unrelated", .value = "private" },
+    };
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&a.stream, .{ .head = .{ .kind = .interim, .status = 100, .fields = &fields } }));
+    try std.testing.expect(a.allowance == null);
+    const other_fields = [_]h2.Field{ .{ .name = "x-codex-primary-used-percent", .value = "99" }, .{ .name = "example-usage", .value = "12" } };
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&b.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &other_fields } }));
+    try std.testing.expectEqual(@as(f64, 12), b.allowance.?.primary.used.value);
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&a.stream, .{ .head = .{ .kind = .final, .status = 429, .fields = &fields } }));
+    try std.testing.expectEqual(@as(u64, 11), a.allowance.?.binding.operation_id);
+    try std.testing.expectEqual(protocol.Provider.codex, a.allowance.?.provider);
+    try std.testing.expectEqual(@as(u64, 22), b.allowance.?.binding.operation_id);
+    try std.testing.expectEqual(protocol.Provider.chatgpt, b.allowance.?.provider);
+    try std.testing.expectEqual(@as(f64, 25.5), a.allowance.?.primary.used.value);
+    try std.testing.expectEqual(@as(u64, 300), a.allowance.?.primary.minutes.value);
+    try std.testing.expectEqual(@as(f64, 101), a.allowance.?.secondary.used.value);
+    try std.testing.expect(a.allowance.?.secondary.minutes == .invalid);
+    try std.testing.expect(a.allowance.?.secondary.reset_at == .invalid);
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&a.stream, .{ .head = .{ .kind = .trailers, .status = 0, .fields = &.{} } }));
+    try std.testing.expectEqual(@as(u16, 429), a.allowance.?.status);
+    const original_time = a.allowance.?.observed_at;
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&a.stream, .{ .head = .{ .kind = .final, .status = 201, .fields = &.{} } }));
+    try std.testing.expectEqual(@as(u16, 429), a.allowance.?.status);
+    try std.testing.expectEqual(original_time, a.allowance.?.observed_at);
+    try std.testing.expectEqual(@as(f64, 25.5), a.allowance.?.primary.used.value);
+    a.allowance_source = null;
+    a.allowance = null;
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&a.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &fields } }));
+    try std.testing.expect(a.allowance == null);
+}
+
+test "CM-51 allowance numeric fields reject invalid and conflicting values without refusing" {
+    var reactor: Reactor = undefined;
+    reactor.io = std.testing.io;
+    reactor.observation = .{};
+    reactor.listings = .initFill(null);
+    reactor.credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    var transfer: Transfer = undefined;
+    transfer.reactor = &reactor;
+    transfer.timing = null;
+    transfer.headers = .{};
+    transfer.credential = null;
+    transfer.observe = &codecs.manifest(.@"openai-responses/2").observe;
+    transfer.allowance = null;
+    transfer.allowance_source = .{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 }, .provider = .codex };
+    const fields = [_]h2.Field{
+        .{ .name = "x-codex-primary-used-percent", .value = "NaN" },
+        .{ .name = "x-codex-primary-used-percent", .value = "4" },
+        .{ .name = "x-codex-primary-window-minutes", .value = "0" },
+        .{ .name = "x-codex-primary-reset-at", .value = "-1" },
+        .{ .name = "x-codex-secondary-used-percent", .value = "3" },
+        .{ .name = "x-codex-secondary-used-percent", .value = "3" },
+    };
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&transfer.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &fields } }));
+    const observed = transfer.allowance.?;
+    try std.testing.expect(observed.primary.used == .invalid and observed.primary.minutes == .invalid and observed.primary.reset_at == .invalid);
+    try std.testing.expectEqual(@as(f64, 3), observed.secondary.used.value);
+    try std.testing.expect(observed.secondary.minutes == .missing);
+}
+
+test "CM-52 allowance Transfer start freezes native attempt and defaults off" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 4096 };
+    var reactor: Reactor = undefined;
+    try reactor.initForTesting(std.testing.allocator, io, .{
+        .endpoints = .init(.{
+            .codex = "http://127.0.0.1:1/codex",
+            .chatgpt = "http://127.0.0.1:1/chatgpt",
+            .openai = "http://127.0.0.1:1/openai",
+        }),
+        .capacity = 1,
+        .inactivity_seconds = 1,
+        .scratch_path = root,
+        .budget = budget,
+    });
+    defer reactor.deinit();
+    const cases = [_]struct { served: protocol.Provider, enabled: bool, expected: bool }{
+        .{ .served = .codex, .enabled = true, .expected = true },
+        .{ .served = .chatgpt, .enabled = true, .expected = true },
+        .{ .served = .openai, .enabled = true, .expected = false },
+        .{ .served = .codex, .enabled = false, .expected = false },
+    };
+    for (cases, 0..) |case, index| {
+        const file = try tmp.dir.createFile(io, "request", .{ .read = true });
+        try file.writeStreamingAll(io, "{}");
+        try std.testing.expect(budget.charge(2));
+        var request: PreparedRequest = .{
+            .file = file,
+            .length = 2,
+            .charged = 2,
+            .structured_output = false,
+            .provider = case.served,
+            .codec = .@"openai-responses/1",
+            .headers = .{ .count = 0 },
+        };
+        var binding: attempt.AttemptBinding = .{ .turn_id = 1, .operation_id = @intCast(index + 1), .attempt_ordinal = 1 };
+        var transfer: Transfer = undefined;
+        var retained: ?named_scratch.Owner = null;
+        const options: Transfer.StartOptions = if (case.enabled) .{ .observe_allowance = true } else .{};
+        try transfer.start(&reactor, &request, binding, options, &retained);
+        defer transfer.deinit();
+        request.provider = .openai;
+        binding.operation_id = 999;
+        const fields = [_]h2.Field{.{ .name = "x-codex-primary-used-percent", .value = "14" }};
+        try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&transfer.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &fields } }));
+        try std.testing.expectEqual(case.expected, transfer.allowance != null);
+        if (transfer.allowance) |snapshot| {
+            try std.testing.expectEqual(case.served, snapshot.provider);
+            try std.testing.expectEqual(@as(u64, @intCast(index + 1)), snapshot.binding.operation_id);
+            try std.testing.expectEqual(@as(f64, 14), snapshot.primary.used.value);
+        }
+    }
+}
+
+test "CM-53 allowance callback handles extreme and sparse final heads" {
+    var reactor: Reactor = undefined;
+    reactor.io = std.testing.io;
+    reactor.observation = .{};
+    reactor.listings = .initFill(null);
+    reactor.credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    const cases = [_]struct { value: []const u8, invalid: bool }{
+        .{ .value = "-1", .invalid = true },
+        .{ .value = "inf", .invalid = true },
+        .{ .value = "1e9999", .invalid = true },
+        .{ .value = "1.7976931348623157e308", .invalid = false },
+    };
+    for (cases) |case| {
+        var transfer: Transfer = undefined;
+        transfer.reactor = &reactor;
+        transfer.timing = null;
+        transfer.headers = .{};
+        transfer.credential = null;
+        transfer.observe = &codecs.manifest(.@"openai-responses/2").observe;
+        transfer.allowance = null;
+        transfer.allowance_source = .{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 }, .provider = .codex };
+        const fields = [_]h2.Field{.{ .name = "x-codex-primary-used-percent", .value = case.value }};
+        try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&transfer.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &fields } }));
+        try std.testing.expectEqual(case.invalid, transfer.allowance.?.primary.used == .invalid);
+        if (!case.invalid) try std.testing.expectEqual(std.math.floatMax(f64), transfer.allowance.?.primary.used.value);
+    }
+    var sparse: Transfer = undefined;
+    sparse.reactor = &reactor;
+    sparse.timing = null;
+    sparse.headers = .{};
+    sparse.credential = null;
+    sparse.observe = &codecs.manifest(.@"openai-responses/2").observe;
+    sparse.allowance = null;
+    sparse.allowance_source = .{ .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 }, .provider = .chatgpt };
+    const reset = [_]h2.Field{.{ .name = "x-codex-primary-reset-at", .value = "42" }};
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&sparse.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &reset } }));
+    try std.testing.expect(sparse.allowance.?.primary.used == .missing);
+    try std.testing.expect(sparse.allowance.?.primary.minutes == .missing);
+    try std.testing.expectEqual(@as(u64, 42), sparse.allowance.?.primary.reset_at.value);
+    try std.testing.expect(sparse.allowance.?.secondary.used == .missing);
 }

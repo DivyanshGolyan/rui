@@ -39,6 +39,10 @@ pub const Name = struct {
     pub fn slice(self: *const Name) []const u8 {
         return self.bytes[0..self.len];
     }
+
+    pub fn eql(self: *const Name, other: Name) bool {
+        return std.mem.eql(u8, self.slice(), other.slice());
+    }
 };
 
 /// A wire-format family: the shape of request and response bytes, without a

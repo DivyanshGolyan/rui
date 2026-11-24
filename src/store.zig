@@ -29,6 +29,7 @@ pub const mysqlMigrationFrom = store_schema.mysqlMigrationFrom;
 pub const ActivityTool = reads_domain.ActivityTool;
 pub const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
 pub const ActionAttemptBinding = action_domain.ActionAttemptBinding;
+pub const SupersedingControl = action_domain.SupersedingControl;
 pub const AgentDelivery = command_domain.AgentDelivery;
 pub const AgentStart = command_domain.AgentStart;
 pub const CoreActionInput = action_domain.CoreActionInput;

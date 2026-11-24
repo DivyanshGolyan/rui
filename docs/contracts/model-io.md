@@ -615,6 +615,12 @@ Native same-model qualification exists for exact `gpt-6-luna` on Linux x86-64 an
 
 The V1 model adapter owns Codex request grammar, output interpretation, managed-route headers and authentication policy; the shared transport owns the HTTP/2 Client, sealed bytes and caller-selected response-header observations.
 Core stores no credentials; Host schedules acquisition and holds an opaque credential lease through the final launch check without interpreting its contents.
+The hidden foreground Host option `--observe-allowance` defaults off and captures only the six numeric primary and secondary used-percent, window-minutes and reset-at headers for managed signed-in native responses.
+The Transfer codec manifest names the observed headers. The existing native-provider gate is transitional diagnostic scope, not connection or account identity.
+A Transfer freezes its issued Attempt and provider, then captures one complete final head with its observation time; interim heads and trailers do not change it.
+Missing, malformed or conflicting fields remain unavailable without refusing the model stream.
+The execution owner emits only bounded numeric fields through optional stderr after completion, with account identity unconfirmed and prior diagnostic loss marked; absent or dropped output is unavailable.
+The observation neither establishes a current account nor proves provider usage availability.
 Resume uses persisted provider binding, without fixture/provider substitution.
 Refresh preserves account binding; decoded trusted-TLS-peer token claims are routing metadata, not independently verified identity.
 Encode provider strings with one bounded JSON encoder including all required control escapes and worst-case expansion.
@@ -764,6 +770,10 @@ The encrypted item is provider-produced compressed context, not a promise of ver
 
 ## Required evidence
 
+
+#### Allowance observer
+
+`test-native -Dtest-filter=allowance` covers the captured final head, field validity, frozen source, default-off activation and bounded rendering. The fixture is synthetic; actual provider header availability and stderr delivery are unverified.
 
 ### Asynchronous peer collaboration
 

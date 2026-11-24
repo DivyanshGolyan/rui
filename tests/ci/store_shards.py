@@ -225,6 +225,10 @@ def report(result):
     skipped = sum(state == "SKIP" for _, _, state in result.tests)
     print(f"{result.label}: {passed} passed, {skipped} skipped, {result.seconds:.3f}s; exit {result.status}", flush=True)
     if not result.status:
+        observed = sorted(((name, seconds) for name, seconds, state in result.tests if state == "OK"),
+                          key=lambda item: (-item[1], item[0]))[:5]
+        for name, seconds in observed:
+            print(f"{result.label} slow test: {seconds:.3f}s observed; {name}", flush=True)
         return
     # Emit the same per-test envelope as Zig's server runner. Each envelope owns
     # its actual binary command, even inside check.sh or another Python process.
