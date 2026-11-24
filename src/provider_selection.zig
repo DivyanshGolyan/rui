@@ -46,15 +46,13 @@ pub const Readinesses = struct {
     }
 };
 
-/// The names a Store serves. Membership and readiness are separate facts: a live Host that answers decides
-/// which names exist, since it is the one that executes; each member's readiness is its credential source's
-/// readiness, read from `known` (built-in sign-in status and key connections). A member with no known
-/// readiness reads missing. With no live Host answering, `known` stands.
-pub fn servedAuthority(live: ?[]const connection.Name, known: Readinesses) Readinesses {
-    const names = live orelse return known;
-    var authority: Readinesses = .{};
-    for (names) |name| authority.set(name, known.get(name));
-    return authority;
+/// Whether an explicit name is one the client cannot judge from its local readiness (the built-ins and the
+/// Store's saved connections). Such a name passes through to the Host, which is the authority on what it
+/// serves and refuses an unserved name by name; the client never asks a live Host to pre-validate it.
+pub fn passesThrough(explicit: ?[]const u8, known: *const Readinesses) bool {
+    const name = explicit orelse return false;
+    for (known.names()) |served| if (std.mem.eql(u8, served.slice(), name)) return false;
+    return true;
 }
 
 pub const Capability = struct {
@@ -165,7 +163,7 @@ fn built_ins_first() connection.Name {
     return provider_route.built_in_names[0];
 }
 
-test "CM-59 served authority: a live Host decides membership, and each member keeps its own credential readiness" {
+test "CM-59 local served names resolve at their own readiness, and a name the client does not know passes through" {
     const model_capability = @import("model_capability.zig");
     const built_ins = provider_route.built_in_names;
     var text: [connection.max_served][16]u8 = undefined;
@@ -173,27 +171,22 @@ test "CM-59 served authority: a live Host decides membership, and each member ke
     for (&pool, 0..) |*name, index| {
         name.* = if (index < built_ins.len) built_ins[index] else connection.Name.parse(try std.fmt.bufPrint(&text[index], "conn-{d}", .{index})).?;
     }
+    const unknown = connection.Name.parse("absent").?;
+    // One name, the built-ins only, and the full served set, at every credential state.
     const counts = [_]usize{ 1, built_ins.len, connection.max_served };
-    // The live Host's member count: none answering, none, one, or all of the served names.
-    for (counts) |count| for ([_]?usize{ null, 0, 1, count }) |live_len| for (std.enums.values(Readiness)) |state| {
+    for (counts) |count| for (std.enums.values(Readiness)) |state| {
         var known: Readinesses = .{};
         for (pool[0..count]) |name| known.set(name, state);
-        const live: ?[]const connection.Name = if (live_len) |len| pool[0..len] else null;
-        const readiness = servedAuthority(live, known);
-        var caps = model_capability.capabilities(&readiness);
-        for (pool[0..count], 0..) |name, index| {
-            const member = live == null or index < live_len.?;
-            const result = resolve(caps.slice(), name.slice(), null, null, null);
-            if (member) {
-                // A member is selected at its own readiness, never forced to configured by the authority.
-                try std.testing.expectEqual(state, readiness.get(name));
-                try std.testing.expectEqual(state, (try result).selected.readiness);
-            } else {
-                // A name the live Host does not serve is refused by name, even when the Store knows it.
-                try std.testing.expectEqual(Readiness.missing, readiness.get(name));
-                try std.testing.expectError(error.UnsupportedSelectionProvider, result);
-            }
+        try std.testing.expectEqual(count, known.names().len);
+        var caps = model_capability.capabilities(&known);
+        for (pool[0..count]) |name| {
+            // A known name is selected at its own readiness, never forced to configured.
+            try std.testing.expect(!passesThrough(name.slice(), &known));
+            try std.testing.expectEqual(state, (try resolve(caps.slice(), name.slice(), null, null, null)).selected.readiness);
         }
-        if (live) |names| try std.testing.expectEqual(names.len, readiness.names().len);
+        // A name the client does not know passes through, and resolve refuses it by name rather than choosing it.
+        try std.testing.expect(passesThrough(unknown.slice(), &known));
+        try std.testing.expectError(error.UnsupportedSelectionProvider, resolve(caps.slice(), unknown.slice(), null, null, null));
+        try std.testing.expect(!passesThrough(null, &known));
     };
 }

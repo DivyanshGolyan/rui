@@ -2007,9 +2007,11 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const destination = try snapshot.destination(home, &fallback);
     try preflightNewSession(init.io, destination.path, destination.saved);
-    var usable = selectableReadiness(init, destination.path);
+    const served = storeReadiness(init, destination.path, localReadiness(init)).readiness;
+    var usable = served;
+    for (served.names()) |name| usable.set(name, .configured);
     const selected = try snapshot.resolve(&usable);
-    var readiness = servedReadiness(init, destination.path);
+    var readiness = served;
     entry.binding = try snapshot.resolve(&readiness);
     if (selected != null and entry.binding != null) {
         if (intent.model == null and std.mem.eql(u8, entry.binding.?.provider.slice(), "openai")) entry.binding = null;
@@ -2080,34 +2082,15 @@ fn copiedKeySource(init: std.process.Init, source: @FieldType(host_start.Connect
     };
 }
 
-/// The readiness of the names a Store serves. A live Host that answers is the authority, since it executes the
-/// requests; with none answering, the Store's saved readiness stands. See provider_selection.servedAuthority.
-fn servedReadiness(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
-    const saved = storeReadiness(init, store, localReadiness(init)).readiness;
-    switch (client.hostStatus(init.io, store)) {
-        .ready => |ready| {
-            var live: [provider_route.max_served]@import("connection.zig").Name = undefined;
-            var count: usize = 0;
-            for (ready.capabilities.connections.slice()) |fact| {
-                if (fact.route == .unserved) continue;
-                live[count] = fact.name;
-                count += 1;
-            }
-            return provider_selection.servedAuthority(live[0..count], saved);
-        },
-        else => return provider_selection.servedAuthority(null, saved),
-    }
-}
-
-/// The served names an unprompted door may select: every served name is usable.
+/// The served names an unprompted door may select: the Store's local readiness, every served name usable.
 fn selectableReadiness(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
-    var usable = servedReadiness(init, store);
+    var usable = storeReadiness(init, store, localReadiness(init)).readiness;
     for (usable.names()) |name| usable.set(name, .configured);
     return usable;
 }
 
 fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
-    return servedReadiness(init, store);
+    return storeReadiness(init, store, localReadiness(init)).readiness;
 }
 
 fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding: new_session_selection.Binding, readiness: *const provider_selection.Readinesses, assignments: []const []const u8, ops: host_start.Ops, result: *HostLaunchResult) void {
@@ -2450,9 +2433,13 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &store_buffer);
             var usable = selectableReadiness(init, store);
-            binding = try snapshot.resolveUnprompted(&usable);
-            input.model = .{ .present = true, .value = binding.model.slice() };
-            if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
+            // A name the local readiness does not know passes through unchanged: the Host refuses it by name if it is unserved.
+            const explicit: ?[]const u8 = if (input.provider.present) input.provider.value else null;
+            if (!provider_selection.passesThrough(explicit, &usable)) {
+                binding = try snapshot.resolveUnprompted(&usable);
+                input.model = .{ .present = true, .value = binding.model.slice() };
+                if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
+            }
         }
         input.applySavedCreation(saved_effort, snapshot.defaults.permission_mode);
         if (!input.parent.present and !input.workspace.present) {
