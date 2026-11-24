@@ -15,7 +15,7 @@ import time
 from urllib.parse import quote
 
 import host_process
-from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, is_peer_disconnect, start_ready_process, stop_process, store_endpoint, wait_for
+from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, claimed_endpoint, dispose_all, is_peer_disconnect, start_ready_process, stop_process, store_endpoint, wait_for
 import os_semantics
 import live_engines
 import settings_fixture as frame_host
@@ -501,18 +501,17 @@ def main():
         finally:
             fifo_lock.unlink()
         stale = store_endpoint(store)
-        stale.parent.mkdir(mode=0o700, exist_ok=True)
-        with os_semantics.unix_stream() as endpoint:
-            endpoint.bind(str(stale))
-        assert status(store) == "unavailable", "stale socket claimed readiness"
-        stale.unlink()
+        with claimed_endpoint(stale, time.monotonic() + 10):
+            with os_semantics.unix_stream() as endpoint:
+                endpoint.bind(str(stale))
+            assert status(store) == "unavailable", "stale socket claimed readiness"
 
         with (store / "host.lock").open("w") as lock:
             assert os_semantics.try_lock(lock), "an unowned Store's lease was already held"
             assert status(store) == "owned_unavailable"
             assert cli_status(home, "--store", store)["status"] == "owned_unavailable"
             for partial in (b"", b"HTTP/1.1 200 OK\r\n", b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\n\r\n{"):
-                with os_semantics.unix_stream() as endpoint:
+                with claimed_endpoint(stale, time.monotonic() + 10), os_semantics.unix_stream() as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(1)
                     release = threading.Event()
@@ -535,8 +534,7 @@ def main():
                         release.set()
                         stalled.join(timeout=3)
                     assert not stalled.is_alive()
-                stale.unlink()
-            with os_semantics.unix_stream() as endpoint:
+            with claimed_endpoint(stale, time.monotonic() + 10), os_semantics.unix_stream() as endpoint:
                 endpoint.bind(str(stale))
                 endpoint.listen(1)
                 def incompatible_peer():
@@ -553,9 +551,8 @@ def main():
                 assert status(store) == "incompatible"
                 peer.join(timeout=3)
                 assert not peer.is_alive()
-            stale.unlink()
             if os_semantics.SOCKET_MODE_ENFORCED:
-                with os_semantics.unix_stream() as endpoint:
+                with claimed_endpoint(stale, time.monotonic() + 10), os_semantics.unix_stream() as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(1)
                     stale.chmod(0)
@@ -564,7 +561,6 @@ def main():
                         assert cli_status(home, "--store", store)["status"] == "access_failure"
                     finally:
                         stale.chmod(0o600)
-                stale.unlink()
             noncanonical = json.dumps({
                 "version": host_process.WIRE_VERSION, "type": "host_info", "store": str(store.resolve()),
                 "instance": "0" * 32, "active_capacity": "01", "started_at": "1792918800", "custody_occupied": "1",
@@ -603,7 +599,7 @@ def main():
                 *((f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n"
                    f"X-Rui-Wire-Version: {host_process.WIRE_VERSION}\r\n\r\n").encode() + body for body in ambiguous_bodies),
             ):
-                with os_semantics.unix_stream() as endpoint:
+                with claimed_endpoint(stale, time.monotonic() + 10), os_semantics.unix_stream() as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(2)
 
@@ -619,13 +615,12 @@ def main():
                     assert observed == "incompatible", (response, observed)
                     peer.join(timeout=3)
                     assert not peer.is_alive()
-                stale.unlink()
             for kind, code in (("busy", "ordinary_capacity_exhausted"),
                                ("host_unavailable", "dispatch_fenced")):
                 body = json.dumps({"version": host_process.WIRE_VERSION, "type": kind, "code": code}).encode()
                 response = (f"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
                             f"Content-Length: {len(body)}\r\nX-Rui-Wire-Version: {host_process.WIRE_VERSION}\r\n\r\n").encode() + body
-                with os_semantics.unix_stream() as endpoint:
+                with claimed_endpoint(stale, time.monotonic() + 10), os_semantics.unix_stream() as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(2)
 
@@ -640,7 +635,6 @@ def main():
                     assert status(store) == "owned_unavailable"
                     peer.join(timeout=3)
                     assert not peer.is_alive()
-                stale.unlink()
             os_semantics.release_lock(lock)
         assert status(store) == "unavailable"
 
