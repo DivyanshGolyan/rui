@@ -13,7 +13,7 @@ def row(frame, label):
 
 
 def cases():
-    """SUI-117 Active creator badges use the Active roster's ancestry across deltas."""
+    """SUI-121 Active creator badges use the Active roster's ancestry across deltas."""
     model = "gpt-6-luna"
     middle_task, leaf_task, sibling_task = "Middle branch", "Leaf behind middle", "Visible sibling"
 

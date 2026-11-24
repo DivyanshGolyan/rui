@@ -5543,19 +5543,30 @@ test "a click that names a Session gone from the list since it was drawn changes
     try expectSelected(&state, &selected);
 }
 
+test "SUI-130 Active roster walks commit one complete listing at a time" {
+    try activeRosterPaging();
+    try activeRosterDuplicates();
+    try activeRosterRetry();
+    try activeRosterFullFallback();
+}
+
 fn expectEachOnce(state: *const State, expected: []const []const u8) !void {
-    try std.testing.expectEqual(expected.len, state.rows.items.len);
-    try std.testing.expectEqual(expected.len, state.order.items.len);
-    try std.testing.expectEqual(expected.len, state.by_reference.items.len);
+    try std.testing.expectEqual(expected.len, Lines.count(state));
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
     for (expected) |ref| {
         var seen: usize = 0;
-        for (state.order.items) |at| seen += @intFromBool(std.mem.eql(u8, ref, &state.rows.items[at].reference));
+        for (0..Lines.count(state)) |at| {
+            const line = (try Lines.at(arena.allocator(), state, at, 80, .{}, 0)).?;
+            if (line.target) |target| if (target == .open and std.mem.eql(u8, ref, &target.open)) {
+                seen += 1;
+            };
+        }
         try std.testing.expectEqual(@as(usize, 1), seen);
-        try std.testing.expectEqualStrings(ref, &state.find(ref[0..6].*).?.reference);
     }
 }
 
-test "merging list pages keeps each Session once" {
+fn activeRosterPaging() !void {
     const a = session("aaaaaa", .{ .working = ago(10) }, .{ .label = "A" });
     const b = session("bbbbbb", .{ .working = ago(20) }, .{ .label = "B" });
     const c = session("cccccc", .{ .working = ago(30) }, .{ .label = "C" });
@@ -5592,7 +5603,7 @@ test "merging list pages keeps each Session once" {
     try std.testing.expect(state.find("aaaaaa".*).?.state == .finished);
 }
 
-test "a Session listed twice keeps its later row, whatever the order" {
+fn activeRosterDuplicates() !void {
     const a = session("aaaaaa", .{ .working = ago(10) }, .{ .label = "A" });
     const b = session("bbbbbb", .{ .working = ago(20) }, .{ .label = "B" });
     const c = session("cccccc", .{ .working = ago(30) }, .{ .label = "C" });
@@ -5642,7 +5653,7 @@ test "the overview says when it next needs a tick" {
     try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), state.wakeAt());
 }
 
-test "the overview lists once a second, one listing at a time" {
+fn activeRosterRetry() !void {
     var state = try testState();
     defer state.deinit();
     const start = test_now_s * 1000;
@@ -6889,7 +6900,7 @@ test "an archived delta refreshes the window from the Host and is never synthesi
     try expectWindowMatchesHost(&state, &newer);
 }
 
-test "a since walk answered full re-walks only live Sessions" {
+fn activeRosterFullFallback() !void {
     const live = session("aaaaaa", .{ .idle = ago(1) }, .{ .label = "kept" });
     const archived = session("bbbbbb", .{ .stopped = .{ .since = test_now_s - 9, .cause = .stop } }, .{ .label = "archived", .archive_state = .archived, .archive_seq = 9 });
     var state = try opened(&.{live});
