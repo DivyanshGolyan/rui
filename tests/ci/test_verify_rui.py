@@ -3403,7 +3403,7 @@ class UpgradeFramesTest(unittest.TestCase):
                             self.assertTrue(predicate(types.SimpleNamespace(completed=chat)), description)
                         terminal = types.SimpleNamespace(wait=wait)
                         run = types.SimpleNamespace(home=Path(directory))
-                        releases = types.SimpleNamespace(version="0.78.10000", requests=["/releases/tag/v0.78.10000"])
+                        releases = types.SimpleNamespace(version="0.78.10000", requests=["/releases/latest", "/releases/redirect"])
                         state = {"upgrade": upgrade, "comparison_side": side}
                         gate = object() if upgrade == "updating" else None
                         drive(run, terminal, state, (releases, gate, "0.78.10000"), steps=lambda *_a, **_kw: None)
