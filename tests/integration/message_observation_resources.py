@@ -130,7 +130,7 @@ def main():
                 isolate_settings=False)
             try:
                 cli.run(home, "configure", "--store", state / "store", "--session", "resources/message",
-                    "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+                    "--workspace", state, "--connection", "codex", "--model", "gpt-6-sol")
                 failed = baseline_admit(home, "message", "--store", state / "store", "--session", "resources/message", "fail")
                 cli.fixture.wait_for(lambda: baseline_observation(state, failed).get("result"), "saved failure")
                 for repetition in range(3):

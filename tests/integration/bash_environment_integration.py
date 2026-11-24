@@ -137,7 +137,7 @@ def main(placement="default"):
 
         def configure(environment):
             reply = json.loads(run(environment, "session", "configure", "--store", store, "--workspace", workspace,
-                                   "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash",
+                                   "--connection", "codex", "--model", "gpt-6-sol", "--tools", "bash",
                                    "--permission-mode", "bypass").stdout)
             return reply["context"]["session"]
 

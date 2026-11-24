@@ -63,7 +63,7 @@ test "Store allocates six character IDs atomically retries collisions and replay
             var replay_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
             const replay = (try storage.configureInto(&second, &replay_receipt, .{})).accepted;
             try std.testing.expect(replay.configuration == &replay_receipt);
-            try std.testing.expectEqual(fresh_receipt.provider, replay_receipt.provider);
+            try std.testing.expectEqualStrings(fresh_receipt.connection.slice(), replay_receipt.connection.slice());
             try std.testing.expectEqualStrings(fresh_receipt.model.slice(), replay_receipt.model.slice());
             try std.testing.expectEqual(fresh_receipt.reasoning_effort, replay_receipt.reasoning_effort);
             try std.testing.expectEqualStrings(fresh_receipt.workspace.slice(), replay_receipt.workspace.slice());

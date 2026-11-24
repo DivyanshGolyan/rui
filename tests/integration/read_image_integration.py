@@ -94,7 +94,7 @@ def prove_case(root, name):
         configured = fixture.command(
             "session", "configure", "--store", store, "--workspace", workspace,
             "--record", state / "configure.json", "--key", "configure",
-            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "read_image",
+            "--connection", "codex", "--model", "gpt-6-sol", "--tools", "read_image",
             "--permission-mode", "ask" if pending else "bypass",
         )
         assert configured["answer"]["status"] == "accepted", configured
@@ -283,7 +283,7 @@ def prove_mcp_mixed(root):
         configured = fixture.command(
             "session", "configure", "--store", store, "--workspace", workspace,
             "--record", state / "configure.json", "--key", "configure",
-            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "mixed_image",
+            "--connection", "codex", "--model", "gpt-6-sol", "--tools", "mixed_image",
             "--permission-mode", "bypass",
         )
         assert configured["answer"]["status"] == "accepted", configured
@@ -333,7 +333,7 @@ def prove_unsupported_retained(root):
         configured = fixture.command(
             "session", "configure", "--store", store, "--workspace", workspace,
             "--record", state / "configure.json", "--key", "configure",
-            "--provider", "codex", "--model", "gpt-4.1", "--tools", "read_image",
+            "--connection", "codex", "--model", "gpt-4.1", "--tools", "read_image",
             "--permission-mode", "bypass",
         )
         assert configured["answer"]["status"] == "accepted", configured

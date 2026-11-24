@@ -255,7 +255,7 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
             .reference = "quiet1".*,
             .read_version = token,
             .workspace = "/work/quiet",
-            .provider = .codex,
+            .provider = @import("connection.zig").Name.parse("codex").?,
             .label = "Quiet row",
             .state = .{ .finished = .{ .since = 100 } },
             .state_change_at = 100,

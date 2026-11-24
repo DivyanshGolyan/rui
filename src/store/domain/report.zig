@@ -1792,7 +1792,7 @@ fn RevisionChunk(comptime Watcher: type) type {
                 .revision = row.revision.get(),
                 .command_key = row.command_key.slice(),
                 .workspace = row.workspace.slice(),
-                .provider = provider_route.builtInOf(row.provider) orelse unreachable,
+                .provider = row.provider,
                 .model = row.model.slice(),
                 .compaction_trigger = optional(row.compaction_trigger),
                 .output_reservation = row.output_reservation,

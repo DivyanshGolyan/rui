@@ -36,7 +36,7 @@ def prove_archive(root, home):
         references = []
         for index in range(18):
             reply = invoke("session", "configure", "--store", store,
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol",
+                "--workspace", root, "--connection", "codex", "--model", "gpt-6-sol",
                 "--label", f"Archive proof {index}")
             references.append(reply["answer"]["session"])
         before = listed()["since"]
@@ -162,7 +162,7 @@ def main():
             allocated = []
             for index in range(9):
                 configured = invoke("session", "configure", "--store", store,
-                    "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")
+                    "--workspace", root, "--connection", "codex", "--model", "gpt-6-sol")
                 assert configured.returncode == 0, configured
                 allocated.append(json.loads(configured.stdout)["answer"]["session"])
             def rewrite(response):

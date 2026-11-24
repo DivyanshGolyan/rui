@@ -2,7 +2,7 @@ pub const Rejection = enum {
     invalid_session_reference,
     unknown_session,
     unsupported_permission_mode,
-    unsupported_provider,
+    unknown_connection,
     invalid_model,
     model_capability_unavailable,
     invalid_output_schema,
@@ -28,7 +28,7 @@ pub const Rejection = enum {
 
     invalid_workspace,
     workspace_is_immutable,
-    provider_is_immutable,
+    connection_is_immutable,
     model_is_immutable,
     revision_exhausted,
     skills_unavailable,

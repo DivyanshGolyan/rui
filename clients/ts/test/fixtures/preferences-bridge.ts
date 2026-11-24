@@ -17,9 +17,9 @@ try {
 	};
 	const preferences = { reasoningEffort: "max", permissionMode: "bypass" } as const;
 	const cases = [
-		{ workspace, provider: "openai", model: "gpt-5.5", preferences },
-		{ workspace, provider: "openai", model: "gpt-6.1-sol", preferences },
-		{ workspace, provider: "openai", model: "gpt-5.5", preferences, effort: "high", permissionMode: "ask" },
+		{ workspace, connection: "openai", model: "gpt-5.5", preferences },
+		{ workspace, connection: "openai", model: "gpt-6.1-sol", preferences },
+		{ workspace, connection: "openai", model: "gpt-5.5", preferences, effort: "high", permissionMode: "ask" },
 	] as const;
 	const reports: unknown[] = [];
 	for (const [index, spec] of cases.entries()) {
@@ -58,7 +58,7 @@ try {
 	// Child authority is checked after Host defaults and preferences are resolved.
 	// The parent has the Host-supported max model; each child supplies a model
 	// while its provider and Workspace inherit from the parent.
-	const parent = await rui.sessions.create({ workspace, provider: "openai", model: "gpt-5.5", permissionMode: "ask" },
+	const parent = await rui.sessions.create({ workspace, connection: "openai", model: "gpt-5.5", permissionMode: "ask" },
 		{ idempotencyKey: "preferences:parent" });
 	for (const [suffix, childPreferences] of [["omitted", undefined], ["bypass", preferences]] as const) {
 		await assert.rejects(
@@ -76,14 +76,14 @@ try {
 			version: WIRE_VERSION, kind: "inspect_session", store: rui.hostInfo!.store, session: child.id,
 		}))).toString("utf8"));
 		assert.equal(report.session.parent, parent.id);
-		assert.equal(report.session.provider, "openai");
+		assert.equal(report.session.connection, "openai");
 		assert.equal(report.session.workspace, workspace);
 		assert.equal(report.session.model, model);
 		assert.equal(report.session.reasoning_effort, effort);
 		assert.equal(report.session.permission_mode, "ask");
 	}
 	await assert.rejects(
-		rui.sessions.create({ workspace, provider: "openai", model: "gpt-6.1-sol", preferences, effort: "max" },
+		rui.sessions.create({ workspace, connection: "openai", model: "gpt-6.1-sol", preferences, effort: "max" },
 			{ idempotencyKey: "preferences:unsupported-explicit" }),
 		(error: unknown) => error instanceof RuiRequestError && error.code === "unsupported_reasoning_effort",
 	);
