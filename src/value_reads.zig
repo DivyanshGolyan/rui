@@ -38,7 +38,7 @@ pub const Display = struct {
         };
         var iterator: protocol_reply.PartIterator = undefined;
         try list.iterator(&iterator);
-        return .{ .display = .{ .length = try part_text.length(&iterator, labels(parts.owner)), .store = store, .session = session, .body = .{ .parts = list } } };
+        return .{ .display = .{ .length = try part_text.displayLength(&iterator, labels(parts.owner)), .store = store, .session = session, .body = .{ .parts = list } } };
     }
 
     /// Feeds exactly `length` display bytes into `sink`. Every Text part is read whole and
@@ -56,7 +56,7 @@ pub const Display = struct {
             .parts => |*list| {
                 var source: PartSource = .{ .requests = requests, .store = self.store, .session = self.session, .list = list, .pass = if (list.value.owner == .message) .images else .stored };
                 try list.iterator(&source.iterator);
-                return part_text.write(&source, labels(list.value.owner), null, sink);
+                return part_text.streamDisplay(&source, labels(list.value.owner), null, sink);
             },
         }
     }
@@ -81,7 +81,7 @@ pub fn firstLine(requests: client.Requests, store: []const u8, session: []const 
         .text => return requests.readPublicPartPrefix(store, session, parts.owner, first, buffer),
         .image => |image| {
             var out: [part_text.max_placeholder_bytes]u8 = undefined;
-            const text = part_text.placeholder(labels(parts.owner), 1, image, first.reference.length, &out);
+            const text = part_text.displayPlaceholder(labels(parts.owner), 1, image, first.reference.length, &out);
             const count = @min(text.len, buffer.len);
             @memcpy(buffer[0..count], text[0..count]);
             return .{ .line = buffer[0..count] };

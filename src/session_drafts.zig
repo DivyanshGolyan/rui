@@ -189,7 +189,7 @@ test "session_drafts preserves the whole snapshot including empty rejected draft
     }
 }
 
-test "SUI-113 an image-only draft survives changing Sessions" {
+test "SUI-115 an image-only draft survives changing Sessions" {
     const allocator = std.testing.allocator;
     var drafts: Drafts = .{};
     defer drafts.deinit(allocator);

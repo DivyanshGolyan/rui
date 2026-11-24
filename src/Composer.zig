@@ -23,7 +23,8 @@ caret: bool = true,
 panel: ?vxfw.Widget = null,
 max_rows: u16 = std.math.maxInt(u16),
 
-pub fn setCaps(self: *Self, caps: view.Caps) void {
+pub fn setCaps(self: *Self, caps: view.Caps, image_attached: bool) void {
+    self.image_attached = image_attached;
     self.style = widget_style.of(caps, .{});
     self.quiet = widget_style.of(caps, .{ .colour = .quiet });
     self.caps = caps;
@@ -143,7 +144,7 @@ fn caretWidthMethods() !void {
         var bytes: [32]u8 = undefined;
         var editor: Editor = .initText(&bytes, draft, draft.len);
         var composer: Self = .{ .editor = &editor };
-        composer.setCaps(.{ .width = method });
+        composer.setCaps(.{ .width = method }, false);
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const emoji: u16 = @intCast(vaxis.gwidth.gwidth("👩‍💻", method));
@@ -282,7 +283,7 @@ fn composerTheme() !void {
                     const text = if (has_draft) draft else "";
                     std.debug.assert(editor.set(text, text.len) == null);
                     var composer: Self = .{ .editor = &editor, .placeholder = placeholder, .caret = caret };
-                    composer.setCaps(caps);
+                    composer.setCaps(caps, false);
                     const surface = try composer.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 10 }, .cell_size = .{} });
                     try std.testing.expectEqual(@as(u16, if (has_draft) 5 else 3), surface.size.height);
                     for (0..width) |col| {
@@ -319,7 +320,7 @@ test "Composer colours the list owner's exact word without taking TextArea's lay
                 var bytes: [128]u8 = undefined;
                 var editor: Editor = .initText(&bytes, typed, caret);
                 var composer: Self = .{ .editor = &editor };
-                composer.setCaps(caps);
+                composer.setCaps(caps, false);
                 composer.known_word = case.word;
                 var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer arena.deinit();

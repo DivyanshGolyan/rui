@@ -400,8 +400,7 @@ fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
     self.app_input.bottom = &hooks.root.bottom;
-    hooks.root.session_focus = .{ .context = self, .changed = focusChanged, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates };
-    hooks.root.clipboard_owner = .{ .context = self, .target = clipboardTarget, .paste = pasteClipboard };
+    hooks.root.session_focus = .{ .context = self, .changed = focusChanged, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates, .clipboard = .{ .target = clipboardTarget, .paste = pasteClipboard } };
     self.app_info = .{ .backend = self.infoBackend(), .home = self.home };
     if (hooks.drafts) |drafts| if (drafts.take(self.init.gpa, self.session)) |draft| {
         defer self.init.gpa.free(draft.snapshot.bytes);
@@ -1090,10 +1089,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const facts_style = quiet;
     self.app_screen.style = normal;
     self.app_input.composer.caret = self.app_hooks.root.input.layer == .main and self.app_hooks.root.input.mainFocused() and !self.info_open and !self.app_info.standaloneOpen() and self.app_hooks.root.input.field == .input;
-    self.app_input.composer.setCaps(self.app_caps);
+    self.app_input.composer.setCaps(self.app_caps, self.input.image() != null);
     self.app_input.composer.placeholder = if (self.line.read != null and self.line.folder != null) "What shall we work on?" else "";
     self.app_input.composer.editor = &self.input.editors[self.input.active];
-    self.app_input.composer.image_attached = self.input.image() != null;
     self.app_card.style = normal;
     self.app_card.quiet = quiet;
     self.app_card.hover_style = hover;
@@ -1734,7 +1732,7 @@ fn settle(self: *Self, restored: anyerror!void) Settled {
     return .{ .restored = restored, .reader = reader, .admission_error = admission.failure(), .skills_error = skills_error };
 }
 
-test "SUI-111 clipboard paste stays in its originating composer until Enter" {
+test "SUI-113 clipboard paste stays in its originating composer until Enter" {
     const png = @embedFile("codecs/fixtures/image-input/pixel.png");
     const encoded = comptime blk: {
         var buffer: [std.base64.standard.Encoder.calcSize(png.len)]u8 = undefined;

@@ -606,7 +606,7 @@ test "a chat Message captures require_model so the Host refuses a Session whose 
     try std.testing.expectEqualStrings("k7m2qx", parsed.value.object.get("session").?.string);
 }
 
-test "SUI-112 clipboard image submission recovers the original multipart identity" {
+test "SUI-114 clipboard image submission recovers the original multipart identity" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();

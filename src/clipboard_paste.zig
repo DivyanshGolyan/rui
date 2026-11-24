@@ -86,6 +86,38 @@ pub const Transaction = struct {
             self.content = .empty;
             self.discarded = true;
         }
+
+        /// A password on an untagged OK identifies another unsolicited offer.
+        /// Untagged traffic without a password has to pass the read's own checks.
+        fn ignoreOffer(self: *Read, frame: Frame) bool {
+            if (self.ignoring_offer) {
+                if (frame.status == .DONE) self.ignoring_offer = false;
+                return true;
+            }
+            if (frame.valid and frame.status == .OK and frame.password != null) {
+                self.ignoring_offer = true;
+                return true;
+            }
+            return false;
+        }
+
+        fn append(self: *Read, allocator: std.mem.Allocator, frame: Frame) bool {
+            var mime_encoded: [base64.Encoder.calcSize("text/plain".len)]u8 = undefined;
+            const expected = base64.Encoder.encode(&mime_encoded, self.mime.mime());
+            if (!eql(frame.mime orelse return false, expected)) return false;
+            const size = decodedSize(frame.payload, chunk_limit) orelse return false;
+            const old_len = self.content.items.len;
+            const needed = old_len + size;
+            const limit = self.mime.limit();
+            if (needed > limit) return false;
+            if (needed > self.content.capacity) {
+                const capacity = @min(limit, @max(needed, @max(chunk_limit, self.content.capacity * 2)));
+                self.content.ensureTotalCapacityPrecise(allocator, capacity) catch return false;
+            }
+            const dest = self.content.addManyAsSliceAssumeCapacity(size);
+            base64.Decoder.decode(dest, frame.payload) catch return false;
+            return true;
+        }
     };
 
     /// True while awaiting another frame, including after abort.
@@ -185,7 +217,7 @@ pub const Transaction = struct {
         if (frame.id) |id| {
             var expected: [20]u8 = undefined;
             if (!eql(id, std.fmt.bufPrint(&expected, "{d}", .{read.id}) catch unreachable)) return null;
-        } else if (ignoreOffer(read, frame)) return null;
+        } else if (read.ignoreOffer(frame)) return null;
 
         if (!frame.valid or frame.password != null) read.discard(allocator);
         switch (frame.status orelse return null) {
@@ -195,7 +227,7 @@ pub const Transaction = struct {
             },
             .DATA => {
                 if (read.discarded) return null;
-                if (!read.started or !append(read, allocator, frame)) read.discard(allocator);
+                if (!read.started or !read.append(allocator, frame)) read.discard(allocator);
             },
             .DONE => {
                 defer self.phase = .idle;
@@ -221,38 +253,6 @@ pub const Transaction = struct {
         return null;
     }
 };
-
-/// A password on an untagged OK identifies another unsolicited offer.
-/// Untagged traffic without a password has to pass the read's own checks.
-fn ignoreOffer(read: *Transaction.Read, frame: Frame) bool {
-    if (read.ignoring_offer) {
-        if (frame.status == .DONE) read.ignoring_offer = false;
-        return true;
-    }
-    if (frame.valid and frame.status == .OK and frame.password != null) {
-        read.ignoring_offer = true;
-        return true;
-    }
-    return false;
-}
-
-fn append(read: *Transaction.Read, allocator: std.mem.Allocator, frame: Frame) bool {
-    var mime_encoded: [base64.Encoder.calcSize("text/plain".len)]u8 = undefined;
-    const expected = base64.Encoder.encode(&mime_encoded, read.mime.mime());
-    if (!eql(frame.mime orelse return false, expected)) return false;
-    const size = decodedSize(frame.payload, chunk_limit) orelse return false;
-    const old_len = read.content.items.len;
-    const needed = old_len + size;
-    const limit = read.mime.limit();
-    if (needed > limit) return false;
-    if (needed > read.content.capacity) {
-        const capacity = @min(limit, @max(needed, @max(chunk_limit, read.content.capacity * 2)));
-        read.content.ensureTotalCapacityPrecise(allocator, capacity) catch return false;
-    }
-    const dest = read.content.addManyAsSliceAssumeCapacity(size);
-    base64.Decoder.decode(dest, frame.payload) catch return false;
-    return true;
-}
 
 const Status = enum { OK, DATA, DONE, ENOSYS, EPERM, EBUSY, EIO, EINVAL, EFBIG };
 const Field = enum { type, status, id, pw, mime, loc };

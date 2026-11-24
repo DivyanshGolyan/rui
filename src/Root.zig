@@ -30,12 +30,10 @@ pub const FocusOwner = struct {
     /// Live event custody; unlike the candidate order this is not draw state.
     modal: ?*const fn (*anyopaque) bool = null,
     candidates: *const fn (*anyopaque, *[std.enums.values(app_input.Target).len]Candidate) Projection,
-};
-
-pub const ClipboardOwner = struct {
-    context: *anyopaque,
-    target: *const fn (*anyopaque) ?Input.Insertion,
-    paste: *const fn (*anyopaque, *vxfw.EventContext, ClipboardData) anyerror!void,
+    clipboard: ?struct {
+        target: *const fn (*anyopaque) ?Input.Insertion,
+        paste: *const fn (*anyopaque, *vxfw.EventContext, ClipboardData) anyerror!void,
+    } = null,
 };
 
 pub const ClipboardData = union(enum) { text: []const u8, image: []u8, local_image };
@@ -45,7 +43,6 @@ pub const MainPresentation = struct {
     context: *anyopaque,
     close: *const fn (*anyopaque) void,
 };
-clipboard_owner: ?ClipboardOwner = null,
 clipboard: clipboard_paste.Transaction = .{},
 clipboard_target: ?Input.Insertion = null,
 clipboard_epoch: u64 = 0,
@@ -85,7 +82,7 @@ pub fn deinitClipboard(self: *Self) void {
 
 fn syncClipboard(self: *Self, ctx: *vxfw.EventContext) !void {
     const target = if (self.clipboard_supported and self.session != null and self.input.layer == .main and self.input.mainFocused() and self.input.field == .input and !self.input.pasting)
-        if (self.clipboard_owner) |owner| owner.target(owner.context) else null
+        if (self.session_focus) |owner| if (owner.clipboard) |clipboard| clipboard.target(owner.context) else null else null
     else
         null;
     if (!std.meta.eql(target, self.clipboard_target)) {
@@ -117,20 +114,20 @@ fn clipboardFrame(self: *Self, ctx: *vxfw.EventContext, payload: []const u8) !vo
         .text => |text| {
             defer allocator.free(text.bytes);
             if (self.clipboard_enabled and text.epoch == self.clipboard_epoch) {
-                const owner = self.clipboard_owner.?;
-                try owner.paste(owner.context, ctx, .{ .text = text.bytes });
+                const owner = self.session_focus.?;
+                try owner.clipboard.?.paste(owner.context, ctx, .{ .text = text.bytes });
             }
         },
         .image => |image| {
             if (self.clipboard_enabled and image.epoch == self.clipboard_epoch) {
-                const owner = self.clipboard_owner.?;
-                try owner.paste(owner.context, ctx, .{ .image = image.bytes });
+                const owner = self.session_focus.?;
+                try owner.clipboard.?.paste(owner.context, ctx, .{ .image = image.bytes });
             } else allocator.free(image.bytes);
         },
         .local_image => |epoch| {
             if (self.clipboard_enabled and epoch == self.clipboard_epoch) {
-                const owner = self.clipboard_owner.?;
-                try owner.paste(owner.context, ctx, .local_image);
+                const owner = self.session_focus.?;
+                try owner.clipboard.?.paste(owner.context, ctx, .local_image);
             }
         },
     }
@@ -291,7 +288,6 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.session = null;
     self.session_keys = null;
     self.session_focus = null;
-    self.clipboard_owner = null;
     if (!self.input.layer.settingsOpen()) self.settings_page.cancelChoice();
     try self.navigate(ctx, .session_closed);
     ctx.redraw = true;

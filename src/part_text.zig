@@ -14,7 +14,11 @@ pub const Labels = enum { compact, detailed };
 
 pub const max_placeholder_bytes = "[image ".len + 10 + ": ".len + "JPEG".len + " ".len + 10 + "x".len + 10 + ", ".len + 24 + "]".len;
 
-pub fn placeholder(labels: Labels, number: u32, image: input_parts.Image, bytes: u64, out: *[max_placeholder_bytes]u8) []const u8 {
+pub fn placeholder(number: u32, image: input_parts.Image, bytes: u64, out: *[max_placeholder_bytes]u8) []const u8 {
+    return displayPlaceholder(.detailed, number, image, bytes, out);
+}
+
+pub fn displayPlaceholder(labels: Labels, number: u32, image: input_parts.Image, bytes: u64, out: *[max_placeholder_bytes]u8) []const u8 {
     if (labels == .compact) {
         if (number == 1) return first_image;
         return std.fmt.bufPrint(out, "[Image {d}]", .{number}) catch unreachable;
@@ -32,7 +36,11 @@ pub const Range = struct { start: u64, length: u64 };
 
 /// Exact display length: the Text lengths, the placeholders and one separator between parts.
 /// `source.next() !?content_value.Part` yields the certified list in order.
-pub fn length(source: anytype, labels: Labels) !u64 {
+pub fn length(source: anytype) !u64 {
+    return displayLength(source, .detailed);
+}
+
+pub fn displayLength(source: anytype, labels: Labels) !u64 {
     var total: u64 = 0;
     var images: u32 = 0;
     var first = true;
@@ -42,7 +50,7 @@ pub fn length(source: anytype, labels: Labels) !u64 {
         var buffer: [max_placeholder_bytes]u8 = undefined;
         total = try std.math.add(u64, total, switch (part.kind) {
             .text => part.reference.length,
-            .image => |image| placeholder(labels, try nextImage(&images), image, part.reference.length, &buffer).len,
+            .image => |image| displayPlaceholder(labels, try nextImage(&images), image, part.reference.length, &buffer).len,
         });
     }
     return total;
@@ -54,7 +62,11 @@ pub fn length(source: anytype, labels: Labels) !u64 {
 /// Without a range every Text part is delivered whole, empty ones included; with one, only
 /// Text parts that overlap it are read. A sink with an `image(part)` method receives each image
 /// the range reaches instead of its placeholder bytes.
-pub fn write(source: anytype, labels: Labels, range: ?Range, sink: anytype) !?Stop(@TypeOf(source)) {
+pub fn write(source: anytype, range: ?Range, sink: anytype) !?Stop(@TypeOf(source)) {
+    return streamDisplay(source, .detailed, range, sink);
+}
+
+pub fn streamDisplay(source: anytype, labels: Labels, range: ?Range, sink: anytype) !?Stop(@TypeOf(source)) {
     const start = if (range) |value| value.start else 0;
     const end = if (range) |value| try std.math.add(u64, value.start, value.length) else std.math.maxInt(u64);
     var offset: u64 = 0;
@@ -77,7 +89,7 @@ pub fn write(source: anytype, labels: Labels, range: ?Range, sink: anytype) !?St
             },
             .image => |image| {
                 var buffer: [max_placeholder_bytes]u8 = undefined;
-                const text = placeholder(labels, try nextImage(&images), image, part.reference.length, &buffer);
+                const text = displayPlaceholder(labels, try nextImage(&images), image, part.reference.length, &buffer);
                 if (comptime std.meta.hasMethod(@TypeOf(sink), "image")) {
                     if (range == null or (offset < end and offset + text.len > start)) try sink.image(part);
                 } else try feedOverlap(sink, text, offset, start, end);
@@ -179,7 +191,7 @@ test "SUI-59 parts display layout" {
         .{ max, imagePart(0, .jpeg, max, max, long_name, std.math.maxInt(u64)), "[image 4294967295: JPEG 4294967295x4294967295, 18446744073709551 KB]" },
     }) |case| {
         var out: [max_placeholder_bytes]u8 = undefined;
-        try std.testing.expectEqualStrings(case[2], placeholder(.detailed, case[0], case[1].kind.image, case[1].reference.length, &out));
+        try std.testing.expectEqualStrings(case[2], placeholder(case[0], case[1].kind.image, case[1].reference.length, &out));
     }
 
     // Every adjacent kind pair, empty Text, a Text ending in "\n" before an image, and a
@@ -200,11 +212,11 @@ test "SUI-59 parts display layout" {
     };
     for (cases) |case| {
         var source: Fixture = .{ .parts = case.parts, .texts = case.texts };
-        try std.testing.expectEqual(@as(u64, case.display.len), try length(&source, .detailed));
+        try std.testing.expectEqual(@as(u64, case.display.len), try length(&source));
         // A whole write reads every Text part once, empty ones included.
         source.restart();
         var whole: Collect = .{};
-        try std.testing.expectEqual(@as(?void, null), try write(&source, .detailed, null, &whole));
+        try std.testing.expectEqual(@as(?void, null), try write(&source, null, &whole));
         try std.testing.expectEqualStrings(case.display, whole.slice());
         var text_parts: usize = 0;
         for (case.parts) |part| text_parts += @intFromBool(part.kind == .text);
@@ -213,7 +225,7 @@ test "SUI-59 parts display layout" {
         for (0..case.display.len + 1) |start| for (0..case.display.len - start + 1) |count| {
             source.restart();
             var ranged: Collect = .{};
-            _ = try write(&source, .detailed, .{ .start = start, .length = count }, &ranged);
+            _ = try write(&source, .{ .start = start, .length = count }, &ranged);
             try std.testing.expectEqualStrings(case.display[start..][0..count], ranged.slice());
         };
     }
@@ -221,7 +233,7 @@ test "SUI-59 parts display layout" {
     // A range inside a placeholder reads no Text part.
     var three: Fixture = .{ .parts = cases[cases.len - 1].parts, .texts = cases[cases.len - 1].texts };
     var inside: Collect = .{};
-    _ = try write(&three, .detailed, .{ .start = "Describe 雪\n".len + 1, .length = 5 }, &inside);
+    _ = try write(&three, .{ .start = "Describe 雪\n".len + 1, .length = 5 }, &inside);
     try std.testing.expectEqualStrings("image", inside.slice());
     try std.testing.expectEqual(@as(usize, 0), three.reads);
 
@@ -241,19 +253,19 @@ test "SUI-59 parts display layout" {
     const mixed = [_]content_value.Part{ textPart(0, "ab"), withOrdinal(png, 1), withOrdinal(jpeg, 2) };
     var source: Fixture = .{ .parts = &mixed, .texts = &.{ "ab", "", "" } };
     var pixels: Pixels = .{};
-    _ = try write(&source, .detailed, null, &pixels);
+    _ = try write(&source, null, &pixels);
     try std.testing.expectEqualStrings("ab\n\n", pixels.text.slice());
     try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, pixels.images[0..pixels.count]);
     source.restart();
     pixels = .{};
-    _ = try write(&source, .detailed, .{ .start = 0, .length = 4 }, &pixels);
+    _ = try write(&source, .{ .start = 0, .length = 4 }, &pixels);
     try std.testing.expectEqualStrings("ab\n", pixels.text.slice());
     try std.testing.expectEqualSlices(u32, &.{1}, pixels.images[0..pixels.count]);
 
     // Lengths a list cannot add up to are refused, not wrapped.
     const huge = [_]content_value.Part{ .{ .ordinal = 0, .kind = .text, .reference = .{ .length = std.math.maxInt(u64), .digest = @splat(0) } }, textPart(1, "") };
     var overflowing: Fixture = .{ .parts = &huge, .texts = &.{ "", "" } };
-    try std.testing.expectError(error.Overflow, length(&overflowing, .detailed));
+    try std.testing.expectError(error.Overflow, length(&overflowing));
 }
 
 fn withOrdinal(part: content_value.Part, ordinal: u32) content_value.Part {
