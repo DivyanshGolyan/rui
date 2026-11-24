@@ -708,7 +708,7 @@ test "App settings sign-in and effort choices reflect saved values without assum
     try std.testing.expectEqualStrings("unavailable", page.fields[@backingInt(Row.sign_in)].value);
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(!page.hasChoice());
-    try std.testing.expectEqualStrings(" · sign-in unavailable", page.failures.get(.model).?);
+    try std.testing.expectEqualStrings(" · models unavailable", page.failures.get(.model).?);
     for (catalog.shipped) |entry| if (entry.openai_listed and !entry.efforts.contains(.max)) {
         try fixture.values.model.set(entry.id);
         break;
