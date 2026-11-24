@@ -1222,6 +1222,7 @@ test "SH-122 a lane root saves its app tools as one set; replacing, clearing and
             const refused = try storage.configure(&child, .{});
             try std.testing.expectEqual(protocol.ConfigurationRejection.app_tools_on_child, refused.rejected.code);
             // An empty list is a declaration too: a child refuses it as well.
+            try child.key.set("app-child-empty");
             declareAppTools(&child.configuration, "[]");
             const refused_empty = try storage.configure(&child, .{});
             try std.testing.expectEqual(protocol.ConfigurationRejection.app_tools_on_child, refused_empty.rejected.code);
