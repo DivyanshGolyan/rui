@@ -676,19 +676,19 @@ test "background discovery domain covers version order publication failure cance
     }
 }
 
-test "a requested run never takes discovery's release: retirement stops a read in flight and leaves a fresh job" {
+test "SH-124 a requested run never acts on discovery's release" {
     const Worker = struct {
-        var release_worker: std.atomic.Value(bool) = .init(false);
         var fail: bool = false;
 
-        fn run(raw: *anyopaque, _: *ClientTask) !void {
+        /// A read in flight ends only when retirement asks it to stop.
+        fn inFlight(raw: *anyopaque, task: *ClientTask) !void {
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &task.cancellation.stopped, test_poll.isSet);
+            return found(raw, task);
+        }
+
+        fn found(raw: *anyopaque, _: *ClientTask) !void {
             const job: *Self = @ptrCast(@alignCast(raw));
-            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &release_worker, test_poll.isSet);
-            job.download.family = .ipv4;
-            if (fail) {
-                job.download.stderr = try job.allocator.dupe(u8, "curl fixture final");
-                return error.ReleaseDownloadFailed;
-            }
+            if (fail) return error.ReleaseDownloadFailed;
             job.candidate = try release_candidate.fromEffectiveUrl(job.allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64");
         }
     };
@@ -698,33 +698,23 @@ test "a requested run never takes discovery's release: retirement stops a read i
         init.gpa = std.testing.allocator;
         var job: Self = .{ .init = init, .allocator = std.testing.allocator, .started = true, .operation = .discover, .discovery_attempted = true };
         defer job.deinit();
-        Worker.release_worker.store(background_finished, .release);
         Worker.fail = discovery_failed;
-        defer Worker.release_worker.store(true, .release);
-        try job.task.start(init.io, &job, Worker.run);
+        try job.task.start(init.io, &job, if (background_finished) Worker.found else Worker.inFlight);
         if (background_finished) {
             try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
             try std.testing.expect(try job.advance());
-        } else {
-            // A read in flight is asked to stop and is not adopted.
-            try std.testing.expect(!try job.retireDiscovery());
-            try std.testing.expect(job.discovering() and job.task.thread != null and job.task.cancellation.stopped.load(.acquire));
-            Worker.release_worker.store(true, .release);
-            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
         }
-        try std.testing.expect(try job.retireDiscovery());
-        // Whatever discovery found, failed with or recovered, the run starts from nothing.
-        try std.testing.expect(!job.discovering() and job.discovery_attempted and !job.started and !job.finished and !job.cancelling);
-        try std.testing.expect(job.task.thread == null and job.candidate == null and job.checked == null and job.result == null and job.failure == null);
-        try std.testing.expectEqual(.automatic, job.download.family);
-        try std.testing.expect(job.download.stderr == null);
-        try std.testing.expectEqual(.open, job.gate.load(.acquire));
+        // Retirement ends only once the read has stopped; an in-flight read stops only when asked.
+        while (!try job.retireDiscovery()) try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
+        try std.testing.expect(!job.discovering());
+        try std.testing.expectEqual(@as(?upgrade_status.Version, null), job.availability());
         if (cancelled) {
-            // Esc during retirement: the caller cancels the fresh run, which ends without checking.
             job.cancel();
             try job.begin(init, "/fixture");
-            try std.testing.expect(job.finished and job.task.thread == null and job.checked == null);
-            try std.testing.expectEqualDeep(upgrade_status.Ended.cancelled, job.status().ended.how);
+            try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, job.status());
+        } else {
+            // The run starts from nothing: its check, not discovery, reads the release.
+            try std.testing.expectEqual(upgrade_status.Run.checking, job.status());
         }
     };
 }

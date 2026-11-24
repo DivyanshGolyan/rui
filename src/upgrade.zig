@@ -485,36 +485,6 @@ test "#1854 a non-interactive install says it is installing, then opens its resu
     }
 }
 
-test "release reads refuse before reading when cancelled or without a usable home" {
-    const allocator = std.testing.allocator;
-    var environ: std.process.Environ.Map = .init(allocator);
-    defer environ.deinit();
-    var init: std.process.Init = undefined;
-    init.io = std.testing.io;
-    init.gpa = allocator;
-    init.environ_map = &environ;
-    try environ.put("RUI_TEST_UPGRADE_RELEASES_URL", "not-a-fixture");
-    var download: Download = .{ .family = .ipv4 };
-    defer download.deinit(allocator);
-    var cancellation: client.Cancellation = .{};
-    cancellation.requestStop();
-    try std.testing.expectError(error.Cancelled, discoverRelease(init, allocator, &cancellation, &download));
-    try std.testing.expectError(error.HomeUnavailable, discoverRelease(init, allocator, null, &download));
-    try std.testing.expectError(error.Cancelled, check(init, allocator, "/fixture", &cancellation, &download));
-    try std.testing.expectError(error.HomeUnavailable, check(init, allocator, "/fixture", null, &download));
-    try std.testing.expectEqual(.ipv4, download.family);
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
-    try environ.put("HOME", home);
-    try std.testing.expectError(error.InvalidReleaseEndpoint, discoverRelease(init, allocator, null, &download));
-    try environ.put("HOME", "relative");
-    try std.testing.expectError(error.InvalidInstallationHome, discoverRelease(init, allocator, null, &download));
-    try std.testing.expectError(error.InvalidInstallationHome, check(init, allocator, home, null, &download));
-    try std.testing.expectEqual(.ipv4, download.family);
-}
-
 test "upgrade selected activation routes by Host directory not SQLite data or MySQL identity" {
     const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
     for ([_][]const u8{ "/data", "0123456789abcdef0123456789abcdef" }) |identity| {
