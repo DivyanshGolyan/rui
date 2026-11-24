@@ -250,7 +250,6 @@ External symlink aliases retain canonical paths, deduplicate the same target and
 Description regressions cover unchanged short and exact-limit ASCII and multibyte scalars, visible Unicode-safe truncation above 1,024 code points, catalog round trips and full unchanged invocation content.
 Catalog JSON requires actual string tokens for name, description and path, rejecting numeric/byte-array coercions while preserving escaped Unicode.
 A full 4096-entry ordering regression covers the constant-stack heap sorts used by discovery, encoding, decoding and deltas.
-The Linux `stack-frames` gate measures the real catalog decode and Configure/creating-Message import paths.
 Configure and creating Messages keep their temporary facts at one address in the Store's existing scratch; reload-only scratch stays in its own same-transaction branch.
 No skill stack exception or larger scratch allocation is permitted.
 A result-arena plus independently reclaiming scratch high-water regression exercises many near-limit project and shadowed home bodies; unsupported native invalid-byte filenames skip only on filesystems that reject their creation.
