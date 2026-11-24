@@ -2426,6 +2426,7 @@ fn launchPreparedRequest(
     const active = &slot.provider;
     active.transfer.start(reactor, request, binding, .{
         .fields = headers.fields(),
+        .observe_allowance = host.probes.hooks.observe_allowance and served.credential.signIn() != null,
         .timing = host.custody.modelTiming(token) catch unreachable,
         .credential = headers.takeCredential(),
         .routing = .{ .turn_id = binding.turn_id, .owner = served.credential.routingOwner(lease) },
@@ -2504,6 +2505,7 @@ fn completeTransfer(
 ) void {
     const active = &slot.provider;
     const owner = active.owner;
+    if (active.transfer.allowance) |observation| server_host.writeAllowance(&host.allowance_diagnostic, observation);
     traceCompletionQueue(host, completion.queued_after, owner.binding);
     defer traceOperation(host, "provider_completion_serviced", owner.binding);
     traceTransfer(host, &active.transfer, owner.binding);
