@@ -46,13 +46,14 @@ pub const Readinesses = struct {
     }
 };
 
-/// The names a Store serves: a live Host that answers is the authority, since it is the one that executes;
-/// with no live Host, the Store's saved readiness (built-ins and saved connections) stands. The two are
-/// never unioned, so each source alone bounds the result by max_served and nothing can overflow.
-pub fn servedAuthority(live: ?[]const connection.Name, saved: Readinesses) Readinesses {
-    const names = live orelse return saved;
+/// The names a Store serves. Membership and readiness are separate facts: a live Host that answers decides
+/// which names exist, since it is the one that executes; each member's readiness is its credential source's
+/// readiness, read from `known` (built-in sign-in status and key connections). A member with no known
+/// readiness reads missing. With no live Host answering, `known` stands.
+pub fn servedAuthority(live: ?[]const connection.Name, known: Readinesses) Readinesses {
+    const names = live orelse return known;
     var authority: Readinesses = .{};
-    for (names) |name| authority.set(name, .configured);
+    for (names) |name| authority.set(name, known.get(name));
     return authority;
 }
 
@@ -164,56 +165,35 @@ fn built_ins_first() connection.Name {
     return provider_route.built_in_names[0];
 }
 
-test "the served authority: a live Host answers alone, else the saved readiness stands, at every overlap and capacity" {
+test "CM-59 served authority: a live Host decides membership, and each member keeps its own credential readiness" {
     const model_capability = @import("model_capability.zig");
-    const alpha = connection.Name.parse("alpha").?;
-    const beta = connection.Name.parse("beta").?;
-    var saved_beta: Readinesses = .initFill(.missing);
-    saved_beta.set(beta, .configured);
-    var saved_alpha_missing: Readinesses = .initFill(.missing);
-    saved_alpha_missing.set(alpha, .missing);
-    saved_alpha_missing.set(beta, .configured);
+    const built_ins = provider_route.built_in_names;
     var text: [connection.max_served][16]u8 = undefined;
-    var full: [connection.max_served]connection.Name = undefined;
-    for (&full, 0..) |*name, index| name.* = connection.Name.parse(try std.fmt.bufPrint(&text[index], "conn-{d}", .{index})).?;
-    const Case = struct { live: ?[]const connection.Name, saved: Readinesses, requested: []const u8, selects: bool };
-    const cases = [_]Case{
-        // Live only: the live name resolves; the Store's saved names do not exist.
-        .{ .live = &.{alpha}, .saved = .initFill(.missing), .requested = "alpha", .selects = true },
-        // Saved only: no live Host answers, so the saved connection resolves.
-        .{ .live = null, .saved = saved_beta, .requested = "beta", .selects = true },
-        // Both overlapping: the live Host is the authority, so the saved beta is refused by name.
-        .{ .live = &.{alpha}, .saved = saved_beta, .requested = "beta", .selects = false },
-        .{ .live = &.{alpha}, .saved = saved_alpha_missing, .requested = "alpha", .selects = true },
-        // Both disjoint: the live name resolves and the saved one is refused.
-        .{ .live = &.{alpha}, .saved = saved_beta, .requested = "alpha", .selects = true },
-        // Live at full capacity with a different saved name: a live name resolves, the saved name is refused.
-        .{ .live = &full, .saved = saved_beta, .requested = "conn-15", .selects = true },
-        .{ .live = &full, .saved = saved_beta, .requested = "beta", .selects = false },
-        // A live Host serving nothing refuses every name, even one the Store saved.
-        .{ .live = &.{}, .saved = saved_beta, .requested = "beta", .selects = false },
-    };
-    for (cases) |case| {
-        const readiness = servedAuthority(case.live, case.saved);
-        var caps = model_capability.capabilities(&readiness);
-        const result = resolve(caps.slice(), case.requested, "custom-model", null, null);
-        if (case.selects) {
-            try std.testing.expectEqualStrings(case.requested, (try result).selected.provider);
-        } else {
-            try std.testing.expectError(error.UnsupportedSelectionProvider, result);
-        }
+    var pool: [connection.max_served]connection.Name = undefined;
+    for (&pool, 0..) |*name, index| {
+        name.* = if (index < built_ins.len) built_ins[index] else connection.Name.parse(try std.fmt.bufPrint(&text[index], "conn-{d}", .{index})).?;
     }
-}
-
-test "a custom name a live Host serves is selectable by explicit name; an absent name is refused" {
-    const model_capability = @import("model_capability.zig");
-    const alpha = connection.Name.parse("alpha").?;
-    var readiness: Readinesses = .initFill(.missing);
-    // The live Host serves alpha, so the served set reads it as configured.
-    readiness.set(alpha, .configured);
-    var caps = model_capability.capabilities(&readiness);
-    const selected = try resolve(caps.slice(), "alpha", "custom-model", null, null);
-    try std.testing.expectEqualStrings("alpha", selected.selected.provider);
-    try std.testing.expectEqualStrings("custom-model", selected.selected.model);
-    try std.testing.expectError(error.UnsupportedSelectionProvider, resolve(caps.slice(), "gamma", null, null, null));
+    const counts = [_]usize{ 1, built_ins.len, connection.max_served };
+    // The live Host's member count: none answering, none, one, or all of the served names.
+    for (counts) |count| for ([_]?usize{ null, 0, 1, count }) |live_len| for (std.enums.values(Readiness)) |state| {
+        var known: Readinesses = .{};
+        for (pool[0..count]) |name| known.set(name, state);
+        const live: ?[]const connection.Name = if (live_len) |len| pool[0..len] else null;
+        const readiness = servedAuthority(live, known);
+        var caps = model_capability.capabilities(&readiness);
+        for (pool[0..count], 0..) |name, index| {
+            const member = live == null or index < live_len.?;
+            const result = resolve(caps.slice(), name.slice(), null, null, null);
+            if (member) {
+                // A member is selected at its own readiness, never forced to configured by the authority.
+                try std.testing.expectEqual(state, readiness.get(name));
+                try std.testing.expectEqual(state, (try result).selected.readiness);
+            } else {
+                // A name the live Host does not serve is refused by name, even when the Store knows it.
+                try std.testing.expectEqual(Readiness.missing, readiness.get(name));
+                try std.testing.expectError(error.UnsupportedSelectionProvider, result);
+            }
+        }
+        if (live) |names| try std.testing.expectEqual(names.len, readiness.names().len);
+    };
 }
