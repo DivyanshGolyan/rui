@@ -21,7 +21,7 @@ pub fn checkPreset(gpa: std.mem.Allocator, spec: std.json.ObjectMap) error{OutOf
     };
 }
 
-pub fn read(io: std.Io, settings_gpa: std.mem.Allocator, scratch: std.mem.Allocator, host: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !std.json.Value {
+pub fn read(io: std.Io, settings_gpa: std.mem.Allocator, scratch: std.mem.Allocator, host: []const u8, settings: *hs.Settings, checks: hs.Checks, failure: *start_report.Failure) !std.json.Value {
     const path = try std.fs.path.join(scratch, &.{ host, "host.json" });
     // Absence is not a private-file admission. Legacy or not-yet-created Host
     // directories need no settings permissions until a document exists.
@@ -36,7 +36,7 @@ pub fn read(io: std.Io, settings_gpa: std.mem.Allocator, scratch: std.mem.Alloca
     }
     const bytes = private_file.read(io, path, buffer) catch return unreadable(failure);
     if (bytes) |document| {
-        try hs.apply(settings, settings_gpa, document, .file, checkPreset, failure);
+        try hs.apply(settings, settings_gpa, document, .file, checks, failure);
         return std.json.parseFromSliceLeaky(std.json.Value, scratch, document, .{ .allocate = .alloc_always, .parse_numbers = false }) catch |err| {
             if (err == error.OutOfMemory) return err;
             failure.* = .init(.settings_invalid, "settings: must be a JSON document");

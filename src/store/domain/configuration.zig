@@ -53,12 +53,13 @@ fn requestedNames(requested: anytype) *const command_input.ToolsField {
 fn toolsRejection(host_tool_set: *const tool_defs.HostToolSet, served: *const provider_route.Served, provider: connection.Name, tools: *const command_input.ToolsField) ?configuration_admission.Rejection {
     var names = tools.iterator();
     while (names.next()) |name| {
-        const index = switch (host_tool_set.resolve(name)) {
-            .found => |index| index,
+        switch (host_tool_set.resolve(name)) {
+            .found => |index| if (host_tool_set.records[index].owner == .provider and !served.runsTool(provider.slice(), name)) return .provider_tool_missing,
+            // An app tool is served by the lane's app, not by a provider.
+            .app => {},
             .unknown_tool => return .unknown_tool,
             .mcp_server_unavailable => return .mcp_server_unavailable,
-        };
-        if (host_tool_set.records[index].owner == .provider and !served.runsTool(provider.slice(), name)) return .provider_tool_missing;
+        }
     }
     return null;
 }
@@ -70,7 +71,10 @@ pub fn missingToolMessage(host_tool_set: *const tool_defs.HostToolSet, code: any
     }
     var names = tools.iterator();
     while (names.next()) |name| {
-        if (host_tool_set.resolve(name) != .found) return host_tool_set.missingTool(name);
+        switch (host_tool_set.resolve(name)) {
+            .found, .app => {},
+            .unknown_tool, .mcp_server_unavailable => return host_tool_set.missingTool(name),
+        }
     }
     return null;
 }
@@ -169,11 +173,8 @@ fn tokenCount(text: []const u8, allow_zero: bool) !u64 {
 
 pub fn configurationBeforeWorkspace(
     selected_facts: []const model_catalog.Entry,
-    host_tool_set: *const tool_defs.HostToolSet,
-    served: *const provider_route.Served,
     current: ?*const CurrentConfiguration,
     requested: anytype,
-    creation_provider: ?connection.Name,
 ) ?configuration_admission.Rejection {
     if (requested.compaction_trigger.state == .explicit_null) return .invalid_compaction_trigger;
     const compact_at = if (requested.compaction_trigger.state == .value)
@@ -193,7 +194,6 @@ pub fn configurationBeforeWorkspace(
         }
     }
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
-    if (requested.tools.state == .value) if (toolsRejection(host_tool_set, served, provider orelse (if (current) |existing| existing.provider else creation_provider.?), requestedNames(requested))) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     if (compact_at) |tokens| if (model_catalog.find(selected_facts, model)) |known| {
         if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
@@ -424,7 +424,10 @@ fn preferences(configuration: *const content_custody.Configuration) configuratio
     };
 }
 
-pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, served: *const provider_route.Served, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
+/// The early parent boundary that start_agent checks before its lane round: the workspace and provider a child may
+/// not set. Tool and permission authority are not checked here: they need the lane's app records, so the lane round
+/// (validateModel's parent resolution) decides both for configure and start_agent alike.
+pub fn inheritParent(configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
     if (!reads.inherits_parent) return null;
     if (!reads.parent_found.get()) return .unknown_session;
     if (reads.parent_checked) return if (reads.parent_failure) |failure| failure.code else null;
@@ -436,23 +439,6 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, served: *const
     const failure: ?ParentFailure = refusal: {
         if (configuration.workspace.state != .omitted) break :refusal .{ .code = .parent_workspace_forbidden };
         if (configuration.provider.state != .omitted) break :refusal .{ .code = .parent_provider_forbidden };
-        // This early start_agent boundary needs only tool and permission
-        // authority. The selected catalog is read later for model defaults.
-        const resolved = configuration_defaults.resolve(&.{}, .{
-            .creating = true,
-            .parent = .{ .tools = reads.inherited.tools.slice(), .permission_mode = try permissionMode(reads.inherited.permission_mode) },
-            .provider = reads.inherited.provider,
-            .model = configuration.model.value.slice(),
-            .can_read_images = @import("../../os/read_image_file.zig").available,
-            .tools = &configuration.tools,
-            .loaded_tools = &configuration.loaded_tools,
-            .permission_mode = &configuration.permission_mode,
-            .reasoning_effort = &configuration.reasoning_effort,
-            .compaction_trigger = &configuration.compaction_trigger,
-            .preferences = preferences(configuration),
-        });
-        if (toolsRejection(host_tool_set, served, reads.inherited.provider, resolved.tools)) |code| return code;
-        if (resolved.parent_refusal) |failure| break :refusal ParentFailure.from(failure);
         break :refusal null;
     };
     reads.parent_checked = true;
@@ -521,6 +507,11 @@ pub const ConfigurationReads = struct {
     missing: ?required_settings.Missing = null,
     /// The validated app declaration and the app tool set it saves as.
     apps: tool_set.AppSet = .{},
+    /// The lane's declared app records, read by the `lane` round; `lane_tools` is the Host set plus them.
+    lane: tool_set.LaneApps = .{},
+    lane_tools: tool_defs.HostToolSet = .{ .records = &.{}, .digests = &.{} },
+    /// The app names the parent offers, comma-separated: what a child may name beyond the parent's own tools.
+    parent_apps: Bounded(tool_set.max_app_names_bytes) = .{},
 
     fn instructionsValue(reads: *ConfigurationReads, configuration: *const content_custody.Configuration) *content_domain.Import {
         return if (configuration.instructions.state == .value) &reads.instructions else &reads.empty;
@@ -656,15 +647,11 @@ fn newReference(io: std.Io, reference: *[session_id.bytes]u8) !void {
     for (reference) |*byte| byte.* = session_id.alphabet[byte.* & 31];
 }
 
-pub noinline fn prepareConfiguration(a: anytype, host_tool_set: *const tool_defs.HostToolSet, session: []const u8, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) void {
+pub noinline fn prepareConfiguration(a: anytype, session: []const u8, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) void {
     const creating = session.len == 0;
     reads.configuration.init(configuration);
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
     if (creating and configuration.parent.state == .value) prepareParent(a, configuration.parent.value.slice(), reads);
-    if (creating or configuration.tools.state == .value) {
-        reads.tools = .of(host_tool_set, if (creating) configuration_defaults.creationTools(&configuration.tools, configuration.model.value.slice(), @import("../../os/read_image_file.zig").available) else &configuration.tools);
-        if (reads.tools) |*tools| tool_set.lookupSelection(a, tools);
-    }
     const instructions: ?*content_domain.Import = if (configuration.instructions.state == .value) requested: {
         reads.instructions = content_domain.sealedIdentity(&configuration.instructions);
         break :requested &reads.instructions;
@@ -761,7 +748,7 @@ fn selectLoaded(a: anytype, request: *const Request, reads: *ConfigurationReads)
     }
     if (v.loaded.count == v.tools.count) return finishValidation(request, reads);
     if (request.session.len == 0 or reads.configuration.tools.state == .value) {
-        reads.loaded_tools = tool_set.Selection.of(request.tools.host_tool_set, v.loaded) orelse return error.CorruptStore;
+        reads.loaded_tools = tool_set.Selection.of(&reads.lane_tools, v.loaded, reads.lane.set) orelse return error.CorruptStore;
         tool_set.lookupSelection(a, &reads.loaded_tools.?);
         return .{ .round = .loaded };
     }
@@ -799,7 +786,7 @@ pub const Request = struct {
     declarations: std.mem.Allocator,
 };
 
-pub const ValidationRound = enum { model, saved_tools, saved_loaded, loaded_source, loaded };
+pub const ValidationRound = enum { lane, model, saved_tools, saved_loaded, loaded_source, loaded };
 
 pub const Validation = union(enum) {
     round: ValidationRound,
@@ -819,6 +806,7 @@ const Validating = struct {
 pub fn validateStep(a: anytype, request: *const Request, reads: *ConfigurationReads, ran: ?ValidationRound) !Validation {
     const at = ran orelse return validateRequest(a, request, reads);
     switch (at) {
+        .lane => return validateLane(a, request, reads),
         .model => return validateModel(a, request, reads),
         .saved_tools => {
             try savedNames(reads);
@@ -902,6 +890,8 @@ fn declareAppTools(request: *const Request, reads: *ConfigurationReads) !?config
         },
         .declared => |declared| declared,
     };
+    // A Host tool, built-in or from an MCP server, never shares its name with an app tool: the offer keeps the Host's.
+    for (declaration.records) |*record| if (request.tools.host_tool_set.find(record.name) != null) return .app_tool_host_clash;
     reads.apps.declaration = declaration;
     return null;
 }
@@ -949,7 +939,28 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
     }
     if (reads.found.get()) try checkSaved(next);
     if (!creating and configuration.parent.state != .omitted) return .{ .rejected = .parent_on_update };
-    if (creating) if (try inheritParent(request.tools.host_tool_set, request.served, request.configuration, reads)) |code| return .{ .rejected = code };
+    // Only a request that names a tool the Host set lacks reads the lane's app records (a round): every other request
+    // resolves in the Host set alone, as it did before app tools.
+    reads.lane = .{};
+    if (!namesLaneTool(request.tools.host_tool_set, configuration.tools)) return validateLane(a, request, reads);
+    const lane = if (creating) (if (reads.parent_lane.len != 0) reads.parent_lane.slice() else null) else if (next.app_lane) |*ref| ref.slice() else null;
+    if (lane) |ref| reads.lane.queue(a, ref);
+    return .{ .round = .lane };
+}
+
+fn namesLaneTool(host_tool_set: *const tool_defs.HostToolSet, tools: *const @FieldType(content_custody.Configuration, "tools")) bool {
+    if (tools.state != .value) return false;
+    var names = tools.iterator();
+    while (names.next()) |name| if (host_tool_set.find(name) == null) return true;
+    return false;
+}
+
+fn validateLane(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
+    const configuration = &reads.configuration;
+    const creating = request.session.len == 0;
+    const next = &reads.next;
+    try reads.lane.check();
+    if (creating) if (try inheritParent(request.configuration, reads)) |code| return .{ .rejected = code };
     const creation_provider: ?connection.Name = if (creating) switch (creationCheck(configuration, reads, request.served)) {
         .missing => |missing| {
             reads.missing = missing;
@@ -960,12 +971,37 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
         .complete => |complete| complete.provider,
     } else null;
     if (request.configuration.app_tools.state == .value) if (try declareAppTools(request, reads)) |code| return .{ .rejected = code };
+    // The one lane resolver for this request: the declaration it carries (create, replace or clear), else the saved lane.
+    reads.lane_tools = if (reads.apps.declaration) |*declaration| declaredLaneTools(request.tools.host_tool_set, declaration) else reads.lane.view(request.tools.host_tool_set);
+    parentApps(reads);
+    if (creating or configuration.tools.state == .value) {
+        reads.tools = tool_set.Selection.of(&reads.lane_tools, if (creating) configuration_defaults.creationTools(configuration.tools, configuration.model.value.slice(), @import("../../os/read_image_file.zig").available) else configuration.tools, reads.lane.set);
+        if (reads.tools) |*tools| tool_set.lookupSelection(a, tools);
+    }
     reads.step = .{ .validating = undefined };
     const v = &reads.step.validating;
     v.creation_provider = creation_provider;
     v.model = .{};
     v.model.read(a, if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice());
     return .{ .round = .model };
+}
+
+/// The Host set plus a declaration this request carries: its records replace the saved lane's for this request.
+fn declaredLaneTools(host: *const tool_defs.HostToolSet, declaration: *const app_tools.Declaration) tool_defs.HostToolSet {
+    return .{
+        .records = host.records,
+        .digests = host.digests,
+        .configured_servers = host.configured_servers,
+        .apps = declaration.records,
+        .app_digests = declaration.digests,
+    };
+}
+
+/// The app names a child's parent offers, as the lane's resolved tools narrow them to the parent's names.
+fn parentApps(reads: *ConfigurationReads) void {
+    reads.parent_apps = .{};
+    if (!reads.inherits_parent) return;
+    tool_set.offeredAppNamesTo(&reads.lane_tools, reads.inherited.tools.slice(), &reads.parent_apps);
 }
 
 fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
@@ -981,9 +1017,12 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
         connection.Name.parse(configuration.provider.value.slice()) orelse return .{ .rejected = .unknown_connection }
     else if (current_configuration) |existing| existing.provider else v.creation_provider.?;
     const model = if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice();
+    // Named tools resolve through the lane before their parent authority is judged, so an unknown or unavailable name
+    // is refused by name, as the Host-only path did.
+    if (configuration.tools.state == .value) if (toolsRejection(&reads.lane_tools, request.served, provider, requestedNames(configuration))) |rejection| return .{ .rejected = rejection };
     reads.defaults = configuration_defaults.resolve(v.model.facts(), .{
         .creating = creating,
-        .parent = if (reads.inherits_parent) .{ .tools = reads.inherited.tools.slice(), .permission_mode = try permissionMode(reads.inherited.permission_mode) } else null,
+        .parent = if (reads.inherits_parent) .{ .tools = reads.inherited.tools.slice(), .apps = reads.parent_apps.slice(), .permission_mode = try permissionMode(reads.inherited.permission_mode) } else null,
         .provider = provider,
         .model = model,
         .can_read_images = @import("../../os/read_image_file.zig").available,
@@ -1003,7 +1042,7 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     reads.configuration.permission_mode = &reads.defaults.permission_mode;
     reads.configuration.reasoning_effort = &reads.defaults.reasoning_effort;
     reads.configuration.compaction_trigger = &reads.defaults.compaction_trigger;
-    if (configurationBeforeWorkspace(v.model.facts(), request.tools.host_tool_set, request.served, current_configuration, configuration, v.creation_provider)) |rejection| {
+    if (configurationBeforeWorkspace(v.model.facts(), current_configuration, configuration)) |rejection| {
         return .{ .rejected = rejection };
     }
 
@@ -1141,6 +1180,11 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
             next.output_schema_id = @intCast(applied.output_schema_id.?);
         },
         .clear => next.output_schema_id = null,
+    }
+    // A declaration this request applied is the lane's set now, so the selections record it as their app set.
+    if (reads.apps.declaration != null) {
+        if (reads.tools) |*tools| tools.app_set = reads.apps.set_id orelse 0;
+        if (reads.loaded_tools) |*loaded| loaded.app_set = reads.apps.set_id orelse 0;
     }
     if (creating or configuration.tools.state == .value) {
         const tools = &(reads.tools orelse return error.CorruptStore);

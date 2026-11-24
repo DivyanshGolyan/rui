@@ -1271,3 +1271,129 @@ test "allows reads the allow list, and a connection without one allows every mod
     try std.testing.expect(allows(&connection, "claude-opus"));
     try std.testing.expect(!allows(&connection, "mistral-large"));
 }
+
+// ---------------------------------------------------------------- the connections list
+
+/// The most names one Host serves: every listed connection plus every
+/// built-in. A listed connection under a built-in name replaces it.
+pub const max_served = 16;
+/// The most built-in names a Host serves beside the listed connections;
+/// provider_route checks the built-in list against it.
+pub const max_built_in = 3;
+/// The most connections one document may list: what the served set holds
+/// beside every built-in.
+pub const max_list = max_served - max_built_in;
+
+/// The connections a settings document lists, in order. Each entry keeps the
+/// connection the parser read and the JSON it came from, which `write` emits
+/// again; the strings borrow from `memory`. This is the one owner of what a
+/// list may hold: its names, its count and what this Rui version serves.
+pub const Connections = struct {
+    entries: []const Entry = &.{},
+    memory: ?std.heap.ArenaAllocator = null,
+
+    pub const Entry = struct {
+        value: Connection,
+        document: std.json.ObjectMap,
+    };
+
+    /// The first problem with a list or one of its entries. `index` is the
+    /// entry, null for the list itself; `field` is the Connection field the
+    /// parser named, or empty; `reason` is the reason as text.
+    pub const Failure = struct {
+        index: ?usize,
+        field: []const u8,
+        reason: []const u8,
+    };
+
+    pub fn deinit(self: *Connections) void {
+        if (self.memory) |*memory| memory.deinit();
+        self.* = .{};
+    }
+
+    /// Parses a document's array of connection objects. An empty array leaves
+    /// the list empty. Scratch goes in `scratch`; the kept values in a new
+    /// arena that replaces this list only when every entry is valid.
+    pub fn parseItems(self: *Connections, gpa: std.mem.Allocator, scratch: std.mem.Allocator, items: []const std.json.Value, host_field: HostField) error{OutOfMemory}!?Failure {
+        if (items.len > max_list) return .{ .index = null, .field = "", .reason = "too many connections" };
+        if (items.len == 0) {
+            self.deinit();
+            return null;
+        }
+        var memory: std.heap.ArenaAllocator = .init(gpa);
+        var kept = false;
+        defer if (!kept) memory.deinit();
+        const retained = try memory.allocator().alloc(Entry, items.len);
+        for (items, retained, 0..) |item, *slot, index| {
+            if (item != .object) return .{ .index = index, .field = "", .reason = "must be an object" };
+            const encoded = try std.json.Stringify.valueAlloc(scratch, item, .{});
+            switch (try parse(memory.allocator(), encoded, host_field)) {
+                .ok => |value| slot.* = .{ .value = value, .document = undefined },
+                // The field may live in `memory`, which is freed on return; the caller owns `scratch`.
+                .refused => |found| return .{ .index = index, .field = try scratch.dupe(u8, found.field), .reason = @tagName(found.reason) },
+            }
+            const document = std.json.parseFromSliceLeaky(std.json.Value, memory.allocator(), encoded, .{ .allocate = .alloc_always, .parse_numbers = false }) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => unreachable,
+            };
+            slot.document = document.object;
+            if (Connections.checkNames(retained[0 .. index + 1])) |failure| return failure;
+        }
+        self.deinit();
+        self.* = .{ .entries = retained, .memory = memory };
+        kept = true;
+        return null;
+    }
+
+    /// The name and count rules: a name is unique and not one a sign-in owns.
+    /// Checked on each entry as it arrives, so an earlier entry is the
+    /// duplicate's owner.
+    pub fn checkNames(entries: []const Entry) ?Failure {
+        if (entries.len > max_list) return .{ .index = null, .field = "", .reason = "too many connections" };
+        for (entries, 0..) |entry, index| {
+            if (reservedName(entry.value.name.slice())) return .{ .index = index, .field = "name", .reason = "reserved for the ChatGPT sign-in" };
+            for (entries[0..index]) |before| {
+                if (before.value.name.eql(entry.value.name)) return .{ .index = index, .field = "name", .reason = "duplicate connection name" };
+            }
+        }
+        return null;
+    }
+
+    /// The first connection this Rui version does not serve, and the field
+    /// that makes it so. It serves one shape: a key, one Responses format,
+    /// and no extra headers or refusal rules.
+    pub fn unserved(self: *const Connections) ?struct { name: []const u8, field: []const u8 } {
+        for (self.entries) |*entry| {
+            const name = entry.value.name.slice();
+            if (entry.value.formats.len != 1 or entry.value.formats[0].family != .responses) return .{ .name = name, .field = "formats" };
+            if (entry.value.headers.len != 0) return .{ .name = name, .field = "headers" };
+            if (entry.value.refusals.len != 0) return .{ .name = name, .field = "refusals" };
+            switch (entry.value.credential) {
+                .key => |key| {
+                    if (key.placement != .bearer) return .{ .name = name, .field = "credential" };
+                    if (key.source == .command) return .{ .name = name, .field = "credential.source" };
+                },
+                .oauth, .@"openai-device" => return .{ .name = name, .field = "credential" },
+            }
+        }
+        return null;
+    }
+
+    /// The document form: the entries' JSON, in order, as one array.
+    pub fn write(self: *const Connections, out: *std.Io.Writer) std.Io.Writer.Error!void {
+        try out.writeByte('[');
+        for (self.entries, 0..) |entry, i| {
+            if (i != 0) try out.writeByte(',');
+            try std.json.Stringify.value(std.json.Value{ .object = entry.document }, .{}, out);
+        }
+        try out.writeByte(']');
+    }
+};
+
+/// Whether a built-in sign-in owns the name (`codex`, `chatgpt`): a connection may not take it.
+pub fn reservedName(name: []const u8) bool {
+    inline for (std.enums.values(provider_name.Provider)) |provider| {
+        if (provider.facts().credential == .sign_in and std.mem.eql(u8, name, @tagName(provider))) return true;
+    }
+    return false;
+}

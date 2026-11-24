@@ -28,6 +28,33 @@ pub fn default(environ: *const std.process.Environ.Map, comptime provider: Provi
     return std.fmt.bufPrint(buffer, "{s}/.config/rui/" ++ @tagName(provider) ++ extension, .{home}) catch error.InvalidCredentialPath;
 }
 
+/// The file a connection's saved key lives in: `RUI_<NAME>_KEY_FILE` when set and absolute,
+/// else `HOME/.config/rui/<name>.key`. The name is a connection name: lowercase letters,
+/// digits and '-', so its variable spells with '_' in place of '-'.
+pub fn connectionKeyFile(environ: *const std.process.Environ.Map, name: []const u8, buffer: []u8) Error![]const u8 {
+    var variable_buffer: [max_variable_bytes]u8 = undefined;
+    const variable_name = connectionVariable(name, &variable_buffer) orelse return error.InvalidCredentialPath;
+    if (environ.get(variable_name)) |path| {
+        if (!std.fs.path.isAbsolute(path)) return error.InvalidCredentialPath;
+        return path;
+    }
+    const home = environ.get("HOME") orelse return error.HomeRequired;
+    if (!std.fs.path.isAbsolute(home)) return error.InvalidCredentialPath;
+    return std.fmt.bufPrint(buffer, "{s}/.config/rui/{s}.key", .{ home, name }) catch error.InvalidCredentialPath;
+}
+
+const connection_name_bytes = @import("connection.zig").max_name_bytes;
+const max_variable_bytes = "RUI_".len + connection_name_bytes + "_KEY_FILE".len;
+
+fn connectionVariable(name: []const u8, buffer: *[max_variable_bytes]u8) ?[]const u8 {
+    if (name.len == 0 or name.len > connection_name_bytes) return null;
+    @memcpy(buffer[0.."RUI_".len], "RUI_");
+    for (name, buffer["RUI_".len..][0..name.len]) |byte, *to| to.* = if (byte == '-') '_' else std.ascii.toUpper(byte);
+    const end = "RUI_".len + name.len;
+    @memcpy(buffer[end..][0.."_KEY_FILE".len], "_KEY_FILE");
+    return buffer[0 .. end + "_KEY_FILE".len];
+}
+
 test "credential default covers each variable and home combination" {
     inline for (std.enums.values(Provider)) |provider| {
         for ([_]?[]const u8{ null, "/credential", "relative", "" }) |named| {
@@ -49,4 +76,16 @@ test "credential default covers each variable and home combination" {
             }
         }
     }
+}
+
+test "a connection's saved key file is RUI_<NAME>_KEY_FILE or HOME's key file for that name" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try env.put("HOME", "/home/test");
+    try std.testing.expectEqualStrings("/home/test/.config/rui/my-alpha.key", try connectionKeyFile(&env, "my-alpha", &buffer));
+    try env.put("RUI_MY_ALPHA_KEY_FILE", "/keys/alpha.key");
+    try std.testing.expectEqualStrings("/keys/alpha.key", try connectionKeyFile(&env, "my-alpha", &buffer));
+    try env.put("RUI_MY_ALPHA_KEY_FILE", "relative");
+    try std.testing.expectError(error.InvalidCredentialPath, connectionKeyFile(&env, "my-alpha", &buffer));
 }

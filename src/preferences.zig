@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const c = @import("posix");
 const model_capability = @import("model_capability.zig");
 const platform = @import("platform.zig");
@@ -85,7 +86,7 @@ fn loginOutcome(before: *const Values, published: bool, provider: protocol.Provi
 }
 
 fn loginMayReplace(saved: []const u8, provider: protocol.Provider) bool {
-    return saved.len == 0 or otherWayIn(saved, provider);
+    return saved.len == 0 or otherWayIn(saved, @tagName(provider));
 }
 
 const otherWayIn = document.otherWayIn;
@@ -241,7 +242,7 @@ fn validateOwner(handle: anytype) !void {
 
 fn codexOnly(state: provider_selection.Readiness) Readinesses {
     var readiness: Readinesses = .initFill(.missing);
-    readiness.set(.codex, state);
+    readiness.set(provider_route.nameOf(.codex), state);
     return readiness;
 }
 

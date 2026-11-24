@@ -987,6 +987,7 @@ pub noinline fn serve(
     allocator: std.mem.Allocator,
     host_directory: []const u8,
     prepared: host_settings.Prepared,
+    connected: *const providers.Connected,
     tuning: Tuning,
     failure: *?start_report.Failure,
 ) !void {
@@ -994,7 +995,7 @@ pub noinline fn serve(
     const settings = prepared.get();
     const active_capacity = settings.execution.active_capacity.value;
     const limits = tuning.limits;
-    const served_value = providers.fromSettings(settings);
+    const served_value = providers.fromSettings(settings, connected);
     const served = &served_value;
     var connections = try server_mcp_settings.Connections.init(allocator, settings);
     defer connections.deinit();
@@ -1275,10 +1276,10 @@ fn serveOpened(
     );
     defer retention.cleanupAll();
     if (served.any()) {
-        for (served.table.values) |entry| if (entry) |value| {
+        for (served.table.values[0..served.table.len]) |value| {
             try provider.validateEndpoint(value.endpoint);
             try value.credential.validate(value.endpoint, served.ca_file);
-        };
+        }
         try provider.checkLibraries();
     }
     storage.instance = instance;

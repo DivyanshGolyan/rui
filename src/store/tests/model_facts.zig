@@ -1,5 +1,6 @@
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
+const provider_route = @import("../../provider_route.zig");
 const protocol = @import("../../protocol.zig");
 const wire_request = @import("../../wire_request.zig");
 const store_core = @import("../Store.zig");
@@ -70,8 +71,8 @@ fn runtimeCatalogListing(storage: *Store, expected: []const u8) !void {
     try std.testing.expect(rounds.taken() <= 1);
     var out: std.Io.Writer.Allocating = .init(arena.allocator());
     try @import("../../model_list.zig").writeProviders(&out.writer, facts, &.{
-        .{ .provider = .codex, .list = .catalog },
-        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\nruntime-only\nruntime-null\nruntime-private\n" } } },
+        .{ .provider = provider_route.nameOf(.codex), .list = .catalog },
+        .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\nruntime-only\nruntime-null\nruntime-private\n" } } },
     });
     try std.testing.expectEqualStrings(expected, out.written());
 }
@@ -102,8 +103,8 @@ test "runtime catalog model list selects one owned generation and survives reope
             try std.testing.expect(fallback.ptr == runtime_catalog.shipped.ptr);
             var expected: std.Io.Writer.Allocating = .init(arena.allocator());
             try @import("../../model_list.zig").writeProviders(&expected.writer, runtime_catalog.shipped, &.{
-                .{ .provider = .codex, .list = .catalog },
-                .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\nruntime-only\nruntime-null\nruntime-private\n" } } },
+                .{ .provider = provider_route.nameOf(.codex), .list = .catalog },
+                .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\nruntime-only\nruntime-null\nruntime-private\n" } } },
             });
             try runtimeCatalogListing(&storage, expected.written());
             try storage.saveModelFacts(runtime_catalog_facts, "\"runtime\"");
@@ -243,7 +244,7 @@ test "runtime catalog failed publication retains the selected generation for con
             const facts = try storage.readModelCatalog(arena.allocator());
             try std.testing.expect(rounds.taken() <= 1);
             var out: std.Io.Writer.Allocating = .init(arena.allocator());
-            try @import("../../model_list.zig").writeProviders(&out.writer, facts, &.{.{ .provider = .codex, .list = .catalog }});
+            try @import("../../model_list.zig").writeProviders(&out.writer, facts, &.{.{ .provider = provider_route.nameOf(.codex), .list = .catalog }});
             try std.testing.expectEqualStrings("[{\"connection\":\"codex\",\"source\":\"catalog\",\"models\":[{\"id\":\"kept\",\"known\":true}]}]", out.written());
             try runtimeCatalogCreation(&storage, "runtime-rollback-accept", "kept", null, "100", null);
             try runtimeCatalogCreation(&storage, "runtime-rollback-refuse", "kept", null, "101", .compact_at_too_large);

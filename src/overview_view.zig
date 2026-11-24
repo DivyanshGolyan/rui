@@ -8111,14 +8111,14 @@ test "shared model reads are admitted by core openings and deduplicated across f
             try expectEffects(&.{ show, .list_models }, try openModelConsumer(&state, opening));
             try expectEffects(&.{show}, try openModelConsumer(&state, opening));
         }
-        try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .pending }}) } }));
+        try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = provider_route.nameOf(.codex), .list = .pending }}) } }));
         try std.testing.expect(state.menu.loading() and !state.asking_models);
         try expectEffects(&.{ show, .list_models }, try openModelConsumer(&state, opening));
         try expectEffects(&.{show}, try openModelConsumer(&state, opening));
-        try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .pending }}) } }));
+        try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = provider_route.nameOf(.codex), .list = .pending }}) } }));
         try expectEffects(&.{ .{ .list = .{ .since = testToken(1), .archive = .active } }, .list_models }, try step(&state, .{ .tick = state.next_list_ms }));
         try expectEffects(&.{show}, try openModelConsumer(&state, opening));
-        try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "model-a\n" } } }}) } }));
+        try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "model-a\n" } } }}) } }));
         try std.testing.expect(!state.asking_models and !state.menu.loading());
         try expectEffects(&.{show}, try openModelConsumer(&state, opening));
         try expectEffects(&.{show}, try openModelConsumer(&state, opening));
@@ -8139,7 +8139,7 @@ test "shared model reads respect every Upgrade hold for opening and loading retr
             .unread => {},
             .invalid => _ = try step(&state, .{ .models = .invalid }),
             .unanswered => _ = try step(&state, .{ .models = .unanswered }),
-            .loading, .complete => _ = try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = if (answer == .loading) .pending else .{ .live = .{ .bytes = "model-a\n" } } }}) } }),
+            .loading, .complete => _ = try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = provider_route.nameOf(.codex), .list = if (answer == .loading) .pending else .{ .live = .{ .bytes = "model-a\n" } } }}) } }),
         }
         if (hold != .active) {
             try expectEffects(&.{}, try step(&state, .start_upgrade));
