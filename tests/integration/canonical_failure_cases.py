@@ -63,7 +63,7 @@ def expect_mutation_error(result, saved, *, human=False, status=500,
 
 def producer_cases(state):
     commands = {
-        "configure": ["session", "configure", "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol"],
+        "configure": ["session", "configure", "--workspace", state, "--connection", "codex", "--model", "gpt-6-sol"],
         "message": ["session", "send"],
         "permission-decision": ["action", "allow", "--action", "7"],
         "permission-denial": ["action", "deny", "--action", "7"],
@@ -195,7 +195,7 @@ def committed_cases(state):
     host = fixture.start_host(store, None)
     try:
         configured = invoke(home, "session", "configure", "--store", store,
-            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+            "--workspace", state, "--connection", "codex", "--model", "gpt-6-sol")
         assert configured.returncode == 0, configured
         session = json.loads(configured.stdout)["answer"]["session"]
         proxy = ReplyProxy(host, "/v1/message")
@@ -273,7 +273,7 @@ def interactive_cases(state, binding=False, null_code=False):
     host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
     try:
         configured = invoke(home, "session", "configure", "--store", store,
-            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+            "--workspace", state, "--connection", "codex", "--model", "gpt-6-sol")
         assert configured.returncode == 0, configured
         session = json.loads(configured.stdout)["answer"]["session"]
         codex.credentials(home / ".config/rui/codex.json")
@@ -286,7 +286,7 @@ def interactive_cases(state, binding=False, null_code=False):
             original_terminal = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
             args = (["session", "resume", "--store", str(store), session] if line is not None
-                else ["--store", str(store), "--provider", "codex", "--model", "gpt-6-luna"])
+                else ["--store", str(store), "--connection", "codex", "--model", "gpt-6-luna"])
             proxy = None
             caller = None
             before_messages = {
@@ -513,7 +513,7 @@ def permission_read_cases(state):
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         configured = invoke(home, "session", "configure", "--store", store,
-            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol",
+            "--workspace", state, "--connection", "codex", "--model", "gpt-6-sol",
             "--permission-mode", "ask")
         assert configured.returncode == 0, configured
         session = json.loads(configured.stdout)["answer"]["session"]
@@ -576,7 +576,7 @@ def permission_read_cases(state):
                 close_pty(master)
                 close_pty(slave)
         configured = invoke(home, "session", "configure", "--store", store,
-            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+            "--workspace", state, "--connection", "codex", "--model", "gpt-6-sol")
         assert configured.returncode == 0, configured
         fold_session = json.loads(configured.stdout)["answer"]["session"]
         with endpoint.lock:
@@ -694,7 +694,7 @@ def keyed_observation_cases(state, only="keyed"):
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         kinds = ("configure", "message", "session_stop", "model_interruption", "permission_decision")
-        commands = (["session", "configure", "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol"],
+        commands = (["session", "configure", "--workspace", state, "--connection", "codex", "--model", "gpt-6-sol"],
             ["session", "send"], ["session", "stop"],
             ["session", "interrupt-model", "--turn", "733", "--operation", "911"], ["action", "allow", "--action", "721"])
         keys = {}

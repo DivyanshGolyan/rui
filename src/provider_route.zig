@@ -8,10 +8,28 @@ pub const Route = enum { unserved, endpoint, chatgpt_device, key_file, chatgpt_p
 /// The most connections one Host serves at once.
 pub const max_served = 16;
 
-/// One served connection: its name, how the Host reaches it, the wire codec
-/// its Sessions speak, and whether it runs web_search.
+/// A served connection's label, as the Host shows it.
+pub const Label = struct {
+    bytes: [connection.max_label_bytes]u8 = @splat(0),
+    len: u8 = 0,
+
+    pub fn parse(text: []const u8) ?Label {
+        if (text.len > connection.max_label_bytes) return null;
+        var label: Label = .{ .len = @intCast(text.len) };
+        @memcpy(label.bytes[0..text.len], text);
+        return label;
+    }
+
+    pub fn slice(self: *const Label) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+/// One served connection: its name, label, how the Host reaches it, the wire
+/// codec its Sessions speak, and whether it runs web_search.
 pub const Entry = struct {
     name: connection.Name,
+    label: Label,
     route: Route,
     codec: provider_name.Codec,
     web_search: bool,
@@ -70,6 +88,7 @@ pub const Served = struct {
 pub fn builtIn(provider: Provider, route: Route) Entry {
     return .{
         .name = connection.Name.parse(@tagName(provider)).?,
+        .label = Label.parse(provider.shown()).?,
         .route = route,
         .codec = provider.codec(),
         .web_search = provider.runsTool("web_search"),

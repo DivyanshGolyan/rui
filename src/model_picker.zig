@@ -181,7 +181,7 @@ pub fn read(gpa: std.mem.Allocator, providers: []const u8) error{ OutOfMemory, I
         var source: ?model_list.Source = null;
         var models: ?[2]usize = null;
         while (try objectKey(&scanner, temporary)) |key| {
-            if (std.mem.eql(u8, key, "provider")) {
+            if (std.mem.eql(u8, key, "connection")) {
                 provider = std.meta.stringToEnum(Provider, try string(&scanner, temporary)) orelse return error.InvalidModelList;
             } else if (std.mem.eql(u8, key, "source")) {
                 source = std.meta.stringToEnum(model_list.Source, try string(&scanner, temporary)) orelse return error.InvalidModelList;
@@ -323,7 +323,7 @@ test "the default leads, known models follow in catalog order, then the others b
 }
 
 test "the Host's word decides which models are known; Rui's catalog only orders them" {
-    var menu = try read(std.testing.allocator, "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[" ++
+    var menu = try read(std.testing.allocator, "[{\"connection\":\"openai\",\"source\":\"live\",\"models\":[" ++
         "{\"id\":\"o9\",\"known\":false},{\"id\":\"gpt-6-luna\",\"known\":false},{\"id\":\"zz-next\",\"known\":true},{\"id\":\"gpt-5.5\",\"known\":true}]}]");
     defer menu.deinit(std.testing.allocator);
     try expectOrder(menu.shown(null), &.{ "gpt-5.5", "zz-next", "gpt-6-luna", "o9" });
@@ -348,13 +348,13 @@ test "a reply Rui cannot read is refused whole" {
     for ([_][]const u8{
         "",
         "{}",
-        "[{\"provider\":\"codex\",\"source\":\"table\",\"models\":[]}]",
-        "[{\"provider\":\"openai\",\"source\":\"table_fallback\",\"models\":[]}]",
-        "[{\"provider\":\"claude\",\"source\":\"catalog\",\"models\":[]}]",
-        "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"a b\",\"known\":false}]}]",
-        "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6-luna\"}]}]",
-        "[{\"provider\":\"openai\",\"source\":\"live\"}]",
-        "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[]},{\"provider\":\"openai\",\"source\":\"catalog\",\"models\":[]}]",
+        "[{\"connection\":\"codex\",\"source\":\"table\",\"models\":[]}]",
+        "[{\"connection\":\"openai\",\"source\":\"table_fallback\",\"models\":[]}]",
+        "[{\"connection\":\"claude\",\"source\":\"catalog\",\"models\":[]}]",
+        "[{\"connection\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"a b\",\"known\":false}]}]",
+        "[{\"connection\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6-luna\"}]}]",
+        "[{\"connection\":\"openai\",\"source\":\"live\"}]",
+        "[{\"connection\":\"openai\",\"source\":\"live\",\"models\":[]},{\"connection\":\"openai\",\"source\":\"catalog\",\"models\":[]}]",
         "[] []",
     }) |reply| try std.testing.expectError(error.InvalidModelList, read(std.testing.allocator, reply));
 }

@@ -1046,7 +1046,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 			session, err = measurement.ConfigurationSession(reply)
 			return err
 		}
-		if err := measure("cli-configuration", "configuration", []string{"session", "configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna", "--tools", "bash", "--permission-mode", "ask"}, nil, configured); err != nil {
+		if err := measure("cli-configuration", "configuration", []string{"session", "configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-luna", "--tools", "bash", "--permission-mode", "ask"}, nil, configured); err != nil {
 			return result, err
 		}
 	} else {

@@ -282,7 +282,7 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     const messaging = core == .message_agent;
     const provider = if (complete) if (records.builtIn(name[0..length])) |builtin| record(builtin).owner == .provider else false else false;
     const tool: ?Record = if (complete and !provider) if (offered.find(name[0..length])) |candidate|
-        if (records.builtIn(candidate)) |builtin| record(builtin).* else .{ .name = candidate, .owner = .mcp }
+        if (records.builtIn(candidate)) |builtin| record(builtin).* else .{ .name = candidate, .owner = if (offered.isApp(candidate)) .app else .mcp }
     else
         null else null;
     const removed = tool == null and complete and !provider and offered.wasWithdrawn(name[0..length]);

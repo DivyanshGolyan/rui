@@ -23,14 +23,16 @@ pub const Presentation = struct {
 pub const too_large = "! Environment too large; nothing sent · details";
 
 /// The refusal of a chat Message whose Session's provider this Host does not serve; the fix is in the Host's settings.
-pub fn writeUnserved(writer: *std.Io.Writer, provider: ?protocol.Provider) !void {
-    try writer.print("! {s}{s}", .{ if (provider) |known| known.shown() else "This Session's provider", unserved_advice });
+pub fn writeUnserved(writer: *std.Io.Writer, provider: ?@import("connection.zig").Name) !void {
+    const shown = if (provider) |name| if (@import("provider_route.zig").builtInOf(name)) |built_in| built_in.shown() else name.slice() else "This Session's provider";
+    try writer.print("! {s}{s}", .{ shown, unserved_advice });
 }
 
 const unserved_advice = " isn't served by this Host. Check rui host settings, then rui host pause and rui host start.";
 pub const unserved_capacity = blk: {
     var longest: usize = "This Session's provider".len;
     for (std.meta.tags(protocol.Provider)) |provider| longest = @max(longest, provider.shown().len);
+    longest = @max(longest, @import("connection.zig").max_name_bytes);
     break :blk "! ".len + longest + unserved_advice.len;
 };
 
@@ -445,7 +447,7 @@ test "SUI-62 departure names the Store, the Session and the pending Action" {
 test "a refused chat Message names its unserved provider and the settings fix" {
     var buffer: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try writeUnserved(&writer, .openai);
+    try writeUnserved(&writer, @import("connection.zig").Name.parse("openai"));
     try std.testing.expectEqualStrings("! OpenAI isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
     writer = std.Io.Writer.fixed(&buffer);
     try writeUnserved(&writer, null);

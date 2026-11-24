@@ -213,7 +213,7 @@ test "a Message with require_model follows the Session's archive state and provi
 }
 
 fn expectCreationReceipt(expected: @import("../../creation_receipt.zig").Configuration, actual: @import("../../creation_receipt.zig").Configuration) !void {
-    try std.testing.expectEqual(expected.provider, actual.provider);
+    try std.testing.expectEqualStrings(expected.connection.slice(), actual.connection.slice());
     try std.testing.expectEqualStrings(expected.model.slice(), actual.model.slice());
     try std.testing.expectEqualDeep(expected.reasoning_effort, actual.reasoning_effort);
     try std.testing.expectEqualStrings(expected.workspace.slice(), actual.workspace.slice());
@@ -248,7 +248,7 @@ test "initial Message atomically allocates its Session and replays its original 
                 try std.testing.expectEqualDeep(expected_input, first.content);
                 try std.testing.expect(first.configuration != null);
                 const receipt = first.configuration.?;
-                try std.testing.expectEqual(.codex, receipt.provider);
+                try std.testing.expectEqualStrings("codex", receipt.connection.slice());
                 try std.testing.expectEqualStrings("model-a", receipt.model.slice());
                 const initial_session = try storage.inspectSessionForTesting(first.session.slice());
                 try std.testing.expectEqual(initial_session.reasoning_effort, receipt.reasoning_effort);
@@ -1551,7 +1551,7 @@ test "creating configuration receipt replays after edit and restart with history
                 try std.testing.expect(created.accepted.configuration != null);
                 original = created.accepted.configuration.?.*;
                 session = created.accepted.session;
-                try std.testing.expectEqual(.codex, original.provider);
+                try std.testing.expectEqualStrings("codex", original.connection.slice());
                 try std.testing.expectEqualStrings("model-a", original.model.slice());
                 try std.testing.expectEqualStrings(workspace, original.workspace.slice());
                 try std.testing.expectEqual(.bypass, original.permission_mode);

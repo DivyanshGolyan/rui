@@ -121,7 +121,7 @@ pub const Command = enum {
             .host_restart => .{ .resource = .host, .name = "restart", .description = "Restart every eligible running Host of this user on the selected installed build, one at a time. Saved work resumes; unsupported Hosts are left running with a reason. Requires --all.", .options = &.{flag("all")}, .requires = &.{&.{"all"}} },
             .host_serve => serve_grammar.definition,
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
-            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --permission-mode ask|bypass saves how new Sessions approve Bash commands; an explicit Session flag wins. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default uses the client product choice.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settingOption("reasoning_effort"), settingOption("permission_mode") }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort", "permission-mode" }} },
+            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --permission-mode ask|bypass saves how new Sessions approve Bash commands; an explicit Session flag wins. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default uses the client product choice.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settingOption("reasoning_effort"), settingOption("permission_mode") }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }}, .requires = &.{&.{ "store", "store-hex", session_settings.cliName("provider"), session_settings.cliName("model"), "clear-model", "notifications", session_settings.cliName("reasoning_effort"), session_settings.cliName("permission_mode") }} },
             .store_schema => .{ .resource = .store, .name = "schema", .description = "Print this build's MySQL DDL for a new Store, or with --from N print every forward migration from format N to this build. The current format prints nothing. The Host never changes MySQL tables.", .options = &.{ value("engine", "mysql"), numeric("from", "N", 0, std.math.maxInt(u64), .count_malformed) }, .requires = &.{&.{"engine"}} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login chatgpt signs in with ChatGPT in your browser, so Rui uses your ChatGPT plan: it prints a link to open, and on a machine whose browser cannot reach back, you paste the address the browser ends on; add --device-code to sign in with a code instead (for SSH or machines without a browser); rui auth login openai saves an OpenAI API key read from stdin. Either ChatGPT sign-in replaces the other as the default for new Sessions; Sessions already open keep theirs. Ordinary peer calls never sign in or prompt.", .options = plan_fixture ++ &[_]Option{flag("device-code")}, .positional = "PROVIDER", .requires = &.{&.{""}} },
             .auth_logout => .{ .resource = .auth, .name = "logout", .description = "rui auth logout chatgpt ends both ChatGPT sign-ins: Rui asks ChatGPT to revoke the browser sign-in, then deletes its tokens, and deletes the tokens of one made with --device-code. If ChatGPT does not confirm the revocation, Rui says so and how to disconnect it there. It fails, saying which sign-in may remain, if a sign-in could not be ended. Rui keeps its app registration and host id, so the next rui auth login chatgpt reuses them. A running Host refuses new ChatGPT work until you sign in again.", .options = plan_fixture, .positional = "PROVIDER", .requires = &.{&.{""}} },
@@ -158,7 +158,7 @@ pub const reasoning_help =
 
 const parent_help =
     \\--parent ID creates an attached Session that inherits its parent's provider, Workspace and saved Bash environment.
-    \\Omit --provider and --workspace; even equal overrides are refused. Tools must be within the parent's configured set, and an asking parent requires ask.
+    \\Omit --connection and --workspace; even equal overrides are refused. Tools must be within the parent's configured set, and an asking parent requires ask.
     \\Other creation settings use normal CLI defaults. Specify --compaction-trigger TOKENS when the parent's provider needs a different threshold than the CLI default binding.
     \\Start receipts show provider null and parent ID for inherited binding. Existing Sessions cannot change parent.
     \\
@@ -234,7 +234,7 @@ fn settingOption(comptime field: []const u8) Option {
             .tools => value(cli.name, if (std.mem.eql(u8, field, "tools")) tool_choices else "a,b|none"),
             .decimal_policy => value(cli.name, "TOKENS|default"),
             .app_tools => @compileError("app_tools has no CLI option"),
-            .choice => if (std.mem.eql(u8, field, "provider")) choice(cli.name, provider_name.Provider) else if (std.mem.eql(u8, field, "permission_mode")) choice(cli.name, cli_value.PermissionMode) else if (std.mem.eql(u8, field, "reasoning_effort")) choice(cli.name, cli_value.ReasoningChoice) else @compileError("choose CLI values for " ++ field),
+            .choice => if (std.mem.eql(u8, field, "provider")) value(cli.name, "NAME") else if (std.mem.eql(u8, field, "permission_mode")) choice(cli.name, cli_value.PermissionMode) else if (std.mem.eql(u8, field, "reasoning_effort")) choice(cli.name, cli_value.ReasoningChoice) else @compileError("choose CLI values for " ++ field),
         };
     }
     @compileError("unknown Session setting: " ++ field);
@@ -407,6 +407,11 @@ fn expectCoherent(definition: Definition) !void {
     for (definition.positional_conflicts) |conflict| try std.testing.expect(definition.positional != null and definition.indexOf(conflict.option) != null);
     for (definition.options) |option| if (option.hex_of) |named| {
         try std.testing.expect(definition.indexOf(named) != null and option.hex_limit != 0);
+    };
+    // A requirement names an option of this grammar, or a positional ("" or "#N").
+    for (definition.requires) |group| for (group) |name| {
+        const positional = name.len == 0 or name[0] == '#';
+        try std.testing.expect(positional or definition.indexOf(name) != null);
     };
 }
 
@@ -597,7 +602,6 @@ test "typed choices share enum names with help and refuse unknown values" {
     const cases = [_]Case{
         .{ .command = .session_start, .name = "permission-mode", .choices = &.{ "ask", "bypass" } },
         .{ .command = .defaults_configure, .name = "permission-mode", .choices = &.{ "ask", "bypass" } },
-        .{ .command = .session_start, .name = "provider", .choices = &.{ "codex", "openai", "chatgpt" } },
         .{ .command = .session_configure, .name = "reasoning-effort", .choices = &.{ "none", "low", "medium", "high", "xhigh", "max", "default" } },
         .{ .command = .defaults_configure, .name = "notifications", .choices = &.{ "on", "off" } },
         .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background", "action-stop" } },
@@ -791,7 +795,7 @@ test "Session settings CLI membership and order preserve configure and start" {
     inline for (.{
         .{ settings, &[_][]const u8{ "workspace", "instructions", "tools", "loaded-tools", "permission-mode", "output-schema", "text-output", "compaction-trigger", "output-reservation", "reasoning-effort", "label" } },
         .{ start_settings, &[_][]const u8{ "workspace", "tools", "loaded-tools", "permission-mode", "compaction-trigger", "output-reservation", "reasoning-effort", "label" } },
-        .{ binding, &[_][]const u8{ "provider", "model" } },
+        .{ binding, &[_][]const u8{ "connection", "model" } },
     }) |case| {
         try std.testing.expectEqual(case[1].len, case[0].len);
         for (case[0], 0..) |option, index| try std.testing.expectEqualStrings(case[1][index], option.name);
@@ -872,9 +876,9 @@ test "Host settings modes and generic overrides share the start grammar" {
 test "parent relation reaches only creating command grammars without hiding canonical refusals" {
     for ([_]Command{ .session_start, .session_configure }) |command| {
         var storage: [1024]u8 = undefined;
-        const parsed = try testParse(command.definition(), &.{ "--parent", "k7m2qx", "--provider", "codex", "--workspace", "/same" }, &storage);
+        const parsed = try testParse(command.definition(), &.{ "--parent", "k7m2qx", "--connection", "codex", "--workspace", "/same" }, &storage);
         try std.testing.expectEqualStrings("k7m2qx", parsed.getNamed("parent").?);
-        try std.testing.expectEqualStrings("codex", parsed.getNamed("provider").?);
+        try std.testing.expectEqualStrings("codex", parsed.getNamed("connection").?);
         try std.testing.expectEqualStrings("/same", parsed.getNamed("workspace").?);
         try expectValidation(command, &.{ "--parent", "k7m2qx", "--parent", "k7m2qx" }, error.DuplicateArgument);
         try expectValidation(command, &.{"--parent"}, error.MissingArgumentValue);

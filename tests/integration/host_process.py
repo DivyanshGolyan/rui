@@ -95,6 +95,13 @@ class _ClosingConnection(sqlite3.Connection):
 sqlite3.connect = functools.partial(sqlite3.connect, factory=_ClosingConnection)
 
 READINESS_LIMIT = 16 * 1024
+BUILT_IN_CONNECTIONS = ("codex", "openai", "chatgpt")
+
+
+def capability_routes(capabilities):
+    """The route of each built-in connection in host_info's capabilities; `unserved` where the Host does not serve it."""
+    served = {entry["name"]: entry["route"] for entry in capabilities["connections"]}
+    return {name: served.get(name, "unserved") for name in BUILT_IN_CONNECTIONS}
 STDERR_TAIL_LIMIT = 16 * 1024
 OBSERVATION_STARTUP_CREDIT = 10 * 3 * 512
 PEER_EXCHANGE_LIMIT = 4 * 321 + 50 + 6

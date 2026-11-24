@@ -449,7 +449,7 @@ fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
         row.* = .{
             .reference = reference,
             .workspace = workspaces[at % workspaces.len],
-            .provider = .codex,
+            .provider = @import("connection.zig").Name.parse("codex").?,
             .label = if (at % 3 == 0) null else "Find why the store tests fail on the second run",
             .state = state,
             .state_change_at = since,
