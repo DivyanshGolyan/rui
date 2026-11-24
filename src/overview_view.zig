@@ -836,6 +836,28 @@ pub const Row = struct {
     last_line: ?session_list.SavedLastLine = null,
     line: FirstLineRead = .unread,
 
+    fn adoptArchived(self: *Row, incoming: *const Row) void {
+        const was = self.*;
+        self.* = incoming.*;
+        if (was.read_version != null) {
+            self.read_version = was.read_version;
+            self.state = was.state;
+            self.turn = was.turn;
+            self.operation = was.operation;
+            self.first_action = was.first_action;
+            self.attention = was.attention;
+            self.group = was.group;
+            self.actions = was.actions;
+            self.last_line = was.last_line;
+            self.clock_version = was.clock_version;
+            self.state_change_at = was.state_change_at;
+            self.subtree_state_change_at = was.subtree_state_change_at;
+            self.descendant_count = was.descendant_count;
+            self.descendant_needs_you_count = was.descendant_needs_you_count;
+            self.list_group = was.list_group;
+        }
+    }
+
     fn setArchivedSince(self: *Row, since: u64) void {
         self.archived_since = if (self.archive_state == .archived) since else null;
     }
@@ -2161,31 +2183,13 @@ fn selectedAt(state: *const State) usize {
 
 /// Replaces an archived row with the incoming one. A row whose first Message is unchanged keeps its line.
 fn applyArchived(state: *State, row: *Row, incoming: *const Row) error{OutOfMemory}!void {
-    const was = row.*;
     const before = RowPresentation.of(state, row);
-    const same = if (incoming.first) |first| if (was.first) |known| first.admission == known.admission else false else false;
-    const line = if (same) was.line else try readableLine(state, incoming.first);
-    row.* = incoming.*;
-    if (was.read_version != null) {
-        row.read_version = was.read_version;
-        row.state = was.state;
-        row.turn = was.turn;
-        row.operation = was.operation;
-        row.first_action = was.first_action;
-        row.attention = was.attention;
-        row.group = was.group;
-        row.actions = was.actions;
-        row.last_line = was.last_line;
-        row.clock_version = was.clock_version;
-        row.state_change_at = was.state_change_at;
-        row.subtree_state_change_at = was.subtree_state_change_at;
-        row.descendant_count = was.descendant_count;
-        row.descendant_needs_you_count = was.descendant_needs_you_count;
-        row.list_group = was.list_group;
-    }
+    const same = if (incoming.first) |first| if (row.first) |known| first.admission == known.admission else false else false;
+    const line = if (same) row.line else try readableLine(state, incoming.first);
+    row.adoptArchived(incoming);
     row.listed = true;
     row.line = line;
-    retitle(state, row, title(state, &was).text);
+    retitle(state, row, before.name.slice());
     const after = RowPresentation.of(state, row);
     if (visible(state, row) and !before.eql(&after)) state.presentation_revision +%= 1;
 }
