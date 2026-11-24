@@ -1,0 +1,3 @@
+# Existing deep-modules diagnostics this tree allows. Regenerate with:
+#   zig build deep-modules -- --update-allow
+# An entry whose diagnostic is gone is stale and fails; a diagnostic not listed here fails.

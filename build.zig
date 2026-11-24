@@ -8,6 +8,7 @@ const measurement_module = @import("build/measurement.zig");
 const cross_module = @import("build/cross.zig");
 const fixtures_module = @import("build/fixtures.zig");
 const link_table = @import("build/link_table.zig");
+const deep_modules = @import("build/deep_modules.zig");
 
 pub fn build(b: *std.Build) void {
     const pr_ci = b.option(bool, "pr-ci", "Use the Linux x86_64 PR-only integration artifact") orelse false;
@@ -550,6 +551,7 @@ pub fn build(b: *std.Build) void {
 
     darwin.configureAcceptance(b, ci.directory);
     link_table.add(b);
+    deep_modules.add(b, rui.root_module);
 
     const ci_build = b.step("ci-build", "Compile selected CI gates without running tests");
     if (ci_targets) |selected| {
