@@ -11,6 +11,8 @@ LEFT = b"\x1b[D"
 DOWN = b"\x1b[B"
 ALT_LEFT = b"\x1b[1;3D"
 ALT_RIGHT = b"\x1b[1;3C"
+GHOSTTY_LEFT = b"\x1bb"
+GHOSTTY_RIGHT = b"\x1bf"
 FIRST_ROW = b"\x1b[H\x1b[1;2B\x1b[1;2B"
 
 
@@ -45,12 +47,15 @@ def keyboard_activation():
                 screen.keys(RIGHT)
                 screen.contains("First answer" if first_shown else "Second answer")
                 draft(screen, "")
-                screen.keys(b"first draft")
-                draft(screen, "first draft")
-                screen.keys(ALT_LEFT + b"_")
-                screen.wait(lambda _: screen.capture.draft("first _draft", 9), "Option+Left edits by word")
-                screen.keys(ALT_RIGHT + b"!")
-                draft(screen, "first _draft!")
+                for left, right in ((ALT_LEFT, ALT_RIGHT), (GHOSTTY_LEFT, GHOSTTY_RIGHT)):
+                    screen.keys(b"first draft")
+                    draft(screen, "first draft")
+                    screen.keys(left + b"_")
+                    screen.wait(lambda _: screen.capture.draft("first _draft", 9), "Option+Left edits by word")
+                    screen.keys(right + b"!")
+                    draft(screen, "first _draft!")
+                    screen.keys(b"\x15")
+                    draft(screen, "")
 
         starting = first if first_shown else second
         starting_answer, destination_answer = (("First answer", "Second answer") if first_shown
@@ -99,10 +104,12 @@ def creator_gestures():
                 screen.contains(task)
                 screen.keys(FIRST_ROW)
                 screen.wait(lambda _: screen.style("Tree parent").bold, "parent selected")
-                screen.keys(ALT_LEFT)
-                screen.wait(lambda frame: task not in frame and "▸ 1" in frame, "Option+Left collapses the parent")
-                screen.keys(ALT_RIGHT)
-                frame = screen.contains(task)
+                for left, right in ((ALT_LEFT, ALT_RIGHT), (GHOSTTY_LEFT, GHOSTTY_RIGHT)):
+                    screen.keys(left)
+                    screen.wait(lambda frame: task not in frame and "▸ 1" in frame and screen.style("Tree parent").bold, "Option+Left collapses the selected parent")
+                    screen.keys(right)
+                    frame = screen.contains(task)
+                    assert screen.style("Tree parent").bold, frame
                 row = row_of(frame, "Tree parent")
                 screen.click(8, row)
                 screen.click(8, row)
@@ -135,3 +142,14 @@ def creator_gestures():
                         "double-click folds the active chat without replacing its transcript")
             screen.keys(RIGHT + b"sameparent")
             draft(screen, "sameparent")
+
+        rows = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
+        child, = (entry["reference"] for entry in rows if entry["creator"] == parent)
+        w.run("session", "pin", "--store", w.store, "--session", child)
+        with w.overview(columns=46, rows=30) as screen:
+            screen.wait(lambda frame: task in frame and "Tree parent" in frame, "pinned child and parent")
+            screen.keys(FIRST_ROW + DOWN)
+            screen.wait(lambda _: screen.style("Tree parent").bold, "unpinned parent selected after pinned child")
+            screen.keys(GHOSTTY_LEFT + RIGHT)
+            screen.wait(lambda frame: "Parent answer" in frame and task in frame and "▸ 1" not in frame,
+                        "pinned child stays visible and outside parent count when parent opens")
