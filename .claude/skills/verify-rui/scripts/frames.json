@@ -1663,7 +1663,7 @@
     },
     {
       "name": "archive-state",
-      "note": "Archive confirmation is one durable left fact; editable model/effort precede the optional name, with no blank row below Footer",
+      "note": "Archive confirmation is one durable left fact; editable model/effort precede the optional name, above the bottom inset",
       "cast": [
         {
           "label": "Archive audit",
@@ -2161,7 +2161,7 @@
         "140x40",
         "46x30"
       ],
-      "expect_last": "gpt-6.1-sol"
+      "expect_regex": ["gpt-6\\.1-sol[^\\n]*\\n *\\Z"]
     },
     {
       "name": "draft-chat-choice-escape",
@@ -5253,7 +5253,7 @@
         "Check this sidebar.",
         "gpt-6.1-sol"
       ],
-      "expect_last": "gpt-6.1-sol",
+      "expect_regex": ["gpt-6\\.1-sol[^\\n]*\\n *\\Z"],
       "absent": [
         "+ New chat",
         "alt+i info"
@@ -5291,7 +5291,7 @@
         "Batch job",
         "Check this sidebar."
       ],
-      "expect_last": "gpt-6.1-sol",
+      "expect_regex": ["gpt-6\\.1-sol[^\\n]*\\n *\\Z"],
       "absent": [
         "+ New chat",
         "alt+i info"
