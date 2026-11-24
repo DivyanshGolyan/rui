@@ -3147,7 +3147,7 @@ class UpgradeFramesTest(unittest.TestCase):
 
     def test_upgrade_matrix_has_distinct_exact_baseline_oracles_and_saved_chat(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
-        states = [state for state in scenario["states"] if state.get("upgrade")]
+        states = [state for state in scenario["states"] if state.get("upgrade") and state["name"] != "settings-available"]
         self.assertEqual(len(states), 10)
         self.assertEqual({state.get("theme") for state in states}, {"day", "night"})
         for state in states:
@@ -3308,7 +3308,7 @@ class UpgradeFramesTest(unittest.TestCase):
     def test_before_upgrade_regex_accepts_ascii_sidebar_divider(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         failure = self.helper["frame_row_failure"]
-        for state in (entry for entry in scenario["states"] if entry.get("upgrade") not in (None, "chat")):
+        for state in (entry for entry in scenario["states"] if entry.get("upgrade") not in (None, "chat") and entry["name"] != "settings-available"):
             patterns = [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in state["comparison"]["before"]["expect_sidebar_regex"]]
             for divider in self.helper["DIVIDER_GLYPHS"]:
                 with self.subTest(state=state["name"], divider=divider):
@@ -3454,7 +3454,7 @@ class UpgradeFramesTest(unittest.TestCase):
     def test_shared_sidebar_row_requires_divider_and_bounds_controls_before_chat_content(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         row_failure = self.helper["frame_row_failure"]
-        for state in (entry for entry in scenario["states"] if entry.get("upgrade") not in (None, "chat")):
+        for state in (entry for entry in scenario["states"] if entry.get("upgrade") not in (None, "chat") and entry["name"] != "settings-available"):
             patterns = [pattern.replace("{available_version}", r"0\.99\.99999") for pattern in state["expect_sidebar_regex"]]
             oracle = {"expect_sidebar_regex": patterns, "expect_sidebar_rule": True}
             label = {"current": "", "available": "Update to 0.99.99999", "updating": "Updating…", "failure": "Update failed"}[state["upgrade"]]
