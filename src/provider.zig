@@ -1457,7 +1457,7 @@ test "response continuation reservation rejects a mismatched semantic body lengt
     try std.testing.expectEqual(@as(u64, 128), transfer.response.charged);
 }
 
-test "CM-48 allowance final head stays bound to its issued attempt" {
+test "CM-49 allowance final head stays bound to its issued attempt" {
     var reactor: Reactor = undefined;
     reactor.io = std.testing.io;
     reactor.observation = .{};
@@ -1517,7 +1517,7 @@ test "CM-48 allowance final head stays bound to its issued attempt" {
     try std.testing.expect(a.allowance == null);
 }
 
-test "CM-49 allowance numeric fields reject invalid and conflicting values without refusing" {
+test "CM-50 allowance numeric fields reject invalid and conflicting values without refusing" {
     var reactor: Reactor = undefined;
     reactor.io = std.testing.io;
     reactor.observation = .{};
@@ -1546,7 +1546,7 @@ test "CM-49 allowance numeric fields reject invalid and conflicting values witho
     try std.testing.expect(observed.secondary.minutes == .missing);
 }
 
-test "CM-50 allowance Transfer start freezes native attempt and defaults off" {
+test "CM-51 allowance Transfer start freezes native attempt and defaults off" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = std.testing.io;
@@ -1605,7 +1605,7 @@ test "CM-50 allowance Transfer start freezes native attempt and defaults off" {
     }
 }
 
-test "CM-51 allowance callback handles extreme and sparse final heads" {
+test "CM-52 allowance callback handles extreme and sparse final heads" {
     var reactor: Reactor = undefined;
     reactor.io = std.testing.io;
     reactor.observation = .{};

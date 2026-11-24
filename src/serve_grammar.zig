@@ -167,7 +167,7 @@ test "running Host sources have one syntax owner" {
     try std.testing.expect((try runningSources(arena.allocator(), full[0 .. full.len - 2])).restartable);
 }
 
-test "CM-54 allowance observer flag is explicit and defaults off" {
+test "CM-55 allowance observer flag is explicit and defaults off" {
     var problem: grammar.Refusal = undefined;
     const absent = try definition.parseSyntax(&.{}, std.testing.allocator, &problem);
     try std.testing.expect(!absent.has("observe-allowance"));

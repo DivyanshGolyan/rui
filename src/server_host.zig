@@ -718,7 +718,7 @@ fn formatAllowance(observation: provider.AllowanceObservation, lost: bool, buffe
     return std.fmt.bufPrint(buffer, "rui: allowance source_account=unconfirmed provider={s} turn={d} operation={d} attempt={d} status={d} observed_at={d} delivery=completion prior_loss={s} primary_used={s} primary_minutes={s} primary_reset_at={s} secondary_used={s} secondary_minutes={s} secondary_reset_at={s}\n", .{ @tagName(observation.provider), observation.binding.turn_id, observation.binding.operation_id, observation.binding.attempt_ordinal, observation.status, observation.observed_at, if (lost) "true" else "false", allowanceField(f64, observation.primary.used, &values[0]), allowanceField(u64, observation.primary.minutes, &values[1]), allowanceField(u64, observation.primary.reset_at, &values[2]), allowanceField(f64, observation.secondary.used, &values[3]), allowanceField(u64, observation.secondary.minutes, &values[4]), allowanceField(u64, observation.secondary.reset_at, &values[5]) });
 }
 
-test "CM-52 allowance diagnostic delivers bounded typed records and reports loss" {
+test "CM-53 allowance diagnostic delivers bounded typed records and reports loss" {
     const Sink = struct {
         fd: c_int,
         fn write(self: @This(), bytes: []const u8) bool {
@@ -1603,7 +1603,7 @@ test "each provider's model list is published and rendered on its own" {
     try std.testing.expect(lists.live.get(.codex) == .catalog);
 }
 
-test "CM-53 allowance observer Host tuning is default off and explicitly enabled" {
+test "CM-54 allowance observer Host tuning is default off and explicitly enabled" {
     var refusal: cli_grammar.Refusal = undefined;
     const absent = try serve_grammar.definition.parseSyntax(&.{}, std.testing.allocator, &refusal);
     const enabled = try serve_grammar.definition.parseSyntax(&.{"--observe-allowance"}, std.testing.allocator, &refusal);
