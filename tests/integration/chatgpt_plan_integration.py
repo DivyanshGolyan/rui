@@ -227,7 +227,7 @@ def run():
 
         fixture.stop_host(host)
         host = None
-        assert bash.rows(store, "SELECT provider, codec FROM session WHERE session_ref=?", (session,)) == [("chatgpt", "openai-responses/3")]
+        assert bash.rows(store, "SELECT s.provider, r.codec FROM session s JOIN session_revision r ON r.session_ref=s.session_ref AND r.revision=s.revision WHERE s.session_ref=?", (session,)) == [("chatgpt", "openai-responses/3")]
         credentials(credential_file, token=access(FAR, "b3RoZXI"), expires_at=FAR, client="another-client")
         gets = len(endpoint.model_gets)
         host = start(store, url)
