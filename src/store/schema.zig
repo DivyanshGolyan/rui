@@ -972,7 +972,7 @@ pub const migrations = [_]Migration{
             "DROP TABLE tool_record_90",
         },
         .mysql = &.{
-            "SET @rui_owner_ddl=(SELECT CONCAT('ALTER TABLE tool_record DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='tool_record' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='owner = _utf8mb4''rui'' or owner = _utf8mb4''provider'' or owner = _utf8mb4''mcp'''",
+            "SET @rui_owner_ddl=(SELECT CONCAT('ALTER TABLE tool_record DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='tool_record' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('provider',cc.CHECK_CLAUSE)>0)",
             "PREPARE rui_owner_check FROM @rui_owner_ddl",
             "EXECUTE rui_owner_check",
             "DEALLOCATE PREPARE rui_owner_check",
@@ -4112,6 +4112,48 @@ test "SH-120 schema 93 MySQL step adds each lane column where the bootstrap has 
     // The field tag: the CHECK on session_change is swapped for one that names app_tools, found by its text.
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[3], "ALTER TABLE session_change DROP CHECK") != null);
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[3], "field=''app_tools''") != null);
+}
+
+test "every MySQL migration statement closes its parentheses and quotes" {
+    for (migrations) |step| {
+        for (step.mysql) |statement| {
+            const balanced = mysqlStatementBalanced(statement);
+            if (!balanced) std.debug.print("unbalanced MySQL statement in format {d} migration: {s}\n", .{ step.from, statement });
+            try std.testing.expect(balanced);
+        }
+    }
+}
+
+fn mysqlStatementBalanced(statement: []const u8) bool {
+    var depth: i64 = 0;
+    var index: usize = 0;
+    while (index < statement.len) {
+        const byte = statement[index];
+        if (byte == '\'' or byte == '`') {
+            // A doubled quote inside a quoted string or identifier is an escape; a single one closes it.
+            index += 1;
+            while (true) {
+                if (index >= statement.len) return false;
+                if (statement[index] == byte) {
+                    if (index + 1 < statement.len and statement[index + 1] == byte) {
+                        index += 2;
+                        continue;
+                    }
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        if (byte == '(') depth += 1;
+        if (byte == ')') {
+            depth -= 1;
+            if (depth < 0) return false;
+        }
+        index += 1;
+    }
+    return depth == 0;
 }
 
 test "schema 89 migration leaves each saved tool record's remote name empty, its offered name, on SQLite" {

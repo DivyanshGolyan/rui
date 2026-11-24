@@ -98,7 +98,7 @@ class PlanTest(unittest.TestCase):
                     draft_run=draft, targets=linux, linux_compile_targets=linux, native_targets=mac,
                     linux_matrix=shards([] if pr_job else linux, mysql_suites=original['mysql_suites']),
                     macos_matrix=shards(mac, 'macos', mysql_suites=original['mysql_suites']),
-                    linux_split=not pr_job and split_build(linux), macos_split=split_build(mac),
+                    linux_split=not pr_job and split_build(linux),
                     pr_job=pr_job, pr_setup_targets=sorted(linux) if pr_job else [],
                     native=bool(mac),
                     retry=name == 'manual',
@@ -207,14 +207,15 @@ class PlanTest(unittest.TestCase):
                                 change_kind=ChangeKind.NORMAL).outputs
                 self.assertIn('check-full', promoted['linux_compile_targets'], 'promotion compiles every partition')
 
-    def test_macos_matrix_and_split_use_the_final_native_selection(self):
-        for native, split in ((['check'], True), (['test'], False), (['check-full'], True), (['test-logic'], False)):
+    def test_macos_matrix_is_one_row_and_never_splits_the_build(self):
+        for native in (['check'], ['test'], ['check-full'], ['test-logic'], ['check-full', 'test-logic']):
             with self.subTest(native=native):
                 output = plan(dict(selection(), targets=[]), event_name='workflow_dispatch', draft=False,
                               promotion=False, change_kind=ChangeKind.NORMAL, native_targets=native).outputs
                 self.assertEqual(output['native_targets'], native)
-                self.assertEqual(output['macos_split'], split)
+                self.assertNotIn('macos_split', output)
                 self.assertEqual(output['macos_matrix'], shards(native, 'macos', mysql_suites=['host-status-integration']))
+                self.assertEqual([row['name'] for row in output['macos_matrix']['include']], ['native'])
                 self.assertFalse(output['linux_split'])
 
     def test_compile_only_builds_every_gate_and_unit_root_and_runs_nothing(self):

@@ -334,8 +334,8 @@ else:
                     for extra in ('unit-native-tests', 'unit-store-tests'):
                         self.assertFalse((build_artifact.roots()['binaries'] / extra).exists())
 
-    def test_macos_split_uses_the_same_restore_cli_and_executes_the_producer(self):
-        self.inputs.update(system='Darwin', machine='arm64', targets=['check', 'admission-debug-integration'])
+    def test_split_restore_uses_the_same_cli_and_executes_the_producer(self):
+        self.inputs.update(system='Linux', machine='x86_64', targets=['check', 'admission-debug-integration'])
         self.split_downloads()
         with patch.object(sys, 'argv', ['build_artifact.py', 'restore', json.dumps(self.inputs['targets']),
                                        '--artifact-id', '202', '--artifact-id', '201']):
@@ -346,8 +346,8 @@ else:
         self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
         self.assertIn('Using verified producer artifact 202, 201', (self.root / 'summary').read_text())
 
-    def test_macos_rejected_unit_artifact_discards_both_parts_before_rebuilding(self):
-        self.inputs.update(system='Darwin', machine='arm64', targets=['check'])
+    def test_rejected_unit_artifact_discards_both_parts_before_rebuilding(self):
+        self.inputs.update(system='Linux', machine='x86_64', targets=['check'])
         self.split_downloads()
         rest = self.downloads['202']
         with zipfile.ZipFile(io.BytesIO(self.downloads['201'][0])) as unit:

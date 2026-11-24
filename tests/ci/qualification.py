@@ -48,14 +48,11 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None):
         return {"include": rows}
 
     if platform == "macos":
+        # One hosted job runs every native target: check-full whole (its parts run in one
+        # isolated batch), the remaining targets beside it, and test-logic when selected.
+        # Each extra job paid its own queue, setup and artifact restore.
         rows = []
-        if "check-full" in targets:
-            for part in FULL_PARTS:
-                rows.append(dict(name=matrix_name("check-full", part), targets=["check-full"] +
-                                 (["test-logic"] if part == "execution" and "test-logic" in targets else []),
-                                 part=part, resource=False, args=[]))
-        remaining = [t for t in targets if t not in RESOURCES and t != "check-full"
-                     and not (t == "test-logic" and "check-full" in targets)]
+        remaining = [t for t in targets if t not in RESOURCES]
         if remaining:
             rows.append(dict(name="native", targets=remaining, part="all", resource=False, args=[]))
         rows.extend(shards([t for t in targets if t in RESOURCES], limit=None, mysql_suites=set())["include"])
