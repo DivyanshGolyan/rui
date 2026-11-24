@@ -72,7 +72,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 90, .digest = 0x2f2d94715f2d01bc },
     .{ .schema_version = 91, .digest = 0xc92515d104a290dd },
     .{ .schema_version = 92, .digest = 0xdbe10b74e562edbd },
-    .{ .schema_version = 93, .digest = 0xa21a5f6764fc4b84 },
+    .{ .schema_version = 93, .digest = 0x86c450983de71d68 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -1011,7 +1011,7 @@ pub const migrations = [_]Migration{
         .mysql = &.{
             "ALTER TABLE session ADD COLUMN app_tool_set_id BIGINT AFTER archive_seq, ADD CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0), ADD FOREIGN KEY(app_tool_set_id) REFERENCES tool_set(tool_set_id)",
             "ALTER TABLE session ADD COLUMN app_lane VARCHAR(6) AFTER app_tool_set_id, ADD CHECK(app_lane IS NULL OR OCTET_LENGTH(app_lane)=6), ADD FOREIGN KEY(app_lane) REFERENCES session(session_ref)",
-            "ALTER TABLE session_revision ADD COLUMN app_tool_set_id BIGINT AFTER loaded_tool_set_id, ADD CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0), ADD FOREIGN KEY(app_tool_set_id) REFERENCES tool_set(tool_set_id)",
+            "ALTER TABLE session_revision ADD COLUMN app_tool_set_id BIGINT, ADD CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0), ADD FOREIGN KEY(app_tool_set_id) REFERENCES tool_set(tool_set_id)",
             "WITH RECURSIVE lanes(child,root) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT s.session_ref,l.root FROM session s JOIN lanes l ON s.parent_ref=l.child) UPDATE session s JOIN (SELECT child,root FROM lanes) l ON l.child=s.session_ref SET s.app_lane=l.root",
             "SET @rui_field_ddl=(SELECT CONCAT('ALTER TABLE session_change DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK((field=''provider'' OR field=''model'' OR field=''instructions'' OR field=''tools'' OR field=''loaded_tools'' OR field=''permission_mode'' OR field=''output_schema'' OR field=''compaction_trigger'' OR field=''output_reservation'' OR field=''reasoning_effort'' OR field=''label'' OR field=''reasoning_effort_refused'' OR field=''app_tools''))') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session_change' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('''provider''',cc.CHECK_CLAUSE)>0 AND LOCATE('provider_text',cc.CHECK_CLAUSE)=0)",
             "PREPARE rui_field_check FROM @rui_field_ddl",
@@ -1517,7 +1517,6 @@ pub const tables = [_]Table{
             .{ .name = "instructions_updated", .type = .flag },
             tool_set_column,
             .{ .name = "loaded_tool_set_id", .type = .int, .nullable = true },
-            .{ .name = "app_tool_set_id", .type = .int, .nullable = true, .sqlite_added = true, .check = "app_tool_set_id IS NULL OR app_tool_set_id>0" },
             permission_mode_column,
             .{ .name = "output_schema_content_id", .type = .int, .nullable = true },
             compaction_trigger_column,
@@ -1525,6 +1524,7 @@ pub const tables = [_]Table{
             reasoning_effort_column,
             label_column,
             .{ .name = "effort_source_revision", .type = .int, .default = "1", .check = "effort_source_revision>0 AND effort_source_revision<=revision" },
+            .{ .name = "app_tool_set_id", .type = .int, .nullable = true, .sqlite_added = true, .check = "app_tool_set_id IS NULL OR app_tool_set_id>0" },
         },
         .primary_key = &.{ "session_ref", "revision" },
         .uniques = &.{&.{"command_key"}},
@@ -4113,10 +4113,12 @@ test "SH-120 schema 93 MySQL step adds each lane column where the bootstrap has 
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[1], lane_check) != null);
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "FOREIGN KEY(app_tool_set_id) REFERENCES tool_set(tool_set_id)") != null);
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[1], "FOREIGN KEY(app_lane) REFERENCES session(session_ref)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, step.mysql[2], "WITH RECURSIVE lanes") != null);
+    // The revision column comes after the Session columns, and the lanes are read after every column is added.
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[2], "ALTER TABLE session_revision ADD COLUMN app_tool_set_id BIGINT, ADD CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[3], "WITH RECURSIVE lanes") != null);
     // The field tag: the CHECK on session_change is swapped for one that names app_tools, found by its text.
-    try std.testing.expect(std.mem.indexOf(u8, step.mysql[3], "ALTER TABLE session_change DROP CHECK") != null);
-    try std.testing.expect(std.mem.indexOf(u8, step.mysql[3], "field=''app_tools''") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[4], "ALTER TABLE session_change DROP CHECK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[4], "field=''app_tools''") != null);
 }
 
 test "every MySQL migration statement closes its parentheses and quotes" {
