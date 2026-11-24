@@ -6293,7 +6293,7 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     var effects: Effects = .{};
     try changeArchiveView(&views, .archived, &effects);
     const read = effects.slice()[0].read_archived;
-    _ = try step(&views, .{ .archived = .{ .read = read, .page = .{ .rows = &.{archived}, .first = 12, .last = 12, .more_above = false, .more_below = false } } });
+    _ = try step(&views, .{ .archived = .{ .read = read, .page = .{ .rows = &.{archived}, .first = archived.archive_seq, .last = archived.archive_seq, .more_above = false, .more_below = false } } });
     try std.testing.expect(views.find(archived.reference) != null);
     try std.testing.expect(views.selected == .new_session);
 
