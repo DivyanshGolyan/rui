@@ -58,6 +58,7 @@ pub const Hooks = struct {
     inspection_reply: Hold = .{},
     control_gate: ?ControlGate = null,
     suppress_first_control_hint: bool = false,
+    observe_allowance: bool = false,
     phase_trace: bool = false,
     pause_fd: if (test_pause.enabled) ?c_int else void = if (test_pause.enabled) null else {},
     observation_fd: ?c_int = null,
@@ -157,7 +158,7 @@ pub const Tuning = struct {
     hooks: Hooks = .{},
 
     pub fn fromOptions(parsed: *const cli_grammar.Parsed) !Tuning {
-        var tuning: Tuning = .{};
+        var tuning: Tuning = .{ .hooks = .{ .observe_allowance = parsed.has("observe-allowance") } };
         const limits = &tuning.limits;
         const hooks = &tuning.hooks;
         if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| limits.bash_scratch_limit_bytes = limit;
@@ -1109,6 +1110,7 @@ pub const Host = struct {
     started_at: u64 = 0,
     /// The frozen settings frame a detached Host was started with; null for a foreground Host.
     settings_digest: ?settings_handoff.Digest = null,
+    allowance_diagnostic: AllowanceDiagnostic = .{},
 };
 
 pub const ModelLists = struct {
@@ -1280,6 +1282,98 @@ pub fn askMcpLists(host: *Host, only: ?[]const u8, out: *[host_settings.max_mcp_
 
 pub fn nowNs(io: std.Io) u64 {
     return @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
+}
+
+const StderrSink = struct {
+    fn write(_: StderrSink, bytes: []const u8) bool {
+        return stderr.write(bytes);
+    }
+};
+
+pub fn writeAllowance(diagnostic: *AllowanceDiagnostic, observation: provider.AllowanceObservation) void {
+    diagnostic.write(observation, StderrSink{});
+}
+
+/// Owns loss across optional allowance diagnostic deliveries.
+pub const AllowanceDiagnostic = struct {
+    lost: std.atomic.Value(bool) = .init(false),
+
+    pub fn write(self: *AllowanceDiagnostic, observation: provider.AllowanceObservation, sink: anytype) void {
+        var buffer: [1024]u8 = undefined;
+        const line = formatAllowance(observation, self.lost.load(.acquire), &buffer) catch {
+            self.lost.store(true, .release);
+            return;
+        };
+        if (!sink.write(line)) self.lost.store(true, .release);
+    }
+};
+
+fn allowanceField(comptime T: type, field: provider.AllowanceField(T), buffer: []u8) []const u8 {
+    return switch (field) {
+        .missing => "missing",
+        .invalid => "invalid",
+        .value => |value| if (T == f64)
+            std.fmt.bufPrint(buffer, "{e}", .{value}) catch "format_unavailable"
+        else
+            std.fmt.bufPrint(buffer, "{d}", .{value}) catch "format_unavailable",
+    };
+}
+
+fn formatAllowance(observation: provider.AllowanceObservation, lost: bool, buffer: []u8) ![]const u8 {
+    var values: [6][64]u8 = undefined;
+    return std.fmt.bufPrint(buffer, "rui: allowance source_account=unconfirmed provider={s} turn={d} operation={d} attempt={d} status={d} observed_at={d} delivery=completion prior_loss={s} primary_used={s} primary_minutes={s} primary_reset_at={s} secondary_used={s} secondary_minutes={s} secondary_reset_at={s}\n", .{ @tagName(observation.provider), observation.binding.turn_id, observation.binding.operation_id, observation.binding.attempt_ordinal, observation.status, observation.observed_at, if (lost) "true" else "false", allowanceField(f64, observation.primary.used, &values[0]), allowanceField(u64, observation.primary.minutes, &values[1]), allowanceField(u64, observation.primary.reset_at, &values[2]), allowanceField(f64, observation.secondary.used, &values[3]), allowanceField(u64, observation.secondary.minutes, &values[4]), allowanceField(u64, observation.secondary.reset_at, &values[5]) });
+}
+
+test "CM-54 allowance diagnostic delivers bounded typed records and reports loss" {
+    const Sink = struct {
+        fd: c_int,
+        fn write(self: @This(), bytes: []const u8) bool {
+            const count = std.c.write(self.fd, bytes.ptr, bytes.len);
+            return count >= 0 and @as(usize, @intCast(count)) == bytes.len;
+        }
+    };
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    const flags = std.c.fcntl(fds[0], std.c.F.GETFL);
+    try std.testing.expect(flags >= 0);
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(fds[0], std.c.F.SETFL, flags | nonblock));
+    const output: Sink = .{ .fd = fds[1] };
+    var diagnostic: AllowanceDiagnostic = .{};
+    const sparse: provider.AllowanceObservation = .{
+        .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 3 },
+        .provider = .codex,
+        .status = 200,
+        .observed_at = 123,
+        .primary = .{ .used = .{ .value = 9.5 }, .reset_at = .invalid },
+    };
+    var buffer: [1024]u8 = undefined;
+    diagnostic.write(sparse, output);
+    var count = std.c.read(fds[0], &buffer, buffer.len);
+    try std.testing.expect(count > 0);
+    try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=codex turn=1 operation=2 attempt=3 status=200 observed_at=123 delivery=completion prior_loss=false primary_used=9.5e0 primary_minutes=missing primary_reset_at=invalid secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
+    const extreme: provider.AllowanceObservation = .{
+        .binding = .{ .turn_id = std.math.maxInt(u64), .operation_id = std.math.maxInt(u64), .attempt_ordinal = std.math.maxInt(u64) },
+        .provider = .chatgpt,
+        .status = 599,
+        .observed_at = std.math.maxInt(i64),
+        .primary = .{ .used = .{ .value = std.math.floatMax(f64) }, .minutes = .{ .value = std.math.maxInt(u64) } },
+    };
+    diagnostic.write(extreme, output);
+    count = std.c.read(fds[0], &buffer, buffer.len);
+    try std.testing.expect(count > 0);
+    try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=chatgpt turn=18446744073709551615 operation=18446744073709551615 attempt=18446744073709551615 status=599 observed_at=9223372036854775807 delivery=completion prior_loss=false primary_used=1.7976931348623157e308 primary_minutes=18446744073709551615 primary_reset_at=missing secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
+
+    // A pipe's read end cannot be written: this is an actual failed write, with no output.
+    diagnostic.write(sparse, Sink{ .fd = fds[0] });
+    var pollfds = [_]std.posix.pollfd{.{ .fd = fds[0], .events = std.posix.POLL.IN, .revents = 0 }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&pollfds, 0));
+    diagnostic.write(sparse, output);
+    count = std.c.read(fds[0], &buffer, buffer.len);
+    try std.testing.expect(count > 0);
+    try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=codex turn=1 operation=2 attempt=3 status=200 observed_at=123 delivery=completion prior_loss=true primary_used=9.5e0 primary_minutes=missing primary_reset_at=invalid secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
 }
 
 pub fn executionFacts(host: *Host) session_report.Execution {
@@ -1668,4 +1762,12 @@ test "each provider's model list is published and rendered on its own" {
     lists.publish(.openai, "{\"data\":[{\"id\":\"gpt-6-mare\"}]}");
     try std.testing.expectEqualStrings("gpt-6-mare\n", lists.live.get(.openai).live.bytes);
     try std.testing.expect(lists.live.get(.codex) == .catalog);
+}
+
+test "CM-55 allowance observer Host tuning is default off and explicitly enabled" {
+    var refusal: cli_grammar.Refusal = undefined;
+    const absent = try serve_grammar.definition.parseSyntax(&.{}, std.testing.allocator, &refusal);
+    const enabled = try serve_grammar.definition.parseSyntax(&.{"--observe-allowance"}, std.testing.allocator, &refusal);
+    try std.testing.expect(!(try Tuning.fromOptions(&absent)).hooks.observe_allowance);
+    try std.testing.expect((try Tuning.fromOptions(&enabled)).hooks.observe_allowance);
 }
