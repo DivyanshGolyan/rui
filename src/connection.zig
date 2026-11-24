@@ -253,6 +253,8 @@ pub const Refusal = struct {
         assignment_without_format,
         reserved_header,
         duplicate_header,
+        claim_without_sign_in,
+        scope_not_granted,
     };
 };
 
@@ -273,6 +275,10 @@ pub fn validate(c: *const Connection, host_field: HostField) ?Refusal {
             if (!validUrl(oauth.authorize_url)) return refusal(.invalid_url, "authorize_url");
             if (!validUrl(oauth.token_url)) return refusal(.invalid_url, "token_url");
         },
+        .@"openai-device", .key => {},
+    }
+    switch (c.credential) {
+        .oauth => |oauth| if (!scopeListed(oauth.scopes, oauth.required_scope)) return refusal(.scope_not_granted, "required_scope"),
         .@"openai-device", .key => {},
     }
     if (c.credential.audience()) |audience| {
@@ -297,6 +303,7 @@ pub fn validate(c: *const Connection, host_field: HostField) ?Refusal {
     }
     const placed = credentialHeader(c.credential);
     for (c.headers, 0..) |header, index| {
+        if (header.from == .claim and c.credential.audience() == null) return refusal(.claim_without_sign_in, "headers");
         if (host_field(header.name)) return refusal(.reserved_header, "headers");
         if (placed) |name| if (std.mem.eql(u8, header.name, name)) return refusal(.reserved_header, "headers");
         for (c.headers[0..index]) |earlier| {
@@ -304,6 +311,15 @@ pub fn validate(c: *const Connection, host_field: HostField) ?Refusal {
         }
     }
     return null;
+}
+
+/// Whether `required` is one of the space-separated scopes, as a whole word.
+fn scopeListed(scopes: []const u8, required: []const u8) bool {
+    var words = std.mem.tokenizeScalar(u8, scopes, ' ');
+    while (words.next()) |word| {
+        if (std.mem.eql(u8, word, required)) return true;
+    }
+    return false;
 }
 
 /// The header a key credential places its secret in, which a connection may
@@ -967,6 +983,68 @@ test "validate allows a credential only over https, never plain HTTP to loopback
     try std.testing.expectEqual(Refusal.Reason.invalid_url, validate(&connection, noHostFields).?.reason);
 }
 
+test "validate refuses a claim header on a credential with no token, and a required scope that is not granted" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const base = "https://gateway.example/v1";
+    var connection = try testOk(arena.allocator(), base_document);
+    const kinds = [_]enum { oauth, device, key }{ .oauth, .device, .key };
+    const sources = [_]enum { claim, literal }{ .claim, .literal };
+    for (kinds) |kind| for (sources) |source| {
+        connection.credential = switch (kind) {
+            .oauth => .{ .oauth = .{
+                .authorize_url = "https://auth.example/authorize",
+                .token_url = "https://auth.example/token",
+                .client_id = .{ .fixed = "client" },
+                .scopes = "openid chatgpt.tokens.use.direct",
+                .required_scope = "chatgpt.tokens.use.direct",
+                .audience = base,
+                .link = &.{},
+            } },
+            .device => .{ .@"openai-device" = .{ .client_id = "app_x", .audience = base } },
+            .key => .{ .key = .{ .source = .saved, .placement = .bearer } },
+        };
+        connection.headers = &.{.{
+            .name = "x-team",
+            .from = switch (source) {
+                .claim => .{ .claim = "account_id" },
+                .literal => .{ .literal = "a" },
+            },
+        }};
+        // A key has no token to read a claim from; a sign-in's token is the claim's source.
+        const expected: ?Refusal.Reason = if (kind == .key and source == .claim) .claim_without_sign_in else null;
+        const found = validate(&connection, noHostFields);
+        try std.testing.expectEqual(expected, if (found) |refused| refused.reason else null);
+    };
+
+    // Scope membership is by whole word: present, absent, and a prefix or extension of the required scope.
+    const scope_cases = [_]struct { scopes: []const u8, required: []const u8, refused: bool }{
+        .{ .scopes = "openid chatgpt.tokens.use.direct", .required = "chatgpt.tokens.use.direct", .refused = false },
+        .{ .scopes = "chatgpt.tokens.use.direct openid", .required = "chatgpt.tokens.use.direct", .refused = false },
+        .{ .scopes = "openid", .required = "chatgpt.tokens.use.direct", .refused = true },
+        .{ .scopes = "openid chatgpt.tokens.use.direct.extra", .required = "chatgpt.tokens.use.direct", .refused = true },
+        .{ .scopes = "openid chatgpt.tokens.use", .required = "chatgpt.tokens.use.direct", .refused = true },
+    };
+    connection.headers = &.{};
+    for (scope_cases) |case| {
+        connection.credential = .{ .oauth = .{
+            .authorize_url = "https://auth.example/authorize",
+            .token_url = "https://auth.example/token",
+            .client_id = .{ .fixed = "client" },
+            .scopes = case.scopes,
+            .required_scope = case.required,
+            .audience = base,
+            .link = &.{},
+        } };
+        const found = validate(&connection, noHostFields);
+        if (case.refused) {
+            try std.testing.expectEqual(Refusal.Reason.scope_not_granted, found.?.reason);
+        } else {
+            try std.testing.expect(found == null);
+        }
+    }
+}
+
 test "validate refuses no format, two endpoints of one family, and a dialect of another family" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -1018,7 +1096,7 @@ test "validate refuses reserved and repeated headers" {
     try std.testing.expectEqual(Refusal.Reason.reserved_header, validate(&connection, noHostFields).?.reason);
     connection.headers = &.{
         .{ .name = "x-team", .from = .{ .literal = "a" } },
-        .{ .name = "x-team", .from = .{ .claim = "account_id" } },
+        .{ .name = "x-team", .from = .{ .literal = "b" } },
     };
     try std.testing.expectEqual(Refusal.Reason.duplicate_header, validate(&connection, noHostFields).?.reason);
 }
