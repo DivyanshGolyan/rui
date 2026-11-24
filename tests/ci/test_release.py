@@ -462,6 +462,17 @@ exit "$TEST_CODE"
             self.assertEqual(output.read_text(), release.installer(template, "0.40.0", digests, publisher, None))
             self.assertNotIn("--publish-install", output.read_text())
 
+    def test_publication_pastes_the_promotion_table_without_measuring(self):
+        """CI-95: Release pastes the qualification tier's one measurement and never measures again."""
+        publication = (ROOT / ".github/workflows/release.yml").read_text().split("  publish:", 1)[1]
+        for measuring in ("host_memory.py", "pip install", "Measure the released", "memory_fetch", "rui-linux-x86_64"):
+            with self.subTest(measuring=measuring):
+                self.assertNotIn(measuring, publication)
+        # The rui-host-memory artifact arrives with the archives' own download, and its absence keeps the fallback.
+        self.assertIn("--pattern 'rui-*'", publication)
+        self.assertIn("-path '*/rui-host-memory/host-memory.md'", publication)
+        self.assertIn('printf \'### Host memory\\n\\nNot measured:', publication)
+
     def test_publication_binds_installer_source_to_artifact_target(self):
         publication = (ROOT / ".github/workflows/release.yml").read_text().split("  publish:", 1)[1]
         self.assertIn("ref: ${{ inputs.sha }}\n          path: .release-source", publication)

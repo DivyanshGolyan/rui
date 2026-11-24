@@ -61,8 +61,6 @@ pub const Hooks = server_host.Hooks;
 pub const Tuning = server_host.Tuning;
 const Host = server_host.Host;
 const nowNs = server_host.nowNs;
-const beginTestObservation = server_host.beginTestObservation;
-const writeTestTrace = server_host.writeTestTrace;
 const traceSubject = server_host.traceSubject;
 const traceRequest = server_host.traceRequest;
 const executionFacts = server_host.executionFacts;
@@ -75,7 +73,7 @@ noinline fn captureFailedResponse(host: *Host, request: *const protocol.InspectS
     const selection = request.failed_response.?;
     const binding = try host.store.failedResponseBinding(request.session.slice(), selection.operation, selection.attempt);
     var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
-    try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
+    try capture.create(host.lease.paths.scratch.slice(), request_number, host.probes.fails(.report_unlink));
     errdefer capture.deinit();
     try failed_responses.exportRecord(host.io, host.lease.store_dir, binding, selection.part, &capture);
     return capture.seal();
@@ -444,7 +442,7 @@ const Intake = struct {
                         .content_length = request_length,
                         .scratch_path = self.host.lease.paths.scratch.slice(),
                         .request_number = self.number.?,
-                        .content_faults = self.host.hooks.contentFaults(),
+                        .content_faults = self.host.probes.contentFaults(),
                         .retained_scratch = &self.retained_scratch,
                         .scratch_budget = self.host.retention.sharedBudget(),
                         .expected_kind = self.route.?.kind(),
@@ -838,7 +836,7 @@ const Intake = struct {
                     _ = std.c.close(fd);
                     stderr.print("rui: intake unavailable: {s}; recover original request\n", .{@errorName(err)});
                 };
-                if (self.host.hooks.fails(.shutdown_after_accept)) {
+                if (self.host.probes.fails(.shutdown_after_accept)) {
                     failure = error.InjectedListenerFailure;
                     _ = self.host.lifecycle.advance(.stopping);
                     break;
@@ -1174,7 +1172,7 @@ fn serveOpened(
 ) !void {
     if (mcp_relist) |owner| try offerMcpTools(io, allocator, storage, owner, if (settings.interface.lifetime.value == .stdin) 0 else null);
     try storage.validateRetryWaits(limits.retry_waits_ms);
-    try lease.prepareForServing(hooks.fails(.startup_cleanup));
+    try lease.prepareForServing(hooks.failures.contains(.startup_cleanup));
     host_endpoint.sweepNeighbors(allocator, endpoint);
 
     var listener = try endpoint.listen(.{ .kernel_backlog = 128 });
@@ -1201,6 +1199,7 @@ fn serveOpened(
         _ = std.c.close(fd);
     };
     var lifecycle: server_host.Lifecycle = .init(io, lease, settings.execution.paused.value, intake_wake[1]);
+    var probes: server_host.Probes = .init(io, hooks);
     var host = Host{
         .io = io,
         .allocator = allocator,
@@ -1209,7 +1208,6 @@ fn serveOpened(
         .settings_digest = settings_digest,
         .lease = lease,
         .store = storage,
-        .hooks = hooks,
         .catalog_url = if (settings.models.catalog_url) |*url| url.slice() else null,
         .limits = limits,
         .providers = served,
@@ -1220,9 +1218,9 @@ fn serveOpened(
         .bash_timeout_ms = bash_timeout_ms,
         .background_after_ms = settings.execution.background_after_ms.value,
         .retention = undefined,
-        .trace_run_ns = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds),
         .custody = execution.CustodyPool.initialize(custody_records),
         .lifecycle = &lifecycle,
+        .probes = &probes,
         .mcp_relist = mcp_relist,
     };
     const test_pause = @import("testing/pause.zig");
@@ -1230,7 +1228,7 @@ fn serveOpened(
     defer pause_owner.deinit();
     const pause_adapter = if (comptime test_pause.enabled) adapter: {
         if (hooks.pause_fd) |fd| {
-            host.pause_owner = &pause_owner;
+            probes.attachPauseOwner(&pause_owner);
             break :adapter try @import("testing/pause_socket.zig").Adapter.start(std.heap.c_allocator, io, &pause_owner, fd);
         }
         break :adapter null;
@@ -1242,12 +1240,8 @@ fn serveOpened(
     defer storage.modelTimingSource().* = .{};
     try host.mcp_servers.init(allocator, mcp_servers);
     defer host.mcp_servers.deinit(allocator);
-    var observation: ?TestObservation = if (hooks.observation_fd) |fd|
-        try TestObservation.init(fd, hooks.observation_state_fd orelse return error.MissingTestObservationState, hooks.observation_plan orelse return error.MissingTestObservationPlan, host.trace_run_ns)
-    else
-        null;
-    defer if (observation) |*writer| writer.close();
-    host.test_observation = if (observation) |*writer| writer else null;
+    try probes.openObservation();
+    defer probes.closeObservation();
     var retention = output_retention.Queue.initializeWithRemoval(
         io,
         lease.paths.scratch.slice(),
@@ -1346,7 +1340,7 @@ noinline fn openStoreForHost(
     var identity_mismatch: store_module.IdentityMismatch = .{};
     var migration: StartupMigration = .{ .diagnostics = diagnostics };
     const store_options: store_module.OpenOptions = .{
-        .served = served.routes(),
+        .served = served.served(),
         .cache_spill = limits.sqlite_cache_spill,
         .cache_kib = limits.sqlite_cache_kib,
         .found_schema_version = &found_schema_version,
@@ -1515,9 +1509,7 @@ noinline fn writeReadiness(
 }
 
 fn publishControlHint(host: *Host, command_key: []const u8) void {
-    if (host.hooks.suppress_first_control_hint and
-        !host.control_hint_suppressed.swap(true, .acq_rel))
-    {
+    if (host.probes.suppressFirstControlHint()) {
         traceSubject(host, "control_hint_suppressed", "command_key", command_key);
         return;
     }
@@ -1544,7 +1536,7 @@ const ControlTiming = struct {
     }
 
     fn storeTrace(self: *ControlTiming) ?store_module.ControlTrace {
-        if (!self.host.hooks.phase_trace) return null;
+        if (!self.host.probes.hooks.phase_trace) return null;
         return .{ .context = self, .mark_fn = markStore };
     }
 
@@ -1571,7 +1563,7 @@ const ControlTiming = struct {
     }
 
     fn waitAtTestGate(self: *ControlTiming) void {
-        const gate_hook = self.host.hooks.control_gate orelse return;
+        const gate_hook = self.host.probes.hooks.control_gate orelse return;
         var candidates = std.mem.splitScalar(u8, gate_hook.keys, ',');
         while (candidates.next()) |candidate| {
             if (!std.mem.eql(u8, candidate, self.command_key.slice())) continue;
@@ -1585,13 +1577,13 @@ const ControlTiming = struct {
     }
 
     inline fn replyComplete(self: *ControlTiming) void {
-        if (self.host.hooks.phase_trace) self.writeReplyComplete();
+        if (self.host.probes.hooks.phase_trace) self.writeReplyComplete();
     }
 
     noinline fn writeReplyComplete(self: *ControlTiming) void {
         const reply_complete_ns = nowNs(self.host.io);
         if (self.store_queued_ns == 0 or self.lock_acquired_ns == 0 or self.store_complete_ns == 0) return;
-        var publication = beginTestObservation(self.host, "control_timing", null);
+        var publication = self.host.probes.beginObservation("control_timing", null);
         defer if (publication) |*value| value.finish();
         var trace: protocol.DiagnosticBuffer = .{};
         trace.append("{\"rui_test_phase\":\"control_timing\",\"command_key\":") catch return;
@@ -1609,7 +1601,7 @@ const ControlTiming = struct {
             reply_complete_ns - self.store_complete_ns,
             reply_complete_ns - self.accepted_at_ns,
         }) catch return;
-        writeTestTrace(self.host, &trace, &publication);
+        self.host.probes.writeTrace(&trace, &publication);
     }
 };
 
@@ -1730,7 +1722,7 @@ fn submitMessageInput(host: *Host, command: *const wire_request.MessageCommand, 
     };
     const initial_skills = prepared.initial;
     const captured_skill = prepared.captured;
-    const faults = host.hooks.storeFaults(.command);
+    const faults = host.probes.storeFaults(.command);
     if (command.configuration) |*configuration| if (configuration.parent.state == .value) {
         var inheritance = @import("child_environment.zig").Inheritance.init(host.environments, configuration.parent.value.slice(), host.allocator, memory.allocator()) catch |err| {
             if (host.store.isFenced()) return .infrastructure_failure;
@@ -1775,13 +1767,13 @@ noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureC
     var decision: store_module.PresetDecision = .{ .request_digest = command.presetRequestDigest() };
     if (command.session.len != 0) {
         decision.rejection = .preset_on_update;
-        return try host.store.configureWithCreationCommittedInto(command, &decision, null, null, host.allocator, null, receipt, host.hooks.storeFaults(.command));
+        return try host.store.configureWithCreationCommittedInto(command, &decision, null, null, host.allocator, null, receipt, host.probes.storeFaults(.command));
     }
     const preset = for (host.presets) |*entry| {
         if (std.mem.eql(u8, entry.name, name.slice())) break entry;
     } else {
         decision.rejection = .unknown_preset;
-        return try host.store.configureWithCreationCommittedInto(command, &decision, null, null, host.allocator, null, receipt, host.hooks.storeFaults(.command));
+        return try host.store.configureWithCreationCommittedInto(command, &decision, null, null, host.allocator, null, receipt, host.probes.storeFaults(.command));
     };
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
@@ -1839,7 +1831,7 @@ noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.Co
     else
         @import("child_environment.zig").Inheritance{ .environments = null };
     defer inheritance.deinit(host.allocator);
-    return host.store.configureWithCreationCommittedInto(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, inheritance.creationCallback(), receipt, host.hooks.storeFaults(.command));
+    return host.store.configureWithCreationCommittedInto(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, inheritance.creationCallback(), receipt, host.probes.storeFaults(.command));
 }
 
 fn submitControl(host: *Host, comptime kind: command_spec.CommandKind, command: *const @FieldType(wire_request.Request, @tagName(kind)), faults: store_module.Faults) host_reply.MutationResult(kind) {
@@ -1955,6 +1947,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
 
 noinline fn replyHostInfo(host: *Host, fd: *Reply) !void {
     if (!host.lifecycle.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
+    const served_set = host.providers.served();
     try fd.json(200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{host_reply.HostInfo{
         .store = host.lease.paths.store_identity.slice(),
         .instance = host.instance,
@@ -1964,7 +1957,7 @@ noinline fn replyHostInfo(host: *Host, fd: *Reply) !void {
         .started_at = host.started_at,
         .custody_occupied = host.custody.held(),
         .paused = host.lifecycle.turnsHeld(),
-        .routes = host.providers.routes(),
+        .routes = protocol.routesOf(&served_set),
         .doublewrite = host.store.admissionDiagnostic().doublewrite,
         .settings_digest = host.settings_digest,
     }});
@@ -2001,7 +1994,7 @@ noinline fn replyMessage(host: *Host, fd: *Reply, command: *@FieldType(wire_requ
 
 noinline fn replyControl(host: *Host, fd: *Reply, header: Header, accepted_at_ns: u64, comptime kind: command_spec.CommandKind, command: *const @FieldType(wire_request.Request, @tagName(kind))) !void {
     var timing = ControlTiming.init(host, command.key, @tagName(kind), accepted_at_ns);
-    const result = submitControl(host, kind, command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
+    const result = submitControl(host, kind, command, host.probes.storeFaults(.{ .control = timing.storeTrace() }));
     try answerControl(host, fd, header, kind, controlSubject(kind, command), result, timing);
 }
 
@@ -2085,8 +2078,8 @@ noinline fn replyInspectSession(host: *Host, fd: *Reply, request_value: *@FieldT
     try fd.setReport(report);
     traceSubject(host, "inspection_captured", "session", request_value.session.slice());
     traceSqliteDiagnostic(host, request_value.session.slice());
-    try fd.holdDelivery(host.hooks.inspection_reply);
-    if (fd.gate != null) traceSubject(host, "test_gate_waiting", "path", host.hooks.inspection_reply.gate_path.?);
+    try fd.holdDelivery(host.probes.hooks.inspection_reply);
+    if (fd.gate != null) traceSubject(host, "test_gate_waiting", "path", host.probes.hooks.inspection_reply.gate_path.?);
 }
 
 noinline fn replyListSessions(host: *Host, fd: *Reply, request_value: *@FieldType(wire_request.Request, "list_sessions"), request_number: u64) !void {
@@ -2236,7 +2229,7 @@ fn captureSessionReport(host: *Host, request: *const protocol.InspectSession, re
     defer host.allocator.destroy(state);
     const capture = &state.capture;
     capture.* = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
-    try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
+    try capture.create(host.lease.paths.scratch.slice(), request_number, host.probes.fails(.report_unlink));
     errdefer capture.deinit();
     state.reply.capture = capture;
     state.reply.execution = executionFacts(host);
@@ -2287,7 +2280,7 @@ test "Session report capture releases its heap state after sealing or scratch ex
     try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
     try std.testing.expect(!storage.isFenced());
     retention.budget.limit = 9000;
-    host.hooks.failures.insert(.report_unlink);
+    host.probes.arm(.report_unlink);
     try std.testing.expectError(error.ReportScratchCleanupFailed, captureSessionReport(&host, &request, 3));
     try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
     try std.testing.expect(!storage.isFenced());
@@ -2296,7 +2289,7 @@ test "Session report capture releases its heap state after sealing or scratch ex
 fn captureSessionList(host: *Host, request: *const protocol.ListSessions, request_number: u64) !store_module.SessionReport {
     try request.validate();
     var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
-    try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
+    try capture.create(host.lease.paths.scratch.slice(), request_number, host.probes.fails(.report_unlink));
     errdefer capture.deinit();
     const reply = try createUnfilled(host.allocator, session_list_reply.Reply(store_module.SessionReportCapture));
     defer host.allocator.destroy(reply);
@@ -2322,7 +2315,7 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
 fn capturePublicParts(host: *Host, reply: *Reply, command: *const protocol.PublicParts, request_number: u64) !store_module.SessionReport {
     const capture = &reply.parts_capture;
     capture.* = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
-    try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
+    try capture.create(host.lease.paths.scratch.slice(), request_number, host.probes.fails(.report_unlink));
     errdefer capture.deinit();
     var reader = try store_module.PublicParts.Reader.init(command.session, command.owner);
     defer reader.deinit();
@@ -3384,11 +3377,11 @@ test "delayed control replies retain command identity after request storage reus
             .allocator = std.testing.allocator,
             .lease = undefined,
             .store = undefined,
-            .hooks = .{ .phase_trace = true },
-            .test_observation = &observation,
         };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, undefined);
+        host_parts.probes.hooks = .{ .phase_trace = true };
+        host_parts.probes.observation = observation;
         var original: [protocol.max_key_bytes]u8 = undefined;
         for (&original, 0..) |*byte, index| byte.* = @intCast('a' + index % 26);
         var request_key = protocol.Bounded(protocol.max_key_bytes){ .bytes = original, .len = original.len };
@@ -5028,7 +5021,7 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expect(overridden == .accepted);
     try storage.inspectSession(overridden.accepted.session.slice(), &observed);
     try std.testing.expectEqualStrings("preset-override-model", observed.model.slice());
-    try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+    try std.testing.expectEqualStrings("codex", observed.provider.?.slice());
     try std.testing.expectEqualStrings(root, observed.workspace.slice());
     try std.testing.expectEqual(@as(?u64, 12000), observed.compaction_trigger_override);
     try std.testing.expectEqual(@import("configuration_defaults.zig").startEffort(@import("model_catalog.zig").shipped, "preset-override-model"), observed.reasoning_effort_override);
@@ -6378,11 +6371,11 @@ test "every accepted control publishes exactly one hint before reply handling" {
                         .allocator = std.testing.allocator,
                         .lease = undefined,
                         .store = undefined,
-                        .hooks = .{ .phase_trace = true },
-                        .test_observation = &observation,
                     };
                     var host_parts: TestParts = undefined;
                     host_parts.attach(&host, undefined);
+                    host_parts.probes.hooks = .{ .phase_trace = true };
+                    host_parts.probes.observation = observation;
                     var result = initial;
                     switch (result) {
                         .accepted => |*value| value.replayed = replayed,

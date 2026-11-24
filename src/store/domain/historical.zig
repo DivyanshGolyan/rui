@@ -1,3 +1,4 @@
+const connection = @import("../../connection.zig");
 const replay_recipe = @import("../../replay_recipe.zig");
 const replay_binding = @import("../../replay_binding.zig");
 const replay_wire = @import("replay_wire.zig");
@@ -69,7 +70,7 @@ pub const HistoricalSettings = struct {
     effort_update: bool = false,
     starting_effort: ?model_capability.ReasoningEffort = null,
     codec: provider_name.Codec,
-    provider: provider_name.Provider,
+    provider: connection.Name,
     model: Bounded(model_capability.max_model_bytes),
     workspace: Bounded(workspace_path.max_bytes),
     store: Bounded(store_path.max_bytes),
@@ -780,7 +781,7 @@ const historical_settings = rsql.Read(.{
         tool_set_id: rsql.Positive,
         member_count: u64,
         provider_count: u64,
-        provider: provider_name.Provider,
+        provider: connection.Name,
         session_ref: *Bounded(session_id.max_reference_bytes),
         parent_ref: ?Bounded(session_id.max_reference_bytes),
         workspace: *Bounded(workspace_path.max_bytes),
@@ -1187,10 +1188,10 @@ const output_boundary = rsql.Read(.{
         frontier: u64,
         own_floor: ?rsql.Positive,
         base_floor: ?rsql.Positive,
-        current_provider: provider_name.Provider,
+        current_provider: connection.Name,
         current_codec: provider_name.Codec,
         current_model: Bounded(model_capability.max_model_bytes),
-        base_provider: ?provider_name.Provider,
+        base_provider: ?connection.Name,
         base_codec: ?provider_name.Codec,
         base_model: ?Bounded(model_capability.max_model_bytes),
         anchors: u64,
@@ -1413,7 +1414,7 @@ const historical_entries = rsql.Read(.{
         private: ?bool,
         form: ?u8,
         model: ?Bounded(model_capability.max_model_bytes),
-        provider: ?provider_name.Provider,
+        provider: ?connection.Name,
         codec: ?provider_name.Codec,
         item_kind: ?u8,
         item_id_digest: ?[32]u8,

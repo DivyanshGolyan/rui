@@ -17,7 +17,7 @@ class CoverageTest(unittest.TestCase):
         # Exhaust the interacting broad/unit/fixture rules, then vary every
         # other CHECK_COVERS member both alone and at the check-promotion edge.
         # The literal 34-target powerset has 17,179,869,184 subsets.
-        interacting = ({"test", "test-native", "test-store", "check", "check-full", "stack-frames"}
+        interacting = ({"test", "test-native", "test-store", "check", "check-full", "rsql-table"}
                        | FIXTURE_COVERS.keys() | set().union(*FIXTURE_COVERS.values()) | {"unrelated-target"})
         ordinary = CHECK_COVERS - interacting
         contexts = [set(), ordinary]
@@ -43,9 +43,9 @@ class CoverageTest(unittest.TestCase):
             ({"test", "test-native", "test-store"}, {"test"}),
             ({"human-cli-integration", "canonical-failure-integration", "terminal-restoration-integration"},
              {"human-cli-integration"}),
-            ({"check", "stack-frames", "test"}, {"check"}),
-            ({"check-full", "check", "stack-frames", "test"}, {"check-full", "stack-frames"}),
-            ({"check-full", "stack-frames"}, {"check-full", "stack-frames"}),
+            ({"check", "rsql-table", "test"}, {"check"}),
+            ({"check-full", "check", "rsql-table", "test"}, {"check-full", "rsql-table"}),
+            ({"check-full", "rsql-table"}, {"check-full", "rsql-table"}),
             ({"unrelated-target", "test-native"}, {"unrelated-target", "test-native"}),
         )
         for selected, expected in cases:
@@ -61,17 +61,17 @@ class CoverageTest(unittest.TestCase):
         for broad, cases in FIXTURE_COVERS.items():
             self.assertEqual(normalize((required - cases) | {broad}), {"check"})
 
-    def test_coverage_distinguishes_full_check_and_stack_frames(self):
+    def test_coverage_distinguishes_full_check_and_rsql_table(self):
         self.assertTrue(covers("check", {"check-full"}))
-        self.assertTrue(covers("stack-frames", {"check"}))
-        self.assertFalse(covers("stack-frames", {"check-full"}))
+        self.assertTrue(covers("rsql-table", {"check"}))
+        self.assertFalse(covers("rsql-table", {"check-full"}))
         self.assertFalse(covers("test-native", {"test-store"}))
         for target in chain(CHECK_COVERS, FIXTURE_COVERS, ("unrelated-target",)):
             self.assertTrue(covers(target, {target}))
             self.assertFalse(covers(target, set()))
 
-    def test_promotion_restores_mysql_after_normalization_and_keeps_stack_frames(self):
-        selected = dict(targets=["check", "stack-frames", "host-status-integration"],
+    def test_promotion_restores_mysql_after_normalization_and_keeps_rsql_table(self):
+        selected = dict(targets=["check", "rsql-table", "host-status-integration"],
                         native_targets=["check", "test-native"], native_required=True,
                         mac_required=True, upgrade_required=False, server_targets=[],
                         cache_execution_checks=False, typecheck_macos=False, linux_memory_checks=False,
@@ -80,9 +80,9 @@ class CoverageTest(unittest.TestCase):
                       change_kind=ChangeKind.NORMAL)
         core = {"check-full", "test-logic", "admission-debug-integration"}
         self.assertEqual(result.outputs["targets"], ["admission-debug-integration", "check-full", "deep-modules", "host-status-integration",
-                                                     "mysql-wire-integration", "rsql-table", "stack-frames", "test-logic"])
+                                                     "mysql-wire-integration", "rsql-table", "test-logic"])
         self.assertEqual(result.outputs["native_targets"], sorted(core))
-        self.assertEqual(selected["targets"], ["check", "stack-frames", "host-status-integration"])
+        self.assertEqual(selected["targets"], ["check", "rsql-table", "host-status-integration"])
 
 
 if __name__ == "__main__":

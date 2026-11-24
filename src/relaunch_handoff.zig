@@ -7,7 +7,25 @@ const upgrade_status = @import("upgrade_status.zig");
 const TerminalText = @import("TerminalText.zig");
 const stderr = @import("stderr.zig");
 
-pub const Entry = struct { id: []const u8, snapshot: Input.Snapshot };
+pub const Entry = struct {
+    id: []const u8,
+    snapshot: Input.Snapshot,
+    image_base64: ?[]const u8 = null,
+
+    pub fn jsonStringify(self: Entry, json: anytype) !void {
+        try json.beginObject();
+        try json.objectField("id");
+        try json.write(self.id);
+        try json.objectField("snapshot");
+        try json.write(self.snapshot);
+        if (self.image_base64) |encoded| {
+            try json.objectField("image_base64");
+            try json.write(encoded);
+        }
+        try json.endObject();
+    }
+};
+const image_encoded_limit = std.base64.standard.Encoder.calcSize(Input.max_image_bytes);
 pub const Payload = struct {
     v: u8,
     store: []const u8,
@@ -23,7 +41,7 @@ const max_drafts = std.math.pow(usize, session_id.alphabet.len, session_id.bytes
 const max_snapshot_bytes = 6 * Input.capacity + 256;
 const max_entry_bytes = max_snapshot_bytes + 6 * session_id.bytes + 64;
 pub const max_encoded_bytes = (max_drafts + 1) * max_entry_bytes +
-    6 * (protocol.max_store_bytes + upgrade_status.max_line_bytes) + 256;
+    6 * (protocol.max_store_bytes + upgrade_status.max_line_bytes) + 256 + std.base64.standard.Encoder.calcSize(Input.image_budget) + 128;
 
 pub fn encode(gpa: std.mem.Allocator, payload: Payload) ![]u8 {
     try validate(gpa, payload, payload.store);
@@ -40,7 +58,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, store: []const u8) !std
 fn parse(gpa: std.mem.Allocator, source: anytype, store: []const u8) !std.json.Parsed(Payload) {
     const parsed = try std.json.parseFromTokenSource(Payload, gpa, source, .{
         .allocate = .alloc_always,
-        .max_value_len = Input.capacity,
+        .max_value_len = image_encoded_limit,
     });
     errdefer parsed.deinit();
     try validate(gpa, parsed.value, store);
@@ -48,7 +66,7 @@ fn parse(gpa: std.mem.Allocator, source: anytype, store: []const u8) !std.json.P
 }
 
 fn validate(gpa: std.mem.Allocator, payload: Payload, store: []const u8) !void {
-    if (payload.v != 1) return error.UnsupportedHandoffVersion;
+    if (payload.v != 1 and payload.v != 2) return error.UnsupportedHandoffVersion;
     if (payload.store.len == 0 or payload.store.len > protocol.max_store_bytes or
         !std.mem.eql(u8, payload.store, store)) return error.HandoffStoreMismatch;
     if (payload.open) |id| if (!session_id.valid(id)) return error.InvalidHandoffSession;
@@ -58,7 +76,14 @@ fn validate(gpa: std.mem.Allocator, payload: Payload, store: []const u8) !void {
     if (payload.drafts.len > max_drafts) return error.HandoffTooLarge;
     var seen: std.AutoHashMap(u32, void) = .init(gpa);
     defer seen.deinit();
+    var image_bytes: usize = 0;
     for (payload.drafts) |draft| {
+        if (draft.image_base64) |encoded| {
+            if (payload.v != 2 or encoded.len > image_encoded_limit) return error.InvalidHandoffDraft;
+            const length = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch return error.InvalidHandoffDraft;
+            if (length == 0 or length > Input.max_image_bytes or length > Input.image_budget - image_bytes) return error.InvalidHandoffDraft;
+            image_bytes += length;
+        }
         if (!session_id.valid(draft.id)) return error.InvalidHandoffSession;
         try validateSnapshot(draft.snapshot);
         var key: u32 = 0;
@@ -232,7 +257,7 @@ test "handoff exact versioned bytes and owned round trip" {
 test "handoff validates version Store IDs duplicates and editor bounds" {
     const gpa = std.testing.allocator;
     var payload: Payload = .{ .v = 1, .store = "/store", .overview = .{ .bytes = "", .cursor = 0 }, .drafts = &.{}, .line = "" };
-    payload.v = 2;
+    payload.v = 3;
     try std.testing.expectError(error.UnsupportedHandoffVersion, encode(gpa, payload));
     payload.v = 1;
     payload.open = "ABCDEF";

@@ -26,6 +26,30 @@ pub fn linkTrust(module: *std.Build.Module) void {
     module.linkFramework("CoreFoundation", .{});
 }
 
+pub fn configureClipboard(
+    b: *std.Build,
+    module: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    sdk: ?std.Build.LazyPath,
+) void {
+    if (target.result.os.tag != .macos) return;
+    if (sdk) |output| {
+        module.addSystemFrameworkPath(output.path(b, "sdk/System/Library/Frameworks"));
+        module.addSystemIncludePath(output.path(b, "sdk/usr/include"));
+        module.addLibraryPath(output.path(b, "sdk/usr/lib"));
+    } else if (b.graph.host.result.os.tag != .macos) {
+        // The unpinned macOS type check must work without an Apple SDK on Linux.
+        return;
+    }
+    module.addCSourceFile(.{
+        .file = b.path("src/os/clipboard_macos.m"),
+        .flags = &.{"-fobjc-arc"},
+    });
+    module.linkFramework("AppKit", .{});
+    module.linkFramework("CoreGraphics", .{});
+    module.linkFramework("ImageIO", .{});
+}
+
 /// Verified native Mac acceptance can buffer output instead of owning the terminal.
 pub fn configureAcceptance(b: *std.Build, artifacts: ?[]const u8) void {
     if (artifacts != null and b.graph.host.result.os.tag == .macos)

@@ -3,6 +3,8 @@ test {
     _ = @import("child_exit_wake.zig");
     _ = @import("InputCapture.zig");
     _ = @import("image_intake.zig");
+    _ = @import("clipboard_paste.zig");
+    _ = @import("os/clipboard_image.zig");
     _ = @import("image_file_source.zig");
     _ = @import("read_image_arguments.zig");
     _ = @import("os/read_image_file.zig");
@@ -93,7 +95,8 @@ test {
     _ = @import("mcp/result_text.zig");
     _ = @import("mcp/result_text_golden_test.zig");
     _ = @import("tool_result.zig");
-    _ = @import("tool_settle.zig");
+    _ = @import("action_attempt.zig");
+    _ = @import("tool_delivery.zig");
     _ = @import("mcp/Running.zig");
     _ = @import("mcp/servers.zig");
     _ = @import("mcp/Listing.zig");

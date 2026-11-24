@@ -153,11 +153,18 @@ pub const Reads = struct {
             return slash_commands.Shown.nextOf(previous, revision, source, slash_commands.conversation.suggest(draft, context));
         };
         const typed = word.name(draft);
+        if (word.slash == 0) {
+            const exact = slash_commands.conversation.nameOf(typed);
+            if (exact) |name| if (!slash_commands.conversationArchiveEligible(name, context.archive_state)) return null;
+        }
         const held = if (self.held) |*kept| (if (std.mem.startsWith(u8, typed, kept.prefix.slice())) kept else null) else null;
         const none: skill_suggestions.Page = .{};
         const page = if (held) |kept| &kept.page else &none;
-        const source = ((if (held) |kept| kept.read else 0) << 32) | (@as(u32, @intCast(word.slash)) + 1);
-        const commands = if (word.slash == 0) slash_commands.conversation.listed() else null;
+        var source = ((if (held) |kept| kept.read else 0) << 32) | (@as(u32, @intCast(word.slash)) + 1);
+        if (word.slash == 0) {
+            source = std.hash.Wyhash.hash(source, if (context.archive_state) |state| @tagName(state) else "unavailable");
+        }
+        const commands = if (word.slash == 0) slash_commands.conversation.listedFor(context) else null;
         var listed = rows.list(typed, commands, page) orelse return null;
         listed.source_word = .{ .start = word.slash, .len = word.end - word.slash };
         return slash_commands.Shown.nextOf(previous, revision, source, listed);
@@ -464,7 +471,7 @@ test "leading skill collisions use the complete grammar including hidden command
             const shown = reads.shown(&rows, draft, draft.len, 1, .{}, null);
             // The listed commands whose name or description holds the name.
             var expected: usize = 0;
-            for (slash_commands.conversation.listed().shown()) |command| {
+            for (slash_commands.conversation.listedFor(.{ .archive_state = null }).shown()) |command| {
                 if (std.mem.indexOf(u8, command.shown, name[0..length]) != null or std.mem.indexOf(u8, command.description, name[0..length]) != null) expected += 1;
             }
             try std.testing.expectEqual(expected, if (shown) |found| found.list.count else 0);
@@ -501,8 +508,8 @@ test "leading skill collisions use the complete grammar including hidden command
 
 test "chat table lists visible commands with substantive descriptions plus every loaded skill" {
     try std.testing.expect(!@hasDecl(slash_commands, "overview"));
-    const names = [_][]const u8{ "archive", "clear", "copy", "effort", "model", "new", "pin", "reload-skills", "reload-tools", "rename", "requests", "result", "setup", "unarchive", "unpin" };
-    const descriptions = [_][]const u8{ "", "start a new chat", "copy the last answer", "", "", "start a new chat", "", "", "", "", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "" };
+    const names = [_][]const u8{ "clear", "copy", "effort", "model", "new", "pin", "reload-skills", "reload-tools", "rename", "requests", "result", "setup", "unarchive", "unpin" };
+    const descriptions = [_][]const u8{ "start a new chat", "copy the last answer", "", "", "start a new chat", "", "", "", "", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "" };
     var skill_names: [skill_suggestions.capacity][16]u8 = undefined;
     var entries: [skill_suggestions.capacity]skill_suggestions.Entry = undefined;
     for (&entries, &skill_names, 0..) |*entry, *name, index| entry.* = .{
@@ -514,7 +521,7 @@ test "chat table lists visible commands with substantive descriptions plus every
         var rows: Rows = .{};
         _ = reads.ask("").?;
         _ = reads.answer(1, testPage(entries[0..count]), "");
-        const listed = reads.shown(&rows, "/", 1, 1, .{}, null).?.list;
+        const listed = reads.shown(&rows, "/", 1, 1, .{ .archive_state = .archived }, null).?.list;
         try std.testing.expectEqual(names.len + count, listed.count);
         for (names, descriptions, listed.shown()[0..names.len]) |name, description, entry| {
             try std.testing.expectEqualStrings(name, entry.shown[1..]);
@@ -644,20 +651,62 @@ test "a list stays the drawn one only while its rows are the same, across every 
     }
 }
 
-test "Enter runs a row only where its word ends the draft" {
-    const entries = [_]skill_suggestions.Entry{.{ .name = "archx", .description = "Skill" }};
+test "SUI-24 archive completion refreshes before accepting and preserves replacement boundaries" {
+    const ArchiveState = @import("session_archive.zig").State;
+    const entries = [_]skill_suggestions.Entry{.{ .name = "archx", .description = "Archive and unarchive notes" }};
     var reads: Reads = .{};
     var rows: Rows = .{};
     _ = reads.answer(reads.ask("").?.read, testPage(&entries), "");
-    var lone = reads.shown(&rows, "/arch", 5, 1, .{}, null).?;
-    try expectReplacement(.{ .start = 1, .end = 5, .text = "archive" }, enter("/arch", 5, &lone).run);
-    lone.highlight = 1;
-    try expectReplacement(.{ .start = 1, .end = 5, .text = "archx " }, enter("/arch", 5, &lone).edit);
-    lone.highlight = 2;
-    try expectReplacement(.{ .start = 1, .end = 5, .text = "unarchive" }, enter("/arch", 5, &lone).run);
+
+    const cases = [_]struct { state: ?ArchiveState, words: []const []const u8 }{
+        .{ .state = null, .words = &.{"/archx"} },
+        .{ .state = .active, .words = &.{ "/archive", "/archx" } },
+        .{ .state = .archiving, .words = &.{"/archx"} },
+        .{ .state = .archived, .words = &.{ "/archx", "/unarchive" } },
+        .{ .state = .active, .words = &.{ "/archive", "/archx" } },
+    };
+    var previous: ?slash_commands.Shown = null;
+    for (cases) |case| {
+        var shown = reads.shown(&rows, "/arch", 5, 1, .{ .archive_state = case.state }, previous).?;
+        try std.testing.expectEqual(.hidden, shown.seen);
+        try std.testing.expectEqual(case.words.len, shown.list.count);
+        for (case.words, shown.list.shown(), 0..) |word, entry, index| {
+            try std.testing.expectEqualStrings(word, entry.shown);
+            shown.highlight = index;
+            if (std.mem.eql(u8, word, "/archx")) {
+                try expectReplacement(.{ .start = 1, .end = 5, .text = "archx " }, enter("/arch", 5, &shown).edit);
+            } else {
+                try expectReplacement(.{ .start = 1, .end = 5, .text = word[1..] }, enter("/arch", 5, &shown).run);
+            }
+        }
+        shown.drew(true);
+        previous = shown;
+    }
+
+    const unavailable = [_]struct { state: ?ArchiveState, draft: []const u8 }{
+        .{ .state = null, .draft = "/archive" },
+        .{ .state = null, .draft = "/unarchive" },
+        .{ .state = .archiving, .draft = "/archive" },
+        .{ .state = .archiving, .draft = "/unarchive" },
+        .{ .state = .archived, .draft = "/archive" },
+        .{ .state = .active, .draft = "/unarchive" },
+    };
+    for (unavailable) |case| {
+        try std.testing.expect(reads.shown(&rows, case.draft, case.draft.len, 2, .{ .archive_state = case.state }, null) == null);
+    }
+
+    for ([_]struct { state: ArchiveState, exact: []const u8 }{
+        .{ .state = .active, .exact = "/archive" },
+        .{ .state = .archived, .exact = "/unarchive" },
+    }) |case| {
+        const shown = reads.shown(&rows, case.exact, case.exact.len, 3, .{ .archive_state = case.state }, null).?;
+        try std.testing.expectEqualStrings(case.exact, shown.list.shown()[0].shown);
+        try std.testing.expectEqualStrings("/archx", shown.list.shown()[1].shown);
+    }
+
     for ([_][]const u8{ "/arch this change", "/arch.foo" }) |draft| {
-        var shown = reads.shown(&rows, draft, 5, 1, .{}, null).?;
-        try std.testing.expectEqual(@as(usize, 3), shown.list.count);
+        var shown = reads.shown(&rows, draft, 5, 1, .{ .archive_state = .active }, null).?;
+        try std.testing.expectEqual(@as(usize, 2), shown.list.count);
         try expectReplacement(.{ .start = 1, .end = 5, .text = "archive" }, enter(draft, 5, &shown).edit);
         shown.highlight = 1;
         try expectReplacement(.{ .start = 1, .end = 5, .text = "archx" }, enter(draft, 5, &shown).edit);

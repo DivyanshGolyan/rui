@@ -46,7 +46,7 @@ jobs:
     with:
       sha: ${{ inputs.head }}
   selected:
-    # Full check-full, frame gate and Debug recovery on Linux and macOS, plus
+    # Full check-full and Debug recovery on Linux and macOS, plus
     # the targets the batch's paths select.
     permissions:
       contents: read
@@ -81,10 +81,70 @@ jobs:
       ref: ${{ inputs.head }}
       batch-base: ${{ inputs.base }}
       release-version: ${{ needs.release_build.outputs.version }}
+  memory:
+    # The per-agent Host memory budget, judged on the linux-x86_64 archive this
+    # promotion publishes. Its table is the release notes' Host memory section, so
+    # Release uploads nothing new and measures nothing. Never skipped and never on a PR:
+    # qualified reads its result, and verdict() counts a skipped tier as unfinished.
+    needs: release_build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.head }}
+          persist-credentials: false
+      # Installs the fixture Python (h2) that host_memory.py imports, which the release job's venv used to supply.
+      - uses: ./.github/actions/setup
+        with:
+          # Restore only: the memory gate publishes no caches, so cache cleanup has nothing of its to prune.
+          publish-caches: 'false'
+          targets: '["host-memory"]'
+      - name: Fetch the release executable this promotion publishes
+        id: release
+        if: ${{ needs.release_build.outputs.version != '' }}
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release_build.outputs.version }}
+          SHA: ${{ inputs.head }}
+        run: |
+          set -euo pipefail
+          # A standalone assignment, so a failed fetch fails this step instead of leaving rui empty.
+          rui=$(python3 -B tests/ci/release_under_test.py "$VERSION" "$SHA" "$RUNNER_TEMP/release-under-test")
+          echo "rui=$rui" >> "$GITHUB_OUTPUT"
+      - name: Gate the per-agent Host memory budget and write its release table
+        id: memory
+        # Without a planned release this compiles ReleaseSafe rui, as the upgrade check does.
+        env:
+          RUI_UNDER_TEST: ${{ steps.release.outputs.rui }}
+          RUI_HOST_MEMORY_NOTES: ${{ runner.temp }}/host-memory.md
+        run: |
+          set -euo pipefail
+          python3 -B tests/ci/steps.py --output-root "$RUNNER_TEMP/memory" \
+            'host-memory=zig build host-memory --summary all ${RUI_UNDER_TEST:+"-Drui-under-test=$RUI_UNDER_TEST"}'
+      - name: Name the promotion suspects of each failed step
+        if: ${{ failure() }}
+        env:
+          BASE: ${{ inputs.base }}
+          HEAD_SHA: ${{ inputs.head }}
+        run: python3 -B tests/ci/promotion.py suspects --base "$BASE" --head "$HEAD_SHA"
+      - name: Retain the Host memory table
+        # Written even when the gate fails, so the failing scenario and its runs are on record.
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rui-host-memory
+          path: ${{ runner.temp }}/host-memory.md
+          retention-days: 7
+          if-no-files-found: ignore
   qualified:
     # The sole verdict, recorded on HEAD whatever it is; a cancelled tier
     # records an unfinished verdict that the next run qualifies again.
-    needs: [release_build, selected, upgrade, renderer]
+    needs: [release_build, selected, upgrade, renderer, memory]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -104,7 +164,7 @@ jobs:
           VERSION: ${{ needs.release_build.outputs.version }}
           RESULTS: >-
             ${{ needs.release_build.result }} ${{ needs.selected.result }}
-            ${{ needs.upgrade.result }} ${{ needs.renderer.result }}
+            ${{ needs.upgrade.result }} ${{ needs.renderer.result }} ${{ needs.memory.result }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC2086 # one word per tier result
@@ -118,7 +178,7 @@ jobs:
         run: test "$STATE" = success
   report:
     # One issue per failure signature, with the failing step's suspects on it.
-    needs: [selected, upgrade, renderer]
+    needs: [selected, upgrade, renderer, memory]
     if: ${{ failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15

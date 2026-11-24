@@ -402,7 +402,7 @@ class EscapeClassTest(unittest.TestCase):
             (MEASUREMENT_BUNDLE, 'failure', [(selected, failed)], Cause('signature', zig_binary='measurement-check'),
              'own-files:measurement-check'),
             (MEASUREMENT_BUNDLE, 'failure', [(selected, failed)], Cause('signature'), 'unknown'),
-            ('qualify / selected / linux suites (stack-frames)', 'failure', [(selected, failed)], Cause('signature'),
+            ('qualify / selected / linux suites (deep-modules)', 'failure', [(selected, failed)], Cause('signature'),
              'pr-tier'),
             ('qualify / selected / linux suites (rsql-table)', 'failure', [(selected, failed)], Cause('signature'),
              'promotion-only:rsql-table'),
@@ -604,11 +604,11 @@ class ReportTest(unittest.TestCase):
         self.assertNotIn('causes', body)
 
     def test_a_promotion_suspects_line_rides_on_the_failure_it_ranked(self):
-        suspect = ('Promotion suspects: stack-frames: 1. ' + 'e' * 40 + ' PR #1692, tier b (import or rule): '
+        suspect = ('Promotion suspects: deep-modules: 1. ' + 'e' * 40 + ' PR #1692, tier b (import or rule): '
                    'Change the stack frames; touched src/server.zig')
         fake = FakeGitHub([dict(id=1, name='linux suites (check)', conclusion='failure')],
-                          {1: BASH + logged('stack-frames: failed (exit 1)') + logged(suspect)
-                           + logged('--- stack-frames: last 1 lines of the failed step\'s output ---')})
+                          {1: BASH + logged('deep-modules: failed (exit 1)') + logged(suspect)
+                           + logged('--- deep-modules: last 1 lines of the failed step\'s output ---')})
         self.run_main(fake, '--label', 'promotion-red')
         [create] = fake.made('create')
         body = create[create.index('--body') + 1]
@@ -772,14 +772,14 @@ class JobCauseTest(unittest.TestCase):
 
     def test_a_job_whose_log_carries_excerpt_lines_is_described_by_them_not_by_its_tail(self):
         log = (numbered_log(50, prefix='early output')
-               + logged('stack-frames: failed (exit 1)',
-                        'Promotion excerpt: stack-frames: last 2 lines of the failed step\'s output:',
-                        'Promotion excerpt: stack-frames: boom',
-                        'Promotion excerpt: stack-frames: end of excerpt'))
-        [cause] = self.causes(log, 'linux suites (stack-frames)', [('stack-frames', 'failure')])
-        self.assertEqual(cause.signature, "Promote: job 'linux suites (stack-frames)' failed at step 'stack-frames'")
-        self.assertIn('Promotion excerpt: stack-frames: boom', cause.detail)
-        self.assertIn('Promotion excerpt: stack-frames: end of excerpt', cause.detail)
+               + logged('deep-modules: failed (exit 1)',
+                        'Promotion excerpt: deep-modules: last 2 lines of the failed step\'s output:',
+                        'Promotion excerpt: deep-modules: boom',
+                        'Promotion excerpt: deep-modules: end of excerpt'))
+        [cause] = self.causes(log, 'linux suites (deep-modules)', [('deep-modules', 'failure')])
+        self.assertEqual(cause.signature, "Promote: job 'linux suites (deep-modules)' failed at step 'deep-modules'")
+        self.assertIn('Promotion excerpt: deep-modules: boom', cause.detail)
+        self.assertIn('Promotion excerpt: deep-modules: end of excerpt', cause.detail)
         self.assertNotIn('early output', cause.detail)
 
     def test_a_job_with_parsed_causes_keeps_its_signature_and_no_tail(self):

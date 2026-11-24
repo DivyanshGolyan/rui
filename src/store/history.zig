@@ -100,7 +100,8 @@ pub const Built = struct {
 
     /// The operator's upgrade, exactly once. SQLite: schema.openExisting on the raw handle
     /// (backup, foreign keys off, shipped steps from N, foreign_key_check, validateCurrent).
-    /// MySQL: schema.mysqlMigrationFrom(N) as DDL, then the catalog and the rows compared with a fresh Store.
+    /// MySQL: schema.mysqlMigrationFrom(N) as DDL. The shape comparison with a fresh Store is not run here: a test that
+    /// proves the migration reaches the current shape calls mysql_dialect_check.historyExpectUpgraded itself.
     pub fn upgrade(self: *Built) !void {
         if (self.upgraded) return;
         switch (self.engine) {
@@ -108,7 +109,6 @@ pub const Built = struct {
             .mysql => {
                 const migration = schema.mysqlMigrationFrom(self.format) orelse return error.StartFormatOutOfRange;
                 if (migration.len > 0) try mysql_dialect_check.historyLoad(migration, false);
-                try mysql_dialect_check.historyExpectUpgraded(self.root(), self.baseline_only);
             },
         }
         self.upgraded = true;
@@ -176,22 +176,28 @@ fn buildSqlite(built: *Built, start: *const Start) !void {
     try expectNoForeignKeyViolations(database);
 }
 
-/// The MySQL build mirrors buildSqlite: the baseline DDL, the baseline meta, the baseline rows and the shipped
-/// steps below N with foreign key checks off, then format N, then the Start's rows with checks on. MySQL has no
-/// foreign_key_check statement, so the baseline rows and steps are not verified beyond their own statements.
+/// The MySQL build mirrors buildSqlite. mysql_dialect_check.historyFrom makes the history database hold the shape
+/// (format N and the baseline rows when asked) by cloning a template built once per process with fillMysql; then
+/// the Start's rows load with checks on. MySQL has no foreign_key_check statement, so the baseline rows and steps
+/// are not verified beyond their own statements.
 fn buildMysql(built: *Built, start: *const Start) !void {
-    try mysql_dialect_check.historyReset();
-    try mysql_dialect_check.historyLoad(store_testing.baseline_mysql_ddl, false);
-
-    var meta_buffer: [protocol.max_store_bytes + 256]u8 = undefined;
-    try mysql_dialect_check.historyLoad(try std.fmt.bufPrint(&meta_buffer, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','7'),('store_selector','{s}'),('format','{d}')", .{ built.root(), schema.migration_baseline }), false);
-    if (start.baseline_rows) try mysql_dialect_check.historyLoad(store_testing.baseline_rows, true);
-    for (stepsBelow(start.format)) |step| for (step.mysql) |statement| try mysql_dialect_check.historyLoad(statement, true);
-
-    var format_buffer: [256]u8 = undefined;
-    try mysql_dialect_check.historyLoad(try std.fmt.bufPrint(&format_buffer, "UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{start.format}), false);
+    try mysql_dialect_check.historyFrom(.{ .format = start.format, .seeded = start.baseline_rows }, built.root(), fillMysql);
     const rows = start.sql.text(.mysql);
     if (rows.len > 0) try mysql_dialect_check.historyLoad(rows, false);
+}
+
+/// The template fill: the baseline DDL, the baseline meta, the baseline rows and the shipped steps below the shape's
+/// format with foreign key checks off, then the format.
+fn fillMysql(loader: mysql_dialect_check.Loader, shape: mysql_dialect_check.Shape, selector: []const u8) !void {
+    try loader.load(store_testing.baseline_mysql_ddl, false);
+
+    var meta_buffer: [protocol.max_store_bytes + 256]u8 = undefined;
+    try loader.load(try std.fmt.bufPrint(&meta_buffer, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','7'),('store_selector','{s}'),('format','{d}')", .{ selector, schema.migration_baseline }), false);
+    if (shape.seeded) try loader.load(store_testing.baseline_rows, true);
+    for (stepsBelow(shape.format)) |step| for (step.mysql) |statement| try loader.load(statement, true);
+
+    var format_buffer: [256]u8 = undefined;
+    try loader.load(try std.fmt.bufPrint(&format_buffer, "UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{shape.format}), false);
 }
 
 /// What a 51 Store held: its selector, a wire version, and format 51 (the steps then carry it on).
@@ -251,6 +257,8 @@ test "a Store built at every format from the baseline to the current one upgrade
         if (engine != .mysql or try mysql_testing.available()) {
             var format: u32 = schema.migration_baseline;
             while (format <= schema.schema_version) : (format += 1) {
+                // MySQL runs live at two formats only: SH-8 (schema.zig) proves every format's upgrade text is the shipped steps from it, a suffix of the baseline's.
+                if (engine == .mysql and format != schema.migration_baseline and format != schema.schema_version) continue;
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 const start: Start = .{ .format = format };
@@ -258,6 +266,8 @@ test "a Store built at every format from the baseline to the current one upgrade
                 defer built.deinit();
                 try std.testing.expectEqual(format, try built.storedFormat());
                 try built.upgrade();
+                // The MySQL shape and catalog comparison with a fresh Store: openAt does not pay for it.
+                if (engine == .mysql) try mysql_dialect_check.historyExpectUpgraded(built.root(), built.baseline_only);
                 if (engine == .sqlite) {
                     // A current Store reopens through the same path, which validates its shape.
                     try schema.openExisting(std.testing.io, built.raw.?, built.root(), null, null);

@@ -4,9 +4,11 @@ const Input = @import("SessionInput.zig");
 
 pub const Draft = struct {
     snapshot: Input.Snapshot,
+    image: ?Input.Image = null,
 
     pub fn deinit(self: Draft, gpa: std.mem.Allocator) void {
         gpa.free(self.snapshot.bytes);
+        if (self.image) |image| image.deinit();
     }
 };
 
@@ -19,14 +21,14 @@ pub const Drafts = struct {
         next: ?*Node,
     };
 
-    pub const Entry = struct { id: []const u8, snapshot: Input.Snapshot };
+    pub const Entry = struct { id: []const u8, snapshot: Input.Snapshot, image: ?Input.Image };
     pub const Iterator = struct {
         node: ?*const Node,
 
         pub fn next(self: *Iterator) ?Entry {
             const node = self.node orelse return null;
             self.node = node.next;
-            return .{ .id = &node.id, .snapshot = node.draft.snapshot };
+            return .{ .id = &node.id, .snapshot = node.draft.snapshot, .image = node.draft.image };
         }
     };
 
@@ -43,15 +45,21 @@ pub const Drafts = struct {
     }
 
     pub fn put(self: *Drafts, gpa: std.mem.Allocator, id: []const u8, snapshot: Input.Snapshot) !void {
+        return self.putDraft(gpa, id, snapshot, null);
+    }
+
+    pub fn putDraft(self: *Drafts, gpa: std.mem.Allocator, id: []const u8, snapshot: Input.Snapshot, image: ?Input.Image) !void {
         std.debug.assert(session_id.valid(id));
         std.debug.assert(snapshot.cursor <= snapshot.bytes.len);
-        if (snapshot.bytes.len == 0 and snapshot.anchor == null and snapshot.rejected == null) {
+        if (snapshot.bytes.len == 0 and snapshot.anchor == null and snapshot.rejected == null and image == null) {
             if (self.take(gpa, id)) |draft| draft.deinit(gpa);
             return;
         }
         const copy = try gpa.dupe(u8, snapshot.bytes);
         errdefer gpa.free(copy);
-        var draft: Draft = .{ .snapshot = snapshot };
+        const image_copy = if (image) |value| try value.clone() else null;
+        errdefer if (image_copy) |value| value.deinit();
+        var draft: Draft = .{ .snapshot = snapshot, .image = image_copy };
         draft.snapshot.bytes = copy;
         var next = &self.first;
         while (next.*) |node| : (next = &node.next) {
@@ -64,6 +72,15 @@ pub const Drafts = struct {
         const node = try gpa.create(Node);
         node.* = .{ .id = id[0..session_id.bytes].*, .draft = draft, .next = null };
         next.* = node;
+    }
+
+    pub fn imageBytes(self: *const Drafts) usize {
+        var total: usize = 0;
+        var entries = self.iterator();
+        while (entries.next()) |entry| if (entry.image) |image| {
+            total += image.bytes.len;
+        };
+        return total;
     }
 
     pub fn take(self: *Drafts, gpa: std.mem.Allocator, id: []const u8) ?Draft {
@@ -170,4 +187,22 @@ test "session_drafts preserves the whole snapshot including empty rejected draft
         try std.testing.expectEqual(snapshot.rejected, saved.snapshot.rejected);
         try std.testing.expectEqual(snapshot.anchor, saved.snapshot.anchor);
     }
+}
+
+test "SUI-115 an image-only draft survives changing Sessions" {
+    const allocator = std.testing.allocator;
+    var drafts: Drafts = .{};
+    defer drafts.deinit(allocator);
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    const image = try Input.Image.validate(png);
+    try drafts.putDraft(allocator, "aaaaaa", .{ .bytes = "", .cursor = 0 }, image);
+    try drafts.put(allocator, "bbbbbb", .{ .bytes = "other chat", .cursor = 3 });
+    try std.testing.expectEqual(png.len, drafts.imageBytes());
+    const draft = drafts.take(allocator, "aaaaaa").?;
+    defer draft.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, png, draft.image.?.bytes);
+    try std.testing.expectEqual(@as(usize, 0), drafts.imageBytes());
+    const other = drafts.take(allocator, "bbbbbb").?;
+    defer other.deinit(allocator);
+    try std.testing.expectEqualStrings("other chat", other.snapshot.bytes);
 }
