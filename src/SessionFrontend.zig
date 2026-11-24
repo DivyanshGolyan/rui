@@ -3062,9 +3062,9 @@ fn settleReader(self: *Self) !void {
         if (self.reading.phase == .fill) self.reading.fills = self.reading.fills.failed(self.reading.feed_read, self.job.feed_page.?);
         self.reading.opening = self.reading.opening_generation != self.job.accepted_refresh;
         self.notice = switch (guard_failure.?) {
-            .store_changed => "! Store changed; original Message still held.",
-            .identity_missing => "! Original Store identity unavailable; Message held.",
-            .unavailable => "! Could not check earlier Message; Enter retries refresh.",
+            .store_changed => "! Store changed · original held.",
+            .identity_missing => "! Store unknown · original held.",
+            .unavailable => "! Check unavailable · Enter refreshes.",
         };
         self.poll_at = feed_reads.scanDue(std.Io.Clock.awake.now(self.init.io).nanoseconds, false);
         self.dirty = true;
@@ -3404,15 +3404,15 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
                 if (result.accepted_observation) |observation| {
                     if (self.submission.messageHeld()) self.notice = switch (try self.submission.observeApplied(result.accepted_store.slice(), observation)) {
                         .taken => "Message taken · see history.",
-                        .queued => "Message was queued at last check; next draft kept.",
-                        .excluded => "Message stopped before it ran; see history.",
-                        .unverified => "! Could not verify earlier Message; Enter retries refresh.",
+                        .queued => "Queued at last check · draft kept.",
+                        .excluded => "Stopped before it ran · see history.",
+                        .unverified => "! Original unverified · Enter refreshes.",
                     };
                 } else if (result.accepted_observation_failed) |failure| if (self.submission.messageHeld()) {
                     self.notice = switch (failure) {
-                        .store_changed => "! Store changed; original Message still held.",
-                        .identity_missing => "! Original Store identity unavailable; Message held.",
-                        .unavailable => "! Could not check earlier Message; Enter retries refresh.",
+                        .store_changed => "! Store changed · original held.",
+                        .identity_missing => "! Store unknown · original held.",
+                        .unavailable => "! Check unavailable · Enter refreshes.",
                     };
                 };
             }
@@ -6633,14 +6633,62 @@ test "SUI-146 non-applied or unavailable observations preserve the accepted loan
         try std.testing.expect(!self.reading.opening and !self.sendFacts().allowed());
         try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
         try std.testing.expectEqualStrings(switch (variant) {
-            .queued => "Message was queued at last check; next draft kept.",
-            .excluded => "Message stopped before it ran; see history.",
-            .mismatch => "! Could not verify earlier Message; Enter retries refresh.",
-            .unavailable => "! Could not check earlier Message; Enter retries refresh.",
-            .store_changed => "! Store changed; original Message still held.",
-            .identity_missing => "! Original Store identity unavailable; Message held.",
+            .queued => "Queued at last check · draft kept.",
+            .excluded => "Stopped before it ran · see history.",
+            .mismatch => "! Original unverified · Enter refreshes.",
+            .unavailable => "! Check unavailable · Enter refreshes.",
+            .store_changed => "! Store changed · original held.",
+            .identity_missing => "! Store unknown · original held.",
         }, self.notice.?);
     }
+}
+
+test "SUI-146 exact applied evidence releases an accepted loan after partial feed insertion" {
+    const Worker = struct {
+        fn done(_: *anyopaque, _: *Task) !void {}
+    };
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const large: [feed_window.row_capacity]u8 = @splat('x');
+    const original: [900]u8 = @splat('a');
+    const filler: [900]u8 = @splat('b');
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    self.store = "/private-store";
+    self.session = "k7m2qx";
+    self.submission.store = self.store;
+    self.submission.session = self.session;
+    _ = try fixture.held.draw();
+    const ticket = self.input.submitText(&original);
+    self.submission.settled_message = .{ .ticket = ticket, .key = key, .admission = 37, .store = try .from("/private-store") };
+    defer if (self.submission.messageHeld()) self.submission.disposeMessage();
+    _ = self.input.append("next draft");
+    self.reading.opening = true;
+    const job = self.freeze(.activity);
+    var offset: u64 = 0;
+    for ([_][]const u8{ &original, &filler, &large, &large }, 0..) |text, at| {
+        try fixture.file.writePositionalAll(std.testing.io, text, offset);
+        job.result.rows[at] = .{ .key = .{ .position = at + 1 }, .offset = offset, .length = text.len, .tight = false, .provisional = false, .message_key = if (at == 0) key else null };
+        offset += text.len;
+    }
+    job.result.row_count = 4;
+    job.result.low = .{ .position = 1 };
+    job.result.high = .{ .position = 4 };
+    job.result.at_start = true;
+    job.result.at_end = true;
+    try job.result.activity_store.set("/private-store");
+    try job.result.accepted_store.set("/private-store");
+    var observed: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = .message, .target = .{}, .state = .processing, .queue = .{ .admission = 37, .admitted_at = 1 }, .binding = .{ .turn = 2, .operation = 3, .attempt = 1 }, .input = .{ .text = .{ .length = original.len, .digest = protocol.contentDigest(&original) } } };
+    try observed.key.set(&key);
+    try observed.target.?.set("k7m2qx");
+    job.result.accepted_observation = observed;
+    try self.launch(job, Worker.done);
+    try self.settleReader();
+    try std.testing.expect(self.screen.feed.count < 4);
+    try std.testing.expect(self.screen.feed.indexOf(.{ .position = 1 }) == null);
+    try std.testing.expect(!self.submission.messageHeld());
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+    try std.testing.expect(self.sendFacts().allowed());
 }
 
 test "SUI-146 a pre-admission opening cannot consume a later accepted refresh" {
@@ -6694,7 +6742,7 @@ test "SUI-146 a foreign Store page cannot release a late or already accepted loa
         try std.testing.expect(self.submission.messageHeld());
         try std.testing.expectEqual(@as(usize, 0), self.screen.feed.count);
         try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
-        try std.testing.expectEqualStrings("! Store changed; original Message still held.", self.notice.?);
+        try std.testing.expectEqualStrings("! Store changed · original held.", self.notice.?);
     }
 }
 
