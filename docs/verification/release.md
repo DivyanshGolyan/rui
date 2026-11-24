@@ -127,9 +127,9 @@ Only verified publication advances the `stable` pointer.
 To recover an interrupted publication, rerun the promotion's failed jobs: `gh run rerun <promotion run id> --failed`.
 When every failure of a promotion's first attempt was infrastructure, such as a macOS job GitHub never gave a runner, [Retry infrastructure failures](gates.md#ci-artifacts-and-caches) does this once automatically.
 
-After publishing, Release rechecks the [wire-version gate](../../tests/ci/test_wire_version.py) on open wire-changing PRs: [recheck_wire_prs.py](../../tests/ci/recheck_wire_prs.py) reruns `policy` (on a ready PR, the single `linux pr` job that runs the policy checks), and so `admission`, on each open, non-draft PR based on main that touches `openapi.json` or `src/wire_version.zig` and whose latest check ran before publication.
+After publishing, Release rechecks the [wire-version gate](../../tests/ci/test_wire_version.py) on open wire-changing PRs: [recheck_wire_prs.py](../../tests/ci/recheck_wire_prs.py) reruns `admission` alone (seconds, not the policy job), on each open, non-draft PR based on main that touches `openapi.json` or `src/wire_version.zig` and whose latest `admission` started before publication. `admission` fetches origin/main and every v0 tag when it starts, and fails rather than skips when either is missing; a run that started `admission` after publication already read the new release.
 A red recheck step means the release did ship; its error names each PR it could not recheck and why.
-Do not rerun the promotion for it: push to each named PR, or rerun that PR's `policy` job; a PR whose run is past GitHub's 30-day rerun limit needs a push.
+Do not rerun the promotion for it: push to each named PR, or rerun that PR's `admission` job; a PR whose run is past GitHub's 30-day rerun limit needs a push.
 
 [release.py](../../tests/ci/release.py) skips a SHA only when a verified public release already includes it, and can repair a missed pointer update without rebuilding.
 Drafts and orphan tags reserve a version for their exact SHA; recovery reuses that identity rather than skipping incomplete publication.
