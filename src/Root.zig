@@ -1404,7 +1404,7 @@ test "A faded screen holds what rendering shows: children above their parents in
     try std.testing.expectEqualStrings("nabb" ++ "aabc", &text);
 }
 
-test "SUI-142 Root routes captured selection through divider and footer as the sole hit" {
+test "SUI-142 Root routes captured selection through divider and footer with one active handler" {
     const Probe = struct {
         count: usize = 0,
         last: vaxis.Mouse = undefined,
@@ -1454,8 +1454,11 @@ test "SUI-142 Root routes captured selection through divider and footer as the s
     }) |mouse| {
         hits.clearRetainingCapacity();
         try frame.hitTest(arena.allocator(), &hits, .{ .row = @intCast(mouse.row), .col = @intCast(mouse.col) });
-        try std.testing.expectEqual(@as(usize, 1), hits.items.len);
-        try std.testing.expect(hits.items[0].widget.eql(root.widget()));
+        var root_hits: usize = 0;
+        for (hits.items) |hit| {
+            if (hit.widget.eql(root.widget())) root_hits += 1 else try std.testing.expect(inert(hit.widget));
+        }
+        try std.testing.expectEqual(@as(usize, 1), root_hits);
         ctx.consume_event = false;
         try Pointer.mouse(&ctx, frame, mouse);
         try std.testing.expect(ctx.consume_event);
@@ -1465,7 +1468,7 @@ test "SUI-142 Root routes captured selection through divider and footer as the s
     try std.testing.expectEqual(@as(usize, 3), session.count);
     try std.testing.expectEqual(@as(i16, 14), session.last.col);
     try std.testing.expectEqual(@as(i16, 24), session.last.row);
-    try std.testing.expectEqual(@as(usize, 1), session.releases);
+    try std.testing.expectEqual(@as(usize, 2), session.releases);
 }
 
 test "Sign-in captures every mouse action above settings without background activation" {

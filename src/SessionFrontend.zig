@@ -4008,7 +4008,8 @@ test "SUI-144 SessionFrontend cancels copy selection when its feed context is co
     for (contexts) |context| for (gestures) |gesture| {
         const held = try HeldFrontend.create();
         defer held.destroy();
-        held.size = .{ .width = 46, .height = 30 };
+        const initial_width: u16 = if (context == .focus) 140 else 46;
+        held.size = .{ .width = initial_width, .height = 30 };
         const text = TerminalText.user_message_on ++ TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ "UserAlpha" ++ TerminalText.user_message_off;
         try seedFeed(held.screen, text);
         const frame = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
