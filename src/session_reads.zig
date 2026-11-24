@@ -1395,14 +1395,23 @@ test "SUI-49 Message placement preserves provenance across pages" {
 
 test "CLI-35 an Activity read keeps its resolved Store across alias retarget" {
     const Host = struct {
-        pub fn answer(_: *@This(), fd: std.posix.fd_t) !void {
+        first: [8192]u8 = undefined,
+        first_len: usize = 0,
+        pub fn answer(self: *@This(), fd: std.posix.fd_t) !void {
             var request_buffer: [8192]u8 = undefined;
             const request = try fake_host.readRequest(fd, &request_buffer) orelse return;
             try std.testing.expect(request.is("/v1/activity-page"));
+            if (self.first_len == 0) {
+                @memcpy(self.first[0..request.body.len], request.body);
+                self.first_len = request.body.len;
+            } else {
+                try std.testing.expectEqualSlices(u8, self.first[0..self.first_len], request.body);
+            }
             var storage: [2048]u8 = undefined;
             var arena = std.heap.FixedBufferAllocator.init(&storage);
             const body = try std.json.parseFromSliceLeaky(struct { store: []const u8 }, arena.allocator(), request.body, .{ .ignore_unknown_fields = true });
-            var page: protocol.ActivityFacts = .{ .end = 0, .direction = .forward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+            const fixture: FakeHost = .{ .history = 50, .tail = &.{}, .end = 50 };
+            var page = fixture.page(50, 25, null, .backward, .full, 7);
             try page.work.workspace.set(body.store);
             var output = std.Io.Writer.Allocating.init(std.testing.allocator);
             defer output.deinit();
@@ -1418,16 +1427,25 @@ test "CLI-35 an Activity read keeps its resolved Store across alias retarget" {
             var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias", .{root});
             const paths = try client.resolveClientPaths(io, alias);
-            const initial = try (client.Requests{ .io = io }).activityPage(alias, "k7m2qx", .{});
+            const requests: client.Requests = .{ .io = io };
+            const cursor: protocol_reply.ActivityCursor = .{ .end = 50, .position = 25, .direction = .backward, .limit = 7 };
+            try std.testing.expectError(error.InvalidSession, requests.activityPageAt(&paths, "invalid", cursor));
+            try std.testing.expectError(error.InvalidCursor, requests.activityPageAt(&paths, "k7m2qx", .{ .limit = 0 }));
+            var cancelled: client.Cancellation = .{};
+            cancelled.requestStop();
+            try std.testing.expectError(error.Cancelled, (client.Requests{ .io = io, .cancellation = &cancelled }).activityPageAt(&paths, "k7m2qx", cursor));
+            const initial = try requests.activityPage(alias, "k7m2qx", cursor);
             try std.testing.expect(initial == .page);
             try std.testing.expectEqualStrings(paths.store_identity.slice(), initial.page.facts.work.workspace.slice());
             try dir.deleteFile(io, "alias");
             try dir.symLink(io, "other", "alias", .{ .is_directory = true });
             const retargeted = try client.resolveClientPaths(io, alias);
             try std.testing.expect(!paths.store_identity.eql(retargeted.store_identity.slice()));
-            const reply = try (client.Requests{ .io = io }).activityPageAt(&paths, "k7m2qx", .{});
+            const reply = try requests.activityPageAt(&paths, "k7m2qx", cursor);
             try std.testing.expect(reply == .page);
             try std.testing.expectEqualStrings(paths.store_identity.slice(), reply.page.facts.work.workspace.slice());
+            try std.testing.expectEqualDeep(initial.page.continuation(), reply.page.continuation());
+            try std.testing.expectEqual(@as(u64, 18), reply.page.continuation().?.position);
             _ = host;
         }
     };
