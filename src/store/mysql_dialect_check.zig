@@ -21,6 +21,9 @@ const DatabaseNames = struct {
     offer: []const u8 = "rui_offer_migration",
     effort: []const u8 = "rui_effort_migration",
     projection: []const u8 = "rui_obligation_projection_parity",
+    // Short: the history Store's name keeps a namespace of 31 characters under the 40-byte testing database name.
+    history: []const u8 = "rh",
+    history_fresh: []const u8 = "rh_fresh",
 };
 
 var names: DatabaseNames = .{};
@@ -105,6 +108,12 @@ fn writeResultNamed(comptime text: []const u8, out: *std.Io.Writer) !void {
     const sql = try std.fmt.allocPrint(std.testing.allocator, text, sqlNames(text, names));
     defer std.testing.allocator.free(sql);
     try writeResult(sql, out);
+}
+
+test "the history Store's database name keeps the longest namespace under the 40-byte testing database name" {
+    var buffer: [64]u8 = undefined;
+    const name = try qualifiedDatabase(&buffer, (DatabaseNames{}).history, "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn");
+    try std.testing.expect(name.len < 40);
 }
 
 test "MySQL test schema namespace preserves defaults and separates concurrent processes" {
@@ -639,6 +648,71 @@ fn expectSameResults(comptime migrated: []const []const u8, comptime fresh: []co
             return err;
         };
     }
+}
+
+/// The history owner's databases (src/store/history.zig): the Store it builds and upgrades, and the fresh twin
+/// it is compared with. Reset for every build, so one pair serves every format in turn.
+pub const history_sql = "{[history]s}";
+pub const history_fresh_sql = "{[history_fresh]s}";
+
+/// The history Store's database name at run time, which history.zig opens as the test Store on MySQL.
+pub fn historyDatabase() []const u8 {
+    return names.history;
+}
+
+/// Empties the history Store's database and selects it. Runs with the dialect driver's root login.
+pub fn historyReset() !void {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return error.MysqlUnavailable;
+    try setupNamed("DROP DATABASE IF EXISTS " ++ history_sql ++ ";DROP DATABASE IF EXISTS " ++ history_fresh_sql ++
+        ";CREATE DATABASE " ++ history_sql ++ ";USE " ++ history_sql);
+}
+
+/// Runs `text` in the history Store's database. `unchecked` turns foreign key checks off for the statement,
+/// as the baseline rows and the shipped steps need (SQLite's build turns them off the same way).
+pub fn historyLoad(text: []const u8, unchecked: bool) !void {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return error.MysqlUnavailable;
+    try load(history_sql, text, unchecked);
+}
+
+/// The history Store's stored format (store_meta 'format').
+pub fn historyFormat() !u32 {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return error.MysqlUnavailable;
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeResultNamed("SELECT meta_value FROM " ++ history_sql ++ ".store_meta WHERE meta_key='format'", &out.writer);
+    // writeResult prints each value as " <length>:<bytes>", so the value follows the last colon.
+    const text = out.written();
+    const colon = std.mem.lastIndexOfScalar(u8, text, ':') orelse return error.MysqlFormatUnreadable;
+    return std.fmt.parseInt(u32, text[colon + 1 ..], 10);
+}
+
+/// The history Store, upgraded by the operator's DDL, must match a fresh schema.ddl(.mysql) Store with the
+/// fresh rows and the same selector: the same shape and a catalog that is current. The rows match only when the
+/// Store holds the baseline rows and nothing a Start added: a fresh twin holds the expected rows alone.
+pub fn historyExpectUpgraded(selector: []const u8, compare_rows: bool) !void {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return error.MysqlUnavailable;
+    try setupNamed("DROP DATABASE IF EXISTS " ++ history_fresh_sql ++ ";CREATE DATABASE " ++ history_fresh_sql);
+    try load(history_fresh_sql, schema.ddl(.mysql), false);
+    try load(history_fresh_sql, store_testing.expected_mysql_rows, true);
+    const meta = try std.fmt.allocPrint(std.testing.allocator, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}'),('store_selector','{s}')", .{ schema.schema_version, selector });
+    defer std.testing.allocator.free(meta);
+    try load(history_fresh_sql, meta, false);
+    try expectSameResults(comptime &shapeQueries(history_sql), comptime &shapeQueries(history_fresh_sql));
+    if (compare_rows) try expectSameResults(comptime rowQueries(history_sql), comptime rowQueries(history_fresh_sql));
+    try expectCatalog(history_fresh_sql);
+    try expectCatalog(history_sql);
 }
 
 test "a MySQL Store at the migration baseline with its rows takes every migration to the current schema's shape and rows" {
@@ -1250,57 +1324,76 @@ test "schema 66 MySQL migration freezes actual effort emission and prior admitte
     };
 }
 
+// The DDL a format-74 build created for core_command and its target-order index. Its kind
+// CHECK is format 74's (1 AND 6) and it has no missing_settings (format 89). It never changes.
+const fresh_74_core_command_mysql =
+    \\CREATE TABLE core_command(
+    \\ command_key VARCHAR(128) NOT NULL,
+    \\ kind BIGINT NOT NULL,
+    \\ target VARCHAR(128) NOT NULL,
+    \\ input_digest BLOB NOT NULL,
+    \\ primary_content_id BIGINT,
+    \\ secondary_content_id BIGINT,
+    \\ accepted TINYINT NOT NULL,
+    \\ code TEXT NOT NULL,
+    \\ revision BIGINT NOT NULL,
+    \\ created TINYINT NOT NULL,
+    \\ command_seq BIGINT NOT NULL,
+    \\ PRIMARY KEY(command_seq),
+    \\ UNIQUE(command_key),
+    \\ FOREIGN KEY(primary_content_id) REFERENCES content(content_id),
+    \\ FOREIGN KEY(secondary_content_id) REFERENCES content(content_id),
+    \\ CHECK(OCTET_LENGTH(command_key)<=128),
+    \\ CHECK(kind BETWEEN 1 AND 6),
+    \\ CHECK(OCTET_LENGTH(target)<=128),
+    \\ CHECK(length(input_digest)=32),
+    \\ CHECK(accepted IN (0,1)),
+    \\ CHECK(OCTET_LENGTH(code)<=96),
+    \\ CHECK(revision>=0),
+    \\ CHECK(created IN (0,1)),
+    \\ CHECK(command_seq>0)
+    \\) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+    \\CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq);
+;
+
 test "schema 75 MySQL pin migration handles fresh and historically upgraded kind checks" {
     const io = std.testing.io;
-    mutex.lockUncancelable(io);
-    defer mutex.unlock(io);
-    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restoreNamed("USE " ++ database_sql);
+    {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    }
+    defer {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        restoreNamed("USE " ++ database_sql);
+    }
     inline for (.{ false, true }) |historical| {
-        try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
-        try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
-        if (historical) try load(migrated_database_sql, store_testing.baseline_rows, true);
-        inline for (schema.migrations) |step| {
-            if (step.from < 74) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
-        }
+        // history.build builds format 74 from the baseline with its rows and takes the mutex for its own statements,
+        // so this arm locks only after the build returns.
+        const start: @import("history.zig").Start = .{ .format = 74, .baseline_rows = true };
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var built = try @import("history.zig").build(io, .mysql, &tmp, &start);
+        defer built.deinit();
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
         if (!historical) {
-            try load(migrated_database_sql, "DROP TABLE core_command", true);
-            for (comptime schema.objects(.mysql)) |object| {
-                if (!std.mem.eql(u8, object.name, "core_command") and !std.mem.eql(u8, object.name, "core_command_target_order")) continue;
-                const text = try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 9", "kind BETWEEN 1 AND 6");
-                defer std.testing.allocator.free(text);
-                try load(migrated_database_sql, text, false);
-            }
-            // Today's core_command carries format 89's missing_settings, which step 89 adds in place.
-            try load(migrated_database_sql, "SET @rui_missing_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, DROP COLUMN missing_settings') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('missing_settings',cc.CHECK_CLAUSE)>0);PREPARE rui_missing FROM @rui_missing_ddl;EXECUTE rui_missing;DEALLOCATE PREPARE rui_missing;SET @rui_missing_ddl=NULL", false);
-            // The expected fixture describes the current schema, while this Store is at format 74.
-            const format_74_rows = comptime blk: {
-                @setEvalBranchQuota(1_000_000);
-                var rows = store_testing.expected_mysql_rows;
-                const baseline = store_testing.baseline_rows;
-                for (.{ "INSERT INTO message_admission(", "INSERT INTO conversation_entry(" }) |insert| {
-                    const start = std.mem.indexOf(u8, rows, insert).?;
-                    const end = start + std.mem.indexOf(u8, rows[start..], ";\n").? + 2;
-                    const old_start = std.mem.indexOf(u8, baseline, insert).?;
-                    const old_end = old_start + std.mem.indexOf(u8, baseline[old_start..], ";\n").? + 2;
-                    rows = rows[0..start] ++ baseline[old_start..old_end] ++ rows[end..];
-                }
-                // Format 90 adds tool_record.remote_name; format 74 has no such column.
-                const tool_start = std.mem.indexOf(u8, rows, "INSERT INTO tool_record(").?;
-                const tool_end = tool_start + std.mem.indexOf(u8, rows[tool_start..], ";\n").? + 2;
-                rows = rows[0..tool_start] ++ "INSERT INTO tool_record(tool_record_id,name,owner,server,description_content_id,input_schema_content_id) VALUES\n(1,'bash','rui','',14,15),\n(2,'web_search','provider','',1,1);\n" ++ rows[tool_end..];
-                break :blk rows;
-            };
-            try load(migrated_database_sql, format_74_rows, true);
+            // Swap in the frozen format-74 shape, keeping the baseline-upgraded rows.
+            try load(history_sql, "CREATE TEMPORARY TABLE fresh_74_commands AS SELECT * FROM core_command", false);
+            defer restoreNamed("DROP TEMPORARY TABLE " ++ history_sql ++ ".fresh_74_commands");
+            try load(history_sql, "DROP TABLE core_command", true);
+            try load(history_sql, fresh_74_core_command_mysql, false);
+            try load(history_sql, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM fresh_74_commands", true);
         }
-        try load(migrated_database_sql, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command", false);
-        defer restoreNamed("DROP TEMPORARY TABLE " ++ migrated_database_sql ++ ".original_pin_commands");
-        try load(migrated_database_sql, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
-        defer restoreNamed("DROP TEMPORARY TABLE " ++ migrated_database_sql ++ ".original_pin_stops");
+        try load(history_sql, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command", false);
+        defer restoreNamed("DROP TEMPORARY TABLE " ++ history_sql ++ ".original_pin_commands");
+        try load(history_sql, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
+        defer restoreNamed("DROP TEMPORARY TABLE " ++ history_sql ++ ".original_pin_stops");
         inline for (schema.migrations) |step| {
-            if (step.from >= 74) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
+            if (step.from >= 74) try load(history_sql, schema.mysqlMigration(step.from), false);
         }
-        try expectCatalog(migrated_database_sql);
+        try expectCatalog(history_sql);
         try expectSameResults(&.{
             "SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command ORDER BY command_seq",
             "SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM session_stop ORDER BY command_key",
@@ -1314,7 +1407,7 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
         });
         // Format 89 adds missing_settings after this step; no pre-89 command has one.
         try expectSameResults(&.{ "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", "SELECT count(*) FROM core_command WHERE missing_settings IS NOT NULL" }, &.{ "SELECT 0", "SELECT 0" });
-        try load(migrated_database_sql, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-upgrade',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,100);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-upgrade',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-upgrade');UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'", false);
+        try load(history_sql, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-upgrade',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,100);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-upgrade',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-upgrade');UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'", false);
         try expectSameResults(&.{
             "SELECT count(*) FROM session_pin WHERE command_key IS NULL",
             "SELECT pinned FROM session_pin_command WHERE command_key='pin-upgrade'",

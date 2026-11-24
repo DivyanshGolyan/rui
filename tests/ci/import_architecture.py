@@ -25,7 +25,7 @@ STORE_DIRECTORY = "src/store/"
 STORE_FACADE = "src/store.zig"
 STORE_WIRE = "src/store/wire/"
 STORE_TESTS = "src/store/tests.zig"
-STORE_TEST_FILES = (STORE_TESTS, "src/store/sqlite_tests.zig", "src/store/mysql_dialect_check.zig",
+STORE_TEST_FILES = (STORE_TESTS, "src/store/sqlite_tests.zig", "src/store/history.zig", "src/store/mysql_dialect_check.zig",
                     "src/store/mysql_session_tests.zig", "src/store/mysql_testing.zig", "src/store/engine_contract.zig")
 STORE_TEST_DIRECTORIES = ("src/store/tests/", "src/store/sqlite_tests/")
 SOURCE_SCAN_TESTS = ("Store entry points queue and fence only through canonical access",
