@@ -374,7 +374,10 @@ test "a saved sign-in endpoint resolves back to exactly the admitted URL" {
         };
         const parsed = switch (try served_connection.parse(arena.allocator(), document, NoHostField.none)) {
             .ok => |value| value,
-            .refused => return error.TestUnexpectedResult,
+            .refused => |found| {
+                std.debug.print("{s}: refused {s} {s}\n", .{ endpoint, found.field, @tagName(found.reason) });
+                return error.TestUnexpectedResult;
+            },
         };
         var url_buffer: [providers.Connected.max_url_bytes]u8 = undefined;
         const resolved = try served_connection.resolve(&parsed, .{ .id = "", .native_family = .responses }, &url_buffer);
