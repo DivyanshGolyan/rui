@@ -6113,7 +6113,7 @@ fn sidebarLateListing() !void {
             var shown = try rig.shown(size.width, size.height);
             defer shown.deinit();
             try std.testing.expectEqual(size.width == 140, std.mem.indexOf(u8, try shown.text(), "+ New chat") != null);
-            try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 1), "alt+i info") == null);
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 2), "alt+i info") == null);
             if (size.width == 140) {
                 try std.testing.expectEqual(if (listed) listed_references.len else 1, overview.app_sessions.shown_at.len);
                 if (listed) {
@@ -6133,20 +6133,30 @@ fn sidebarLateListing() !void {
         overview.paintDivider();
         try std.testing.expect(frontend.input.editors[frontend.input.active].set(draft, draft.len) == null);
         frontend.info_open = panel;
-        for ([_]u16{ 46, 99, 100, 140 }) |width| for ([_]u16{ 10, 30, 40 }) |height| {
+        for ([_]u16{ 46, 99, 100, 140 }) |width| for ([_]u16{ 10, 24, 25, 30, 40 }) |height| {
             var shown = try rig.shown(width, height);
             defer shown.deinit();
+            const last_content_row = height - @as(u16, if (height <= 24) 1 else 2);
+            if (height > 24) try std.testing.expectEqualStrings("", std.mem.trim(u8, try shown.line(height - 1), " "));
             const chat_column: u16 = if (width >= Root.split_at) Root.list_width + 1 else 0;
-            try std.testing.expectEqualStrings(if (unicode) "┄" else "-", shown.screen.readCell(chat_column, height - 2).?.char.grapheme);
+            try std.testing.expectEqualStrings(if (unicode) "┄" else "-", shown.screen.readCell(chat_column, last_content_row - 1).?.char.grapheme);
             if (width >= Root.split_at) {
-                try std.testing.expectEqualStrings(if (unicode) "┄" else "-", shown.screen.readCell(0, height - 2).?.char.grapheme);
-                try std.testing.expectEqualStrings(if (unicode) "┆" else "|", shown.screen.readCell(Root.list_width, height - 2).?.char.grapheme);
-                try std.testing.expect(std.mem.startsWith(u8, try shown.line(height - 1), "     Settings"));
+                try std.testing.expectEqualStrings(if (unicode) "┄" else "-", shown.screen.readCell(0, last_content_row - 1).?.char.grapheme);
+                try std.testing.expectEqualStrings(if (unicode) "┆" else "|", shown.screen.readCell(Root.list_width, last_content_row - 1).?.char.grapheme);
+                try std.testing.expect(std.mem.startsWith(u8, try shown.line(last_content_row), "     Settings"));
             }
             try std.testing.expectEqualStrings(draft, frontend.input.composition().bytes);
         };
     };
     frontend.info_open = false;
+    var focus_ctx = rig.context();
+    defer focus_ctx.cmds.deinit(std.testing.allocator);
+    try overview.root.focusChat(&focus_ctx);
+    try std.testing.expect(try rig.click(5, 29, 140, 30) == null);
+    try std.testing.expect(!overview.root.input.listFocused());
+    try std.testing.expect(try rig.click(6, 28, 140, 30) == null);
+    try std.testing.expect(overview.root.input.layer.settingsOpen());
+    try std.testing.expect(try rig.press("\x1b") == null);
     for ([_]u16{ 46, 140 }) |width| for ([_]enum { idle, notice, unconfirmed, rejected, info }{ .idle, .notice, .unconfirmed, .rejected, .info }) |mode| {
         errdefer std.debug.print("geometry mode={s} width={d}\n", .{ @tagName(mode), width });
         frontend.shown_notice.dismiss();
@@ -6160,11 +6170,11 @@ fn sidebarLateListing() !void {
         }
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
-        const row: u16 = if (mode == .unconfirmed or mode == .rejected) 27 else 28;
+        const row: u16 = if (mode == .unconfirmed or mode == .rejected) 26 else 27;
         const chat_column: u16 = if (width >= Root.split_at) Root.list_width + 1 else 0;
         try std.testing.expectEqual(row, overview.root.bottom.rule.?);
         try std.testing.expectEqualStrings("┄", shown.screen.readCell(chat_column, row).?.char.grapheme);
-        if (mode == .notice) try std.testing.expect(std.mem.indexOf(u8, try shown.line(29), "Copied 3 lines") != null);
+        if (mode == .notice) try std.testing.expect(std.mem.indexOf(u8, try shown.line(28), "Copied 3 lines") != null);
         if (mode == .unconfirmed) try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Decision not confirmed") != null);
         if (mode == .rejected) try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Rejected") != null);
         if (width >= Root.split_at) {
@@ -6204,8 +6214,9 @@ fn sidebarLateListing() !void {
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Chats") != null);
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Archived") != null);
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Fix the flaky test") != null);
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(29), "     Settings"));
-        try std.testing.expectEqualStrings("┄", shown.screen.readCell(0, 28).?.char.grapheme);
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(28), "     Settings"));
+        try std.testing.expectEqualStrings("┄", shown.screen.readCell(0, 27).?.char.grapheme);
+        try std.testing.expectEqualStrings("", std.mem.trim(u8, try shown.line(29), " "));
     }
 }
 

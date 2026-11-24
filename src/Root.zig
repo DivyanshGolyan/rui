@@ -11,6 +11,11 @@ const FocusRect = struct { row: i32, col: i32, width: i32, height: i32 };
 
 pub const list_width = 40;
 pub const split_at = 100;
+const min_main_rows = 24;
+
+fn mainHeight(height: u16) u16 {
+    return height - @as(u16, @intFromBool(height > min_main_rows));
+}
 
 pub const Keys = struct {
     context: *anyopaque,
@@ -228,7 +233,7 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {
             .wheel_up, .wheel_down, .wheel_left, .wheel_right => .wheel,
-            else => if (mouse.type == .motion) .motion else if (mouse.type != .press or mouse.button != .left or mouse.mods.alt or mouse.row < 0 or mouse.col < 0 or mouse.row >= self.size.height or mouse.col >= self.size.width) .click else if ((self.size.width >= split_at and mouse.col < list_width) or self.chooseLayout().pane == .overview) .list_click else .chat_click,
+            else => if (mouse.type == .motion) .motion else if (mouse.type != .press or mouse.button != .left or mouse.mods.alt or mouse.row < 0 or mouse.col < 0 or mouse.row >= mainHeight(self.size.height) or mouse.col >= self.size.width) .click else if ((self.size.width >= split_at and mouse.col < list_width) or self.chooseLayout().pane == .overview) .list_click else .chat_click,
         } },
         .key_release => .key_release,
         .color_report, .color_scheme => .colors,
@@ -359,7 +364,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
     self.size = size;
-    self.bottom = @import("draft_layout.zig").fixedBottom(size.height, 0, .overview);
+    const height = mainHeight(size.height);
+    const main_ctx = ctx.withConstraints(.{ .width = ctx.min.width, .height = @min(ctx.min.height, height) }, .{ .width = size.width, .height = height });
+    self.bottom = @import("draft_layout.zig").fixedBottom(height, 0, .overview);
     if (self.presentation_hold) |hold| if (hold.held(hold.context, size.width)) {
         return try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     };
@@ -367,7 +374,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     // Sign-in opened from Settings takes Settings' place rather than stacking a second card.
     const signing = self.input.layer.signInOpen();
     const covering = signing or self.input.layer.settingsOpen();
-    const children = try ctx.arena.alloc(vxfw.SubSurface, if (covering) 2 else 1);
+    const inset = height < size.height;
+    const children = try ctx.arena.alloc(vxfw.SubSurface, if (covering or inset) 2 else 1);
     var background = self.input;
     if (covering) background.layer = .main;
     const background_pane = app_input.mainPane(background, self.session != null, size.width >= split_at);
@@ -388,11 +396,17 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             .narrow = .right,
             .divider = self.divider,
         };
-        break :split try split.widget().draw(ctx);
-    } else try pane.draw(ctx);
-    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child, @import("widget_style.zig").backdrop(self.appCaps()), self.dialogWidget()) else child };
+        break :split try split.widget().draw(main_ctx);
+    } else try pane.draw(main_ctx);
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child, @import("widget_style.zig").backdrop(self.appCaps()), self.backgroundWidget()) else child };
     self.projectFocus(child, layout);
-    if (covering) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (signing) try self.sign_in.?.draw(ctx) else try self.settingsDialog(ctx, size) };
+    if (covering) {
+        children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (signing) try self.sign_in.?.draw(ctx) else try self.settingsDialog(ctx, size) };
+    } else if (inset) {
+        const ground = try vxfw.Surface.init(ctx.cell_arena, self.backgroundWidget(), .{ .width = size.width, .height = 1 });
+        @memset(ground.buffer, .{ .style = @import("widget_style.zig").of(self.appCaps(), .{}) });
+        children[1] = .{ .origin = .{ .row = @intCast(height), .col = 0 }, .surface = ground };
+    }
     self.frames += 1;
     return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
 }
@@ -403,10 +417,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 /// `outside` is a widget with no cursor in `screen`, so rendering shows none, and with no
 /// handlers: the faded layer is its own, so no click or wheel on it reaches the screen it shows.
 fn faded(ctx: vxfw.DrawContext, screen: vxfw.Surface, backdrop: vaxis.Style, outside: vxfw.Widget) std.mem.Allocator.Error!vxfw.Surface {
-    var scratch = try vaxis.Screen.init(ctx.cell_arena, .{ .cols = screen.size.width, .rows = screen.size.height, .x_pixel = 0, .y_pixel = 0 });
+    const size = ctx.max.size();
+    var scratch = try vaxis.Screen.init(ctx.cell_arena, .{ .cols = size.width, .rows = size.height, .x_pixel = 0, .y_pixel = 0 });
     const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.size.width, .height = screen.size.height, .screen = &scratch };
     try screen.render(window, outside);
-    const flat = try vxfw.Surface.init(ctx.cell_arena, outside, screen.size);
+    const flat = try vxfw.Surface.init(ctx.cell_arena, outside, size);
     for (flat.buffer, scratch.buf) |*cell, drawn| cell.* = .{ .char = drawn.char, .style = backdrop };
     return flat;
 }
@@ -417,19 +432,19 @@ fn settingsDialog(self: *Self, ctx: vxfw.DrawContext, size: vxfw.Size) std.mem.A
     const fit = Dialog.bound(size);
     const footer_height: u16 = @intFromBool(fit.height > 1);
     const body = try self.settings_page.widget().draw(ctx.withConstraints(.{}, .{ .width = fit.width, .height = fit.height - footer_height }));
-    var content = try vxfw.Surface.init(ctx.cell_arena, self.dialogWidget(), .{ .width = fit.width, .height = body.size.height + footer_height });
+    var content = try vxfw.Surface.init(ctx.cell_arena, self.backgroundWidget(), .{ .width = fit.width, .height = body.size.height + footer_height });
     @memset(content.buffer, .{ .style = look.ground });
     const parts = try ctx.arena.alloc(vxfw.SubSurface, @as(usize, 1) + footer_height);
     parts[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = body };
     if (footer_height == 1) parts[1] = .{ .origin = .{ .row = @intCast(body.size.height), .col = 0 }, .surface = try self.settings_page.footerWidget().draw(ctx.withConstraints(.{}, .{ .width = fit.width, .height = 1 })) };
     content.children = parts;
-    return Dialog.lay(ctx, self.dialogWidget(), look, content, size);
+    return Dialog.lay(ctx, self.backgroundWidget(), look, content, size);
 }
 
-/// Root's drawing with no handlers, owning the faded screen and the dialog's own surfaces: a
+/// Root's drawing with no handlers, owning the bottom inset, faded screen and dialog surfaces: a
 /// click or wheel the dialog does not use reaches nothing behind it, and Root's capture sits
 /// in each event's path once.
-fn dialogWidget(self: *Self) vxfw.Widget {
+fn backgroundWidget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = draw };
 }
 
