@@ -831,8 +831,6 @@ pub const Row = struct {
     }
 };
 
-const SelectionGap = struct { index: usize, previous: ?Reference, next: ?Reference };
-
 pub const State = struct {
     gpa: Allocator,
     home: []const u8,
@@ -867,7 +865,6 @@ pub const State = struct {
     /// Coalesce moves until the existing application tick; no feed cache.
     browse_pending: bool = false,
     browse_target: ?Reference = null,
-    selection_gap: ?SelectionGap = null,
 
     conversing: ?Reference = null,
     read_instance: ?[16]u8 = null,
@@ -1482,7 +1479,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     // A selection move or click is the most recent input: it releases the rows a wheel scroll held (archivedFocus).
     const moved = !std.meta.eql(selected_before, state.selected);
     if (event == .clicked or (event != .viewport and moved)) state.viewport = null;
-    if (moved and state.selected != .none) state.selection_gap = null;
     return effects;
 }
 
@@ -1556,7 +1552,6 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
         .archived => |answer| try archivedAnswer(state, answer, &effects),
         .pointer => |pointer| try carryPointer(state, pointer, &effects),
         .clicked => |input| {
-            state.selection_gap = null;
             state.launch = .done;
             endCarry(state);
             const candidate = if (!state.creating() and input.target == .open) input.target.open else null;
@@ -1978,7 +1973,6 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     const stale = state.list_stale;
     const selected_at = if (state.selected == .session) position(state, state.selected.session) else null;
     const selected_ref = if (state.selected == .session) state.selected.session else null;
-    const old_gap = state.selection_gap;
     const opening = state.token == null;
     if (answer.delta == .full) for (state.rows.items) |*row| {
         if (row.archive_state != .archived) row.listed = false;
@@ -2047,9 +2041,9 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     try arrange(state);
     reconcileSelection(state, selected_at, opening);
     if (selected_ref) |reference| {
-        if (position(state, reference) == null) {
+        const physically_trimmed = state.archive == .archived and if (state.find(reference)) |row| row.archive_state == .archived else false;
+        if (position(state, reference) == null and !physically_trimmed) {
             state.selected = .none;
-            state.selection_gap = .{ .index = selected_at orelse 0, .previous = null, .next = null };
             if (state.browse_target != null and std.mem.eql(u8, &reference, &state.browse_target.?)) {
                 state.browse_pending = false;
                 state.browse_target = null;
@@ -2057,10 +2051,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         } else {
             state.selected = .{ .session = reference };
         }
-    } else if (state.selected == .none) {
-        if (old_gap) |previous| state.selection_gap = previous;
     }
-    if (state.selected == .none) refreshSelectionGap(state);
     if (stale or count != state.order.items.len or !std.meta.eql(selected, state.selected) or !std.meta.eql(summary, state.summary) or !std.meta.eql(trouble, band(state))) state.presentation_revision +%= 1;
 }
 
@@ -2143,11 +2134,9 @@ fn namesArchived(rows: []const Listed, reference: Reference) bool {
 /// restored or moved since the read, so they leave the window; the named rows are upserted.
 fn placeArchived(state: *State, read: ArchivedRead, page: ArchivedPage) error{OutOfMemory}!void {
     const selected_ref = if (state.selected == .session) state.selected.session else null;
-    const selected_at = if (selected_ref) |reference| position(state, reference) else null;
     const selected_key = if (selected_ref) |reference| if (state.find(reference)) |row| row.archive_seq else null else null;
-    const old_gap = state.selection_gap;
     const range: [2]u64 = switch (read.from) {
-        .head => .{ 0, std.math.maxInt(u64) },
+        .head => if (page.more_below) .{ page.last orelse std.math.maxInt(u64), std.math.maxInt(u64) } else .{ 0, std.math.maxInt(u64) },
         .below => |key| .{ page.last orelse 0, key - 1 },
         .above => |key| .{ key + 1, page.first orelse std.math.maxInt(u64) },
         .tail => unreachable,
@@ -2156,13 +2145,6 @@ fn placeArchived(state: *State, read: ArchivedRead, page: ArchivedPage) error{Ou
         key >= range[0] and key <= range[1] and !namesArchived(page.rows, reference)
     else
         false else false;
-    const selected_gap_index = if (selected_at) |at| at else if (selected_key) |key| blk: {
-        var before: usize = 0;
-        for (state.order.items) |index| if ((state.rows.items[index].archive_seq orelse 0) > key) {
-            before += 1;
-        };
-        break :blk before;
-    } else 0;
     for (state.rows.items) |*row| {
         if (!row.listed or row.archive_state != .archived) continue;
         const key = row.archive_seq orelse continue;
@@ -2194,17 +2176,10 @@ fn placeArchived(state: *State, read: ArchivedRead, page: ArchivedPage) error{Ou
     try arrange(state);
     if (selected_omitted) {
         state.selected = .none;
-        state.selection_gap = .{ .index = selected_gap_index, .previous = null, .next = null };
         if (state.browse_target != null and std.mem.eql(u8, &selected_ref.?, &state.browse_target.?)) {
             state.browse_pending = false;
             state.browse_target = null;
         }
-    }
-    if (state.selected == .none) {
-        if (selected_ref == null) {
-            if (old_gap) |previous| state.selection_gap = previous;
-        }
-        refreshSelectionGap(state);
     }
 }
 
@@ -2326,16 +2301,6 @@ fn restartArchivedAtHead(state: *State) void {
     state.archived.refresh = null;
 }
 
-fn refreshSelectionGap(state: *State) void {
-    if (state.selection_gap) |*gap| {
-        const previous_at = if (gap.previous) |reference| position(state, reference) else null;
-        const next_at = if (gap.next) |reference| position(state, reference) else null;
-        gap.index = if (previous_at) |at| at + 1 else next_at orelse @min(gap.index, state.order.items.len);
-        gap.previous = if (gap.index > 0) state.rows.items[state.order.items[gap.index - 1]].reference else null;
-        gap.next = if (gap.index < state.order.items.len) state.rows.items[state.order.items[gap.index]].reference else null;
-    }
-}
-
 fn reconcileSelection(state: *State, selected_at: ?usize, opening: bool) void {
     if (state.selected == .session and state.selectedRow() == null) {
         state.selected = if (selected_at) |at| if (at < state.order.items.len) .{ .session = state.rows.items[state.order.items[at]].reference } else .new_session else .new_session;
@@ -2365,7 +2330,8 @@ fn retainRows(state: *State) error{OutOfMemory}!void {
     var kept: usize = 0;
     for (state.rows.items) |row| {
         const open = if (state.conversing) |ref| std.mem.eql(u8, &ref, &row.reference) else false;
-        if (!row.listed and !open) continue;
+        const selected_archive = state.archive == .archived and state.selected == .session and row.archive_state == .archived and std.mem.eql(u8, &state.selected.session, &row.reference);
+        if (!row.listed and !open and !selected_archive) continue;
         state.rows.items[kept] = row;
         kept += 1;
     }
@@ -3081,17 +3047,16 @@ const no_selection = "! Select a chat first.";
 
 fn move(state: *State, action: Action) void {
     const order = state.order.items;
-    if (state.selected == .none and state.selection_gap != null and (action == .previous or action == .next)) {
-        const index = state.selection_gap.?.index;
-        state.selection_gap = null;
+    if (state.selected == .none and (action == .previous or action == .next)) {
         if (action == .previous) {
-            state.selected = if (index > 0) .{ .session = state.rows.items[order[index - 1]].reference } else .sessions;
+            state.selected = if (state.archive == .archived) .archived else .sessions;
+        } else if (order.len != 0) {
+            state.selected = .{ .session = state.rows.items[order[0]].reference };
         } else {
-            state.selected = if (index < order.len) .{ .session = state.rows.items[order[index]].reference } else .settings;
+            state.selected = .settings;
         }
         return;
     }
-    if (action == .first or action == .last) state.selection_gap = null;
     const current: usize = switch (state.selected) {
         .none => 1,
         .new_session => 0,
@@ -6234,7 +6199,7 @@ fn segmentText(arena: Allocator, segments: []const Segment) ![]const u8 {
     return std.mem.concat(arena, u8, texts);
 }
 
-test "SUI-105 removing the selected row clears activation but keeps arrow navigation and browse intent exact" {
+test "SUI-131 overview removal clears activation and arrows re-enter current rows" {
     const rows = [_]Listed{
         session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" }),
         session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" }),
@@ -6244,7 +6209,7 @@ test "SUI-105 removing the selected row clears activation but keeps arrow naviga
         var state = try opened(&rows);
         defer state.deinit();
         const removed = rows[removed_at];
-        _ = try step(&state, .{ .conversation = "aaaaaa".* });
+        _ = try step(&state, .{ .conversation = removed.reference });
         state.selected = .{ .session = removed.reference };
         var archived = removed;
         archived.archive_state = .archived;
@@ -6252,7 +6217,8 @@ test "SUI-105 removing the selected row clears activation but keeps arrow naviga
         _ = try refresh(&state, .changed, testToken(2), &.{archived});
         try std.testing.expect(state.selected == .none);
         try std.testing.expectEqual(null, state.selectedRow());
-        try std.testing.expectEqualStrings("aaaaaa", &state.conversing.?);
+        try std.testing.expectEqualStrings(&removed.reference, &state.conversing.?);
+        try std.testing.expectEqual(null, Lines.highlighted(&state, true));
         var effects = try submit(&state);
         try std.testing.expectEqual(@as(usize, 0), effects.len);
         effects = try press(&state, .open_session);
@@ -6261,19 +6227,16 @@ test "SUI-105 removing the selected row clears activation but keeps arrow naviga
         try std.testing.expectEqual(@as(usize, 0), effects.len);
         try expectNotice(&state, no_selection);
         _ = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = direction } } });
-        const adjacent = if (direction == .previous)
-            (if (removed_at > 0) ?usize(removed_at - 1) else null)
-        else if (removed_at + 1 < rows.len) ?usize(removed_at + 1) else null;
-        if (adjacent) |index| {
-            try expectSelected(&state, &rows[index].reference);
-        } else if (direction == .previous) {
+        if (direction == .previous) {
             try std.testing.expect(state.selected == .sessions);
+        } else if (removed_at != 0) {
+            try expectSelected(&state, &rows[0].reference);
         } else {
-            try std.testing.expect(state.selected == .settings);
+            try expectSelected(&state, &rows[1].reference);
         }
     };
 
-    // Removing a neighbor before the next arrow re-resolves the gap against the current projection.
+    // Further authoritative removals cannot make Down target a stale Session.
     var removals = try opened(&rows);
     defer removals.deinit();
     removals.selected = .{ .session = rows[1].reference };
@@ -6287,7 +6250,7 @@ test "SUI-105 removing the selected row clears activation but keeps arrow naviga
     _ = try refresh(&removals, .changed, testToken(3), &.{removed_c});
     try std.testing.expect(removals.selected == .none);
     _ = try press(&removals, .next);
-    try std.testing.expect(removals.selected == .settings);
+    try expectSelected(&removals, &rows[0].reference);
 
     // With no conversation open, Enter on the cleared selection cannot create a New Chat.
     var only = try opened(&rows[0..1]);
@@ -6297,6 +6260,8 @@ test "SUI-105 removing the selected row clears activation but keeps arrow naviga
     try std.testing.expect(only.selected == .none);
     try expectEffects(&.{}, try submit(&only));
     try std.testing.expectEqual(@as(usize, 0), only.request_count);
+    _ = try press(&only, .next);
+    try std.testing.expect(only.selected == .settings);
 
     // A queued wide preview for the removed exact target cannot activate the fallback row.
     var preview = try opened(&rows);
@@ -6327,12 +6292,30 @@ test "SUI-105 removing the selected row clears activation but keeps arrow naviga
     try std.testing.expect(views.find(archived.reference) != null);
     try std.testing.expect(views.selected == .new_session);
 
-    // A head answer omitting a previously held row is authoritative restore/movement, unlike physical trim.
+    // Window trim retains the selected record's archive sequence. A capped head is not evidence about older rows.
     _ = try step(&views, .{ .conversation = rows[0].reference });
     views.selected = .{ .session = archived.reference };
+    views.find(archived.reference).?.listed = false;
+    try retainRows(&views);
+    try arrange(&views);
+    try std.testing.expect(views.find(archived.reference) != null);
+    _ = try refresh(&views, .changed, testToken(3), &.{ rows[0], rows[2] });
+    try std.testing.expectEqualStrings(&archived.reference, &views.selected.session);
+    try std.testing.expect(views.find(archived.reference) != null);
+    var newer = rows[0];
+    newer.archive_state = .archived;
+    newer.archive_seq = 20;
     var refresh_effects: Effects = .{};
     readArchived(&views, &refresh_effects, .head);
-    const head_read = refresh_effects.slice()[0].read_archived;
+    var head_read = refresh_effects.slice()[0].read_archived;
+    _ = try step(&views, .{ .archived = .{ .read = head_read, .page = .{ .rows = &.{newer}, .first = 20, .last = 20, .more_above = false, .more_below = true } } });
+    try std.testing.expectEqualStrings(&archived.reference, &views.selected.session);
+    try std.testing.expect(views.find(archived.reference) != null);
+
+    // A complete head omission is authoritative restore/movement.
+    refresh_effects = .{};
+    readArchived(&views, &refresh_effects, .head);
+    head_read = refresh_effects.slice()[0].read_archived;
     _ = try step(&views, .{ .archived = .{ .read = head_read, .page = .{ .rows = &.{}, .first = null, .last = null, .more_above = false, .more_below = false } } });
     try std.testing.expect(views.selected == .none);
     try std.testing.expectEqualStrings("aaaaaa", &views.conversing.?);
@@ -6340,6 +6323,10 @@ test "SUI-105 removing the selected row clears activation but keeps arrow naviga
     try expectEffects(&.{}, try press(&views, .open_session));
     try expectEffects(&.{}, try press(&views, .archive));
     try expectNotice(&views, no_selection);
+    _ = try press(&views, .previous);
+    try std.testing.expect(views.selected == .archived);
+    _ = try step(&views, .{ .input = .{ .key = .left } });
+    try std.testing.expect(views.selected == .sessions);
 }
 
 test "a pressed chat dropped on the other tab archives or restores it, and no other drop does" {
@@ -7641,30 +7628,24 @@ fn projectionCase0() !void {
     try std.testing.expectEqualStrings("newend", &state.rows.items[state.order.items[0]].reference);
 }
 
-test "overview refresh clears a disappeared selection and preserves explicit navigation" {
+test "overview refresh keeps a cleared selection blank until explicit navigation" {
     const a = session("aaaaaa", .{ .working = ago(1) }, .{ .label = "A" });
     const b = session("bbbbbb", .{ .working = ago(2) }, .{ .label = "B" });
     const c = session("cccccc", .{ .working = ago(3) }, .{ .label = "C" });
     var state = try opened(&.{ a, b, c });
     defer state.deinit();
-    try expectSelected(&state, "aaaaaa");
     _ = try press(&state, .next);
     _ = try refresh(&state, .full, testToken(2), &.{ a, c });
     try std.testing.expect(state.selected == .none);
-    _ = try press(&state, .next);
-    try expectSelected(&state, "cccccc");
     _ = try refresh(&state, .full, testToken(3), &.{a});
-    try std.testing.expectEqual(Selection.none, state.selected);
+    try std.testing.expect(state.selected == .none);
     _ = try refresh(&state, .full, testToken(4), &.{ a, b });
-    try std.testing.expectEqual(Selection.new_session, state.selected);
-    _ = try press(&state, .last);
-    _ = try refresh(&state, .full, testToken(5), &.{});
-    try std.testing.expectEqual(Selection.settings, state.selected);
+    try std.testing.expect(state.selected == .none);
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .next } } });
+    try expectSelected(&state, &a.reference);
     _ = try press(&state, .first);
     try std.testing.expectEqual(Selection.new_session, state.selected);
-    _ = try press(&state, .next);
-    try std.testing.expectEqual(Selection.sessions, state.selected);
-    _ = try press(&state, .next);
+    _ = try press(&state, .last);
     try std.testing.expectEqual(Selection.settings, state.selected);
     var empty = try opened(&.{});
     defer empty.deinit();
@@ -8753,12 +8734,11 @@ test "Overview browse explicit Enter and Right share activation and focus depart
     var none = try opened(&mixed);
     defer none.deinit();
     none.selected = .none;
-    none.selection_gap = .{ .index = 1, .previous = null, .next = null };
     try expectEffects(&.{}, try submit(&none));
     try expectEffects(&.{}, try press(&none, .open_session));
     try expectEffects(&.{}, try press(&none, .archive));
     try expectNotice(&none, no_selection);
-    try std.testing.expect(none.selection_gap != null);
+    try std.testing.expect(none.selected == .none);
 
     var state = try opened(&mixed);
     defer state.deinit();
