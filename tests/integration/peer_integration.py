@@ -33,6 +33,9 @@ def address_of(request):
 PEER_PARTS = (pathlib.Path(__file__).resolve().parents[2] / "src" / "peer_message.txt").read_text().split("{}")
 A_LABEL = "Lead: arithmetic check"
 B_LABEL = "Worker: multiply"
+EMPTY_LABEL = "Empty target"
+ARCHIVED_LABEL = "Archived target"
+STOPPED_LABEL = "Stopped target"
 
 
 def model_instructions(workspace, session):
@@ -81,18 +84,24 @@ class PeerModel(TestHTTPServer):
         self.foreign_store = foreign_store
         self.foreign_session = foreign_session
         self.external_session = external_session
-        self.a = self.b = None
+        self.a = self.b = self.empty = self.missing = self.archived = self.stopped = None
         self.requests = []
         self.lock = threading.Lock()
         self.defaults_restored = threading.Event()
         self.b_received = threading.Event()
         self.a_continued = threading.Event()
         self.a_reply_received = threading.Event()
+        self.stop_received = threading.Event()
+        self.stop_release = threading.Event()
 
     def respond(self, request):
         address = address_of(request)
         outputs = tool_outputs(request)
         text = last_user_text(request)
+        if address == self.stopped:
+            self.stop_received.set()
+            assert self.stop_release.wait(20), "stopped target provider was not released"
+            return answer("stopped", "unobserved answer")
         if address != self.a:
             self.b = address
             if text.startswith("self report"):
@@ -122,7 +131,9 @@ class PeerModel(TestHTTPServer):
             ), stdin=REPORT)
         if text.startswith("from peer/b: "):
             self.a_reply_received.set()
-            return answer("a-final", "peer said 42")
+            return answer("a-final", f"peer said 42. [Open worker](rui-session:{self.b})\n"
+                          f"[Open empty](rui-session:{self.empty}) [Open missing](rui-session:{self.missing})\n"
+                          f"[Open archived](rui-session:{self.archived}) [Open stopped](rui-session:{self.stopped})")
         if outputs:
             self.a_continued.set()
             return answer("a-wait", "waiting for peer/b")
@@ -181,6 +192,87 @@ def allocated(response):
     assert response["answer"]["status"] == "accepted", response
     assert SESSION_ID.fullmatch(session) and response["answer"]["session"] == session, response
     return session
+
+
+def assistant_session_link_journey(installed, store, home, workspace, session_a, session_b, empty, missing, endpoint):
+    # SUI-26: the rendered Assistant link carries its exact Session through the feed.
+    from human_cli_fixture import keyed_frame, read_terminal, terminal_capture
+    from terminal_process import terminal_process
+    env = {"PATH": os.environ["PATH"], "HOME": str(home)}
+
+    def showing(label):
+        return lambda frame, x, y: f"\n ‹ {label} · " in frame
+
+    def pointer(frame, label, drag=False):
+        rows = frame.split("\n")
+        row = next(index for index, line in enumerate(rows) if label in line)
+        column = rows[row].index(label) + 1
+        end = column + 4 if drag else column
+        motion = f"\x1b[<32;{end};{row + 1}M" if drag else ""
+        return f"\x1b[<0;{column};{row + 1}M{motion}\x1b[<0;{end};{row + 1}m".encode()
+
+    with terminal_process([str(installed), "session", "resume", "--store", str(store), session_a], env=env) as (_, master):
+        read_terminal(master, f"Messaged {B_LABEL}")
+        (workspace / "b-release").write_text("")
+        frame = keyed_frame(master, b"", lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "Open worker" in screen)
+        assert "rui-session:" not in frame and "[Open worker]" not in frame, frame
+        for session in (session_a, session_b):
+            def settled(session=session):
+                report = run(installed, "session", "inspect", "--store", store, "--session", session, home=home)
+                return report["work"]["state"]["kind"] == "finished" and report["pending_messages"] == "0"
+            wait_for(settled, "Session settled", timeout=20)
+        def messages(session):
+            return run(installed, "session", "inspect", "--store", store, "--session", session,
+                       "--profile", "full", home=home)["full"]["messages"]
+
+        before_messages = {session: messages(session) for session in (session_a, session_b, empty, endpoint.archived, endpoint.stopped)}
+        assert before_messages[empty] == [] and before_messages[endpoint.archived] == [], before_messages
+        assert len(before_messages[endpoint.stopped]) == 1, before_messages[endpoint.stopped]
+        before_requests = len(endpoint.requests)
+        frame = keyed_frame(master, b"draft survives", lambda screen, x, y: "draft survives" in screen)
+        capture = terminal_capture(master)
+        before = len(capture.clipboard)
+        frame = keyed_frame(master, pointer(frame, "Open worker", drag=True),
+                            lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "Copied 1 line" in screen)
+        assert len(capture.clipboard) == before + 1, capture.clipboard
+        worker = keyed_frame(master, pointer(frame, "Open worker"), showing(B_LABEL))
+        assert "draft survives" not in worker, worker
+        frame = keyed_frame(master, b"\x1b", lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "draft survives" in screen)
+        target = keyed_frame(master, pointer(frame, "Open empty"), showing(EMPTY_LABEL))
+        assert "draft survives" not in target, target
+        frame = keyed_frame(master, b"\x1b", lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "draft survives" in screen)
+        linked_footers = {}
+        for text, label in (("Open archived", ARCHIVED_LABEL), ("Open stopped", STOPPED_LABEL)):
+            target = keyed_frame(master, pointer(frame, text), lambda screen, x, y:
+                                 showing(label)(screen, x, y) and (label != STOPPED_LABEL or "Work to stop" in screen))
+            linked_footers[label] = next(line.strip() for line in target.split("\n") if f"‹ {label} · " in line)
+            frame = keyed_frame(master, b"\x1b", lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "draft survives" in screen)
+        assert "Archived" in linked_footers[ARCHIVED_LABEL], linked_footers
+
+    for session, label in ((endpoint.archived, ARCHIVED_LABEL), (endpoint.stopped, STOPPED_LABEL)):
+        with terminal_process([str(installed), "session", "resume", "--store", str(store), session], env=env) as (_, master):
+            direct = keyed_frame(master, b"", lambda screen, x, y:
+                                 showing(label)(screen, x, y) and (label != STOPPED_LABEL or "Work to stop" in screen))
+            footer = next(line.strip() for line in direct.split("\n") if f"‹ {label} · " in line)
+            assert footer == linked_footers[label], (label, footer, linked_footers[label])
+
+    # Reopening reads the saved Assistant answer and still follows its link.
+    with terminal_process([str(installed), "session", "resume", "--store", str(store), session_a], env=env) as (caller, master):
+        frame = keyed_frame(master, b"", lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "Open worker" in screen)
+        keyed_frame(master, pointer(frame, "Open worker"), showing(B_LABEL))
+        frame = keyed_frame(master, b"\x1b", showing(A_LABEL))
+        os.write(master, pointer(frame, "Open missing"))
+        wait_for(lambda: caller.poll() is not None, "missing linked Session ends the terminal")
+        linked_status = caller.returncode
+
+    with terminal_process([str(installed), "session", "resume", "--store", str(store), missing], env=env) as (caller, master):
+        terminal_capture(master)
+        wait_for(lambda: caller.poll() is not None, "direct missing Session ends the terminal")
+        assert linked_status == caller.returncode and linked_status != 0, (linked_status, caller.returncode)
+
+    assert {session: messages(session) for session in before_messages} == before_messages
+    assert len(endpoint.requests) == before_requests, endpoint.requests
+    assert run(installed, "session", "inspect", "--store", store, "--session", missing, home=home)["session"] is None
 
 
 def session_link_journey(installed, store, home, session_a):
@@ -285,8 +377,29 @@ def main(report_source):
         session_a = allocated(run(installed, "session", "configure", "--store", store, "--workspace", workspace,
             "--connection", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "bypass", home=home))
         endpoint.a = session_a
+        endpoint.empty = allocated(run(installed, "session", "configure", "--store", store, "--workspace", workspace,
+            "--provider", "codex", "--model", "gpt-6-sol", "--label", EMPTY_LABEL, home=home))
+        endpoint.archived = allocated(run(installed, "session", "configure", "--store", store, "--workspace", workspace,
+            "--provider", "codex", "--model", "gpt-6-sol", "--label", ARCHIVED_LABEL, home=home))
+        endpoint.stopped = allocated(run(installed, "session", "configure", "--store", store, "--workspace", workspace,
+            "--provider", "codex", "--model", "gpt-6-sol", "--label", STOPPED_LABEL, home=home))
+        archived = run(installed, "session", "archive", "--store", store, "--session", endpoint.archived, home=home)
+        assert archived["answer"]["status"] == "accepted", archived
+        wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", endpoint.archived,
+                             home=home)["archive_state"] == "archived", "archived target")
+        stopped_input = run(installed, "session", "send", "--store", store, "--session", endpoint.stopped,
+                            home=home, input="Work to stop")
+        assert stopped_input["answer"]["status"] == "accepted", stopped_input
+        assert endpoint.stop_received.wait(20), "stopped target did not start its model request"
+        stopped = run(installed, "session", "stop", "--store", store, "--session", endpoint.stopped, home=home)
+        assert stopped["answer"]["status"] == "accepted", stopped
+        def stopped_report():
+            report = run(installed, "session", "inspect", "--store", store, "--session", endpoint.stopped, home=home)
+            return report if report["recent_messages"] and report["recent_messages"][0]["outcome"] == "cancelled" else None
+        wait_for(stopped_report, "stopped target settled", timeout=20)
+        endpoint.stop_release.set()
         run(installed, "defaults", "configure", "--store", store, home=home)
-        ask = subprocess.run([str(installed), "session", "send", "--session", session_a], input="Ask peer/b for 6*7.",
+        ask = subprocess.run([str(installed), "session", "send", "--store", str(store), "--session", session_a], input="Ask peer/b for 6*7.",
                              text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
         assert ask.returncode == 0, ask
         ask_key = json.loads(ask.stdout)["context"]["key"]
@@ -296,6 +409,10 @@ def main(report_source):
         assert endpoint.b_received.wait(20), "B never received the peer Message"
         session_b = endpoint.b
         assert session_b != session_a and SESSION_ID.fullmatch(session_b), session_b
+        endpoint.missing = next(candidate for candidate in ("000000", "111111", "222222", "333333", "444444", "555555")
+                                if candidate not in (session_a, session_b, endpoint.empty, endpoint.archived, endpoint.stopped))
+        missing_report = run(installed, "session", "inspect", "--store", store, "--session", endpoint.missing, home=home)
+        assert missing_report["session"] is None and missing_report["execution"]["reason"] == "session_not_found", missing_report
         wait_for(lambda: (workspace / "b-captures-after").exists(), "B's self-send admissions", timeout=20)
         self_sends = []
         for name in ("b-self", "b-self-generated"):
@@ -372,7 +489,10 @@ def main(report_source):
         assert recovered["answer"]["status"] == "accepted" and recovered["answer"]["replayed"] is True, recovered
         assert recovered["context"]["key"] == receipt["context"]["key"], recovered
 
-        (workspace / "b-release").write_text("")
+        if report_source == "stdin":
+            assistant_session_link_journey(installed, store, home, workspace, session_a, session_b, endpoint.empty, endpoint.missing, endpoint)
+        else:
+            (workspace / "b-release").write_text("")
         assert endpoint.a_reply_received.wait(20), "A never received B's reply"
         a_continuation = next(request for request in endpoint.requests if address_of(request) == session_a and tool_outputs(request))
         assert tool_outputs(a_continuation) == [settled["result"]["text"]], a_continuation
@@ -477,6 +597,7 @@ def main(report_source):
             disposals.append(lambda: stop_process(foreign_host))
         if endpoint is not None:
             disposals.append(endpoint.defaults_restored.set)
+            disposals.append(endpoint.stop_release.set)
             disposals.extend((endpoint.shutdown, endpoint.server_close))
         if state is not None:
             disposals.append(lambda: shutil.rmtree(state))
