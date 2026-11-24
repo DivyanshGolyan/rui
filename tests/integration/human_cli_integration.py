@@ -634,6 +634,8 @@ def clipboard_paste_case(*, protocol_only=False):
             raw_output(master, b"\x1b[?5522h")
             paste(master, b"text/plain", b"Clipboard caption")
             raw_output(master, lambda screen: "Clipboard caption" in screen)
+            os.write(master, b"\x1b[200~ ordinary\x1b[201~")
+            raw_output(master, lambda screen: "Clipboard caption ordinary" in screen)
             paste(master, b"text/plain", b"x" * 65_538)
             raw_output(master, lambda screen: "Paste too long" in screen and "Clipboard caption" in screen)
             paste(master, b"image/png", png)
@@ -649,7 +651,7 @@ def clipboard_paste_case(*, protocol_only=False):
             request = json.loads(endpoint.requests[0])
             parts = next(item["content"] for item in reversed(request["input"]) if item.get("role") == "user")
             assert [part["type"] for part in parts] == ["input_text", "input_image"], parts
-            assert parts[0]["text"] == "Clipboard caption", parts
+            assert parts[0]["text"] == "Clipboard caption ordinary", parts
             assert parts[1]["image_url"] == "data:image/png;base64," + base64.b64encode(png).decode(), parts
 
             os.write(master, frame(b"OK:pw=dG9rZW4=") + frame(b"DATA:mime=Lg==", b"image/png") + frame(b"DONE"))
@@ -662,7 +664,7 @@ def clipboard_paste_case(*, protocol_only=False):
             raw_output(master, lambda screen: "Clipboard read timed out" in screen)
             overview_frame(master, lambda screen: True, b"\x1b[27u")
             keyed_frame(master, b"\x1b[13u", lambda screen, x, y: composer_ready(screen, x, y))
-            os.write(master, encoded[12:] + b"\x1b\\" + frame(b"DONE" + prefix))
+            os.write(master, b"\x1b[200~" + encoded[12:] + b"\x1b[201~\x1b\\" + frame(b"DONE" + prefix))
             os.write(master, b"safe")
             shown = raw_output(master, lambda screen: "safe" in screen)
             assert encoded[12:32] not in shown, "a delayed clipboard tail reached the composer"
@@ -676,9 +678,11 @@ def clipboard_paste_case(*, protocol_only=False):
             raw_output(master, lambda screen: "Clipboard read timed out" in screen)
             overview_frame(master, lambda screen: True, b"\x1b[27u")
             keyed_frame(master, b"\x1b[13u", lambda screen, x, y: composer_ready(screen, x, y))
-            os.write(master, b"unframedtext\x01\x05\x1b[200~works\x1b[201~")
-            raw_output(master, lambda screen: "works" in screen)
-            assert "unframedtext" not in current_screen(master), "an unfinished clipboard frame released unframed text"
+            os.write(master, b"unframedtext\x01\x05\x1b[200~blockedpaste\x1b[201~\x1b[120;1;120u")
+            raw_output(master, lambda screen: "safex" in screen)
+            current = current_screen(master)
+            assert "unframedtext" not in current, "an unfinished clipboard frame released unframed text"
+            assert "blockedpaste" not in current, "an unfinished clipboard frame released bracketed paste"
             os.write(master, b"\x03")
             reset = raw_output(master, b"Your chats keep working")
             assert b"\x1b[?5522l" in reset, reset
