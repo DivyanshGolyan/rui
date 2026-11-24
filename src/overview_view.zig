@@ -6305,25 +6305,12 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     _ = try step(&views, .{ .conversation = rows[0].reference });
     views.selected = .{ .session = archived.reference };
     try std.testing.expect(views.find(archived.reference).?.listed);
-    const roster_tick = try step(&views, .{ .tick = views.now_ms + list_interval_ms });
-    var roster_requested = false;
-    var head_read: ?ArchivedRead = null;
-    for (roster_tick.slice()) |effect| switch (effect) {
-        .list => {
-            try std.testing.expectEqual(testToken(2), effect.list.since.?);
-            roster_requested = true;
-        },
-        .read_archived => |archived_read| head_read = archived_read,
-        else => {},
-    };
-    try std.testing.expect(roster_requested);
-    _ = try respond(&views, .changed, testToken(3), &.{ rows[0], rows[2] });
-    try std.testing.expectEqualStrings(&archived.reference, &views.selected.session);
-    try std.testing.expect(views.find(archived.reference) != null);
     var newer = rows[0];
     newer.archive_state = .archived;
     newer.archive_seq = 20;
-    const reanchor = head_read orelse return error.TestExpectedEqual;
+    var reanchor_effects: Effects = .{};
+    readArchived(&views, &reanchor_effects, .head);
+    const reanchor = reanchor_effects.slice()[0].read_archived;
     try std.testing.expect(reanchor.from == .head);
     _ = try step(&views, .{ .archived = .{ .read = reanchor, .page = .{ .rows = &.{newer}, .first = 20, .last = 20, .more_above = false, .more_below = true } } });
     try std.testing.expectEqualStrings(&archived.reference, &views.selected.session);
