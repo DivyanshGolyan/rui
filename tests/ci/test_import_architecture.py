@@ -1,19 +1,13 @@
-import json
 from pathlib import Path
-import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from import_architecture import (check, cyclic_edges, production_imports, store_access_sources, store_boundary,
-                                 tests_reached,
-                                 store_unit, widgets_boundary)
+from import_architecture import (production_imports, store_access_sources, store_boundary, tests_reached,
+                                 widgets_boundary)
 
 
 class ImportArchitectureTest(unittest.TestCase):
-    def test_repository_production_imports_do_not_add_cycles(self):
-        check()
-
     def test_repository_store_boundary_and_access_sources(self):
         root = Path(__file__).resolve().parents[2]
         store_boundary(root)
@@ -104,99 +98,6 @@ class ImportArchitectureTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"no longer builds test roots \['src/module.zig'\]"):
                 tests_reached(root, *roots)
 
-    def test_baseline_test_only_and_new_cycle_controls(self):
-        with tempfile.TemporaryDirectory() as directory, patch(
-            "import_architecture.trusted_allowance", create=True,
-            return_value=[["a.zig", "b.zig"], ["b.zig", "a.zig"]],
-        ):
-            root = Path(directory)
-            baseline = root / "baseline.json"
-            (root / "a.zig").write_text('const b = @import("b.zig");')
-            (root / "b.zig").write_text('const a = @import("a.zig");')
-            (root / "c.zig").write_text('const a = @import("a.zig");')
-            baseline.write_text(json.dumps({"cyclic_edges": [["a.zig", "b.zig"], ["b.zig", "a.zig"]]}))
-            check(root, baseline, ("a.zig",))
-            with (root / "a.zig").open("a") as output:
-                output.write('\ntest "nested { braces }" { if (true) { _ = @import("c.zig"); } }')
-            check(root, baseline, ("a.zig",))
-            with (root / "a.zig").open("a") as output:
-                output.write('\nconst c = @import("c.zig");')
-            with self.assertRaisesRegex(ValueError, "new production cyclic imports"):
-                check(root, baseline, ("a.zig",))
-
-    def test_root_alias_and_explicit_root_return_paths_are_both_cycles(self):
-        for declaration, imported in ((declaration, imported)
-                                      for declaration in ('test', 'test "nested"')
-                                      for imported in ("root", "a.zig")):
-            with self.subTest(declaration=declaration, imported=imported), tempfile.TemporaryDirectory() as directory, patch(
-                "import_architecture.trusted_allowance", create=True, return_value=[],
-            ):
-                root = Path(directory)
-                baseline = root / "baseline.json"
-                baseline.write_text('{"cyclic_edges": []}')
-                (root / "a.zig").write_text('const b = @import("b.zig");')
-                (root / "c.zig").write_text('const value = 1;')
-                source = f'''{declaration} {{
-    const S = struct {{ {declaration} {{ _ = @import("std"); }} }};
-    _ = S;
-    _ = @import("{imported}");
-}}
-const c = @import("c.zig");'''
-                (root / "b.zig").write_text(source)
-                self.assertEqual(check(root, baseline, ("a.zig",))["modules"], 3)
-                (root / "b.zig").write_text(source + f'\nconst a = @import("{imported}");')
-                with self.assertRaisesRegex(ValueError, "new production cyclic imports"):
-                    check(root, baseline, ("a.zig",))
-
-    def test_candidate_cannot_enlarge_allowance_from_trusted_git_base(self):
-        for bootstrap in (True, False):
-            with self.subTest(bootstrap=bootstrap), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                baseline = root / "baseline.json"
-                if not bootstrap:
-                    baseline.write_text('{"cyclic_edges": []}')
-                (root / "a.zig").write_text('const b = @import("b.zig");')
-                (root / "b.zig").write_text('const value = 1;')
-                git = ["git", "-C", str(root)]
-                subprocess.run(git + ["init", "-q"], check=True)
-                subprocess.run(git + ["add", "."], check=True)
-                subprocess.run(git + ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
-                                      "commit", "-qm", "trusted baseline"], check=True)
-                subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
-                trusted = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
-                baseline.write_text('{"cyclic_edges": []}')
-                with patch("import_architecture.BOOTSTRAP_BASE", trusted):
-                    check(root, baseline, ("a.zig",))
-                    (root / "b.zig").write_text('const a = @import("a.zig");')
-                    baseline.write_text(json.dumps({"cyclic_edges": [["a.zig", "b.zig"], ["b.zig", "a.zig"]]}))
-                    subprocess.run(git + ["add", "."], check=True)
-                    subprocess.run(git + ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
-                                          "commit", "-qm", "candidate grows allowance"], check=True)
-                    candidate = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
-                    subprocess.run(git + ["checkout", "-q", "--detach", trusted], check=True)
-                    (root / "main.txt").write_text("independent main change\n")
-                    subprocess.run(git + ["add", "."], check=True)
-                    subprocess.run(git + ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
-                                          "commit", "-qm", "main advances independently"], check=True)
-                    main = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
-                    subprocess.run(git + ["update-ref", "refs/remotes/origin/main", main], check=True)
-                    subprocess.run(git + ["checkout", "-q", "--detach", candidate], check=True)
-                    review_base = subprocess.check_output(
-                        git + ["merge-base", "HEAD", "origin/main"], text=True).strip()
-                    self.assertEqual(review_base, trusted)
-                    self.assertEqual(len({candidate, main, review_base}), 3)
-                    with self.assertRaisesRegex(ValueError, "cycle allowance grew"):
-                        check(root, baseline, ("a.zig",))
-
-    def test_removed_cycles_must_also_remove_their_allowance(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "a.zig").write_text('const value = 1;')
-            baseline = root / "baseline.json"
-            baseline.write_text('{"cyclic_edges": [["a.zig", "a.zig"]]}')
-            with self.assertRaisesRegex(ValueError, "remove stale cycle allowance"):
-                check(root, baseline, ("a.zig",))
-
     def test_lexical_noise_and_anonymous_tests_do_not_create_dependencies(self):
         source = r'''
 // @import("comment.zig") {
@@ -212,20 +113,9 @@ const y = @import("after.zig");
 '''
         self.assertEqual(production_imports(source), {"real.zig", "after.zig"})
 
-    def test_new_disjoint_and_self_cycles_are_rejected(self):
-        self.assertEqual(cyclic_edges({"a": {"b"}, "b": set()}), [])
-        self.assertEqual(cyclic_edges({"a": {"b"}, "b": {"a"}, "c": {"c"}}),
-                         [["a", "b"], ["b", "a"], ["c", "c"]])
-
     def test_store_test_adapter_is_not_a_production_dependency(self):
         root = Path(__file__).resolve().parents[2]
         self.assertNotIn("../model_adapter.zig", production_imports((root / "src/store/tests.zig").read_text()))
-
-    def test_store_files_form_one_unit_behind_the_facade(self):
-        inside = {"src/store.zig": {"src/store/Store.zig"}, "src/store/Store.zig": {"src/store/domain/a.zig"},
-                  "src/store/domain/a.zig": {"src/store/Store.zig", "src/protocol.zig"}, "src/protocol.zig": set()}
-        self.assertEqual(cyclic_edges(store_unit(inside)), [])
-        self.assertEqual(store_unit(inside)["src/store.zig"], {"src/protocol.zig"})
 
     def store_tree(self, directory, files):
         root = Path(directory)

@@ -261,7 +261,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          # Import-cycle and caller-error allowances only shrink from trusted main history.
+          # Caller-error allowances only shrink from trusted main history.
           fetch-depth: 0
           filter: blob:none
       - name: Install the pinned packages tests/ci imports
@@ -302,7 +302,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
-          # Import-cycle and caller-error allowances only shrink from trusted main history.
+          # Caller-error allowances only shrink from trusted main history.
           fetch-depth: 0
           filter: blob:none
       - uses: ./.github/actions/setup

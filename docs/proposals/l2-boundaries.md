@@ -164,7 +164,7 @@ source-import evidence across platform branches, not compiler lazy-declaration
 reachability.
 Store's test-only model-adapter imports do not form a production
 cycle.
-`python3 tests/ci/import_architecture.py` reproduces the current graph.
+`zig build deep-modules` (tests/ci/deep_modules/ModuleCycle.zig) reproduces the current module graph.
 
 The protocol/named-scratch unit moves inline bounded values below both owners
 and imports ScratchBudget directly in named scratch.
