@@ -194,7 +194,7 @@ test "real SQLite full during import publishes no canonical prefix" {
             var reply: configuration_domain.ConfigureReply = undefined;
             var configuring: command_domain.Configure = .{ .input = .{
                 .io = storage.io,
-                .served = storage.served,
+                .served = storage.servedSet(),
                 .tools = storage.hostTools(),
                 .command = &command,
                 .preset = null,

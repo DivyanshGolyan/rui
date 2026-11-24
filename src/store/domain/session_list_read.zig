@@ -1,9 +1,11 @@
+const connection = @import("../../connection.zig");
 const std = @import("std");
 const utf8_validation = @import("../../utf8_validation.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const change_ring = @import("../../change_ring.zig");
 const model_capability = @import("../../model_capability.zig");
 const provider_name = @import("../../provider_name.zig");
+const provider_route = @import("../../provider_route.zig");
 const session_archive = @import("../../session_archive.zig");
 const session_id = @import("../../session_id.zig");
 const session_list = @import("../../session_list.zig");
@@ -762,7 +764,7 @@ const ListRow = struct {
     parent_ref: ?Bounded(session_id.bytes),
     creator_ref: ?Bounded(session_id.bytes),
     workspace: Bounded(workspace_path.max_bytes),
-    provider: provider_name.Provider,
+    provider: connection.Name,
     model: Bounded(model_capability.max_model_bytes),
     tools: ?Bounded(tool_set.max_names_bytes),
     permission_mode: u8,
@@ -922,7 +924,7 @@ fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_
         .parent = if (row.parent_ref) |*parent| parent.slice() else null,
         .creator = if (row.creator_ref) |*creator| creator.slice() else null,
         .workspace = row.workspace.slice(),
-        .provider = row.provider,
+        .provider = provider_route.builtInOf(row.provider) orelse unreachable,
         .model = row.model.slice(),
         .tools = names,
         .permission_mode = permission_mode,

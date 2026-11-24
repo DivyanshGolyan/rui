@@ -1,3 +1,4 @@
+const connection = @import("../../connection.zig");
 const std = @import("std");
 const tool_fulfillment = @import("tool_fulfillment.zig");
 const command_reply = @import("../../command_reply.zig");
@@ -333,7 +334,7 @@ pub const SessionObservation = struct {
     archive_state: session_archive.State = .active,
     session: Bounded(session_id.max_reference_bytes) = .{},
     workspace: Bounded(workspace_path.max_bytes) = .{},
-    provider: ?provider_name.Provider = null,
+    provider: ?connection.Name = null,
     model: Bounded(model_capability.max_model_bytes) = .{},
     revision: u64 = 0,
     tool_set_id: u64 = 0,
@@ -866,7 +867,7 @@ const page_session = rsql.Read(.{
         output_reservation: ?u64,
         reasoning_effort: ?model_capability.ReasoningEffort,
         created_at: rsql.Positive,
-        provider: provider_name.Provider,
+        provider: connection.Name,
         workspace: *Bounded(workspace_path.max_bytes),
         creator_ref: ?Bounded(session_id.bytes),
     },

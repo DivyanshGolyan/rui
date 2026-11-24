@@ -36,7 +36,7 @@ pub const Recipe = struct {
 };
 
 test "replay recipe selects only compatible bases and compares effective floors" {
-    const wire: replay_binding.Wire = .{ .connection = "marlin", .dialect = .openai_responses };
+    const wire: replay_binding.Wire = .{ .connection = @import("connection.zig").Name.parse("marlin").?, .dialect = .openai_responses };
     const base: Base = .{ .position = 10, .floor = 4, .binding = .{ .wire = wire, .model = "a" } };
     const selected = Recipe.select(.{ .wire = wire, .model = "a" }, base, 0);
     try std.testing.expectEqual(Recipe{ .frontier = 10, .floor = 4 }, selected);

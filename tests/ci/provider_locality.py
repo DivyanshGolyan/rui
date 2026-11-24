@@ -43,7 +43,6 @@ CODEC_RULES = (
 
 ALLOWED = {
     ("provider.zig", "names a ChatGPT or Codex header"),
-    ("store/sqlite_tests.zig", "switches on a provider"),
 }
 
 TEST_BLOCK = re.compile(r'^([ \t]*)test\b[^{\n]*\{', re.MULTILINE)

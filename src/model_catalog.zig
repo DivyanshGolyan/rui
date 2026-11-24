@@ -60,22 +60,22 @@ fn containsId(ids: []const []const u8, id: []const u8) bool {
 // https://developers.openai.com/api/docs/guides/images-vision.md
 // These rules apply to auto detail on the API route only.
 pub const ImageCostRule = enum { astra_auto, gpt41_auto };
-pub fn imageCostRule(provider: @import("provider_name.zig").Provider, model: []const u8) ?ImageCostRule {
-    if (provider != .openai) return null;
+pub fn imageCostRule(provider: []const u8, model: []const u8) ?ImageCostRule {
+    if (!std.mem.eql(u8, provider, "openai")) return null;
     if (std.mem.eql(u8, model, "gpt-6-astra")) return .astra_auto;
     if (std.mem.eql(u8, model, "gpt-4.1")) return .gpt41_auto;
     return null;
 }
 
 test "image cost facts are exact and provider qualified" {
-    try std.testing.expectEqual(ImageCostRule.astra_auto, imageCostRule(.openai, "gpt-6-astra").?);
-    try std.testing.expectEqual(ImageCostRule.gpt41_auto, imageCostRule(.openai, "gpt-4.1").?);
-    for ([_]@import("provider_name.zig").Provider{ .codex, .chatgpt }) |provider| {
+    try std.testing.expectEqual(ImageCostRule.astra_auto, imageCostRule("openai", "gpt-6-astra").?);
+    try std.testing.expectEqual(ImageCostRule.gpt41_auto, imageCostRule("openai", "gpt-4.1").?);
+    for ([_][]const u8{ "codex", "chatgpt" }) |provider| {
         try std.testing.expect(imageCostRule(provider, "gpt-6-astra") == null);
         try std.testing.expect(imageCostRule(provider, "gpt-4.1") == null);
     }
-    try std.testing.expect(imageCostRule(.openai, "gpt-4.1-mini") == null);
-    try std.testing.expect(imageCostRule(.openai, "GPT-6-ASTRA") == null);
+    try std.testing.expect(imageCostRule("openai", "gpt-4.1-mini") == null);
+    try std.testing.expect(imageCostRule("openai", "GPT-6-ASTRA") == null);
 }
 
 test "image capability uses exact sourced facts and preserves unknown" {

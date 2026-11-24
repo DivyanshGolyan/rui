@@ -381,8 +381,6 @@ field-leak provider.Reactor.wake
 field-leak read_transcript.StoreParts.next_index
 field-leak request_encoding.TestSink.output
 field-leak result_layout.Layout.run_open
-field-leak server.ControlTiming.command_key
-field-leak server.Intake.Exchange.host
 field-leak server.Intake.Exchange.ingress
 field-leak server.Intake.Exchange.request
 field-leak server.Intake.Exchange.retained_scratch
@@ -391,11 +389,6 @@ field-leak server.Intake.lines
 field-leak server.Intake.polls
 field-leak server.Intake.stdin
 field-leak server.Intake.wake
-field-leak server.Reply.body
-field-leak server.Reply.end
-field-leak server.Reply.parts_capture
-field-leak server.Reply.timing
-field-leak server_execution.ProviderSlot.transfer
 field-leak server_mcp_relist.Relist.pending
 field-leak session_chrome.FooterSpans.text
 field-leak session_follow.Follow.pending

@@ -433,7 +433,7 @@ pub fn testingStore(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir
 pub const TestingStoreOptions = struct {
     host_tool_set: *const tool_defs.HostToolSet = &tool_defs.built_in_tool_set,
     identity: ?[]const u8 = null,
-    served: protocol.Routes = protocol.routesAll(.endpoint),
+    served: protocol.Served = protocol.servedBuiltIns(.endpoint),
 };
 
 pub fn testingStoreWith(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: TestingStoreOptions) !void {

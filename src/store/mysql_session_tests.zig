@@ -47,9 +47,9 @@ pub fn okUntilReady(connection: *Connection) !u64 {
     return affected;
 }
 
-const served_routes: protocol.Routes = blk: {
-    var routes = protocol.routesAll(.unserved);
-    routes.codex = .endpoint;
+const served_routes: protocol.Served = blk: {
+    var routes: protocol.Served = .{};
+    routes.put(protocol.servedEntry(.codex, .endpoint)) catch unreachable;
     break :blk routes;
 };
 
@@ -146,7 +146,7 @@ pub fn roundTrip(connection: *Connection, args: *const Present, text: *Bounded(l
     try std.testing.expectEqual(args.workspace_key, row.head.workspace_key);
     try std.testing.expectEqual(args.next_position, row.head.next_position);
     try std.testing.expectEqual(now_second, row.at);
-    const routes_served = if (std.meta.stringToEnum(protocol.Provider, args.served)) |provider| protocol.routeOf(served_routes, provider) != .unserved else false;
+    const routes_served = served_routes.route(args.served) != .unserved;
     try std.testing.expectEqual(routes_served, row.served);
     try std.testing.expectEqualStrings(args.label.slice(), row.label.slice());
 }

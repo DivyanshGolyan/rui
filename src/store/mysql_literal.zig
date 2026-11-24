@@ -2,6 +2,7 @@ const std = @import("std");
 const Bounded = @import("../bounded.zig").Bounded;
 const isBounded = @import("../bounded.zig").isBounded;
 const provider_route = @import("../provider_route.zig");
+const connection = @import("../connection.zig");
 const provider_name = @import("../provider_name.zig");
 const rsql = @import("rsql.zig");
 
@@ -13,7 +14,7 @@ const null_text = "NULL";
 
 pub const Bound = struct {
     now: i64,
-    served: *const provider_route.Routes,
+    served: *const provider_route.Served,
 };
 
 pub const Error = error{IntegerOutOfRange};
@@ -69,15 +70,17 @@ fn argument(comptime Args: type, comptime index: usize, args: *const Args) ArgTy
     return @field(args, @typeInfo(Args).@"struct".field_names[index]);
 }
 
-fn served(provider: provider_name.Provider, bound: Bound) []const u8 {
-    return rsql.servedBinding(provider, provider_route.of(bound.served.*, provider) != .unserved);
+/// The text served slot `index` binds: that served entry's name, or '' past the served set.
+fn servedName(index: usize, bound: Bound) []const u8 {
+    const entries = bound.served.items();
+    return if (index < entries.len) entries[index].name.slice() else "";
 }
 
 fn slotLength(comptime Args: type, comptime slot: rsql.Slot, args: *const Args, bound: Bound) Error!usize {
     return switch (slot) {
         .argument => |index| valueLength(ArgType(Args, index), argument(Args, index, args)),
         .now => std.fmt.count("{d}", .{bound.now}),
-        .served => |provider| textLength(served(provider, bound).len),
+        .served => |index| textLength(servedName(index, bound).len),
     };
 }
 
@@ -85,7 +88,7 @@ fn writeSlot(comptime Args: type, comptime slot: rsql.Slot, args: *const Args, b
     switch (slot) {
         .argument => |index| try writeValue(ArgType(Args, index), argument(Args, index, args), w),
         .now => try w.print("{d}", .{bound.now}),
-        .served => |provider| try writeText(served(provider, bound), w),
+        .served => |index| try writeText(servedName(index, bound), w),
     }
 }
 
@@ -95,6 +98,7 @@ fn valueLength(comptime T: type, value: T) Error!usize {
     if (T == rsql.Bytes) return bytesLength(value.bytes.len);
     if (T == rsql.SessionHead) return textLength(value.ref.len);
     if (comptime isBounded(T)) return textLength(value.len);
+    if (T == connection.Name) return textLength(value.slice().len);
     return switch (@typeInfo(T)) {
         .optional => |optional| if (value) |present| valueLength(optional.child, present) else null_text.len,
         .bool => 1,
@@ -111,6 +115,7 @@ fn writeValue(comptime T: type, value: T, w: *std.Io.Writer) std.Io.Writer.Error
     if (T == rsql.Bytes) return writeBytes(value.bytes, w);
     if (T == rsql.SessionHead) return writeText(&value.ref, w);
     if (comptime isBounded(T)) return writeText(value.slice(), w);
+    if (T == connection.Name) return writeText(value.slice(), w);
     switch (@typeInfo(T)) {
         .optional => |optional| if (value) |present| try writeValue(optional.child, present, w) else try w.writeAll(null_text),
         .bool => try w.writeByte(if (value) '1' else '0'),
@@ -138,12 +143,12 @@ fn writeBytes(bytes: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
 
 const Tag = enum { first, second_tag };
 
-const all_unserved = provider_route.all(.unserved);
+const all_unserved: provider_route.Served = .{};
 
 fn expectRendered(comptime text: []const u8, comptime Args: type, args: Args, bound: Bound, expected: []const u8) !void {
     const template = comptime rsql.mysqlRendering(text).rendered;
     const len = try length(template, Args, &args, bound);
-    var buffer: [512]u8 = undefined;
+    var buffer: [2048]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buffer);
     try write(template, Args, &args, bound, &w);
     try std.testing.expectEqualStrings(expected, w.buffered());
@@ -198,16 +203,34 @@ test "empty text and bytes are empty literals, never NULL" {
     );
 }
 
-test "@now writes the bound second, and @served each provider's binding" {
+fn servedLiteral(comptime text: []const u8) []const u8 {
+    comptime {
+        var hex: []const u8 = "";
+        for (text) |byte| hex = hex ++ std.fmt.comptimePrint("{x:0>2}", .{byte});
+        return "_utf8mb4 X'" ++ hex ++ "' COLLATE utf8mb4_0900_bin";
+    }
+}
+
+test "@served binds each served name in slot order, and '' past the served set" {
     const Args = struct { provider: []const u8 };
-    var routes = provider_route.all(.unserved);
-    routes.codex = .endpoint;
+    var set: provider_route.Served = .{};
+    try set.put(provider_route.builtIn(.codex, .endpoint));
+    try set.put(provider_route.builtIn(.chatgpt, .chatgpt_plan));
+    const names = [_][]const u8{ "codex", "chatgpt" };
+    const slots = comptime blk: {
+        var list: []const u8 = "";
+        for (0..provider_route.max_served) |index| {
+            const text = if (index < names.len) names[index] else "";
+            list = list ++ (if (index == 0) "" else ",") ++ servedLiteral(text);
+        }
+        break :blk list;
+    };
     try expectRendered(
         "SELECT @now,@served(?1)",
         Args,
         .{ .provider = "x" },
-        .{ .now = 1_700_000_000, .served = &routes },
-        "SELECT 1700000000,(_utf8mb4 X'78' COLLATE utf8mb4_0900_bin IN (_utf8mb4 X'636f646578' COLLATE utf8mb4_0900_bin,_utf8mb4 X'' COLLATE utf8mb4_0900_bin,_utf8mb4 X'' COLLATE utf8mb4_0900_bin))",
+        .{ .now = 1_700_000_000, .served = &set },
+        "SELECT 1700000000,(_utf8mb4 X'78' COLLATE utf8mb4_0900_bin IN (" ++ slots ++ "))",
     );
 }
 

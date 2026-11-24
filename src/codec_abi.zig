@@ -5,6 +5,12 @@ pub const ObservedHeaders = struct {
     model: []const u8 = "",
     alternate_model: []const u8 = "",
     turn_state: []const u8 = "",
+    primary_used: []const u8 = "",
+    primary_minutes: []const u8 = "",
+    primary_reset_at: []const u8 = "",
+    secondary_used: []const u8 = "",
+    secondary_minutes: []const u8 = "",
+    secondary_reset_at: []const u8 = "",
 };
 
 pub const ItemKind = enum(u8) {
