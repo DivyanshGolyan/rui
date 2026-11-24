@@ -3,6 +3,7 @@ const execution = @import("execution.zig");
 const store = @import("store.zig");
 const result_fault = @import("result_fault.zig");
 const server_host = @import("server_host.zig");
+const TestHost = if (@import("builtin").is_test) @import("server_host_testing.zig").Fixture else void;
 const tool_delivery = @import("tool_delivery.zig");
 const tool_result = @import("tool_result.zig");
 
@@ -215,7 +216,7 @@ const Fixture = struct {
     probes: server_host.Probes,
     records: [2]execution.CustodyRecord,
     custody: execution.CustodyPool,
-    host: server_host.Host,
+    host: TestHost,
 
     fn open(self: *Fixture) !void {
         self.tmp = std.testing.tmpDir(.{});
