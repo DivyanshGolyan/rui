@@ -10633,7 +10633,7 @@ fn projectionArchivedFullWalkCase() !void {
     const row = state.find(ref).?;
     try std.testing.expectEqual(ArchiveState.archived, row.archive_state);
     try std.testing.expectEqual(@as(?u64, 10), row.archive_seq);
-    try std.testing.expectEqualDeep(testToken(10), row.read_version.?);
+    try std.testing.expect(std.meta.eql(testToken(10), row.read_version.?));
     try std.testing.expectEqual(Kind.working, std.meta.activeTag(row.state));
 }
 
