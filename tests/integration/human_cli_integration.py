@@ -63,7 +63,7 @@ import model_fixture as fixture
 from session_list_fixture import session_values
 import codex_fixture
 import os_semantics
-from human_cli_fixture import chat_info_geometry, model_choice_frame, model_choice_shown, chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, chat_footer_row, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import composer_bounds, chat_info_geometry, model_choice_frame, model_choice_shown, chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, chat_footer_row, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -617,6 +617,12 @@ def clipboard_paste_case(*, protocol_only=False):
             frames.insert(at, corrupt if malformed == "oversized" else corrupt[:-2])
         os.write(master, frame(b"OK" + prefix) + b"".join(frames) + frame(b"DONE" + prefix))
 
+    def assert_no_draft_image(master):
+        screen = current_screen(master)
+        bounds = composer_bounds(screen)
+        assert bounds is not None, "composer bounds were not rendered"
+        assert "[Image 1]" not in "\n".join(screen.splitlines()[bounds[0] + 1:bounds[1]]), "a stale image reached the draft"
+
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         session = create_session(home, "--store", store, "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
@@ -654,14 +660,25 @@ def clipboard_paste_case(*, protocol_only=False):
             assert parts[0]["text"] == "Clipboard caption ordinary", parts
             assert parts[1]["image_url"] == "data:image/png;base64," + base64.b64encode(png).decode(), parts
 
+            delayed_png = (pathlib.Path(__file__).parents[2] / "src/codecs/fixtures/image-input/pixel.png").read_bytes()
+            encoded = base64.b64encode(delayed_png)
             os.write(master, frame(b"OK:pw=dG9rZW4=") + frame(b"DATA:mime=Lg==", b"image/png") + frame(b"DONE"))
             request = raw_output(master, b";" + base64.b64encode(b"image/png") + b"\x1b\\")
             handle = re.search(rb"type=read:id=([0-9]+)", request).group(1)
             prefix = b":id=" + handle
-            delayed_png = (pathlib.Path(__file__).parents[2] / "src/codecs/fixtures/image-input/pixel.png").read_bytes()
-            encoded = base64.b64encode(delayed_png)
+            complete_data = frame(b"DATA:mime=aW1hZ2UvcG5n" + prefix, delayed_png)
+            overview_frame(master, lambda screen: True, frame(b"OK" + prefix) + complete_data + b"\x1b[27u")
+            keyed_frame(master, b"\x1b[13u", lambda screen, x, y: composer_ready(screen, x, y))
+            os.write(master, frame(b"DONE" + prefix) + b"cancelled")
+            raw_output(master, lambda screen: "cancelled" in screen)
+            assert_no_draft_image(master)
+            keyed_frame(master, b"\x15", lambda screen, x, y: composer_ready(screen, x, y) and "cancelled" not in screen)
+
+            os.write(master, frame(b"OK:pw=dG9rZW4=") + frame(b"DATA:mime=Lg==", b"image/png") + frame(b"DONE"))
+            request = raw_output(master, b";" + base64.b64encode(b"image/png") + b"\x1b\\")
+            handle = re.search(rb"type=read:id=([0-9]+)", request).group(1)
+            prefix = b":id=" + handle
             os.write(master, frame(b"OK" + prefix) + b"\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n" + prefix + b";" + encoded[:12])
-            raw_output(master, lambda screen: "Clipboard read timed out" in screen)
             overview_frame(master, lambda screen: True, b"\x1b[27u")
             keyed_frame(master, b"\x1b[13u", lambda screen, x, y: composer_ready(screen, x, y))
             os.write(master, b"\x1b[200~" + encoded[12:] + b"\r\t\x7f\x1b[120;1;120u\x1b[201~\x1b\\" + frame(b"DONE" + prefix))
@@ -670,6 +687,7 @@ def clipboard_paste_case(*, protocol_only=False):
             assert encoded[12:32] not in shown, "a delayed clipboard tail reached the composer"
             assert encoded[12:32].decode() not in current_screen(master), "a delayed clipboard tail reached the composer"
             assert "xsafe" not in current_screen(master), "encoded paste text reached the composer"
+            assert_no_draft_image(master)
             assert len(endpoint.requests) == 1, "a control byte inside paste submitted a message"
 
             os.write(master, frame(b"OK:pw=dG9rZW4=") + frame(b"DATA:mime=Lg==", b"image/png") + frame(b"DONE"))
@@ -677,7 +695,6 @@ def clipboard_paste_case(*, protocol_only=False):
             handle = re.search(rb"type=read:id=([0-9]+)", request).group(1)
             prefix = b":id=" + handle
             os.write(master, frame(b"OK" + prefix) + b"\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n" + prefix + b";" + encoded[:12])
-            raw_output(master, lambda screen: "Clipboard read timed out" in screen)
             overview_frame(master, lambda screen: True, b"\x1b[27u")
             keyed_frame(master, b"\x1b[13u", lambda screen, x, y: composer_ready(screen, x, y))
             os.write(master, b"unframedtext\x01\x05\x1b[200~blockedpaste\x1b[121;1;121u\x1b[201~\x1b[120;1;120u")

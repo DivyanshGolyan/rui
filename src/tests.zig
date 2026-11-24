@@ -47,6 +47,7 @@ test {
     _ = @import("FeedView.zig");
     _ = @import("Root.zig");
     _ = @import("root_focus_owner_tests.zig");
+    _ = @import("root_clipboard_tests.zig");
     _ = @import("Chip.zig");
     _ = @import("StatusRow.zig");
     _ = @import("FactsRow.zig");
