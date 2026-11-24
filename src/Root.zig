@@ -310,6 +310,7 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (routed == .mouse) if (try self.captureSelection(ctx, routed.mouse)) return;
     if (routed == .mouse and (routed.mouse.type == .press or routed.mouse.type == .motion)) if (self.pointer_free) |hook| try hook.free(hook.context, ctx);
     var input: app_input.Input = switch (routed) {
         .key_press => |key| .{ .key = .{ .named = @import("keypress.zig").named(key), .enter = @import("keypress.zig").isEnter(key), .printable = @import("keypress.zig").classify(key) == .text } },
@@ -340,6 +341,19 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     try self.syncClipboard(ctx);
 }
 
+fn captureSelection(self: *Self, ctx: *vxfw.EventContext, mouse: vaxis.Mouse) !bool {
+    if ((mouse.type != .drag and mouse.type != .release) or
+        (mouse.button != .left and mouse.button != .none) or self.session == null or
+        self.chooseLayout().pane != .session or self.input.layer.signInOpen() or self.input.layer.settingsOpen())
+        return false;
+    var captured = mouse;
+    if (self.size.width >= split_at) captured.col -= @intCast(list_width + 1);
+    try self.session.?.captureEvent(ctx, .{ .mouse = captured });
+    if (!ctx.consume_event) return false;
+    if (mouse.type == .release) if (self.pointer_free) |hook| try hook.free(hook.context, ctx);
+    return true;
+}
+
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
@@ -349,7 +363,10 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         },
         .osc_5522 => |payload| try self.clipboardFrame(ctx, payload),
         .osc_5522_invalid => self.clipboard.invalidFrame(std.heap.page_allocator),
-        .mouse => |mouse| if (mouse.type == .release) if (self.pointer_free) |hook| try hook.free(hook.context, ctx),
+        .mouse => |mouse| {
+            if (try self.captureSelection(ctx, mouse)) return;
+            if (mouse.type == .release) if (self.pointer_free) |hook| try hook.free(hook.context, ctx);
+        },
         .init => {
             try ctx.requestFocus(self.overview);
             try self.overview.handleEvent(ctx, .init);
@@ -1381,6 +1398,70 @@ test "A faded screen holds what rendering shows: children above their parents in
     }
     // "n" sits partly off screen; "z" lies under "b" by z order; "c" is clipped to "b"'s 2x2.
     try std.testing.expectEqualStrings("nabb" ++ "aabc", &text);
+}
+
+test "Root routes captured selection through divider and footer as the sole hit" {
+    const Probe = struct {
+        count: usize = 0,
+        last: vaxis.Mouse = undefined,
+        releases: usize = 0,
+
+        fn capturePointer(raw: *anyopaque, ctx: *vxfw.EventContext, event_: vxfw.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const mouse = if (event_ == .mouse) event_.mouse else return error.UnexpectedEvent;
+            self.count += 1;
+            self.last = mouse;
+            ctx.consumeEvent();
+        }
+
+        fn free(raw: *anyopaque, _: *vxfw.EventContext) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.releases += 1;
+        }
+
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .captureHandler = capturePointer, .drawFn = drawProbe };
+        }
+
+        fn drawProbe(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
+        }
+    };
+    const Pointer = @import("testing/app_events.zig");
+    const empty: vxfw.Text = .{ .text = "" };
+    var session: Probe = .{};
+    var root: Self = .{
+        .overview = empty.widget(),
+        .list = empty.widget(),
+        .session = session.widget(),
+        .pointer_free = .{ .context = &session, .free = Probe.free },
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const frame = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 25 }, .cell_size = .{} });
+    var hits: std.ArrayList(vxfw.HitResult) = .empty;
+    defer hits.deinit(arena.allocator());
+    for ([_]vaxis.Mouse{
+        .{ .col = 40, .row = 8, .button = .left, .type = .release, .mods = .{} },
+        .{ .col = 55, .row = 24, .button = .left, .type = .drag, .mods = .{} },
+        .{ .col = 55, .row = 24, .button = .left, .type = .release, .mods = .{} },
+    }) |mouse| {
+        hits.clearRetainingCapacity();
+        try frame.hitTest(arena.allocator(), &hits, .{ .row = @intCast(mouse.row), .col = @intCast(mouse.col) });
+        try std.testing.expectEqual(@as(usize, 1), hits.items.len);
+        try std.testing.expect(hits.items[0].widget.eql(root.widget()));
+        ctx.consume_event = false;
+        try Pointer.mouse(&ctx, frame, mouse);
+        try std.testing.expect(ctx.consume_event);
+        try std.testing.expectEqual(if (mouse.col == 40) @as(i16, -1) else 14, session.last.col);
+        try std.testing.expectEqual(mouse.row, session.last.row);
+    }
+    try std.testing.expectEqual(@as(usize, 3), session.count);
+    try std.testing.expectEqual(@as(i16, 14), session.last.col);
+    try std.testing.expectEqual(@as(i16, 24), session.last.row);
+    try std.testing.expectEqual(@as(usize, 1), session.releases);
 }
 
 test "Sign-in captures every mouse action above settings without background activation" {

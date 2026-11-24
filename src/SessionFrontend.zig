@@ -85,6 +85,7 @@ requests: Requests = undefined,
 status: Status = undefined,
 screen: *Screen = undefined,
 app_content: FeedView = .{ .window = undefined, .anchor = undefined },
+feed_origin: SurfaceOrigin = .{},
 app_document: DocumentView = .{ .document = undefined },
 app_body: AppScreen.Content = undefined,
 app_input: InputArea = undefined,
@@ -666,7 +667,21 @@ fn nowMs(self: *const Self) u64 {
 }
 
 pub fn widget(self: *Self) vxfw.Widget {
-    return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appDraw };
+    return .{ .userdata = self, .captureHandler = appCapture, .eventHandler = appEvent, .drawFn = appDraw };
+}
+
+fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const mouse = if (event == .mouse) event.mouse else return;
+    if ((mouse.type != .drag and mouse.type != .release) or !self.app_content.capturesCopySelection() or
+        self.leaving != null or self.screen.view != .feed or self.info_open or self.app_info.standaloneOpen() or
+        self.app_consent.request != null)
+        return;
+    var local = mouse;
+    local.col -= @intCast(self.feed_origin.col);
+    local.row -= @intCast(self.feed_origin.row);
+    local.col = std.math.clamp(local.col, 0, @as(i16, @intCast(self.app_content.size.width)));
+    try self.app_content.widget().handleEvent(ctx, .{ .mouse = local });
 }
 
 fn appNotice(raw: *anyopaque, ctx: *vxfw.EventContext, text: []const u8) !void {
@@ -1086,6 +1101,14 @@ fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
     }
 }
 
+const SurfaceOrigin = struct { row: i32 = 0, col: i32 = 0 };
+
+fn surfaceOrigin(surface: vxfw.Surface, target: vxfw.Widget, row: i32, col: i32) ?SurfaceOrigin {
+    if (surface.widget.eql(target)) return .{ .row = row, .col = col };
+    for (surface.children) |child| if (surfaceOrigin(child.surface, target, row + child.origin.row, col + child.origin.col)) |found| return found;
+    return null;
+}
+
 fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const screen = self.screen;
@@ -1231,6 +1254,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.chrome.status.key.focused = focused == .needs;
     self.chrome.status.stop.focused = focused == .stop;
     var surface = try self.app_screen.widget().draw(ctx);
+    if (screen.view == .feed) self.feed_origin = surfaceOrigin(surface, self.app_content.widget(), 0, 0) orelse .{};
     const size = if (self.app_consent.request != null) self.app_preview.size else if (screen.view == .feed) self.app_content.size else self.app_document.size;
     screen.height = size.height;
     screen.vx.screen.width = size.width;

@@ -22,9 +22,19 @@ pub const Range = struct {
     }
 
     fn covers(self: Range, spot: Spot) bool {
-        return if (spot.start == spot.end) self.from <= spot.start and spot.start < self.to else spot.start < self.to and spot.end > self.from;
+        return if (spot.start == spot.end) self.from < spot.start and spot.start < self.to else spot.start < self.to and spot.end > self.from;
     }
 };
+
+test "selection ranges exclude point cells at endpoints and include interior blank boundaries" {
+    const range: Range = .{ .from = 4, .to = 9 };
+    try std.testing.expect(!range.covers(Spot.point(4)));
+    try std.testing.expect(range.covers(Spot.point(5)));
+    try std.testing.expect(range.covers(Spot.point(8)));
+    try std.testing.expect(!range.covers(Spot.point(9)));
+    try std.testing.expect(range.covers(.{ .start = 3, .end = 5 }));
+    try std.testing.expect(range.covers(.{ .start = 8, .end = 10 }));
+}
 
 pub const Row = RowFor(Document);
 
@@ -72,14 +82,29 @@ pub fn RowFor(comptime Doc: type) type {
             covered: usize = 0,
             cover: Hit = undefined,
             column: usize = 0,
+            decorated_prefix: usize = 0,
 
             fn init(row: Self) Spots {
                 const document = row.document;
+                var result: Spots = .{
+                    .row = row,
+                    .boundary = document.origin + (row.line orelse document.text().len),
+                };
+                for (row.cells, 0..) |cell, column| {
+                    const offset = document.cellOffset(cell) orelse continue;
+                    if (document.inlineDecoration(offset)) {
+                        result.decorated_prefix = column;
+                        break;
+                    }
+                }
                 for (row.cells) |cell| {
                     const offset = document.cellOffset(cell) orelse continue;
-                    if (document.selectable(offset)) return .{ .row = row, .boundary = document.origin + offset };
+                    if (document.selectable(offset)) {
+                        result.boundary = document.origin + offset;
+                        break;
+                    }
                 }
-                return .{ .row = row, .boundary = document.origin + (row.line orelse document.text().len) };
+                return result;
             }
 
             fn next(self: *Spots) ?Hit {
@@ -100,7 +125,7 @@ pub fn RowFor(comptime Doc: type) type {
                     return self.cover;
                 }
                 if (self.column < self.covered) return self.cover;
-                return .{ .spot = Spot.point(self.boundary) };
+                return .{ .spot = Spot.point(self.boundary), .paint = self.column >= self.decorated_prefix };
             }
         };
     };
@@ -220,6 +245,51 @@ test "a row's columns map to the clusters they show, indents and wide cells incl
     try std.testing.expectEqualSlices(bool, &.{ true, true, true, false, false, false, false, false, false, false }, &columns);
     empty.covered(range, &columns);
     try std.testing.expectEqualSlices(bool, &@as([10]bool, @splat(false)), &columns);
+}
+
+test "selection leaves generated user gutter alone and includes authored blank rows" {
+    const testing = std.testing;
+    const DocumentType = viewport.Sized(256, true);
+    var document: DocumentType = .{};
+    const marker = TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off;
+    try document.append(TerminalText.user_message_on ++ marker ++ "UserAlpha\n\nAnswerBeta" ++ TerminalText.user_message_off);
+    try document.prepare();
+    const SelectionRow = RowFor(@TypeOf(document));
+    const width: u16 = 46;
+    const height: u16 = 8;
+    const layout: viewport.Layout = .{ .width = width, .method = .unicode };
+    var cells: [46 * 8]vaxis.Cell = @splat(.{});
+    var screen: vaxis.Screen = .{ .width = width, .height = height, .width_method = .unicode, .buf = &cells };
+    const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+    _ = document.draw(window, .{}, true, false, .{}, .{});
+    const blank_line = document.lineEnd(0) + 1;
+    var rows = document.rowsFrom(layout, .{});
+    var saw_marker = false;
+    var saw_blank = false;
+    var columns: [46]bool = undefined;
+    for (0..height) |row_index| {
+        const position = rows.next() orelse break;
+        const row_cells = cells[row_index * width ..][0..width];
+        const row: SelectionRow = .{ .document = &document, .cells = row_cells, .line = document.selectionLine(layout, position) };
+        row.covered(.{ .from = document.origin, .to = document.origin + document.text().len }, &columns);
+        if (position.offset == 0 and std.mem.indexOf(u8, document.text(), "UserAlpha") != null) {
+            var marker_column: ?usize = null;
+            for (row_cells, 0..) |cell, column| if (std.mem.eql(u8, cell.char.grapheme, "›")) {
+                marker_column = column;
+                break;
+            };
+            if (marker_column) |column| {
+                saw_marker = true;
+                try testing.expect(column >= 2);
+                for (columns[0 .. column + 2]) |selected| try testing.expect(!selected);
+            }
+        }
+        if (position.offset == blank_line) {
+            saw_blank = true;
+            try testing.expect(columns[0]);
+        }
+    }
+    try testing.expect(saw_marker and saw_blank);
 }
 
 test "a release copies the shown text with its line count, within the clipboard limit" {
