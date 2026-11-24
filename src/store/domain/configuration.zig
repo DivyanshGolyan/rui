@@ -855,7 +855,7 @@ fn creationCheck(configuration: *const ConfigurationView, reads: *const Configur
     else
         null;
     // Naming a connection the Host does not serve is refused; a default or inherited provider is not.
-    if (explicit) |name| if (served.of(name.slice()) == null) return .unserved_connection;
+    if (explicit) |name| if (served.codecOf(name.slice()) == null) return .unserved_connection;
     const named: ?connection.Name = if (reads.inherits_parent) reads.inherited.provider else explicit;
     return switch (required_settings.check(.{
         .model = configuration.model.state == .value,
@@ -957,7 +957,7 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
         next.provider = provider_value;
         // A Host serving no provider still creates a Session on the product default. Its codec is that
         // provider's built-in codec, which the Session keeps until a served connection of its name runs it.
-        next.codec = if (request.served.of(provider_value.slice())) |entry| entry.codec else (if (provider_route.builtInOf(provider_value)) |built_in| built_in.codec() else return .{ .rejected = .connection_unserved });
+        next.codec = request.served.codecOf(provider_value.slice()) orelse return .{ .rejected = .connection_unserved };
     }
     v.workspace_matches = if (creating and reads.inherits_parent) inherited: {
         validateWorkspace(io, next.workspace.slice(), &next.workspace) catch return .{ .rejected = .invalid_workspace };

@@ -383,7 +383,7 @@ test "ADM-33 a creation takes a served connection, the default or its parent's, 
             const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             try std.testing.expect(host_tool_set.valid());
             const Host = enum { serves_codex, serves_nothing };
-            const Binding = enum { codex, chatgpt, omitted };
+            const Binding = enum { codex, chatgpt, gateway, omitted };
             const Tools = enum { omitted, web_search, code_interpreter };
             for (std.enums.values(Host)) |host| {
                 var tmp = std.testing.tmpDir(.{});
@@ -425,6 +425,7 @@ test "ADM-33 a creation takes a served connection, the default or its parent's, 
                         switch (binding) {
                             .codex => try command.configuration.provider.value.set("codex"),
                             .chatgpt => try command.configuration.provider.value.set("chatgpt"),
+                            .gateway => try command.configuration.provider.value.set("gateway"),
                             .omitted => command.configuration.provider.state = .omitted,
                         }
                     }
@@ -433,11 +434,11 @@ test "ADM-33 a creation takes a served connection, the default or its parent's, 
                         .web_search => command.configuration.tools = try .of(&.{"web_search"}),
                         .code_interpreter => command.configuration.tools = try .of(&.{"code_interpreter"}),
                     }
-                    // An explicit unserved connection is refused whatever tools it asks for; the default and
-                    // inherited bindings check the tools against the built-in codex binding, served or not.
-                    // Explicit codex is unserved on a Host serving nothing; chatgpt is unserved on both Hosts.
-                    const unserved = binding == .chatgpt or (binding == .codex and host == .serves_nothing);
-                    const expected: ?protocol.ConfigurationRejection = if (!inherited and unserved)
+                    // A built-in name is a binding whether or not this Host serves it, so offline creation keeps
+                    // working; an unserved name that is not built in has no codec and is refused whatever tools
+                    // it asks for. Tools are checked against the binding: the default and inherited one is codex.
+                    const unknown = binding == .gateway;
+                    const expected: ?protocol.ConfigurationRejection = if (!inherited and unknown)
                         .connection_unserved
                     else if (tools == .code_interpreter)
                         .provider_tool_missing
@@ -452,7 +453,8 @@ test "ADM-33 a creation takes a served connection, the default or its parent's, 
                     } else {
                         try std.testing.expect(reply == .accepted);
                         const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
-                        try std.testing.expectEqualStrings("codex", observed.provider.?.slice());
+                        const bound = if (!inherited and binding == .chatgpt) "chatgpt" else "codex";
+                        try std.testing.expectEqualStrings(bound, observed.provider.?.slice());
                         try std.testing.expectEqual(before + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
                     }
                 };
@@ -1108,14 +1110,7 @@ test "capability-required configuration rejects on replacement and replays its s
             var changed_intent = command;
             changed_intent.require_model = false;
             try std.testing.expect(try storage.configure(&changed_intent, .{}) == .conflict);
-            // Creating under an explicit name the Host does not serve is refused (connection_unserved).
-            var unserved = changed_intent;
-            try unserved.key.set("explicit-unserved-config");
-            const refused = try storage.configure(&unserved, .{});
-            try std.testing.expect(refused == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.connection_unserved, refused.rejected.code);
             try changed_intent.key.set("explicit-offline-config");
-            storage.servedSet().* = protocol.servedBuiltIns(.endpoint);
             try std.testing.expect(try storage.configure(&changed_intent, .{}) == .accepted);
         }
     }.run);

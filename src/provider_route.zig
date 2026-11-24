@@ -48,6 +48,14 @@ pub const Served = struct {
         return if (self.of(name)) |entry| entry.route else .unserved;
     }
 
+    /// The codec of the binding named `name`: a served name's entry, else an absent built-in name's own
+    /// codec, else none. The one owner of whether a name is a binding a Session may be created on.
+    pub fn codecOf(self: *const Served, name: []const u8) ?provider_name.Codec {
+        if (self.of(name)) |entry| return entry.codec;
+        const built_in = builtInOf(connection.Name.parse(name) orelse return null) orelse return null;
+        return built_in.codec();
+    }
+
     /// Whether the binding named `name` runs the tool. This is the one owner of tool capability: a served
     /// name answers from its entry, an absent built-in name from the built-in provider's facts, and any
     /// other absent name runs nothing. Serving decides reachability, not what the binding can run.
