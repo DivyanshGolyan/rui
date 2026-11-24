@@ -398,15 +398,16 @@ class AdmissionTest(unittest.TestCase):
     def test_every_policy_check_runs_after_another_fails_and_any_failure_fails_the_suite(self):
         # CI-76: checks.sh over its fake tools, with no check, each check's last call, or every check failing.
         calls = ['python3 -B tests/ci/caller_errors.py', 'python3 -B tests/ci/flake_sources.py',
-                 'python3 -B tests/ci/client_locality.py',
+                 'python3 -B tests/ci/client_locality.py', 'python3 -B tests/ci/deep_modules_allowance.py',
                  'python3 -B tests/ci/policy_suite.py --skips ["test_unchanged"]',
                  'python3 -B tests/ci/rsql_table.py fingerprint', 'python3 -B tests/ci/link_table.py fingerprint',
                  'python3 -m ruff check --select F821 tests', 'npm ci --ignore-scripts --no-audit --no-fund',
                  'npm run check', 'npm test', 'actionlint -shellcheck= .github/workflows/check.yml']
-        last_of_each_check = [calls[index] for index in (0, 1, 2, 3, 4, 5, 6, 9, 10)]
+        last_of_each_check = [calls[index] for index in (0, 1, 2, 3, 4, 5, 6, 7, 10, 11)]
         names = ['Check caller error coverage and shrink-only pending causes',
                  'Check flake sources and shrink-only allowances',
                  'Check client locality and shrink-only exceptions',
+                 'Check the deep-modules allowance does not grow past trusted main',
                  'Run tests/ci, less self-checks whose inputs are unchanged',
                  'Check the Store statement table was generated from the current inputs',
                  "Check the build's link table was generated from the current build inputs",
@@ -621,26 +622,27 @@ class CandidatePlanTest(unittest.TestCase):
 
     # CI-1: written as literals, independent of select_tests' tier constants. measurement-check and
     # mysql-wire-integration reach the PR tier only through their own files; stack-frames runs whenever a Host
-    # source, build input or frame gate file selects it (the rows below name each case).
+    # source, build input or frame gate file selects it, and deep-modules runs for every src/ or build manifest
+    # path that is not documentation (the rows below name each case).
     PR_TIER_NEVER = {'check', 'check-full', 'test', 'test-full'}
     # Unit roots the diff reaches, plus fixtures whose own script, executable or owner changed.
     PR_TIER_CASES = {
         'documentation': (['README.md'], set()),
         'tests/ci only': (['tests/ci/select_tests.py'], set()),
         # A source file no owner reaches is unclassified, so it selects the full PR set.
-        'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native', 'test-store', 'test-h2', 'test-pg'}),
-        'build hub': (['build.zig'], {'stack-frames', 'test-logic'}),
+        'unreached source': (['src/future_owner.zig'], {'deep-modules', 'test-logic', 'test-native', 'test-store', 'test-h2', 'test-pg'}),
+        'build hub': (['build.zig'], {'deep-modules', 'stack-frames', 'test-logic'}),
         'compiler and cache setup': (['.github/actions/setup/action.yml'], {'test-logic'}),
         'CI artifact producer': (['tests/ci/build_artifact.py'], {'test-logic'}),
         # The replayed SQLite pin: the PR roots that link sqlite, and the logic root the bootstrap always runs.
-        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'stack-frames', 'test-logic', 'test-native', 'test-store'}),
-        'dependency fetch': (['src/fetch_dependencies.sh'], {'stack-frames', 'test-logic'}),
+        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'deep-modules', 'stack-frames', 'test-logic', 'test-native', 'test-store'}),
+        'dependency fetch': (['src/fetch_dependencies.sh'], {'deep-modules', 'stack-frames', 'test-logic'}),
         'workflow and policy only': (['.github/workflows/check.yml', '.github/actions/policy/action.yml',
                                       'tests/ci/ci_plan.py'], set()),
         'producer and documentation': (['tests/ci/build_artifact.py', 'docs/verification/gates.md'], {'test-logic'}),
         'producer and core source': (['tests/ci/build_artifact.py', 'src/request_encoding.zig'],
-                                     {'stack-frames', 'test-logic', 'test-native'}),
-        'Store': (['src/store.zig'], {'stack-frames', 'test-native', 'test-store'}),
+                                     {'deep-modules', 'stack-frames', 'test-logic', 'test-native'}),
+        'Store': (['src/store.zig'], {'deep-modules', 'stack-frames', 'test-native', 'test-store'}),
         'fixture script': (['tests/integration/overview_integration.py'], {'overview-integration'}),
         # A shared helper runs the fixtures that import it, directly (bash_fixture.py) or through another
         # helper (tool_profile_fixture.py is imported by fresh_tool_profile_cases.py, which human-cli imports).
@@ -659,18 +661,18 @@ class CandidatePlanTest(unittest.TestCase):
         'fixture script that other fixtures import': (['tests/integration/settings_fixture.py'], {
             'host-launch-integration', 'host-status-integration', 'human-cli-integration', 'settings-integration',
             'upgrade-integration', 'test-logic', 'test-native'}),
-        'slow fixture owner': (['src/Upgrade.zig'], {'upgrade-integration'}),
-        'core owning no fixture': (['src/request_encoding.zig'], {'stack-frames', 'test-logic', 'test-native'}),
-        'core owning one fixture': (['src/session_skills.zig'], {'skills-integration', 'stack-frames', 'test-logic', 'test-native'}),
+        'slow fixture owner': (['src/Upgrade.zig'], {'deep-modules', 'upgrade-integration'}),
+        'core owning no fixture': (['src/request_encoding.zig'], {'deep-modules', 'stack-frames', 'test-logic', 'test-native'}),
+        'core owning one fixture': (['src/session_skills.zig'], {'deep-modules', 'skills-integration', 'stack-frames', 'test-logic', 'test-native'}),
         # The frame gate's budget and any Host source run stack-frames on the PR.
         'frame gate budget': (['tests/ci/stack_frames.json'], {'stack-frames'}),
-        'Host source under check': (['src/wire_version.zig'], {'stack-frames', 'test-logic', 'test-native'}),
+        'Host source under check': (['src/wire_version.zig'], {'deep-modules', 'stack-frames', 'test-logic', 'test-native'}),
         'measurement own file': (['tests/qualification/call-classification/main.go'], {'measurement-check'}),
         'measurement non-own file': (['build/measurement.zig'], set()),
         'mysql wire own file': (['tests/integration/mysql_wire_test.zig'], {'mysql-wire-integration', 'test-logic'}),
         'mysql wire non-own file': (['src/store/wire/mysql_connection.zig'],
-                                    {'stack-frames', 'test-logic', 'test-native', 'test-store'}),
-        'core owning many fixtures (Mac path)': (['src/client.zig'], {
+                                    {'deep-modules', 'stack-frames', 'test-logic', 'test-native', 'test-store'}),
+        'core owning many fixtures (Mac path)': (['src/client.zig'], {'deep-modules',
             'activity-integration', 'admission-integration', 'cli-image-integration', 'control-integration',
             'conversation-page-integration',
             'host-status-integration', 'host-stop-integration', 'human-cli-integration', 'request-wait-integration',

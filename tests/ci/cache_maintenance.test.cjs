@@ -521,7 +521,7 @@ test('maintenance warms both producer parts on both platforms using the consumer
   assert.match(consumers.macos_build, /check-part: compiled\s/);
   assert.match(consumers.macos_build, /^    timeout-minutes: 90$/m);
   assert.equal(consumers.macos_build_unit, undefined);
-  assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration","stack-frames"\]/);
+  assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration","stack-frames","deep-modules"\]/);
   assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration"\]/);
   assert.match(jobs.compiled, /^    timeout-minutes: 120$/m);
 });
