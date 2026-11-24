@@ -386,9 +386,9 @@ const base_revision_join_sql = " LEFT JOIN session_revision base_revision ON bas
 
 pub const context_changed = rsql.Read(.{
     .sql = "WITH context_session AS (SELECT ?1 AS session_ref,?2 AS boundary)," ++ baseCteSql("context.session_ref", "context.boundary") ++ ",since AS (SELECT " ++ changedSinceBaseSql("context.session_ref", "context.boundary") ++ " AS changed FROM context_session context) SELECT since.changed," ++ base_columns_sql ++
-        ",(SELECT s.provider FROM session s WHERE s.session_ref=?1) AS provider,(SELECT r.codec FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision WHERE o.session_ref=?1 AND o.admission_position=?2) AS codec" ++
-        ",(SELECT r.model FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
-        "WHERE o.session_ref=?1 AND o.admission_position=?2) AS model FROM since LEFT JOIN base ON 1" ++ base_revision_join_sql,
+        "," ++ replay_wire.operationBindingSql("request_revision") ++ " FROM since LEFT JOIN base ON 1" ++ base_revision_join_sql ++
+        " LEFT JOIN model_operation request_operation ON request_operation.session_ref=?1 AND request_operation.admission_position=?2" ++
+        " LEFT JOIN session_revision request_revision ON request_revision.session_ref=request_operation.session_ref AND request_revision.revision=request_operation.settings_revision",
     .Args = struct { session: []const u8, boundary: u64 },
     .Row = struct {
         changed: bool,
