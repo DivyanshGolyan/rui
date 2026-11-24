@@ -2956,7 +2956,7 @@ test "Sign-in stale blank key cannot activate endpoint-only or source-only super
         try page.target.set(store);
         const first = try host_start.saveConnection(page.init.?, store, .{ .base = "https://first.example/v1" }, .{ .provided = "first-key" }, "custom-model", Hooks.yes);
         try std.testing.expect(first == .saved);
-        const assignment = try host_start.connectionAssignment(rig.arena.allocator(), &first.saved);
+        const assignment = try host_start.connectionAssignment(page.init.?, rig.arena.allocator(), store, &first.saved);
         try std.testing.expect(std.mem.indexOf(u8, assignment, "first-key") == null);
         try rig.send("\t\r");
         try std.testing.expect(page.state.page == .api and page.form.?.value.original.reusable());
