@@ -9269,8 +9269,8 @@ fn archivedLaterWindowCase() !void {
         fn row(page: *protocol_reply.SessionListPage, index: usize, reference: []const u8) !void {
             const r = &page.rows[index];
             const target_row = std.mem.eql(u8, reference, &target);
-            const work: view.WorkState = if (target_row) .{ .approval = .{ .since = test_now_s - 1800 } } else .{ .idle = .{ .since = test_now_s } };
-            r.* = .{ .read_version = if (std.mem.eql(u8, reference, "z00000")) archived else through, .work = fixtureSessionWork(.{ .state = work, .turn = if (target_row) 7 else null, .first_action = if (target_row) 42 else null }) };
+            const staged_work: view.WorkState = if (target_row) .{ .approval = .{ .since = test_now_s - 1800 } } else .{ .idle = .{ .since = test_now_s } };
+            r.* = .{ .read_version = if (std.mem.eql(u8, reference, "z00000")) archived else through, .work = fixtureSessionWork(.{ .state = staged_work, .turn = if (target_row) 7 else null, .first_action = if (target_row) 42 else null }) };
             try r.reference.set(reference);
             try r.workspace.set("/work");
             try r.model.set("gpt-5.5");
@@ -9282,7 +9282,9 @@ fn archivedLaterWindowCase() !void {
 
         fn bootstrap(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, filter: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             const failure = try fake_operations.list(self, requests, cursor, filter, page);
-            if (page.count != 0) if (page.rows[0].first_message) |*first| first.admission = 1000;
+            if (page.count != 0) {
+                if (page.rows[0].first_message) |*first| first.admission = 1000;
+            }
             return failure;
         }
 
