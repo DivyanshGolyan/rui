@@ -1107,6 +1107,8 @@ def fatal_reporting_cases(state):
         session = human.admit(home, "session", "configure", "--store", store,
             "--workspace", root, "--connection", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
         missing_session = "000000" if session != "000000" else "000001"
+        # Each diagnostic keeps its own exit whether stderr is open, stopped or disconnected.
+        exits = {b"[preference_provider_invalid]": 2, b"[selection_provider_unsupported]": 6}
         diagnostics = [
             (["session", "resume", "--store", str(store), missing_session], b"[internal_unexpected]"),
             # A connection is a name, not a closed choice: an unknown one is refused as an invalid saved default.
@@ -1123,7 +1125,7 @@ def fatal_reporting_cases(state):
                     termios.tcflow(error_slave, termios.TCOOFF)
                 caller = spawn([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=error_slave)
-                assert caller.wait(timeout=3) == {b"[preference_provider_invalid]": 2, b"[selection_provider_unsupported]": 6}.get(error, 1), "fatal diagnostic did not exit"
+                assert caller.wait(timeout=3) == exits.get(error, 1), "fatal diagnostic did not exit"
                 assert termios.tcgetattr(slave) == original
                 assert_file_flags(fcntl.fcntl(error_slave, fcntl.F_GETFL), error_flags)
                 if not stopped:
@@ -1144,7 +1146,7 @@ def fatal_reporting_cases(state):
             try:
                 caller = spawn([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
-                assert caller.wait(timeout=3) == (2 if error == b"[choice_unsupported]" else 1), "disconnected stderr replaced the real exit"
+                assert caller.wait(timeout=3) == exits.get(error, 1), "disconnected stderr replaced the real exit"
                 assert termios.tcgetattr(slave) == original
                 assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
                 print(f"fatal reporting: {error.decode()} disconnected stderr passed", flush=True)

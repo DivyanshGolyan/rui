@@ -5,12 +5,10 @@ const caller_error = @import("caller_error.zig");
 const ClientTask = @import("ClientTask.zig");
 const upgrade_status = @import("upgrade_status.zig");
 const upgrade_run = @import("upgrade_run.zig");
-const release_candidate = @import("release_candidate.zig");
-const test_poll = @import("test_poll");
 const Self = @This();
 
 pub const Outcome = @import("session_upgrade.zig").Outcome;
-const Operation = enum { discover, check, install };
+const Operation = enum { check, install };
 
 init: std.process.Init = undefined,
 store: []const u8 = "",
@@ -19,8 +17,6 @@ task: ClientTask = .{},
 phase: std.atomic.Value(upgrade.Phase) = .init(.checking),
 gate: std.atomic.Value(enum(u8) { open, cancelled, committed }) = .init(.open),
 operation: Operation = .check,
-candidate: ?release_candidate.ReleaseCandidate = null,
-discovery_attempted: bool = false,
 checked: ?upgrade.Check = null,
 result: ?upgrade.Result = null,
 cleanup: upgrade.CleanupReceipts = .{},
@@ -31,41 +27,12 @@ cancelling: bool = false,
 started: bool = false,
 finished: bool = false,
 
-pub fn discover(self: *Self, init: std.process.Init) !void {
-    std.debug.assert(!self.discovery_attempted);
-    self.discovery_attempted = true;
-    self.operation = .discover;
-    try self.begin(init, "");
-}
-
-pub fn discovering(self: *const Self) bool {
-    return self.operation == .discover;
-}
-
-/// Ends background discovery so a requested run can start. The run never
-/// takes discovery's release: it may be hours old, so the check reads the
-/// release itself. A read still in flight is stopped, not waited out.
-pub fn retireDiscovery(self: *Self) !bool {
-    std.debug.assert(self.discovering() and self.started);
-    self.cancel();
-    if (!try self.advance()) return false;
-    self.deinit();
-    return true;
-}
-
-pub fn availability(self: *const Self) ?upgrade_status.Version {
-    if (!self.discovering() or !self.finished or self.cancelling or self.failure != null) return null;
-    const candidate = self.candidate orelse return null;
-    return newerRelease(@import("transport_options").version, candidate.version);
-}
-
 pub fn begin(self: *Self, init: std.process.Init, store: []const u8) !void {
     std.debug.assert(!self.started and self.task.thread == null);
     self.init = init;
     self.store = store;
     self.allocator = init.gpa;
     self.started = true;
-    self.discovery_attempted = true;
     if (self.cancelling) return self.finish();
     self.task.start(init.io, self, work) catch |err| {
         self.failure = err;
@@ -77,15 +44,9 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8) !void {
 fn work(raw: *anyopaque, task: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (self.operation) {
-        .discover => self.candidate = try upgrade.discoverRelease(self.init, self.allocator, &task.cancellation, &self.download),
         .check => self.checked = try upgrade.check(self.init, self.allocator, self.store, &task.cancellation, &self.download),
         .install => self.result = try upgrade.install(self.init, self.allocator, &self.checked.?, &task.cancellation, .{ .context = self, .report = progress }, &self.cleanup, &self.download),
     }
-}
-
-fn newerRelease(running_text: []const u8, candidate: @import("release_candidate.zig").Version) ?upgrade_status.Version {
-    const running = @import("release_candidate.zig").Version.parse(running_text) catch return null;
-    return if (running.order(candidate) == .lt) upgrade.versionOf(candidate) else null;
 }
 
 fn progress(raw: *anyopaque, phase: upgrade.Phase) void {
@@ -160,10 +121,9 @@ pub fn settle(self: *Self) void {
 pub fn deinit(self: *Self) void {
     self.settle();
     if (self.result) |*result| result.deinit(self.allocator);
-    if (self.candidate) |*candidate| candidate.deinit(self.allocator);
     if (self.checked) |*checked| checked.deinit(self.allocator);
     self.download.deinit(self.allocator);
-    self.* = .{ .discovery_attempted = self.discovery_attempted };
+    self.* = .{};
 }
 
 fn resumed(checked: *const upgrade.Check) upgrade_run.Facts {
@@ -627,96 +587,6 @@ test "Upgrade publication version survives cancellation and restart discovery or
         try std.testing.expectEqualDeep(upgrade_status.Version{ .schema = 61, .patch = 2 }, if (failure == error.Cancelled) ended.upgraded.version else ended.incompatible);
         try std.testing.expect(job.hasGuidance());
     }
-}
-
-test "background discovery domain covers version order publication failure cancellation and once-only retirement" {
-    const Candidate = @import("release_candidate.zig").Version;
-    const running_version = Candidate.parse(@import("transport_options").version) catch null;
-    const newer_candidate = if (running_version) |running| running.order(.{ .schema = 999, .patch = 2 }) == .lt else false;
-    for ([_]struct { []const u8, Candidate, bool }{
-        .{ "0.60.1", .{ .schema = 60, .patch = 0 }, false },
-        .{ "0.60.1", .{ .schema = 60, .patch = 1 }, false },
-        .{ "0.60.1", .{ .schema = 60, .patch = 2 }, true },
-        .{ "0.60.1", .{ .schema = 61, .patch = 0 }, true },
-        .{ "0.60.1", .{ .schema = 59, .patch = 999 }, false },
-        .{ "source", .{ .schema = 60, .patch = 2 }, false },
-    }) |case| {
-        const available = newerRelease(case[0], case[1]);
-        try std.testing.expectEqual(case[2], available != null);
-        if (available) |found| try std.testing.expectEqualDeep(upgrade_status.Version{ .schema = case[1].schema, .patch = case[1].patch }, found);
-    }
-    const Worker = struct {
-        fn run(raw: *anyopaque, _: *ClientTask) !void {
-            const job: *Self = @ptrCast(@alignCast(raw));
-            std.debug.assert(job.operation == .discover);
-        }
-    };
-    for (0..4) |case| {
-        var init: std.process.Init = undefined;
-        init.io = std.testing.io;
-        var job: Self = .{ .init = init, .allocator = std.testing.allocator, .started = true, .operation = .discover, .discovery_attempted = true, .candidate = try release_candidate.fromEffectiveUrl(std.testing.allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64") };
-        defer job.deinit();
-        try std.testing.expectEqual(@as(?upgrade_status.Version, null), job.availability());
-        try job.task.start(init.io, &job, Worker.run);
-        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
-        if (case == 1) job.cancel();
-        if (case == 2) job.failure = error.ConnectionRefused;
-        if (case == 3) {
-            job.candidate.?.deinit(std.testing.allocator);
-            job.candidate = null;
-        }
-        try std.testing.expect(try job.advanceWith(Worker.run));
-        try std.testing.expect(job.finished and job.operation == .discover);
-        try std.testing.expect(job.task.thread == null and job.checked == null and job.result == null);
-        try std.testing.expectEqual(Outcome.unchanged, job.outcome);
-        try std.testing.expectEqual(case == 0 and newer_candidate, job.availability() != null);
-        job.deinit();
-        try std.testing.expect(job.discovery_attempted);
-        try std.testing.expect(!job.started and !job.cancelling);
-    }
-}
-
-test "SH-129 a requested run never acts on discovery's release" {
-    const Worker = struct {
-        var fail: bool = false;
-
-        /// A read in flight ends only when retirement asks it to stop.
-        fn inFlight(raw: *anyopaque, task: *ClientTask) !void {
-            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &task.cancellation.stopped, test_poll.isSet);
-            return found(raw, task);
-        }
-
-        fn found(raw: *anyopaque, _: *ClientTask) !void {
-            const job: *Self = @ptrCast(@alignCast(raw));
-            if (fail) return error.ReleaseDownloadFailed;
-            job.candidate = try release_candidate.fromEffectiveUrl(job.allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64");
-        }
-    };
-    for ([_]bool{ false, true }) |background_finished| for ([_]bool{ false, true }) |discovery_failed| for ([_]bool{ false, true }) |cancelled| {
-        var init: std.process.Init = undefined;
-        init.io = std.testing.io;
-        init.gpa = std.testing.allocator;
-        var job: Self = .{ .init = init, .allocator = std.testing.allocator, .started = true, .operation = .discover, .discovery_attempted = true };
-        defer job.deinit();
-        Worker.fail = discovery_failed;
-        try job.task.start(init.io, &job, if (background_finished) Worker.found else Worker.inFlight);
-        if (background_finished) {
-            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
-            try std.testing.expect(try job.advance());
-        }
-        // Retirement ends only once the read has stopped; an in-flight read stops only when asked.
-        while (!try job.retireDiscovery()) try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
-        try std.testing.expect(!job.discovering());
-        try std.testing.expectEqual(@as(?upgrade_status.Version, null), job.availability());
-        if (cancelled) {
-            job.cancel();
-            try job.begin(init, "/fixture");
-            try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, job.status());
-        } else {
-            // The run starts from nothing: its check, not discovery, reads the release.
-            try std.testing.expectEqual(upgrade_status.Run.checking, job.status());
-        }
-    };
 }
 
 test "SH-76 Upgrade job adapts joined errors and receipts through the shared owner" {
