@@ -339,12 +339,12 @@ class AdapterTest(unittest.TestCase):
                 self.assertIn("mac_runner", needs, name)
                 setup = job.split("- uses: ./.github/actions/setup\n", 1)[1]
                 self.assertIn("publish-caches: ${{ github.ref == 'refs/heads/main' && needs.mac_runner.outputs.self_hosted != 'true' && 'true' || 'false' }}", setup)
-        self.assertEqual(routed, {"macos_build", "macos_build_unit", "macos_suites"})
+        self.assertEqual(routed, {"macos_build", "macos_suites"})
         route = jobs["mac_runner"]
         self.assertIn("timeout-minutes: 3", route)
         self.assertIn("    continue-on-error: true", route)
-        for producer in ("macos_build", "macos_build_unit"):
-            self.assertIn("!cancelled() && needs.plan.result == 'success'", jobs[producer])
+        producer = "macos_build"
+        self.assertIn("!cancelled() && needs.plan.result == 'success'", jobs[producer])
         self.assertIn("--max-time 10", route)
         self.assertEqual(text.count("secrets.MAC_RUNNER_STATUS_TOKEN"), 1)
         self.assertIn("test \"$(uname -m)\" = arm64", jobs["macos_suites"])

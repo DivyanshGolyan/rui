@@ -99,6 +99,9 @@ runs:
         if [ "$CHECK_PART" = compiled ]; then
           case "$PREFIX" in
             rui-build-v2-Linux-X64-*) PREFIX="rui-build-v4-${PREFIX#rui-build-v2-}" ;;
+            # macOS compiles every part in one producer now; a fresh prefix keeps the
+            # old rest-only snapshot from exact-hitting the combined build.
+            rui-build-v2-macOS-ARM64-*) PREFIX="rui-build-v3-${PREFIX#rui-build-v2-}" ;;
           esac
         fi
         {
