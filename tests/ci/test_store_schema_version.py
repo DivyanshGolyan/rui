@@ -18,8 +18,10 @@ LITERALS = r'(?:"(?:,")*,?)?'
 LITERAL_STEP = re.compile(r"\{\.from=\d+,\.sqlite=&\.\{" + LITERALS + r"\},\.mysql=&\.\{" + LITERALS + r"\},?\}")
 # Steps main may carry in a repaired form. Each entry pins the exact repaired text by SHA-256, so any further
 # edit is refused again. Format 92's MySQL step (from 91) never ran: its owner-CHECK SET lacked a closing
-# parenthesis, so MySQL refused it with error 1064 and no MySQL Store took it. Owner approved 2026-11-24.
-REPAIRED_STEPS = {91: "604733fba73cdafb03b2a45774c1e0e338d3a0b864de10cdda916198bf7214d1"}
+# parenthesis, so MySQL refused it with error 1064 and no MySQL Store took it. Owner approved 2026-11-24. The repair
+# also matches the owner CHECK by LOCATE('provider'), because information_schema's CHECK_CLAUSE text did not equal the
+# normalised literal on MySQL 8.4.
+REPAIRED_STEPS = {91: "9f9e6210d1278947bcb8a8d51868fe62d31dc1ed16e9ef06f1ce26672f876bfa"}
 
 
 def baseline_version(source):
