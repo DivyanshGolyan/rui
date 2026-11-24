@@ -9,10 +9,20 @@ const input_parts = @import("input_parts.zig");
 const byte_size = @import("byte_size.zig");
 
 pub const separator = "\n";
+pub const first_image = "[Image 1]";
+pub const Labels = enum { compact, detailed };
 
 pub const max_placeholder_bytes = "[image ".len + 10 + ": ".len + "JPEG".len + " ".len + 10 + "x".len + 10 + ", ".len + 24 + "]".len;
 
 pub fn placeholder(number: u32, image: input_parts.Image, bytes: u64, out: *[max_placeholder_bytes]u8) []const u8 {
+    return displayPlaceholder(.detailed, number, image, bytes, out);
+}
+
+pub fn displayPlaceholder(labels: Labels, number: u32, image: input_parts.Image, bytes: u64, out: *[max_placeholder_bytes]u8) []const u8 {
+    if (labels == .compact) {
+        if (number == 1) return first_image;
+        return std.fmt.bufPrint(out, "[Image {d}]", .{number}) catch unreachable;
+    }
     var size: [24]u8 = undefined;
     const format = switch (image.media.format) {
         .png => "PNG",
@@ -27,6 +37,10 @@ pub const Range = struct { start: u64, length: u64 };
 /// Exact display length: the Text lengths, the placeholders and one separator between parts.
 /// `source.next() !?content_value.Part` yields the certified list in order.
 pub fn length(source: anytype) !u64 {
+    return displayLength(source, .detailed);
+}
+
+pub fn displayLength(source: anytype, labels: Labels) !u64 {
     var total: u64 = 0;
     var images: u32 = 0;
     var first = true;
@@ -36,7 +50,7 @@ pub fn length(source: anytype) !u64 {
         var buffer: [max_placeholder_bytes]u8 = undefined;
         total = try std.math.add(u64, total, switch (part.kind) {
             .text => part.reference.length,
-            .image => |image| placeholder(try nextImage(&images), image, part.reference.length, &buffer).len,
+            .image => |image| displayPlaceholder(labels, try nextImage(&images), image, part.reference.length, &buffer).len,
         });
     }
     return total;
@@ -49,6 +63,10 @@ pub fn length(source: anytype) !u64 {
 /// Text parts that overlap it are read. A sink with an `image(part)` method receives each image
 /// the range reaches instead of its placeholder bytes.
 pub fn write(source: anytype, range: ?Range, sink: anytype) !?Stop(@TypeOf(source)) {
+    return streamDisplay(source, .detailed, range, sink);
+}
+
+pub fn streamDisplay(source: anytype, labels: Labels, range: ?Range, sink: anytype) !?Stop(@TypeOf(source)) {
     const start = if (range) |value| value.start else 0;
     const end = if (range) |value| try std.math.add(u64, value.start, value.length) else std.math.maxInt(u64);
     var offset: u64 = 0;
@@ -71,7 +89,7 @@ pub fn write(source: anytype, range: ?Range, sink: anytype) !?Stop(@TypeOf(sourc
             },
             .image => |image| {
                 var buffer: [max_placeholder_bytes]u8 = undefined;
-                const text = placeholder(try nextImage(&images), image, part.reference.length, &buffer);
+                const text = displayPlaceholder(labels, try nextImage(&images), image, part.reference.length, &buffer);
                 if (comptime std.meta.hasMethod(@TypeOf(sink), "image")) {
                     if (range == null or (offset < end and offset + text.len > start)) try sink.image(part);
                 } else try feedOverlap(sink, text, offset, start, end);

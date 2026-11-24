@@ -590,6 +590,8 @@ def fixture_rows(before, after):
     return {match[1] for match in FIXTURE_ROW.finditer(after) if rows.get(match[1]) != match[0]}
 
 
+VAXIS_OVERLAY_TARGETS = ("test-native", "human-cli-integration", "terminal-restoration-integration")
+
 BUILD_MODULES = {
     "build/product.zig": BUILD_HUB,
     "build/ci.zig": BUILD_HUB,
@@ -601,6 +603,7 @@ BUILD_MODULES = {
     "build/link_table.zig": BUILD_HUB,
     "build/darwin.zig": ("test", "host-launch-integration"),
     "build/deep_modules.zig": ("deep-modules", "deep-modules-test"),
+    "build/vaxis_overlay.zig": VAXIS_OVERLAY_TARGETS,
     ".github/actions/setup/caches/action.yml": ("test-logic",),
     ".github/actions/setup/caches/save-keys.cjs": ("test-logic",),
     ".github/actions/setup/fixtures/action.yml":
@@ -609,6 +612,8 @@ BUILD_MODULES = {
 RULES += tuple(((module,), targets, tuple(target for target in targets if target not in LINUX_ONLY),
                 "Build module: the targets it defines or builds for")
                for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
+RULES += ((('build/vaxis_overlay.patch',), VAXIS_OVERLAY_TARGETS, VAXIS_OVERLAY_TARGETS,
+           "Vaxis overlay input: the native terminal and its integration fixtures"),)
 
 
 # The module lint reads every production src/ file (from src/cli.zig) and its allow file; build/deep_modules.zig
@@ -1156,6 +1161,8 @@ DIRECT, GRAPH, BROAD = 0, 1, 2
 EXTRA_OWN_FILES = {"deep-modules": ("tests/ci/deep_modules.allow", "tests/ci/deep_modules/*", "build/deep_modules.zig"),
                    "deep-modules-test": ("tests/ci/deep_modules/*", "build/deep_modules.zig"),
                    "rsql-table": ("tests/ci/rsql_table.py", "src/store/rsql_table.zig"),
+                   # Attribution only: host-memory is in no selection rule, so only Promote's memory job runs it.
+                   "host-memory": ("tests/ci/host_memory.py",),
                    # The Go packages select() maps to measurement-check by its path rule (QUALIFICATION_GO).
                    "measurement-check": tuple(f"{QUALIFICATION_ROOT}*{suffix}" for suffix in QUALIFICATION_GO)}
 # The targets whose binaries rsql-table's collect build compiles: every statement and fixture text they
@@ -1199,6 +1206,9 @@ def attribute(path, graph, available, read, contents=None, fixture_literals=None
     rule_named = {target for patterns, checks, *_ in RULES if matches(path, patterns) for target in checks}
     if any(path in graph.reached[root] for root in STATEMENT_TABLE_TARGETS):
         record("rsql-table", GRAPH)
+    if path in graph.host:
+        # Host graph paths reach the memory gate through the Host's closure, which no selection rule names.
+        record("host-memory", GRAPH)
     if path == DEPENDENCY_MANIFEST and contents and DEPENDENCY_MANIFEST in contents:
         # The link edges the changed packages reach, before the PR tier's CI_RUNNABLE filter drops some of them.
         packages = changed_dependencies(*contents[DEPENDENCY_MANIFEST])

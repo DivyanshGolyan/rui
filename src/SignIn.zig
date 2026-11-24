@@ -2207,7 +2207,7 @@ test "Sign-in both OAuth methods retry published Host failures without authentic
     };
 }
 
-test "SUI-128 Sign-in departure retains remote handover cause and certainty" {
+test "SUI-131 Sign-in departure retains remote handover cause and certainty" {
     const activation = @import("host_activation.zig");
     for ([_]activation.EffectTag{ .check_target, .verify }) |effect| for ([_]bool{ false, true }) |screen_first| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

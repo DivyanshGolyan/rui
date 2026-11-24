@@ -7,7 +7,7 @@ import main_qualified as mq
 NOW = datetime(2026, 11, 18, 12, tzinfo=timezone.utc)
 A, B, C, D = (letter * 40 for letter in "abcd")
 QUALIFIER = ".github/workflows/main-qualifier.yml"
-ARTIFACTS = ("rui-linux-x86_64", "rui-linux-arm64", "rui-darwin-arm64", "rui-npm", "rui-digests")
+ARTIFACTS = ("rui-linux-x86_64", "rui-linux-arm64", "rui-darwin-arm64", "rui-npm", "rui-digests", "rui-host-memory")
 
 
 def status(state, description, run="41", context="main-qualified", creator="github-actions[bot]"):
@@ -89,8 +89,10 @@ class PromotionChoiceTest(unittest.TestCase):
             "digests expired": (green, run, artifacts(expired=("rui-digests",)), "0.80.0",
                                 "run 41 no longer holds rui-digests"),
             "inside the margin": (green, run, artifacts(expires="2026-11-18T13:30:00Z"), "0.80.0",
-                                  "run 41 no longer holds rui-darwin-arm64, rui-digests, rui-linux-arm64, "
-                                  "rui-linux-x86_64, rui-npm"),
+                                  "run 41 no longer holds rui-darwin-arm64, rui-digests, rui-host-memory, "
+                                  "rui-linux-arm64, rui-linux-x86_64, rui-npm"),
+            "memory table expired": (green, run, artifacts(expired=("rui-host-memory",)), "0.80.0",
+                                     "run 41 no longer holds rui-host-memory"),
             "just past the margin": (green, run, artifacts(expires="2026-11-18T14:01:00Z"), "0.80.0", None),
         }
         for case, (record, found, held, planned, expected) in reusable.items():
