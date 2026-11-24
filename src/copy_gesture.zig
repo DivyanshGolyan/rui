@@ -65,7 +65,7 @@ pub fn step(phase: Phase, input: Input) Step {
     };
 }
 
-test "copy gesture step covers every phase and pointer fact" {
+test "SUI-159 copy gesture transitions exhaust phases and consume canceled releases" {
     const Case = struct { phase: Phase, input: Input, expected: Step };
     const cases = [_]Case{
         .{ .phase = .idle, .input = .press, .expected = .{ .phase = .pressed, .effect = .begin } },
@@ -98,22 +98,28 @@ test "copy gesture step covers every phase and pointer fact" {
         .{ .phase = .cancelled, .input = .{ .release = true }, .expected = .{ .phase = .idle, .effect = .consume_release } },
     };
     for (cases) |case| try std.testing.expectEqualDeep(case.expected, step(case.phase, case.input));
-}
 
-test "cancelled copy release is consumed before a fresh press starts" {
-    const canceled = step(.dragging, .cancel);
-    try std.testing.expectEqual(Phase.cancelled, canceled.phase);
-    try std.testing.expectEqual(Effect.cancel, canceled.effect);
+    const cancelled = step(.dragging, .cancel);
+    try std.testing.expectEqual(Phase.cancelled, cancelled.phase);
+    try std.testing.expectEqual(Effect.cancel, cancelled.effect);
 
-    const drag = step(canceled.phase, .{ .drag = true });
-    try std.testing.expectEqual(Phase.cancelled, drag.phase);
-    try std.testing.expectEqual(Effect.consume_drag, drag.effect);
+    const consumed_drag = step(cancelled.phase, .{ .drag = true });
+    try std.testing.expectEqual(Phase.cancelled, consumed_drag.phase);
+    try std.testing.expectEqual(Effect.consume_drag, consumed_drag.effect);
 
-    const released = step(drag.phase, .{ .release = false });
-    try std.testing.expectEqual(Phase.idle, released.phase);
-    try std.testing.expectEqual(Effect.consume_release, released.effect);
+    const consumed_release = step(consumed_drag.phase, .{ .release = false });
+    try std.testing.expectEqual(Phase.idle, consumed_release.phase);
+    try std.testing.expectEqual(Effect.consume_release, consumed_release.effect);
 
-    const fresh = step(released.phase, .press);
+    const fresh = step(consumed_release.phase, .press);
     try std.testing.expectEqual(Phase.pressed, fresh.phase);
     try std.testing.expectEqual(Effect.begin, fresh.effect);
+
+    const cancelled_again = step(.dragging, .cancel);
+    const restarted = step(cancelled_again.phase, .press);
+    try std.testing.expectEqual(Phase.pressed, restarted.phase);
+    try std.testing.expectEqual(Effect.restart, restarted.effect);
+    const restarted_release = step(restarted.phase, .{ .release = true });
+    try std.testing.expectEqual(Phase.idle, restarted_release.phase);
+    try std.testing.expectEqual(Effect.finish_click, restarted_release.effect);
 }

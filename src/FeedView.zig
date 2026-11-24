@@ -112,6 +112,10 @@ pub fn dragging(self: *const Self) bool {
     return if (self.selection) |held| held.phase == .dragging else false;
 }
 
+pub fn selectionHeld(self: *const Self) bool {
+    return if (self.selection) |held| held.phase == .pressed or held.phase == .dragging else false;
+}
+
 pub fn capturesCopySelection(self: *const Self) bool {
     return if (self.selection) |held| held.purpose == .copy else false;
 }
