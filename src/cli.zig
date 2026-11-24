@@ -2080,17 +2080,23 @@ fn copiedKeySource(init: std.process.Init, source: @FieldType(host_start.Connect
     };
 }
 
-/// The readiness of every name the Store serves: the saved overlay, plus each connection its live Host serves.
-/// A live Host holds its own keys, so a name it serves is configured whatever the saved overlay read.
+/// The readiness of the names a Store serves. A live Host that answers is the authority, since it executes the
+/// requests; with none answering, the Store's saved readiness stands. See provider_selection.servedAuthority.
 fn servedReadiness(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
-    var served = storeReadiness(init, store, localReadiness(init)).readiness;
+    const saved = storeReadiness(init, store, localReadiness(init)).readiness;
     switch (client.hostStatus(init.io, store)) {
-        .ready => |ready| for (ready.capabilities.connections.slice()) |fact| {
-            if (fact.route != .unserved) served.set(fact.name, .configured);
+        .ready => |ready| {
+            var live: [provider_route.max_served]@import("connection.zig").Name = undefined;
+            var count: usize = 0;
+            for (ready.capabilities.connections.slice()) |fact| {
+                if (fact.route == .unserved) continue;
+                live[count] = fact.name;
+                count += 1;
+            }
+            return provider_selection.servedAuthority(live[0..count], saved);
         },
-        else => {},
+        else => return provider_selection.servedAuthority(null, saved),
     }
-    return served;
 }
 
 /// The served names an unprompted door may select: every served name is usable.

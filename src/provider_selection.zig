@@ -46,6 +46,16 @@ pub const Readinesses = struct {
     }
 };
 
+/// The names a Store serves: a live Host that answers is the authority, since it is the one that executes;
+/// with no live Host, the Store's saved readiness (built-ins and saved connections) stands. The two are
+/// never unioned, so each source alone bounds the result by max_served and nothing can overflow.
+pub fn servedAuthority(live: ?[]const connection.Name, saved: Readinesses) Readinesses {
+    const names = live orelse return saved;
+    var authority: Readinesses = .{};
+    for (names) |name| authority.set(name, .configured);
+    return authority;
+}
+
 pub const Capability = struct {
     name: []const u8,
     recommended_model: []const u8,
@@ -152,6 +162,47 @@ test "CM-57 served-name selection resolves by name across counts, readiness and 
 
 fn built_ins_first() connection.Name {
     return provider_route.built_in_names[0];
+}
+
+test "the served authority: a live Host answers alone, else the saved readiness stands, at every overlap and capacity" {
+    const model_capability = @import("model_capability.zig");
+    const alpha = connection.Name.parse("alpha").?;
+    const beta = connection.Name.parse("beta").?;
+    var saved_beta: Readinesses = .initFill(.missing);
+    saved_beta.set(beta, .configured);
+    var saved_alpha_missing: Readinesses = .initFill(.missing);
+    saved_alpha_missing.set(alpha, .missing);
+    saved_alpha_missing.set(beta, .configured);
+    var text: [connection.max_served][16]u8 = undefined;
+    var full: [connection.max_served]connection.Name = undefined;
+    for (&full, 0..) |*name, index| name.* = connection.Name.parse(try std.fmt.bufPrint(&text[index], "conn-{d}", .{index})).?;
+    const Case = struct { live: ?[]const connection.Name, saved: Readinesses, requested: []const u8, selects: bool };
+    const cases = [_]Case{
+        // Live only: the live name resolves; the Store's saved names do not exist.
+        .{ .live = &.{alpha}, .saved = .initFill(.missing), .requested = "alpha", .selects = true },
+        // Saved only: no live Host answers, so the saved connection resolves.
+        .{ .live = null, .saved = saved_beta, .requested = "beta", .selects = true },
+        // Both overlapping: the live Host is the authority, so the saved beta is refused by name.
+        .{ .live = &.{alpha}, .saved = saved_beta, .requested = "beta", .selects = false },
+        .{ .live = &.{alpha}, .saved = saved_alpha_missing, .requested = "alpha", .selects = true },
+        // Both disjoint: the live name resolves and the saved one is refused.
+        .{ .live = &.{alpha}, .saved = saved_beta, .requested = "alpha", .selects = true },
+        // Live at full capacity with a different saved name: a live name resolves, the saved name is refused.
+        .{ .live = &full, .saved = saved_beta, .requested = "conn-15", .selects = true },
+        .{ .live = &full, .saved = saved_beta, .requested = "beta", .selects = false },
+        // A live Host serving nothing refuses every name, even one the Store saved.
+        .{ .live = &.{}, .saved = saved_beta, .requested = "beta", .selects = false },
+    };
+    for (cases) |case| {
+        const readiness = servedAuthority(case.live, case.saved);
+        var caps = model_capability.capabilities(&readiness);
+        const result = resolve(caps.slice(), case.requested, "custom-model", null, null);
+        if (case.selects) {
+            try std.testing.expectEqualStrings(case.requested, (try result).selected.provider);
+        } else {
+            try std.testing.expectError(error.UnsupportedSelectionProvider, result);
+        }
+    }
 }
 
 test "a custom name a live Host serves is selectable by explicit name; an absent name is refused" {
