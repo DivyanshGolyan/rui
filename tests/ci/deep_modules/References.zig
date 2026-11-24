@@ -50,12 +50,7 @@ pub fn collect(arena: Allocator, sources: *const Sources, items: *const Items.It
 
 pub fn collectWithStats(arena: Allocator, sources: *const Sources, items: *const Items.Items, stats: *Stats) Allocator.Error![]Reference {
     const bodies = try Bodies.collect(arena, sources, items);
-    const locals = try arena.alloc(Infer.Locals, items.list.len);
-    for (locals) |*slot| slot.* = .{};
-    for (items.list, 0..) |item, i| {
-        if (item.kind != .function) continue;
-        try Infer.bind(arena, &locals[i], items, sources, nodeItem(i), bodies.nodes[i]);
-    }
+    const locals = try bindLocals(arena, sources, items, &bodies);
     var refs: std.ArrayList(Reference) = .empty;
     for (sources.files, 0..) |*file, i| {
         var pass: Pass = .{
@@ -72,6 +67,215 @@ pub fn collectWithStats(arena: Allocator, sources: *const Sources, items: *const
         try pass.run(&refs);
     }
     return refs.items;
+}
+
+/// The names each function item declares, by item: its own parameters and declarations, then
+/// those of the functions nested in its body. `bodies` must be Bodies.collect of the same items.
+pub fn bindLocals(arena: Allocator, sources: *const Sources, items: *const Items.Items, bodies: *const Bodies) Allocator.Error![]Infer.Locals {
+    const none = try arena.alloc([]const ?Types.TypeRef, items.list.len);
+    @memset(none, &.{});
+    const locals = try bindWith(arena, sources, items, bodies, none);
+    // Only the functions whose anytype parameters now have a type bind again. Re-binding the
+    // nested functions is idempotent where their holder is unchanged: a name bound twice keeps
+    // its type when both bindings agree.
+    const param_types = try anytypeTypes(arena, sources, items, bodies, locals);
+    const rebound = try arena.alloc(bool, sources.files.len);
+    @memset(rebound, false);
+    for (items.list, 0..) |item, i| {
+        if (item.kind != .function or !hasTyped(param_types[i])) continue;
+        locals[i] = .{};
+        rebound[@backingInt(item.file)] = true;
+        try Infer.bindWithParams(arena, &locals[i], items, sources, nodeItem(i), bodies.nodes[i], param_types[i]);
+    }
+    for (rebound, 0..) |changed, i| {
+        if (changed) try bindNestedFns(arena, sources, items, bodies, locals, @fromBackingInt(@intCast(i)));
+    }
+    return locals;
+}
+
+fn hasTyped(types: []const ?Types.TypeRef) bool {
+    for (types) |t| if (t != null) return true;
+    return false;
+}
+
+/// The locals of each function item with its anytype parameters given by `param_types` (by item, then index).
+fn bindWith(arena: Allocator, sources: *const Sources, items: *const Items.Items, bodies: *const Bodies, param_types: []const []const ?Types.TypeRef) Allocator.Error![]Infer.Locals {
+    const locals = try arena.alloc(Infer.Locals, items.list.len);
+    for (locals) |*slot| slot.* = .{};
+    for (items.list, 0..) |item, i| {
+        if (item.kind != .function) continue;
+        try Infer.bindWithParams(arena, &locals[i], items, sources, nodeItem(i), bodies.nodes[i], param_types[i]);
+    }
+    for (sources.files, 0..) |_, i| try bindNestedFns(arena, sources, items, bodies, locals, @fromBackingInt(@intCast(i)));
+    return locals;
+}
+
+/// The one type that a function's anytype parameter takes, when every production call passes
+/// that type. It is derived only when the function is never used except as a called callee,
+/// no production call the walk cannot resolve has its name, and every production call's argument
+/// has the same known type. Otherwise the parameter stays unknown.
+fn anytypeTypes(arena: Allocator, sources: *const Sources, items: *const Items.Items, bodies: *const Bodies, locals: []const Infer.Locals) Allocator.Error![]const []const ?Types.TypeRef {
+    const Agreed = struct {
+        is_any: bool,
+        state: enum { none, typed, conflict } = .none,
+        t: TypeRef = Types.unknown,
+    };
+    const slots = try arena.alloc([]Agreed, items.list.len);
+    for (slots, items.list) |*slot, item| {
+        slot.* = &.{};
+        if (item.kind != .function) continue;
+        const tree = &sources.files[@backingInt(item.file)].ast;
+        var buffer: [1]Ast.Node.Index = undefined;
+        const proto = tree.fullFnProto(&buffer, syntax.protoNode(tree, item.decl)) orelse continue;
+        var list: std.ArrayList(Agreed) = .empty;
+        var params = proto.iterate(tree);
+        while (params.next()) |param| try list.append(arena, .{ .is_any = param.type_expr == null });
+        slot.* = list.items;
+    }
+
+    // Only the names of functions with an anytype parameter matter; the walk checks calls by name first.
+    var names: std.StringHashMapUnmanaged(void) = .empty;
+    for (slots, items.list) |slot, item| {
+        for (slot) |agreed| if (agreed.is_any) {
+            try names.put(arena, item.name, {});
+            break;
+        };
+    }
+
+    // The production calls of those functions, and the names of calls the walk cannot resolve.
+    const Site = struct { file: FileId, holder: ItemId, call: Ast.Node.Index, callee: ItemId };
+    var sites: std.ArrayList(Site) = .empty;
+    var unresolved: std.StringHashMapUnmanaged(void) = .empty;
+    const callees = try arena.alloc([]bool, sources.files.len);
+    for (sources.files, 0..) |*file, fi| {
+        const file_id: FileId = @fromBackingInt(@intCast(fi));
+        const tree = &file.ast;
+        const is_callee = try arena.alloc(bool, tree.nodes.len);
+        @memset(is_callee, false);
+        callees[fi] = is_callee;
+        var buffer: [1]Ast.Node.Index = undefined;
+        for (0..tree.nodes.len) |ni| {
+            const node = nodeAt(ni);
+            const call = tree.fullCall(&buffer, node) orelse continue;
+            is_callee[@backingInt(call.ast.fn_expr)] = true;
+            const name = calleeName(tree, call.ast.fn_expr) orelse continue;
+            if (!names.contains(name)) continue;
+            const holder = bodies.holder(file_id, tree.firstToken(node)) orelse continue;
+            const scope = items.get(holder).parent orelse holder;
+            if (Infer.calleeOf(&locals[@backingInt(holder)], items, sources, scope, file_id, call.ast.fn_expr, Types.unknown)) |callee| {
+                if (slots[@backingInt(callee)].len != 0) try sites.append(arena, .{ .file = file_id, .holder = holder, .call = node, .callee = callee });
+            } else {
+                try unresolved.put(arena, name, {});
+            }
+        }
+    }
+
+    // A function named anywhere but as a callee (a value, a field, an alias) may be called from code the walk cannot see.
+    const escaped = try arena.alloc(bool, items.list.len);
+    @memset(escaped, false);
+    for (sources.files, 0..) |*file, fi| {
+        const file_id: FileId = @fromBackingInt(@intCast(fi));
+        const tree = &file.ast;
+        for (0..tree.nodes.len) |ni| {
+            const node = nodeAt(ni);
+            if (callees[fi][ni]) continue;
+            if (tree.nodeTag(node) != .identifier and tree.nodeTag(node) != .field_access) continue;
+            const name = calleeName(tree, node) orelse continue;
+            if (!names.contains(name)) continue;
+            const scope = if (bodies.holder(file_id, tree.firstToken(node))) |holder| items.get(holder).parent orelse holder else items.files[fi];
+            const item = Names.resolvePath(items, sources, scope, file_id, node) orelse continue;
+            escaped[@backingInt(item)] = true;
+        }
+    }
+
+    // The argument types of each production call to an unescaped function with anytype parameters.
+    for (sites.items) |site| {
+        const index = @backingInt(site.callee);
+        if (escaped[index] or unresolved.contains(items.get(site.callee).name)) continue;
+        const tree = &sources.files[@backingInt(site.file)].ast;
+        var buffer: [1]Ast.Node.Index = undefined;
+        const call = tree.fullCall(&buffer, site.call).?;
+        const scope = items.get(site.holder).parent orelse site.holder;
+        const at = &locals[@backingInt(site.holder)];
+        const offset = receiverShift(items, sources, scope, site.file, call.ast.fn_expr, site.callee);
+        for (call.ast.params, 0..) |arg, i| {
+            const p = i + offset;
+            if (p >= slots[index].len or !slots[index][p].is_any) continue;
+            const agreed = &slots[index][p];
+            if (agreed.state == .conflict) continue;
+            const t = Infer.typeOf(at, items, sources, scope, site.file, arg, Types.unknown);
+            if (t.container == null) {
+                agreed.state = .conflict;
+            } else if (agreed.state == .none) {
+                agreed.state = .typed;
+                agreed.t = t;
+            } else if (!Values.sameType(agreed.t, t)) {
+                agreed.state = .conflict;
+            }
+        }
+    }
+
+    const out = try arena.alloc([]const ?Types.TypeRef, items.list.len);
+    for (slots, out) |slot, *list| {
+        const types = try arena.alloc(?Types.TypeRef, slot.len);
+        for (slot, types) |agreed, *t| {
+            t.* = if (agreed.is_any and agreed.state == .typed) agreed.t else null;
+        }
+        list.* = types;
+    }
+    return out;
+}
+
+/// The name a callee expression is known by: an identifier, or the last name of a field access.
+fn calleeName(tree: *const Ast, node: Ast.Node.Index) ?[]const u8 {
+    return switch (tree.nodeTag(node)) {
+        .identifier => tree.tokenSlice(tree.nodeMainToken(node)),
+        .field_access => tree.tokenSlice(tree.nodeData(node).node_and_token[1]),
+        else => null,
+    };
+}
+
+/// 1 when `callee` is a method called on a value (its `self` is the value), else 0. Mirrors `receiverOffset`.
+fn receiverShift(items: *const Items.Items, sources: *const Sources, scope: ItemId, file: FileId, fn_expr: Ast.Node.Index, callee: ItemId) usize {
+    const ast = &sources.files[@backingInt(file)].ast;
+    if (ast.nodeTag(fn_expr) != .field_access or !items.get(callee).takes_self) return 0;
+    const base = ast.nodeData(fn_expr).node_and_token[0];
+    return if (Names.resolvePath(items, sources, scope, file, base) == null) 1 else 0;
+}
+
+/// Binds the functions nested in a function's body into the locals of the function that holds
+/// them. Bodies gives a nested function's code to its holder, and the nested function has no item.
+fn bindNestedFns(arena: Allocator, sources: *const Sources, items: *const Items.Items, bodies: *const Bodies, locals: []Infer.Locals, file: FileId) Allocator.Error!void {
+    const tree = &sources.files[@backingInt(file)].ast;
+    var decls: std.ArrayList(Ast.Node.Index) = .empty;
+    var holders: std.ArrayList(ItemId) = .empty;
+    for (0..tree.nodes.len) |i| {
+        const node = nodeAt(i);
+        if (tree.nodeTag(node) != .fn_decl or bodies.function(file, node) != null) continue;
+        const holder = bodies.holder(file, tree.firstToken(node)) orelse continue;
+        if (items.get(holder).kind != .function or items.get(holder).decl == node) continue;
+        try decls.append(arena, node);
+        try holders.append(arena, holder);
+    }
+    if (decls.items.len == 0) return;
+    const lists = try arena.alloc(std.ArrayList(Ast.Node.Index), decls.items.len);
+    for (lists) |*list| list.* = .empty;
+    for (0..tree.nodes.len) |i| {
+        const node = nodeAt(i);
+        if (bodies.function(file, node) != null) continue;
+        const holder = bodies.holder(file, tree.firstToken(node)) orelse continue;
+        if (items.get(holder).kind != .function) continue;
+        // The innermost nested declaration that holds the node is the one whose code it is.
+        var inner: ?usize = null;
+        for (decls.items, 0..) |decl, k| {
+            if (tree.firstToken(decl) > tree.firstToken(node) or tree.lastToken(decl) < tree.lastToken(node)) continue;
+            if (inner == null or tree.firstToken(decl) > tree.firstToken(decls.items[inner.?])) inner = k;
+        }
+        if (inner) |k| try lists[k].append(arena, node);
+    }
+    for (decls.items, holders.items, lists) |decl, holder, list| {
+        try Infer.bindNested(arena, &locals[@backingInt(holder)], items, sources, holder, decl, list.items);
+    }
 }
 
 /// The fixed-point rounds for expected types: one round per level of literal nesting.

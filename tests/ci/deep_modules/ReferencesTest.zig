@@ -176,3 +176,61 @@ test "a reference is held by the innermost item and comes from its file's module
     }
     return error.TestNoReference;
 }
+
+const nested_source =
+    \\pub const Cell = struct { n: u8, pub fn bump(self: *Cell) void { self.n += 1; } };
+    \\pub fn outer(raw: *anyopaque) u8 {
+    \\    _ = raw;
+    \\    const Local = struct {
+    \\        fn read(c: *Cell) u8 {
+    \\            const alias = c;
+    \\            return alias.n;
+    \\        }
+    \\    };
+    \\    return Local.read(undefined);
+    \\}
+    \\
+;
+
+test "a function nested in a function body binds its params and locals in the holder" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const loaded = try Fixture.load(a, &.{.{ .path = "src/main.zig", .text = nested_source }}, "src/main.zig");
+    const refs = try References.collect(a, &loaded.sources, &loaded.items);
+
+    // `alias.n` in the nested read: alias is a local of read, typed from the parameter c: *Cell.
+    const n = loaded.item("src/main.zig", "Cell.n");
+    try testing.expectEqual(Access.copy, accessOf(refs, n, loaded.item("src/main.zig", "outer")).?);
+}
+
+const anytype_source =
+    \\pub const Cell = struct { n: u8 };
+    \\pub fn show(v: anytype) u8 { return v.n; }
+    \\pub fn a(c: *Cell) u8 { return show(c) + show(c); }
+    \\pub fn other(v: anytype) u8 { return v.n; }
+    \\pub fn c1(c: *Cell) u8 { return other(c); }
+    \\pub fn c2(c: Cell) u8 { return other(c); }
+    \\pub fn esc(v: anytype) u8 { return v.n; }
+    \\pub fn c3(c: *Cell) u8 { return esc(c); }
+    \\pub const cb = esc;
+    \\
+;
+
+test "an anytype parameter takes the one type its production calls agree on, and stays unknown otherwise" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const loaded = try Fixture.load(a, &.{.{ .path = "src/main.zig", .text = anytype_source }}, "src/main.zig");
+    const refs = try References.collect(a, &loaded.sources, &loaded.items);
+
+    // Both calls of show pass a *Cell, so v is a *Cell and `v.n` is a read of Cell.n.
+    const n = loaded.item("src/main.zig", "Cell.n");
+    try testing.expectEqual(Access.copy, accessOf(refs, n, loaded.item("src/main.zig", "show")).?);
+    // other is called with a *Cell and a Cell: no single type, so nothing is recorded in other.
+    // esc is used as a value (`cb = esc`), so its callers cannot all be seen: nothing is recorded in esc.
+    for (refs) |ref| {
+        try testing.expect(ref.holder != loaded.item("src/main.zig", "other"));
+        try testing.expect(ref.holder != loaded.item("src/main.zig", "esc"));
+    }
+}

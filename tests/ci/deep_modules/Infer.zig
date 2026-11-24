@@ -39,6 +39,12 @@ pub const Locals = struct {
 /// declarations and captures in source order. `nodes` are the function's own nodes
 /// (Bodies.nodes). `locals` must start empty.
 pub fn bind(arena: Allocator, locals: *Locals, items: *const Items.Items, sources: *const Sources, function: ItemId, nodes: []const Ast.Node.Index) Allocator.Error!void {
+    return bindWithParams(arena, locals, items, sources, function, nodes, &.{});
+}
+
+/// `bind`, with the types of the anytype parameters given by `param_types`, by parameter index.
+/// A null entry, or an index past the end, leaves that parameter unknown.
+pub fn bindWithParams(arena: Allocator, locals: *Locals, items: *const Items.Items, sources: *const Sources, function: ItemId, nodes: []const Ast.Node.Index, param_types: []const ?TypeRef) Allocator.Error!void {
     const item = items.get(function);
     if (item.kind != .function) return;
     const tree = &sources.files[@backingInt(item.file)].ast;
@@ -46,12 +52,44 @@ pub fn bind(arena: Allocator, locals: *Locals, items: *const Items.Items, source
     var buffer: [1]Ast.Node.Index = undefined;
     const proto = tree.fullFnProto(&buffer, syntax.protoNode(tree, item.decl)) orelse return;
     var params = proto.iterate(tree);
-    while (params.next()) |param| {
+    var index: usize = 0;
+    while (params.next()) |param| : (index += 1) {
         const name_token = param.name_token orelse continue;
-        const t = if (param.type_expr) |type_node| Types.ofTypeExpr(items, sources, env.scope, env.file, type_node) else Types.unknown;
+        const t = if (param.type_expr) |type_node|
+            Types.ofTypeExpr(items, sources, env.scope, env.file, type_node)
+        else if (index < param_types.len) (param_types[index] orelse Types.unknown) else Types.unknown;
         try locals.put(arena, tree.tokenSlice(name_token), Values.known(t));
     }
     for (try Captures.collect(arena, tree, nodes)) |site| try env.bindSite(arena, locals, site);
+}
+
+/// Binds the parameters and declarations of a function nested in `holder`'s body (a
+/// function inside a function, or inside an anonymous struct of one). Bodies gives its code
+/// to `holder`, so its names share `holder`'s map: Zig forbids shadowing, and a name bound
+/// twice keeps its type only when both bindings agree. `decl` is the nested fn_decl and
+/// `nodes` the nodes of its declaration.
+pub fn bindNested(arena: Allocator, locals: *Locals, items: *const Items.Items, sources: *const Sources, holder: ItemId, decl: Ast.Node.Index, nodes: []const Ast.Node.Index) Allocator.Error!void {
+    const item = items.get(holder);
+    const env: Env = .{ .locals = locals, .items = items, .sources = sources, .scope = item.parent orelse return, .file = item.file };
+    const tree = env.ast();
+    var buffer: [1]Ast.Node.Index = undefined;
+    if (tree.fullFnProto(&buffer, syntax.protoNode(tree, decl))) |proto| {
+        var params = proto.iterate(tree);
+        while (params.next()) |param| {
+            const name_token = param.name_token orelse continue;
+            const t = if (param.type_expr) |type_node| Types.ofTypeExpr(items, sources, env.scope, env.file, type_node) else Types.unknown;
+            try locals.put(arena, tree.tokenSlice(name_token), Values.known(t));
+        }
+    }
+    for (try Captures.collect(arena, tree, nodes)) |site| try env.bindSite(arena, locals, site);
+}
+
+/// Adds one branch's type to the type that the branches agree on; false when it is unknown or differs.
+fn joinBranch(out: *?TypeRef, t: TypeRef) bool {
+    if (t.container == null) return false;
+    if (out.*) |prev| return Values.sameType(prev, t);
+    out.* = t;
+    return true;
 }
 
 /// The type of the expression `node` in `file`, inside container `scope`, with the
@@ -103,6 +141,8 @@ const Env = struct {
             .slice_open, .slice, .slice_sentinel => env.slice(node),
             .struct_init_one, .struct_init_one_comma, .struct_init_dot_two, .struct_init_dot_two_comma, .struct_init_dot, .struct_init_dot_comma, .struct_init, .struct_init_comma, .array_init_one, .array_init_one_comma, .array_init_dot_two, .array_init_dot_two_comma, .array_init_dot, .array_init_dot_comma, .array_init, .array_init_comma => env.literal(node, result),
             .call_one, .call_one_comma, .call, .call_comma => env.call(node, result),
+            .if_simple, .@"if" => env.ifExpr(node, result),
+            .@"switch", .switch_comma => env.switchExpr(node, result),
             .builtin_call_two, .builtin_call_two_comma, .builtin_call, .builtin_call_comma => env.builtin(node, result),
             .enum_literal => env.declLiteral(node, result),
             else => Types.unknown,
@@ -199,6 +239,41 @@ const Env = struct {
         const owner = Values.literalOwner(result) orelse return Types.unknown;
         const found = Items.lookup(env.items, owner, tree.tokenSlice(tree.nodeMainToken(node))) orelse return Types.unknown;
         return Values.declType(env.items, env.sources, found);
+    }
+
+    /// `if (c) a else b` is the type that both branches have. A branch that does not
+    /// return a value (`unreachable`, `return`, `break`, `continue`, `@panic`) is left out.
+    fn ifExpr(env: Env, node: Ast.Node.Index, result: TypeRef) TypeRef {
+        const info = env.ast().fullIf(node) orelse return Types.unknown;
+        const else_node = info.ast.else_expr.unwrap() orelse return Types.unknown;
+        var out: ?TypeRef = null;
+        for ([_]Ast.Node.Index{ info.ast.then_expr, else_node }) |branch| {
+            if (env.exits(branch)) continue;
+            if (!joinBranch(&out, env.value(branch, result))) return Types.unknown;
+        }
+        return out orelse Types.unknown;
+    }
+
+    /// A `switch` is the type that every prong with a value has, as `ifExpr` gives it.
+    fn switchExpr(env: Env, node: Ast.Node.Index, result: TypeRef) TypeRef {
+        const tree = env.ast();
+        const info = tree.fullSwitch(node) orelse return Types.unknown;
+        var out: ?TypeRef = null;
+        for (info.ast.cases) |case| {
+            const target = (tree.fullSwitchCase(case) orelse return Types.unknown).ast.target_expr;
+            if (env.exits(target)) continue;
+            if (!joinBranch(&out, env.value(target, result))) return Types.unknown;
+        }
+        return out orelse Types.unknown;
+    }
+
+    fn exits(env: Env, node: Ast.Node.Index) bool {
+        const tree = env.ast();
+        return switch (tree.nodeTag(node)) {
+            .unreachable_literal, .@"return", .@"break", .@"continue" => true,
+            .builtin_call_two, .builtin_call_two_comma, .builtin_call, .builtin_call_comma => std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "@panic"),
+            else => false,
+        };
     }
 
     /// `@as(T, e)` is T; `@ptrCast` and `@alignCast` take the type the context expects.
