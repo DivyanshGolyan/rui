@@ -237,7 +237,7 @@ MySQL follows ordered stop then start: the replacement's own Store lock acquisit
 When departure guidance prevents relaunch, a terminal client that cannot speak the new Host's protocol retains its draft and unresolved handles in a local recovery hold rather than reattaching or resending work.
 
 `src/Installation.zig` is the sole final publication owner; source and release shell installers invoke the same staged native helper.
-A `release_candidate` follows the HTTPS redirect chain from `https://ruicode.com/releases/latest` and reads curl's effective URL, requiring the exact `https://github.com/DivyanshGolyan/rui/releases/tag/v` prefix and a canonical stable version.
+A `release_candidate` follows the redirects from `https://ruicode.com/releases/latest` one hop at a time without loading the tag page, and stops at the Location with the exact `https://github.com/DivyanshGolyan/rui/releases/tag/v` prefix and a canonical stable version.
 It derives pinned SHA256SUMS and archive URLs on `https://ruicode.com/releases/download/vX.Y.Z/`, without GitHub's rate-limited JSON API. The archive must appear exactly once in SHA256SUMS; that membership and digest pin the candidate before archive download.
 `upgrade_process.Download` owns curl options for release discovery, checksums, and archives in both CLI and terminal upgrades.
 Each download has one 300-second deadline across at most two attempts, with a 10-second connection timeout on each attempt.

@@ -69,7 +69,10 @@ path = urllib.parse.urlsplit(url).path
 # Configuration and protocol confinement remain mandatory on every attempt.
 assert args[0] == "--disable", args
 assert args[args.index("--proto") + 1] == "=http", args
-assert args[args.index("--proto-redir") + 1] == ("=http" if path == "/releases/latest" else "=https"), args
+# Each redirect hop is its own attempt: one redirect_url probe with no --location.
+redirect_hop = "%{redirect_url}" in args
+assert ("--location" in args) != redirect_hop, args
+assert args[args.index("--proto-redir") + 1] == ("=http" if redirect_hop else "=https"), args
 previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 number = sum(row["path"] == path for row in previous)
 failures = plan["failures"].get(path, [])
@@ -268,7 +271,7 @@ def discovery_cases(root, binary, releases):
         assert f"Latest published stable: {releases.version}" in output, output
         assert "Selected managed release: 0.1.0" in output, output
         assert "No running Hosts discovered now" in output
-        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path]
+        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", releases.sums_path]
         c.assert_unchanged()
         c.assert_no_host()
         for args in (("--bogus",), ("unexpected-message",), ("--check", "--check")):
@@ -355,7 +358,7 @@ def install_cases(root, binary, releases):
         installing = output.index(f"Installing Rui {releases.version}...")
         verdict = output.index(f"Upgraded to Rui {releases.version}. Complete build: ")
         assert check_end < installing < verdict, output
-        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path, releases.archive_path]
+        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", releases.sums_path, releases.archive_path]
         assert c.link.resolve() != c.original
         assert c.original.exists(), "retained old complete build removed"
         assert c.run("--version").startswith("rui " + releases.version)
@@ -1619,9 +1622,11 @@ def terminal_download_recovery(root, binary, releases, artifacts):
             proof_ready(c, previous, old_host)
             screen.save(artifacts, "download-recovered")
             curl.assert_attempts([("/releases/latest", "normal", 0),
+                                 ("/releases/redirect", "normal", 0),
                                  (releases.sums_path, "normal", 0),
                                  ("/releases/latest", "normal", 6),
                                  ("/releases/latest", "ipv4", 0),
+                                 ("/releases/redirect", "ipv4", 0),
                                  (releases.sums_path, "ipv4", 0),
                                  (releases.archive_path, "ipv4", 0)])
             receipt = exit_on_sigint(screen, process, "recovered download report after terminal restoration")
