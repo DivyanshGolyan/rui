@@ -36,6 +36,14 @@ pub fn validateKeyEndpoint(target: []const u8, ca_file: ?[]const u8, fixture: bo
     } else if (!std.mem.startsWith(u8, target, "https://")) return error.InsecureKeyEndpoint;
 }
 
+/// The rule every URL a connection names meets (its base, its sign-in
+/// URLs): an https endpoint, or loopback HTTP for a fixture, never a key's
+/// plain HTTP. Callers add their own query and path rules.
+pub fn validateEndpointUrl(target: []const u8) !void {
+    try validateEndpoint(target);
+    try validateKeyEndpoint(target, null, false);
+}
+
 /// The endpoint at `path` under `base`, validated as a key endpoint.
 pub fn endpointUnder(allocator: std.mem.Allocator, base: []const u8, path: []const u8) ![]const u8 {
     const uri = std.Uri.parse(base) catch return error.InvalidBaseUrl;
@@ -43,8 +51,7 @@ pub fn endpointUnder(allocator: std.mem.Allocator, base: []const u8, path: []con
     const trimmed = std.mem.trimEnd(u8, base, "/");
     const under = try std.fmt.allocPrint(allocator, "{s}{s}", .{ trimmed, path });
     errdefer allocator.free(under);
-    validateEndpoint(under) catch return error.InvalidBaseUrl;
-    validateKeyEndpoint(under, null, false) catch return error.InvalidBaseUrl;
+    validateEndpointUrl(under) catch return error.InvalidBaseUrl;
     return under;
 }
 

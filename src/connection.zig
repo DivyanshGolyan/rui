@@ -7,7 +7,6 @@
 //! (`resolve`).
 
 const std = @import("std");
-const url = @import("url");
 const provider_name = @import("provider_name.zig");
 const endpoint_value = @import("endpoint_value.zig");
 
@@ -338,9 +337,11 @@ fn refusal(reason: Refusal.Reason, field: []const u8) Refusal {
     return .{ .reason = reason, .field = field };
 }
 
+/// The one URL rule for every URL field a connection names (base, sign-in
+/// URLs): the endpoint owner's rule, and no query.
 fn validUrl(text: []const u8) bool {
     if (std.mem.indexOfScalar(u8, text, '?') != null) return false;
-    _ = url.parseUrl(text) catch return false;
+    endpoint_value.validateEndpointUrl(text) catch return false;
     return true;
 }
 
@@ -981,6 +982,41 @@ test "validate allows a credential only over https, never plain HTTP to loopback
     try std.testing.expectEqual(Refusal.Reason.invalid_url, validate(&connection, noHostFields).?.reason);
     connection.base_url = "https://gateway.example/v1?x=1";
     try std.testing.expectEqual(Refusal.Reason.invalid_url, validate(&connection, noHostFields).?.reason);
+}
+
+test "validate holds the sign-in URLs to the base URL's rule: https, no query, never plain HTTP" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var connection = try testOk(arena.allocator(), base_document);
+    const base = "https://gateway.example/v1";
+    connection.credential = .{ .oauth = .{
+        .authorize_url = "https://auth.example/authorize",
+        .token_url = "https://auth.example/token",
+        .client_id = .{ .fixed = "client" },
+        .scopes = "openid",
+        .required_scope = "openid",
+        .audience = base,
+        .link = &.{},
+    } };
+    try std.testing.expect(validate(&connection, noHostFields) == null);
+    const bad = [_][]const u8{
+        "http://127.0.0.1:8080/token",
+        "http://[::1]:8080/token",
+        "http://auth.example/token",
+        "https://auth.example/token?x=1",
+        "https://auth.example/token#f",
+        "https://user@auth.example/token",
+    };
+    for (bad) |text| {
+        for ([_]bool{ true, false }) |authorize| {
+            var oauth = connection.credential.oauth;
+            if (authorize) oauth.authorize_url = text else oauth.token_url = text;
+            connection.credential = .{ .oauth = oauth };
+            const found = validate(&connection, noHostFields) orelse return error.TestExpectedRefusal;
+            try std.testing.expectEqual(Refusal.Reason.invalid_url, found.reason);
+            try std.testing.expectEqualStrings(if (authorize) "authorize_url" else "token_url", found.field);
+        }
+    }
 }
 
 test "validate refuses a claim header on a credential with no token, and a required scope that is not granted" {
