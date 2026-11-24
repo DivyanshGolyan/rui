@@ -71,6 +71,7 @@ pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target
     configureBashPlatform(b, compile);
     configureHostLaunch(b, compile);
     configureTerminalEditor(b, compile);
+    darwin.configureClipboard(b, compile.root_module, target, if (pinned) |transport| transport.output else null);
     configureTransport(b, compile, target, pinned);
     configureOpenApi(b, compile);
 }
@@ -152,6 +153,7 @@ fn addRuiWithIdentity(
     configureBashPlatform(b, executable);
     configureHostLaunch(b, executable);
     configureTerminalEditor(b, executable);
+    darwin.configureClipboard(b, executable.root_module, target, if (pinned_transport) |transport| transport.output else null);
     configureTransportWithIdentity(b, executable, target, pinned_transport, identity);
     return executable;
 }
@@ -500,7 +502,7 @@ fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
     });
     module.addImport("terminal_unicode", dependency.module("unicode"));
     module.addImport("terminal_width", dependency.module("gwidth"));
-    module.addImport("vaxis", dependency.module("vaxis"));
+    module.addImport("vaxis", @import("vaxis_overlay.zig").add(b, dependency));
 }
 
 fn addBindings(b: *std.Build, module: *std.Build.Module, name: []const u8, header: []const u8) Translator {

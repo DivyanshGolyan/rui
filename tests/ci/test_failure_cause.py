@@ -150,7 +150,7 @@ class WiringTest(unittest.TestCase):
         tier = (ROOT / ".github/workflows/qualification-tier.yml").read_text()
         for name in PROMOTE_AGGREGATES:
             body = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  [a-z_]+:|\Z)", tier)[1]
-            self.assertIn("needs: [release_build, selected, upgrade, renderer]", body)
+            self.assertIn("needs: [release_build, selected, upgrade, renderer, memory]", body)
         text = (ROOT / ".github/workflows/promote.yml").read_text()
         release = re.search(r"(?ms)^  release:\n(.*?)(?=^  [a-z_]+:|\Z)", text)[1]
         # A rerun reruns the failed tier jobs, its verdict and Release, which waits for the rerun verdict.
