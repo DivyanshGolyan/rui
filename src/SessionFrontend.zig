@@ -3289,12 +3289,13 @@ fn showStaged(self: *Self) !void {
             self.submission.observeMessage(key);
         }
         if (entry.message_key) |key| {
+            const has_text = entry.text.bytes.len != 0;
             if (self.local_projection) |*local| if (std.mem.eql(u8, &local.key, &key)) {
-                if (entry.length == 0 and entry.provisional) local.position = entry.key.position else if (entry.length != 0) {
+                if (!has_text and entry.provisional) local.position = entry.key.position else if (has_text) {
                     local.terminal = true;
                 }
             };
-            if (entry.length != 0) {
+            if (has_text) {
                 self.submission.observeMessage(key);
             } else if (page.kinds == .all and entry.provisional) {
                 if (self.submission.messageKey()) |held| if (std.mem.eql(u8, &held, &key)) {
