@@ -143,6 +143,11 @@ fn drawInput(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
     return surface;
 }
 
+/// The connection name the open choice picks for.
+pub fn providerName(self: *const Self) []const u8 {
+    return self.provider.slice();
+}
+
 fn row(self: *const Self, entry: picker.Entry) ?picker.Row {
     if (!entry.providers.contains(self.provider)) return null;
     var constrained = entry;
@@ -326,7 +331,7 @@ test "Model choice shares picker rows filters never empty and picks only its pro
     const menu: picker.Menu = .{ .entries = &entries };
     var fixture: Fixture = .{};
     var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel };
-    choice.open(&menu, .codex, "gpt-6.1-sol");
+    choice.open(&menu, provider_route.nameOf(.codex), "gpt-6.1-sol");
     try std.testing.expect(choice.active);
     try std.testing.expectEqual(@as(?usize, 0), choice.focus.selected());
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -353,13 +358,13 @@ test "Model choice shares picker rows filters never empty and picks only its pro
     try press(&choice, &ctx, vaxis.Key.enter);
     try std.testing.expectEqualStrings("gpt-5.5", fixture.picked.?);
     try std.testing.expect(!choice.active);
-    choice.open(&menu, .openai, "api-only");
+    choice.open(&menu, provider_route.nameOf(.openai), "api-only");
     try std.testing.expectEqual(@as(?usize, 2), choice.focus.selected());
     choice.cancel();
     try std.testing.expect(!choice.active);
     try std.testing.expectEqualStrings("gpt-5.5", fixture.picked.?);
     const empty: picker.Menu = .{};
-    choice.open(&empty, .codex, "");
+    choice.open(&empty, provider_route.nameOf(.codex), "");
     try std.testing.expect(!choice.active);
 }
 
@@ -402,7 +407,7 @@ test "Model choice keeps a chat on its own way into ChatGPT, and either ChatGPT 
 test "Model choice bounds scrolling and mouse picking use the visible list" {
     var fixture: Fixture = .{};
     var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel };
-    choice.open(null, .codex, "");
+    choice.open(null, provider_route.nameOf(.codex), "");
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -474,7 +479,7 @@ fn expectFilterRecovery(failure: RejectedInput) !void {
     const menu: picker.Menu = .{ .entries = &entries };
     var fixture: Fixture = .{};
     var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel };
-    choice.open(&menu, .codex, "alpha-one");
+    choice.open(&menu, provider_route.nameOf(.codex), "alpha-one");
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -551,7 +556,7 @@ test "Model choice Panel field keeps its input visible and compacts indented mat
         const menu: picker.Menu = .{ .entries = entries[0..count] };
         var fixture: Fixture = .{};
         var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel };
-        choice.open(&menu, .codex, if (count == 0) "" else entries[if (last) count - 1 else 0].id);
+        choice.open(&menu, provider_route.nameOf(.codex), if (count == 0) "" else entries[if (last) count - 1 else 0].id);
         const fields = [_]Panel.Field{ .{ .label = "One", .value = "1" }, .{ .label = "Two", .value = "2" }, .{ .label = "Three", .value = "3" }, .{ .label = "Four", .value = "4" }, .{ .label = "Model", .value = "saved model" }, .{ .label = "After", .value = "next" } };
         var panel: Panel = .{ .title = "Title", .fields = &fields, .selected = 4 };
         if (choice.active) panel.custom_choice = choice.field(4);
@@ -613,7 +618,7 @@ test "Model choice Panel field keeps its input visible and compacts indented mat
 
 test "Model choice input scrolls by grapheme and reserves refusal without a label" {
     var choice: Self = .{};
-    choice.open(null, .codex, "");
+    choice.open(null, provider_route.nameOf(.codex), "");
     const query = "sol e\u{301} 🧑‍🌾";
     _ = choice.editor.append(query);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -650,7 +655,7 @@ test "Model choice size column follows only the longest shown name across widths
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var choice: Self = .{};
-        choice.open(&menu, .codex, "gpt-6.1-terra");
+        choice.open(&menu, provider_route.nameOf(.codex), "gpt-6.1-terra");
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         if (filtered) try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 's', .text = "sol" } });
         const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = height }, .cell_size = .{} });
@@ -669,7 +674,7 @@ test "Model choice shared ASCII inline input and compact matches preserve PR4 ge
     const entries = [_]picker.Entry{.{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) }};
     const menu: picker.Menu = .{ .entries = &entries };
     var choice: Self = .{ .unicode = false };
-    choice.open(&menu, .codex, entries[0].id);
+    choice.open(&menu, provider_route.nameOf(.codex), entries[0].id);
     choice.no_match = true;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -688,7 +693,7 @@ test "Model choice shared ASCII inline input and compact matches preserve PR4 ge
         try std.testing.expect(std.mem.indexOf(u8, out.written(), "Filter:") == null);
         try std.testing.expect(input_surface.cursor != null);
     }
-    choice.open(null, .codex, "");
+    choice.open(null, provider_route.nameOf(.codex), "");
     const overflow = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 3 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("v", overflow.readCell(3, 2).char.grapheme);
     for (overflow.buffer) |cell| for (cell.char.grapheme) |byte| try std.testing.expect(byte < 0x80);
@@ -707,7 +712,7 @@ test "Model choice ASCII cursor projection stays bounded across Unicode prefixes
     const State = enum { plain, no_match, refusal, both };
     for (cases) |case| for (std.enums.values(State)) |state| {
         var choice: Self = .{ .unicode = false };
-        choice.open(null, .codex, "");
+        choice.open(null, provider_route.nameOf(.codex), "");
         _ = choice.editor.append(case.query);
         choice.editor.setCursor(case.caret);
         choice.no_match = state == .no_match or state == .both;
@@ -753,7 +758,7 @@ test "Model choice hover and click follow full-width Panel matches without selec
         defer arena.deinit();
         var fixture: Fixture = .{};
         var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel, .ground = .{ .bg = .{ .index = 1 } }, .selection = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 3 } } };
-        choice.open(&menu, .codex, "model-0");
+        choice.open(&menu, provider_route.nameOf(.codex), "model-0");
         var panel: Panel = .{ .title = "Title", .fields = &.{.{ .label = "Model", .value = "model-0" }} };
         const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} };
         _ = try panel.widget().draw(draw_ctx);
@@ -805,7 +810,7 @@ test "Model choice standalone rows use all bounded space without viewport hints"
     };
     const menu: picker.Menu = .{ .entries = &entries };
     var choice: Self = .{};
-    choice.open(&menu, .codex, "gpt-6.1-sol");
+    choice.open(&menu, provider_route.nameOf(.codex), "gpt-6.1-sol");
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 2 }, .cell_size = .{} };
@@ -829,7 +834,7 @@ test "Model Tab includes its drawn filter and excludes clipped results" {
     };
     const menu: picker.Menu = .{ .entries = &entries };
     var choice: Self = .{};
-    choice.open(&menu, .codex, "one");
+    choice.open(&menu, provider_route.nameOf(.codex), "one");
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };

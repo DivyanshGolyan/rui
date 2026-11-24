@@ -296,7 +296,7 @@ fn pickModel(raw: *anyopaque, ctx: *vxfw.EventContext, id: []const u8) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     self.panel.custom_choice = null;
     try self.save(ctx, .model, .{
-        .provider = .{ .set = @tagName(self.model_choice.provider) },
+        .provider = .{ .set = self.model_choice.providerName() },
         .model = .{ .set = id },
     });
 }

@@ -1761,10 +1761,32 @@ fn relativeLeaf(comptime T: type, value: *const T, name: *LeafName) bool {
     return false;
 }
 
+/// A connection's key file is a path like any other: relative only when the Host has no base.
+fn relativeConnections(value: *const @import("connection.zig").Connections, name: *LeafName) bool {
+    const at = name.len;
+    for (value.entries) |*entry| {
+        const key = switch (entry.value.credential) {
+            .key => |*key| key,
+            else => continue,
+        };
+        const file = switch (key.source) {
+            .file => |path| path,
+            else => continue,
+        };
+        if (!std.fs.path.isAbsolute(file)) {
+            name.len = at;
+            name.push("connections");
+            return true;
+        }
+    }
+    return false;
+}
+
 fn relativeBelow(comptime T: type, value: *const T, name: *LeafName) bool {
     if (@typeInfo(T) == .optional) {
         return if (value.*) |*present| relativeLeaf(@typeInfo(T).optional.child, present, name) else false;
     }
+    if (T == @import("connection.zig").Connections) return relativeConnections(value, name);
     const at = name.len;
     if (@hasDecl(T, "kind")) {
         return switch (T.kind) {

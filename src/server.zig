@@ -1296,10 +1296,10 @@ fn serveOpened(
     host.retention = &retention;
     defer retention.cleanupAll();
     if (served.any()) {
-        for (served.table.values) |entry| if (entry) |value| {
+        for (served.table.values[0..served.table.len]) |value| {
             try provider.validateEndpoint(value.endpoint);
             try value.credential.validate(value.endpoint, served.ca_file);
-        };
+        }
         try provider.checkLibraries();
     }
     host.instance = instance;

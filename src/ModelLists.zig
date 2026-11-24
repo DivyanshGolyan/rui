@@ -17,7 +17,7 @@ asked: std.atomic.Value(bool) = .init(false),
 pub fn init(io: std.Io, allocator: std.mem.Allocator, providers: *const providers_module.Providers) Self {
     var lists: Self = .{ .io = io, .allocator = allocator, .providers = providers };
     for (std.enums.values(protocol.Provider)) |name| {
-        if (providers.liveList(name) != null) lists.live.set(name, .pending);
+        if (providers.liveList(provider_route.nameOf(name)) != null) lists.live.set(name, .pending);
     }
     return lists;
 }
@@ -41,7 +41,7 @@ pub fn set(self: *Self, name: protocol.Provider, list: model_list.List) void {
 }
 
 pub fn publish(self: *Self, name: protocol.Provider, body: anyerror![]const u8) void {
-    const listing = self.providers.liveList(name).?.credential.listing().?;
+    const listing = self.providers.liveList(provider_route.nameOf(name)).?.credential.listing().?;
     const list: model_list.List = if (keep(self.allocator, listing, body)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
         stderr.print("rui: {s} model list unavailable ({s}); the picker shows Rui's models\n", .{ name.shown(), @errorName(err) });
         break :failed .catalog_fallback;
@@ -63,7 +63,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, facts: []const @import("model_ca
     var entries: [std.enums.values(protocol.Provider).len]model_list.Entry = undefined;
     var count: usize = 0;
     for (std.enums.values(protocol.Provider)) |name| {
-        if (!self.providers.serves(name)) continue;
+        if (!self.providers.serves(provider_route.nameOf(name))) continue;
         entries[count] = .{ .provider = provider_route.nameOf(name), .list = self.live.get(name) };
         count += 1;
     }
@@ -81,9 +81,9 @@ pub fn takeAsk(self: *Self) bool {
 test "EXR-100 each provider's model list is published and rendered on its own" {
     const catalog = @import("model_catalog.zig");
     var served: providers_module.Providers = .{};
-    served.table.set(.codex, .{ .endpoint = providers_module.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } });
-    served.table.set(.openai, .{ .endpoint = providers_module.endpoint(.openai), .credential = .{ .key_file = .{ .key = "sk-test" } } });
-    served.table.set(.chatgpt, .{ .endpoint = providers_module.endpoint(.chatgpt), .credential = .{ .chatgpt_plan = .{ .path = "/p" } } });
+    served.table.set(provider_route.nameOf(.codex), .{ .endpoint = providers_module.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } }) catch unreachable;
+    served.table.set(provider_route.nameOf(.openai), .{ .endpoint = providers_module.endpoint(.openai), .credential = .{ .key_file = .{ .key = "sk-test" } } }) catch unreachable;
+    served.table.set(provider_route.nameOf(.chatgpt), .{ .endpoint = providers_module.endpoint(.chatgpt), .credential = .{ .chatgpt_plan = .{ .path = "/p" } } }) catch unreachable;
     var lists: Self = .init(std.testing.io, std.testing.allocator, &served);
     defer lists.deinit();
     const facts: []const catalog.Entry = &.{.{ .id = "gpt-6-sol", .context_window = null, .efforts = .{}, .openai_listed = true }};

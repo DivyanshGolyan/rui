@@ -4934,7 +4934,7 @@ test "chat footer background click and Alt-I share natural panel opening and Esc
         try std.testing.expectEqual(panel.origin, keyed_panel.origin);
         try std.testing.expectEqual(panel.surface.size, keyed_panel.surface.size);
         held.self.app_info.panel.selected = 4;
-        held.self.app_info.model_choice.open(&menu, .codex, "model-2");
+        held.self.app_info.model_choice.open(&menu, provider_route.nameOf(.codex), "model-2");
         const expanded_frame = try held.draw();
         const expanded_input = try held.drawnInput(expanded_frame.children[0].surface);
         const expanded_panel = try held.drawnPanel(expanded_frame.children[0].surface);

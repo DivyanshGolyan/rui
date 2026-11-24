@@ -10,6 +10,8 @@ const credential_policy = @import("codex_credential_policy.zig");
 const provider_transport = @import("provider.zig");
 const turn_states = @import("turn_states.zig");
 const provider_route = @import("provider_route.zig");
+const connection = @import("connection.zig");
+const connection_names = @import("connection_names.zig");
 
 const Provider = protocol.Provider;
 
@@ -23,7 +25,7 @@ pub fn fromSettings(settings: *const @import("host_settings.zig").Settings) Prov
         if (@field(settings.providers.entries, @tagName(named))) |*entry| {
             const target = if (entry.endpoint) |*url| url.slice() else endpoint(named);
             const fixture = @import("host_settings.zig").fixtureEndpoint(settings, target);
-            result.table.set(named, .{
+            result.table.set(provider_route.nameOf(named), .{
                 .endpoint = target,
                 .credential = if (entry.unauthenticated.value) .none else switch (comptime named.facts().credential) {
                     .api_key => .{ .key_file = .{ .key = entry.key.value(), .fixture = fixture } },
@@ -33,7 +35,7 @@ pub fn fromSettings(settings: *const @import("host_settings.zig").Settings) Prov
                         .openai => unreachable,
                     },
                 },
-            });
+            }) catch unreachable;
         }
     }
     return result;
@@ -288,16 +290,15 @@ pub const Served = struct {
 pub const none: Providers = .{};
 
 pub const Providers = struct {
-    table: std.EnumArray(Provider, ?Served) = .initFill(null),
+    table: connection_names.NameArray(Served) = .{},
     ca_file: ?[]const u8 = null,
 
-    pub fn get(self: *const Providers, provider: Provider) ?*const Served {
-        return if (self.table.getPtrConst(provider).*) |*entry| entry else null;
+    pub fn get(self: *const Providers, name: connection.Name) ?*const Served {
+        return self.table.find(name);
     }
 
     pub fn any(self: *const Providers) bool {
-        for (self.table.values) |entry| if (entry != null) return true;
-        return false;
+        return self.table.len != 0;
     }
 
     pub fn proxyRefusal(self: *const Providers, allocator: std.mem.Allocator) error{ OutOfMemory, SystemResources }!?[]const u8 {
@@ -312,34 +313,36 @@ pub const Providers = struct {
     }
 
     pub fn anySignIn(self: *const Providers) bool {
-        for (self.table.values) |entry| if (entry) |value| if (value.credential.leased()) return true;
+        for (self.table.values[0..self.table.len]) |value| if (value.credential.leased()) return true;
         return false;
     }
 
     /// The Host's served set: one entry per provider the settings serve.
     pub fn served(self: *const Providers) protocol.Served {
         var out: protocol.Served = .{};
-        inline for (std.enums.values(Provider)) |named| {
-            if (self.get(named)) |value| out.put(provider_route.builtIn(named, value.credential.route())) catch unreachable;
+        for (self.table.names[0..self.table.len], self.table.values[0..self.table.len]) |name, value| {
+            const named = provider_route.builtInOf(name) orelse continue;
+            out.put(provider_route.builtIn(named, value.credential.route())) catch unreachable;
         }
         return out;
     }
 
-    pub fn liveList(self: *const Providers, provider: Provider) ?*const Served {
+    pub fn liveList(self: *const Providers, name: connection.Name) ?*const Served {
+        const provider = provider_route.builtInOf(name) orelse return null;
         if (provider.facts().model_list != .live) return null;
-        const entry = self.get(provider) orelse return null;
+        const entry = self.get(name) orelse return null;
         if (entry.credential.listing() == null or responsesBase(entry.endpoint) == null) return null;
         return entry;
     }
 
     pub fn liveLists(self: *const Providers) usize {
         var count: usize = 0;
-        for (std.enums.values(Provider)) |provider| count += @intFromBool(self.liveList(provider) != null);
+        for (provider_route.built_in_names) |name| count += @intFromBool(self.liveList(name) != null);
         return count;
     }
 
-    pub fn serves(self: *const Providers, provider: Provider) bool {
-        return self.get(provider) != null;
+    pub fn serves(self: *const Providers, name: connection.Name) bool {
+        return self.get(name) != null;
     }
 };
 
@@ -446,19 +449,19 @@ test "a Host's served set names each provider it serves and its credential" {
     var providers: Providers = .{};
     try std.testing.expect(!providers.any());
     try std.testing.expectEqual(protocol.Route.unserved, providers.served().route("codex"));
-    providers.table.set(.codex, .{ .endpoint = "http://127.0.0.1:1/responses", .credential = .none });
-    try std.testing.expect(providers.any() and providers.serves(.codex));
+    providers.table.set(provider_route.nameOf(.codex), .{ .endpoint = "http://127.0.0.1:1/responses", .credential = .none }) catch unreachable;
+    try std.testing.expect(providers.any() and providers.serves(provider_route.nameOf(.codex)));
     try std.testing.expectEqual(protocol.Route.endpoint, providers.served().route("codex"));
     try std.testing.expect(!providers.anySignIn());
-    providers.table.set(.codex, .{ .endpoint = endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } });
+    providers.table.set(provider_route.nameOf(.codex), .{ .endpoint = endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } }) catch unreachable;
     try std.testing.expectEqual(protocol.Route.chatgpt_device, providers.served().route("codex"));
     try std.testing.expect(providers.anySignIn());
-    try std.testing.expectEqualStrings("/c", providers.get(.codex).?.credential.signIn().?.path);
-    providers.table.set(.chatgpt, .{ .endpoint = endpoint(.chatgpt), .credential = .{ .chatgpt_plan = .{ .path = "/p" } } });
+    try std.testing.expectEqualStrings("/c", providers.get(provider_route.nameOf(.codex)).?.credential.signIn().?.path);
+    providers.table.set(provider_route.nameOf(.chatgpt), .{ .endpoint = endpoint(.chatgpt), .credential = .{ .chatgpt_plan = .{ .path = "/p" } } }) catch unreachable;
     try std.testing.expectEqual(protocol.Route.chatgpt_plan, providers.served().route("chatgpt"));
     try std.testing.expectEqual(protocol.Route.unserved, providers.served().route("openai"));
-    try std.testing.expectEqual(Authentication{ .path = "/c", .wire = .codex_device }, providers.get(.codex).?.credential.signIn().?);
-    try std.testing.expectEqual(Authentication{ .path = "/p", .wire = .chatgpt_plan }, providers.get(.chatgpt).?.credential.signIn().?);
+    try std.testing.expectEqual(Authentication{ .path = "/c", .wire = .codex_device }, providers.get(provider_route.nameOf(.codex)).?.credential.signIn().?);
+    try std.testing.expectEqual(Authentication{ .path = "/p", .wire = .chatgpt_plan }, providers.get(provider_route.nameOf(.chatgpt)).?.credential.signIn().?);
     try std.testing.expect(!acceptsOutputSchema(.chatgpt_device) and acceptsOutputSchema(.chatgpt_plan));
 }
 
@@ -561,7 +564,7 @@ test "prepared provider projection derives every credential endpoint and Host tr
     const served = fromSettings(settings);
     try std.testing.expectEqualStrings("relative/root.pem", served.ca_file.?);
     inline for (std.enums.values(Provider)) |named| {
-        const entry = served.get(named).?;
+        const entry = served.get(provider_route.nameOf(named)).?;
         try std.testing.expectEqualStrings(if (comptime named.facts().credential == .api_key) "https://proxy.example/responses" else endpoint(named), entry.endpoint);
         switch (comptime named.facts().credential) {
             .api_key => try std.testing.expectEqualStrings("key", entry.credential.key_file.key),
@@ -570,7 +573,7 @@ test "prepared provider projection derives every credential endpoint and Host tr
         @field(settings.providers.entries, @tagName(named)).?.unauthenticated.value = true;
     }
     const uncredentialed = fromSettings(settings);
-    inline for (std.enums.values(Provider)) |named| try std.testing.expect(uncredentialed.get(named).?.credential == .none);
+    inline for (std.enums.values(Provider)) |named| try std.testing.expect(uncredentialed.get(provider_route.nameOf(named)).?.credential == .none);
     inline for (std.enums.values(Provider)) |named| {
         const entry = &@field(settings.providers.entries, @tagName(named)).?;
         entry.unauthenticated.value = false;
@@ -580,16 +583,16 @@ test "prepared provider projection derives every credential endpoint and Host tr
     settings.providers.entries.chatgpt.?.token_endpoint = .{};
     try settings.providers.entries.chatgpt.?.token_endpoint.?.text.set("http://127.0.0.1:9/oauth/token");
     const fixture = fromSettings(settings);
-    try std.testing.expect(fixture.get(.openai).?.credential.key_file.fixture);
-    try std.testing.expect(fixture.get(.codex).?.credential.chatgpt_device.refresh == .synthetic);
-    try std.testing.expectEqualStrings("http://127.0.0.1:9/oauth/token", fixture.get(.chatgpt).?.credential.chatgpt_plan.refresh.fixture_endpoint);
+    try std.testing.expect(fixture.get(provider_route.nameOf(.openai)).?.credential.key_file.fixture);
+    try std.testing.expect(fixture.get(provider_route.nameOf(.codex)).?.credential.chatgpt_device.refresh == .synthetic);
+    try std.testing.expectEqualStrings("http://127.0.0.1:9/oauth/token", fixture.get(provider_route.nameOf(.chatgpt)).?.credential.chatgpt_plan.refresh.fixture_endpoint);
     inline for (std.enums.values(Provider)) |named| {
         @field(settings.providers.entries, @tagName(named)).?.unauthenticated.value = true;
     }
     const unauthenticated_fixture = fromSettings(settings);
-    inline for (std.enums.values(Provider)) |named| try std.testing.expect(unauthenticated_fixture.get(named).?.credential == .none);
+    inline for (std.enums.values(Provider)) |named| try std.testing.expect(unauthenticated_fixture.get(provider_route.nameOf(named)).?.credential == .none);
     settings.providers.entries.openai = null;
-    try std.testing.expect(!fromSettings(settings).serves(.openai));
+    try std.testing.expect(!fromSettings(settings).serves(provider_route.nameOf(.openai)));
 }
 
 test "each route says how its model list reads, and a provider's list is live only over one that has a list" {
@@ -611,17 +614,17 @@ test "each route says how its model list reads, and a provider's list is live on
     try std.testing.expectError(error.InvalidModelList, Listing.openai.parse(arena.allocator(), plan_body, &out));
 
     var providers: Providers = .{};
-    for (std.enums.values(Provider)) |name| try std.testing.expect(providers.liveList(name) == null);
+    for (std.enums.values(Provider)) |name| try std.testing.expect(providers.liveList(provider_route.nameOf(name)) == null);
     try std.testing.expectEqual(@as(usize, 0), providers.liveLists());
-    providers.table.set(.codex, .{ .endpoint = endpoint(.codex), .credential = device });
-    providers.table.set(.openai, .{ .endpoint = endpoint(.openai), .credential = keyed });
-    providers.table.set(.chatgpt, .{ .endpoint = endpoint(.chatgpt), .credential = plan });
-    try std.testing.expect(providers.liveList(.codex) == null);
-    try std.testing.expectEqual(providers.get(.openai).?, providers.liveList(.openai).?);
-    try std.testing.expectEqual(providers.get(.chatgpt).?, providers.liveList(.chatgpt).?);
+    providers.table.set(provider_route.nameOf(.codex), .{ .endpoint = endpoint(.codex), .credential = device }) catch unreachable;
+    providers.table.set(provider_route.nameOf(.openai), .{ .endpoint = endpoint(.openai), .credential = keyed }) catch unreachable;
+    providers.table.set(provider_route.nameOf(.chatgpt), .{ .endpoint = endpoint(.chatgpt), .credential = plan }) catch unreachable;
+    try std.testing.expect(providers.liveList(provider_route.nameOf(.codex)) == null);
+    try std.testing.expectEqual(providers.get(provider_route.nameOf(.openai)).?, providers.liveList(provider_route.nameOf(.openai)).?);
+    try std.testing.expectEqual(providers.get(provider_route.nameOf(.chatgpt)).?, providers.liveList(provider_route.nameOf(.chatgpt)).?);
     try std.testing.expectEqual(@as(usize, 2), providers.liveLists());
-    providers.table.set(.openai, .{ .endpoint = "http://127.0.0.1:9/responses", .credential = .none });
-    providers.table.set(.chatgpt, .{ .endpoint = "http://127.0.0.1:9/chat", .credential = plan });
-    try std.testing.expect(providers.liveList(.openai) == null and providers.liveList(.chatgpt) == null);
+    providers.table.set(provider_route.nameOf(.openai), .{ .endpoint = "http://127.0.0.1:9/responses", .credential = .none }) catch unreachable;
+    providers.table.set(provider_route.nameOf(.chatgpt), .{ .endpoint = "http://127.0.0.1:9/chat", .credential = plan }) catch unreachable;
+    try std.testing.expect(providers.liveList(provider_route.nameOf(.openai)) == null and providers.liveList(provider_route.nameOf(.chatgpt)) == null);
     try std.testing.expectEqual(@as(usize, 0), providers.liveLists());
 }

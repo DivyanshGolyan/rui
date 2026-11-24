@@ -62,6 +62,12 @@ pub fn NameArray(comptime T: type) type {
             self.len += 1;
         }
 
+        /// The stored value for a name, by pointer, so a large value is not copied.
+        pub fn find(self: *const Self, name: connection.Name) ?*const T {
+            for (self.names[0..self.len], 0..) |*one, index| if (one.eql(name)) return &self.values[index];
+            return null;
+        }
+
         pub fn get(self: *const Self, name: connection.Name) ?T {
             for (self.names[0..self.len], self.values[0..self.len]) |*one, value| {
                 if (one.eql(name)) return value;

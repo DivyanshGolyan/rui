@@ -1,6 +1,6 @@
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
-const provider_route = @import("provider_route.zig");
+const provider_route = @import("../../provider_route.zig");
 const protocol = @import("../../protocol.zig");
 const wire_request = @import("../../wire_request.zig");
 const store_core = @import("../Store.zig");
