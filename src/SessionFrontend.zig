@@ -2936,7 +2936,7 @@ fn feedState(self: *Self) FeedPolicy.State {
         .scan = self.live.scan,
         .window_provisional = screen.feed.firstProvisional(),
         .window_continuing = screen.feed.forward_partial,
-        .selection_held = self.app_content.dragging(),
+        .selection_held = self.app_content.selectionHeld(),
         .fills = self.reading.fills,
         .choice_open = screen.consent != null or self.app_consent.request != null,
         .action_named = self.live.work.first_action != null,
@@ -4008,7 +4008,10 @@ test "SUI-144 SessionFrontend cancels copy selection when its feed context is co
             .settings => held.root.input.layer = .settings,
             .message => held.screen.view = .message,
             .paste => held.root.input.pasting = true,
-            .focus => try std.testing.expect(try held.root.focusList(&ctx)),
+            .focus => {
+                try std.testing.expect(try held.root.focusList(&ctx));
+                try std.testing.expect(!held.self.app_content.selectionHeld());
+            },
             .resize => {
                 held.size.width = (held.size.width orelse 0) + 1;
                 _ = try held.self.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
@@ -4023,6 +4026,7 @@ test "SUI-144 SessionFrontend cancels copy selection when its feed context is co
         try held.self.widget().captureEvent(&ctx, .{ .mouse = .{ .col = user.col, .row = user.row, .button = .left, .type = .release, .mods = .{} } });
         try std.testing.expect(ctx.consume_event);
         try std.testing.expect(!held.self.app_content.dragging());
+        try std.testing.expect(!held.self.app_content.selectionHeld());
         try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
 
         held.self.app_consent.withdraw();
@@ -8562,7 +8566,7 @@ fn provisionalEvictionReplay() !void {
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "answer after eviction") != null);
 }
 
-test "SessionFrontend feed press and drag hold both loading edges until release while scans continue" {
+test "SUI-160 SessionFrontend selection holds edge fills from press through drag until release" {
     for ([_]@FieldType(FeedPolicy.State, "need"){ .above, .below }) |edge| {
         const fixture = try FeedFixture.create();
         defer fixture.destroy();
@@ -8584,11 +8588,15 @@ test "SessionFrontend feed press and drag hold both loading edges until release 
             .{ .col = 4, .row = 2, .button = .left, .mods = .{}, .type = .release },
         }) |mouse| {
             try held.self.app_content.widget().handleEvent(&ctx, .{ .mouse = mouse });
-            try std.testing.expectEqual(mouse.type != .release, held.self.app_content.dragging());
+            try std.testing.expectEqual(mouse.type == .drag, held.self.app_content.dragging());
+            try std.testing.expectEqual(mouse.type != .release, held.self.app_content.selectionHeld());
             try std.testing.expectEqual(if (mouse.type == .release) @as(?feed_reads.Read, fill) else null, FeedPolicy.nextRead(held.self.feedState()));
             held.self.poll_at = 0;
             try std.testing.expectEqual(feed_reads.Read.scan, FeedPolicy.nextRead(held.self.feedState()).?);
             held.self.poll_at = std.math.maxInt(i96);
+            held.self.live.work.first_action = 17;
+            try std.testing.expectEqual(feed_reads.Read.permission, FeedPolicy.nextRead(held.self.feedState()).?);
+            held.self.live.work.first_action = null;
         }
     }
 }
