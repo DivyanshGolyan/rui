@@ -48,6 +48,59 @@ pub fn forCode(certainty: Certainty, code: caller_error.Code) Status {
     return status(certainty, caller_error.facts(code).act);
 }
 
+/// The handover's Store answer at the CLI boundary: a failed entry was never stopped, so it exits ordinary.
+pub fn selectedHandover(selected: @import("host_activation.zig").Selected) ?Status {
+    return switch (selected) {
+        .outcome => |outcome| handover(outcome),
+        .failed => null,
+    };
+}
+
+/// A handover that cannot confirm its result retains uncertainty at the CLI boundary.
+/// A fault after the stop is unconfirmed; a fault before it leaves the ordinary exit.
+pub fn handover(outcome: @import("host_activation.zig").Outcome) ?Status {
+    return switch (outcome) {
+        .unconfirmed => .unconfirmed,
+        .faulted => |fault| if (fault.effect.stage() != null) .unconfirmed else null,
+        else => null,
+    };
+}
+
+test "CLI-32 unconfirmed handover preserves exit certainty" {
+    const activation = @import("host_activation.zig");
+    for (std.enums.values(activation.EffectTag)) |effect| {
+        if (effect.stage() != null) continue;
+        try std.testing.expectEqual(@as(?Status, null), handover(.{ .faulted = .{ .effect = effect, .cause = try .from("OutOfMemory") } }));
+    }
+    const cases = [_]struct { outcome: activation.Outcome, status: ?Status }{
+        .{ .outcome = .not_needed, .status = null },
+        .{ .outcome = .superseded, .status = null },
+        .{ .outcome = .{ .already_ready = .{ .instance = @splat(0), .pid = 1 } }, .status = null },
+        .{ .outcome = .{ .ready = .{ .instance = @splat(0), .pid = 1 } }, .status = null },
+        .{ .outcome = .{ .client_incompatible = 1 }, .status = null },
+        .{ .outcome = .replacement_observed, .status = null },
+        .{ .outcome = .cancelled, .status = null },
+        .{ .outcome = .{ .faulted = .{ .effect = .resolve_target, .cause = try .from("OutOfMemory") } }, .status = null },
+        .{ .outcome = .{ .faulted = .{ .effect = .stop, .cause = try .from("OutOfMemory") } }, .status = .unconfirmed },
+        .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "check refused") } }, .status = null },
+        .{ .outcome = .{ .refused = .{ .stage = .starting, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "start refused") } }, .status = null },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.status, handover(case.outcome));
+    for (std.enums.values(activation.Limitation)) |limitation| try std.testing.expectEqual(@as(?Status, null), handover(.{ .unsupported = limitation }));
+    for (std.enums.values(activation.TargetStep)) |step| try std.testing.expectEqual(@as(?Status, null), handover(.{ .target_unusable = step }));
+    for (std.enums.values(activation.Stage)) |stage| {
+        const effect: activation.EffectTag = switch (stage) {
+            .stopping => .stop,
+            .awaiting_retirement => .await_retirement,
+            .starting => .start,
+            .verifying => .verify,
+        };
+        try std.testing.expectEqual(@as(?Status, .unconfirmed), handover(.{ .faulted = .{ .effect = effect, .cause = try .from("OutOfMemory") } }));
+        try std.testing.expectEqual(@as(?Status, .unconfirmed), handover(.{ .unconfirmed = stage }));
+        try std.testing.expectEqual(@as(?Status, null), handover(.{ .failed = stage }));
+    }
+}
+
 pub fn knownError(err: anyerror) Status {
     return forCode(.not_sent, caller_error.of(err));
 }

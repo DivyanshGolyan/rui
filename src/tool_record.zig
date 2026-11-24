@@ -1019,9 +1019,9 @@ pub const app_tools = struct {
         return std.fmt.parseInt(Int, found.number_string, 10) catch error.InvalidAppToolPolicy;
     }
 
-    // SH-131: an input schema keeps every number exactly as written (integer, decimal and exponent forms), so its text
+    // SH-143: an input schema keeps every number exactly as written (integer, decimal and exponent forms), so its text
     // and record digest never depend on floating-point rounding; policy integers accept only plain digits.
-    test "SH-131 app tools keep schema numbers exactly as written" {
+    test "SH-143 app tools keep schema numbers exactly as written" {
         const arena_memory = try std.testing.allocator.alloc(u8, arena_bytes);
         defer std.testing.allocator.free(arena_memory);
         const schemas = [_][]const u8{
@@ -1054,9 +1054,9 @@ pub const app_tools = struct {
         }
     }
 
-    // SH-131: the declaration validator accepts one well-formed list of records and names the refusal of every other
+    // SH-143: the declaration validator accepts one well-formed list of records and names the refusal of every other
     // document, over the whole domain of names, policies, sizes and counts.
-    test "SH-131 app tools validate one declaration with named refusals over its domain" {
+    test "SH-143 app tools validate one declaration with named refusals over its domain" {
         const arena_memory = try std.testing.allocator.alloc(u8, arena_bytes);
         defer std.testing.allocator.free(arena_memory);
         const ok = "{\"name\":\"lookup\",\"description\":\"Look up a thing\",\"input_schema\":{\"type\":\"object\"}}";

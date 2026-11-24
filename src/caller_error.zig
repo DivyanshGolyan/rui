@@ -246,7 +246,7 @@ fn mapped(err: anyerror) ?Code {
         error.OutOfMemory => .memory_exhausted,
         error.SavedRequestWireVersionMismatch => .request_wire_incompatible,
         error.HostNotServing => .host_not_serving,
-        error.HostRestartFailed, error.UnsupportedHostConfiguration => .host_restart_failed,
+        error.HostRestartFailed, error.HostRestartUnconfirmed, error.UnsupportedHostConfiguration => .host_restart_failed,
         error.IncompatibleHost => .host_incompatible,
         error.InvalidHostInfo, error.HostPeerNotServing, error.HostServeArgumentsUnreadable, error.HostServeStoreMissing, error.HostServeStoreRelative, error.HostSocketStoreMismatch, error.HostPeerPidMismatch, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot, error.HostDirectoryUnavailable, error.ForeignHostStatusFailed, error.InvalidForeignHostStatus => .host_identity_unconfirmed,
         error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
@@ -426,7 +426,7 @@ pub fn facts(code: Code) Facts {
         .upgrade_download_failed => .{ .act = .operate, .input = null, .accepted = .none, .says = "Rui could not download release information or the archive from GitHub.", .next = "Check network access, then retry; nothing was changed." },
         .upgrade_preparation_failed => .{ .act = .operate, .input = null, .accepted = .none, .says = "Release preparation or validation failed.", .next = "Check network access, disk space and the published archive. The selected build and Host were not changed before publication." },
         .host_not_serving => .{ .act = .operate, .input = null, .accepted = .none, .says = "No Host serves this Store.", .next = "Start its Host with the command below, then retry the same saved request unchanged." },
-        .host_incompatible => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host serving this Store runs a different Rui version that does not speak this rui's protocol.", .next = "Pause it with the Rui version that started it, then start it again with rui host start --store PATH." },
+        .host_incompatible => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host serving this Store runs a different Rui version that does not speak this rui's protocol.", .next = "Run rui host restart --all to hand over eligible managed Hosts, and follow its per-Host instructions." },
         .host_stopping => .{ .act = .wait, .input = null, .accepted = .none, .says = "The Host for this Store is shutting down and no longer accepts requests.", .next = "Wait for it to exit, then start it again with rui host start --store PATH and retry." },
         .mysql_host_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The launched MySQL Host for this Store is unavailable.", .next = "Check this Store's settings-based Host and RUI_RUNTIME_DIR, then retry unchanged." },
         .store_path_malformed => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "a nonempty UTF-8 filesystem path without controls, whose canonical form is at most 492 bytes" }, .says = "The Store path is malformed.", .next = "Supply --store PATH naming a private Store directory." },
@@ -894,6 +894,7 @@ test "settings admission has a caller refusal fallback outside startup reporting
 
 test "an escaped replay preflight failure keeps the restart repair" {
     try std.testing.expectEqual(Code.host_restart_failed, of(error.UnsupportedHostConfiguration));
+    try std.testing.expectEqual(Code.host_restart_failed, of(error.HostRestartUnconfirmed));
 }
 
 test "guided sign-in native caller outcomes keep truthful repair without reclassifying context-free I/O" {
