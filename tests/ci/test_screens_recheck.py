@@ -17,7 +17,8 @@ def pr(**changes):
 def run(number, status="completed", branch="feature", event="pull_request", sha=HEAD):
     return {"id": number, "run_number": number, "run_attempt": 1, "status": status, "created_at": "2026-11-24T08:15:51Z",
             "event": event, "head_sha": sha, "head_branch": branch,
-            "head_repository": {"full_name": REPO}, "path": ".github/workflows/check.yml"}
+            "head_repository": {"full_name": REPO}, "path": ".github/workflows/check.yml",
+            "pull_requests": [{"number": 42}]}
 
 
 def job(number, status="completed", conclusion="failure"):
@@ -111,13 +112,26 @@ class ScreensRecheckTest(unittest.TestCase):
         self.assertEqual(api.posts, [])
 
     def test_same_second_transition_uses_run_trigger_state(self):
-        for marker, expected in (("PR admission trigger ready", 1),
-                                 ("PR admission trigger draft", 0), (None, 0)):
+        for marker, expected in (("PR admission trigger 42 ready", 1),
+                                 ("PR admission trigger 42 draft", 0), (None, 0)):
             with self.subTest(marker=marker):
                 current = run(1)
                 plan = {"name": "plan", "steps": ([{"name": marker}] if marker else [])}
                 api = FakeGitHub([current], {1: [plan, job(11)]})
                 api.timeline = [{"event": "ready_for_review", "created_at": current["created_at"]}]
+                self.execute(api)
+                self.assertEqual(len(api.posts), expected)
+
+    def test_run_must_belong_to_the_published_pr(self):
+        for association, marker, expected in (([42], None, 1), ([], None, 0),
+                                              ([43], None, 0), ([42, 43], None, 0),
+                                              ([], "PR admission trigger 42 ready", 1),
+                                              ([42], "PR admission trigger 43 ready", 0)):
+            with self.subTest(association=association, marker=marker):
+                current = run(1)
+                current["pull_requests"] = [{"number": number} for number in association]
+                plan = {"name": "plan", "steps": ([{"name": marker}] if marker else [])}
+                api = FakeGitHub([current], {1: [plan, job(11)]})
                 self.execute(api)
                 self.assertEqual(len(api.posts), expected)
 

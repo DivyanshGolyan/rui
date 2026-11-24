@@ -20,11 +20,11 @@ def after_ready_transition(api, repo, number, run, jobs):
     ready = max((event["created_at"] for event in events if event.get("event") == "ready_for_review"), default="")
     plan = next((job for job in jobs if job["name"] == "plan"), {})
     markers = {step["name"] for step in plan.get("steps", [])}
-    if "PR admission trigger draft" in markers:
-        return False
-    if "PR admission trigger ready" in markers:
-        return run["created_at"] >= ready
-    return run["created_at"] > ready
+    triggers = {name for name in markers if name.startswith("PR admission trigger ")}
+    if triggers:
+        return triggers == {f"PR admission trigger {number} ready"} and run["created_at"] >= ready
+    associated = {str(item["number"]) for item in run.get("pull_requests", [])}
+    return associated == {str(number)} and run["created_at"] > ready
 
 
 def recheck(api, repo, number, head, *, sleep=time.sleep, clock=time.monotonic):
@@ -39,7 +39,7 @@ def recheck(api, repo, number, head, *, sleep=time.sleep, clock=time.monotonic):
             return "No current PR run; its future admission will read the screens"
         jobs = list(pages(api, f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest", "jobs"))
         if not after_ready_transition(api, repo, number, run, jobs):
-            return "::warning::Cannot distinguish this run from a ready transition; verify the current admission and rerun it if needed"
+            return "::warning::Cannot confirm the PR or ready transition for this run; verify the current admission and rerun it if needed"
         admission = next((job for job in jobs if job["name"] == "admission"), None)
         if admission is None or admission["status"] in ("queued", "waiting", "pending", "requested"):
             return "Admission has not started; it will read the screens"
