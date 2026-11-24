@@ -217,6 +217,10 @@ pub fn build(b: *std.Build) void {
     session_list_integration.addFileArg(release_safe);
     session_list_integration.addFileArg(ci.path(session_list_client));
     b.step("session-list-integration", "Run native Session listing and idle Host resource checks").dependOn(&session_list_integration.step);
+    const temp_cleaners_integration = b.addSystemCommand(&.{"python3"});
+    temp_cleaners_integration.addFileArg(b.path("tests/integration/temp_cleaners.py"));
+    temp_cleaners_integration.addFileArg(release_safe);
+    b.step("temp-cleaners-integration", "Run Apple and systemd temp cleaners against a live Host's endpoint").dependOn(&temp_cleaners_integration.step);
     const activity_client = b.addExecutable(.{
         .name = "rui-activity-client-test",
         .use_llvm = test_actor_llvm,

@@ -736,8 +736,9 @@ test "SH-11 only the holder of an interface directory's lock removes its endpoin
 }
 
 /// The cleaners' published rules as pure predicates over one node (evidence.md
-/// has the sources). The worst case is assumed: every age is past, so only a
-/// node the Host refreshed is kept by its timestamps.
+/// has the sources). A node is removed only when its timestamps are older than
+/// the cleaner's age, so a node the Host refreshed is kept by its times, and a
+/// node it holds is kept by its lock, where the cleaner honours one.
 const Cleaner = enum {
     /// Apple 110.clean-tmps (crontabs-54) and tmp_cleaner (macOS 14+, reported):
     /// `-type f` with every timestamp old, and `-type d -empty` with mtime old.
@@ -746,10 +747,19 @@ const Cleaner = enum {
     /// systemd-tmpfiles before v242: ages everything except live sockets, and
     /// ignores locks (E9, E11).
     tmpfiles_pre242,
-    /// v242 to v253: also skips a directory it cannot LOCK_EX, and everything below it (E9).
+    /// v242 to v253: also skips a directory it cannot LOCK_EX, and everything below it (E9, E10).
     tmpfiles_242,
     /// v254 and later: also skips a non-directory it cannot LOCK_EX (E10).
     tmpfiles_254,
+
+    /// The age a pass removes at: periodic's default for /tmp (E2) and systemd's (E7).
+    fn ageNs(cleaner: Cleaner) i96 {
+        const days: i96 = switch (cleaner) {
+            .darwin_find => 3,
+            .tmpfiles_pre242, .tmpfiles_242, .tmpfiles_254 => 10,
+        };
+        return days * std.time.ns_per_day;
+    }
 };
 
 /// One node as a cleaner's rule reads it.
@@ -761,12 +771,12 @@ const Node = struct {
     live: bool = false,
     /// Someone holds LOCK_EX on it.
     locked: bool = false,
-    /// The Host's timestamps are newer than the cleaner's age.
-    refreshed: bool = false,
+    /// Its timestamps are older than the cleaner's age.
+    old: bool = false,
 };
 
 fn cleanerRemoves(cleaner: Cleaner, node: Node) bool {
-    if (node.refreshed) return false;
+    if (!node.old) return false;
     if (node.kind == .socket and node.live) return false;
     if (node.locked) switch (cleaner) {
         .darwin_find, .tmpfiles_pre242 => {},
@@ -780,20 +790,31 @@ fn cleanerRemoves(cleaner: Cleaner, node: Node) bool {
     };
 }
 
-/// Whether someone else holds LOCK_EX on D. A probe, as a lock-honouring cleaner takes it.
-fn directoryLocked(io: std.Io, directory: []const u8) !bool {
-    const dir = try openDirectory(directory);
-    defer dir.close(io);
-    return switch (std.posix.errno(std.posix.system.flock(dir.handle, std.posix.LOCK.EX | std.posix.LOCK.NB))) {
+fn oldAt(cleaner: Cleaner, timestamp: std.Io.Timestamp, now: i96) bool {
+    return timestamp.nanoseconds < now - cleaner.ageNs();
+}
+
+/// Whether someone else holds LOCK_EX on the open node `fd`. A probe, as a lock-honouring cleaner takes it.
+fn lockHeldElsewhere(fd: std.posix.fd_t) !bool {
+    return switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB))) {
         .SUCCESS => false,
         .AGAIN => true,
         else => error.EndpointLockFailed,
     };
 }
 
-/// Applies one cleaner's pass to the real entries of D, removing what its rule
-/// removes. Returns whether D itself went.
-fn applyCleaner(io: std.Io, cleaner: Cleaner, directory: []const u8, refreshed: bool) !bool {
+/// Whether someone else holds LOCK_EX on D. The directory is opened the way a lock-honouring cleaner opens it.
+fn directoryLocked(io: std.Io, directory: []const u8) !bool {
+    const dir = try openDirectory(directory);
+    defer dir.close(io);
+    return lockHeldElsewhere(dir.handle);
+}
+
+/// Applies one cleaner's pass to the entries of D, removing what its rule
+/// removes, then to D itself. Ages come from the real timestamps, and locks
+/// from real probes. Returns whether D went.
+fn applyCleaner(io: std.Io, cleaner: Cleaner, directory: []const u8) !bool {
+    const now = std.Io.Clock.real.now(io).nanoseconds;
     const dir = std.Io.Dir.cwd().openDir(io, directory, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return true,
         else => return err,
@@ -805,22 +826,33 @@ fn applyCleaner(io: std.Io, cleaner: Cleaner, directory: []const u8, refreshed: 
         var buffer: [std.Io.net.UnixAddress.max_len]u8 = undefined;
         const path = try std.fmt.bufPrint(&buffer, "{s}/{s}", .{ directory, entry.name });
         const stat = try dir.statFile(io, entry.name, .{ .follow_symlinks = false });
+        const old = oldAt(cleaner, stat.mtime, now) and if (stat.atime) |atime| oldAt(cleaner, atime, now) else true;
         const node: Node = if (stat.kind == .unix_domain_socket)
-            .{ .kind = .socket, .live = acceptsConnection(io, path) }
-        else
-            .{ .kind = .regular };
+            .{ .kind = .socket, .live = acceptsConnection(io, path), .old = old }
+        else blk: {
+            const file = try dir.openFile(io, entry.name, .{});
+            defer file.close(io);
+            break :blk .{ .kind = .regular, .locked = try lockHeldElsewhere(file.handle), .old = old };
+        };
         if (cleanerRemoves(cleaner, node)) try dir.deleteFile(io, entry.name) else remaining += 1;
     }
-    const node: Node = .{ .kind = .directory, .empty = remaining == 0, .locked = try directoryLocked(io, directory), .refreshed = refreshed };
+    // D is read after its entries went, so an unlink's mtime bump keeps an emptied D young for this pass.
+    const node: Node = .{
+        .kind = .directory,
+        .empty = remaining == 0,
+        .locked = try directoryLocked(io, directory),
+        .old = oldAt(cleaner, (try dir.stat(io)).mtime, now),
+    };
     if (!cleanerRemoves(cleaner, node)) return false;
     try std.Io.Dir.cwd().deleteDir(io, directory);
     return true;
 }
 
-/// Sets D's times to the epoch, as a claim from days ago would have left them.
-fn backdate(dir: std.Io.Dir) !void {
+/// Sets an open node's atime and mtime to the epoch, as a claim from days ago would have left them.
+/// Its ctime is set to now by the kernel, which is why the model reads only atime and mtime.
+fn backdate(fd: std.posix.fd_t) !void {
     const epoch = [2]c.timespec{ .{ .tv_sec = 0, .tv_nsec = 0 }, .{ .tv_sec = 0, .tv_nsec = 0 } };
-    if (c.futimens(dir.handle, &epoch) != 0) return error.BackdateFailed;
+    if (c.futimens(fd, &epoch) != 0) return error.BackdateFailed;
 }
 
 test "SH-11 no OS temp cleaner's rules remove a node of a live endpoint (#2128)" {
@@ -846,10 +878,11 @@ test "SH-11 no OS temp cleaner's rules remove a node of a live endpoint (#2128)"
                 try endpoint.unbind();
             },
         }
-        // A stalled claim: D's times are as old as the claim's, long ago.
-        if (phase == .claimed_stalled) try backdate(endpoint.held.?.dir);
-        // Every phase but a stall has the Host's own refresh (claim, bind or unbind) on D.
-        const removed = try applyCleaner(io, cleaner, directory, phase != .claimed_stalled);
+        // Aged D: a stalled claim (its times are as old as the claim's), and a
+        // bound D whose socket keeps it non-empty and locked. A fresh claim, and
+        // an unbind, leave D's own refresh in place.
+        if (phase == .claimed_stalled or phase == .bound) try backdate(endpoint.held.?.dir.handle);
+        const removed = try applyCleaner(io, cleaner, directory);
         if (removed) {
             // Only a stalled claim under a cleaner that ignores locks loses D.
             try testing.expectEqual(Phase.claimed_stalled, phase);
@@ -882,20 +915,28 @@ test "SH-11 no OS temp cleaner's rules remove a node of a live endpoint (#2128)"
     };
 }
 
-test "SH-11 the cleaner model matches the old regular rui.lock it replaces (#2128)" {
-    // The pre-#2128 endpoint: a regular, locked rui.lock. Every rule but
-    // v254's removes it, which is why the lock file had to go.
-    const locked_file: Node = .{ .kind = .regular, .locked = true };
-    try testing.expect(cleanerRemoves(.darwin_find, locked_file));
-    try testing.expect(cleanerRemoves(.tmpfiles_pre242, locked_file));
-    try testing.expect(cleanerRemoves(.tmpfiles_242, locked_file));
-    try testing.expect(!cleanerRemoves(.tmpfiles_254, locked_file));
-    // The new endpoint's directory, locked and empty: only darwin ignores the lock.
-    const locked_empty: Node = .{ .kind = .directory, .empty = true, .locked = true };
-    try testing.expect(cleanerRemoves(.darwin_find, locked_empty));
-    try testing.expect(!cleanerRemoves(.tmpfiles_242, locked_empty));
-    // A live socket is spared by every rule.
-    for (std.enums.values(Cleaner)) |cleaner| try testing.expect(!cleanerRemoves(cleaner, .{ .kind = .socket, .live = true }));
+test "SH-11 the cleaners remove the old layout's regular rui.lock unless they honour its lock (#2128)" {
+    const io = testing.io;
+    var runtime = try socket_fixture.Directory.init();
+    defer runtime.cleanup();
+    const root = runtime.root[0..runtime.root_len];
+    var directory_buffer: [Path.max_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
+
+    // The pre-#2128 endpoint: an old D holding an old regular rui.lock that a previous-release Host locks.
+    for (std.enums.values(Cleaner)) |cleaner| {
+        errdefer std.debug.print("endpoint legacy cleaner row: cleaner={s}\n", .{@tagName(cleaner)});
+        {
+            const holders = try arrange(io, directory, .free, .held_elsewhere, .absent, false);
+            defer holders.release(io);
+            try backdate(holders.legacy.?.handle);
+            try backdate(holders.dir.?.handle);
+            _ = try applyCleaner(io, cleaner, directory);
+        }
+        // Only v254 and later, which skip a locked regular file, keep it (E10).
+        try testing.expectEqual(cleaner == .tmpfiles_254, (try leftIn(io, directory)).legacy);
+        try std.Io.Dir.cwd().deleteTree(io, directory);
+    }
 }
 
 test "SH-11 a claimed directory's times are refreshed, so an empty D is not old" {
@@ -909,7 +950,7 @@ test "SH-11 a claimed directory's times are refreshed, so an empty D is not old"
     (try arrange(io, directory, .free, .absent, .absent, false)).release(io);
     const old = try openDirectory(directory);
     defer old.close(io);
-    try backdate(old);
+    try backdate(old.handle);
     try testing.expectEqual(@as(i96, 0), (try old.stat(io)).mtime.nanoseconds);
     var endpoint = try claim(io, derived);
     defer endpoint.retire() catch {};
