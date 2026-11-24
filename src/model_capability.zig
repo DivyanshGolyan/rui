@@ -101,7 +101,7 @@ const provider_count = @typeInfo(provider_name.Provider).@"enum".field_names.len
 /// The capabilities of the served names, in the Readinesses order. Names point into the readiness they came from,
 /// so the list must not outlive it.
 pub const Capabilities = struct {
-    items: [connection.max_list]provider_selection.Capability = undefined,
+    items: [connection.max_served]provider_selection.Capability = undefined,
     len: usize = 0,
 
     pub fn slice(self: *const Capabilities) []const provider_selection.Capability {
