@@ -185,7 +185,7 @@ test "built-in entries carry each provider's codec and web_search" {
     }
 }
 
-test "a name's display label and login come from its served entry or built-in facts" {
+test "CM-59 connection display labels preserve precedence and borrowed lifetime" {
     var served: Served = .{};
     var codex_entry = builtIn(.codex, .endpoint);
     codex_entry.label = Label.parse("Device route").?;
@@ -203,6 +203,19 @@ test "a name's display label and login come from its served entry or built-in fa
     try std.testing.expectEqual(@intFromPtr(beta.slice().ptr), @intFromPtr(fallback.ptr));
     beta.bytes[0] = 'B';
     try std.testing.expectEqualStrings("Beta", fallback);
-    try std.testing.expectEqualStrings("rui auth login chatgpt --device-code", loginOf(connection.Name.parse("codex").?).?);
-    try std.testing.expectEqual(@as(?[]const u8, null), loginOf(connection.Name.parse("alpha").?));
+}
+
+test "CM-60 connection login lookup returns only built-in commands" {
+    const cases = .{
+        .{ "codex", "rui auth login chatgpt --device-code" },
+        .{ "chatgpt", "rui auth login chatgpt" },
+        .{ "openai", "rui auth login openai" },
+    };
+    try std.testing.expectEqual(std.meta.fields(Provider).len, std.meta.fields(@TypeOf(cases)).len);
+    inline for (cases) |case| {
+        try std.testing.expectEqualStrings(case[1], loginOf(connection.Name.parse(case[0]).?).?);
+    }
+    for ([_][]const u8{ "alpha", "beta" }) |name| {
+        try std.testing.expectEqual(@as(?[]const u8, null), loginOf(connection.Name.parse(name).?));
+    }
 }
