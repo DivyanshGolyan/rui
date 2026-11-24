@@ -115,6 +115,8 @@ pub const Action = enum {
     stop,
     archive,
     open_session,
+    collapse_tree,
+    expand_tree,
     next_question,
 };
 
@@ -141,6 +143,8 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .shift_tab = null,
     .shift_up = .select_previous,
     .shift_down = .select_next,
+    .alt_left = .collapse_tree,
+    .alt_right = .expand_tree,
     .page_up = null,
     .page_down = null,
     .home = .first,
@@ -391,9 +395,17 @@ const ViewRows = struct { first: Reference, last: Reference };
 /// The order indices a window must keep, first through end (exclusive).
 const Focus = struct { first: usize, end: usize };
 
+const ParentClick = struct {
+    reference: Reference,
+    deadline_ms: u64,
+    released: bool = false,
+
+    const interval_ms = 300;
+};
+
 pub const Event = union(enum) {
     input: InputDelivery,
-    list_settled: struct { wide: bool, focused: bool },
+    list_settled: struct { wide: bool, focused: bool, click_clock_ms: ?u64 = null },
     list_presence: struct { at_ms: u64, pointer_over: bool },
     /// The pointer after a press, over the drawn target under it: a left drag, its release, or a move with no
     /// button held. Lists report it wherever the press landed (see `Carry`).
@@ -439,7 +451,7 @@ pub const Event = union(enum) {
     observed: Observed,
     conversation: ?Reference,
 
-    clicked: struct { target: Click, upgrade_admitted: bool = true },
+    clicked: struct { target: Click, upgrade_admitted: bool = true, at_ms: ?u64 = null },
 
     unconfirmed: Unconfirmed,
 };
@@ -916,6 +928,7 @@ pub const State = struct {
     nodes: Vec(Node) = .{},
     scratch: Vec(u32) = .{},
     folded: Vec(Reference) = .{},
+    parent_click: ?ParentClick = null,
     pin_end: usize = 0,
     ordered_refs: Vec(Reference) = .{},
     full_order: Vec(u32) = .{},
@@ -1442,6 +1455,7 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .input => |input| {
+            state.parent_click = null;
             endCarry(state);
             if (input.list_origin and !input.pasted and !input.under and input.key != .ignored) {
                 const was_held = holding(state);
@@ -1453,6 +1467,7 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
             try listInput(state, input, &effects);
         },
         .viewport => |span| {
+            state.parent_click = null;
             state.viewport = viewportRows(state, span);
             try archivedReads(state, &effects);
         },
@@ -1463,6 +1478,14 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
             if (was_held and !holding(state)) try releaseOrder(state);
         },
         .list_settled => |frame| {
+            if (!frame.focused) state.parent_click = null;
+            if (state.parent_click) |click| if (frame.click_clock_ms) |now| {
+                if (now >= click.deadline_ms) {
+                    state.parent_click = null;
+                    state.presentation_revision +%= 1;
+                    try clickOpen(state, click.reference, &effects);
+                }
+            };
             const pending = state.browse_pending;
             state.browse_pending = false;
             if (pending and frame.wide and frame.focused) {
@@ -1491,10 +1514,23 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
         .clicked => |input| {
             state.launch = .done;
             endCarry(state);
+            const parent_click = state.parent_click;
+            state.parent_click = null;
             if (!state.creating()) switch (input.target) {
-                .open => |reference| {
+                .open => |reference| open_row: {
                     // Only an admitted press can carry its row: while a chat is being created, clicks are refused.
                     state.carry.pressed = reference;
+                    if (input.at_ms) |now| if (position(state, reference) != null and foldable(state, reference)) {
+                        state.browse_pending = false;
+                        state.selected = .{ .session = reference };
+                        if (parent_click) |click| if (click.released and now < click.deadline_ms and std.mem.eql(u8, &click.reference, &reference)) {
+                            endCarry(state);
+                            try foldSelected(state, !isFolded(state, reference));
+                            break :open_row;
+                        };
+                        state.parent_click = .{ .reference = reference, .deadline_ms = now +| ParentClick.interval_ms };
+                        break :open_row;
+                    };
                     try clickOpen(state, reference, &effects);
                 },
                 .pin => |request| pinIntent(state, request, &effects),
@@ -2518,11 +2554,15 @@ fn isFolded(state: *const State, reference: Reference) bool {
     return false;
 }
 
+fn foldable(state: *const State, reference: Reference) bool {
+    const index = lookup(state.by_reference.items, reference) orelse return false;
+    return index < state.nodes.items.len and state.nodes.items[index].descendants != 0;
+}
+
 fn foldSelected(state: *State, folded: bool) error{OutOfMemory}!void {
     if (state.selected != .session) return;
     const reference = state.selected.session;
-    const index = lookup(state.by_reference.items, reference) orelse return;
-    if (index >= state.nodes.items.len or state.nodes.items[index].descendants == 0) return;
+    if (!foldable(state, reference)) return;
     for (state.folded.items, 0..) |known, at| {
         if (!std.mem.eql(u8, &known, &reference)) continue;
         if (folded) return;
@@ -2693,17 +2733,19 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         },
         .left => if (state.selected == .archived) {
             state.selected = .sessions;
-        } else if (state.selected == .session) try foldSelected(state, true),
+        },
         .action => |action| switch (action) {
             .exit => unreachable,
             .open_session => {
                 state.browse_pending = false;
                 switch (state.selected) {
-                    .session => try foldSelected(state, false),
+                    .session => try activateList(state, .open_session, effects),
                     .sessions => state.selected = .archived,
                     .new_session, .archived, .settings => {},
                 }
             },
+            .collapse_tree => try foldSelected(state, true),
+            .expand_tree => try foldSelected(state, false),
             .clear => {
                 state.notice = null;
                 if (state.archive == .archived) try changeArchiveView(state, .active, effects);
@@ -2845,12 +2887,18 @@ fn carryPointer(state: *State, pointer: Pointer, effects: *Effects) error{OutOfM
         if (!state.carry.carrying) {
             // A drag still inside the pressed row is a click that wobbled.
             if (pointer.over != null and pointer.over.? == .open and std.mem.eql(u8, &pointer.over.?.open, &pressed)) return;
+            state.parent_click = null;
             state.carry.carrying = true;
         }
         state.carry.over = pointer.over;
         if (!std.meta.eql(before, state.carry)) state.presentation_revision +%= 1;
         return;
     }
+    if (pointer.phase == .released) if (state.parent_click) |*click| {
+        if (pointer.over != null and pointer.over.? == .open and std.mem.eql(u8, &pointer.over.?.open, &click.reference)) {
+            click.released = true;
+        } else state.parent_click = null;
+    };
     const dropped = pointer.phase == .released and state.carry.carrying and blk: {
         state.carry.over = pointer.over;
         break :blk state.carry.dropping(state);
@@ -4228,9 +4276,9 @@ test "SUI-100 creator tree uses served subtree facts and disjoint nested pins" {
     });
     defer state.deinit();
     _ = try step(&state, .{ .clicked = .{ .target = .{ .open = "b4n8wd".* } } });
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     _ = try step(&state, .{ .clicked = .{ .target = .{ .open = "a1b2c3".* } } });
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     const text = try screenText(&state, 140, 24, .{});
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "Pinned ▸ 1") != null);
@@ -4257,7 +4305,7 @@ fn creatorSnapshotCase() !void {
     _ = try step(&state, .{ .conversation = "b4n8wd".* });
     _ = try step(&state, .{ .observed = .{ .reference = "b4n8wd".*, .read_version = testToken(3), .work = fixtureWork(.{ .state = .{ .working = ago(1) } }), .opening = false } });
     _ = try step(&state, .{ .clicked = .{ .target = .{ .open = "a1b2c3".* } } });
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     const text = try screenText(&state, 140, 24, .{ .depth = .none });
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "Root ▸ 1") != null);
@@ -4270,7 +4318,7 @@ fn creatorPagesCase() !void {
     var state = try opened(&.{root});
     defer state.deinit();
     _ = try step(&state, .{ .clicked = .{ .target = .{ .open = root.reference } } });
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
     root.read_version = testToken(2);
     root.descendant_count = 2;
@@ -4298,6 +4346,7 @@ fn creatorPagesCase() !void {
 
 test "SUI-101 creator tree folding and expansion" {
     try creatorFoldCase();
+    try creatorClickCase();
     try creatorHiddenOpenCase();
 }
 
@@ -4375,10 +4424,52 @@ fn creatorFoldCase() !void {
     });
     defer state.deinit();
     state.selected = .{ .session = "a1b2c3".* };
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     try expectOrder(&state, &.{"A"});
-    _ = try press(&state, .open_session);
+    const right_effects = try press(&state, .open_session);
+    try expectEffects(&.{ .{ .open = "a1b2c3".* }, .list_models }, right_effects);
+    try expectOrder(&state, &.{"A"});
+    try expectEffects(&.{}, try press(&state, .expand_tree));
     try expectOrder(&state, &.{ "A", "Child" });
+}
+
+fn creatorClickCase() !void {
+    const parent: Reference = "a1b2c3".*;
+    const child: Reference = "b4n8wd".*;
+    const target: Click = .{ .open = parent };
+    const press_parent = Event{ .clicked = .{ .target = target, .at_ms = 100 } };
+    const release_parent = Event{ .pointer = .{ .phase = .released, .over = target } };
+    const last_before_deadline = 100 + ParentClick.interval_ms - 1;
+    const deadline = last_before_deadline + 1;
+    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { single, double, childless, focus_left, drag })) |gesture| {
+        var state = try opened(&.{
+            session(&parent, .{ .working = ago(10) }, .{ .label = "Parent", .descendant_count = 1 }),
+            session(&child, .{ .finished = ago(1) }, .{ .label = "Child", .creator = parent }),
+        });
+        defer state.deinit();
+        if (gesture == .childless) {
+            try expectEffects(&.{ .{ .open = child }, .list_models }, try step(&state, .{ .clicked = .{ .target = .{ .open = child }, .at_ms = 100 } }));
+            continue;
+        }
+        try expectEffects(&.{}, try step(&state, press_parent));
+        try expectOrder(&state, &.{ "Parent", "Child" });
+        if (gesture == .drag) {
+            _ = try step(&state, .{ .pointer = .{ .phase = .held, .over = .archived } });
+        } else {
+            try expectEffects(&.{}, try step(&state, release_parent));
+        }
+        try expectEffects(&.{}, try step(&state, .{ .list_settled = .{ .wide = wide, .focused = gesture != .focus_left, .click_clock_ms = last_before_deadline } }));
+        if (gesture == .double) {
+            try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = target, .at_ms = last_before_deadline } }));
+            try expectOrder(&state, &.{"Parent"});
+            try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = target, .at_ms = deadline } }));
+            try expectEffects(&.{}, try step(&state, release_parent));
+            try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = target, .at_ms = deadline + 1 } }));
+            try expectOrder(&state, &.{ "Parent", "Child" });
+        }
+        const settled = try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true, .click_clock_ms = deadline + 1 } });
+        try expectEffects(if (gesture == .single) &.{ .{ .open = parent }, .list_models } else &.{}, settled);
+    };
 }
 
 fn creatorHiddenOpenCase() !void {
@@ -4391,7 +4482,7 @@ fn creatorHiddenOpenCase() !void {
     defer state.deinit();
     try expectOrder(&state, &.{ "A", "Child", "B" });
     state.selected = .{ .session = "a1b2c3".* };
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     try expectOrder(&state, &.{ "A", "B" });
     _ = try step(&state, .{ .conversation = "b4n8wd".* });
     state.selected = .{ .session = "b4n8wd".* };
@@ -4479,7 +4570,7 @@ fn creatorAttentionCase() !void {
     });
     defer state.deinit();
     state.selected = .{ .session = "a1b2c3".* };
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     const index = lookup(state.by_reference.items, "a1b2c3".*).?;
     try std.testing.expectEqual(@as(u64, 2), state.nodes.items[index].descendants);
     try std.testing.expectEqual(@as(u64, 1), state.nodes.items[index].attention);
@@ -4511,7 +4602,7 @@ fn creatorEdgeCase() !void {
     });
     defer state.deinit();
     state.selected = .{ .session = "a1b2c3".* };
-    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
     try std.testing.expectEqual(@as(usize, 0), edgeAttention(&state, .below, 0, 1));
     try std.testing.expectEqual(@as(usize, 1), edgeAttention(&state, .above, 1, 2));
 }
@@ -8258,7 +8349,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
                 try std.testing.expectEqual(before_requests, state.request_count);
                 switch (action) {
                     .exit => unreachable,
-                    .open_session => {
+                    .open_session, .collapse_tree, .expand_tree => {
                         try std.testing.expect(std.meta.eql(before_notice, state.notice));
                         try std.testing.expectEqual(Selection.new_session, state.selected);
                     },
@@ -8282,7 +8373,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
 }
 
 test "Overview list activation resumes same or opens other chat at wide and narrow widths" {
-    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |same| for ([_]Input{.enter}) |key| {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |same| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| {
         var state = try opened(&mixed);
         defer state.deinit();
         _ = try step(&state, .{ .resized = .{ .width = width, .height = 30 } });
@@ -8362,7 +8453,7 @@ test "Overview browse settles only the last wide list move and never activates c
 }
 
 test "Overview browse explicit Enter and Right share activation and focus departure cancels settle" {
-    for ([_]bool{ false, true }) |wide| for ([_]Input{.enter}) |key| for ([_]Selection{ .new_session, .settings, .{ .session = "b2c3d4".* }, .{ .session = "g7h8j9".* } }) |selection| {
+    for ([_]bool{ false, true }) |wide| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| for ([_]Selection{ .new_session, .settings, .{ .session = "b2c3d4".* }, .{ .session = "g7h8j9".* } }) |selection| {
         var state = try opened(&mixed);
         defer state.deinit();
         _ = try step(&state, .{ .conversation = "b2c3d4".* });
@@ -9424,7 +9515,7 @@ fn creatorWidthCase() !void {
         });
         defer state.deinit();
         state.selected = .{ .session = "b4n8wd".* };
-        _ = try step(&state, .{ .input = .{ .key = .left } });
+        _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const text = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 1, width, .{ .unicode = use_unicode }, 0));
@@ -9441,7 +9532,7 @@ fn creatorSidebarCase() !void {
         var state = try opened(&.{session("a1b2c3", .{ .finished = ago(999 * 86400) }, .{ .label = name, .descendant_count = 2, .descendant_needs_you_count = 1 })});
         defer state.deinit();
         state.selected = .{ .session = "a1b2c3".* };
-        _ = try step(&state, .{ .input = .{ .key = .left } });
+        _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const line = (try Lines.at(arena.allocator(), &state, 0, width, .{ .unicode = use_unicode }, 0)).?;
@@ -9466,7 +9557,7 @@ fn creatorPresentationCase() !void {
     try std.testing.expect(state.presentation_revision != unchanged);
     const nesting = state.presentation_revision;
     state.selected = .{ .session = a.reference };
-    _ = try step(&state, .{ .input = .{ .key = .left, .at_ms = state.now_ms } });
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree }, .at_ms = state.now_ms } });
     try std.testing.expect(state.presentation_revision != nesting);
     const collapsed = state.presentation_revision;
     _ = try refresh(&state, .full, testToken(4), &.{ a, b });
