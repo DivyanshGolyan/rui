@@ -596,7 +596,6 @@ test "typed choices share enum names with help and refuse unknown values" {
     const cases = [_]Case{
         .{ .command = .session_start, .name = "permission-mode", .choices = &.{ "ask", "bypass" } },
         .{ .command = .defaults_configure, .name = "permission-mode", .choices = &.{ "ask", "bypass" } },
-        .{ .command = .session_start, .name = "connection", .choices = &.{ "codex", "openai", "chatgpt" } },
         .{ .command = .session_configure, .name = "reasoning-effort", .choices = &.{ "none", "low", "medium", "high", "xhigh", "max", "default" } },
         .{ .command = .defaults_configure, .name = "notifications", .choices = &.{ "on", "off" } },
         .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background", "action-stop" } },

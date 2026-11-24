@@ -614,7 +614,7 @@ pub const SessionRow = struct {
 
     pub const json_shape = .{
         "{\"read_version\":\"", Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState }, "\",\"pin_order\":",         Hole.optional_id,                          ",\"reference\":",                   Hole{ .string = max_session_bytes },      ",\"archive_seq\":",          Hole.optional_id,                            ",\"workspace\":",                      Hole{ .string = max_workspace_bytes },
-        ",\"connection\":",     Hole{ .string = connection.max_name_bytes }, ",\"model\":",           Hole{ .string = max_model_bytes },  ",\"tools\":",               Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"",           Hole{ .tag = PermissionMode },            "\",\"parent\":",             Hole{ .optional_string = session_id_bytes }, ",\"creator\":",                        Hole{ .optional_string = session_id_bytes },
+        ",\"connection\":\"", Hole{ .text = connection.max_name_bytes }, "\",\"model\":",           Hole{ .string = max_model_bytes },  ",\"tools\":",               Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"",           Hole{ .tag = PermissionMode },            "\",\"parent\":",             Hole{ .optional_string = session_id_bytes }, ",\"creator\":",                        Hole{ .optional_string = session_id_bytes },
         ",\"label\":",          Hole{ .optional_string = max_label_bytes },  ",\"created_at\":\"",      Hole.decimal,                       "\",\"state_change_at\":\"", Hole.decimal,                              "\",\"subtree_state_change_at\":\"", Hole.decimal,                             "\",\"descendant_count\":\"", Hole.decimal,                                "\",\"descendant_needs_you_count\":\"", Hole.decimal,
         "\",\"revision\":\"",   Hole.decimal,                                "\",\"end\":\"",           Hole.decimal,                       "\",\"first_message\":",     Hole{ .optional_json = FirstMessage },     ",\"last_line\":",                   Hole{ .optional_json = LastLine.Fields }, ",\"work\":",                 Hole{ .json = SessionWork },                 ",\"peers\":",                          Hole{ .json = PeerFacts },
         "}",
@@ -2542,7 +2542,7 @@ pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
 pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
 pub const parts_reference_shape = .{ "{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
 
-pub const creation_configuration_shape = .{ ",\"configuration\":{\"connection\":", Hole{ .string = connection.max_name_bytes }, ",\"model\":", Hole{ .string = max_model_bytes }, ",\"reasoning_effort\":", Hole{ .optional_tag = ReasoningEffort }, ",\"workspace\":", Hole{ .string = max_workspace_bytes }, ",\"tools\":", Hole{ .json = @import("creation_receipt_wire.zig").NamesJson }, ",\"loaded_tools\":", Hole{ .json = @import("creation_receipt_wire.zig").NamesJson }, ",\"permission_mode\":\"", Hole{ .tag = cli_value.PermissionMode }, "\",\"compaction_trigger\":", Hole.optional_id, "}" };
+pub const creation_configuration_shape = .{ ",\"configuration\":{\"connection\":\"", Hole{ .text = connection.max_name_bytes }, "\",\"model\":", Hole{ .string = max_model_bytes }, ",\"reasoning_effort\":", Hole{ .optional_tag = ReasoningEffort }, ",\"workspace\":", Hole{ .string = max_workspace_bytes }, ",\"tools\":", Hole{ .json = @import("creation_receipt_wire.zig").NamesJson }, ",\"loaded_tools\":", Hole{ .json = @import("creation_receipt_wire.zig").NamesJson }, ",\"permission_mode\":\"", Hole{ .tag = cli_value.PermissionMode }, "\",\"compaction_trigger\":", Hole.optional_id, "}" };
 
 pub const configuration_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.configure).reply_type ++ "\",\"answer\":{\"status\":";
@@ -2752,7 +2752,7 @@ pub const host_info_reply = struct {
     pub const settings_digest = .{ ",\"settings_digest\":\"", Hole{ .hex = 32 }, "\"" };
     /// The served connections: `connections_head`, one `connection` per served name separated by commas, then `connections_tail`.
     pub const connections_head = ",\"capabilities\":{\"bash\":true,\"connections\":[";
-    pub const connection_entry = .{ "{\"name\":", Hole{ .string = @import("connection.zig").max_name_bytes }, ",\"label\":", Hole{ .string = @import("connection.zig").max_label_bytes }, ",\"route\":\"", Hole{ .tag = Route }, "\"}" };
+    pub const connection_entry = .{ "{\"name\":\"", Hole{ .text = @import("connection.zig").max_name_bytes }, "\",\"label\":", Hole{ .string = @import("connection.zig").max_label_bytes }, ",\"route\":\"", Hole{ .tag = Route }, "\"}" };
     pub const connections_tail = "]}}";
     pub const max_bytes = shapeBytes(head) + shapeBytes(doublewrite) + shapeBytes(settings_digest) + shapeBytes(.{connections_head}) +
         provider_route.max_served * shapeBytes(connection_entry) + (provider_route.max_served - 1) + shapeBytes(.{connections_tail});

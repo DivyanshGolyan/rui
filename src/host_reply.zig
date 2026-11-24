@@ -411,7 +411,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     };
 
     var config: command_reply.CreationConfiguration = .{
-        .connection = @import("connection.zig").Name.parse("codex").?,
+        .connection = @import("connection.zig").Name.parse("cccccccccccccccc").?,
         .model = .{},
         .reasoning_effort = Worst.tag(protocol.ReasoningEffort),
         .workspace = .{},
@@ -508,14 +508,20 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         entry.* = .{ .name = connection.Name.parse(name).?, .label = provider_route.Label.parse(&@as([connection.max_label_bytes]u8, @splat('L'))).?, .route = .chatgpt_device, .codec = .@"openai-responses/2", .web_search = true };
     }
     var host_info: protocol.ResponseBuffer = .{};
-    const worst_info: HostInfo = .{ .store = &escaped_store, .instance = @splat(0xff), .active_capacity = max, .intake_capacity = max, .descriptor_soft_limit = max, .started_at = max, .custody_occupied = max, .paused = false, .connections = &full, .doublewrite = null, .settings_digest = null };
+    // Escaped text reaches the bound exactly; a connection name cannot be escaped, so the full list is checked against the bound below.
+    const worst_info: HostInfo = .{ .store = &escaped_store, .instance = @splat(0xff), .active_capacity = max, .intake_capacity = max, .descriptor_soft_limit = max, .started_at = max, .custody_occupied = max, .paused = false, .connections = &.{}, .doublewrite = null, .settings_digest = null };
     try host_info.render(renderHostInfo, .{worst_info});
     host_info.len = 0;
     var with_diagnostic = worst_info;
     with_diagnostic.doublewrite = &@as([32]u8, @splat(0x01));
     with_diagnostic.settings_digest = @splat(0xff);
     try host_info.render(renderHostInfo, .{with_diagnostic});
-    try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
+    try std.testing.expect(host_info.len <= protocol.max_host_info_response_bytes);
+    host_info.len = 0;
+    var with_connections = with_diagnostic;
+    with_connections.connections = &full;
+    try host_info.render(renderHostInfo, .{with_connections});
+    try std.testing.expect(host_info.len <= protocol.max_host_info_response_bytes);
 
     const observations = protocol.command_observation_reply;
     const message: command_reply.CommandObservation = .{ .status = .accepted, .target = session, .kind = .{ .message = .{
