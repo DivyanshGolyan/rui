@@ -5,7 +5,6 @@ const store = @import("store.zig");
 const InputCapture = @import("InputCapture.zig");
 const arguments = @import("read_image_arguments.zig");
 const source_file = @import("os/read_image_file.zig");
-const fenceDispatch = @import("server_host.zig").fenceDispatch;
 const tool_settle = @import("tool_settle.zig");
 const result_fault = @import("result_fault.zig");
 const tool_result = @import("tool_result.zig");
@@ -83,7 +82,7 @@ pub const Calls = struct {
         var admission = (host.store.admitActionAttempt(call, 300_000, host.hooks.storeFaults(.attempt_admission)) catch |err| {
             host.allocator.destroy(active);
             host.custody.releaseUnused(token) catch unreachable;
-            fenceDispatch(host, "image read admission", err);
+            host.lifecycle.fenceDispatch("image read admission", err);
             return .retry_later;
         }) orelse {
             host.allocator.destroy(active);
@@ -93,7 +92,7 @@ pub const Calls = struct {
         active.binding = host.custody.attach(token, &admission.permit) catch |err| {
             host.allocator.destroy(active);
             host.custody.releaseUnused(token) catch unreachable;
-            fenceDispatch(host, "image read custody", err);
+            host.lifecycle.fenceDispatch("image read custody", err);
             return .admitted;
         };
         prepare(host, active) catch |err| {
@@ -112,7 +111,7 @@ pub const Calls = struct {
         var progress = false;
         for (&self.entries) |*entry| if (entry.*) |active| {
             const stopped = host.store.actionSupersededByStop(active.binding) catch |err| {
-                fenceDispatch(host, "image read stop", err);
+                host.lifecycle.fenceDispatch("image read stop", err);
                 return progress;
             };
             if (stopped != null) {
@@ -185,7 +184,7 @@ fn fail(host: *Host, active: *Active, fault: result_fault.Failure) void {
         inline else => |value| value,
     };
     if (host.store.isFenced()) {
-        fenceDispatch(host, "image read canonical input", err);
+        host.lifecycle.fenceDispatch("image read canonical input", err);
     } else if (err == error.HostDispatchSuppressed) {
         return;
     } else if (err == error.SupersededByControl) {
@@ -254,7 +253,7 @@ noinline fn prepare(host: *Host, active: *Active) !void {
     host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding }, now) catch |err| return active.recordFailure(.{ .store = err });
     host.store.withActionLaunchHandoff(active.binding, .{ .host = host, .active = active }, struct {
         fn handoff(context: anytype, cutoff: u64) !void {
-            try context.host.withEffectLaunch(context, launch);
+            try context.host.lifecycle.withEffectLaunch(context, launch);
             try context.host.custody.watchMessages(context.active.token, cutoff);
         }
         fn launch(context: anytype) !void {
@@ -279,6 +278,8 @@ noinline fn prepare(host: *Host, active: *Active) !void {
 }
 
 const TestCase = enum { snapshot, missing, invalid, oversized, stop, stop_between_ticks, background, source_io, result_allocation, empty_allocation, oversized_allocation, capture, seal, publication, shutdown, payload_capacity, index_capacity };
+
+const TestParts = if (@import("builtin").is_test) @import("server_host_testing.zig").TestParts else void;
 
 test "read_image custody owns snapshot publication stop background and recovery" {
     try testReadImage(&.{ .snapshot, .missing, .invalid, .oversized, .stop, .background, .source_io, .capture, .seal, .publication, .shutdown });
@@ -354,6 +355,8 @@ fn testReadImage(cases: []const TestCase) !void {
         // The first allocation admits Active; fail Result.create after admission.
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 1 });
         var host: Host = .{ .io = std.testing.io, .allocator = if (case == .result_allocation or case == .empty_allocation or case == .oversized_allocation) failing.allocator() else std.testing.allocator, .lease = undefined, .store = &storage, .retention = &queue, .custody = execution.CustodyPool.initialize(&records) };
+        var host_parts: TestParts = undefined;
+        host_parts.attach(&host, undefined);
         var capture_vtable = std.testing.io.vtable.*;
         var calls: Calls = .{};
         defer calls.shutdown(&host);
@@ -407,7 +410,7 @@ fn testReadImage(cases: []const TestCase) !void {
                 failInput(&host, active, outcome.failed);
                 active.destroy(&host);
                 calls.entries[0] = null;
-                try std.testing.expect(host.launchAllowed());
+                try std.testing.expect(host.lifecycle.launchAllowed());
             } else if (case == .seal) {
                 const complete = active.result.?.stepImage();
                 try std.testing.expect(complete == .kept);
@@ -415,7 +418,7 @@ fn testReadImage(cases: []const TestCase) !void {
                 publish(&host, active);
                 calls.shutdown(&host);
             } else if (case == .shutdown) {
-                _ = host.advance(.stopping);
+                _ = host.lifecycle.advance(.stopping);
                 calls.shutdown(&host);
             } else try std.testing.expect(calls.service(&host));
         }
@@ -424,7 +427,7 @@ fn testReadImage(cases: []const TestCase) !void {
         try std.testing.expectEqual(baseline, used.load(.acquire));
         if (case == .result_allocation or case == .capture or case == .seal or case == .publication or case == .shutdown) {
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{selected.action_id}));
-            if (case != .shutdown) try std.testing.expect(!host.launchAllowed());
+            if (case != .shutdown) try std.testing.expect(!host.lifecycle.launchAllowed());
             if (case == .publication) try std.testing.expect(storage.isFenced());
             // Recovery runs under a fresh Store owner, never through a
             // canonical fault fence or a retained source descriptor.
@@ -437,13 +440,13 @@ fn testReadImage(cases: []const TestCase) !void {
         }
         if (case == .empty_allocation or case == .oversized_allocation) {
             try std.testing.expect(!failing.has_induced_failure);
-            try std.testing.expect(host.launchAllowed());
+            try std.testing.expect(host.lifecycle.launchAllowed());
             const text = if (case == .empty_allocation) "Image read failed: TruncatedImage." else "Image read failed: ImageResourceLimit.";
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.form=0 AND c.byte_length=?2 AND c.digest=?3", .{ selected.action_id, text.len, testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
         }
         if (case == .result_allocation) try std.testing.expect(failing.has_induced_failure);
         if (case == .payload_capacity or case == .index_capacity) {
-            try std.testing.expect(host.launchAllowed());
+            try std.testing.expect(host.lifecycle.launchAllowed());
             try std.testing.expect(!storage.isFenced());
             const text = result_fault.storage_failed_text;
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='storage_failed' AND c.form=0 AND c.byte_length=?2 AND c.digest=?3", .{ selected.action_id, text.len, testing.Blob{ .bytes = &protocol.contentDigest(text) } }));

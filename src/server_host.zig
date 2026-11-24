@@ -28,6 +28,7 @@ const session_report = @import("session_report.zig");
 const stderr = @import("stderr.zig");
 const host_drain = @import("host_drain.zig");
 const host_settings = @import("host_settings.zig");
+const child_exit_wake = @import("child_exit_wake.zig");
 const server_mcp_relist = @import("server_mcp_relist.zig");
 
 pub const default_bash_timeout_ms = @import("host_settings.zig").default_bash_timeout_ms;
@@ -324,11 +325,217 @@ pub const HookProgress = struct {
 
 pub const Phase = enum(u8) { open, fenced, ending, stopping };
 
+pub const Lifecycle = struct {
+    io: std.Io,
+    /// Null only in tests that never stop the Host.
+    lease: *platform.StoreLease,
+    phase: std.atomic.Value(Phase) = .init(.open),
+    controls_changed: std.atomic.Value(bool) = .init(false),
+    /// The operator's hold on new Turns (host-pause). Read the hold in force
+    /// through `turnsHeld`, never this flag alone.
+    turns_paused: std.atomic.Value(bool) = .init(false),
+    /// A draining pause's deadline on the awake clock; 0 means none. Written
+    /// only by `askStop` under `launch_mutex`; it only ever moves earlier.
+    drain_until_ns: std.atomic.Value(u64) = .init(0),
+    dispatch_wake: std.Io.Event = .unset,
+    intake_wake: ?std.posix.fd_t = null,
+    launch_mutex: std.Io.Mutex = .init,
+    /// Attached after readiness, when the Host's stderr may be /dev/null; launch_mutex guards writes.
+    diagnostics: ?*HostDiagnostics = null,
+
+    pub fn init(io: std.Io, lease: *platform.StoreLease, paused: bool, intake_wake: ?std.posix.fd_t) Lifecycle {
+        return .{ .io = io, .lease = lease, .turns_paused = .init(paused), .intake_wake = intake_wake };
+    }
+
+    pub fn launchAllowed(self: *const Lifecycle) bool {
+        return self.phase.load(.acquire) == .open;
+    }
+
+    pub fn stopping(self: *const Lifecycle) bool {
+        return self.phase.load(.acquire) == .stopping;
+    }
+
+    pub fn executionEnding(self: *const Lifecycle) bool {
+        return @backingInt(self.phase.load(.acquire)) >= @backingInt(Phase.ending);
+    }
+
+    pub fn advance(self: *Lifecycle, target: Phase) Phase {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        const previous = self.phase.load(.monotonic);
+        if (@backingInt(target) > @backingInt(previous)) self.phase.store(target, .release);
+        return previous;
+    }
+
+    /// Advances like `advance`, and records the reason when this call made the transition.
+    pub fn fence(self: *Lifecycle, target: Phase, phase: []const u8, err: anyerror) Phase {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        const previous = self.phase.load(.monotonic);
+        if (@backingInt(target) <= @backingInt(previous)) return previous;
+        self.phase.store(target, .release);
+        if (self.diagnostics) |writer| writer.recordAs(@tagName(target), phase, @errorName(err));
+        return previous;
+    }
+
+    pub fn attachDiagnostics(self: *Lifecycle, writer: *HostDiagnostics) void {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        self.diagnostics = writer;
+    }
+
+    /// The hold on new Turns in force: the operator's hold or a drain.
+    pub fn turnsHeld(self: *const Lifecycle) bool {
+        return self.turns_paused.load(.acquire) or self.drain_until_ns.load(.acquire) != 0;
+    }
+
+    pub fn drainUntil(self: *const Lifecycle) ?u64 {
+        const until = self.drain_until_ns.load(.acquire);
+        return if (until == 0) null else until;
+    }
+
+    /// A plain stop. True when this call moved the Host to stopping.
+    pub fn stopAsked(self: *Lifecycle) bool {
+        return self.askStop(.immediate) == .stop_now;
+    }
+
+    /// The one door every stop enters: a plain stop, a signal, stdin closing
+    /// and a draining pause. The stop record is written inside the lock, so
+    /// its order matches the order of decisions.
+    pub fn askStop(self: *Lifecycle, bound: host_drain.Bound) host_drain.Ask {
+        const answer = blk: {
+            self.launch_mutex.lockUncancelable(self.io);
+            defer self.launch_mutex.unlock(self.io);
+            const phase: host_drain.PhaseView = switch (self.phase.load(.monotonic)) {
+                .open => .open,
+                .fenced => .fenced,
+                .ending => .ending,
+                .stopping => .stopping,
+            };
+            const current = self.drainUntil();
+            const answer = host_drain.ask(phase, current, bound, nowNs(self.io));
+            switch (answer) {
+                .already_stopping => {},
+                .stop_now => {
+                    self.phase.store(.stopping, .release);
+                    self.recordStop(if (current == null) .asked else .superseded);
+                },
+                .drain => |drain| if (drain.changed) {
+                    self.drain_until_ns.store(drain.until_ns, .release);
+                    if (current == null) self.recordStop(.draining);
+                },
+            }
+            break :blk answer;
+        };
+        if (answer == .drain and answer.drain.changed) self.dispatch_wake.set(self.io);
+        return answer;
+    }
+
+    /// Ends a drain the execution owner judged over. False when a plain stop
+    /// already ended the Host.
+    pub fn finishDrain(self: *Lifecycle, outcome: host_drain.Outcome) bool {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        if (@backingInt(self.phase.load(.monotonic)) >= @backingInt(Phase.stopping)) return false;
+        self.phase.store(.stopping, .release);
+        self.recordStop(host_drain.Record.of(outcome));
+        return true;
+    }
+
+    fn recordStop(self: *Lifecycle, record: host_drain.Record) void {
+        self.lease.recordStop(record.text()) catch |err| stderr.print("rui: stop record not written: {s}\n", .{@errorName(err)});
+    }
+
+    pub fn withEffectLaunch(self: *Lifecycle, context: anytype, comptime launch: anytype) !void {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        if (!self.launchAllowed()) return error.HostDispatchSuppressed;
+        try launch(context);
+    }
+
+    pub fn fenceDispatch(self: *Lifecycle, phase: []const u8, err: anyerror) void {
+        if (self.fence(.stopping, phase, err) == .stopping) return;
+        stderr.print("rui: dispatch fenced after {s} failure: {s}\nHost cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
+        self.wakeListener();
+    }
+
+    pub fn retainDispatchFence(self: *Lifecycle, phase: []const u8, err: anyerror) void {
+        _ = self.fence(.fenced, phase, err);
+        stderr.print("rui: dispatch fenced after {s} failure: {s}\nNew work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
+    }
+
+    pub fn wakeListener(self: *Lifecycle) void {
+        if (self.intake_wake) |fd| _ = std.c.write(fd, "x", 1);
+    }
+
+    pub fn noteControlsChanged(self: *Lifecycle) void {
+        self.controls_changed.store(true, .release);
+    }
+
+    pub fn takeControlsChanged(self: *Lifecycle) bool {
+        return self.controls_changed.swap(false, .acq_rel);
+    }
+
+    pub fn controlsChangedPending(self: *const Lifecycle) bool {
+        return self.controls_changed.load(.acquire);
+    }
+
+    pub fn setTurnsPaused(self: *Lifecycle, paused: bool) void {
+        self.turns_paused.store(paused, .release);
+    }
+
+    pub fn wakeDispatch(self: *Lifecycle) void {
+        self.dispatch_wake.set(self.io);
+    }
+
+    pub fn resetDispatchWake(self: *Lifecycle) void {
+        self.dispatch_wake.reset();
+    }
+
+    pub fn dispatchWakeIsSet(self: *Lifecycle) bool {
+        return self.dispatch_wake.isSet();
+    }
+
+    pub fn awaitDispatchWake(self: *Lifecycle, timeout_ms: u32) void {
+        self.dispatch_wake.waitTimeout(self.io, .{ .duration = .{
+            .raw = .fromMilliseconds(timeout_ms),
+            .clock = .awake,
+        } }) catch {};
+    }
+
+    pub fn childExitWake(self: *Lifecycle) child_exit_wake.Wake {
+        return .{ .event = &self.dispatch_wake, .io = self.io };
+    }
+
+    pub fn connectDispatchWake(self: *Lifecycle, reactor: ?*provider.Reactor, store: *store_module.Store) void {
+        if (reactor) |active| active.wake = &self.dispatch_wake;
+        store.commitWake().store(&self.dispatch_wake, .release);
+    }
+
+    /// Runs `open`, which creates a descriptor that is not yet close-on-exec, with
+    /// effect launches held off, so no child launched meanwhile inherits it.
+    pub fn openUninherited(self: *Lifecycle, context: anytype, comptime open: anytype) @TypeOf(open(context)) {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        return open(context);
+    }
+
+    /// Runs `hand_off` with whether the Host is stopping, ordered against askStop:
+    /// a stop asked before the lock is seen, and one asked after waits for the hand-off.
+    pub fn handOff(self: *Lifecycle, context: anytype, comptime hand_off: anytype) @TypeOf(hand_off(context, false)) {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        return hand_off(context, self.stopping());
+    }
+};
+
 pub const Host = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     lease: *platform.StoreLease,
     store: *store_module.Store,
+    /// Set by serveOpened, or by TestParts.attach in tests, before any Host method that reads lifecycle runs.
+    lifecycle: *Lifecycle = undefined,
     instance: protocol.InstanceId = undefined,
     hooks: Hooks = .{},
     pause_owner: if (test_pause.enabled) ?*test_pause.PauseController else void = if (test_pause.enabled) null else {},
@@ -356,22 +563,11 @@ pub const Host = struct {
     retention: *output_retention.Queue = undefined,
     failed_response_store: ?std.Io.Dir = null,
     custody: execution.CustodyPool = .{ .records = &.{} },
-    phase: std.atomic.Value(Phase) = .init(.open),
-    controls_changed: std.atomic.Value(bool) = .init(false),
-    /// The operator's hold on new Turns (host-pause). Read the hold in force
-    /// through `turnsHeld`, never this flag alone.
-    turns_paused: std.atomic.Value(bool) = .init(false),
-    /// A draining pause's deadline on the awake clock; 0 means none. Written
-    /// only by `askStop` under `launch_mutex`; it only ever moves earlier.
-    drain_until_ns: std.atomic.Value(u64) = .init(0),
     control_hint_suppressed: std.atomic.Value(bool) = .init(false),
-    dispatch_wake: std.Io.Event = .unset,
     request_counter: std.atomic.Value(u64) = .init(0),
-    intake_wake: ?std.posix.fd_t = null,
     intake_capacity: usize = product_defaults.intake_capacity,
     descriptor_soft_limit: ?usize = null,
     scratch_used: std.atomic.Value(u64) = .init(0),
-    launch_mutex: std.Io.Mutex = .init,
     trace_run_ns: u64 = 0,
     started_at: u64 = 0,
     /// The frozen settings frame a detached Host was started with; null for a foreground Host.
@@ -379,115 +575,7 @@ pub const Host = struct {
     trace_sequence: u64 = 0,
     trace_lost: std.atomic.Value(bool) = .init(false),
     test_observation: ?*TestObservation = null,
-    /// Attached after readiness, when the Host's stderr may be /dev/null; launch_mutex guards writes.
-    diagnostics: ?*HostDiagnostics = null,
     last_unprocessed_completions: ?u64 = null,
-
-    pub fn launchAllowed(self: *const Host) bool {
-        return self.phase.load(.acquire) == .open;
-    }
-
-    pub fn stopping(self: *const Host) bool {
-        return self.phase.load(.acquire) == .stopping;
-    }
-
-    pub fn executionEnding(self: *const Host) bool {
-        return @backingInt(self.phase.load(.acquire)) >= @backingInt(Phase.ending);
-    }
-
-    pub fn advance(self: *Host, target: Phase) Phase {
-        self.launch_mutex.lockUncancelable(self.io);
-        defer self.launch_mutex.unlock(self.io);
-        const previous = self.phase.load(.monotonic);
-        if (@backingInt(target) > @backingInt(previous)) self.phase.store(target, .release);
-        return previous;
-    }
-
-    /// Advances like `advance`, and records the reason when this call made the transition.
-    pub fn fence(self: *Host, target: Phase, phase: []const u8, err: anyerror) Phase {
-        self.launch_mutex.lockUncancelable(self.io);
-        defer self.launch_mutex.unlock(self.io);
-        const previous = self.phase.load(.monotonic);
-        if (@backingInt(target) <= @backingInt(previous)) return previous;
-        self.phase.store(target, .release);
-        if (self.diagnostics) |writer| writer.recordAs(@tagName(target), phase, @errorName(err));
-        return previous;
-    }
-
-    pub fn attachDiagnostics(self: *Host, writer: *HostDiagnostics) void {
-        self.launch_mutex.lockUncancelable(self.io);
-        defer self.launch_mutex.unlock(self.io);
-        self.diagnostics = writer;
-    }
-
-    /// The hold on new Turns in force: the operator's hold or a drain.
-    pub fn turnsHeld(self: *const Host) bool {
-        return self.turns_paused.load(.acquire) or self.drain_until_ns.load(.acquire) != 0;
-    }
-
-    pub fn drainUntil(self: *const Host) ?u64 {
-        const until = self.drain_until_ns.load(.acquire);
-        return if (until == 0) null else until;
-    }
-
-    /// A plain stop. True when this call moved the Host to stopping.
-    pub fn stopAsked(self: *Host) bool {
-        return self.askStop(.immediate) == .stop_now;
-    }
-
-    /// The one door every stop enters: a plain stop, a signal, stdin closing
-    /// and a draining pause. The stop record is written inside the lock, so
-    /// its order matches the order of decisions.
-    pub fn askStop(self: *Host, bound: host_drain.Bound) host_drain.Ask {
-        const answer = blk: {
-            self.launch_mutex.lockUncancelable(self.io);
-            defer self.launch_mutex.unlock(self.io);
-            const phase: host_drain.PhaseView = switch (self.phase.load(.monotonic)) {
-                .open => .open,
-                .fenced => .fenced,
-                .ending => .ending,
-                .stopping => .stopping,
-            };
-            const current = self.drainUntil();
-            const answer = host_drain.ask(phase, current, bound, nowNs(self));
-            switch (answer) {
-                .already_stopping => {},
-                .stop_now => {
-                    self.phase.store(.stopping, .release);
-                    self.recordStop(if (current == null) .asked else .superseded);
-                },
-                .drain => |drain| if (drain.changed) {
-                    self.drain_until_ns.store(drain.until_ns, .release);
-                    if (current == null) self.recordStop(.draining);
-                },
-            }
-            break :blk answer;
-        };
-        if (answer == .drain and answer.drain.changed) self.dispatch_wake.set(self.io);
-        return answer;
-    }
-
-    /// Ends a drain the execution owner judged over. False when a plain stop
-    /// already ended the Host.
-    pub fn finishDrain(self: *Host, outcome: host_drain.Outcome) bool {
-        self.launch_mutex.lockUncancelable(self.io);
-        defer self.launch_mutex.unlock(self.io);
-        if (@backingInt(self.phase.load(.monotonic)) >= @backingInt(Phase.stopping)) return false;
-        self.phase.store(.stopping, .release);
-        self.recordStop(host_drain.Record.of(outcome));
-        return true;
-    }
-
-    fn recordStop(self: *Host, record: host_drain.Record) void {
-        self.lease.recordStop(record.text()) catch |err| stderr.print("rui: stop record not written: {s}\n", .{@errorName(err)});
-    }
-
-    pub fn withEffectLaunch(self: *Host, context: anytype, comptime launch: anytype) !void {
-        self.launch_mutex.lockUncancelable(self.io);
-        defer self.launch_mutex.unlock(self.io);
-        if (!self.launchAllowed()) return error.HostDispatchSuppressed;
-        try launch(context);
-    }
 };
 
 pub const ModelLists = struct {
@@ -648,32 +736,17 @@ pub const BashWork = union {
     prepared_cleanup: bash.PreparedCleanup,
 };
 
-pub fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
-    if (host.fence(.stopping, phase, err) == .stopping) return;
-    stderr.print("rui: dispatch fenced after {s} failure: {s}\nHost cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
-    wakeListener(host);
-}
-
-pub fn wakeListener(host: *Host) void {
-    if (host.intake_wake) |fd| _ = std.c.write(fd, "x", 1);
-}
-
 /// The one ask for MCP lists from the Host: asks the re-list owner for `only` or every configured server, wakes the
 /// dispatch loop when anything was asked, and returns how many were asked. `tools_reload` and `find_tools` reload both
 /// call it, so neither path asks or wakes on its own.
 pub fn askMcpLists(host: *Host, only: ?[]const u8, out: *[host_settings.max_mcp_servers]server_mcp_relist.Relist.Asked) usize {
     const count: usize = if (host.mcp_relist) |owner| owner.askAll(only, out) else 0;
-    if (count != 0) host.dispatch_wake.set(host.io);
+    if (count != 0) host.lifecycle.wakeDispatch();
     return count;
 }
 
-pub fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
-    _ = host.fence(.fenced, phase, err);
-    stderr.print("rui: dispatch fenced after {s} failure: {s}\nNew work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
-}
-
-pub fn nowNs(host: *Host) u64 {
-    return @intCast(std.Io.Clock.Timestamp.now(host.io, .awake).raw.nanoseconds);
+pub fn nowNs(io: std.Io) u64 {
+    return @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
 }
 
 pub fn beginTestObservation(host: *Host, phase: []const u8, subject: ?[]const u8) ?TestObservation.Publication {
@@ -716,7 +789,7 @@ noinline fn writeSubjectTrace(host: *Host, phase: []const u8, subject_kind: []co
     var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"subject_kind\":", .{nowNs(host)}) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"subject_kind\":", .{nowNs(host.io)}) catch return;
     trace.appendJsonString(subject_kind) catch return;
     trace.append(",\"subject\":") catch return;
     trace.appendJsonString(subject) catch return;
@@ -752,7 +825,7 @@ noinline fn writeRequestTrace(host: *Host, phase: []const u8, request_number: u6
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(
         ",\"at_ns\":\"{d}\",\"subject_kind\":\"request_number\",\"subject\":\"{d}\"",
-        .{ nowNs(host), request_number },
+        .{ nowNs(host.io), request_number },
     ) catch return;
     if (scratch_used_bytes) |used|
         trace.appendFmt(",\"scratch_used_bytes\":\"{d}\"", .{used}) catch return;
@@ -762,7 +835,7 @@ noinline fn writeRequestTrace(host: *Host, phase: []const u8, request_number: u6
 
 pub fn executionFacts(host: *Host) session_report.Execution {
     return .{
-        .dispatch_fenced = !host.launchAllowed(),
+        .dispatch_fenced = !host.lifecycle.launchAllowed(),
         .custody_occupied = host.custody.held(),
         .scratch_used_bytes = host.scratch_used.load(.acquire),
     };
@@ -793,7 +866,7 @@ noinline fn writeLifecycleServiceTrace(host: *Host, maximum_gap_ns: u64) void {
     var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"lifecycle_service_observation\",\"at_ns\":\"{d}\",\"maximum_gap_ns\":\"{d}\",\"owner\":\"execution\"}}",
-        .{ nowNs(host), maximum_gap_ns },
+        .{ nowNs(host.io), maximum_gap_ns },
     ) catch return;
     writeTestTrace(host, &trace, &publication);
 }
@@ -809,7 +882,7 @@ noinline fn writeOperationTrace(host: *Host, phase: []const u8, binding: store_m
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
-        nowNs(host),
+        nowNs(host.io),
         binding.turn_id,
         binding.operation_id,
         binding.attempt_ordinal,
@@ -839,7 +912,7 @@ noinline fn writePreparationAdvanceTrace(
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(
         ",\"at_ns\":\"{d}\",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
-        .{ nowNs(host), stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
+        .{ nowNs(host.io), stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
     ) catch return;
     writeTestTrace(host, &trace, &publication);
 }
@@ -866,7 +939,7 @@ noinline fn writePreparationAdvanceErrorTrace(
     var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"error\":", .{nowNs(host)}) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"error\":", .{nowNs(host.io)}) catch return;
     trace.appendJsonString(@errorName(err)) catch return;
     trace.appendFmt(
         ",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
@@ -885,7 +958,7 @@ noinline fn writeCompletionQueueTrace(host: *Host, queued_after: usize, binding:
     var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"provider_completion_removed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
-        .{ nowNs(host), queued_after, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
+        .{ nowNs(host.io), queued_after, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
     ) catch return;
     writeTestTrace(host, &trace, &publication);
 }
@@ -901,7 +974,7 @@ noinline fn writeActionTrace(host: *Host, phase: []const u8, binding: store_modu
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
-        nowNs(host),
+        nowNs(host.io),
         binding.turn_id,
         binding.parent_operation_id,
         binding.action_id,
@@ -929,7 +1002,7 @@ noinline fn writeOperationControlTrace(
     var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host.io)}) catch return;
     trace.appendJsonString(command_key) catch return;
     trace.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
         binding.turn_id,
@@ -959,7 +1032,7 @@ noinline fn writeActionControlTrace(
     var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host.io)}) catch return;
     trace.appendJsonString(command_key) catch return;
     trace.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
         binding.turn_id,
@@ -993,7 +1066,7 @@ noinline fn writeActionControlOutcomeTrace(
     var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host.io)}) catch return;
     trace.appendJsonString(command_key) catch return;
     trace.appendFmt(",\"attempted\":{s},\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
         if (attempted) "true" else "false",
@@ -1028,7 +1101,7 @@ noinline fn writeActionDeadlineTrace(
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"deadline_ns\":\"{d}\",\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
-        nowNs(host),
+        nowNs(host.io),
         deadline_ns,
         if (failed) "true" else "false",
         binding.turn_id,
@@ -1096,7 +1169,7 @@ noinline fn writeUnprocessedCompletionsTrace(host: *Host, count: u64) void {
     var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"native_completions_unprocessed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\"}}",
-        .{ nowNs(host), count },
+        .{ nowNs(host.io), count },
     ) catch return;
     writeTestTrace(host, &trace, &publication);
 }
@@ -1165,7 +1238,7 @@ noinline fn writeSqliteDiagnosticTrace(host: *Host, subject: []const u8) void {
 noinline fn renderSqliteDiagnosticTrace(host: *Host, subject: []const u8, value: *const @FieldType(store_module.Diagnostic, "sqlite"), publication: *?TestObservation.Publication) void {
     var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
-    trace.appendFmt("{d}", .{nowNs(host)}) catch return;
+    trace.appendFmt("{d}", .{nowNs(host.io)}) catch return;
     trace.append("\",\"subject\":") catch return;
     trace.appendJsonString(subject) catch return;
     trace.append(",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",") catch return;
@@ -1263,6 +1336,8 @@ test "inspection counts held custody, not an in-flight admission reservation" {
         .store = undefined,
         .custody = execution.CustodyPool.initialize(&records),
     };
+    var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
+    host.lifecycle = &host_lifecycle;
     const cleanup = host.custody.reserve().?;
     var permit = store_module.DispatchPermit{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 } };
     _ = try host.custody.attach(cleanup, &permit);
@@ -1299,6 +1374,8 @@ test "required Bash observations publish while optional stderr custody is held" 
             .hooks = .{ .phase_trace = true },
             .test_observation = &observation,
         };
+        var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
+        host.lifecycle = &host_lifecycle;
         try std.testing.expect(stderr.tryAcquire());
         defer stderr.release();
         var count: u64 = 0;
@@ -1344,14 +1421,16 @@ test "effect launch gate rechecks every Host phase" {
             .lease = undefined,
             .store = undefined,
         };
-        try std.testing.expect(host.launchAllowed());
-        _ = host.advance(phase);
+        var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
+        host.lifecycle = &host_lifecycle;
+        try std.testing.expect(host.lifecycle.launchAllowed());
+        _ = host.lifecycle.advance(phase);
         var calls: usize = 0;
         if (phase == .open) {
-            try host.withEffectLaunch(&calls, Launch.run);
+            try host.lifecycle.withEffectLaunch(&calls, Launch.run);
             try std.testing.expectEqual(@as(usize, 1), calls);
         } else {
-            try std.testing.expectError(error.HostDispatchSuppressed, host.withEffectLaunch(&calls, Launch.run));
+            try std.testing.expectError(error.HostDispatchSuppressed, host.lifecycle.withEffectLaunch(&calls, Launch.run));
             try std.testing.expectEqual(@as(usize, 0), calls);
         }
     }
@@ -1366,13 +1445,15 @@ test "Host phases only move forward" {
                 .lease = undefined,
                 .store = undefined,
             };
-            try std.testing.expectEqual(Phase.open, host.advance(start));
-            try std.testing.expectEqual(start, host.advance(target));
+            var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
+            host.lifecycle = &host_lifecycle;
+            try std.testing.expectEqual(Phase.open, host.lifecycle.advance(start));
+            try std.testing.expectEqual(start, host.lifecycle.advance(target));
             const later = if (@backingInt(target) > @backingInt(start)) target else start;
-            try std.testing.expectEqual(later, host.phase.load(.acquire));
-            try std.testing.expectEqual(later == .open, host.launchAllowed());
-            try std.testing.expectEqual(later == .stopping, host.stopping());
-            try std.testing.expectEqual(later == .ending or later == .stopping, host.executionEnding());
+            try std.testing.expectEqual(later, host.lifecycle.phase.load(.acquire));
+            try std.testing.expectEqual(later == .open, host.lifecycle.launchAllowed());
+            try std.testing.expectEqual(later == .stopping, host.lifecycle.stopping());
+            try std.testing.expectEqual(later == .ending or later == .stopping, host.lifecycle.executionEnding());
         }
     }
 }
@@ -1384,6 +1465,8 @@ test "effect launch gate releases its mutex after native failure" {
         .lease = undefined,
         .store = undefined,
     };
+    var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
+    host.lifecycle = &host_lifecycle;
     const Launch = struct {
         fn fail(calls: *usize) !void {
             calls.* += 1;
@@ -1395,8 +1478,8 @@ test "effect launch gate releases its mutex after native failure" {
         }
     };
     var calls: usize = 0;
-    try std.testing.expectError(error.TestLaunchFailure, host.withEffectLaunch(&calls, Launch.fail));
-    try host.withEffectLaunch(&calls, Launch.succeed);
+    try std.testing.expectError(error.TestLaunchFailure, host.lifecycle.withEffectLaunch(&calls, Launch.fail));
+    try host.lifecycle.withEffectLaunch(&calls, Launch.succeed);
     try std.testing.expectEqual(@as(usize, 2), calls);
 }
 
@@ -1415,13 +1498,15 @@ test "an asked stop leaves the stop record only when it is what stops the Host, 
         try lease.prepareForServing(false);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
         var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
-        _ = host.advance(before);
+        var host_lifecycle = Lifecycle.init(host.io, &lease, false, null);
+        host.lifecycle = &host_lifecycle;
+        _ = host.lifecycle.advance(before);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
         const stopped = before != .stopping;
-        try std.testing.expectEqual(stopped, host.stopAsked());
-        try std.testing.expect(host.stopping());
+        try std.testing.expectEqual(stopped, host.lifecycle.stopAsked());
+        try std.testing.expect(host.lifecycle.stopping());
         try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
-        try std.testing.expect(!host.stopAsked());
+        try std.testing.expect(!host.lifecycle.stopAsked());
         try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
         try lease.prepareForServing(false);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
@@ -1444,31 +1529,33 @@ test "a draining stop holds new Turns, only tightens, and records how it ended" 
         defer lease.release();
         try lease.prepareForServing(false);
         var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
-        try std.testing.expect(!host.turnsHeld());
-        const first = host.askStop(try .seconds(60));
+        var host_lifecycle = Lifecycle.init(host.io, &lease, false, null);
+        host.lifecycle = &host_lifecycle;
+        try std.testing.expect(!host.lifecycle.turnsHeld());
+        const first = host.lifecycle.askStop(try .seconds(60));
         try std.testing.expect(first == .drain and first.drain.changed);
-        try std.testing.expect(host.turnsHeld() and !host.stopping());
+        try std.testing.expect(host.lifecycle.turnsHeld() and !host.lifecycle.stopping());
         try std.testing.expectEqual(host_drain_test.Record.draining, platform.StoreLease.stopRecord(io, path));
         // A longer repeat leaves the deadline; a shorter one brings it in.
-        const longer = host.askStop(try .seconds(600));
+        const longer = host.lifecycle.askStop(try .seconds(600));
         try std.testing.expectEqual(host_drain_test.Ask{ .drain = .{ .until_ns = first.drain.until_ns, .changed = false } }, longer);
-        const shorter = host.askStop(try .seconds(1));
+        const shorter = host.lifecycle.askStop(try .seconds(1));
         try std.testing.expect(shorter == .drain and shorter.drain.changed and shorter.drain.until_ns < first.drain.until_ns);
-        try std.testing.expectEqual(shorter.drain.until_ns, host.drainUntil().?);
+        try std.testing.expectEqual(shorter.drain.until_ns, host.lifecycle.drainUntil().?);
         // The operator's release does not end a drain's hold.
-        host.turns_paused.store(false, .release);
-        try std.testing.expect(host.turnsHeld());
+        host.lifecycle.setTurnsPaused(false);
+        try std.testing.expect(host.lifecycle.turnsHeld());
         if (ending) |outcome| {
-            try std.testing.expect(host.finishDrain(outcome));
+            try std.testing.expect(host.lifecycle.finishDrain(outcome));
             try std.testing.expectEqual(host_drain_test.Record.of(outcome), platform.StoreLease.stopRecord(io, path));
-            try std.testing.expect(!host.stopAsked());
+            try std.testing.expect(!host.lifecycle.stopAsked());
         } else {
-            try std.testing.expect(host.stopAsked());
+            try std.testing.expect(host.lifecycle.stopAsked());
             try std.testing.expectEqual(host_drain_test.Record.superseded, platform.StoreLease.stopRecord(io, path));
-            try std.testing.expect(!host.finishDrain(.finished));
+            try std.testing.expect(!host.lifecycle.finishDrain(.finished));
         }
-        try std.testing.expect(host.stopping());
-        try std.testing.expectEqual(host_drain_test.Ask.already_stopping, host.askStop(try .seconds(60)));
+        try std.testing.expect(host.lifecycle.stopping());
+        try std.testing.expectEqual(host_drain_test.Ask.already_stopping, host.lifecycle.askStop(try .seconds(60)));
         try std.testing.expectEqual(platform.StoreLease.LastStop.asked, platform.StoreLease.lastStop(io, path));
     }
 }
