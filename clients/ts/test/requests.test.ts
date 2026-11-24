@@ -250,7 +250,7 @@ test("creation sends explicit settings without Host client defaults", async () =
 			assert.deepEqual(request.configuration.effort, null);
 			assert.deepEqual(request.configuration.tools, []);
 			assert.deepEqual(request.configuration.permissionMode, "ask");
-			assert.deepEqual(request.configuration.provider, undefined);
+			assert.deepEqual(request.configuration.connection, undefined);
 			assert.equal(request.configuration.workspace, "/caller");
 			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
 		},
@@ -344,7 +344,7 @@ function presetTypeContract(sessions: Sessions): void {
 	// @ts-expect-error a child inherits its Workspace
 	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol", workspace: "/caller" }, { idempotencyKey: "child-workspace" });
 	// @ts-expect-error a child inherits its provider
-	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol", provider: "openai" }, { idempotencyKey: "child-provider" });
+	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol", connection: "openai" }, { idempotencyKey: "child-provider" });
 	// @ts-expect-error an explicit null model is never valid
 	void sessions.create({ workspace: "/caller", model: null }, { idempotencyKey: "null-model" });
 	// @ts-expect-error a preset name is never null

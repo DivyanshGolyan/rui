@@ -119,7 +119,7 @@ for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysq
 				writeFileSync(credentialFile, `version=3\ngeneration=1\naccount_id=plan-subject\nclient_id=rui-test-plan-client\nfedramp=0\nid_token=${id}\naccess_token=${token}\nrefresh_token=fixture-refresh\nexpires_at=4102444800\nrefreshed_at=1750000000\nstate=ready\n`, { mode: 0o600 });
 			}
 			const spec = {
-				provider: adapter, model: "gpt-6.1-sol", effort: "low" as const, compactAt: 100000,
+				connection: adapter, model: "gpt-6.1-sol", effort: "low" as const, compactAt: 100000,
 				workspace: root, tools: ["bash", "settings_echo"], permissionMode: "bypass" as const,
 			};
 			rui = await Rui.connect({
@@ -146,7 +146,7 @@ for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysq
 					await delay(100, undefined, { signal: deadline });
 				}
 				const listed = await rui.models();
-				assert.ok(listed.some((model) => model.provider === "chatgpt" && model.id === "gpt-6.1-sol"), "live ChatGPT listing must offer the preset's fixture model");
+				assert.ok(listed.some((model) => model.connection === "chatgpt" && model.id === "gpt-6.1-sol"), "live ChatGPT listing must offer the preset's fixture model");
 				assert.ok(providerRequests.includes("GET /v1/models"), "live listing must reach the sign-in fixture, not unknown-model fallback");
 			}
 			const session = await rui.sessions.create(adapter === "chatgpt" ? { preset: "drift" } : spec, { idempotencyKey: "settings:create" });

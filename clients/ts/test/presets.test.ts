@@ -19,7 +19,7 @@ test("connect presets seed creation, overrides win and edited presets replay by 
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
 	const spec: AgentSpec = {
 		model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["start_agent"], permissionMode: "ask",
-		provider: "openai", workspace: root, instructions: "Preset instructions", label: "Review",
+		connection: "openai", workspace: root, instructions: "Preset instructions", label: "Review",
 		outputSchema: { type: "object" },
 	};
 	const options = {
@@ -47,7 +47,7 @@ test("connect presets seed creation, overrides win and edited presets replay by 
 		const child = await rui.sessions.create(overrides, { idempotencyKey: "preset:override" });
 		const changed = await inspect(rui, child.id);
 		assert.equal(changed.model, "override-model");
-		assert.equal(changed.provider, "openai");
+		assert.equal(changed.connection, "openai");
 		assert.equal(changed.workspace, root);
 		assert.equal(changed.reasoning_effort, "low");
 		assert.equal(changed.reasoning_effort_override, "low");
