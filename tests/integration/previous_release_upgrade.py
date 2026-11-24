@@ -135,6 +135,17 @@ def assert_running_upgrade(dialect, binary, store, seed, ready, previous, versio
     print(f"Running Host upgraded to {version}, instance {previous['instance']} → {current['instance']}", flush=True)
 
 
+def assert_endpoint_layout_break(previous_cli, previous_artifact, store, seed, previous_status, output):
+    # #2120 moved the endpoint into a per-Host folder. A baseline from before it
+    # cannot be found by the candidate, so the installer names the Host it left.
+    assert "left running: ownership is unconfirmed" in output, output
+    assert "1 left unchanged" in output, output
+    assert seed.poll() is None, "installer stopped the previous-release Host"
+    state, shown = previous_cli.host_status(previous_artifact, store, 5)
+    assert state == "ready", shown
+    assert json.loads(shown)["instance"] == previous_status["instance"], (previous_status, shown)
+
+
 def supported_format(checkout):
     path = checkout / "src/store/schema.zig"
     source = (path if path.exists() else checkout / "src/store.zig").read_text()
@@ -259,11 +270,15 @@ def main():
                         help="previous is an unpacked release; leave its Host running during release/install.sh")
     parser.add_argument("--candidate-release", type=pathlib.Path,
                         help="with --running-host: install this release executable instead of building the upgrade fixture")
+    parser.add_argument("--baseline-layout", choices=("current", "before-endpoint-dirs"), default="current",
+                        help="with --running-host: before-endpoint-dirs asserts the accepted break for a previous release that predates per-Host endpoint folders (#2120)")
     parser.add_argument("previous", type=pathlib.Path)
     parser.add_argument("candidate", type=pathlib.Path)
     args = parser.parse_args()
     if args.candidate_release and not args.running_host:
         parser.error("--candidate-release requires --running-host")
+    if args.baseline_layout != "current" and not args.running_host:
+        parser.error("--baseline-layout requires --running-host")
     previous, candidate = args.previous.resolve(), args.candidate.resolve()
     if not args.running_host:
         previous_format = supported_format(previous)
@@ -306,7 +321,12 @@ def main():
 
         def stop_installed_host():
             nonlocal host_released
-            if args.running_host:
+            if args.running_host and args.baseline_layout == "before-endpoint-dirs":
+                # The candidate cannot reach a Host the baseline started, so only the previous CLI can release it.
+                if not host_released:
+                    stop_detached(previous_cli, previous_artifact, store)
+                    host_released = True
+            elif args.running_host:
                 stop_detached(candidate_cli, publisher, store)
                 host_released = True
             elif attempted_restart:
@@ -356,7 +376,14 @@ def main():
             assert hashlib.sha256(previous_artifact.read_bytes()).digest() == previous_hash, "old build changed"
             fixture.RUI = binary
             dialect = candidate_cli = Dialect(binary)
-            if args.running_host:
+            if args.running_host and args.baseline_layout == "before-endpoint-dirs":
+                # The saved-work checks below run through the previous CLI, which is the only one that reaches this Host.
+                assert_endpoint_layout_break(previous_cli, previous_artifact, store, seed, previous_status,
+                                             installer_output)
+                fixture.RUI = previous_artifact
+                dialect = previous_cli
+                commands = ()
+            elif args.running_host:
                 assert_running_upgrade(dialect, binary, store, seed, ready, previous_status,
                                        release_version(publisher), installer_output)
                 commands = ()
@@ -415,7 +442,11 @@ def main():
             for field, value in configuration.items():
                 assert after[field] == value, (field, value, after)
             assert len(endpoint.requests) == 1, "upgrade replayed completed work"
-            if args.running_host:
+            if args.running_host and args.baseline_layout == "before-endpoint-dirs":
+                stop_detached(previous_cli, previous_artifact, store)
+                host_released = True
+                print("Endpoint layout break accepted: previous Host left running and reachable by its own CLI; saved work intact", flush=True)
+            elif args.running_host:
                 # A ready socket alone cannot show the endpoint/network source
                 # survived. New work must reach the same actual provider peer.
                 dialect.message(root, store, "fresh-upgrade-message", session, "Check the retained endpoint.")
@@ -443,6 +474,8 @@ def main():
     else:
         shutil.rmtree(directory)
         print(("Running-release install passed: installer exited 0 and named the restart; candidate Host version/new instance; "
+               if args.running_host and args.baseline_layout == "current" else
+               "Running-release install passed: installer exited 0 and named the left Host; "
                if args.running_host else
                "Compatibility passed: supported startup readiness/migration backup or unsupported-format refusal; ") +
               "exact saved work/configuration and no replay", flush=True)
