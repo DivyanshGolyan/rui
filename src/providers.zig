@@ -402,7 +402,9 @@ test "ChatGPT headers carry the credential, user-agent and FedRAMP fields" {
                 if (std.mem.eql(u8, entry.name, "x-openai-fedramp")) fedramp_found = std.mem.eql(u8, entry.value, "true");
                 if (std.mem.eql(u8, entry.name, "authorization"))
                     try std.testing.expectEqualStrings("Bearer " ++ codex_auth.fixture_access_token, entry.value);
-                try std.testing.expect(provider_transport.hostField(entry.name));
+                // The account and FedRAMP fields are connection headers, not host-owned names.
+                if (!std.mem.eql(u8, entry.name, "chatgpt-account-id") and !std.mem.eql(u8, entry.name, "x-openai-fedramp"))
+                    try std.testing.expect(provider_transport.hostField(entry.name));
             }
             for (entries) |entry| try std.testing.expectEqual(entry.name.len + entry.value.len > 16, entry.borrowed);
             const shared = headers.credential.?;

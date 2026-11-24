@@ -256,15 +256,16 @@ pub const Refusal = struct {
     };
 };
 
-const reserved_headers = [_][]const u8{
-    "authorization", "connection", "content-length", "host", "transfer-encoding", "user-agent",
-};
+/// Whether the host itself sets a header of this name. The owner is the
+/// shell's `provider.hostField`, which a functional core cannot import, so the
+/// caller passes it in; a connection may not set any header it names.
+pub const HostField = *const fn (name: []const u8) bool;
 
 /// Checks what no single field can: the audience of a sign-in, the formats
 /// (one per family, each with its dialect), the request path that would
 /// double `/v1`, assignments that name a family the connection does not speak,
 /// and the headers. Null means valid.
-pub fn validate(c: *const Connection) ?Refusal {
+pub fn validate(c: *const Connection, host_field: HostField) ?Refusal {
     if (!validUrl(c.base_url)) return refusal(.invalid_url, "base_url");
     const base = std.mem.trimEnd(u8, c.base_url, "/");
     switch (c.credential) {
@@ -294,15 +295,27 @@ pub fn validate(c: *const Connection) ?Refusal {
     for (c.assign) |assignment| {
         if (c.endpointFor(assignment.family) == null) return refusal(.assignment_without_format, "assign");
     }
+    const placed = credentialHeader(c.credential);
     for (c.headers, 0..) |header, index| {
-        for (reserved_headers) |reserved| {
-            if (std.mem.eql(u8, header.name, reserved)) return refusal(.reserved_header, "headers");
-        }
+        if (host_field(header.name)) return refusal(.reserved_header, "headers");
+        if (placed) |name| if (std.mem.eql(u8, header.name, name)) return refusal(.reserved_header, "headers");
         for (c.headers[0..index]) |earlier| {
             if (std.mem.eql(u8, earlier.name, header.name)) return refusal(.duplicate_header, "headers");
         }
     }
     return null;
+}
+
+/// The header a key credential places its secret in, which a connection may
+/// not also set. A sign-in's bearer header is host-owned (`host_field`).
+fn credentialHeader(credential: Credential) ?[]const u8 {
+    return switch (credential) {
+        .key => |key| switch (key.placement) {
+            .bearer => "authorization",
+            .@"x-api-key" => "x-api-key",
+        },
+        .oauth, .@"openai-device" => null,
+    };
 }
 
 fn refusal(reason: Refusal.Reason, field: []const u8) Refusal {
@@ -427,13 +440,13 @@ pub const Outcome = union(enum) {
 /// `arena`, and the returned value borrows from it. Every field is required
 /// except a path and an allow list: a document is the whole truth, with
 /// nothing defaulted.
-pub fn parse(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}!Outcome {
+pub fn parse(arena: std.mem.Allocator, text: []const u8, host_field: HostField) error{OutOfMemory}!Outcome {
     var parser: Parser = .{ .arena = arena, .refusal = undefined };
     const connection = parser.connection(text) catch |err| switch (err) {
         error.Refused => return .{ .refused = parser.refusal },
         error.OutOfMemory => return error.OutOfMemory,
     };
-    if (validate(&connection)) |found| return .{ .refused = found };
+    if (validate(&connection, host_field)) |found| return .{ .refused = found };
     return .{ .ok = connection };
 }
 
@@ -731,6 +744,13 @@ const CredentialKind = enum { oauth, @"openai-device", key };
 
 // ---------------------------------------------------------------- tests
 
+/// The core's own tests name no host-owned header; the owner's probes, which
+/// use `provider.hostField`, live in src/testing/connection_owners.zig.
+fn noHostFields(name: []const u8) bool {
+    _ = name;
+    return false;
+}
+
 fn refusedBy(outcome: Outcome) ?Refusal {
     return switch (outcome) {
         .refused => |found| found,
@@ -739,7 +759,7 @@ fn refusedBy(outcome: Outcome) ?Refusal {
 }
 
 fn testOk(arena: std.mem.Allocator, text: []const u8) !Connection {
-    return switch (try parse(arena, text)) {
+    return switch (try parse(arena, text, noHostFields)) {
         .ok => |connection| connection,
         .refused => error.UnexpectedRefusal,
     };
@@ -850,7 +870,7 @@ test "parse refuses each malformed field with its reason and field" {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const text = try std.mem.replaceOwned(u8, arena.allocator(), base_document, case.from, case.to);
-        const found = refusedBy(try parse(arena.allocator(), text)) orelse {
+        const found = refusedBy(try parse(arena.allocator(), text, noHostFields)) orelse {
             std.debug.print("accepted but refused expected {s}: {s}\n", .{ @tagName(case.reason), case.from });
             return error.TestExpectedRefusal;
         };
@@ -863,10 +883,10 @@ test "parse refuses a document that is not one object, or is too large" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    try std.testing.expectEqual(Refusal.Reason.wrong_type, refusedBy(try parse(allocator, "[]")).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.wrong_type, refusedBy(try parse(allocator, "[]", noHostFields)).?.reason);
     const large = try allocator.alloc(u8, max_document_bytes + 1);
     @memset(large, ' ');
-    try std.testing.expectEqual(Refusal.Reason.too_large, refusedBy(try parse(allocator, large)).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.too_large, refusedBy(try parse(allocator, large, noHostFields)).?.reason);
 }
 
 test "parse accepts the names and labels at their bounds and refuses one past each" {
@@ -895,7 +915,7 @@ test "parse keeps a credential's fields to its own kind" {
     ,
         \\"credential": {"kind": "openai-device", "client_id": "app_x", "audience": "https://gateway.example/v1", "source": {"kind": "saved"}}
     );
-    try std.testing.expectEqual(Refusal.Reason.unknown_field, refusedBy(try parse(allocator, device)).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.unknown_field, refusedBy(try parse(allocator, device, noHostFields)).?.reason);
 }
 
 test "validate refuses a sign-in token sent anywhere but its audience" {
@@ -912,13 +932,13 @@ test "validate refuses a sign-in token sent anywhere but its audience" {
         .link = &.{},
     } };
     connection.credential = oauth;
-    try std.testing.expectEqual(Refusal.Reason.token_audience_mismatch, validate(&connection).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.token_audience_mismatch, validate(&connection, noHostFields).?.reason);
 
     connection.credential = .{ .@"openai-device" = .{ .client_id = "app_x", .audience = "https://chatgpt.com/backend-api/codex" } };
-    try std.testing.expectEqual(Refusal.Reason.token_audience_mismatch, validate(&connection).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.token_audience_mismatch, validate(&connection, noHostFields).?.reason);
 
     connection.base_url = "https://chatgpt.com/backend-api/codex/";
-    try std.testing.expect(validate(&connection) == null);
+    try std.testing.expect(validate(&connection, noHostFields) == null);
 
     connection.base_url = "https://gateway.example/v1";
     connection.credential = .{ .oauth = .{
@@ -930,7 +950,7 @@ test "validate refuses a sign-in token sent anywhere but its audience" {
         .audience = "https://gateway.example/v1/",
         .link = &.{},
     } };
-    try std.testing.expect(validate(&connection) == null);
+    try std.testing.expect(validate(&connection, noHostFields) == null);
 }
 
 test "validate allows a credential only over https, never plain HTTP to loopback" {
@@ -938,13 +958,13 @@ test "validate allows a credential only over https, never plain HTTP to loopback
     defer arena.deinit();
     var connection = try testOk(arena.allocator(), base_document);
     connection.base_url = "https://gateway.example/v1";
-    try std.testing.expect(validate(&connection) == null);
+    try std.testing.expect(validate(&connection, noHostFields) == null);
     connection.base_url = "http://127.0.0.1:9/v1";
-    try std.testing.expectEqual(Refusal.Reason.invalid_url, validate(&connection).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.invalid_url, validate(&connection, noHostFields).?.reason);
     connection.base_url = "http://gateway.example/v1";
-    try std.testing.expectEqual(Refusal.Reason.invalid_url, validate(&connection).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.invalid_url, validate(&connection, noHostFields).?.reason);
     connection.base_url = "https://gateway.example/v1?x=1";
-    try std.testing.expectEqual(Refusal.Reason.invalid_url, validate(&connection).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.invalid_url, validate(&connection, noHostFields).?.reason);
 }
 
 test "validate refuses no format, two endpoints of one family, and a dialect of another family" {
@@ -956,13 +976,13 @@ test "validate refuses no format, two endpoints of one family, and a dialect of 
     const messages1: Endpoint = .{ .family = .messages, .dialect = .@"anthropic-messages/1", .web_search = false };
 
     connection.formats = &.{};
-    try std.testing.expectEqual(Refusal.Reason.no_format, validate(&connection).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.no_format, validate(&connection, noHostFields).?.reason);
     connection.formats = &.{ responses3, responses2 };
-    try std.testing.expectEqual(Refusal.Reason.duplicate_format, validate(&connection).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.duplicate_format, validate(&connection, noHostFields).?.reason);
     connection.formats = &.{ responses3, messages1 };
-    try std.testing.expect(validate(&connection) == null);
+    try std.testing.expect(validate(&connection, noHostFields) == null);
     connection.formats = &.{.{ .family = .responses, .dialect = .@"anthropic-messages/1", .web_search = false }};
-    try std.testing.expectEqual(Refusal.Reason.dialect_family_mismatch, validate(&connection).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.dialect_family_mismatch, validate(&connection, noHostFields).?.reason);
 }
 
 test "validate refuses an assignment to a family the connection does not speak" {
@@ -970,7 +990,7 @@ test "validate refuses an assignment to a family the connection does not speak" 
     defer arena.deinit();
     var connection = try testOk(arena.allocator(), base_document);
     connection.assign = &.{.{ .models = .all, .family = .messages }};
-    try std.testing.expectEqual(Refusal.Reason.assignment_without_format, validate(&connection).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.assignment_without_format, validate(&connection, noHostFields).?.reason);
 }
 
 test "validate refuses a path that doubles /v1 and a path that is not a path" {
@@ -979,14 +999,14 @@ test "validate refuses a path that doubles /v1 and a path that is not a path" {
     var connection = try testOk(arena.allocator(), base_document);
     const doubled: Endpoint = .{ .family = .responses, .dialect = .@"openai-responses/3", .path = "/v1/responses", .web_search = false };
     connection.formats = &.{doubled};
-    try std.testing.expectEqual(Refusal.Reason.doubled_path_segment, validate(&connection).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.doubled_path_segment, validate(&connection, noHostFields).?.reason);
 
     connection.base_url = "https://gateway.example";
-    try std.testing.expect(validate(&connection) == null);
+    try std.testing.expect(validate(&connection, noHostFields) == null);
 
     for ([_][]const u8{ "responses", "/x?y=1", "/x#f", "/x y" }) |path| {
         connection.formats = &.{.{ .family = .responses, .dialect = .@"openai-responses/3", .path = path, .web_search = false }};
-        try std.testing.expectEqual(Refusal.Reason.invalid_path, validate(&connection).?.reason);
+        try std.testing.expectEqual(Refusal.Reason.invalid_path, validate(&connection, noHostFields).?.reason);
     }
 }
 
@@ -995,12 +1015,12 @@ test "validate refuses reserved and repeated headers" {
     defer arena.deinit();
     var connection = try testOk(arena.allocator(), base_document);
     connection.headers = &.{.{ .name = "authorization", .from = .{ .literal = "x" } }};
-    try std.testing.expectEqual(Refusal.Reason.reserved_header, validate(&connection).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.reserved_header, validate(&connection, noHostFields).?.reason);
     connection.headers = &.{
         .{ .name = "x-team", .from = .{ .literal = "a" } },
         .{ .name = "x-team", .from = .{ .claim = "account_id" } },
     };
-    try std.testing.expectEqual(Refusal.Reason.duplicate_header, validate(&connection).?.reason);
+    try std.testing.expectEqual(Refusal.Reason.duplicate_header, validate(&connection, noHostFields).?.reason);
 }
 
 test "resolve takes the first assignment that covers the model" {
@@ -1142,7 +1162,7 @@ test "every bundled preset parses and validates through the same parser" {
         defer arena.deinit();
         const connection = try testOk(arena.allocator(), preset[1]);
         try std.testing.expectEqualStrings(preset[0], connection.name.slice());
-        try std.testing.expect(validate(&connection) == null);
+        try std.testing.expect(validate(&connection, noHostFields) == null);
     }
 }
 

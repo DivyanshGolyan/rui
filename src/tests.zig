@@ -11,6 +11,7 @@ test {
     _ = @import("host_launch_transfer.zig");
     _ = @import("server_mcp_settings.zig");
     _ = @import("testing/host_settings.zig");
+    _ = @import("testing/connection_owners.zig");
     _ = @import("relaunch_handoff.zig");
     _ = @import("widgets/Panel.zig");
     _ = @import("app_settings.zig");
