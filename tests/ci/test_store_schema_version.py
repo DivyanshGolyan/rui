@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 import re
 import subprocess
 import textwrap
@@ -15,6 +16,10 @@ TAG = re.compile(r"v0\.(\d+)\.\d+")
 STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 LITERALS = r'(?:"(?:,")*,?)?'
 LITERAL_STEP = re.compile(r"\{\.from=\d+,\.sqlite=&\.\{" + LITERALS + r"\},\.mysql=&\.\{" + LITERALS + r"\},?\}")
+# Steps main may carry in a repaired form. Each entry pins the exact repaired text by SHA-256, so any further
+# edit is refused again. Format 92's MySQL step (from 91) never ran: its owner-CHECK SET lacked a closing
+# parenthesis, so MySQL refused it with error 1064 and no MySQL Store took it. Owner approved 2026-11-24.
+REPAIRED_STEPS = {91: "604733fba73cdafb03b2a45774c1e0e338d3a0b864de10cdda916198bf7214d1"}
 
 
 def baseline_version(source):
@@ -35,6 +40,12 @@ def non_literal_steps(steps):
 def edited_shipped_steps(candidate, shipped, released):
     return sorted(start for start in set(candidate) | set(shipped)
                   if start < released and candidate.get(start) != shipped.get(start))
+
+
+def unrepaired(edited, candidate_steps, repaired=REPAIRED_STEPS):
+    return [start for start in edited
+            if candidate_steps.get(start) is None
+            or hashlib.sha256(candidate_steps[start].encode()).hexdigest() != repaired.get(start)]
 
 
 def edited_released_rows(candidate, released_rows, released):
@@ -121,6 +132,18 @@ class StoreSchemaVersionTest(unittest.TestCase):
         self.assertEqual(edited_shipped_steps(released, {}, 52), [51], "a step added below the release")
         self.assertEqual(migration_steps("pub const schema_version: u32 = 50;\n"), {})
 
+    def test_a_pinned_repair_is_the_only_allowed_edit_to_a_main_step(self):
+        repaired = "ALTER TABLE t ADD CHECK((owner='app'))"
+        pins = {91: hashlib.sha256(repaired.encode()).hexdigest()}
+        base = {91: "ALTER TABLE t ADD CHECK(owner='app'"}
+        def edited(text):
+            return edited_shipped_steps({91: text}, base, 92)
+        self.assertEqual(unrepaired(edited(repaired), {91: repaired}, pins), [])
+        self.assertEqual(unrepaired(edited(repaired + "!"), {91: repaired + "!"}, pins), [91],
+                         "one more character is a new edit and is refused")
+        self.assertEqual(unrepaired(edited("changed"), {91: "changed"}, pins), [91])
+        self.assertEqual(unrepaired([91], {}, pins), [91], "a dropped pinned step is refused")
+
     def test_steps_are_literals_only(self):
         steps = migration_steps(textwrap.dedent("""\
             pub const migrations = [_]Migration{
@@ -159,7 +182,8 @@ class StoreSchemaVersionTest(unittest.TestCase):
         self.assertIsNone(error, f"{error} (main at {base_commit[:12]}); each format PR appends its own step (D226)")
         rows = edited_released_rows(digest_rows(source), digest_rows(base_source), base)
         self.assertEqual(rows, [], f"main's bootstrap_digests rows {rows} are immutable, even unreleased: append a new version")
-        steps = edited_shipped_steps(migration_steps(source), migration_steps(base_source), base)
+        candidate_steps = migration_steps(source)
+        steps = unrepaired(edited_shipped_steps(candidate_steps, migration_steps(base_source), base), candidate_steps)
         self.assertEqual(steps, [], f"main's migration steps from {steps} are immutable, even unreleased: append a new step")
         tag = released_tag(ROOT)
         if tag is None or not TAG.fullmatch(tag):
