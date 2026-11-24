@@ -61,14 +61,11 @@ const Purpose = union(enum) {
     copy,
     quote: struct { target: SessionInput.Insertion, frame: QuoteFrame },
 };
-const External = struct {
-    point: resident.Point,
-    frame: QuoteFrame,
-    visible: Feed.Visible,
-};
+const LinkFrame = struct { quote: QuoteFrame, visible: Feed.Visible };
+const LinkClick = @import("answer_link_click.zig").Click(resident.Point, Cell, LinkFrame);
 const Selection = struct {
     purpose: Purpose = .copy,
-    external: ?External = null,
+    link: LinkClick = .{},
     press: Cell,
     anchor: Spot,
     head: Spot,
@@ -244,14 +241,13 @@ fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?Spot {
     return self.keyed((Row{ .document = &self.window.document, .cells = cells, .line = self.window.document.selectionLine(self.layout(), line) }).spot(col));
 }
 
-const ExternalHit = struct { point: resident.Point, uri: []const u8 };
-
-fn externalAt(self: *const Self, at: Cell) ?ExternalHit {
+fn linkHit(self: *const Self, at: Cell) ?LinkClick.Hit {
     if (at.row < 0 or at.col < 0 or at.row >= self.drawn.height or at.col >= self.drawn.width) return null;
     for (self.drawn.links) |link| {
         if (!link.rect.contains(@intCast(at.col), @intCast(at.row))) continue;
-        const offset = self.window.offsetOf(link.point) orelse return null;
-        return .{ .point = link.point, .uri = self.window.document.assistantWebLinkAt(offset) orelse return null };
+        const visible = self.anchor.visible(self.window.layoutEntriesWith(self.layout(), self.presentation()), self.size.height);
+        if (!std.meta.eql(self.drawn.quote, self.quoteFrame()) or !std.meta.eql(self.drawn.visible, visible)) return null;
+        return .{ .target = link.point, .freshness = .{ .quote = self.drawn.quote, .visible = self.drawn.visible } };
     }
     return null;
 }
@@ -288,13 +284,6 @@ fn drawnLinks(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !voi
     self.drawn.links = links.items;
 }
 
-fn externalCurrent(self: *const Self, external: External) bool {
-    return std.meta.eql(external.frame, self.quoteFrame()) and
-        std.meta.eql(external.frame, self.drawn.quote) and
-        std.meta.eql(external.visible, self.drawn.visible) and
-        std.meta.eql(external.visible, self.anchor.visible(self.window.layoutEntriesWith(self.layout(), self.presentation()), self.size.height));
-}
-
 fn retryAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?resident.RetryHit {
     if (!self.retry_actionable or at.row < 0 or at.col < 0 or at.row >= self.drawn.height or at.col >= self.drawn.width) return null;
     const position = self.rowPosition(@intCast(at.row)) orelse return null;
@@ -309,6 +298,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
     switch (input) {
         .mouse => |value| try self.mouse(ctx, value),
         .focus_out => {
+            if (self.selection) |*held| _ = held.link.step(.cancel);
             if (self.cancelQuote()) ctx.redraw = true;
         },
         .mouse_leave => {
@@ -385,18 +375,15 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
                 return;
             };
             const spot = try self.spotAt(ctx.alloc, at) orelse return;
-            const external: ?External = if (purpose == .copy and !value.mods.alt and !value.mods.ctrl and !value.mods.shift and handler.on_external != null and
-                std.meta.eql(self.drawn.quote, self.quoteFrame()) and
-                std.meta.eql(self.drawn.visible, self.anchor.visible(self.window.layoutEntriesWith(self.layout(), self.presentation()), self.size.height)))
-                if (self.externalAt(at)) |hit| .{ .point = hit.point, .frame = self.drawn.quote, .visible = self.drawn.visible } else null
-            else
-                null;
-            self.selection = .{ .purpose = purpose, .press = at, .anchor = spot, .head = spot, .external = external };
+            var selection: Selection = .{ .purpose = purpose, .press = at, .anchor = spot, .head = spot };
+            const plain = purpose == .copy and !value.mods.alt and !value.mods.ctrl and !value.mods.shift;
+            _ = selection.link.step(.{ .press = .{ .plain = plain, .cell = at, .hit = if (plain) self.linkHit(at) else null } });
+            self.selection = selection;
             ctx.consumeEvent();
         },
         .drag => {
             const held = if (self.selection) |*selection| selection else return;
-            held.external = null;
+            _ = held.link.step(.drag);
             if (!held.dragging and std.meta.eql(at, held.press)) return;
             held.dragging = true;
             held.head = try self.spotAt(ctx.alloc, at) orelse return;
@@ -410,7 +397,7 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
             ctx.consumeAndRedraw();
         },
         .release => {
-            const held = self.selection orelse return;
+            var held = self.selection orelse return;
             self.selection = null;
             ctx.consumeAndRedraw();
             const anchor = self.resolved(held.anchor) orelse return;
@@ -436,15 +423,15 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
                 if (selecting.notice(result, &buffer)) |text| try handler.on_notice(handler.userdata, ctx, text);
                 return;
             }
-            if (!std.meta.eql(at, held.press)) return;
-            if (held.external) |external| {
-                if (!self.externalCurrent(external)) return;
-                if ((value.button != .left and value.button != .none) or value.mods.alt or value.mods.ctrl or value.mods.shift) return;
-                const hit = self.externalAt(at) orelse return;
-                if (!std.meta.eql(hit.point, external.point)) return;
-                if (handler.on_external) |open| try open(handler.userdata, ctx, hit.uri);
+            if (held.link.pending()) {
+                const plain = (value.button == .left or value.button == .none) and !value.mods.alt and !value.mods.ctrl and !value.mods.shift;
+                const point = held.link.step(.{ .release = .{ .plain = plain, .cell = at, .hit = if (plain) self.linkHit(at) else null } }) orelse return;
+                const offset = self.window.offsetOf(point) orelse return;
+                const uri = self.window.document.assistantWebLinkAt(offset) orelse return;
+                if (handler.on_external) |open| try open(handler.userdata, ctx, uri);
                 return;
             }
+            if (!std.meta.eql(at, held.press)) return;
             if (selecting.opens(&self.window.document, anchor)) |peer| {
                 if (handler.on_open) |open| try open(handler.userdata, ctx, peer);
                 return;
