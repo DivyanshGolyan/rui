@@ -255,6 +255,7 @@ test "SUI-145 transcript projection leaves generated gutters and preserves autho
     _ = document.draw(window, .{}, true, false, .{}, .{});
     const blank_line = document.lineEnd(0) + 1;
     var rows = document.rowsFrom(layout, .{});
+    const all: Range = .{ .from = document.origin, .to = document.origin + document.text().len };
     var saw_marker = false;
     var saw_blank = false;
     var columns: [46]bool = undefined;
@@ -262,7 +263,7 @@ test "SUI-145 transcript projection leaves generated gutters and preserves autho
         const position = rows.next() orelse break;
         const row_cells = cells[row_index * width ..][0..width];
         const row: SelectionRow = .{ .document = &document, .cells = row_cells, .line = document.selectionLine(layout, position) };
-        row.covered(.{ .from = document.origin, .to = document.origin + document.text().len }, &columns);
+        row.covered(all, &columns);
         if (position.offset == 0 and std.mem.indexOf(u8, document.text(), "UserAlpha") != null) {
             var marker_column: ?usize = null;
             for (row_cells, 0..) |cell, column| if (std.mem.eql(u8, cell.char.grapheme, "›")) {
@@ -272,11 +273,24 @@ test "SUI-145 transcript projection leaves generated gutters and preserves autho
             if (marker_column) |column| {
                 saw_marker = true;
                 try testing.expect(column >= 2);
+                const marker_at = document.cellOffset(row_cells[column]) orelse return error.MissingMarkerOffset;
+                const space_at = document.cellOffset(row_cells[column + 1]) orelse return error.MissingMarkerSpaceOffset;
+                try testing.expect(document.inlineDecoration(marker_at));
+                try testing.expect(!document.selectable(marker_at));
+                try testing.expect(document.inlineDecoration(space_at));
+                try testing.expect(!document.selectable(space_at));
+                const decorated_space = row.spot(@intCast(column + 1));
+                try testing.expectEqual(Spot.point(document.origin + marker_at), decorated_space);
+                try testing.expect(all.covers(decorated_space));
+                try testing.expect(!columns[column + 1]);
                 for (columns[0 .. column + 2]) |selected| try testing.expect(!selected);
             }
         }
         if (position.offset == blank_line) {
             saw_blank = true;
+            const blank_boundary = row.spot(0);
+            try testing.expectEqual(Spot.point(document.origin + blank_line), blank_boundary);
+            try testing.expect(all.covers(blank_boundary));
             try testing.expect(columns[0]);
         }
     }
@@ -383,23 +397,46 @@ test "selection contrasts with sent bands and padding at both widths" {
         const colours: viewport.Colours = .{ .user_band = .{ .index = 2 }, .no_depth = !colour };
         _ = document.draw(window, .{}, true, true, .{}, colours);
         var positions = document.rowsFrom(layout, .{});
+        const all: Range = .{ .from = document.origin, .to = document.origin + document.text().len };
         var columns: [140]bool = undefined;
         for (0..height) |row_index| {
             const position = positions.next().?;
             const row_cells = cells[row_index * width ..][0..width];
             const row: RowFor(@TypeOf(document)) = .{ .document = &document, .cells = row_cells, .line = document.selectionLine(layout, position) };
-            row.covered(.{ .from = 0, .to = document.text().len }, columns[0..width]);
+            row.covered(all, columns[0..width]);
             const old = row_cells[0].style.reverse;
-            const old_text = row_cells[4].style.reverse;
-            const old_unselected = row_cells[1].style.reverse;
             try testing.expectEqual(!colour, old);
-            const top_cap = position.row == 0;
-            try testing.expectEqual(!top_cap, columns[0] and columns[4]);
+            if (position.row == 0) {
+                try testing.expectEqual(@as(?usize, null), document.cellOffset(row_cells[0]));
+                try testing.expectEqual(@as(?usize, null), document.cellOffset(row_cells[4]));
+                const cap_point = row.spot(0);
+                try testing.expectEqual(Spot.point(document.origin), cap_point);
+                try testing.expect(!all.covers(cap_point));
+                try testing.expect(!columns[0] and !columns[4]);
+            } else if (position.row == 1) {
+                try testing.expectEqual(@as(?usize, null), document.cellOffset(row_cells[0]));
+                const first_body_cell = document.cellOffset(row_cells[4]) orelse return error.MissingFirstBodyCell;
+                try testing.expectEqual(@as(usize, 2), first_body_cell);
+                try testing.expect(document.selectable(first_body_cell));
+                const inset_point = row.spot(0);
+                try testing.expectEqual(Spot.point(document.origin), inset_point);
+                try testing.expect(!all.covers(inset_point));
+                try testing.expect(all.covers(row.spot(4)));
+                try testing.expect(!columns[0] and columns[4]);
+            } else {
+                const interior_point = row.spot(0);
+                try testing.expect(interior_point.start > all.from and interior_point.start < all.to);
+                try testing.expect(all.covers(interior_point));
+                try testing.expect(columns[0] and columns[4]);
+            }
+            var reverse_before: [140]bool = undefined;
+            for (row_cells, 0..) |cell, column| reverse_before[column] = cell.style.reverse;
             columns[1] = false;
             highlight(row_cells, columns[0..width]);
-            try testing.expectEqual(if (top_cap) old else !old, row_cells[0].style.reverse);
-            try testing.expectEqual(if (top_cap) old_text else !old_text, row_cells[4].style.reverse);
-            try testing.expectEqual(old_unselected, row_cells[1].style.reverse);
+            for (row_cells, 0..) |cell, column| {
+                const expected = if (columns[column]) !reverse_before[column] else reverse_before[column];
+                try testing.expectEqual(expected, cell.style.reverse);
+            }
         }
     };
 }
