@@ -6360,6 +6360,12 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     try std.testing.expect(views.selected == .archived);
     _ = try step(&views, .{ .input = .{ .key = .left } });
     try std.testing.expect(views.selected == .sessions);
+
+    try sUI132RefreshCase();
+    try sUI132AdjacentBrowseCase();
+    try sUI132ExplicitBrowseCase();
+    try sUI132IgnoredPasteBrowseCase();
+    try sUI132ArchivedTrimCase();
 }
 
 test "a pressed chat dropped on the other tab archives or restores it, and no other drop does" {
@@ -7412,7 +7418,7 @@ test "archived window: a trim that drops the selected row, then Down, selects fr
     try std.testing.expectEqual(shown_top, selectedAt(&state));
 }
 
-test "SUI-132 a trim preserves the selected Archived identity through conversation and roster changes until a covered omission" {
+fn sUI132ArchivedTrimCase() !void {
     var refs: [1200][6]u8 = undefined;
     var host: [1200]Listed = undefined;
     var state = try archivedWheelFixture(&refs, &host);
@@ -7714,7 +7720,7 @@ fn projectionCase0() !void {
     try std.testing.expectEqualStrings("newend", &state.rows.items[state.order.items[0]].reference);
 }
 
-test "overview refresh keeps a cleared selection blank until explicit navigation" {
+fn sUI132RefreshCase() !void {
     const a = session("aaaaaa", .{ .working = ago(1) }, .{ .label = "A" });
     const b = session("bbbbbb", .{ .working = ago(2) }, .{ .label = "B" });
     const c = session("cccccc", .{ .working = ago(3) }, .{ .label = "C" });
@@ -8831,7 +8837,7 @@ test "Overview browse explicit Enter and Right share activation and focus depart
     try std.testing.expectEqual(@as(usize, 0), cancelled.len);
 }
 
-test "Overview explicit adjacent navigation cancels its queued browse preview before opening" {
+fn sUI132AdjacentBrowseCase() !void {
     const rows = [_]Listed{
         session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" }),
         session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" }),
@@ -8850,7 +8856,7 @@ test "Overview explicit adjacent navigation cancels its queued browse preview be
     try std.testing.expect(!settled.browse_open);
 }
 
-test "Overview explicit Enter and Right consume queued wide browse without a duplicate open" {
+fn sUI132ExplicitBrowseCase() !void {
     const rows = [_]Listed{
         session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" }),
         session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" }),
@@ -8871,7 +8877,7 @@ test "Overview explicit Enter and Right consume queued wide browse without a dup
     }
 }
 
-test "Overview ignored and pasted input preserve the queued wide browse target" {
+fn sUI132IgnoredPasteBrowseCase() !void {
     const rows = [_]Listed{
         session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" }),
         session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" }),
