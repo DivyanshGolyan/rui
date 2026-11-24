@@ -762,7 +762,7 @@ const historical_settings = rsql.Read(.{
     .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,o.tool_set_id AS tool_set_id,tool_set.member_count," ++
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=o.tool_set_id AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,s.parent_ref,r.workspace,o.compaction_trigger,o.output_reservation,o.output_limit," ++
-        operation_effort.effectiveSql("o") ++ " AS reasoning_effort,(" ++ operation_effort.emittedSql("o") ++ ") AS effort_update,r.codec,o.purpose," ++
+        operation_effort.effectiveSql("o") ++ " AS reasoning_effort,(" ++ operation_effort.emittedSql("o") ++ ") AS effort_update,r.codec,r.codec_options IS NULL AS plain_codec,o.purpose," ++
         "(SELECT first.reasoning_effort FROM model_operation first JOIN session_revision first_revision ON first_revision.session_ref=first.session_ref AND first_revision.revision=first.settings_revision " ++
         "WHERE first.session_ref=o.session_ref AND " ++ replay_wire.sameBindingSql(replay_wire.revisionSide("first_revision"), replay_wire.revisionSide("r")) ++ " ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
         "instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest,instructions.private AS instructions_private," ++
@@ -790,6 +790,7 @@ const historical_settings = rsql.Read(.{
         reasoning_effort: ?model_capability.ReasoningEffort,
         effort_update: bool,
         codec: Bounded(40),
+        plain_codec: bool,
         purpose: u8,
         starting_effort: ?model_capability.ReasoningEffort,
         catalogs_consistent: bool,
@@ -966,6 +967,7 @@ pub const SettingsRead = struct {
         out.starting_effort = row.starting_effort;
         out.provider = row.provider;
         out.codec = std.meta.stringToEnum(provider_name.Codec, row.codec.slice()) orelse return error.CorruptStore;
+        if (!row.plain_codec) return error.CorruptStore;
         out.session_affinity = hash.finalResult()[0..16].*;
     }
 

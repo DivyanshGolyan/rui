@@ -611,9 +611,10 @@ pub const update_session_sql = update_session.sql;
 
 const insert_revision = rsql.Write(.{
     .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id," ++
-        "permission_mode,output_schema_content_id,provider,codec,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) " ++
+        "permission_mode,output_schema_content_id,provider,codec,codec_options,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) " ++
         "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,provider," ++
         "CASE WHEN ?5 IS NULL THEN (SELECT prior.codec FROM session_revision prior WHERE prior.session_ref=session.session_ref AND prior.revision=session.revision-1) ELSE ?5 END," ++
+        "CASE WHEN ?5 IS NULL THEN (SELECT prior.codec_options FROM session_revision prior WHERE prior.session_ref=session.session_ref AND prior.revision=session.revision-1) END," ++
         "compaction_trigger,output_reservation,reasoning_effort,label,CASE WHEN revision=1 OR ?4 THEN revision ELSE (SELECT prior.effort_source_revision FROM session_revision prior WHERE prior.session_ref=session.session_ref AND prior.revision=session.revision-1) END FROM session WHERE session_ref=@session(?1)",
     .Args = struct { session: rsql.SessionHead, command_key: []const u8, instructions_updated: bool, effort_choice: bool, codec: ?[]const u8 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },

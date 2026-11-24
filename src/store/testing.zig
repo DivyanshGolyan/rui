@@ -800,25 +800,26 @@ fn dropFormat89And90Columns(storage: *Store) !void {
     try mysql_testing.rawExec(storage, "ALTER TABLE core_command DROP COLUMN missing_settings");
 }
 
-/// Undoes format 92's codec move: each Session takes its current revision's codec back, then the
-/// revisions lose theirs. SQLite adds the Session's columns with a placeholder default, which the
+/// Undoes format 92's codec move: each Session takes its current revision's codec and codec options back, then the
+/// revisions lose theirs (on MySQL; SQLite keeps them, as below). SQLite adds the Session's columns with a placeholder default, which the
 /// backfill replaces before the first row is read; MySQL drops the revision's CHECK by lookup.
 fn dropFormat92Codec(storage: *Store) !void {
     if (storage.engine != .mysql) {
         try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE session ADD COLUMN codec TEXT NOT NULL DEFAULT 'openai-responses/1' CHECK(length(CAST(codec AS BLOB)) BETWEEN 3 AND 40)");
         try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE session ADD COLUMN codec_options BLOB CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512)");
-        // The revision keeps its codec: the current configure SQL reads it after this rewind, and the
-        // refused upgrade that follows does not depend on dropping it.
-        return sqlite.exec(storage.sqliteDatabase(), "UPDATE session SET codec=(SELECT r.codec FROM session_revision r WHERE r.session_ref=session.session_ref AND r.revision=session.revision)");
+        // The revision keeps its codec and options: the current configure SQL reads them after this rewind, and the
+        // refused upgrade that follows does not depend on dropping them.
+        return sqlite.exec(storage.sqliteDatabase(), "UPDATE session SET codec=(SELECT r.codec FROM session_revision r WHERE r.session_ref=session.session_ref AND r.revision=session.revision)," ++
+            "codec_options=(SELECT r.codec_options FROM session_revision r WHERE r.session_ref=session.session_ref AND r.revision=session.revision)");
     }
     try mysql_testing.rawExec(storage, "ALTER TABLE session ADD COLUMN codec TEXT NOT NULL AFTER provider, ADD COLUMN codec_options BLOB, ADD CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512)");
-    try mysql_testing.rawExec(storage, "UPDATE session s JOIN session_revision r ON r.session_ref=s.session_ref AND r.revision=s.revision SET s.codec=r.codec");
+    try mysql_testing.rawExec(storage, "UPDATE session s JOIN session_revision r ON r.session_ref=s.session_ref AND r.revision=s.revision SET s.codec=r.codec, s.codec_options=r.codec_options");
     try mysql_testing.rawExec(storage, "SET @rui_codec_ddl=(SELECT CONCAT('ALTER TABLE session_revision ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') SEPARATOR ', ')) FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session_revision' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('codec',cc.CHECK_CLAUSE)>0)");
     try mysql_testing.rawExec(storage, "PREPARE rui_codec FROM @rui_codec_ddl");
     try mysql_testing.rawExec(storage, "EXECUTE rui_codec");
     try mysql_testing.rawExec(storage, "DEALLOCATE PREPARE rui_codec");
     try mysql_testing.rawExec(storage, "SET @rui_codec_ddl=NULL");
-    try mysql_testing.rawExec(storage, "ALTER TABLE session_revision DROP COLUMN codec");
+    try mysql_testing.rawExec(storage, "ALTER TABLE session_revision DROP COLUMN codec, DROP COLUMN codec_options");
 }
 
 /// Undoes format 91's output limits. SQLite's step rebuilds model_fact from named columns, so only
