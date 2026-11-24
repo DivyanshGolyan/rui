@@ -348,7 +348,11 @@ pub const Requests = struct {
         try protocol_reply.validateIdentityInputs("", session);
         try cursor.validate();
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ paths.store_identity.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
+        if (cursor.hide_redundant_peer_sends) {
+            try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.hide_redundant_peer_sends ++ protocol.activity_page_request.tail), .{ paths.store_identity.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit, true });
+        } else {
+            try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ paths.store_identity.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
+        }
         const fd = try openRead(self, paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {

@@ -1,6 +1,7 @@
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const idempotency_key = @import("../../idempotency_key.zig");
 const wire_request = @import("../../wire_request.zig");
 const tool_defs = @import("../../tools.zig");
 const store_core = @import("../Store.zig");
@@ -325,6 +326,187 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
     }.run);
 }
 
+test "SUI-124 successful message_agent receipts are opt-in while raw Activity and Conversation keep results" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("peer-projection-sender", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"message_agent"});
+            create.configuration.permission_mode.state = .value;
+            try create.configuration.permission_mode.value.set("bypass");
+            const sender = (try storage.configure(&create, .{})).accepted.session;
+            const receiver = try configureTestSession(&storage, "peer-projection-receiver");
+            try submitTestMessage(&storage, &tmp, "peer-projection-task", "peer-projection-task", sender.slice(), "send the same note");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+            var identities: [8][24]u8 = undefined;
+            var argument_buffers: [8][128]u8 = undefined;
+            var encoded_buffers: [8][192]u8 = undefined;
+            var calls: [8]TestingCall = undefined;
+            for (&calls, &identities, &argument_buffers, &encoded_buffers, 0..) |*call, *identity, *arguments, *encoded, index| {
+                const id = try std.fmt.bufPrint(identity, "peer-send-{d}", .{index});
+                const target = if (index < 5 or index == 7) receiver.slice() else if (index == 5) sender.slice() else "zzzzzz";
+                call.* = .{
+                    .item_id = id,
+                    .name = "message_agent",
+                    .encoded_call_id = id,
+                    .decoded_call_id = id,
+                    .encoded_arguments = try std.fmt.bufPrint(encoded, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"same note\\\"}}", .{target}),
+                    .decoded_arguments = try std.fmt.bufPrint(arguments, "{{\"id\":\"{s}\",\"text\":\"same note\"}}", .{target}),
+                };
+            }
+            try settleCallsForTesting(&storage, &tmp, model, "peer-projection-calls", &calls);
+
+            const before_resolution = try store_core.activityPageForTesting(&storage, .{ .session = sender });
+            try std.testing.expectEqual(@as(u64, 8), before_resolution.call_activity.total);
+            var action_ids: [8]u64 = undefined;
+            for (calls, 0..) |_, index| {
+                const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+                action_ids[index] = action.binding.action_id;
+                const target = if (index < 5 or index == 7) receiver.slice() else if (index == 5) sender.slice() else "zzzzzz";
+                if (index == 7) {
+                    var key_buffer: [128]u8 = undefined;
+                    const key = try std.fmt.bufPrint(&key_buffer, "{s}{d}", .{ idempotency_key.agent_message_prefix, action.binding.action_id });
+                    try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,?2,?3,1,'',0,0,1000000)", .{ key, receiver.slice(), store_testing.Blob{ .bytes = &protocol.contentDigest("taken") } });
+                }
+                const delivery = try storage.deliverAgentMessage(action.binding, target, "same note", .{});
+                try std.testing.expectEqual(if (index < 6) command_domain.AgentDelivery.delivered else command_domain.AgentDelivery.failed, delivery);
+            }
+
+            var raw_request: protocol.ActivityPage = .{ .kinds = .initMany(&.{ .tool_result, .sent }) };
+            try raw_request.session.set(sender.slice());
+            const raw = try store_core.activityPageForTesting(&storage, raw_request);
+            try std.testing.expectEqual(@as(usize, 14), raw.count);
+            var raw_results: usize = 0;
+            var raw_sent: usize = 0;
+            for (raw.items[0..raw.count]) |item| switch (item.value) {
+                .tool_result => |result| {
+                    raw_results += 1;
+                    try std.testing.expect(!result.redundant_peer_send);
+                },
+                .sent => raw_sent += 1,
+                else => unreachable,
+            };
+            try std.testing.expectEqual(@as(usize, 8), raw_results);
+            try std.testing.expectEqual(@as(usize, 6), raw_sent);
+
+            raw_request.hide_redundant_peer_sends = true;
+            const projected = try store_core.activityPageForTesting(&storage, raw_request);
+            try std.testing.expectEqual(raw.count, projected.count);
+            var hidden: usize = 0;
+            var retained_failures: usize = 0;
+            var projected_sent: usize = 0;
+            for (projected.items[0..projected.count]) |item| switch (item.value) {
+                .tool_result => |result| {
+                    if (result.redundant_peer_send) {
+                        hidden += 1;
+                        try std.testing.expectEqual(protocol.ToolPresentation.Code.succeeded, result.presentation.code);
+                    } else if (result.presentation.code == .failed) {
+                        retained_failures += 1;
+                    } else return error.UnprovenPeerSendWasHidden;
+                },
+                .sent => projected_sent += 1,
+                else => unreachable,
+            };
+            try std.testing.expectEqual(@as(usize, 6), hidden);
+            try std.testing.expectEqual(@as(usize, 2), retained_failures);
+            try std.testing.expectEqual(@as(usize, 6), projected_sent);
+
+            const failed_result = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{action_ids[6]});
+            try expectContent(&storage, try testingContentReference(&storage, failed_result), "No Session zzzzzz in this Store; nothing was sent.");
+            const taken_result = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{action_ids[7]});
+            try expectContent(&storage, try testingContentReference(&storage, taken_result), "Rui could not send this Message: its command key is already taken. Nothing was sent.");
+            try std.testing.expectEqual(@as(u64, 6), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE sender_session_ref=?1", .{sender.slice()}));
+            const sender_order_sql = "SELECT count(*) FROM message_admission WHERE sender_session_ref=?1 AND sender_position<(SELECT acceptance_position FROM action_operation a WHERE message_admission.command_key=@concat('" ++ idempotency_key.agent_message_prefix ++ "',a.action_id))";
+            try std.testing.expectEqual(@as(u64, 6), try store_testing.queryU64(&storage, sender_order_sql, .{sender.slice()}));
+
+            var conversation_request: @import("../../conversation_read.zig").ConversationPage = .{};
+            try conversation_request.session.set(sender.slice());
+            const conversation = try store_core.publicConversationPageForTesting(&storage, conversation_request);
+            var conversation_results: usize = 0;
+            for (conversation.items[0..conversation.count]) |item| if (item.kind == .tool_result) {
+                conversation_results += 1;
+            };
+            try std.testing.expectEqual(@as(usize, 8), conversation_results);
+        }
+    }.run);
+}
+
+test "SUI-124 live candidate cap runs after receipt filtering and still certifies a fully filtered group" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("peer-live-sender", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"message_agent"});
+            create.configuration.permission_mode.state = .value;
+            try create.configuration.permission_mode.value.set("bypass");
+            const sender = (try storage.configure(&create, .{})).accepted.session;
+            const receiver = try configureTestSession(&storage, "peer-live-receiver");
+            try submitTestMessage(&storage, &tmp, "peer-live-task", "peer-live-task", sender.slice(), "send these");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+            var identities: [5][24]u8 = undefined;
+            var argument_buffers: [5][128]u8 = undefined;
+            var encoded_buffers: [5][192]u8 = undefined;
+            var calls: [5]TestingCall = undefined;
+            for (&calls, &identities, &argument_buffers, &encoded_buffers, 0..) |*call, *identity, *arguments, *encoded, index| {
+                const id = try std.fmt.bufPrint(identity, "live-peer-{d}", .{index});
+                call.* = .{
+                    .item_id = id,
+                    .name = "message_agent",
+                    .encoded_call_id = id,
+                    .decoded_call_id = id,
+                    .encoded_arguments = try std.fmt.bufPrint(encoded, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"same note\\\"}}", .{receiver.slice()}),
+                    .decoded_arguments = try std.fmt.bufPrint(arguments, "{{\"id\":\"{s}\",\"text\":\"same note\"}}", .{receiver.slice()}),
+                };
+            }
+            try settleCallsForTesting(&storage, &tmp, model, "peer-live-calls", &calls);
+            const before = try store_core.activityPageForTesting(&storage, .{ .session = sender });
+            try std.testing.expectEqual(@as(u64, 5), before.call_activity.total);
+
+            var raw_request: protocol.ActivityPage = .{ .end = before.end };
+            try raw_request.session.set(sender.slice());
+            for (calls, 0..) |_, index| {
+                const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+                try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action.binding, receiver.slice(), "same note", .{}));
+                if (index == 1) {
+                    const raw_midway = try store_core.activityPageForTesting(&storage, raw_request);
+                    try std.testing.expectEqual(@as(u64, 5), raw_midway.call_activity.total);
+                    try std.testing.expectEqual(@as(usize, 3), raw_midway.call_activity.count);
+                    raw_request.hide_redundant_peer_sends = true;
+                    const projected_midway = try store_core.activityPageForTesting(&storage, raw_request);
+                    try std.testing.expectEqual(@as(u64, 3), projected_midway.call_activity.total);
+                    try std.testing.expectEqual(@as(usize, 3), projected_midway.call_activity.count);
+                    for (projected_midway.call_activity.entries, 2..) |entry, ordinal| {
+                        try std.testing.expectEqual(ordinal, entry.ordinal);
+                        try std.testing.expectEqual(protocol.ToolPresentation.Code.unresolved, entry.presentation.code);
+                    }
+                    raw_request.hide_redundant_peer_sends = false;
+                }
+            }
+
+            raw_request.hide_redundant_peer_sends = true;
+            const projected = try store_core.activityPageForTesting(&storage, raw_request);
+            try std.testing.expectEqual(@as(u64, 0), projected.call_activity.total);
+            try std.testing.expectEqual(@as(usize, 0), projected.call_activity.count);
+        }
+    }.run);
+}
+
 test "session message writer covers peer message_agent start_agent and ending with wake and refusal" {
     const owner = @embedFile("../domain/sourced_input.zig");
     const callers = @embedFile("../domain/command.zig");
@@ -406,6 +588,13 @@ test "session message writer covers peer message_agent start_agent and ending wi
                         try std.testing.expectEqual(command_domain.AgentStart.started, try storage.startAgent(action.binding, sender.slice(), text, true, &spec, commits.callback(), .{}));
                         const sent = try store_core.activityPageForTesting(&storage, .{ .session = sender, .kinds = .initOne(.sent) });
                         receiver = sent.items[0].value.sent.target.session;
+                        const projected = try store_core.activityPageForTesting(&storage, .{ .session = sender, .hide_redundant_peer_sends = true });
+                        var unrelated_success: ?protocol.CallActivity.Entry = null;
+                        for (projected.call_activity.entries[0..projected.call_activity.count]) |entry| if (entry.ordinal == 0) {
+                            unrelated_success = entry;
+                        };
+                        try std.testing.expect(unrelated_success != null);
+                        try std.testing.expectEqual(protocol.ToolPresentation.Code.succeeded, unrelated_success.?.presentation.code);
                     },
                     .ending => try std.testing.expect(try storage.deliverChildEnding(model.turn_id, .{})),
                 }

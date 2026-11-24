@@ -1730,7 +1730,7 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseActivityPage(self: *Parser, out: *ActivityPage, members: *Members) !void {
-            const Field = enum { session, end, position, ordinal, direction, kinds, limit, since };
+            const Field = enum { session, end, position, ordinal, direction, kinds, limit, since, hide_redundant_peer_sends };
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
@@ -1763,6 +1763,7 @@ fn ParserOf(comptime Custody: type) type {
                     };
                 },
                 .limit => out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor,
+                .hide_redundant_peer_sends => out.hide_redundant_peer_sends = try self.readBoolean(),
             };
             try require(Field, seen, &.{ .session, .end, .position, .ordinal, .direction, .kinds, .limit });
             try out.validate();
@@ -2358,8 +2359,10 @@ pub const max_activity_search_request_bytes = shapeBytes(activity_search_request
 pub const activity_page_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"limit\":\"", Hole.decimal, "\"" };
     pub const since = .{ ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes } };
+    pub const hide_redundant_peer_sends = .{ ",\"hide_redundant_peer_sends\":", Hole.boolean };
     pub const tail = .{"}"};
     pub const all = head ++ since ++ tail;
+    pub const with_peer_projection = head ++ since ++ hide_redundant_peer_sends ++ tail;
 };
 /// The Message admission or Action that holds a parts value: `{"message":"ID"}` or `{"action":"ID"}`.
 pub const OwnerJson = struct {
@@ -2527,7 +2530,7 @@ pub const max_read_action_arguments_request_bytes = shapeBytes(read_action_argum
 pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id_request);
 pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request.all);
 pub const max_conversation_page_request_bytes = shapeBytes(conversation_page_request);
-pub const max_activity_page_request_bytes = shapeBytes(activity_page_request.all);
+pub const max_activity_page_request_bytes = @max(shapeBytes(activity_page_request.all), shapeBytes(activity_page_request.with_peer_projection));
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
     observe_command_request.all,       host_info_request,                   host_stop_request,
@@ -3022,7 +3025,7 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
     }
 }
 
-test "an activity page names its kinds once each, in order, and a limit from 1 to 16" {
+test "SUI-124 Activity page names its kinds once each, in order, and a limit from 1 to 16" {
     const cases = [_]struct { body: []const u8, failure: ?anyerror = null }{
         .{ .body = "[\"admission\"],\"limit\":\"1\"" },
         .{ .body = "[\"admission\",\"received\"],\"limit\":\"16\"" },
@@ -3045,8 +3048,15 @@ test "an activity page names its kinds once each, in order, and a limit from 1 t
         } else {
             const request = try parseForTest(&parser);
             try std.testing.expect(request == .activity_page);
+            try std.testing.expect(!request.activity_page.hide_redundant_peer_sends);
         }
     }
+    const projected_json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":\"s\",\"session\":\"x\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"tool_result\"],\"limit\":\"16\",\"hide_redundant_peer_sends\":true}";
+    var projected_source: MetadataSource = .{ .input = projected_json };
+    var projected_parser = Tested.Parser{ .source = &projected_source };
+    const projected_request = try parseForTest(&projected_parser);
+    try std.testing.expect(projected_request == .activity_page);
+    try std.testing.expect(projected_request.activity_page.hide_redundant_peer_sends);
 }
 
 test "configuration token heuristics and effort parse sparsely and bind idempotency" {

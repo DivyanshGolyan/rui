@@ -121,8 +121,9 @@ pub const ActivityCursor = struct {
     direction: @FieldType(protocol.ActivityPage, "direction") = .forward,
     kinds: protocol.ActivityPage.Kinds = .full,
     limit: u8 = protocol.ActivityPage.items,
+    hide_redundant_peer_sends: bool = false,
     pub fn validate(self: ActivityCursor) !void {
-        try (protocol.ActivityPage{ .end = self.end, .position = self.position, .ordinal = self.ordinal, .direction = self.direction, .kinds = self.kinds, .limit = self.limit }).validate();
+        try (protocol.ActivityPage{ .end = self.end, .position = self.position, .ordinal = self.ordinal, .direction = self.direction, .kinds = self.kinds, .limit = self.limit, .hide_redundant_peer_sends = self.hide_redundant_peer_sends }).validate();
     }
 };
 pub const ActivityPageReply = union(enum) { page: ActivityPage, failure: ReadFailure };
@@ -131,12 +132,13 @@ pub const ActivityPage = struct {
     facts: protocol.ActivityFacts,
     kinds: protocol.ActivityPage.Kinds = .full,
     limit: u8 = protocol.ActivityPage.items,
+    hide_redundant_peer_sends: bool = false,
 
     pub fn continuation(self: *const ActivityPage) ?ActivityCursor {
         const facts = &self.facts;
         if (!facts.more) return null;
         const last = facts.items[facts.count - 1];
-        return .{ .end = facts.end, .position = last.position, .ordinal = last.ordinal, .direction = facts.direction, .kinds = self.kinds, .limit = self.limit };
+        return .{ .end = facts.end, .position = last.position, .ordinal = last.ordinal, .direction = facts.direction, .kinds = self.kinds, .limit = self.limit, .hide_redundant_peer_sends = self.hide_redundant_peer_sends };
     }
 
     pub fn parse(bytes: []const u8, cursor: ActivityCursor) !ActivityPage {
@@ -148,13 +150,14 @@ pub const ActivityPage = struct {
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
         const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: ?JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref, description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
+        const ToolResult = struct { content: Ref, presentation: JsonToolPresentation, redundant_peer_send: ?bool = null };
         const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
         const ModelCall = struct { model: JsonString(protocol.max_model_bytes), served_model: ?JsonString(protocol.max_model_bytes), input_tokens: ?JsonString(20), output_tokens: ?JsonString(20), cached_tokens: ?JsonString(20), latency_ms: ?JsonString(20), first_event_ms: ?JsonString(20), status: JsonString(protocol.max_code_bytes), attempts: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: ToolResult, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall } };
         const Items = JsonArray(Item, 16);
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
         const Calls = JsonArray(CallEntry, 3);
@@ -175,10 +178,10 @@ pub const ActivityPage = struct {
                 .direction = cursor.direction,
                 .token = SessionToken.parse(wire.since.slice()) catch return error.InvalidActivityPage,
                 .not_modified = true,
-            }, .kinds = cursor.kinds, .limit = cursor.limit };
+            }, .kinds = cursor.kinds, .limit = cursor.limit, .hide_redundant_peer_sends = cursor.hide_redundant_peer_sends };
         }
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidActivityPage;
-        var page: ActivityPage = .{ .facts = .{ .token = if (wire.since) |token| SessionToken.parse(token.slice()) catch return error.InvalidActivityPage else null, .end = try id(wire.end, true), .direction = wire.direction.value, .more = wire.more, .count = wire.items.count }, .kinds = cursor.kinds, .limit = cursor.limit };
+        var page: ActivityPage = .{ .facts = .{ .token = if (wire.since) |token| SessionToken.parse(token.slice()) catch return error.InvalidActivityPage else null, .end = try id(wire.end, true), .direction = wire.direction.value, .more = wire.more, .count = wire.items.count }, .kinds = cursor.kinds, .limit = cursor.limit, .hide_redundant_peer_sends = cursor.hide_redundant_peer_sends };
         if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("activity_page") or page.facts.direction != cursor.direction or
             (cursor.end != null and cursor.end.? != page.facts.end) or cursor.position > page.facts.end or
             wire.items.count > cursor.limit or (wire.more and wire.items.count != cursor.limit)) return error.InvalidActivityPage;
@@ -235,8 +238,8 @@ pub const ActivityPage = struct {
                 },
                 .assistant => |assistant| fact.value = .{ .assistant = .{ .content = try textOf(assistant.content), .final = assistant.final } },
                 .tool_result => |result| {
-                    if (result.presentation.value.publication_position != fact.position) return error.InvalidActivityPage;
-                    fact.value = .{ .tool_result = .{ .content = result.content.value, .presentation = result.presentation.value } };
+                    if (result.presentation.value.publication_position != fact.position or (result.redundant_peer_send != null and (!result.redundant_peer_send.? or !cursor.hide_redundant_peer_sends or result.presentation.value.code != .succeeded))) return error.InvalidActivityPage;
+                    fact.value = .{ .tool_result = .{ .content = result.content.value, .presentation = result.presentation.value, .redundant_peer_send = result.redundant_peer_send orelse false } };
                 },
                 .hosted_call => |call| {
                     if (call.presentation.value.publication_position != fact.position or call.presentation.value.description == null) return error.InvalidActivityPage;
@@ -2369,6 +2372,38 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);
         try std.testing.expectEqual(std.math.maxInt(i64) + 1 - item.position, item.at);
     }
+}
+
+test "SUI-124 Activity peer-send receipt marker requires opt-in and a successful result" {
+    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try description.set("Message k7m2qx");
+    var facts: protocol.ActivityFacts = .{ .end = 2, .count = 1 };
+    facts.items[0] = .{ .position = 2, .ordinal = 1, .at = 2, .value = .{ .tool_result = .{
+        .content = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } },
+        .presentation = .{ .description = description, .code = .succeeded, .publication_position = 2 },
+    } } };
+    facts.work.work = .{ .state = .{ .idle = .{ .since = 1 } } };
+    facts.work.revision = 1;
+    try facts.work.workspace.set("/work");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try activity_reply.writePage(&writer, &facts);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "redundant_peer_send") == null);
+    const raw = try ActivityPage.parse(writer.buffered(), .{ .kinds = .initOne(.tool_result) });
+    try std.testing.expect(!raw.facts.items[0].value.tool_result.redundant_peer_send);
+
+    facts.items[0].value.tool_result.redundant_peer_send = true;
+    writer = std.Io.Writer.fixed(&buffer);
+    try activity_reply.writePage(&writer, &facts);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"redundant_peer_send\":true") != null);
+    try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{ .kinds = .initOne(.tool_result) }));
+    const projected = try ActivityPage.parse(writer.buffered(), .{ .kinds = .initOne(.tool_result), .hide_redundant_peer_sends = true });
+    try std.testing.expect(projected.facts.items[0].value.tool_result.redundant_peer_send);
+
+    facts.items[0].value.tool_result.presentation.code = .failed;
+    writer = std.Io.Writer.fixed(&buffer);
+    try activity_reply.writePage(&writer, &facts);
+    try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{ .kinds = .initOne(.tool_result), .hide_redundant_peer_sends = true }));
 }
 
 test "activity page preserves the canonical row preview with its work" {

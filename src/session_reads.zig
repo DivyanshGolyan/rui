@@ -462,6 +462,7 @@ fn pageCursor(job: *const Job, plan: FeedPolicy.Page) protocol_reply.ActivityCur
         .limit = plan.limit,
         .kinds = if (plan.kinds == .all) .full else .initMany(&.{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed }),
         .end = if (plan.kinds == .all and plan.continuing) job.cursor.end else null,
+        .hide_redundant_peer_sends = true,
     };
     if (plan.from) |from| {
         cursor.position = from.position;
@@ -547,6 +548,7 @@ fn scanAt(job: *Job, task: *Task, reads: client.SessionReads, plan: FeedPolicy.P
         job.result.high = key;
         switch (item.value) {
             .admission, .received, .user => |message| if (!View.visibleMessage(message)) continue,
+            .tool_result => |result| if (result.redundant_peer_send) continue,
             else => {},
         }
         const pending = item.value == .admission and item.value.admission.state == .queued;
@@ -1122,12 +1124,13 @@ const FakeHost = struct {
     /// Serves the parts routes; a Message whose content is parts reads through it.
     parts: ?*value_reads.PartsHost = null,
     pages: usize = 0,
+    peer_projection_reads: usize = 0,
     contents: usize = 0,
     others: usize = 0,
     output: [4096]u8 = undefined,
     shown: []const u8 = "",
 
-    const Tail = struct { value: protocol.ActivityItem.Value, excluded_at: ?u64 = null, applied_at: ?u64 = null };
+    const Tail = struct { value: protocol.ActivityItem.Value, ordinal: u64 = 0, excluded_at: ?u64 = null, applied_at: ?u64 = null };
     const text = "please wait\nfor the build";
 
     fn content() content_value.Reference {
@@ -1145,6 +1148,11 @@ const FakeHost = struct {
     }
 
     const Row = struct { position: u64, ordinal: u64 = 0 };
+
+    fn rowOrdinal(self: *const FakeHost, position: u64) u64 {
+        if (position <= self.history) return 0;
+        return self.tail[position - self.history - 1].ordinal;
+    }
 
     fn step(row: Row, end: u64, direction: @FieldType(protocol.ActivityFacts, "direction")) ?Row {
         const following: Row = switch (direction) {
@@ -1176,16 +1184,19 @@ const FakeHost = struct {
             value.admission.state = .applied;
             value.admission.turn = 1;
         };
-        return .{ .position = position, .at = 1, .value = value };
+        return .{ .position = position, .ordinal = tail.ordinal, .at = 1, .value = value };
     }
 
     fn page(self: *const FakeHost, end: u64, position: u64, ordinal: ?u64, direction: @FieldType(protocol.ActivityFacts, "direction"), kinds: protocol.ActivityPage.Kinds, limit: u8) protocol.ActivityFacts {
         var facts: protocol.ActivityFacts = .{ .end = end, .direction = direction };
         var next: ?Row = if (ordinal) |at|
-            (if (direction == .backward and at > 0) .{ .position = position } else step(.{ .position = position, .ordinal = at }, end, direction))
+            if (direction == .backward and position != 0 and self.rowOrdinal(position) < at)
+                .{ .position = position, .ordinal = self.rowOrdinal(position) }
+            else
+                step(.{ .position = position, .ordinal = at }, end, direction)
         else switch (direction) {
             .forward => step(.{ .position = position }, end, direction),
-            .backward => if (position != 0) step(.{ .position = position }, end, direction) else if (end >= 1) .{ .position = end } else null,
+            .backward => if (position != 0) step(.{ .position = position }, end, direction) else if (end >= 1) .{ .position = end, .ordinal = self.rowOrdinal(end) } else null,
         };
         while (next) |row| {
             const value = self.item(row, end);
@@ -1223,11 +1234,12 @@ const FakeHost = struct {
         }
         var storage: [4096]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
-        const Cursor = struct { end: ?[]const u8 = null, position: []const u8, ordinal: ?[]const u8 = null, direction: []const u8 = "forward", kinds: []const protocol.ActivityItem.Kind = &.{}, limit: []const u8 = "16" };
+        const Cursor = struct { end: ?[]const u8 = null, position: []const u8, ordinal: ?[]const u8 = null, direction: []const u8 = "forward", kinds: []const protocol.ActivityItem.Kind = &.{}, limit: []const u8 = "16", hide_redundant_peer_sends: bool = false };
         const cursor = try std.json.parseFromSliceLeaky(Cursor, fixed.allocator(), request.body, .{ .ignore_unknown_fields = true });
         const position = try std.fmt.parseInt(u64, cursor.position, 10);
         if (request.is("/v1/activity-page")) {
             self.pages += 1;
+            self.peer_projection_reads += @intFromBool(cursor.hide_redundant_peer_sends);
             const end = if (cursor.end) |value| try std.fmt.parseInt(u64, value, 10) else self.end;
             const ordinal = if (cursor.ordinal) |value| try std.fmt.parseInt(u64, value, 10) else null;
             var kinds: protocol.ActivityPage.Kinds = .{};
@@ -1893,6 +1905,7 @@ test "SUI-51 opening reads expose ordered rows and scan boundaries" {
     var job: Job = .{ .opening = true, .session = "k7m2qx", .line_read = .{ .revision = 1, .end = 2 } };
     try host.read(&job);
     try std.testing.expectEqual(@as(usize, 2), job.result.row_count);
+    try std.testing.expectEqual(@as(usize, 1), host.peer_projection_reads);
     try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), job.result.low);
     try std.testing.expectEqualDeep(@as(?Key, .{ .position = 2, .ordinal = std.math.maxInt(u64) }), job.result.high);
     try std.testing.expectEqual(@as(u64, 2), job.result.cursor.position);
@@ -1917,6 +1930,80 @@ test "SUI-51 opening reads expose ordered rows and scan boundaries" {
     try std.testing.expectEqual(@as(usize, 0), job.result.row_count);
     try std.testing.expectEqual(@as(?Key, null), job.result.high);
     try std.testing.expect(job.result.at_start and job.result.at_end);
+}
+
+test "SUI-124 chat feed hides only proven peer-send successes before row bookkeeping" {
+    var peer: protocol.NamedPeer = .{ .session = .{} };
+    try peer.session.set("9f8e7d");
+    try peer.label.set("Peer");
+    var incoming = FakeHost.message(2).admission;
+    incoming.sender = peer;
+    var success_description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try success_description.set("Message 9f8e7d");
+    var failure_description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try failure_description.set("Message missing");
+    const texts = [_][]const u8{ "sent body", "incoming body", "Delivered to 9f8e7d.", "unrelated successful result", "No Session zzzzzz in this Store; nothing was sent." };
+    const tail = [_]FakeHost.Tail{
+        .{ .value = .{ .sent = .{ .admission = 1, .target = peer, .content = .{ .text = .{ .length = texts[0].len, .digest = protocol.contentDigest(texts[0]) } }, .admitted_at = 1 } } },
+        .{ .value = .{ .received = incoming } },
+        .{ .ordinal = 1, .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = texts[2].len, .digest = protocol.contentDigest(texts[2]) } }, .presentation = .{ .description = success_description, .code = .succeeded, .publication_position = 3 }, .redundant_peer_send = true } } },
+        .{ .ordinal = 1, .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = texts[3].len, .digest = protocol.contentDigest(texts[3]) } }, .presentation = .{ .description = success_description, .code = .succeeded, .publication_position = 4 } } } },
+        .{ .ordinal = 1, .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = texts[4].len, .digest = protocol.contentDigest(texts[4]) } }, .presentation = .{ .description = failure_description, .code = .failed, .publication_position = 5 } } } },
+    };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 5, .content_texts = &texts };
+    var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 5 } };
+    job.init.gpa = std.testing.allocator; // the opened tool fold allocates its output
+    job.opened.set(.{ .position = 5, .ordinal = 1 }, true);
+    try host.read(&job);
+    try std.testing.expectEqual(@as(usize, 4), job.result.row_count);
+    try std.testing.expectEqual(@as(usize, 1), host.peer_projection_reads);
+    try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), job.result.low);
+    try std.testing.expectEqualDeep(@as(?Key, .{ .position = 5, .ordinal = std.math.maxInt(u64) }), job.result.high);
+    try std.testing.expectEqual(@as(u64, 5), job.result.cursor.position);
+    try std.testing.expectEqual(@as(u64, 1), job.result.rows[0].key.position);
+    try std.testing.expectEqual(@as(u64, 2), job.result.rows[1].key.position);
+    try std.testing.expectEqual(@as(u64, 4), job.result.rows[2].key.position);
+    try std.testing.expectEqual(@as(u64, 5), job.result.rows[3].key.position);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "Messaged") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, host.shown, TerminalText.session_link));
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "Received message from") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Message 9f8e7d"));
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, texts[2]) == null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, texts[3]) == null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "× Message missing") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "exit") == null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, texts[4]) != null);
+    try std.testing.expectEqual(@as(usize, 2), host.contents);
+}
+
+test "SUI-124 a backward page split skips a hidden result then reaches its older sent row" {
+    var peer: protocol.NamedPeer = .{ .session = .{} };
+    try peer.session.set("9f8e7d");
+    try peer.label.set("Peer");
+    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try description.set("Message 9f8e7d");
+    const texts = [_][]const u8{ "sent body", "Delivered to 9f8e7d." };
+    const tail = [_]FakeHost.Tail{
+        .{ .value = .{ .sent = .{ .admission = 1, .target = peer, .content = .{ .text = .{ .length = texts[0].len, .digest = protocol.contentDigest(texts[0]) } }, .admitted_at = 1 } } },
+        .{ .ordinal = 1, .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = texts[1].len, .digest = protocol.contentDigest(texts[1]) } }, .presentation = .{ .description = description, .code = .succeeded, .publication_position = 2 }, .redundant_peer_send = true } } },
+        .{ .value = .{ .session_changed = .{ .revision = 2, .field = .label } } },
+    };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 3, .content_texts = &texts };
+    var recent: Job = .{ .opening = true, .feed_page = .{ .direction = .backward, .kinds = .visible, .limit = 1, .started_from = null, .from = null } };
+    try host.read(&recent);
+    try std.testing.expectEqual(@as(usize, 0), recent.result.row_count);
+    try std.testing.expectEqualDeep(@as(?Key, .{ .position = 2, .ordinal = 1 }), recent.result.low);
+    try std.testing.expectEqualDeep(@as(?Key, .{ .position = 3, .ordinal = std.math.maxInt(u64) }), recent.result.high);
+    try std.testing.expectEqual(@as(usize, 1), host.peer_projection_reads);
+
+    const older: Key = .{ .position = 2, .ordinal = 1 };
+    var older_job: Job = .{ .cursor = .{ .position = 3 }, .feed_page = .{ .direction = .backward, .kinds = .visible, .limit = 1, .started_from = older, .from = older } };
+    try host.read(&older_job);
+    try std.testing.expectEqual(@as(usize, 1), older_job.result.row_count);
+    try std.testing.expectEqual(@as(u64, 1), older_job.result.rows[0].key.position);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "Messaged") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, TerminalText.session_link) != null);
+    try std.testing.expectEqual(@as(usize, 2), host.peer_projection_reads);
 }
 
 test "SUI-52 visible fills leave live read state unchanged" {

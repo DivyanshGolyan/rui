@@ -46,6 +46,25 @@ pub fn consistentSql(comptime message: []const u8, comptime command: []const u8)
         command ++ ".primary_content_id=" ++ message ++ ".content_id AND " ++ actionConsistentSql(message);
 }
 
+pub const message_agent_name_digest = digest: {
+    @setEvalBranchQuota(10_000);
+    break :digest content_string.digest("message_agent");
+};
+
+/// Matches a successful message_agent Action to its exact reserved command and
+/// the accepted peer Message that command admitted from that Action's Session.
+pub fn peerSendReceiptSql(comptime call: []const u8, comptime action: []const u8, comptime digest_arg: []const u8) []const u8 {
+    return "EXISTS(SELECT 1 FROM content peer_tool_name " ++
+        "JOIN core_command peer_command ON peer_command.command_key=@concat('" ++ idempotency_key.agent_message_prefix ++ "'," ++ action ++ ".action_id) " ++
+        "JOIN message_admission peer_message ON peer_message.command_key=peer_command.command_key " ++
+        "WHERE peer_tool_name.content_id=" ++ call ++ ".name_content_id AND peer_tool_name.digest=" ++ digest_arg ++ " " ++
+        "AND " ++ action ++ ".parent_operation_id=" ++ call ++ ".operation_id AND " ++ action ++ ".call_ordinal=" ++ call ++ ".call_ordinal " ++
+        "AND " ++ action ++ ".resolution_code='succeeded' AND " ++
+        "peer_message.sender_session_ref=" ++ action ++ ".session_ref AND " ++
+        "peer_message.sender_position<" ++ action ++ ".acceptance_position AND " ++
+        consistentSql("peer_message", "peer_command") ++ ")";
+}
+
 const admit_message = rsql.Write(.{
     .sql = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,source_kind) VALUES(?1,@session(?2),?3,?4,?5,@now,?6)",
     .Args = struct { admission_id: u64, session: rsql.SessionHead, key: []const u8, content_id: u64, position: u64, source_kind: u8 },

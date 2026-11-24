@@ -2487,50 +2487,104 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
-            "properties": {
-              "position": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "ordinal": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "at": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "value": {
+            "anyOf": [
+              {
                 "type": "object",
                 "properties": {
-                  "tool_result": {
+                  "position": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "ordinal": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "at": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "value": {
                     "type": "object",
                     "properties": {
-                      "content": {
-                        "$ref": "#/components/schemas/ContentValue"
-                      },
-                      "presentation": {
-                        "$ref": "#/components/schemas/ToolPresentation"
+                      "tool_result": {
+                        "type": "object",
+                        "properties": {
+                          "content": {
+                            "$ref": "#/components/schemas/ContentValue"
+                          },
+                          "presentation": {
+                            "$ref": "#/components/schemas/ToolPresentation"
+                          }
+                        },
+                        "required": [
+                          "content",
+                          "presentation"
+                        ],
+                        "additionalProperties": false
                       }
                     },
                     "required": [
-                      "content",
-                      "presentation"
+                      "tool_result"
                     ],
                     "additionalProperties": false
                   }
                 },
                 "required": [
-                  "tool_result"
+                  "position",
+                  "ordinal",
+                  "at",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "position": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "ordinal": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "at": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "value": {
+                    "type": "object",
+                    "properties": {
+                      "tool_result": {
+                        "type": "object",
+                        "properties": {
+                          "content": {
+                            "$ref": "#/components/schemas/ContentValue"
+                          },
+                          "presentation": {
+                            "$ref": "#/components/schemas/ToolPresentation"
+                          },
+                          "redundant_peer_send": {
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "content",
+                          "presentation",
+                          "redundant_peer_send"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "tool_result"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "position",
+                  "ordinal",
+                  "at",
+                  "value"
                 ],
                 "additionalProperties": false
               }
-            },
-            "required": [
-              "position",
-              "ordinal",
-              "at",
-              "value"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "type": "object",
@@ -3463,6 +3517,9 @@
                 "type": "null"
               }
             ]
+          },
+          "hide_redundant_peer_sends": {
+            "type": "boolean"
           }
         },
         "required": [

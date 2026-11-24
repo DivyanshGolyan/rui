@@ -1962,6 +1962,7 @@ const expression_markers = [_]ExpressionMarker{
     .{ .name = "max_where", .arity = 2, .sqlite = "max(" ++ arg_a ++ ") FILTER (WHERE " ++ arg_b ++ ")", .mysql = "max(CASE WHEN " ++ arg_b ++ " THEN " ++ arg_a ++ " END)" },
     .{ .name = "list", .arity = 1, .sqlite = "group_concat(" ++ arg_a ++ ",',')", .mysql = "GROUP_CONCAT(" ++ arg_a ++ " SEPARATOR ',')" },
     .{ .name = "served", .arity = 1, .sqlite = "rui_served(" ++ arg_a ++ ")", .mysql = "(" ++ arg_a ++ " IN (" ++ served_slots ++ "))" },
+    .{ .name = "concat", .arity = 2, .sqlite = arg_a ++ "||" ++ arg_b, .mysql = "CONCAT(" ++ arg_a ++ "," ++ arg_b ++ ")" },
     .{
         .name = "payload",
         .arity = 1,
@@ -2783,6 +2784,11 @@ test "each marker renders its SQLite spelling" {
     try std.testing.expectEqualStrings("count(*) FILTER (WHERE a.authorized=0 AND (x IS 1))", comptime render(.sqlite, "@count_where(a.authorized=0 AND @same(x,1))"));
     try std.testing.expectEqualStrings("max(a.decided_at) FILTER (WHERE r.permission_mode=0)", comptime render(.sqlite, "@max_where(a.decided_at,r.permission_mode=0)"));
     try std.testing.expectEqualStrings("group_concat(tool.name,',')", comptime render(.sqlite, "@list(tool.name)"));
+}
+
+test "SUI-124 reserved peer key concatenation renders identically across SQL dialects" {
+    try std.testing.expectEqualStrings("'rui.core/message_agent/'||action.action_id", comptime render(.sqlite, "@concat('rui.core/message_agent/',action.action_id)"));
+    try std.testing.expectEqualStrings("CONCAT('rui.core/message_agent/',action.action_id)", comptime render(.mysql, "@concat('rui.core/message_agent/',action.action_id)"));
 }
 
 test "canonical form classification keeps filtered count portable inside an aggregate case" {

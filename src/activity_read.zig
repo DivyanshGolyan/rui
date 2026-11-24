@@ -17,6 +17,7 @@ pub const ActivityPage = struct {
     direction: enum { forward, backward } = .forward,
     kinds: Kinds = .full,
     limit: u8 = items,
+    hide_redundant_peer_sends: bool = false,
 
     pub const Kinds = std.enums.EnumSet(Kind);
     pub const items = 16;

@@ -41,6 +41,7 @@ pub const ItemJson = struct {
         pub const assistant = .{ "{\"content\":", H{ .json = ContentValueJson }, ",\"final\":", H.boolean, "}" };
         pub const call = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"action\":", H.optional_id, ",\"rejection\":", H{ .optional_tag = protocol.ProposalRejection }, ",\"fields\":[", H{ .json = ContentValueJson }, ",", H{ .json = ContentValueJson }, ",", H{ .json = ContentValueJson }, "]" } ++ call_details ++ .{"}"};
         pub const tool_result = .{ "{\"content\":", H{ .json = ContentValueJson }, ",\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
+        pub const tool_result_peer_send = .{ "{\"content\":", H{ .json = ContentValueJson }, ",\"presentation\":", H{ .json = ToolPresentationJson }, ",\"redundant_peer_send\":true}" };
         pub const hosted_call = .{ "{\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
         pub const turn_ended = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"turn\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"ending\":\"", H{ .tag = protocol.TurnEnding }, "\",\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = ContentValueJson }, "}" };
         pub const stop = .{ "{\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"cutoff\":\"", H.decimal, "\",\"completion\":\"", H{ .tag = protocol.SessionStopCompletion }, "\"}" };
@@ -57,6 +58,7 @@ pub const ItemJson = struct {
         for (std.meta.tags(Item.Kind)) |kind| {
             const name = @tagName(kind);
             bytes = @max(bytes, shapeBytes(head(kind)) + shapeBytes(@field(value_shapes, name)));
+            if (kind == .tool_result) bytes = @max(bytes, shapeBytes(head(kind)) + shapeBytes(value_shapes.tool_result_peer_send));
         }
         break :blk bytes + shapeBytes(tail);
     };
@@ -81,7 +83,11 @@ pub const ItemJson = struct {
             .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),
             .model_call => |call| try writeShape(out, value_shapes.model_call, .{ call.model.slice(), if (call.served_model) |model| model.slice() else null, call.input_tokens, call.output_tokens, call.cached_tokens, call.latency_ms, call.first_event_ms, call.status.slice(), call.attempts }),
             .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ ContentValueJson.text(assistant.content), assistant.final }),
-            .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ ContentValueJson{ .value = result.content }, ToolPresentationJson{ .value = result.presentation } }),
+            .tool_result => |result| if (result.redundant_peer_send) {
+                try writeShape(out, value_shapes.tool_result_peer_send, .{ ContentValueJson{ .value = result.content }, ToolPresentationJson{ .value = result.presentation } });
+            } else {
+                try writeShape(out, value_shapes.tool_result, .{ ContentValueJson{ .value = result.content }, ToolPresentationJson{ .value = result.presentation } });
+            },
             .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{ToolPresentationJson{ .value = presentation }}),
             .call => |call| {
                 comptime std.debug.assert(call.fields.len == 3);

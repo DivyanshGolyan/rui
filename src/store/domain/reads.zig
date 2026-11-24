@@ -652,7 +652,8 @@ const public_tool_result = rsql.Read(.{
         "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1) AS consistent,op.operation_id," ++
         "(SELECT " ++ tool_fulfillment.timeSql("a", "op") ++ " FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal " ++
         "WHERE c.operation_id=op.operation_id ORDER BY " ++ tool_fulfillment.positionSql("c", "a") ++ " DESC LIMIT 1) AS at," ++
-        resolutionActionSql("tool_call", "action") ++ " AS resolution_action " ++
+        resolutionActionSql("tool_call", "action") ++ " AS resolution_action," ++
+        "CASE WHEN ?4=1 AND " ++ sourced_input.peerSendReceiptSql("tool_call", "action", "?5") ++ " THEN 1 ELSE 0 END AS redundant_peer_send " ++
         "FROM last CROSS JOIN model_operation op ON op.operation_id=last.operation_id " ++
         "JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
         "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
@@ -664,8 +665,8 @@ const public_tool_result = rsql.Read(.{
         "AND NOT EXISTS (SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a " ++
         "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
         "AND (" ++ tool_fulfillment.positionSql("c", "a") ++ " IS NULL OR " ++ tool_fulfillment.contentSql("c", "a") ++ " IS NULL))",
-    .Args = struct { session: []const u8, position: u64, ordinal: u64 },
-    .Row = struct { content_id: rsql.Positive, consistent: bool, operation_id: rsql.Positive, at: rsql.Positive, resolution_action: ?rsql.Positive },
+    .Args = struct { session: []const u8, position: u64, ordinal: u64, hide_redundant_peer_sends: bool, tool_name_digest: [32]u8 },
+    .Row = struct { content_id: rsql.Positive, consistent: bool, operation_id: rsql.Positive, at: rsql.Positive, resolution_action: ?rsql.Positive, redundant_peer_send: bool },
     .cardinality = .each,
     .compound = true,
 });
@@ -681,6 +682,9 @@ const PublicContentRead = struct {
     missing: missing_assistant_entry.Result = null,
     metadata: content_metadata.Row = undefined,
     outcome: ToolOutcomeCheck = .{},
+    hide_redundant_peer_sends: bool = false,
+    tool_name_digest: [32]u8 = sourced_input.message_agent_name_digest,
+    redundant_peer_send: bool = false,
     count: RowCount = .{},
 
     fn queue(read: *PublicContentRead, a: *ReadAccess, session: []const u8) void {
@@ -688,7 +692,7 @@ const PublicContentRead = struct {
         if (read.ordinal == 0) {
             a.read(missing_assistant_entry, .{ .session = session, .lower = read.position, .upper = read.position }, &read.missing);
             readRow(a, public_entry, .{ .session = session, .position = read.position }, read);
-        } else readFirst(a, public_tool_result, .{ .session = session, .position = read.position, .ordinal = read.ordinal }, read);
+        } else readFirst(a, public_tool_result, .{ .session = session, .position = read.position, .ordinal = read.ordinal, .hide_redundant_peer_sends = read.hide_redundant_peer_sends, .tool_name_digest = read.tool_name_digest }, read);
     }
 
     pub fn visit(read: *PublicContentRead, row: anytype) bool {
@@ -702,6 +706,7 @@ const PublicContentRead = struct {
             if (read.sender) |sender| sender.* = if (row.sender) |session| .{ .session = session } else null;
         } else {
             read.content = .{ .id = @intCast(row.content_id.get()), .value = undefined, .tool_operation = row.operation_id.get(), .admitted_at = null, .at = row.at.get(), .owner = if (row.resolution_action) |action| .{ .action = action.get() } else null };
+            read.redundant_peer_send = row.redundant_peer_send;
         }
     }
 
@@ -905,7 +910,7 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
         a.readEach(activity_backward, .{ .session = session_ref, .position = if (request.position != 0) request.position else end, .ordinal = if (request.position == 0) whole else request.ordinal orelse 0, .kinds = kinds }, limit + 1, &rows);
     _ = work.queue(a);
     if (request.ordinal) |ordinal| {
-        readItems(1, a, session_ref, end, &.{.{ .position = request.position, .ordinal = ordinal }}, page.items[0..1], null, null) catch |err| switch (err) {
+        readItems(1, a, session_ref, end, &.{.{ .position = request.position, .ordinal = ordinal }}, page.items[0..1], null, null, false) catch |err| switch (err) {
             error.ContentNotFound => return error.InvalidCursor,
             else => return err,
         };
@@ -925,14 +930,14 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     const last = if (forward) boundary else null;
     const call_position = if (last) |item| item.position else end;
     var missing: missing_assistant_entry.Result = null;
-    var calls: CallRows = .{ .activity = &page.call_activity, .args = .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null } };
+    var calls: CallRows = .{ .activity = &page.call_activity, .args = .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null, .hide_redundant_peer_sends = request.hide_redundant_peer_sends, .tool_name_digest = sourced_input.message_agent_name_digest } };
     var waiting: QueuedMessages = .{};
     if (lower <= upper and request.kinds.contains(.assistant)) a.read(missing_assistant_entry, .{ .session = session_ref, .lower = lower, .upper = upper }, &missing);
     if (request.kinds.eql(.full)) {
         a.readEach(call_activity, calls.args, std.math.maxInt(u64), &calls);
         a.readEach(queued, .{ .session = session_ref, .position = call_position }, std.math.maxInt(u64), &waiting);
     }
-    try readItems(page.items.len, a, session_ref, end, at[0..page.count], page.items[0..page.count], &calls, null);
+    try readItems(page.items.len, a, session_ref, end, at[0..page.count], page.items[0..page.count], &calls, null, request.hide_redundant_peer_sends);
     if (missing != null) return error.CorruptStore;
     page.queued = waiting.queued;
     if (waiting.queued.count != 0) page.queued.newest_content = try content_parts.publicValue(&(waiting.newest orelse return error.CorruptStore), .{ .message = waiting.queued.newest_admission });
@@ -974,7 +979,7 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
     const end = session.next_position.get() - 1;
     if ((request.before_position orelse 0) > end) return error.InvalidCursor;
     if (request.before_ordinal) |ordinal| {
-        readItems(1, a, session_ref, end, &.{.{ .position = request.before_position.?, .ordinal = ordinal }}, (&scratch.item)[0..1], null, null) catch |err| switch (err) {
+        readItems(1, a, session_ref, end, &.{.{ .position = request.before_position.?, .ordinal = ordinal }}, (&scratch.item)[0..1], null, null, false) catch |err| switch (err) {
             error.ContentNotFound => return error.InvalidCursor,
             else => return err,
         };
@@ -993,7 +998,7 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
         for (rows.slice()[0..count], 0..) |row, index| {
             const at: ItemAt = .{ .position = row.position.get(), .ordinal = row.ordinal };
             var located: ?Located = null;
-            try readItems(1, a, session_ref, end, &.{at}, (&scratch.item)[0..1], null, &located);
+            try readItems(1, a, session_ref, end, &.{at}, (&scratch.item)[0..1], null, &located, false);
             scratch.hit_count = 0;
             scratch.matcher.init(request.query.slice());
             if (scratch.item.value == .call) {
@@ -1110,16 +1115,19 @@ const call_candidates_sql = "ops AS (SELECT parent_operation_id AS operation_id 
     "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
     "AND count(" ++ tool_fulfillment.positionSql("tool_call", "action") ++ ")=count(*) " ++
     "AND count(" ++ tool_fulfillment.contentSql("tool_call", "action") ++ ")=count(*)), " ++
-    "candidates AS (SELECT op.operation_id,tool_call.call_ordinal,tool_groups.position FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id " ++
+    "candidates AS (SELECT op.operation_id,tool_call.call_ordinal,tool_groups.position,CASE WHEN ?4=1 AND " ++
+    sourced_input.peerSendReceiptSql("tool_call", "action", "?5") ++ " THEN 1 ELSE 0 END AS redundant_peer_send " ++
+    "FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id " ++
     "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
+    "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
     "LEFT JOIN tool_groups ON tool_groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " " ++
     "AND (tool_groups.position IS NULL OR tool_groups.position>?2 OR (tool_groups.position=?2 AND ?3 IS NOT NULL AND tool_call.call_ordinal+1>?3)))";
 
-const CallArgs = struct { session: []const u8, position: u64, ordinal: ?u64 };
-const CallRow = struct { operation_id: rsql.Positive, call_ordinal: u64, position: ?rsql.Positive };
+const CallArgs = struct { session: []const u8, position: u64, ordinal: ?u64, hide_redundant_peer_sends: bool, tool_name_digest: [32]u8 };
+const CallRow = struct { operation_id: rsql.Positive, call_ordinal: u64, position: ?rsql.Positive, redundant_peer_send: bool };
 
 const call_activity = rsql.Read(.{
-    .sql = "WITH " ++ call_candidates_sql ++ " SELECT operation_id,call_ordinal,position FROM candidates ORDER BY operation_id,call_ordinal",
+    .sql = "WITH " ++ call_candidates_sql ++ " SELECT operation_id,call_ordinal,position,redundant_peer_send FROM candidates ORDER BY operation_id,call_ordinal",
     .Args = CallArgs,
     .Row = CallRow,
     .cardinality = .each,
@@ -1145,6 +1153,7 @@ const CallRows = struct {
             if (rows.operation_count < max_operations) rows.operations[rows.operation_count] = operation;
             if (rows.operation_count <= max_operations) rows.operation_count += 1;
         }
+        if (rows.args.hide_redundant_peer_sends and row.redundant_peer_send) return true;
         const activity = rows.activity;
         activity.total += 1;
         if (activity.count < activity.entries.len) {
@@ -1169,7 +1178,7 @@ const CallRows = struct {
             2 => for (kept) |*presentation| presentation.queueProposal(a),
             else => return false,
         }
-        return kept.len != 0;
+        return if (round == 1) rows.operation_count != 0 else kept.len != 0;
     }
 
     fn take(rows: *CallRows, round: u8) !void {
@@ -1544,6 +1553,7 @@ const ItemRead = struct {
     position: u64,
     ordinal: u64,
     item: *activity_facts.Item,
+    hide_redundant_peer_sends: bool = false,
     content: ?struct { id: u64, value: content_value.Value } = null,
     round: u8 = 0,
     done: bool = false,
@@ -1591,7 +1601,10 @@ const ItemRead = struct {
             3, 5 => {
                 const content = &read.state.content;
                 switch (read.round) {
-                    1 => content.read.queue(a, session),
+                    1 => {
+                        content.read.hide_redundant_peer_sends = read.hide_redundant_peer_sends;
+                        content.read.queue(a, session);
+                    },
                     2 => {
                         content.read.queueMetadata(a);
                         if (read.kind == 3) a.read(answer_entry, .{ .session = session, .position = read.position, .end = end }, &content.answer);
@@ -1700,6 +1713,7 @@ const ItemRead = struct {
                         }
                         if (found.tool_operation == null) return error.CorruptStore;
                         item.value.tool_result.content = found.value;
+                        item.value.tool_result.redundant_peer_send = content.read.redundant_peer_send;
                         read.exposes(@intCast(found.id), found.value);
                         return content.presentation.checkCall();
                     },
@@ -1880,10 +1894,10 @@ const ActivityItemReads = struct {
     model_call: model_call_row.Row = undefined,
 };
 
-noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, end: u64, at: []const ItemAt, items: []activity_facts.Item, calls: ?*CallRows, located: ?*?Located) !void {
+noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, end: u64, at: []const ItemAt, items: []activity_facts.Item, calls: ?*CallRows, located: ?*?Located, hide_redundant_peer_sends: bool) !void {
     std.debug.assert(at.len <= max and max <= activity_read.ActivityPage.items);
     const reads = &a.store.reportScratch(ActivityItemReads).items;
-    for (at, items, reads[0..at.len]) |place, *item, *read| read.* = .{ .position = place.position, .ordinal = place.ordinal, .item = item };
+    for (at, items, reads[0..at.len]) |place, *item, *read| read.* = .{ .position = place.position, .ordinal = place.ordinal, .item = item, .hide_redundant_peer_sends = hide_redundant_peer_sends };
     var round: u8 = 0;
     while (true) : (round += 1) {
         var busy = round == 0;
@@ -1910,7 +1924,7 @@ pub fn openActivityContent(a: *ReadAccess, request: *const activity_read.ReadAct
     if (guard != null) return store_core.fence(a.store, error.CorruptStore);
     var item: activity_facts.Item = undefined;
     var located: ?Located = null;
-    readItems(1, a, request.session.slice(), std.math.maxInt(i64), &.{.{ .position = request.position, .ordinal = request.ordinal }}, (&item)[0..1], null, &located) catch |err| switch (err) {
+    readItems(1, a, request.session.slice(), std.math.maxInt(i64), &.{.{ .position = request.position, .ordinal = request.ordinal }}, (&item)[0..1], null, &located, false) catch |err| switch (err) {
         error.ContentNotFound => return err,
         else => return store_core.fence(a.store, err),
     };
