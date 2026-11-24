@@ -8108,7 +8108,7 @@ fn checkCreationPreferenceFailure() !void {
             defer file.close(std.testing.io);
             try file.writePositionalAll(std.testing.io, bytes, 0);
         }
-        const valid = "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=high\npermission_mode=bypass\n";
+        const valid = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=high\npermission_mode=bypass\n";
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
