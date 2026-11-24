@@ -84,19 +84,33 @@ const Held = struct {
 
     /// The one teardown, under D's lock so no census or claim interleaves: the
     /// socket, then a free legacy lock file, then a derived D if it is empty
-    /// (MySQL scratch, diagnostics and `host.stopped` stay). A crash or failure
-    /// at any step leaves a free D, which the next census or claim proves and
-    /// finishes. Always releases the lock.
-    fn dissolve(self: *Held, io: std.Io, interface: *const Interface) !void {
+    /// (MySQL scratch, diagnostics and `host.stopped` stay). A previous-release
+    /// Host that holds `rui.lock` makes this `.busy`, with nothing removed. A
+    /// crash or failure at any step leaves a free D, which the next census or
+    /// claim proves and finishes. Always releases the lock.
+    fn dissolve(self: *Held, io: std.Io, interface: *const Interface) !Teardown {
         defer self.release(io);
+        // Held through the socket unlink and the rmdir below: a legacy Host that
+        // starts now cannot take the lock, so its socket is not removed under it.
+        const legacy = takeLegacyLock(self.dir.handle) catch |err| switch (err) {
+            error.LegacyLockHeld => return .busy,
+            else => return err,
+        };
+        defer if (legacy) |fd| {
+            _ = c.close(fd);
+        };
         try self.clearSocket(io);
-        try unlinkFreeLegacyLock(io, self.dir);
+        if (legacy != null) self.dir.deleteFile(io, legacy_lock_name) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
         // A Host that lost D (EndpointLost) holds an inode the path no longer names. The path may now
         // name another Host's freshly claimed D, so only the held inode's own name is ever removed.
         if (interface.* == .derived and namesDirectory(io, interface.path(), self.dir.handle)) std.Io.Dir.cwd().deleteDir(io, interface.path()) catch |err| switch (err) {
             error.FileNotFound, error.DirNotEmpty => {},
             else => return err,
         };
+        return .done;
     }
 
     fn release(self: *Held, io: std.Io) void {
@@ -104,6 +118,8 @@ const Held = struct {
         self.* = undefined;
     }
 };
+
+const Teardown = enum { done, busy };
 
 const LockResult = union(enum) {
     held: Held,
@@ -187,7 +203,10 @@ const Legacy = enum { absent, free, held, unusable };
 
 /// One release only (#2128): a previous-release Host locks `D/rui.lock`, not
 /// D. A new Host must not claim, census or remove that Host's live socket, so
-/// a held legacy lock makes D busy. Remove this with `unlinkFreeLegacyLock`.
+/// a held legacy lock makes D busy. `dissolve` takes the same lock before it
+/// removes anything. A lock created after that check can still race: a
+/// previous-release Host that starts during a census is not excluded until
+/// its file exists. Remove this with `takeLegacyLock` and `legacyState`.
 fn legacyState(dir: std.posix.fd_t) Legacy {
     const fd = std.posix.openat(dir, legacy_lock_name, .{
         .ACCMODE = .RDONLY,
@@ -206,29 +225,25 @@ fn legacyState(dir: std.posix.fd_t) Legacy {
     };
 }
 
-/// One release only (#2128): removes `D/rui.lock` when no previous-release
-/// Host holds it. A lock taken here is only a check, so it is released before
-/// the name goes.
-fn unlinkFreeLegacyLock(io: std.Io, dir: std.Io.Dir) !void {
-    const fd = std.posix.openat(dir.handle, legacy_lock_name, .{
+/// One release only (#2128): the previous release's lock, taken exclusively
+/// by the caller, or `null` when the file is absent. `error.LegacyLockHeld`
+/// when a previous-release Host holds it.
+fn takeLegacyLock(dir: std.posix.fd_t) !?std.posix.fd_t {
+    const fd = std.posix.openat(dir, legacy_lock_name, .{
         .ACCMODE = .RDONLY,
         .NONBLOCK = true,
         .NOFOLLOW = true,
         .CLOEXEC = true,
     }, 0) catch |err| switch (err) {
-        error.FileNotFound => return,
+        error.FileNotFound => return null,
         else => return err,
     };
-    defer _ = c.close(fd);
+    errdefer _ = c.close(fd);
     switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB))) {
-        .SUCCESS => {},
-        .AGAIN => return,
+        .SUCCESS => return fd,
+        .AGAIN => return error.LegacyLockHeld,
         else => return error.EndpointLockFailed,
     }
-    dir.deleteFile(io, legacy_lock_name) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
 }
 
 /// A Host's endpoint, from `claim` until `retire`.
@@ -270,7 +285,7 @@ pub const Endpoint = struct {
     pub fn retire(self: *Endpoint) !void {
         var held = self.held orelse return;
         self.held = null;
-        try held.dissolve(self.io, &self.interface);
+        _ = try held.dissolve(self.io, &self.interface);
     }
 };
 
@@ -347,8 +362,10 @@ pub fn inspect(io: std.Io, interface: *const Interface) Sighting {
     switch (lockVerified(io, interface.path())) {
         .held => |value| {
             var held = value;
-            held.dissolve(io, interface) catch return .unprovable;
-            return .reclaimed;
+            return switch (held.dissolve(io, interface) catch return .unprovable) {
+                .done => .reclaimed,
+                .busy => .busy,
+            };
         },
         .busy => return .busy,
         .unusable => return .unprovable,
@@ -989,6 +1006,27 @@ test "SH-11 a Host that lost D does not remove the claim that replaced it" {
     listener.deinit(io);
     try replacement.retire();
     try testing.expectEqual(Left{ .directory = false }, try leftIn(io, directory));
+}
+
+test "SH-11 a previous-release Host that locks rui.lock after the check keeps its socket" {
+    const io = testing.io;
+    var runtime = try socket_fixture.Directory.init();
+    defer runtime.cleanup();
+    const root = runtime.root[0..runtime.root_len];
+    var directory_buffer: [Path.max_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
+    const derived = try Interface.within(root, directory);
+
+    // The look's check finds rui.lock free; a previous-release Host then takes it before the teardown.
+    const holders = try arrange(io, directory, .free, .free, .socket, false);
+    defer holders.release(io);
+    var held = switch (lockVerified(io, directory)) {
+        .held => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try expectFlock(holders.legacy.?.handle);
+    try testing.expectEqual(Teardown.busy, try held.dissolve(io, &derived));
+    try testing.expectEqual(Left{ .socket = .unix_domain_socket, .legacy = true }, try leftIn(io, directory));
 }
 
 test "SH-11 a held legacy rui.lock makes its directory busy for a claim and a look" {
