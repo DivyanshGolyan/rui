@@ -8,7 +8,7 @@ import sys
 
 import host_process
 
-GROUPS = ("smoke", "groups", "counts", "clicks")
+GROUPS = ("smoke", "groups", "counts", "clicks", "keyboard", "tree_counts")
 
 
 def smoke():

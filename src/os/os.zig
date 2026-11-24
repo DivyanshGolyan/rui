@@ -88,18 +88,68 @@ pub const LinkOpener = union(enum) {
     wsl: ?[]const u8,
 
     pub fn open(self: LinkOpener, io: std.Io, link: []const u8) !void {
-        switch (self) {
+        if (!supported) return error.Unsupported;
+        // Reserve the waiter before launching so failure cannot strand a child.
+        const waiter = try Waiter.start();
+        errdefer waiter.publish(null);
+        const pid = switch (self) {
             .desktop => |command| try launch(io, &.{ command, link }),
-            .wsl => |fallback| launch(io, &.{ "rundll32.exe", "url.dll,FileProtocolHandler", link }) catch |err| {
+            .wsl => |fallback| launch(io, &.{ "rundll32.exe", "url.dll,FileProtocolHandler", link }) catch |err| blk: {
                 const command = fallback orelse return err;
-                try launch(io, &.{ command, link });
+                break :blk try launch(io, &.{ command, link });
             },
-        }
+        };
+        waiter.publish(pid);
     }
 
-    fn launch(io: std.Io, argv: []const []const u8) !void {
-        _ = try std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+    fn launch(io: std.Io, argv: []const []const u8) !?std.posix.pid_t {
+        const child = try std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+        return child.id;
     }
+
+    const Waiter = struct {
+        ready: std.Io.Event = .unset,
+        pid: ?std.posix.pid_t = null,
+        // The publisher retains its reference until the event wake returns.
+        references: std.atomic.Value(u8) = .init(2),
+
+        const allocator = std.heap.smp_allocator;
+
+        fn start() !*Waiter {
+            const waiter = try allocator.create(Waiter);
+            errdefer allocator.destroy(waiter);
+            waiter.* = .{};
+            // Leave room for glibc static TLS, including Zig's test signal stack.
+            const thread = try std.Thread.spawn(.{ .stack_size = 1024 * 1024 }, run, .{waiter});
+            thread.detach();
+            return waiter;
+        }
+
+        fn publish(waiter: *Waiter, pid: ?std.posix.pid_t) void {
+            waiter.pid = pid;
+            waiter.ready.set(std.Io.Threaded.global_single_threaded.io());
+            waiter.release();
+        }
+
+        fn run(waiter: *Waiter) void {
+            waiter.ready.waitUncancelable(std.Io.Threaded.global_single_threaded.io());
+            const pid = waiter.pid;
+            waiter.release();
+            // Only the PID outlives the launch call and its I/O context.
+            if (pid) |child| {
+                var status: c_int = undefined;
+                while (true) switch (std.posix.errno(std.c.waitpid(child, &status, 0))) {
+                    .SUCCESS => if (std.posix.W.IFEXITED(@bitCast(status)) or std.posix.W.IFSIGNALED(@bitCast(status))) return,
+                    .INTR => continue,
+                    else => return,
+                };
+            }
+        }
+
+        fn release(waiter: *Waiter) void {
+            if (waiter.references.fetchSub(1, .acq_rel) == 1) allocator.destroy(waiter);
+        }
+    };
 };
 
 pub fn linkOpener(environ: *const std.process.Environ.Map) ?LinkOpener {

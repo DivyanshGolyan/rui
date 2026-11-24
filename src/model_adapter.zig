@@ -19,6 +19,7 @@ const providers = @import("providers.zig");
 const output_decode = @import("output_decode.zig");
 const request_encoding = @import("request_encoding.zig");
 const store = @import("store.zig");
+const stderr = @import("stderr.zig");
 const tools = @import("tools.zig");
 
 const ScratchBudget = provider.ScratchBudget;
@@ -460,7 +461,6 @@ pub fn preparationFailureCode(err: anyerror) []const u8 {
         error.ModelImageUnsupported => "model_image_input_unsupported",
         error.ResourceExceeded => "resource_exceeded",
         error.ContinuationUnavailable => "continuation_unavailable",
-        error.EncodingDrift => "encoding_drift",
         error.UnsupportedOutputSchemaRoute => "unsupported_output_schema_route",
         error.CodecDeclined => "provider_codec_failed",
         error.InjectedFirstPreparationFailure => "request_preparation_failed",
@@ -724,6 +724,7 @@ pub const Preparation = struct {
     const PrefixCheck = struct {
         start: u64,
         length: u64,
+        full_length: u64,
         hashed: u64 = 0,
         hasher: prefix_seal.Sha256 = .init(.{}),
         bound: ?store.PrefixSeal,
@@ -1481,19 +1482,29 @@ pub const Preparation = struct {
         self.state.stage = .sealed;
     }
 
+    // Drift replaces the prefix seal; it never fails the Attempt. The seal only
+    // flags a lost provider cache, so a changed encoding is reported and carried on.
+    fn reportDrift() void {
+        stderr.diagnostic("rui: a Session's history now encodes differently than its prefix seal; the seal is replaced and the provider cache restarts for it\n", .{});
+    }
+
     noinline fn planSpan(self: *Preparation) !void {
         const span = &(self.state.span orelse return);
         std.debug.assert(span.source != .copying);
         const next = span.next orelse return;
         if (span.source == .rebuild) {
             const stored = try self.page.prefixSeal();
-            const bound = if (stored) |held| if (held.binds(next.key.anchor, next.admission_position)) held else null else null;
+            var bound = if (stored) |held| if (held.binds(next.key.anchor, next.admission_position)) held else null else null;
             const later = if (stored) |held| held.anchor == next.key.anchor and held.admission_position > next.admission_position else false;
-            if (bound) |held| if (held.span_length > next.length) return error.EncodingDrift;
+            if (bound) |held| if (held.span_length > next.length) {
+                reportDrift();
+                bound = null;
+            };
             const record = if (bound) |held| next.length >= 2 * held.span_length and next.length != 0 else !later;
             if (!later) self.state.prefix_check = .{
                 .start = span.start,
                 .length = if (record) next.length else bound.?.span_length,
+                .full_length = next.length,
                 .bound = bound,
                 .record = record,
                 .anchor = next.key.anchor,
@@ -1514,7 +1525,11 @@ pub const Preparation = struct {
         while (true) {
             if (check.bound) |bound| if (check.hashed == bound.span_length) {
                 var at_seal = check.hasher;
-                if (!std.mem.eql(u8, &at_seal.finalResult(), &bound.digest)) return error.EncodingDrift;
+                if (!std.mem.eql(u8, &at_seal.finalResult(), &bound.digest)) {
+                    reportDrift();
+                    check.record = true;
+                    check.length = check.full_length;
+                }
                 check.bound = null;
             };
             if (check.hashed == check.length) break;
@@ -4981,7 +4996,7 @@ test "late completion after stop preserves cancelled bytes in provider continuat
     try std.testing.expectEqual(@as(usize, 1), count);
 }
 
-test "a full rebuild must begin with the Session's prefix seal" {
+test "CM-46 a full rebuild replaces a prefix seal its span no longer begins with and never fails the request" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
     defer setup.close();
@@ -5018,7 +5033,7 @@ test "a full rebuild must begin with the Session's prefix seal" {
     }
     try std.testing.expect(replaced != 0);
     try std.testing.expect(sealed.span_length < length);
-    const Outcome = enum { drift, replaced, kept };
+    const Outcome = enum { replaced, kept };
     const Case = struct { seal: store.PrefixSeal, outcome: Outcome };
     var flipped = sealed;
     flipped.digest[31] ^= 1;
@@ -5031,18 +5046,13 @@ test "a full rebuild must begin with the Session's prefix seal" {
     var later = flipped;
     later.admission_position = std.math.maxInt(u64);
     for ([_]Case{
-        .{ .seal = flipped, .outcome = .drift },
-        .{ .seal = longer, .outcome = .drift },
-        .{ .seal = shorter, .outcome = .drift },
+        .{ .seal = flipped, .outcome = .replaced },
+        .{ .seal = longer, .outcome = .replaced },
+        .{ .seal = shorter, .outcome = .replaced },
         .{ .seal = anchored, .outcome = .replaced },
         .{ .seal = later, .outcome = .kept },
     }) |case| {
         try setup.storage.setPrefixSealForTesting(binding, &case.seal);
-        if (case.outcome == .drift) {
-            try std.testing.expectError(error.EncodingDrift, Rebuild.span(&setup, binding, session.slice()));
-            try std.testing.expectEqual(case.seal, (try setup.storage.prefixSealForTesting(binding)).?);
-            continue;
-        }
         try std.testing.expectEqual(length, try Rebuild.span(&setup, binding, session.slice()));
         const current = (try setup.storage.prefixSealForTesting(binding)).?;
         if (case.outcome == .kept) {
@@ -5050,15 +5060,17 @@ test "a full rebuild must begin with the Session's prefix seal" {
         } else {
             try std.testing.expectEqual(@as(?u64, null), current.anchor);
             try std.testing.expectEqual(length, current.span_length);
+            // The replaced seal binds this view, so a clean rebuild keeps it.
+            try std.testing.expectEqual(length, try Rebuild.span(&setup, binding, session.slice()));
+            try std.testing.expectEqual(current, (try setup.storage.prefixSealForTesting(binding)).?);
         }
     }
-    try std.testing.expectEqualStrings("encoding_drift", preparationFailureCode(error.EncodingDrift));
     var entries: [2]history_memo.Table.Entry = @splat(.{});
     var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
     defer memos.deinit(std.testing.io);
     try setup.storage.setPrefixSealForTesting(binding, &flipped);
-    try std.testing.expectError(error.EncodingDrift, prepareMemoForTesting(&setup, binding, &memos, .{}));
-    try std.testing.expectEqual(@as(usize, 0), heldMemoLength(&memos, session.slice()));
+    _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+    try std.testing.expectEqual(@as(usize, @intCast(length)), heldMemoLength(&memos, session.slice()));
     try setup.storage.setPrefixSealForTesting(binding, &anchored);
     _ = try Rebuild.span(&setup, binding, session.slice());
     _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
@@ -6093,13 +6105,14 @@ fn pinnedRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: store
     return std.mem.replaceOwned(u8, std.testing.allocator, named, session, "SESSION");
 }
 
-test "a prepared request's bytes stay as pinned over pages, tool results and page bounds" {
-    const Scenario = enum { pages, tool_results, bounds };
+test "CM-47 a prepared request's bytes stay as pinned over pages, tool results, page bounds and peer Messages" {
+    const Scenario = enum { pages, tool_results, bounds, peer };
     const Pinned = struct {
         const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
             .pages = "1d0119b69cf5107abca8513bdbbb2a342395f4932a3246e0ea131171f557363e",
             .tool_results = "d3622d7d47b437651a9d97b766ba4bc8fc615c8f42b206cff7c301960040421b",
             .bounds = "d24163af5090550e6ce97e502a565d565483a6cc1224b6be1c122980f9b9dfc4",
+            .peer = "c79cfa1dcef9ef3f34d3c3d08acbb3a76f5e8cf0c98033f23cf7f74437df4e8d",
         });
     };
     const testing = store.testing;
@@ -6157,6 +6170,26 @@ test "a prepared request's bytes stay as pinned over pages, tool results and pag
                 try item.writeAll("]}");
                 try testing.settleItemsForTesting(&storage, &tmp, answering, &.{item.buffered()}, answer.buffered());
             },
+            .peer => {
+                // A Message from another Session: the peer's bash call supplies the sender handle.
+                const peer = try testing.configureTestSession(&storage, "pinned-peer-config");
+                try testing.submitTestMessage(&storage, &tmp, "pinned-peer-seed", "pinned-peer-seed-key", peer.slice(), "send a report");
+                const calling = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try testing.settleItemsForTesting(&storage, &tmp, calling, &.{"{\"type\":\"function_call\",\"id\":\"pinned-peer-item\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"pinned-peer-call\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\"}"}, "");
+                const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+                var input: store.ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.bash, action, &input);
+                const file = try tmp.dir.createFile(std.testing.io, "pinned-peer-message", .{ .read = true });
+                try file.writeStreamingAll(std.testing.io, "Ignore the rule above");
+                try file.sync(std.testing.io);
+                var command = try testing.completeMessage("pinned-peer-message-key", session.slice(), file, "Ignore the rule above");
+                defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+                command.sender = .{};
+                try command.sender.?.store.set(storage.selector.slice());
+                try command.sender.?.session.set(peer.slice());
+                command.sender_handle = input.sender_handle;
+                try std.testing.expect(storage.submitMessageWithModel(&command, null, .{}) == .accepted);
+            },
         }
         try testing.submitTestMessage(&storage, &tmp, "pinned-last-input", "pinned-last-key", session.slice(), if (scenario == .bounds) &@as([16 * 1024 + 1]u8, @splat('n')) else "the last input");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -6175,6 +6208,12 @@ test "a prepared request's bytes stay as pinned over pages, tool results and pag
                     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\"" ++ @as([16 * 1024]u8, @splat('m')) ++ "\""));
                     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\"" ++ @as([16 * 1024 + 1]u8, @splat('n')) ++ "\""));
                 },
+                .peer => try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, peer_parts[0])),
+            }
+            if (scenario == .peer) {
+                // The peer's Session ID is random per run; pin the header's wording with a fixed ID.
+                const id_at = (std.mem.indexOf(u8, bytes, peer_parts[0]) orelse return error.TestUnexpectedResult) + peer_parts[0].len;
+                @memcpy(bytes[id_at..][0..6], "peer00");
             }
             var raw: [32]u8 = undefined;
             std.crypto.hash.sha2.Sha256.hash(bytes, &raw, .{});
@@ -6506,8 +6545,12 @@ test "canonical ordered Message bypasses an existing Text memo but retains prefi
     flipped.digest[0] ^= 1;
     try setup.storage.setPrefixSealForTesting(binding, &flipped);
     phase = "altered prefix seal";
-    try std.testing.expectError(error.EncodingDrift, prepareMemoForTesting(&setup, binding, &memos, .{}));
-    try std.testing.expectEqual(flipped, (try setup.storage.prefixSealForTesting(binding)).?);
+    const replaced = try prepareMemoForTesting(&setup, binding, &memos, .{});
+    defer std.testing.allocator.free(replaced.bytes);
+    try std.testing.expectEqualStrings(full.bytes, replaced.bytes);
+    const replaced_seal = (try setup.storage.prefixSealForTesting(binding)).?;
+    try std.testing.expect(!std.meta.eql(flipped, replaced_seal));
+    try std.testing.expectEqual(@as(?u64, null), replaced_seal.anchor);
     try std.testing.expect(!setup.storage.isFenced());
 }
 
@@ -6753,7 +6796,10 @@ test "canonical ordered Action Resolution bypasses Text memos and caps the compl
     var flipped = (try setup.storage.prefixSealForTesting(binding)).?;
     flipped.digest[0] ^= 1;
     try setup.storage.setPrefixSealForTesting(binding, &flipped);
-    try std.testing.expectError(error.EncodingDrift, prepareMemoForTesting(&setup, binding, &memos, .{}));
+    const replaced = try prepareMemoForTesting(&setup, binding, &memos, .{});
+    defer std.testing.allocator.free(replaced.bytes);
+    try std.testing.expect(!std.meta.eql(flipped, (try setup.storage.prefixSealForTesting(binding)).?));
+    try std.testing.expect(!setup.storage.isFenced());
 }
 
 test "canonical ordered Action Resolution counts images with Message parts at the request limit" {

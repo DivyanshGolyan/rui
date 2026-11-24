@@ -542,7 +542,11 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 ctx.redraw = true;
             }
             if (self.signInIsFirstRun()) return;
-            try self.appNext(ctx, try self.event(.{ .list_settled = .{ .wide = self.root.size.width >= Root.split_at, .focused = self.root.input.listFocused() and self.root.input.layer == .main } }));
+            try self.appNext(ctx, try self.event(.{ .list_settled = .{
+                .wide = self.root.size.width >= Root.split_at,
+                .focused = self.root.input.listFocused() and self.root.input.layer == .main,
+                .click_clock_ms = if (self.root.input.pasting) null else self.animationMs(),
+            } }));
             while (self.retired.items.len != 0 and self.retired.items[0].frame < self.root.frames) {
                 self.disposeSession(self.retired.orderedRemove(0).left);
             }
@@ -646,7 +650,7 @@ fn appScrolled(raw: *anyopaque, ctx: *vxfw.EventContext, top: u32, height: u32) 
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const upgrade_admitted = if (self.app_session) |shown| (if (shown.frontend) |frontend| frontend.admitsUpgrade() else true) else true;
-    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .upgrade_admitted = upgrade_admitted } }));
+    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .upgrade_admitted = upgrade_admitted, .at_ms = self.animationMs() } }));
     ctx.redraw = true;
 }
 
@@ -861,7 +865,10 @@ fn disposeSession(self: *Self, left: Left) void {
         inline for (.{ "scratch", "action", "inspection", "details", "parts" }) |name| @field(files, name).close(self.init.io);
         for (files.actions) |file| file.close(self.init.io);
     }
-    if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
+    if (left.frontend) |frontend| {
+        frontend.input.deinit();
+        self.init.gpa.destroy(frontend);
+    }
 }
 
 fn finishApp(self: *Self, ended: anyerror!void) !?Relaunch {
@@ -929,14 +936,24 @@ noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerro
 fn makeRelaunch(self: *Self, left: ?Left) !Relaunch {
     const gpa = self.init.gpa;
     if (left) |held| if (held.frontend) |frontend| {
-        try self.session_drafts.put(gpa, &held.session, frontend.input.snapshot());
+        try self.session_drafts.putDraft(gpa, &held.session, frontend.input.snapshot(), frontend.input.image());
     };
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const temporary = arena.allocator();
     var entries: std.ArrayList(handoff.Entry) = .empty;
-    defer entries.deinit(gpa);
     var drafts = self.session_drafts.iterator();
-    while (drafts.next()) |entry| try entries.append(gpa, .{ .id = entry.id, .snapshot = entry.snapshot });
+    const encoder = std.base64.standard.Encoder;
+    var version: u8 = 1;
+    while (drafts.next()) |entry| {
+        const encoded = if (entry.image) |image| blk: {
+            version = 2;
+            break :blk encoder.encode(try temporary.alloc(u8, encoder.calcSize(image.bytes.len)), image.bytes);
+        } else null;
+        try entries.append(temporary, .{ .id = entry.id, .snapshot = entry.snapshot, .image_base64 = encoded });
+    }
     const bytes = try handoff.encode(gpa, .{
-        .v = 1,
+        .v = version,
         .store = self.options.store,
         .open = if (left) |*held| &held.session else null,
         .overview = .{ .bytes = "", .cursor = 0 },
@@ -953,7 +970,17 @@ fn makeRelaunch(self: *Self, left: ?Left) !Relaunch {
 fn restoreRelaunch(self: *Self) !void {
     const value = self.options.restoration orelse return;
     self.options.restoration = null;
-    for (value.drafts) |entry| try self.session_drafts.put(self.init.gpa, entry.id, entry.snapshot);
+    for (value.drafts) |entry| {
+        const image = if (entry.image_base64) |encoded| image: {
+            const decoder = std.base64.standard.Decoder;
+            const bytes = try std.heap.page_allocator.alloc(u8, try decoder.calcSizeForSlice(encoded));
+            errdefer std.heap.page_allocator.free(bytes);
+            try decoder.decode(bytes, encoded);
+            break :image try @import("SessionInput.zig").Image.validate(bytes);
+        } else null;
+        defer if (image) |attachment| attachment.deinit();
+        try self.session_drafts.putDraft(self.init.gpa, entry.id, entry.snapshot, image);
+    }
     if (value.open) |id| self.options.open = id[0..session_id.bytes].*;
 }
 
@@ -1288,6 +1315,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
 }
 
 fn destroy(self: *Self) void {
+    self.root.deinitClipboard();
     self.sign_in.deinit();
     self.session_drafts.deinit(self.init.gpa);
     std.debug.assert(self.worker.thread == null);
@@ -3592,7 +3620,7 @@ test "Host line and Settings tail show together without overlap at wide and narr
     try std.testing.expectEqual(at.settings.start, at.input);
 }
 
-test "overview pins Settings below update states and feedback without an open chat" {
+fn sidebarUpgradeStates() !void {
     const rig = try openListed();
     defer rig.close();
     const overview = rig.overview;
@@ -3604,7 +3632,7 @@ test "overview pins Settings below update states and feedback without an open ch
         .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } },
         .{ .ended = .{ .how = .{ .upgraded = .{ .version = version, .restarted = true } }, .outcome = .compatible } },
     };
-    for ([_]u16{ 46, 100, 140 }) |width| for ([_]u16{ 10, 30, 40 }) |height| for (runs) |active_run| for ([_]bool{ false, true }) |notice| {
+    for ([_]u16{ 46, 100, 140 }) |width| for ([_]u16{ 10, 24, 25, 30, 40 }) |height| for (runs) |active_run| for ([_]bool{ false, true }) |notice| {
         overview.state.upgrade.run = active_run;
         overview.state.upgrade.available = version;
         overview.state.notice = if (notice) .{ .colour = .quiet, .len = "Copied 3 lines".len } else null;
@@ -3612,11 +3640,13 @@ test "overview pins Settings below update states and feedback without an open ch
         var shown = try rig.shown(width, height);
         defer shown.deinit();
         try std.testing.expect(overview.root.session == null);
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(height - 1), "     Settings"));
-        try std.testing.expectEqualStrings("┄", shown.screen.readCell(0, height - 2).?.char.grapheme);
+        const content_height = height - @as(u16, if (height <= 24) 0 else 1);
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(content_height - 1), "     Settings"));
+        try std.testing.expectEqualStrings("┄", shown.screen.readCell(0, content_height - 2).?.char.grapheme);
+        if (height > 24) try std.testing.expectEqualStrings("", std.mem.trim(u8, try shown.line(height - 1), " "));
         const at = view.layout(&overview.state);
-        try std.testing.expectEqual(height - 2, at.settings.start);
-        try std.testing.expectEqual(height, at.settings.end);
+        try std.testing.expectEqual(content_height - 2, at.settings.start);
+        try std.testing.expectEqual(content_height, at.settings.end);
         if (notice) try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Copied 3 lines") != null);
         if (active_run) |running| if (running.takesEscape() and !notice) try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "esc cancels") != null);
     };
@@ -4585,7 +4615,7 @@ test "overview Archived window effect runs one job and its reply becomes the win
     try std.testing.expectEqual(@as(u64, 3), Seen.now.line.position);
 }
 
-test "overview archive effects preserve server filter, pending visibility, and restore intent" {
+test "overview archive effects preserve server filter, pending visibility, and restore intent (SUI-25)" {
     const Listing = struct {
         var archive_state: protocol.SessionArchiveState = .active;
         fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
@@ -4642,8 +4672,8 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
     try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[C\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    // Roster deltas ask for changed archived Sessions too (the window takes them); the window itself is a read.
-    try std.testing.expectEqual(protocol.SessionArchiveFilter.all, Seen.now.archive_filter);
+    // Active deltas carry archived changes; the separate window reads archived Sessions.
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
     _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .stopped, .input = .unarchive } });
     try std.testing.expect(try rig.settle() == null);
@@ -4658,7 +4688,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
     try std.testing.expect(try rig.press("\x1b") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(protocol.SessionArchiveFilter.all, Seen.now.archive_filter);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
 }
 
@@ -6030,6 +6060,7 @@ fn controlsAboveScroll() !void {
 test "SUI-42 sidebar controls and footer survive chat and listing changes" {
     try sidebarControls();
     try sidebarLateListing();
+    try sidebarUpgradeStates();
 }
 
 fn sidebarControls() !void {
@@ -6113,7 +6144,7 @@ fn sidebarLateListing() !void {
             var shown = try rig.shown(size.width, size.height);
             defer shown.deinit();
             try std.testing.expectEqual(size.width == 140, std.mem.indexOf(u8, try shown.text(), "+ New chat") != null);
-            try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 1), "alt+i info") == null);
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 2), "alt+i info") == null);
             if (size.width == 140) {
                 try std.testing.expectEqual(if (listed) listed_references.len else 1, overview.app_sessions.shown_at.len);
                 if (listed) {
@@ -6133,20 +6164,30 @@ fn sidebarLateListing() !void {
         overview.paintDivider();
         try std.testing.expect(frontend.input.editors[frontend.input.active].set(draft, draft.len) == null);
         frontend.info_open = panel;
-        for ([_]u16{ 46, 99, 100, 140 }) |width| for ([_]u16{ 10, 30, 40 }) |height| {
+        for ([_]u16{ 46, 99, 100, 140 }) |width| for ([_]u16{ 10, 24, 25, 30, 40 }) |height| {
             var shown = try rig.shown(width, height);
             defer shown.deinit();
+            const last_content_row = height - @as(u16, if (height <= 24) 1 else 2);
+            if (height > 24) try std.testing.expectEqualStrings("", std.mem.trim(u8, try shown.line(height - 1), " "));
             const chat_column: u16 = if (width >= Root.split_at) Root.list_width + 1 else 0;
-            try std.testing.expectEqualStrings(if (unicode) "┄" else "-", shown.screen.readCell(chat_column, height - 2).?.char.grapheme);
+            try std.testing.expectEqualStrings(if (unicode) "┄" else "-", shown.screen.readCell(chat_column, last_content_row - 1).?.char.grapheme);
             if (width >= Root.split_at) {
-                try std.testing.expectEqualStrings(if (unicode) "┄" else "-", shown.screen.readCell(0, height - 2).?.char.grapheme);
-                try std.testing.expectEqualStrings(if (unicode) "┆" else "|", shown.screen.readCell(Root.list_width, height - 2).?.char.grapheme);
-                try std.testing.expect(std.mem.startsWith(u8, try shown.line(height - 1), "     Settings"));
+                try std.testing.expectEqualStrings(if (unicode) "┄" else "-", shown.screen.readCell(0, last_content_row - 1).?.char.grapheme);
+                try std.testing.expectEqualStrings(if (unicode) "┆" else "|", shown.screen.readCell(Root.list_width, last_content_row - 1).?.char.grapheme);
+                try std.testing.expect(std.mem.startsWith(u8, try shown.line(last_content_row), "     Settings"));
             }
             try std.testing.expectEqualStrings(draft, frontend.input.composition().bytes);
         };
     };
     frontend.info_open = false;
+    var focus_ctx = rig.context();
+    defer focus_ctx.cmds.deinit(std.testing.allocator);
+    try overview.root.focusChat(&focus_ctx);
+    try std.testing.expect(try rig.click(5, 29, 140, 30) == null);
+    try std.testing.expect(!overview.root.input.listFocused());
+    try std.testing.expect(try rig.click(6, 28, 140, 30) == null);
+    try std.testing.expect(overview.root.input.layer.settingsOpen());
+    try std.testing.expect(try rig.press("\x1b") == null);
     for ([_]u16{ 46, 140 }) |width| for ([_]enum { idle, notice, unconfirmed, rejected, info }{ .idle, .notice, .unconfirmed, .rejected, .info }) |mode| {
         errdefer std.debug.print("geometry mode={s} width={d}\n", .{ @tagName(mode), width });
         frontend.shown_notice.dismiss();
@@ -6160,11 +6201,11 @@ fn sidebarLateListing() !void {
         }
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
-        const row: u16 = if (mode == .unconfirmed or mode == .rejected) 27 else 28;
+        const row: u16 = if (mode == .unconfirmed or mode == .rejected) 26 else 27;
         const chat_column: u16 = if (width >= Root.split_at) Root.list_width + 1 else 0;
         try std.testing.expectEqual(row, overview.root.bottom.rule.?);
         try std.testing.expectEqualStrings("┄", shown.screen.readCell(chat_column, row).?.char.grapheme);
-        if (mode == .notice) try std.testing.expect(std.mem.indexOf(u8, try shown.line(29), "Copied 3 lines") != null);
+        if (mode == .notice) try std.testing.expect(std.mem.indexOf(u8, try shown.line(28), "Copied 3 lines") != null);
         if (mode == .unconfirmed) try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Decision not confirmed") != null);
         if (mode == .rejected) try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Rejected") != null);
         if (width >= Root.split_at) {
@@ -6204,8 +6245,9 @@ fn sidebarLateListing() !void {
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Chats") != null);
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Archived") != null);
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Fix the flaky test") != null);
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(29), "     Settings"));
-        try std.testing.expectEqualStrings("┄", shown.screen.readCell(0, 28).?.char.grapheme);
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(28), "     Settings"));
+        try std.testing.expectEqualStrings("┄", shown.screen.readCell(0, 27).?.char.grapheme);
+        try std.testing.expectEqualStrings("", std.mem.trim(u8, try shown.line(29), " "));
     }
 }
 
@@ -7229,6 +7271,8 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .shift_tab = &.{ "\x1b[Z", "\x1b[9;2u" },
     .shift_up = &.{ "\x1b[1;2A", "\x1b[1;2:1A" },
     .shift_down = &.{ "\x1b[1;2B", "\x1b[1;2:1B" },
+    .alt_left = &.{ "\x1b[1;3D", "\x1b[1;3:1D" },
+    .alt_right = &.{ "\x1b[1;3C", "\x1b[1;3:1C" },
     .page_up = &.{ "\x1b[5~", "\x1b[5;1~", "\x1b[5;2~" },
     .page_down = &.{ "\x1b[6~", "\x1b[6;1~", "\x1b[6;2~" },
     .home = &.{ "\x1b[H", "\x1bOH", "\x1b[1~", "\x1b[7~", "\x1b[1;1H" },

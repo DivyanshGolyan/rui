@@ -1,7 +1,6 @@
 const std = @import("std");
 const execution = @import("execution.zig");
 const Host = @import("server_host.zig").Host;
-const fenceDispatch = @import("server_host.zig").fenceDispatch;
 const store = @import("store.zig");
 const result_fault = @import("result_fault.zig");
 const tool_record = @import("tool_record.zig");
@@ -58,7 +57,7 @@ pub fn fence(host: *Host, phase: []const u8, fault: result_fault.Failure) Delive
     const err = switch (fault) {
         inline else => |value| value,
     };
-    fenceDispatch(host, phase, err);
+    host.lifecycle.fenceDispatch(phase, err);
     return .fenced;
 }
 
@@ -86,7 +85,7 @@ fn deliverAttempt(host: *Host, slot: Slot, code: store.ActionResolutionCode, val
     var kept = false;
     defer if (retained) |result_value| result_value.settleRetention(kept);
     if (!host.custody.claimTerminalDelivery(slot.token)) return .lost;
-    const settlement = deliver(host.store, .{ .attempt = slot }, code, value, host.hooks.storeFaults(.action_result)) catch |err| {
+    const settlement = deliver(host.store, .{ .attempt = slot }, code, value, host.probes.storeFaults(.action_result)) catch |err| {
         return fence(host, slot.publication_phase, .{ .store = err });
     };
     kept = settlement.attempt.kept;
