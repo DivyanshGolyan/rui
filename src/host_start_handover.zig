@@ -70,7 +70,7 @@ const Fixture = struct {
     }
 };
 
-test "SH-120 ordinary start hands over only eligible incompatible Hosts and preserves every activation result" {
+test "SH-122 ordinary start hands over only eligible incompatible Hosts and preserves every activation result" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var environment: std.process.Environ.Map = .init(std.testing.allocator);

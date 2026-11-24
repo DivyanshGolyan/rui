@@ -112,6 +112,7 @@ test {
     _ = @import("protocol_reply_store_tests.zig");
     _ = @import("caller_rejection.zig");
     _ = @import("platform.zig");
+    _ = @import("runtime_directory.zig");
     _ = @import("host_endpoint.zig");
     _ = @import("socket_fixture.zig");
     _ = @import("HostDiagnostics.zig");

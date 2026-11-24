@@ -407,10 +407,7 @@ pub const Requests = struct {
             .report => {},
             .command => |reply| return self.failRead(try self.captureReadFailure(reply)),
         }
-        var page = try protocol_reply.decodeSkillSuggestions(gpa, sink.bytes.items);
-        errdefer page.deinit(gpa);
-        for (page.entries) |entry| if (!std.mem.startsWith(u8, entry.name, prefix)) return error.InvalidResponse;
-        return page;
+        return protocol_reply.decodeSkillSuggestions(gpa, sink.bytes.items, prefix);
     }
 
     /// The owner's whole certified part list, streamed into `sink` (a report scratch file);
@@ -6665,7 +6662,6 @@ test "socket upgrade discovery shares one refusal window and settles an unanswer
     _ = try std.Io.Dir.cwd().statFile(io, socket, .{ .follow_symlinks = false });
     // Once its holder is gone, the next look proves it dead and removes it.
     candidates.items[0].result = .{ .unanswered = error.ConnectionRefused };
-    endpoint.held.?.lock.close(io);
     endpoint.held.?.dir.close(io);
     endpoint.held = null;
     settleUnansweredSockets(allocator, io, &candidates);

@@ -251,6 +251,8 @@ test "a Store built at every format from the baseline to the current one upgrade
         if (engine != .mysql or try mysql_testing.available()) {
             var format: u32 = schema.migration_baseline;
             while (format <= schema.schema_version) : (format += 1) {
+                // MySQL runs live at two formats only: SH-8 (schema.zig) proves every format's upgrade text is the shipped steps from it, a suffix of the baseline's.
+                if (engine == .mysql and format != schema.migration_baseline and format != schema.schema_version) continue;
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 const start: Start = .{ .format = format };

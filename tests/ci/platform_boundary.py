@@ -23,7 +23,7 @@ import build_files
 ROOT = Path(__file__).resolve().parents[2]
 
 MAC_PATHS = (
-    "src/os/*", "src/cli.zig", "src/client.zig", "src/platform.zig", "src/HostLifecycle.zig",
+    "src/os/*", "src/cli.zig", "src/client.zig", "src/platform.zig", "src/runtime_directory.zig", "src/HostLifecycle.zig",
     "src/host_coordinator.zig", "src/host_endpoint.zig", "src/host_restart_all.zig", "src/host_start.zig", "src/host_start_handover.zig", "src/host_identity.zig",
     "src/upgrade.zig", "src/upgrade_process.zig", "src/self_executable.zig",
     # The Python fixtures' platform owner. Fixtures ask it for platform facts
@@ -257,10 +257,10 @@ def self_executable_violations(root=ROOT):
 
 
 # Only the holder of a Host's interface directory lock may remove its socket or
-# lock file. src/host_endpoint.zig proves the lock and owns every such unlink.
+# the previous release's rui.lock. src/host_endpoint.zig proves the lock and owns every such unlink.
 HOST_ENDPOINT_OWNER = "src/host_endpoint.zig"
 UNLINK_CALLS = ("deleteFile", "deleteFileAbsolute", "unlink", "unlinkat")
-ENDPOINT_NAMES = ('"rui.sock"', '"rui.lock"', "socket_name", "lock_name")
+ENDPOINT_NAMES = ('"rui.sock"', '"rui.lock"', "socket_name")
 
 
 def host_socket_unlink_violations(root=ROOT):
@@ -284,8 +284,8 @@ def host_socket_unlink_violations(root=ROOT):
                 names_endpoint = any(item in ENDPOINT_NAMES or (item == "socket" and j > 0 and argument[j - 1:j] == ["."])
                                      for j, item in enumerate(argument))
                 if names_endpoint:
-                    found.append(f"{path}: {token} removes a Host socket or rui.lock; only {HOST_ENDPOINT_OWNER} "
-                                 "may unlink them, while holding the interface directory's rui.lock")
+                    found.append(f"{path}: {token} removes a Host socket or legacy rui.lock; only {HOST_ENDPOINT_OWNER} "
+                                 "may unlink them, while holding the interface directory's lock")
     return found
 
 

@@ -96,7 +96,7 @@ pub fn startHandoverEligible(foreign: bool, order: std.math.Order, selected_matc
     return foreign and order == .lt and selected_matches;
 }
 
-test "SH-121 start activation requires an older foreign Host and the selected client" {
+test "SH-123 start activation requires an older foreign Host and the selected client" {
     const rows = [_]struct { foreign: bool, order: std.math.Order, selected: bool, eligible: bool }{
         .{ .foreign = false, .order = .lt, .selected = false, .eligible = false },
         .{ .foreign = false, .order = .lt, .selected = true, .eligible = false },

@@ -11,7 +11,7 @@ import sys
 
 from caller_errors import close_brace, git, lex, production
 from host_settings_locality import tokens_for, unquote
-from select_tests import Graph, STACK_FRAMES_GATE, tree_graph
+from select_tests import Graph, tree_graph
 
 ROOT = Path(__file__).resolve().parents[2]
 GATE = "tests/ci/client_locality.py"
@@ -56,8 +56,6 @@ def source_graph(root):
         return tree_graph()
     names = [path.relative_to(root).as_posix() for directory in ("src", "tests/integration")
              for path in (root / directory).rglob("*.zig")]
-    if (root / STACK_FRAMES_GATE).exists():
-        names.append(STACK_FRAMES_GATE)
     return Graph(names, lambda name: (root / name).read_text())
 
 

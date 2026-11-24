@@ -60,7 +60,7 @@ pub fn activateOlderHostForStart(init: std.process.Init, directory: []const u8) 
     return HostLifecycle.activate(init, allocator, &observation, .same, target.build, target.version, null, null);
 }
 
-test "SH-123 absent Store owner is not started by handover observation" {
+test "SH-125 absent Store owner is not started by handover observation" {
     const io = std.testing.io;
     var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();
@@ -542,7 +542,7 @@ test "restart reports a positively identified Host without a socket or directory
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "HostServeStoreMissing") != null);
 }
 
-test "SH-125 lifecycle faults report the exact effect and cause at every stage" {
+test "SH-127 lifecycle faults report the exact effect and cause at every stage" {
     const cases = [_]struct { effect: std.meta.Tag(activation.Effect), expected: []const u8 }{
         .{ .effect = .resolve_target, .expected = "failed during resolve_target (OutOfMemory)" },
         .{ .effect = .confirm_current, .expected = "failed during confirm_current (OutOfMemory)" },
@@ -573,7 +573,7 @@ test "SH-125 lifecycle faults report the exact effect and cause at every stage" 
     }
 }
 
-test "SH-127 batch exit preserves uncertainty across mixed Host results" {
+test "SH-129 batch exit preserves uncertainty across mixed Host results" {
     const pre: Entry = .{ .state = .{ .fault = .{ .effect = .check_target, .cause = "OutOfMemory" } } };
     const post: Entry = .{ .state = .{ .fault = .{ .effect = .verify, .cause = "OutOfMemory" } } };
     const unconfirmed: Entry = .{ .state = .{ .outcome = .{ .unconfirmed = .stopping } } };

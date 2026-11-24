@@ -43,9 +43,9 @@ def ui_paths(graph):
 @cache
 def revision_ui_paths(revision):
     """Also classify removed UI files using the base tree, through the same graph owner."""
-    from select_tests import Graph, STACK_FRAMES_GATE
+    from select_tests import Graph
 
-    archive = subprocess.check_output(["git", "archive", revision, "src", "tests/integration", STACK_FRAMES_GATE])
+    archive = subprocess.check_output(["git", "archive", revision, "src", "tests/integration"])
     with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
         sources = {entry.name: tree.extractfile(entry).read() for entry in tree if entry.isfile()}
     return ui_paths(Graph(sources, lambda name: sources[name].decode()))

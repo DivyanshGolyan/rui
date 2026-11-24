@@ -303,7 +303,7 @@ class PlatformBoundaryTest(unittest.TestCase):
             (root / "src" / "client.zig").write_text(
                 'try dir.deleteFile(io, "rui.sock");\n'
                 "try std.posix.unlink(paths.socket.slice());\n"
-                "try dir.deleteFile(io, host_endpoint.lock_name);\n"
+                "try dir.deleteFile(io, \"rui.lock\");\n"
                 'try dir.deleteFile(io, "host.lock");\n'
                 '// try dir.deleteFile(io, "rui.lock");\n'
                 'const s = "deleteFile(io, socket_name)";\n')

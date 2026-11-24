@@ -1663,7 +1663,7 @@
     },
     {
       "name": "archive-state",
-      "note": "Archive confirmation is one durable left fact; editable model/effort precede the optional name, with no blank row below Footer",
+      "note": "Archive confirmation is one durable left fact; editable model/effort precede the optional name, above the bottom inset",
       "cast": [
         {
           "label": "Archive audit",
@@ -2161,7 +2161,7 @@
         "140x40",
         "46x30"
       ],
-      "expect_last": "gpt-6.1-sol"
+      "expect_regex": ["gpt-6\\.1-sol[^\\n]*\\n *\\Z"]
     },
     {
       "name": "draft-chat-choice-escape",
@@ -3076,12 +3076,11 @@
           "wait": "The project has a README"
         }
       ],
+      "absent_regex": ["\u00d7 Fail with exit 127[ \\t]+exit 127[ \\t]*$", "\u00d7 Fail with an excerpt[ \\t]+exit 1[ \\t]*$"],
       "expect": [
         "\u2713 List project files",
         "\u00d7 Fail with exit 127",
-        "exit 127",
         "\u00d7 Fail with an excerpt",
-        "exit 1",
         "The project has a README",
         "retry policy notes"
       ],
@@ -3174,12 +3173,11 @@
           }
         }
       ],
+      "absent_regex": ["\u00d7 Fail with exit 127[ \\t]+exit 127[ \\t]*$", "\u00d7 Fail with an excerpt[ \\t]+exit 1[ \\t]*$"],
       "expect": [
         "\u2713 List project files",
         "\u00d7 Fail with exit 127",
-        "exit 127",
         "\u00d7 Fail with an excerpt",
-        "exit 1",
         "The project has a README",
         "retry policy notes",
         "Fail with an excerpt"
@@ -3227,12 +3225,11 @@
           "gone": "\u25b8"
         }
       ],
+      "absent_regex": ["\u00d7 Fail with exit 127[ \\t]+exit 127[ \\t]*$", "\u00d7 Fail with an excerpt[ \\t]+exit 1[ \\t]*$"],
       "expect": [
         "\u2713 List project files",
         "\u00d7 Fail with exit 127",
-        "exit 127",
         "\u00d7 Fail with an excerpt",
-        "exit 1",
         "    Bash failed. Exit code: 1.",
         "    stderr:",
         "    usage: example",
@@ -3328,6 +3325,7 @@
           "gone": "\u25b8"
         }
       ],
+      "absent_regex": ["\u00d7 Fail with exit 127[ \\t]+exit 127[ \\t]*$", "\u00d7 Fail with an excerpt[ \\t]+exit 1[ \\t]*$"],
       "expect": [
         "\u2713 List project files",
         "    Bash succeeded. Exit code: 0.",
@@ -3335,9 +3333,7 @@
         "    README.md",
         "    src",
         "\u00d7 Fail with exit 127",
-        "exit 127",
         "\u00d7 Fail with an excerpt",
-        "exit 1",
         "    Bash failed. Exit code: 1.",
         "    stderr:",
         "    usage: example",
@@ -3443,12 +3439,11 @@
           "gone": "\u25b8"
         }
       ],
+      "absent_regex": ["\u00d7 Fail with exit 127[ \\t]+exit 127[ \\t]*$", "\u00d7 Fail with an excerpt[ \\t]+exit 1[ \\t]*$"],
       "expect": [
         "\u2713 List project files",
         "\u00d7 Fail with exit 127",
-        "exit 127",
         "\u00d7 Fail with an excerpt",
-        "exit 1",
         "    Bash failed. Exit code: 1.",
         "    stderr:",
         "    usage: example",
@@ -4211,7 +4206,8 @@
         "ctrl+c   leave",
         "next focus",
         "previous focus",
-        "fold tree · info actions"
+        "open chat · info actions",
+        "fold / expand tree"
       ],
       "absent": [
         "/help",
@@ -5253,7 +5249,7 @@
         "Check this sidebar.",
         "gpt-6.1-sol"
       ],
-      "expect_last": "gpt-6.1-sol",
+      "expect_regex": ["gpt-6\\.1-sol[^\\n]*\\n *\\Z"],
       "absent": [
         "+ New chat",
         "alt+i info"
@@ -5291,7 +5287,7 @@
         "Batch job",
         "Check this sidebar."
       ],
-      "expect_last": "gpt-6.1-sol",
+      "expect_regex": ["gpt-6\\.1-sol[^\\n]*\\n *\\Z"],
       "absent": [
         "+ New chat",
         "alt+i info"
@@ -5698,7 +5694,7 @@
     },
     {
       "name": "list-to-chat",
-      "note": "Enter on the open row returns to its retained input, without reopening the feed.",
+      "note": "Right on the open row returns to its retained input, without reopening the feed.",
       "open": "Focus navigation audit",
       "steps": [
         {
@@ -5707,16 +5703,19 @@
         {
           "keys": [
             "Left",
-            "Enter"
+            "Right"
           ]
         },
         {
-          "sleep": 0.2
+          "text": "Right Arrow draft"
+        },
+        {
+          "wait": "Right Arrow draft"
         }
       ],
       "expect": [
         "Focus navigation audit",
-        "›"
+        "Right Arrow draft"
       ],
       "absent": [
         "Opening…"

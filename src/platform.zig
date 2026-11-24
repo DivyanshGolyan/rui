@@ -6,17 +6,16 @@ const validStoreId = @import("store_id.zig").valid;
 const c = @import("posix");
 const hs = @import("host_settings.zig");
 const start_report = @import("start_report.zig");
+const host_endpoint = @import("host_endpoint.zig");
+const runtime_directory = @import("runtime_directory.zig");
 
 pub const database_suffix = store_path.database_suffix;
 pub const scratch_suffix = "/scratch";
 pub const max_database_path_bytes = store_path.max_database_path_bytes;
 pub const max_scratch_path_bytes = protocol.max_store_bytes + scratch_suffix.len;
-const runtime_prefix = "/tmp/rui-";
-const max_uid_bytes = "4294967295".len;
-pub const max_runtime_directory_bytes = runtime_prefix.len + max_uid_bytes;
 /// A derived interface directory: a child of the runtime directory named for
 /// the canonical Host directory (`interfaceFor`).
-pub const max_interface_directory_bytes = max_runtime_directory_bytes + "/".len + 32;
+pub const max_interface_directory_bytes = runtime_directory.max_runtime_directory_bytes + "/".len + 32;
 pub const max_socket_path_bytes = max_interface_directory_bytes + "/".len + hs.socket_name.len;
 pub const max_launch_socket_path_bytes = @import("host_settings.zig").max_launch_socket_path_bytes;
 
@@ -73,8 +72,14 @@ pub const StoreLease = struct {
             error.FileNotFound => .unowned,
             else => .access_failure,
         };
-        const mysql = paths.kind == .mysql;
-        var store_dir = std.Io.Dir.cwd().openDir(io, if (mysql) paths.runtimeHint().? else paths.store_identity.slice(), .{}) catch |err| return switch (err) {
+        // A MySQL Store is owned by the Host that holds its interface directory;
+        // host_endpoint owns that lock, so observation asks it rather than reading the lock.
+        if (paths.kind == .mysql) return switch (host_endpoint.occupancy(io, paths.runtimeHint().?)) {
+            .held => .{ .owned = paths },
+            .free, .absent => .unowned,
+            .unusable => .access_failure,
+        };
+        var store_dir = std.Io.Dir.cwd().openDir(io, paths.store_identity.slice(), .{}) catch |err| return switch (err) {
             error.FileNotFound => .unowned,
             else => .access_failure,
         };
@@ -82,7 +87,7 @@ pub const StoreLease = struct {
         validatePrivateDirectory(store_dir, io) catch return .access_failure;
         // A hostile FIFO must not wait for a writer; never follow or create
         // a replacement lock node during observation.
-        const fd = std.posix.openat(store_dir.handle, if (mysql) "rui.lock" else "host.lock", .{
+        const fd = std.posix.openat(store_dir.handle, "host.lock", .{
             .ACCMODE = .RDONLY,
             .NONBLOCK = true,
             .NOFOLLOW = true,
@@ -457,14 +462,6 @@ fn validateCanonicalPath(canonical: []const u8) !void {
     if (!std.unicode.utf8ValidateSlice(canonical)) return error.InvalidStorePath;
 }
 
-pub fn runtimeDirectory(buffer: []u8) ![]const u8 {
-    return runtimeDirectoryForUid(buffer, @intCast(std.c.geteuid()));
-}
-
-fn runtimeDirectoryForUid(buffer: []u8, uid: u32) ![]const u8 {
-    return std.fmt.bufPrint(buffer, "{s}{d}", .{ runtime_prefix, uid });
-}
-
 /// The interface directory Rui derives for a canonical Host directory, the
 /// same for SQLite and MySQL: `<runtime>/<first 16 SHA-256 bytes in hex>`.
 /// `host_endpoint` owns what lives in it.
@@ -472,8 +469,8 @@ pub fn interfaceFor(canonical: []const u8, buffer: []u8) ![]const u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(canonical, &digest, .{});
     const hash_text = std.fmt.bytesToHex(digest[0..16].*, .lower);
-    var runtime_buffer: [max_runtime_directory_bytes]u8 = undefined;
-    const runtime = try runtimeDirectory(&runtime_buffer);
+    var runtime_buffer: [runtime_directory.max_runtime_directory_bytes]u8 = undefined;
+    const runtime = try runtime_directory.runtimeDirectory(&runtime_buffer);
     return std.fmt.bufPrint(buffer, "{s}/{s}", .{ runtime, hash_text });
 }
 
@@ -647,14 +644,14 @@ test "the stop record reads asked only when present as a file, and unknown when 
     try tmp.dir.deleteFile(io, "store/" ++ stop_record_name);
 }
 
-test "SH-122 canonical Store paths derive current and legacy endpoints" {
+test "SH-124 canonical Store paths derive current and legacy endpoints" {
     const cases = [_]struct { canonical: []const u8, hash: []const u8 }{
         .{ .canonical = "/tmp/rui-stdlib-hex", .hash = "043ea4efef72c68973ebffcb0927e537" },
         .{ .canonical = "/", .hash = "8a5edab282632443219e051e4ade2d1d" },
         .{ .canonical = "/var/tmp/Store space", .hash = "0fe33990882de5ffba8479feeb54d347" },
     };
-    var runtime_buffer: [max_runtime_directory_bytes]u8 = undefined;
-    const runtime = try runtimeDirectory(&runtime_buffer);
+    var runtime_buffer: [runtime_directory.max_runtime_directory_bytes]u8 = undefined;
+    const runtime = try runtime_directory.runtimeDirectory(&runtime_buffer);
     for (cases) |case| {
         var interface_buffer: [max_interface_directory_bytes]u8 = undefined;
         const interface = try interfaceFor(case.canonical, &interface_buffer);
@@ -757,11 +754,6 @@ test "Store path capacities follow the SQLite VFS and derived suffixes" {
     try std.testing.expectEqual(@as(usize, 504), max_database_path_bytes);
     try std.testing.expectEqual(@as(usize, 500), max_scratch_path_bytes);
     try std.testing.expectEqual(@as(usize, 61), max_socket_path_bytes);
-    var runtime_buffer: [max_runtime_directory_bytes]u8 = undefined;
-    try std.testing.expectEqual(
-        @as(usize, max_runtime_directory_bytes),
-        (try runtimeDirectoryForUid(&runtime_buffer, std.math.maxInt(u32))).len,
-    );
 }
 
 test "canonical Store boundary rejects before ownership or endpoint effects" {
