@@ -360,6 +360,82 @@ fn appendFocus(self: *Self, candidate: Candidate) void {
     self.focus_frame.append(candidate.target);
 }
 
+fn expectDividerUnchanged(split_frame: vxfw.Surface) !void {
+    const divider = split_frame.children[1].surface;
+    for (divider.buffer) |cell| {
+        try std.testing.expectEqualStrings("┆", cell.char.grapheme);
+        try std.testing.expect(cell.style.eql(@import("widgets/Stitch.zig").cell(true, .vertical, .{}).style));
+    }
+}
+
+test "SUI-4 split pane focus dims only the inactive chat or sidebar" {
+    const Pane = struct {
+        glyph: []const u8,
+
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .drawFn = drawPane };
+        }
+        fn drawPane(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
+            @memset(surface.buffer, .{ .char = .{ .grapheme = self.glyph, .width = 1 }, .style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } }, .bg = .{ .rgb = .{ 0, 0, 0 } } } });
+            return surface;
+        }
+    };
+    var overview: Pane = .{ .glyph = "o" };
+    var list: Pane = .{ .glyph = "l" };
+    var chat: Pane = .{ .glyph = "c" };
+    try std.testing.expect(!overview.widget().eql(list.widget()));
+    try std.testing.expect(!list.widget().eql(chat.widget()));
+    try std.testing.expect(!overview.widget().eql(chat.widget()));
+    var root: Self = .{ .overview = overview.widget(), .list = list.widget(), .session = chat.widget() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const drawAt = struct {
+        fn run(root_: *Self, arena_: std.mem.Allocator, width: u16, height: u16) !vxfw.Surface {
+            return root_.widget().draw(.{ .arena = arena_, .cell_arena = arena_, .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        }
+    }.run;
+
+    root.input.area = .main;
+    var frame = try drawAt(&root, arena.allocator(), 140, 26);
+    var split_frame = frame.children[0].surface;
+    try expectDividerUnchanged(split_frame);
+    try std.testing.expectEqual(@as(u8, 209), split_frame.children[0].surface.buffer[0].style.fg.rgb[0]);
+    try std.testing.expectEqual(@as(u8, 255), split_frame.children[2].surface.buffer[0].style.fg.rgb[0]);
+    root.input.area = .list;
+    frame = try drawAt(&root, arena.allocator(), 140, 26);
+    split_frame = frame.children[0].surface;
+    try expectDividerUnchanged(split_frame);
+    try std.testing.expectEqual(@as(u8, 255), split_frame.children[0].surface.buffer[0].style.fg.rgb[0]);
+    try std.testing.expectEqual(@as(u8, 209), split_frame.children[2].surface.buffer[0].style.fg.rgb[0]);
+    root.input.area = .settings_row;
+    frame = try drawAt(&root, arena.allocator(), 140, 26);
+    split_frame = frame.children[0].surface;
+    try expectDividerUnchanged(split_frame);
+    try std.testing.expectEqual(@as(u8, 209), split_frame.children[2].surface.buffer[0].style.fg.rgb[0]);
+    for ([_]app_input.Target{ .back, .model, .effort, .info, .latest, .details, .needs, .stop }) |target| {
+        root.input.area = .{ .button = target };
+        frame = try drawAt(&root, arena.allocator(), 140, 26);
+        split_frame = frame.children[0].surface;
+        try expectDividerUnchanged(split_frame);
+        try std.testing.expectEqual(@as(u8, 209), split_frame.children[0].surface.buffer[0].style.fg.rgb[0]);
+        try std.testing.expectEqual(@as(u8, 255), split_frame.children[2].surface.buffer[0].style.fg.rgb[0]);
+    }
+
+    root.input.area = .main;
+    frame = try drawAt(&root, arena.allocator(), 46, 26);
+    try std.testing.expect(frame.children[0].surface.widget.eql(chat.widget()));
+    try std.testing.expectEqual(@as(u8, 255), frame.children[0].surface.buffer[0].style.fg.rgb[0]);
+
+    root.input.layer = .settings;
+    frame = try drawAt(&root, arena.allocator(), 140, 26);
+    try std.testing.expectEqual(@as(usize, 2), frame.children.len);
+    const backdrop = @import("widget_style.zig").backdrop(root.appCaps());
+    for (frame.children[0].surface.buffer) |cell| try std.testing.expect(cell.style.eql(backdrop));
+    try std.testing.expect(containsWidget(frame.children[1].surface, root.settings_page.widget()));
+}
+
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
@@ -398,6 +474,16 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         };
         break :split try split.widget().draw(main_ctx);
     } else try pane.draw(main_ctx);
+    if (layout.split and !covering) {
+        const inactive = switch (self.input.area) {
+            .list, .settings_row => self.session.?,
+            .main, .button => self.list,
+        };
+        for (child.children) |pane_surface| if (pane_surface.surface.widget.eql(inactive)) {
+            @import("widget_style.zig").dimSurface(pane_surface.surface, self.appCaps().depth == .none);
+            break;
+        };
+    }
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child, @import("widget_style.zig").backdrop(self.appCaps()), self.backgroundWidget()) else child };
     self.projectFocus(child, layout);
     if (covering) {
