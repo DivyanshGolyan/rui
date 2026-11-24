@@ -163,33 +163,33 @@ pub const Stream = extern struct {
     pub const idle: Stream = .{};
 
     pub fn deinit(self: *Stream) void {
-        const record = Record.of(self);
-        std.debug.assert(record.state == .idle or record.state == .collected or record.state == .cancelled);
-        std.debug.assert(record.fields == null);
+        const rec = record(self);
+        std.debug.assert(rec.state == .idle or rec.state == .collected or rec.state == .cancelled);
+        std.debug.assert(rec.fields == null);
         self.* = .idle;
     }
 
     pub fn status(self: *const Stream) ?u16 {
-        const record = Record.ofConst(self);
-        return if (record.flags.final_seen) record.status else null;
+        const rec = recordConst(self);
+        return if (rec.flags.final_seen) rec.status else null;
     }
 
     pub fn end(self: *const Stream) ?End {
-        const record = Record.ofConst(self);
-        if (record.state != .finished and record.state != .collected) return null;
-        return .{ .cause = record.cause.?, .request_sent = record.flags.request_sent };
+        const rec = recordConst(self);
+        if (rec.state != .finished and rec.state != .collected) return null;
+        return .{ .cause = rec.cause.?, .request_sent = rec.flags.request_sent };
     }
 
     pub fn responseLength(self: *const Stream) u64 {
-        return Record.ofConst(self).sink_written;
+        return recordConst(self).sink_written;
     }
 
     pub fn openedConnection(self: *const Stream) bool {
-        return Record.ofConst(self).flags.opened_connection;
+        return recordConst(self).flags.opened_connection;
     }
 
     pub fn replays(self: *const Stream) u8 {
-        return Record.ofConst(self).flags.replays;
+        return recordConst(self).flags.replays;
     }
 };
 
@@ -198,75 +198,96 @@ pub const EndpointError = UrlError || tls_client.TrustError || error{ OutOfMemor
 pub const PrepareError = error{ OutOfMemory, InvalidRequest };
 pub const DriveError = error{PollFailed};
 
+fn engine(client: *Client) *Engine {
+    return @ptrCast(client);
+}
+
+fn engineConst(client: *const Client) *const Engine {
+    return @ptrCast(client);
+}
+
+fn record(stream: *Stream) *Record {
+    return @ptrCast(stream);
+}
+
+fn recordConst(stream: *const Stream) *const Record {
+    return @ptrCast(stream);
+}
+
+fn public(r: *Record) *Stream {
+    return @ptrCast(r);
+}
+
 pub const Client = extern struct {
     storage: [Engine.size]u8 align(Engine.alignment),
 
     pub fn init(self: *Client, allocator: std.mem.Allocator, io: std.Io, options: Options) InitError!void {
-        return Engine.of(self).init(allocator, io, options);
+        return engine(self).init(allocator, io, options);
     }
 
     pub fn deinit(self: *Client) void {
-        Engine.of(self).deinit();
+        engine(self).deinit();
     }
 
     pub fn addEndpoint(self: *Client, url: []const u8) EndpointError!Endpoint {
-        return Engine.of(self).addEndpoint(url);
+        return engine(self).addEndpoint(url);
     }
 
     pub fn prepare(self: *Client, stream: *Stream, request: Request) PrepareError!void {
-        return Engine.of(self).prepare(Record.of(stream), request);
+        return engine(self).prepare(record(stream), request);
     }
 
     pub fn launch(self: *Client, stream: *Stream) void {
-        Engine.of(self).launch(Record.of(stream));
+        engine(self).launch(record(stream));
     }
 
     pub fn cancel(self: *Client, stream: *Stream) void {
-        Engine.of(self).cancel(Record.of(stream));
+        engine(self).cancel(record(stream));
     }
 
     pub fn drive(self: *Client, receiver: anytype) DriveError!void {
         const R = @typeInfo(@TypeOf(receiver)).pointer.child;
         if (!@hasDecl(R, "observe")) @compileError(@typeName(R) ++ " is not an h2 receiver");
-        return Engine.of(self).drive(.{
+        return engine(self).drive(.{
             .context = receiver,
             .observe = struct {
-                fn observe(context: *anyopaque, stream: *Stream, event: Event) Verdict {
+                fn observe(context: *anyopaque, rec: *Record, event: Event) Verdict {
                     const typed: *R = @ptrCast(@alignCast(context));
-                    return typed.observe(stream, event);
+                    return typed.observe(public(rec), event);
                 }
             }.observe,
         });
     }
 
     pub fn wait(self: *Client, timeout_ms: u32) DriveError!void {
-        return Engine.of(self).wait(timeout_ms);
+        return engine(self).wait(timeout_ms);
     }
 
     pub fn armWait(self: *Client, timeout_ms: u32) Armed {
-        return Engine.of(self).armWait(timeout_ms);
+        return engine(self).armWait(timeout_ms);
     }
 
     pub const Armed = Engine.Armed;
 
     pub fn wake(self: *Client) void {
-        Engine.of(self).waker.wake();
+        engine(self).wake();
     }
 
     pub fn nextFinished(self: *Client) ?*Stream {
-        return Engine.of(self).nextFinished();
+        const rec = engine(self).nextFinished() orelse return null;
+        return public(rec);
     }
 
     pub fn finishedCount(self: *const Client) usize {
-        return Engine.ofConst(self).finished_count;
+        return engineConst(self).finishedCount();
     }
 
     pub fn retireConnections(self: *Client, endpoint: Endpoint) void {
-        Engine.of(self).retireConnections(endpoint);
+        engine(self).retireConnections(endpoint);
     }
 
     pub fn hasConnections(self: *const Client) bool {
-        return Engine.ofConst(self).connections_len > 0;
+        return engineConst(self).hasConnections();
     }
 };
 
@@ -326,7 +347,7 @@ pub fn exchange(io: std.Io, request: Exchange) ExchangeError!ExchangeOutcome {
         if (request.cancelled) |cancelled| if (cancelled()) return error.Interrupted;
         const elapsed: u64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds - started);
         if (elapsed >= request.total_timeout_ns)
-            return .{ .timed_out = .{ .request_sent = Record.of(&stream).flags.request_sent } };
+            return .{ .timed_out = .{ .request_sent = record(&stream).flags.request_sent } };
         const remaining_ms = std.math.divCeil(u64, request.total_timeout_ns - elapsed, std.time.ns_per_ms) catch unreachable;
         try client.wait(@intCast(@min(remaining_ms, 100)));
     }

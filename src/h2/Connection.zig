@@ -64,7 +64,7 @@ pub const Head = struct {
     refs: std.ArrayList(*c.nghttp2_rcbuf) = .empty,
 };
 
-pub fn free(engine: *Engine, index: u32) Connection {
+pub fn vacant(engine: *Engine, index: u32) Connection {
     return .{
         .engine = engine,
         .index = index,
@@ -693,7 +693,7 @@ pub fn close(self: *Connection, mode: enum { goaway, abrupt }) void {
     self.head.fields.deinit(self.engine.allocator);
     self.head.refs.deinit(self.engine.allocator);
     const verification = self.verification;
-    self.* = .free(self.engine, self.index);
+    self.* = .vacant(self.engine, self.index);
     self.verification = verification;
 }
 

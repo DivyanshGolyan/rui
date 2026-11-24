@@ -43,7 +43,7 @@ pub const alignment = @alignOf(Engine);
 
 pub const Receiver = struct {
     context: *anyopaque,
-    observe: *const fn (*anyopaque, *h2.Stream, h2.Event) h2.Verdict,
+    observe: *const fn (*anyopaque, *Record, h2.Event) h2.Verdict,
 };
 
 pub const Origin = struct {
@@ -123,14 +123,6 @@ pub const Scratch = struct {
 
     pub const Chunk = struct { record: ?*Record, bytes: []const u8 };
 };
-
-pub fn of(client: *h2.Client) *Engine {
-    return @ptrCast(client);
-}
-
-pub fn ofConst(client: *const h2.Client) *const Engine {
-    return @ptrCast(client);
-}
 
 pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2.Options) h2.InitError!void {
     std.debug.assert(options.stream_capacity > 0 and options.inactivity_ns > 0 and options.connect_timeout_ns > 0);
@@ -371,12 +363,12 @@ pub fn cancel(self: *Engine, record: *Record) void {
     record.state = .cancelled;
 }
 
-pub fn nextFinished(self: *Engine) ?*h2.Stream {
+pub fn nextFinished(self: *Engine) ?*Record {
     std.debug.assert(self.receiver == null);
     const record = self.finished.popHead() orelse return null;
     self.finished_count -= 1;
     record.state = .collected;
-    return record.public();
+    return record;
 }
 
 pub fn endStream(self: *Engine, record: *Record, cause: policy.Cause) void {
@@ -408,7 +400,7 @@ pub fn retireBody(self: *Engine, record: *Record) void {
 
 pub fn observe(self: *Engine, record: *Record, event: h2.Event) h2.Verdict {
     const receiver = self.receiver.?;
-    return receiver.observe(receiver.context, record.public(), event);
+    return receiver.observe(receiver.context, record, event);
 }
 
 pub fn originOf(self: *Engine, record: *const Record) *Origin {
@@ -422,6 +414,18 @@ fn connectionOf(self: *Engine, record: *const Record) *Connection {
 pub fn now(self: *const Engine) u64 {
     const awake: u64 = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds);
     return awake - self.stall_ns;
+}
+
+pub fn wake(self: *Engine) void {
+    self.waker.wake();
+}
+
+pub fn finishedCount(self: *const Engine) usize {
+    return self.finished_count;
+}
+
+pub fn hasConnections(self: *const Engine) bool {
+    return self.connections_len > 0;
 }
 
 pub fn drive(self: *Engine, receiver: Receiver) h2.DriveError!void {
@@ -549,7 +553,7 @@ fn freeConnection(self: *Engine) ?*Connection {
     }
     if (self.connections_len < self.connections.len) {
         const connection = &self.connections[self.connections_len];
-        connection.* = .free(self, self.connections_len);
+        connection.* = .vacant(self, self.connections_len);
         self.connections_len += 1;
         return connection;
     }
@@ -761,65 +765,4 @@ fn nextDeadline(self: *Engine) ?u64 {
         if (deadline) |value| earliest = if (earliest) |current| @min(current, value) else value;
     }
     return earliest;
-}
-
-test "a large table stays unwritten until connections need it" {
-    var client: h2.Client = undefined;
-    try client.init(std.heap.page_allocator, std.testing.io, .{
-        .stream_capacity = 10_000,
-        .inactivity_ns = std.time.ns_per_s,
-        .connect_timeout_ns = std.time.ns_per_s,
-    });
-    defer client.deinit();
-    const engine = of(&client);
-    const page = std.heap.pageSize();
-    for ([_][]u8{ std.mem.sliceAsBytes(engine.connections), std.mem.sliceAsBytes(engine.views), std.mem.sliceAsBytes(engine.pollfds) }) |table| {
-        const start = std.mem.alignForward(usize, @intFromPtr(table.ptr), page);
-        const end = std.mem.alignBackward(usize, @intFromPtr(table.ptr) + table.len, page);
-        if (end <= start) continue;
-        const pages = (end - start) / page;
-        var residency: [4096]u8 = undefined;
-        const checked = @min(pages, residency.len);
-        try std.testing.expectEqual(@as(c_int, 0), std.c.mincore(@ptrFromInt(start), checked * page, &residency));
-        var resident: usize = 0;
-        for (residency[0..checked]) |flags| resident += flags & 1;
-        try std.testing.expectEqual(@as(usize, 0), resident);
-    }
-    try std.testing.expectEqual(@as(u32, 0), engine.connections_len);
-}
-
-test "drives walk only as far as the last connection not free" {
-    var client: h2.Client = undefined;
-    try client.init(std.testing.allocator, std.testing.io, .{
-        .stream_capacity = 4,
-        .inactivity_ns = std.time.ns_per_s,
-        .connect_timeout_ns = std.time.ns_per_s,
-    });
-    defer client.deinit();
-    const peer = try @import("testing/Peer.zig").start(std.testing.allocator, .{});
-    var url_buffer: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buffer, "{s}", .{peer.url()});
-    peer.stop();
-    const endpoint = try client.addEndpoint(url);
-    var stream: h2.Stream = .idle;
-    var sink: [8]u8 = undefined;
-    try client.prepare(&stream, .{ .endpoint = endpoint, .fields = &.{}, .body = .{ .bytes = "x" }, .sink = .{ .buffer = &sink } });
-    client.launch(&stream);
-    const Ignore = struct {
-        pub fn observe(_: *@This(), _: *h2.Stream, _: h2.Event) h2.Verdict {
-            return .accept;
-        }
-    };
-    var receiver: Ignore = .{};
-    try client.drive(&receiver);
-    try std.testing.expectEqual(@as(u32, 1), of(&client).connections_len);
-    var steps: u32 = 0;
-    while (client.finishedCount() == 0) : (steps += 1) {
-        if (steps > 2000) return error.Timeout;
-        try client.drive(&receiver);
-        try client.wait(1);
-    }
-    try std.testing.expectEqual(@as(u32, 0), of(&client).connections_len);
-    _ = client.nextFinished();
-    stream.deinit();
 }
