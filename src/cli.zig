@@ -3915,10 +3915,10 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         std.debug.assert(reply.isAccepted() and reply.target == .message and reply.target.message.creates_session);
         try writer.writeAll(",\"configuration\":");
         if (value.parent != null) {
-            try std.json.Stringify.value(.{ .provider = value.provider, .parent = value.parent, .model = value.model, .reasoning_effort = value.reasoning_effort, .effort_source = value.effort_source }, .{}, writer);
+            try std.json.Stringify.value(.{ .connection = value.provider, .parent = value.parent, .model = value.model, .reasoning_effort = value.reasoning_effort, .effort_source = value.effort_source }, .{}, writer);
         } else {
             try std.json.Stringify.value(.{
-                .provider = value.provider,
+                .connection = value.provider,
                 .model = value.model,
                 .reasoning_effort = value.reasoning_effort,
                 .effort_source = value.effort_source,

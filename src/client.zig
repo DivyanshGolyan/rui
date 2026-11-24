@@ -5662,7 +5662,7 @@ test "runtime catalog model list client accepts a reply larger than its shipped 
     var body: std.Io.Writer.Allocating = .init(allocator);
     defer body.deinit();
     try body.writer.writeAll(protocol.model_list_reply.head);
-    try body.writer.writeAll("[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[");
+    try body.writer.writeAll("[{\"connection\":\"codex\",\"source\":\"catalog\",\"models\":[");
     for (0..count) |index| {
         var digits_buffer: [20]u8 = undefined;
         const digits = try std.fmt.bufPrint(&digits_buffer, "{d}", .{index});
