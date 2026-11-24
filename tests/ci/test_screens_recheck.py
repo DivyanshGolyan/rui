@@ -52,7 +52,8 @@ class ScreensRecheckTest(unittest.TestCase):
         return screens_recheck.recheck(api, REPO, 42, HEAD, sleep=sleep, clock=clock)
 
     def test_scr_11_publication_rechecks_only_the_current_admission(self):
-        cases = (self.case_latest_run_is_the_only_candidate,
+        cases = (self.case_pure_snapshot_decisions,
+                 self.case_latest_run_is_the_only_candidate,
                  self.case_admission_that_already_started_is_observed_to_completion,
                  self.case_pending_or_missing_admission_will_read_published_screens,
                  self.case_other_heads_branches_and_dispatches_never_choose_retry,
@@ -65,6 +66,18 @@ class ScreensRecheckTest(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case.__name__):
                 case()
+
+    def case_pure_snapshot_decisions(self):
+        plan = {"name": "plan", "steps": [{"name": "PR admission trigger 42 ready"}]}
+        for status, conclusion, expired, expected in (("queued", None, False, "stop"),
+                                                       ("in_progress", None, False, "wait"),
+                                                       ("in_progress", None, True, "stop"),
+                                                       ("completed", "success", False, "stop"),
+                                                       ("completed", "failure", False, "rerun")):
+            with self.subTest(status=status, conclusion=conclusion, expired=expired):
+                actual, _ = screens_recheck.decide(pr(), REPO, 42, HEAD, run(1),
+                                                   [plan, job(11, status, conclusion)], [], expired)
+                self.assertEqual(actual, expected)
 
     def case_latest_run_is_the_only_candidate(self):
         api = FakeGitHub([run(1), run(2, "in_progress")], {1: [job(11)], 2: [job(22, "queued", None)]})
