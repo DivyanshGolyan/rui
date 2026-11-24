@@ -196,6 +196,9 @@ jobs:
       pr_setup_targets: ${{ steps.select.outputs.pr_setup_targets }}
       compile_only: ${{ steps.select.outputs.compile_only }}
     steps:
+      - name: PR admission trigger ${{ github.event.pull_request.number }} ${{ github.event.pull_request.draft && 'draft' || 'ready' }}
+        if: ${{ github.event_name == 'pull_request' }}
+        run: ':'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
