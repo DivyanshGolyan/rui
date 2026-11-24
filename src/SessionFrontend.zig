@@ -688,6 +688,12 @@ fn selectionContextActive(self: *const Self) bool {
 
 fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (event == .focus_out) {
+        cancelPointerSelection(raw);
+        if (self.app_document.cancelSelection()) self.dirty = true;
+        if (self.dirty) ctx.redraw = true;
+        return;
+    }
     const mouse = if (event == .mouse) event.mouse else return;
     if (self.app_content.capturePointerLifecycle(ctx, mouse)) return;
     if (mouse.type == .press or mouse.type == .motion) return;
@@ -3562,6 +3568,8 @@ const HeldFrontend = struct {
     tmp: std.testing.TmpDir,
     directory: [std.Io.Dir.max_path_bytes]u8 = undefined,
     interrupted: client.Cancellation = .{},
+    peer_opened: usize = 0,
+    peer_id: [session_id.bytes]u8 = @splat(0),
     root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() },
     arena: std.heap.ArenaAllocator,
     left: ?Outcome = null,
@@ -3630,6 +3638,12 @@ const HeldFrontend = struct {
 
     fn onOpen(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {
         return error.UnexpectedOpen;
+    }
+
+    fn recordPeerOpen(raw: *anyopaque, _: *vxfw.EventContext, id: *const [session_id.bytes]u8) !void {
+        const held: *HeldFrontend = @ptrCast(@alignCast(raw));
+        held.peer_opened += 1;
+        held.peer_id = id.*;
     }
 
     fn context(held: *HeldFrontend) vxfw.EventContext {
@@ -3921,6 +3935,26 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
             return .{ .userdata = self, .on_external = external, .on_notice = notice, .on_scroll = scrollNoop, .quote = .{ .begin = quoteBegin, .insert = quoteInsert } };
         }
     };
+    const FocusPath = struct {
+        fn deliver(held: *HeldFrontend, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+            // Mirror vxfw FocusHandler's capture-to-focused-composer route.
+            const field = held.root.input.field;
+            ctx.consume_event = false;
+            ctx.phase = .capturing;
+            try held.root.widget().captureEvent(ctx, event);
+            try std.testing.expect(!ctx.consume_event);
+            try std.testing.expectEqual(field, held.root.input.field);
+            try std.testing.expect(held.root.input.mainFocused());
+            try held.self.widget().captureEvent(ctx, event);
+            try std.testing.expect(!ctx.consume_event);
+            try std.testing.expectEqual(field, held.root.input.field);
+            try std.testing.expect(held.root.input.mainFocused());
+            ctx.phase = .at_target;
+            try held.self.app_input.composer.widget().handleEvent(ctx, event);
+            try std.testing.expectEqual(field, held.root.input.field);
+            try std.testing.expect(held.root.input.mainFocused());
+        }
+    };
 
     const held = try HeldFrontend.create();
     defer held.destroy();
@@ -3935,6 +3969,8 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
     const frame = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
     const user = screenTextPoint(frame, "UserAlpha", 0, 0) orelse return error.MissingUserCell;
     const web = screenTextPoint(frame, "LinkText", 0, 0) orelse return error.MissingLinkCell;
+    try std.testing.expectEqual(@import("app_input.zig").Field.input, held.root.input.field);
+    try std.testing.expect(held.root.input.mainFocused());
     var ctx = held.context();
 
     try Pointer.mouse(&ctx, frame, .{ .col = user.col + 4, .row = user.row, .button = .left, .type = .press, .mods = .{} });
@@ -3951,18 +3987,42 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
     try std.testing.expectEqualStrings(url, actions.uri[0..actions.uri_len]);
     try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
 
-    // A link release after focus leaves the feed is still captured, not
-    // delivered as a second activation to the newly focused target.
+    // Focus events with no held selection pass through to the composer.
+    try FocusPath.deliver(held, &ctx, .focus_out);
+    try FocusPath.deliver(held, &ctx, .focus_in);
+    try std.testing.expect(!held.self.app_content.selectionHeld());
+
+    // Terminal focus loss is captured by Root and SessionFrontend before the
+    // focused composer receives it; focus-in alone must not cancel a gesture.
+    try FocusPath.deliver(held, &ctx, .focus_out);
+    try FocusPath.deliver(held, &ctx, .focus_in);
+    try std.testing.expect(!held.self.app_content.selectionHeld());
+    for ([_]bool{ false, true }) |dragging| {
+        try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .press, .mods = .{} });
+        try FocusPath.deliver(held, &ctx, .focus_in);
+        try std.testing.expect(held.self.app_content.selectionHeld());
+        try std.testing.expect(!held.self.app_content.dragging());
+        var release_col = web.col;
+        if (dragging) {
+            try Pointer.mouse(&ctx, frame, .{ .col = web.col + 1, .row = web.row, .button = .left, .type = .drag, .mods = .{} });
+            release_col += 1;
+            try std.testing.expect(held.self.app_content.dragging());
+        }
+        try FocusPath.deliver(held, &ctx, .focus_out);
+        try std.testing.expect(!held.self.app_content.selectionHeld());
+        try FocusPath.deliver(held, &ctx, .focus_in);
+        try Pointer.mouse(&ctx, frame, .{ .col = release_col, .row = web.row, .button = .left, .type = .release, .mods = .{} });
+        try std.testing.expectEqual(@as(usize, 1), actions.opened);
+        try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+    }
     try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .press, .mods = .{} });
-    try held.self.app_content.widget().handleEvent(&ctx, .focus_out);
     try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .release, .mods = .{} });
-    try std.testing.expectEqual(@as(usize, 1), actions.opened);
-    try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+    try std.testing.expectEqual(@as(usize, 2), actions.opened);
 
     try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .press, .mods = .{} });
     try held.self.app_content.widget().handleEvent(&ctx, .mouse_leave);
     try Pointer.mouse(&ctx, frame, .{ .col = 40, .row = web.row, .button = .left, .type = .release, .mods = .{} });
-    try std.testing.expectEqual(@as(usize, 1), actions.opened);
+    try std.testing.expectEqual(@as(usize, 2), actions.opened);
     try std.testing.expectEqual(@as(usize, 1), clipboardCount(&ctx));
     try std.testing.expect(lastClipboard(&ctx).?.len < url.len);
 
@@ -3978,6 +4038,43 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
     try Pointer.mouse(&ctx, frame, .{ .col = 40, .row = user.row, .button = .left, .type = .release, .mods = .{} });
     try std.testing.expectEqual(@as(usize, 1), actions.quotes);
     try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+
+    const peer = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "Plan" ++ TerminalText.link_close;
+    for ([_][]const u8{ peer, TerminalText.body_on ++ peer ++ TerminalText.body_off }) |content| {
+        const document = try HeldFrontend.create();
+        defer document.destroy();
+        document.size = .{ .width = 140, .height = 25 };
+        document.self.app_hooks.on_open = HeldFrontend.recordPeerOpen;
+        try document.screen.staging.append(content);
+        try document.screen.staging.prepare();
+        document.screen.view = .message;
+        const document_frame = try document.root.widget().draw(.{ .arena = document.arena.allocator(), .cell_arena = document.arena.allocator(), .min = .{}, .max = document.size, .cell_size = .{} });
+        const document_link = screenTextPoint(document_frame, "Plan", 0, 0) orelse return error.MissingDocumentLink;
+        var document_ctx = document.context();
+        try FocusPath.deliver(document, &document_ctx, .focus_out);
+        try FocusPath.deliver(document, &document_ctx, .focus_in);
+        try std.testing.expect(!document.self.app_document.dragging());
+        for ([_]bool{ false, true }) |dragging| {
+            try Pointer.mouse(&document_ctx, document_frame, .{ .col = document_link.col, .row = document_link.row, .button = .left, .type = .press, .mods = .{} });
+            try FocusPath.deliver(document, &document_ctx, .focus_in);
+            try std.testing.expect(document.self.app_document.dragging());
+            var release_col = document_link.col;
+            if (dragging) {
+                try Pointer.mouse(&document_ctx, document_frame, .{ .col = document_link.col + 1, .row = document_link.row, .button = .left, .type = .drag, .mods = .{} });
+                release_col += 1;
+                try std.testing.expect(document.self.app_document.dragging());
+            }
+            try FocusPath.deliver(document, &document_ctx, .focus_out);
+            try std.testing.expect(!document.self.app_document.dragging());
+            try FocusPath.deliver(document, &document_ctx, .focus_in);
+            try Pointer.mouse(&document_ctx, document_frame, .{ .col = release_col, .row = document_link.row, .button = .left, .type = .release, .mods = .{} });
+            try std.testing.expectEqual(@as(usize, 0), document.peer_opened);
+        }
+        try Pointer.mouse(&document_ctx, document_frame, .{ .col = document_link.col, .row = document_link.row, .button = .left, .type = .press, .mods = .{} });
+        try Pointer.mouse(&document_ctx, document_frame, .{ .col = document_link.col, .row = document_link.row, .button = .left, .type = .release, .mods = .{} });
+        try std.testing.expectEqual(@as(usize, 1), document.peer_opened);
+        try std.testing.expectEqualStrings("k7m2qx", &document.peer_id);
+    }
 }
 
 test "SUI-144 SessionFrontend cancels copy selection when its feed context is covered" {
