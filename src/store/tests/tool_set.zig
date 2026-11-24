@@ -2110,6 +2110,14 @@ test "SH-176 settlement classifies a call by its frozen offer's owner, and a Hos
 
                 // At admission: the root was declared before the Host tool came, and now the Host tool is in the set, so the next request
                 // offers the Host tool for the name and no app tool of that name.
+                // A selection saved before the Host tool came holds the app member; the narrowed root names the tool again to hold the Host one.
+                if (narrowed) {
+                    var refresh: wire_request.ConfigureCommand = .{};
+                    try refresh.key.set(try std.fmt.bufPrint(&key_buffer, "sh176-refresh-{s}", .{tag}));
+                    try refresh.session.set(root);
+                    refresh.configuration.tools = try .of(&.{ "ask", "find_tools" });
+                    try expectAccepted("refresh", try storage.configure(&refresh, .{}));
+                }
                 const second = try admitMessage(&storage, &tmp, try std.fmt.bufPrint(&key_buffer, "sh176-second-{s}", .{tag}), root);
                 var offered: Offered = undefined;
                 try offerOf(&storage, second, &offered);
