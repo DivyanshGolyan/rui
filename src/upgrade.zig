@@ -191,7 +191,7 @@ pub fn checkDiscovered(init: std.process.Init, allocator: std.mem.Allocator, sto
     try process.check(cancellation);
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
     // The mode is read only once a caller continues past the check.
-    var facts: upgrade_run.Facts = .{ .mode = .check, .adopted = discovered.* != null };
+    var facts: upgrade_run.Facts = .{ .mode = .check, .discovered = if (discovered.*) |value| versionOf(value.version) else null };
     var selected: ?Installation.Selection = null;
     errdefer if (selected) |*value| value.deinit(allocator);
     var candidate: ?release.ReleaseCandidate = null;
@@ -213,7 +213,12 @@ pub fn checkDiscovered(init: std.process.Init, allocator: std.mem.Allocator, sto
                     discovered.* = null;
                     break :take value;
                 },
-                .discover => try fetchRelease(init, allocator, cancellation, diagnostic),
+                .discover => fresh: {
+                    const value = try fetchRelease(init, allocator, cancellation, diagnostic);
+                    if (discovered.*) |*stale| stale.deinit(allocator);
+                    discovered.* = null;
+                    break :fresh value;
+                },
             };
             facts.release = .{ .ok = versionOf(candidate.?.version) };
         },

@@ -1817,10 +1817,71 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
                 dispose_all(release_version)
 
 
+def first_click_cases(root, binary, releases):
+    # SH-72: a previously current candidate cannot prove the release is still current.
+    selected_version = f"0.{int(releases.version.split('.')[1]) + 1}.0"
+    future_version = f"0.{int(releases.version.split('.')[1]) + 2}.0"
+    for outcome in ("newer", "unchanged", "error"):
+        fixture = Releases(binary, future_version)
+        try:
+            future_name, future_sums = fixture.name, fixture.sums_path
+            fixture.version = selected_version
+            fixture.name = future_name.replace(future_version, selected_version)
+            fixture.sums_path = future_sums.replace(future_version, selected_version)
+            fixture.latest_location = fixture.origin + "/releases/tag/v" + selected_version
+            with case(root, binary, fixture, "first-click-" + outcome) as c:
+                c.select(c.build("selected", selected_version))
+                c.start_host()
+                from codex_fixture import credentials
+                directory = c.home / ".config/rui"
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                credentials(directory / "codex.json")
+                c.run("defaults", "configure", "--provider", "codex", "--model", "gpt-6-terra")
+                c.json("session", "configure", "--store", c.store, "--workspace", c.root,
+                       "--provider", "codex", "--model", "gpt-6-terra")
+                args = [str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-terra"]
+                with terminal_process(args, env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
+                    screen = TerminalScreen(master, process)
+                    screen.launch_overview()
+                    frame = screen.contains("Update to " + selected_version)
+                    if outcome == "newer":
+                        fixture.version = future_version
+                        fixture.name, fixture.sums_path = future_name, future_sums
+                        fixture.latest_location = fixture.origin + "/releases/tag/v" + future_version
+                    elif outcome == "error":
+                        fixture.status["/releases/latest"] = 503
+                    gate = fixture.gate_archive()
+                    before = len(fixture.requests)
+                    for row, line in enumerate(frame.splitlines()):
+                        if "Update to " + selected_version in line:
+                            column = line.index("Update to " + selected_version)
+                            screen.send(f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m")
+                            break
+                    else:
+                        raise AssertionError(frame)
+                    if outcome == "newer":
+                        screen.until(gate.entered.is_set, "first click reaches newer release archive")
+                    else:
+                        screen.until(lambda: "Update to " + selected_version not in screen.capture.completed,
+                                     "first click settles")
+                        frame = screen.contains("Settings")
+                        for row, line in enumerate(frame.splitlines()):
+                            if "Settings" in line[:40]:
+                                column = line.index("Settings")
+                                screen.send(f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m")
+                                break
+                        screen.contains("up to date" if outcome == "unchanged" else "couldn't reach GitHub")
+                    assert "/releases/latest" in fixture.requests[before:], fixture.requests
+                    assert c.link.resolve() == c.original
+                    exit_on_sigint(screen, process, "first-click exit")
+        finally:
+            fixture.close()
+
+
 def main():
-    modes = ("restart-all", "lifecycle", "custody", "download", "terminal", "startup", "future-target", "unchecked-target", "frozen-settings", "pre-freeze-target")
+    modes = ("restart-all", "lifecycle", "custody", "download", "terminal", "startup", "future-target", "unchecked-target", "frozen-settings", "pre-freeze-target", "first-click")
     if len(sys.argv) not in (2, 3, 4, 5) or (len(sys.argv) >= 3 and sys.argv[2] not in modes):
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|future-target FUTURE_REAL_RUI|unchecked-target BASELINE_RUI|frozen-settings|pre-freeze-target PRE_FREEZE_REAL_RUI]")
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|first-click|future-target FUTURE_REAL_RUI|unchecked-target BASELINE_RUI|frozen-settings|pre-freeze-target PRE_FREEZE_REAL_RUI]")
     selection = sys.argv[2] if len(sys.argv) >= 3 else "all"
     assert len(sys.argv) == (4 if selection in ("future-target", "pre-freeze-target") else 4 if selection == "unchecked-target" else 2 if selection == "all" else 3), "supply the native binaries required by this mode"
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
@@ -1841,6 +1902,9 @@ def main():
     releases = Releases(target_binary, version)
     complete = False
     try:
+        if selection in ("all", "terminal", "first-click"):
+            first_click_cases(root, binary, releases)
+            print("upgrade native: first_click_cases passed", flush=True)
         if selection == "frozen-settings":
             frozen_upgrade_cases(root, binary, releases)
             frozen_credential_refusal_case(root, binary, releases)

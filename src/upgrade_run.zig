@@ -27,7 +27,7 @@ pub const Facts = struct {
     /// Read only once the caller continues past the check.
     mode: Mode,
     /// Background discovery handed over a release candidate.
-    adopted: bool = false,
+    discovered: ?Version = null,
     selection: ?Seen(Selection) = null,
     release: ?Seen(Version) = null,
     /// Hosts found before installing; a warning only.
@@ -67,7 +67,10 @@ pub const Effect = union(enum) {
 pub fn next(f: Facts) Effect {
     const selection = f.selection orelse return .inspect_selection;
     if (selection == .failed) return .end;
-    const release = f.release orelse return .{ .release = if (f.adopted) .adopt else .discover };
+    const release = f.release orelse return .{ .release = if (f.discovered) |candidate| switch (selection.ok) {
+        .released => |installed| if (installed.order(candidate) == .lt) .adopt else .discover,
+        else => .adopt,
+    } else .discover };
     if (release == .failed) return .end;
     const census = f.census orelse return .census;
     if (census == .failed) return .end;
@@ -220,7 +223,7 @@ const world = struct {
 
     /// Applies each effect as the script says, resuming once after `checked`.
     fn run(script: Script) !Trace {
-        var trace: Trace = .{ .facts = .{ .mode = script.mode, .adopted = script.adopted } };
+        var trace: Trace = .{ .facts = .{ .mode = script.mode, .discovered = if (script.adopted) release else null } };
         while (true) {
             const effect = next(trace.facts);
             try std.testing.expect(trace.len < trace.effects.len);
@@ -286,10 +289,11 @@ const world = struct {
 
 test "SH-72 a run observes the selection, then the release, then the Hosts" {
     try world.each({}, struct {
-        fn visit(_: void, script: world.Script, _: ?std.math.Order) !void {
+        fn visit(_: void, script: world.Script, ordered: ?std.math.Order) !void {
             const trace = try world.run(script);
+            const adopts = script.adopted and (ordered == null or ordered.? == .lt);
             // The check's effects, cut after the first that fails.
-            const observations = [_]Effect{ .inspect_selection, .{ .release = if (script.adopted) .adopt else .discover }, .census };
+            const observations = [_]Effect{ .inspect_selection, .{ .release = if (adopts) .adopt else .discover }, .census };
             var expected = observations.len;
             var stopped = false;
             for (observations, 0..) |effect, at| if (script.failure) |failure| if (failure[0] == world.kindOf(effect)) {
@@ -307,11 +311,11 @@ test "SH-72 a run observes the selection, then the release, then the Hosts" {
                 try std.testing.expectEqual(Effect.checked, trace.effects[expected]);
                 try std.testing.expect(exit(trace.facts) != .check_failed);
             }
-            // The release is read once, and not at all when it was handed over.
+            // A handed-over candidate is refreshed if it cannot improve the selected release.
             var reads: usize = 0;
             for (trace.effects[0..trace.len]) |effect| if (effect == .release) {
                 reads += 1;
-                try std.testing.expectEqual(script.adopted, effect.release == .adopt);
+                try std.testing.expectEqual(adopts, effect.release == .adopt);
             };
             try std.testing.expect(reads <= 1);
             try std.testing.expectEqual(@as(usize, 1), world.count(&trace, .inspect_selection));
