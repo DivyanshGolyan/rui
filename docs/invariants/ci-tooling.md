@@ -132,3 +132,4 @@ Existing owner names in CI-30–CI-65 identify current tests, not a claim that e
 | Id | Level | Invariant | Seam | Owner test | Source |
 | --- | --- | --- | --- | --- | --- |
 | CI-97 | Module | A successful unit shard reports its five slowest completed tests by observed duration, while a failed shard retains its existing failure attribution. | `store_shards.report` over completed result records | `StoreTimingReportTest.test_ci_97_only_successful_shards_report_slowest_completed_tests` in `tests/ci/test_store_shards_timing.py` | tests/ci/store_shards.py (`TerminalTimes`, `report`) |
+| CI-98 | Module | The SQL collector reports its compile-step summary while retaining all collected records and failing on a failed build. | `rsql_table.collect` through a controlled compiler command | `CollectorSummaryTest.test_ci_98_collector_reports_summary_and_preserves_records` in `tests/ci/test_rsql_collector_summary.py` | tests/ci/rsql_table.py (`collect`) |
