@@ -450,9 +450,10 @@ const Parser = struct {
 
     fn connection(self: *Parser, text: []const u8) Error!Connection {
         if (text.len > max_document_bytes) return self.refuse(.too_large, "");
-        if (try self.duplicateKey(text)) |key| return self.refuse(.duplicate_key, key);
-        const root = std.json.parseFromSliceLeaky(std.json.Value, self.arena, text, .{}) catch |err| switch (err) {
+        // The JSON owner refuses a repeated key, the same rule host_settings applies.
+        const root = std.json.parseFromSliceLeaky(std.json.Value, self.arena, text, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.DuplicateField => return self.refuse(.duplicate_key, ""),
             else => return self.refuse(.malformed_json, ""),
         };
         const object = try self.objectOf(root, "");
@@ -467,54 +468,6 @@ const Parser = struct {
             .formats = try self.listOf(Endpoint, try self.required(object, "formats"), "formats", endpoint),
             .assign = try self.listOf(Assignment, try self.required(object, "assign"), "assign", assignment),
             .models = try self.models(try self.required(object, "models")),
-        };
-    }
-
-    /// The first key an object in the document names twice, if any. The
-    /// JSON parser keeps the last of two equal keys, so the document is read
-    /// once more here to refuse the duplicate.
-    fn duplicateKey(self: *Parser, text: []const u8) Error!?[]const u8 {
-        var scanner: std.json.Scanner = .initCompleteInput(self.arena, text);
-        defer scanner.deinit();
-        return self.skipValue(&scanner, try self.nextToken(&scanner));
-    }
-
-    fn skipValue(self: *Parser, scanner: *std.json.Scanner, token: std.json.Token) Error!?[]const u8 {
-        switch (token) {
-            .object_begin => {
-                var seen = std.StringHashMap(void).init(self.arena);
-                while (true) {
-                    const key_token = try self.nextToken(scanner);
-                    if (std.meta.activeTag(key_token) == .object_end) return null;
-                    const key = Parser.tokenText(key_token) orelse return self.refuse(.malformed_json, "");
-                    if ((try seen.getOrPut(key)).found_existing) return key;
-                    if (try self.skipValue(scanner, try self.nextToken(scanner))) |dup| return dup;
-                }
-            },
-            .array_begin => {
-                while (true) {
-                    const item = try self.nextToken(scanner);
-                    if (std.meta.activeTag(item) == .array_end) return null;
-                    if (try self.skipValue(scanner, item)) |dup| return dup;
-                }
-            },
-            .string, .allocated_string, .number, .allocated_number, .true, .false, .null => return null,
-            else => return self.refuse(.malformed_json, ""),
-        }
-    }
-
-    fn tokenText(token: std.json.Token) ?[]const u8 {
-        return switch (token) {
-            .string => |text| text,
-            .allocated_string => |text| text,
-            else => null,
-        };
-    }
-
-    fn nextToken(self: *Parser, scanner: *std.json.Scanner) Error!std.json.Token {
-        return scanner.nextAllocMax(self.arena, .alloc_always, max_document_bytes) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return self.refuse(.malformed_json, ""),
         };
     }
 
@@ -874,7 +827,7 @@ test "parse refuses each malformed field with its reason and field" {
         .{ .from = "\"base_url\": \"https://gateway.example/v1\",", .to = "", .reason = .missing_field, .field = "base_url" },
         .{ .from = "\"base_url\": \"https://gateway.example/v1\"", .to = "\"base_url\": 7", .reason = .wrong_type, .field = "base_url" },
         .{ .from = "\"headers\": [],", .to = "\"headers\": [], \"extra\": 1,", .reason = .unknown_field, .field = "extra" },
-        .{ .from = "\"assign\": [],", .to = "\"assign\": [], \"assign\": [],", .reason = .duplicate_key, .field = "assign" },
+        .{ .from = "\"assign\": [],", .to = "\"assign\": [], \"assign\": [],", .reason = .duplicate_key, .field = "" },
         .{ .from = "\"models\": {\"list\": \"openai\"}", .to = "\"models\": {", .reason = .malformed_json, .field = "" },
         .{ .from = "\"placement\": \"bearer\"", .to = "\"placement\": \"bearer\", \"client_id\": \"x\"", .reason = .unknown_field, .field = "client_id" },
         .{ .from = "\"source\": {\"kind\": \"saved\"}", .to = "\"source\": {\"kind\": \"saved\", \"path\": \"/x\"}", .reason = .unknown_field, .field = "path" },
