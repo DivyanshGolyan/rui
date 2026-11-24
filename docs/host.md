@@ -16,6 +16,7 @@ rui host start
 
 `rui` starts a Host when it needs one.
 `host start` starts one explicitly, or connects to a running Host without changing its settings.
+If an older managed Host owns the Store, the selected installed client can replace it and resume saved work after checking its identity and settings.
 It prints where the diagnostic log is.
 
 If startup times out, run `host status` and read the diagnostic log.
@@ -46,13 +47,13 @@ rui host restart --all
 ```
 
 `--all` is required; this command does not accept `--store` yet.
-It discovers this user's running Hosts through private runtime sockets and same-user process hints, authenticates each resolved socket peer, and restarts eligible Hosts one at a time on the selected installed build, preserving capacity and saved work. Process hints are not stop authority; saved DIR placement finds nested MySQL and moved interfaces without a registry.
+It discovers this user's running Hosts through private runtime sockets and same-user process hints, authenticates each resolved socket peer, and restarts eligible Hosts one at a time on the selected installed build, preserving capacity and saved work. Process hints are not stop authority; saved DIR placement finds nested MySQL and moved interfaces without a registry. Discovery can also identify older Hosts at the legacy flat socket and hand them over through the same authenticated activation path.
 Each line names the Host directory (independently of its Store identity) and reports restarted, already current, left running with a reason, or failure with recovery instructions; a target build that cannot be resolved or checked fails before any stop, and the Host keeps running; a total follows.
 Socket discovery retries transient connection refusal for up to 200 ms inside its observation deadline.
 A standard SQLite Host serves from its private interface directory `/tmp/rui-<uid>/<hash>/`, which holds `rui.sock`; it holds an exclusive lock on that directory for its whole life, and no routing hint file exists.
 For an unreachable socket, discovery drops it silently only when a fresh look finds its interface directory's lock free, and removes that dead endpoint.
 A busy directory lock, a socket node Rui did not make, or a connected unreadable peer is reported as unconfirmed and counted as failed, with the socket path and recovery advice. The directory lock is liveness state, not activation authority.
-It reclaims an endpoint only when its interface directory's lock is free, and never infers absence from failed transport.
+It reclaims a current endpoint only when its interface directory's lock is free, and never infers absence from failed transport. Legacy flat sockets are read only and are never reclaimed by the new build.
 No running Hosts prints `No running Hosts.` and starts nothing.
 A newer Host is not downgraded; unsupported, application-owned and unconfirmed-ownership launches are left running with a reason.
 Success requires readiness on DIR's socket, a different instance from the stopped Host, and the answering managed executable's target release version. A concurrent starter of that version may win; it need not be our child or the selected executable path. If only the target client can read the new wire, its public status is bracketed by authenticated peer generations and the result advises using that client; incompatible transport alone is never success.
@@ -223,6 +224,16 @@ The endpoint comes from the [Host settings](#save-host-settings); a running Host
 An invalid one stops a Host explicitly configured to serve `openai`; with automatic provider selection, the Host reports it and starts serving its ChatGPT sign-ins only.
 Sessions of a provider the Host does not serve wait until a Host that serves it starts.
 Without a `providers` setting, every start path uses automatic provider selection: device-code sign-in is served even while signed out, browser sign-in when its credential is usable, and OpenAI when its key is usable. To serve no model providers, pass `--set 'providers={}'`.
+
+## Key connections
+
+A settings document may name key connections in a `connections` list. Each entry is served under its own `name` (lowercase letters, digits and `-`, at most 16 bytes) at its own `base_url`, with the key its `credential` source names: a private `file`, an `env` variable, or the connection's saved key file (`RUI_<NAME>_KEY_FILE`, else `HOME/.config/rui/<name>.key`). The Host reads each key once at start, as it does for `providers`; the key bytes never enter the settings document. Only one shape is served: a key, one Responses format, and no extra headers, refusal rules or command sources. Other shapes are refused by name at start.
+
+A document with no `connections` list adds no connection: OpenAI is served, or not, by the `providers` selection above.
+
+`rui auth login openai` saves its key as the connection named `openai` in the document's `connections` list, with the key in a private file beside the document. It leaves the other connections as they are. A connection named `openai` takes the place of the built-in `openai` provider, with its own endpoint, format and tools.
+
+This version serves a connection only under a built-in name (`codex`, `openai` or `chatgpt`), where it replaces that provider's entry; a connection under any other name is refused by name at start. The model picker does not list a connection's models yet.
 The [Host reference](contracts/host.md#platforms-and-server-lifetime) states the startup and shutdown guarantees.
 
 ## Export a failed model response

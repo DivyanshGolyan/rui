@@ -1219,7 +1219,7 @@ def read_image_cases(state, processes, endpoints):
         configured = command(
             "session", "configure", "--store", store, "--workspace", workspace,
             "--record", state / f"image-{label}-config.json", "--key", f"image-{label}-config",
-            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "read_image",
+            "--connection", "codex", "--model", "gpt-6-sol", "--tools", "read_image",
             "--permission-mode", "bypass",
         )
         assert configured["answer"]["status"] == "accepted", configured
@@ -1288,7 +1288,7 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
 
     def config(store, key, model, provider="codex", session=None, instructions=baseline):
         args = ["session", "configure", "--store", store, "--record", state / (key + ".json"),
-                "--key", key, "--workspace", workspace, "--provider", provider, "--model", model,
+                "--key", key, "--workspace", workspace, "--connection", provider, "--model", model,
                 "--tools", "none", "--permission-mode", "bypass", "--reasoning-effort", "low",
                 "--instructions", "-"]
         if session is not None:

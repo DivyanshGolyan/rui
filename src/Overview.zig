@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const session_list = @import("session_list.zig");
 const model_catalog = @import("model_catalog.zig");
 const vaxis = @import("vaxis");
@@ -29,6 +30,7 @@ const app_events = @import("testing/app_events.zig");
 const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
 const UpgradeJob = @import("UpgradeJob.zig");
+const ReleaseWatch = @import("ReleaseWatch.zig");
 const session_upgrade = @import("session_upgrade.zig");
 const upgrade_status = @import("upgrade_status.zig");
 const session_chrome = @import("session_chrome.zig");
@@ -368,6 +370,7 @@ retired: std.ArrayList(struct { left: Left, frame: u64 }) = .empty,
 interrupted: *client.Cancellation,
 worker: ClientTask = .{},
 upgrade_job: UpgradeJob = .{},
+release_watch: ReleaseWatch = .{},
 host_process: ?struct { started_at: u64, pid: i32 } = null,
 memory_override: ?view.Memory,
 host_observation: HostObservation = .unread,
@@ -577,7 +580,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 .host_unavailable = hostHeld(self),
             } });
             ctx.redraw = ctx.redraw or presentation.redraw;
-            if (!self.state.upgrading()) try self.appDiscoverUpgrade(ctx);
+            try self.appReleaseWatch(ctx);
             const launch = try self.eventResult(.launch_poll);
             try self.appNext(ctx, launch.next);
             ctx.redraw = ctx.redraw or launch.redraw;
@@ -790,27 +793,16 @@ fn appCopy(raw: *anyopaque, file: std.Io.File, start: u64, length: u64) !void {
     try app.vx.copyToSystemClipboard(app.tty.writer(), bytes, self.init.gpa);
 }
 
-fn appDiscoverUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
-    const job = &self.upgrade_job;
-    if (!job.started and !job.discovery_attempted) job.discover(self.init) catch {};
-    if (!job.discovering() or !job.started) return;
-    if (try job.advance()) {
-        const available = job.availability();
-        if (!std.meta.eql(available, self.state.upgrade.available)) {
-            _ = try self.event(.{ .available_upgrade = available });
-            ctx.redraw = true;
-        }
+fn appReleaseWatch(self: *Self, ctx: *vxfw.EventContext) !void {
+    const available = self.release_watch.poll(self.init, self.animationMs());
+    if (!std.meta.eql(available, self.state.upgrade.available)) {
+        _ = try self.event(.{ .available_upgrade = available });
+        ctx.redraw = true;
     }
 }
 
 fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
     const job = &self.upgrade_job;
-    if (job.discovering()) {
-        const cancelled = self.state.upgrade.run.? == .cancelling;
-        if (!try job.retireDiscovery(cancelled)) return;
-        if (cancelled) job.cancel();
-        _ = try self.event(.{ .available_upgrade = null });
-    }
     if (!job.started and try self.quiesceUpgrade() and self.conversationSettled()) job.begin(self.init, self.options.store) catch {};
     const done = job.started and try job.advance();
     const stands = job.status();
@@ -853,10 +845,6 @@ fn conversationSettled(self: *const Self) bool {
 fn keepUpgrade(self: *Self) !void {
     const job = &self.upgrade_job;
     if (!job.started) return;
-    if (job.discovering()) {
-        job.deinit();
-        return;
-    }
     self.upgrade_guidance = self.upgrade_guidance or job.hasGuidance();
     if (self.relaunch_build) |build| self.init.gpa.free(build);
     self.relaunch_build = null;
@@ -893,6 +881,7 @@ fn finishApp(self: *Self, ended: anyerror!void) !?Relaunch {
         self.retired.deinit(self.init.gpa);
     }
     self.upgrade_job.settle();
+    self.release_watch.settle();
     const kept = self.keepUpgrade();
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
@@ -1319,6 +1308,9 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
         fn run(raw: *anyopaque) ?upgrade_status.Run {
             return owner(raw).state.upgrade.run;
         }
+        fn available(raw: *anyopaque) ?upgrade_status.Version {
+            return owner(raw).state.upgrade.available;
+        }
         fn signIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
             try owner(raw).openSignIn(ctx);
         }
@@ -1326,7 +1318,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
             return owner(raw).caps;
         }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .available = Callbacks.available, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue };
 }
 
 fn destroy(self: *Self) void {
@@ -1335,6 +1327,7 @@ fn destroy(self: *Self) void {
     self.session_drafts.deinit(self.init.gpa);
     std.debug.assert(self.worker.thread == null);
     self.upgrade_job.deinit();
+    self.release_watch.deinit();
     if (self.relaunch_build) |build| self.init.gpa.free(build);
     if (self.upgrade_report) |*report| report.deinit();
     self.job.deinit(self.init.gpa);
@@ -1382,7 +1375,6 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .stop => |reference| self.queue(.{ .stop = reference }),
         .cancel_upgrade => {
             self.upgrade_job.cancel();
-            if (self.upgrade_job.discovering()) _ = try self.event(.{ .upgrade = .cancelling });
         },
         .archive => |request| self.queue(.{ .archive = request }),
         .pin => |request| self.queue(.{ .pin = request }),
@@ -1636,7 +1628,7 @@ fn creationInput(self: *const Self, snapshot: *const CreationSnapshot) !configur
         .session = .create,
         .require_model = true,
         .workspace = .{ .present = true, .value = self.options.workspace },
-        .provider = if (binding.*) |value| .{ .present = true, .value = @tagName(value.provider) } else .{},
+        .provider = if (binding.*) |*value| .{ .present = true, .value = value.provider.slice() } else .{},
         .model = if (binding.*) |*value| .{ .present = true, .value = value.model.slice() } else .{},
     };
     configuration.applySavedCreation(saved.effort, saved.permission);
@@ -2235,8 +2227,8 @@ const fake_operations: Operations = .{
             errdefer reply.deinit();
             try reply.writer.writeAll(protocol.model_list_reply.head);
             try model_list.writeProviders(&reply.writer, model_catalog.shipped, &.{
-                .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\n" } } },
-                .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
+                .{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\n" } } },
+                .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
             });
             try reply.writer.writeAll(protocol.model_list_reply.tail);
             return reply.toOwnedSlice();
@@ -4023,7 +4015,17 @@ test "Host recovery derives launch progress from job custody without copying rea
     try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
 }
 
-test "Host recovery renders the launch result cause without confusing failure and reachability" {
+test "SUI-133 Host recovery renders the launch result cause without confusing failure and reachability" {
+    const Handover = struct {
+        fn summary(outcome: @import("host_activation.zig").Outcome) HostLaunch {
+            return selectedSummary(.{ .outcome = outcome });
+        }
+        fn selectedSummary(selected: @import("host_activation.zig").Selected) HostLaunch {
+            var result: @import("host_launch.zig").Result = .failed(.setup, error.HostRestartFailed);
+            result.outcome.failed.detail = .{ .handover = selected };
+            return result.summary();
+        }
+    };
     const Case = struct { launch: HostLaunch, words: []const u8, retry: bool = false };
     const cases = [_]Case{
         .{ .launch = .{ .ready = {} }, .words = "" },
@@ -4034,6 +4036,13 @@ test "Host recovery renders the launch result cause without confusing failure an
         .{ .launch = .{ .failed = .{ .kind = .incompatible, .err = error.IncompatibleHost } }, .words = "different Rui version" },
         .{ .launch = .{ .failed = .{ .kind = .provider_unserved, .err = error.HostModelUnavailable } }, .words = "does not serve this provider" },
         .{ .launch = .{ .failed = .{ .kind = .store_format, .err = error.HostStartupFailed } }, .words = "needs a compatible Rui" },
+        .{ .launch = Handover.summary(.{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "invalid") } }), .words = "settings refused", .retry = true },
+        .{ .launch = Handover.summary(.{ .failed = .stopping }), .words = "stop failed", .retry = true },
+        .{ .launch = Handover.summary(.{ .unconfirmed = .awaiting_retirement }), .words = "retire unconfirmed", .retry = true },
+        .{ .launch = Handover.summary(.{ .unconfirmed = .starting }), .words = "start unconfirmed", .retry = true },
+        .{ .launch = Handover.summary(.{ .unconfirmed = .verifying }), .words = "verify unconfirmed", .retry = true },
+        .{ .launch = Handover.selectedSummary(.{ .failed = .of(.observation, error.OutOfMemory) }), .words = "observation failed", .retry = true },
+        .{ .launch = Handover.selectedSummary(.{ .failed = .of(.selection, error.NoVerifiedRelease) }), .words = "build unverified", .retry = true },
     };
     for (cases) |case| for ([_]HostRecovery.Availability{ .ready, .stopping, .stopped }) |after| {
         errdefer std.debug.print("after={s} words={s}\n", .{ @tagName(after), case.words });
@@ -6330,7 +6339,7 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                         },
                         .result = .{
                             .installation = if (outcome == .unchanged) .{ .unchanged = receipt } else .{ .installed = receipt },
-                            .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = try a.dupe(@import("host_restart_all.zig").Entry, &.{.{ .socket = try a.dupe(u8, ""), .store = try a.dupe(u8, "/store"), .state = .{ .outcome = switch (outcome) {
+                            .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = try a.dupe(@import("host_restart_report.zig").Entry, &.{.{ .socket = try a.dupe(u8, ""), .store = try a.dupe(u8, "/store"), .state = .{ .outcome = switch (outcome) {
                                 .unchanged => .not_needed,
                                 .compatible => .{ .ready = .{ .instance = @splat(1), .pid = 42 } },
                                 .incompatible => .{ .client_incompatible = 42 },
@@ -6450,7 +6459,7 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         const rig = try openOverview();
         defer rig.close();
         const overview = rig.overview;
-        try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "future-chat\ngpt-5.5\n" } } }}) } }) == null);
+        try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "future-chat\ngpt-5.5\n" } } }}) } }) == null);
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try overview.root.openSettings(&ctx);
@@ -6463,7 +6472,7 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         if (release) {
             try std.testing.expect(try overview.event(.leave) == null);
         } else {
-            try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }}) } }) == null);
+            try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }}) } }) == null);
         }
         try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
         try std.testing.expect(!page.hasChoice());
@@ -6533,8 +6542,8 @@ fn sui4ModelFilter() !void {
         try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
         _ = try overview.event(.{ .input = .{ .key = .{ .action = .first } } });
         try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{
-            .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
-            .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
+            .{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
+            .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
         }) } }) == null);
         try std.testing.expect(try rig.press("kept draft") == null);
         var ctx = rig.context();
@@ -6954,7 +6963,7 @@ test "Sign-in completion applies the core default and restores only a visible fo
             try std.testing.expect(std.mem.indexOf(u8, text, "couldn't save default") != null);
             try std.testing.expect(std.mem.indexOfAny(u8, text, "\r\n\x1b") == null);
         }
-        try std.testing.expectEqual(protocol.Provider.openai, overview.state.default.?.provider);
+        try std.testing.expectEqualStrings("openai", overview.state.default.?.provider.slice());
         try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
         const next_creation = overview.creationSnapshot(overview.state.default);
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), (try next_creation.settings).effort);
@@ -7569,7 +7578,7 @@ const EmptySessionOwner = struct {
             .result = .{
                 .status = true,
                 .work = .{ .read_version = .{ .instance = @splat(1), .generation = generation }, .work = row.work.core() },
-                .line = .{ .read = .{ .revision = row.revision, .end = row.end }, .model = row.model, .provider = .codex, .folder = row.workspace, .effort = effort },
+                .line = .{ .read = .{ .revision = row.revision, .end = row.end }, .model = row.model, .provider = view.pn(.codex), .folder = row.workspace, .effort = effort },
                 .hint = .absent,
                 .cursor = .{ .position = row.end },
                 .at_start = true,
@@ -8129,7 +8138,7 @@ fn checkCreationPreferenceFailure() !void {
             defer file.close(std.testing.io);
             try file.writePositionalAll(std.testing.io, bytes, 0);
         }
-        const valid = "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=high\npermission_mode=bypass\n";
+        const valid = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=high\npermission_mode=bypass\n";
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -8577,7 +8586,7 @@ test "overview redraw deadline includes quota header with failed row off screen"
             row.work.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = test_now_s + 200 } };
             try row.work.state.failed.code.set("provider_quota");
             row.work = fixtureSessionWork(row.work.core());
-            row.provider = .codex;
+            row.provider = view.pn(.codex);
             return failure;
         }
     };
@@ -8613,75 +8622,6 @@ test "overview redraw deadline includes quota header with failed row off screen"
     var changed = try rig.shown(140, 8);
     defer changed.deinit();
     try std.testing.expect(std.mem.indexOf(u8, try changed.text(), "Quota used up. Resets in 2m.") != null);
-}
-
-test "background discovery reaches the production version widget without requesting an upgrade" {
-    for (0..3) |case| {
-        const discovery_failed = case == 1;
-        const running_version = @import("release_candidate.zig").Version.parse(@import("transport_options").version) catch null;
-        const newer_candidate = if (running_version) |running| running.schema < 999 or (running.schema == 999 and running.patch < 2) else false;
-        const offers_update = !discovery_failed and newer_candidate;
-        const rig = try openOverview();
-        defer rig.close();
-        const overview = rig.overview;
-        const job = &overview.upgrade_job;
-        job.* = .{ .init = rig.init, .allocator = std.testing.allocator, .started = true, .discovery_attempted = true, .operation = .discover };
-        const Worker = struct {
-            var release: std.atomic.Value(bool) = .init(true);
-            fn run(raw: *anyopaque, _: *ClientTask) !void {
-                const owner: *UpgradeJob = @ptrCast(@alignCast(raw));
-                try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &release, test_poll.isSet);
-                owner.candidate = try @import("release_candidate.zig").fromEffectiveUrl(owner.allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64");
-            }
-        };
-        Worker.release.store(case != 2, .release);
-        defer Worker.release.store(true, .release);
-        try job.task.start(rig.init.io, job, Worker.run);
-        if (case == 2) {
-            var waiting_ctx = rig.context();
-            defer waiting_ctx.cmds.deinit(std.testing.allocator);
-            try overview.startUpgrade();
-            _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .idle, .input = .cancel_upgrade } });
-            try overview.appUpgrade(&waiting_ctx);
-            try std.testing.expect(job.discovering() and job.task.thread != null);
-            try std.testing.expectEqual(upgrade_status.Run.cancelling, overview.state.upgrade.run.?);
-            Worker.release.store(true, .release);
-            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
-            try overview.appUpgrade(&waiting_ctx);
-            try std.testing.expectEqual(upgrade_status.Ended.cancelled, overview.state.upgrade.run.?.ended.how);
-            try std.testing.expect(job.discovery_attempted and !job.started and !job.cancelling and !job.discovering());
-            continue;
-        }
-        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
-        if (discovery_failed) job.failure = error.ConnectionRefused;
-        var ctx = rig.context();
-        defer ctx.cmds.deinit(std.testing.allocator);
-        try overview.appDiscoverUpgrade(&ctx);
-        try std.testing.expect(!overview.state.upgrading());
-        try std.testing.expect(overview.state.upgrade.run == null);
-        try std.testing.expectEqual(offers_update, overview.state.upgrade.available != null);
-        try std.testing.expect(job.finished and job.task.thread == null and job.result == null and job.checked == null);
-        var shown = try rig.shown(80, 24);
-        defer shown.deinit();
-        try std.testing.expectEqualDeep(overview.state.upgrade.available, overview.app_settings_line.available);
-        const settings_row: u16 = for (0..24) |row| {
-            if (std.mem.startsWith(u8, try shown.line(@intCast(row)), "     Settings")) break @intCast(row);
-        } else return error.TestExpectedSettingsRow;
-        const bottom = try shown.line(settings_row);
-        try std.testing.expectEqual(offers_update, std.mem.indexOf(u8, bottom, "Update to 0.999.2") != null);
-        if (!offers_update) try std.testing.expect(std.mem.indexOf(u8, bottom, @import("transport_options").version) == null);
-        try std.testing.expect(std.mem.indexOf(u8, bottom, "Update failed") == null);
-        try overview.appDiscoverUpgrade(&ctx);
-        try std.testing.expect(job.task.thread == null);
-        try overview.startUpgrade();
-        _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .idle, .input = .cancel_upgrade } });
-        try std.testing.expectEqual(upgrade_status.Run.cancelling, overview.state.upgrade.run.?);
-        try overview.appUpgrade(&ctx);
-        try std.testing.expectEqual(upgrade_status.Ended.cancelled, overview.state.upgrade.run.?.ended.how);
-        try std.testing.expect(job.discovery_attempted and !job.started and !job.cancelling and !job.discovering());
-        try overview.appDiscoverUpgrade(&ctx);
-        try std.testing.expect(!job.started);
-    }
 }
 
 test "upgrade attempt presentation domain ends synthetic pause and publishing without lifting recovery holds" {
@@ -8864,7 +8804,7 @@ test "named launch waits for sign-in before choosing its binding" {
             row.* = .{ .created_at = 10, .read_version = page.since, .work = .{ .state = .{ .idle = .{ .since = test_now_s } } } };
             row.reference.set(listed_references[0]) catch unreachable;
             row.workspace.set("/work") catch unreachable;
-            row.provider = .codex;
+            row.provider = view.pn(.codex);
             row.model.set("gpt-6-luna") catch unreachable;
             return null;
         }

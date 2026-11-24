@@ -268,7 +268,7 @@ def assert_configure_defaults(root, store, env):
 
     module = (DEFAULTS.recommended_model, DEFAULTS.tools.split(","), DEFAULTS.permission_mode)
     assert settings(configure()) == module
-    addressed = configure("--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")
+    addressed = configure("--workspace", root, "--connection", "codex", "--model", "gpt-6-sol")
     assert settings(addressed) == ("gpt-6-sol", *module[1:])
     configure("--session", addressed, "--tools", "none", "--permission-mode", "ask")
     configure("--session", addressed, "--compaction-trigger", "12345")
@@ -294,7 +294,7 @@ def managed_descriptor_rejection(store, env, limit):
     assert inherited in os_semantics.INHERITED_DESCRIPTORS, fields
     fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
     authentication = os_semantics.AUTHENTICATION_DESCRIPTORS
-    execution, clients = (DEFAULT_ACTIVE_CAPACITY - 1) * 5 + 10, INTAKE * 5 + 3
+    execution, clients = (DEFAULT_ACTIVE_CAPACITY - 1) * 5 + 10, INTAKE * os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS + 3
     expected = dict(active_capacity=DEFAULT_ACTIVE_CAPACITY, soft_limit=limit, inherited=inherited,
                     fixed_host=fixed_host, clients=clients, execution=execution,
                     authentication=authentication, self_wake=2, lines=LINE_DESCRIPTORS,
@@ -308,10 +308,10 @@ def managed_descriptor_rejection(store, env, limit):
 
 def startup_limits(root, env):
     required = managed_descriptor_rejection(root / "hard-256", env, 256)
-    minimum = required - 5 * (INTAKE - 10)
+    minimum = required - os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS * (INTAKE - 10)
     observed = managed_descriptor_rejection(root / "hard-below-minimum", env, minimum - 1)
     if observed != required:
-        required, minimum = observed, observed - 5 * (INTAKE - 10)
+        required, minimum = observed, observed - os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS * (INTAKE - 10)
         assert managed_descriptor_rejection(root / "hard-below-minimum-again", env, minimum - 1) == required
     print(f"default capacity refused below {minimum} descriptors (default intake needs {required})", flush=True)
     for name, hard in (("soft-256", None), ("linux-1024", 1024), ("hard-minimum", minimum)):
@@ -328,7 +328,7 @@ def startup_limits(root, env):
             assert json.loads(started.stdout) == reported, (started, reported)
             capacity = int(reported["intake_capacity"])
             if hard == 1024:
-                expected_capacity = INTAKE - max(0, (required - 1024 + 4) // 5)
+                expected_capacity = INTAKE - max(0, -(-(required - 1024) // os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS))
                 assert capacity == expected_capacity and reported["descriptor_limit"] == "1024", reported
             elif hard:
                 assert capacity == 10 and reported["descriptor_limit"] == str(hard), reported
@@ -548,7 +548,7 @@ def moved_store_identity(root, env, *, terminal=False):
             selected = original if alias else moved
             for command in (("interactive",) if terminal else ("serve", "start")):
                 if command == "interactive":
-                    with terminal_process([RUI, "--store", selected, "--provider", "codex"], env=interactive_env, cwd=root) as (caller, master):
+                    with terminal_process([RUI, "--store", selected, "--connection", "codex"], env=interactive_env, cwd=root) as (caller, master):
                         output = bytearray()
                         code = wait_for_terminal_exit(caller, master, output, time.monotonic() + COMMAND_TIMEOUT)
                         diagnostic = output.decode().replace("\r\n", "\n")
@@ -715,7 +715,7 @@ def new_host_provider_policy(root, env):
                             info = json.loads(observed.stdout)
                             return info if info["status"] == "ready" else None
                         info = wait_for(ready, f"{state} {selection} {door} Host readiness", timeout=20)
-                        assert info["capabilities"]["providers"] == expected, (state, selection, door, info)
+                        assert host_process.capability_routes(info["capabilities"]) == expected, (state, selection, door, info)
                         assert not missing.exists(), "signed-out startup created credentials"
                         if expected["chatgpt"] != "unserved" or expected["openai"] != "unserved":
                             def intercepted():
@@ -931,7 +931,7 @@ def frozen_settings_launches(root, env):
 
             try:
                 ready = held_start(directory, arguments, mutate)
-                assert ready["capabilities"]["providers"] == expected, (door, mutation, policy, ready)
+                assert host_process.capability_routes(ready["capabilities"]) == expected, (door, mutation, policy, ready)
                 # Saved document bytes also locate a later DIR client. Restore
                 # them only AFTER launch returned positive A readiness with B
                 # still installed; explicit and assignment sources stay B.
@@ -939,7 +939,7 @@ def frozen_settings_launches(root, env):
                     source.write_bytes(admitted)
                 observed = status(directory, selected_env)
                 assert instance(observed, 2) == ready["instance"]
-                assert observed["capabilities"]["providers"] == expected, observed
+                assert host_process.capability_routes(observed["capabilities"]) == expected, observed
                 assert (directory / "rui.sqlite3").is_file()
                 checked += 1
             finally:
@@ -966,7 +966,7 @@ def frozen_settings_launches(root, env):
 
         try:
             ready = held_start(directory, [], move_source)
-            assert ready["store"] == str(data_a.resolve()) and ready["capabilities"]["providers"] == none, ready
+            assert ready["store"] == str(data_a.resolve()) and host_process.capability_routes(ready["capabilities"]) == none, ready
             assert (data_a / "rui.sqlite3").is_file() and not data_b.exists()
             assert (interface / "rui.sock").is_socket()
             source.write_bytes(admitted)
@@ -1001,7 +1001,7 @@ def frozen_settings_launches(root, env):
         ready = held_start(directory, arguments, remove_presets)
         observed = status(directory, selected_env)
         assert instance(observed, 2) == ready["instance"]
-        assert observed["capabilities"]["providers"] == none, observed
+        assert host_process.capability_routes(observed["capabilities"]) == none, observed
         assert all(not source.exists() for source in sources)
         checked += 1
     finally:
@@ -1137,7 +1137,7 @@ def saved_settings(root, env):
                 record = root / f"{name}-request.json"
                 command = subprocess.run([RUI, "session", "start",
                                           "--record", str(record), "--key", "placement-start",
-                                          "--provider", "codex", "--model", "gpt-5.5", "--workspace", str(root)],
+                                          "--connection", "codex", "--model", "gpt-5.5", "--workspace", str(root)],
                                          env=selected_env, input="Saved placement evidence", text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
                 assert command.returncode == 0, command
                 receipt = json.loads(command.stdout)
@@ -1150,7 +1150,7 @@ def saved_settings(root, env):
                                         env=selected_env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
                 assert replay.returncode == 0, replay
                 configured = subprocess.run([RUI, "session", "configure", "--store", moved, "--workspace", root,
-                                             "--provider", "codex", "--model", "gpt-5.5", "--tools", "none"],
+                                             "--connection", "codex", "--model", "gpt-5.5", "--tools", "none"],
                                             env=selected_env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
                 assert configured.returncode == 0, configured
                 reference = json.loads(configured.stdout)["answer"]["session"]
@@ -1326,7 +1326,7 @@ def saved_settings_served(root, env):
         assert started.returncode == 0, started.stderr
         configured = model_fixture.command(
             "session", "configure", "--store", tls_store, "--record", state / "tls-config.json", "--key", "tls-config",
-            "--workspace", model_fixture.ROOT, "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none")
+            "--workspace", model_fixture.ROOT, "--connection", "codex", "--model", "gpt-6-sol", "--tools", "none")
         assert configured["answer"]["status"] == "accepted", configured
         tls_session = configured["answer"]["session"]
         model_fixture.message(state, tls_store, "tls-message", tls_session, "over-tls")
@@ -1493,7 +1493,7 @@ def host_refusal_receipts(root, env):
     master, slave = open_pty()
     bare = None
     try:
-        bare = spawn([RUI, "--store", directory, "--provider", "codex"], env=selected_env, cwd=root, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        bare = spawn([RUI, "--store", directory, "--connection", "codex"], env=selected_env, cwd=root, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         _, diagnostic = bare.communicate(timeout=COMMAND_TIMEOUT)
         assert bare.returncode == 1 and diagnostic.decode() == child.stderr, (bare.returncode, diagnostic, child)
     finally:
@@ -1628,7 +1628,7 @@ def main():
         try:
             started = run_start(invalid_store, invalid_env)
             assert started.returncode == 0, started.stderr
-            providers = status(invalid_store, invalid_env)["capabilities"]["providers"]
+            providers = host_process.capability_routes(status(invalid_store, invalid_env)["capabilities"])
             assert providers == {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}, providers
         finally:
             forced_crash_cleanup(invalid_store)
@@ -1638,7 +1638,7 @@ def main():
         try:
             started = run_start(openai_store, openai_env, "--set", "providers.openai.endpoint=https://proxy.example/v1/responses")
             assert started.returncode == 0, started.stderr
-            providers = status(openai_store, openai_env)["capabilities"]["providers"]
+            providers = host_process.capability_routes(status(openai_store, openai_env)["capabilities"])
             assert providers["openai"] == "key_file", providers
         finally:
             forced_crash_cleanup(openai_store)
@@ -1790,7 +1790,7 @@ def main():
             assert "Bash commands can run without asking you" not in screen.completed, screen.completed
             assert not list((bare_home / ".config/rui/requests").glob("*.json")), "the overview captured a request"
             assert len(wait_for_processes(bare_store, 1)) == 1
-            assert status(bare_store, bare_env)["capabilities"]["providers"] == {
+            assert host_process.capability_routes(status(bare_store, bare_env)["capabilities"]) == {
                 "codex": "chatgpt_device", "chatgpt": "unserved", "openai": "unserved"}
             os.set_blocking(master, False)
             deadline = time.monotonic() + 5

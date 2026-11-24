@@ -4,6 +4,7 @@ The list bottom has a divider immediately above one pinned row: Settings on the 
 
 ## Sub-features
 
+- Settings Version names an offered release (`0.80.1 · update to 0.80.2`).
 - Hidden current/completed versions, available `Update to <version>`, `Updating…` and retryable `Update failed` without a reason on the bottom row.
 - Separate Settings and update hit targets on the shared row; Settings Version retains the installed version, full failure diagnostic and upgrade entry point.
 - A successfully upgraded conversation keeps its ordinary chat footer without upgrade notices.
@@ -14,7 +15,7 @@ Open Overview. Settings shares the row below the divider with either memory or u
 
 ## Driving it with verify-rui
 
-Frame states: `sidebar-current`, `sidebar-available`, `sidebar-updating`, `sidebar-failure`, `chat-after-upgrade`, `day-sidebar-current`, `day-sidebar-available`, `day-sidebar-updating`, `day-sidebar-failure`, `day-chat-after-upgrade`
+Frame states: `sidebar-current`, `sidebar-available`, `settings-available`, `sidebar-updating`, `sidebar-failure`, `chat-after-upgrade`, `day-sidebar-current`, `day-sidebar-available`, `day-sidebar-updating`, `day-sidebar-failure`, `day-chat-after-upgrade`
 
 Build each pinned revision with `build FULLSHA --upgrade` before capture. This explicitly adds the same-source synthetic release actor and its source and binary hashes to the cached manifest; frames never builds it implicitly. Use the working frames.json as an explicit shared `--scenario` for before/after, selecting these states at `--sizes 140x40,46x30`. Every state gets a private managed installation and production Host, but Upgrade discovery is UID-global: a synthetic HOME does not isolate other Hosts owned by that account. Capture only under a dedicated fixture account such as `rui-s7-sidebar`, setting `VERIFY_RUI_UPGRADE_FIXTURE_USER=rui-s7-sidebar`. The runner refuses root and requires the explicit login name to match its non-root UID. Never use an account with unrelated Rui Hosts. The runner pauses and waits for its ordinary parent Host to retire before the first isolated Upgrade, retires every managed Host after its state, and restores the parent only when subsequent ordinary states need it. These boundaries are recorded in `upgrade-host-lifecycle.jsonl`; a failed Upgrade teardown stops the run rather than admitting another UID-global Upgrade. Only release HTTP responses and the existing provider fixture are synthetic.
 

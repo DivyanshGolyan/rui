@@ -105,7 +105,7 @@ class Chrome:
     def session(self, permission="bypass", model="gpt-6-sol"):
         flags = ("--reasoning-effort", "high") if model == "gpt-6.1-terra" else ()
         reply = json.loads(private_chrome_command(self, "session", "configure", "--store", self.store,
-            "--workspace", self.workspace, "--provider", "codex", "--model", model, "--permission-mode", permission, *flags))
+            "--workspace", self.workspace, "--connection", "codex", "--model", model, "--permission-mode", permission, *flags))
         return reply["answer"]["session"]
 
     def answered(self, session, *inputs):

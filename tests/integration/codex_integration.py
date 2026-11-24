@@ -105,14 +105,14 @@ def run():
         head, listed_body = raw_request(host.rui_ready_fields["socket"], "/v1/model-list", json.dumps({
             "version": host_process.WIRE_VERSION, "kind": "model_list", "store": str(store),
         }).encode())
-        listed = json.loads(listed_body)["providers"]
+        listed = json.loads(listed_body)["connections"]
         assert b" 200 " in head and len(listed) == 1, (head, listed)
-        assert listed[0]["provider"] == "codex" and listed[0]["source"] == "catalog", listed
+        assert listed[0]["connection"] == "codex" and listed[0]["source"] == "catalog", listed
         assert listed[0]["models"] and all(model["known"] for model in listed[0]["models"]), listed
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
             "--key", "configure", "--workspace", fixture.ROOT,
-            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash",
+            "--connection", "codex", "--model", "gpt-6-sol", "--tools", "bash",
             "--permission-mode", "ask", "--instructions", "-",
             input="Use the approved tool result.",
         )
@@ -180,7 +180,7 @@ def run():
         guard = fixture.command(
             "session", "configure", "--store", store, "--record", state / "effort-guard.json",
             "--key", "effort-guard", "--workspace", fixture.ROOT,
-            "--provider", "codex", "--model", "gpt-6.1-sol", "--tools", "bash",
+            "--connection", "codex", "--model", "gpt-6.1-sol", "--tools", "bash",
             "--reasoning-effort", "high", "--permission-mode", "ask",
         )
         assert guard["answer"]["status"] == "accepted", guard
@@ -256,7 +256,7 @@ def run():
         configured = fixture.command(
             "session", "configure", "--store", stop_store, "--record", state / "stop-config.json",
             "--key", "stop-config", "--workspace", fixture.ROOT,
-            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none",
+            "--connection", "codex", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configured["answer"]["status"] == "accepted"
         stopped_session = configured["answer"]["session"]
@@ -283,7 +283,7 @@ def run():
         configured = fixture.command(
             "session", "configure", "--store", stop_store, "--record", state / "handoff-config.json",
             "--key", "handoff-config", "--workspace", fixture.ROOT,
-            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none",
+            "--connection", "codex", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configured["answer"]["status"] == "accepted"
         handoff_session = configured["answer"]["session"]
@@ -308,7 +308,7 @@ def run():
         configured = fixture.command(
             "session", "configure", "--store", stop_store,
             "--record", state / "schema-config.json", "--key", "schema-config",
-            "--workspace", fixture.ROOT, "--provider", "codex",
+            "--workspace", fixture.ROOT, "--connection", "codex",
             "--model", "gpt-6-sol", "--tools", "none", "--output-schema", schema,
         )
         assert configured["answer"]["status"] == "accepted"
@@ -335,7 +335,7 @@ def run():
             configured = fixture.command(
                 "session", "configure", "--store", stop_store, "--record", state / f"{key}-config.json",
                 "--key", key + "-config", "--workspace", fixture.ROOT,
-                "--provider", "codex", "--model", model, "--tools", "bash" if index % 2 else "none",
+                "--connection", "codex", "--model", model, "--tools", "bash" if index % 2 else "none",
             )
             assert configured["answer"]["status"] == "accepted", configured
             selected = configured["answer"]["session"]
@@ -375,7 +375,7 @@ def run():
                 endpoint.responses.append(response)
             configured = fixture.command(
                 "session", "configure", "--store", stop_store, "--record", state / f"{key}-config.json",
-                "--key", key + "-config", "--workspace", fixture.ROOT, "--provider", "codex",
+                "--key", key + "-config", "--workspace", fixture.ROOT, "--connection", "codex",
                 "--model", "unlisted-effort-model", "--tools", "none", "--reasoning-effort", effort,
             )
             assert configured["answer"]["status"] == "accepted", configured
@@ -473,7 +473,7 @@ def turn_state_journey():
             configured = fixture.command(
                 "session", "configure", "--store", store, "--record", state / f"{key}.json",
                 "--key", key, "--workspace", fixture.ROOT,
-                "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "ask",
+                "--connection", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "ask",
             )
             assert configured["answer"]["status"] == "accepted", configured
             sessions.append(configured["answer"]["session"])
@@ -550,7 +550,7 @@ def forced_refresh_journey():
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
             "--key", "configure", "--workspace", fixture.ROOT,
-            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none",
+            "--connection", "codex", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]
@@ -672,13 +672,13 @@ def openai_journey():
 
         host = start(store, url, "--set", f"providers.openai.endpoint={url}")
         status = fixture.command("host", "status", "--store", store)
-        assert status["capabilities"]["providers"] == {"codex": "chatgpt_device", "openai": "key_file", "chatgpt": "unserved"}, status
+        assert host_process.capability_routes(status["capabilities"]) == {"codex": "chatgpt_device", "openai": "key_file", "chatgpt": "unserved"}, status
         sessions = {}
         for provider in ("codex", "openai"):
             configured = fixture.command(
                 "session", "configure", "--store", store, "--record", state / f"configure-{provider}.json",
                 "--key", f"configure-{provider}", "--workspace", fixture.ROOT,
-                "--provider", provider, "--model", "gpt-6.1-sol", "--tools", "none",
+                "--connection", provider, "--model", "gpt-6.1-sol", "--tools", "none",
             )
             assert configured["answer"]["status"] == "accepted", configured
             sessions[provider] = configured["answer"]["session"]

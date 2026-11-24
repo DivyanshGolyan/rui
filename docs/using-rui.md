@@ -245,7 +245,7 @@ rui session unarchive --session SESSION_REF
 
 ## Paste an image into chat
 
-Copy an image and use your terminal's usual paste shortcut, such as Cmd+V on macOS. Rui detects support for terminal clipboard paste events automatically. If no image appears, press Ctrl+V in the composer. The fallback uses the macOS clipboard or `wl-paste` or `xclip` on a local Linux desktop.
+Copy an image and use your terminal's usual paste shortcut, such as Cmd+V on macOS. Rui detects support for terminal clipboard paste events automatically. If no image appears, press Ctrl+V in the composer, or Alt+V where the terminal keeps Ctrl+V for its own paste, as Windows Terminal does. The fallback uses the macOS clipboard, `wl-paste` or `xclip` on a local Linux desktop, or the Windows clipboard through `powershell.exe` under WSL, where a copied image file also works.
 
 `[Image 1]` shows that the draft has an image. Press Enter to send it with any text you typed. To remove the image, move the caret to the start of the draft and press Backspace. Pasting another image replaces it. Rui accepts PNG and JPEG images up to 16 MiB.
 
@@ -279,7 +279,7 @@ The Permissions row, between Effort and Notifications, offers **run without aski
 Press Enter to open the choices, then Enter to save one.
 
 From the shell, use `rui defaults configure`; in a chat’s composer, use `/setup`.
-Both accept `--store PATH`, `--provider PROVIDER`, `--model ID`, `--clear-model`,
+Both accept `--store PATH`, `--connection NAME`, `--model ID`, `--clear-model`,
 `--reasoning-effort LEVEL|default`, `--permission-mode ask|bypass`, and `--notifications on|off`.
 `--clear-model` cannot be combined with `--model`.
 For example, `/setup --permission-mode ask` makes new Sessions ask before running Bash.
@@ -288,7 +288,7 @@ An explicit `--permission-mode` on a new Session wins over the saved choice; wit
 
 Signing in with `rui auth login PROVIDER` saves that provider as the default when none is saved.
 Either ChatGPT sign-in, in the browser or with `--device-code`, also replaces a saved default of the other and keeps the model saved with it, since both sign in to the same ChatGPT account: new Sessions use the one logged in last, and Sessions already open keep theirs.
-Any other saved provider stays; the sign-in says so and names the command that changes it, such as `rui defaults configure --provider chatgpt`.
+Any other saved provider stays; the sign-in says so and names the command that changes it, such as `rui defaults configure --connection chatgpt`.
 Existing Sessions keep their provider.
 
 ## Notifications

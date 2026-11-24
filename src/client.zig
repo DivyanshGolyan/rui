@@ -312,9 +312,16 @@ pub const Requests = struct {
         try protocol_reply.validateIdentityInputs("", session);
         try cursor.validate();
         const paths = try resolveClientPaths(self.io, store_path);
+        return self.activityPageAt(&paths, session, cursor);
+    }
+
+    pub fn activityPageAt(self: Requests, paths: *const platform.Paths, session: []const u8, cursor: protocol_reply.ActivityCursor) !protocol_reply.ActivityPageReply {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        try cursor.validate();
         var body: protocol.RequestBuffer = .{};
         try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ paths.store_identity.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
-        const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
+        const fd = try openRead(self, paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
             buffer: protocol.FixedJsonBuffer(activity_reply.max_page_bytes) = .{},
@@ -702,11 +709,35 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
     return hostStatusAt(io, &paths, deadline);
 }
 
+// A flat socket is only a read-only hint when the current endpoint is absent
+// and the SQLite Store is owned. All lifecycle decisions still authenticate
+// its peer and confirm the Host through the ordinary upgrade observation.
+fn upgradePaths(io: std.Io, paths: *const platform.Paths) platform.Paths {
+    var buffer: [platform.max_socket_path_bytes]u8 = undefined;
+    const legacy = platform.legacySocketForCanonical(paths.host_directory.slice(), &buffer) catch return paths.*;
+    return upgradePathsWithLegacy(io, paths, legacy);
+}
+
+fn upgradePathsWithLegacy(io: std.Io, paths: *const platform.Paths, legacy: []const u8) platform.Paths {
+    var result = paths.*;
+    if (paths.kind != .sqlite or paths.host_directory.len == 0 or lockState(io, paths) != .held) return result;
+    if (std.Io.Dir.cwd().statFile(io, paths.socket.slice(), .{ .follow_symlinks = false })) |_| return result else |err| {
+        if (err != error.FileNotFound) return result;
+    }
+    const stat = std.Io.Dir.cwd().statFile(io, legacy, .{ .follow_symlinks = false }) catch return result;
+    if (stat.kind != .unix_domain_socket) return result;
+    result.socket.set(legacy) catch return paths.*;
+    return result;
+}
+
 pub fn hostStatusAt(io: std.Io, paths: *const platform.Paths, deadline: ?i128) protocol_reply.HostStatus {
     if (paths.kind == .mysql) return readHostInfo(io, paths, deadline);
     return switch (lockState(io, paths)) {
         .free => .unavailable,
-        .held => readHostInfo(io, paths, deadline),
+        .held => held: {
+            const selected = upgradePaths(io, paths);
+            break :held readHostInfo(io, &selected, deadline);
+        },
         .failure => .access_failure,
     };
 }
@@ -779,7 +810,8 @@ pub const StatusFacts = struct {
 
 pub fn observeHostForUpgrade(allocator: std.mem.Allocator, io: std.Io, store_path: []const u8, deadline: ?i128) !HostControlObservation {
     const paths = try resolveClientPaths(io, store_path);
-    return observeHostForUpgradeAt(allocator, io, &paths, hostObservationDeadline(io, deadline), .{});
+    const selected = upgradePaths(io, &paths);
+    return observeHostForUpgradeAt(allocator, io, &selected, hostObservationDeadline(io, deadline), .{});
 }
 
 /// `until` is the shared discovery budget for the socket exchange and, after a
@@ -901,7 +933,8 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
 /// or resolving MySQL identity. The caller owns (and must wipe) the snapshot.
 pub fn observeUpgradePeer(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, deadline: ?i128) !@import("host_identity.zig").Snapshot {
     const paths = try platform.resolveClientPaths(io, directory);
-    const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
+    const selected = upgradePaths(io, &paths);
+    const address = try std.Io.net.UnixAddress.init(selected.socket.slice());
     const fd = try connectRequest(.{ .io = io }, address, hostObservationDeadline(io, deadline));
     defer closeSocket(io, fd);
     const identity = @import("host_identity.zig");
@@ -1285,7 +1318,7 @@ test "upgrade Host observation validates exact foreign rejection envelopes" {
     try std.testing.expect(!hostProtocolMismatch(envelope, rejected, "/store"));
 }
 
-test "upgrade Host observation reads the current wire in one exchange and refuses bad envelopes" {
+test "SH-99 upgrade Host observation reads the current wire in one exchange and refuses bad envelopes" {
     // Another wire is observed through its own executable (`host status`), which an
     // in-process fixture cannot run: that path is covered by readForeignHostStatus tests
     // and by the previous-release upgrade gate. Here every case stops at the envelope.
@@ -1300,6 +1333,8 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
         activation_current,
         activation_200,
         activation_400,
+        activation_legacy,
+        activation_legacy_shadow,
         activation_bad_rejection,
         activation_500,
         activation_503,
@@ -1315,11 +1350,11 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
         wrong_wire_without_directory,
         wrong_wire_explicit_deadline,
     };
-    const Phase = enum { temporary_store, store_permissions, store_path, lease, runtime, listener, peer_spawn, observation, verification, expired_current };
+    const Phase = enum { temporary_store, store_permissions, lease, runtime, listener, peer_spawn, observation, verification, expired_current };
     const responseWire = struct {
         fn of(mode: Mode) []const u8 {
             return switch (mode) {
-                .current, .unavailable, .activation_current => protocol.wire_version,
+                .current, .unavailable, .activation_current, .activation_legacy, .activation_legacy_shadow => protocol.wire_version,
                 else => released_wire,
             };
         }
@@ -1372,7 +1407,7 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
             const response_wire = responseWire(self.mode);
             const body_wire = if (self.mode == .body_mismatch or self.mode == .activation_body_version) protocol.wire_version else response_wire;
             var body_buffer: [1024]u8 = undefined;
-            const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store });
+            const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"connections\":[{{\"name\":\"codex\",\"label\":\"ChatGPT (device code)\",\"route\":\"endpoint\"}}]}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store });
             var error_buffer: [256]u8 = undefined;
             const body: []const u8 = switch (self.mode) {
                 .activation_400, .activation_bad_rejection, .activation_500, .activation_503, .strict_503 => try std.fmt.bufPrint(&error_buffer, "{{\"version\":\"{s}\",\"type\":\"invocation_error\",\"code\":\"{s}\"}}", .{ response_wire, if (self.mode == .activation_bad_rejection) "SomeOtherFailure" else "WrongWireVersion" }),
@@ -1466,16 +1501,15 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
 
         fn execute(phase: *Phase, active_mode: *?Mode) !void {
             const io = std.testing.io;
-            var tmp = std.testing.tmpDir(.{ .iterate = true });
-            defer tmp.cleanup();
+            var store = try @import("socket_fixture.zig").Directory.init();
+            defer store.cleanup();
             phase.* = .store_permissions;
-            try tmp.dir.setPermissions(io, .fromMode(0o700));
-            var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            phase.* = .store_path;
-            const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+            try store.dir.setPermissions(io, .fromMode(0o700));
+            const root = store.root[0..store.root_len];
             phase.* = .lease;
             var lease = try platform.StoreLease.acquire(io, root);
-            defer lease.release();
+            var lease_held = true;
+            defer if (lease_held) lease.release();
             phase.* = .runtime;
             try lease.prepareForServing(false);
             const paths = lease.paths;
@@ -1484,7 +1518,15 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
                 phase.* = .listener;
                 var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
                 defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
-                var listener = try endpoint.listen(.{});
+                var legacy_buffer: [platform.max_socket_path_bytes]u8 = undefined;
+                const legacy = try platform.legacySocketForCanonical(root, &legacy_buffer);
+                var shadow = if (mode == .activation_legacy_shadow) try (try std.Io.net.UnixAddress.init(legacy)).listen(io, .{}) else null;
+                defer if (shadow) |*server| {
+                    server.deinit(io);
+                    std.Io.Dir.cwd().deleteFile(io, legacy) catch @panic("unable to remove shadow socket");
+                };
+                var listener = if (mode == .activation_legacy) try (try std.Io.net.UnixAddress.init(legacy)).listen(io, .{}) else try endpoint.listen(.{});
+                defer if (mode == .activation_legacy) std.Io.Dir.cwd().deleteFile(io, legacy) catch @panic("unable to remove legacy fixture socket");
                 defer listener.deinit(io);
                 var peer: Peer = .{ .listener = &listener, .store = paths.store_identity.slice(), .mode = mode };
                 phase.* = .peer_spawn;
@@ -1547,7 +1589,7 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
                         try std.testing.expect(reading == .incompatible);
                         try std.testing.expectEqual(std.c.getpid(), reading.incompatible);
                     },
-                    .current, .activation_current => {
+                    .current, .activation_current, .activation_legacy, .activation_legacy_shadow => {
                         const reading = try result;
                         try std.testing.expect(reading == .current);
                         const observed = reading.current;
@@ -1562,6 +1604,22 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
                 try std.testing.expectEqual(@as(usize, 1), peer.seen);
             }
             active_mode.* = null;
+            var legacy_buffer: [platform.max_socket_path_bytes]u8 = undefined;
+            const legacy = try platform.legacySocketForCanonical(root, &legacy_buffer);
+            try std.testing.expect(hostStatusAt(io, &paths, null) == .owned_unavailable);
+            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = legacy, .data = "not a socket" });
+            try std.testing.expect(hostStatusAt(io, &paths, null) == .owned_unavailable);
+            try std.Io.Dir.cwd().deleteFile(io, legacy);
+            var legacy_listener = try (try std.Io.net.UnixAddress.init(legacy)).listen(io, .{});
+            defer std.Io.Dir.cwd().deleteFile(io, legacy) catch @panic("unable to remove legacy socket");
+            defer legacy_listener.deinit(io);
+            try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(paths.socket.slice()).?);
+            defer std.Io.Dir.cwd().deleteTree(io, std.fs.path.dirname(paths.socket.slice()).?) catch @panic("unable to remove fixture endpoint");
+            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = paths.socket.slice(), .data = "not a socket" });
+            try std.testing.expect(hostStatusAt(io, &paths, null) == .owned_unavailable);
+            lease.release();
+            lease_held = false;
+            try std.testing.expect(hostStatusAt(io, &paths, null) == .unavailable);
             const expired = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - 1;
             phase.* = .expired_current;
             try std.testing.expectError(error.TransferInactive, observeHostForUpgrade(std.testing.allocator, io, root, expired));
@@ -2796,6 +2854,8 @@ const Capture = struct {
         try self.write("{");
         var separator: []const u8 = "";
         inline for (@import("session_settings.zig").spec_entries) |entry| {
+            // ConfigureInput has no appTools field: the Zig CLI has no option for it, and only the TypeScript client sends it.
+            if (comptime entry.kind == .app_tools) continue;
             const value = @field(input, entry.field);
             const present = switch (entry.kind) {
                 .content => value.state != .omitted,
@@ -2819,6 +2879,7 @@ const Capture = struct {
                         .value => if (entry.json_object) try self.writeInputFile(value.path, protocol.max_sqlite_content_bytes, false, true) else try self.writeJsonFile(value.path),
                     },
                     .tools => try self.writeTools(value.?),
+                    .app_tools => unreachable,
                     .decimal_policy => if (value.value) |text| {
                         const tokens = try std.fmt.parseInt(u64, text, 10);
                         var digits: [20]u8 = undefined;
@@ -5662,7 +5723,7 @@ test "runtime catalog model list client accepts a reply larger than its shipped 
     var body: std.Io.Writer.Allocating = .init(allocator);
     defer body.deinit();
     try body.writer.writeAll(protocol.model_list_reply.head);
-    try body.writer.writeAll("[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[");
+    try body.writer.writeAll("[{\"connection\":\"codex\",\"source\":\"catalog\",\"models\":[");
     for (0..count) |index| {
         var digits_buffer: [20]u8 = undefined;
         const digits = try std.fmt.bufPrint(&digits_buffer, "{d}", .{index});
@@ -6504,6 +6565,7 @@ test "Session settings client writes every setting and the Host parser preserves
     var missing_buffer: [4096]u8 = undefined;
     var missing: std.Io.Writer = .fixed(&missing_buffer);
     inline for (session_settings.entries) |entry| {
+        if (comptime entry.kind == .app_tools) continue;
         if (@field(configuration, entry.field).state != .value)
             try missing.print("{s}: ConfigureInput fixture / client.Capture.writeConfiguration / Host Parser\n", .{entry.field});
     }
@@ -6856,7 +6918,7 @@ test "capture routing round trips six placements without conflating selector and
                 }
                 try std.testing.expectEqualStrings(expected, request[0..body_used]);
                 var body: protocol.ResponseBuffer = .{};
-                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null, .settings_digest = null };
+                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .connections = &.{}, .doublewrite = null, .settings_digest = null };
                 try body.render(@import("host_reply.zig").renderHostInfo, .{info});
                 var head_buffer: [512]u8 = undefined;
                 const head = try std.fmt.bufPrint(&head_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nConnection: close\r\n\r\n", .{body.len});

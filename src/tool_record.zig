@@ -67,7 +67,7 @@ const agent_required_properties = blk: {
 const agent_spec_properties = blk: {
     var properties: []const u8 = "";
     for (@import("session_settings.zig").entries) |entry| {
-        if (std.mem.eql(u8, entry.field, "workspace") or std.mem.eql(u8, entry.field, "provider")) continue;
+        if (std.mem.eql(u8, entry.field, "workspace") or std.mem.eql(u8, entry.field, "provider") or entry.kind == .app_tools) continue;
         const kind = switch (entry.kind) {
             .tools => "array",
             .decimal_policy => "integer",
@@ -256,8 +256,13 @@ pub const HostToolSet = struct {
     digests: []const [32]u8,
 
     configured_servers: []const []const u8 = &.{},
+    /// The lane's app records, sorted by name, when the set is a lane's view of the Host set plus its declared app tools
+    /// (`configuration.zig` builds it); empty for the Host's own set.
+    apps: []const Record = &.{},
+    app_digests: []const [32]u8 = &.{},
 
-    pub const Resolution = union(enum) { found: usize, unknown_tool, mcp_server_unavailable };
+    /// `found` is a Host record, `app` a lane's app record; a name the Host set has is never `app`.
+    pub const Resolution = union(enum) { found: usize, app: usize, unknown_tool, mcp_server_unavailable };
     pub const max_refusal_message_bytes = 768;
 
     /// A missing tool's refusal. It records which configured servers had no tools
@@ -296,6 +301,7 @@ pub const HostToolSet = struct {
 
     pub fn resolve(self: *const HostToolSet, name: []const u8) Resolution {
         if (self.find(name)) |index| return .{ .found = index };
+        if (self.findApp(name)) |index| return .{ .app = index };
         var empty = self.emptyServers();
         if (empty.next() != null) return .mcp_server_unavailable;
         return .unknown_tool;
@@ -331,6 +337,20 @@ pub const HostToolSet = struct {
         while (low < high) {
             const middle = low + (high - low) / 2;
             switch (std.mem.order(u8, self.records[middle].name, name)) {
+                .eq => return middle,
+                .lt => low = middle + 1,
+                .gt => high = middle,
+            }
+        }
+        return null;
+    }
+
+    pub fn findApp(self: *const HostToolSet, name: []const u8) ?usize {
+        var low: usize = 0;
+        var high = self.apps.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            switch (std.mem.order(u8, self.apps[middle].name, name)) {
                 .eq => return middle,
                 .lt => low = middle + 1,
                 .gt => high = middle,
@@ -495,6 +515,15 @@ pub const Runner = enum {
             .mcp => @import("mcp/action_text.zig").indeterminate,
             .app => "The Host stopped while this app call was running. The app may have run it; it was not automatically repeated.",
             .core, .provider => unreachable,
+        };
+    }
+
+    /// The result of an app call while no app serves its tool. Only `.app` has one; the Store resolves
+    /// the call with it at once.
+    pub fn unservedText(self: Runner) []const u8 {
+        return switch (self) {
+            .app => "No app is serving this tool yet.",
+            else => unreachable,
         };
     }
 
@@ -689,6 +718,8 @@ comptime {
 
 pub const Offered = struct {
     names: []const u8 = "",
+    /// The subset of `names` that `owner = app` serves (comma-separated); every other name is an MCP name.
+    apps: []const u8 = "",
     historical_digests: []const [32]u8 = &.{},
     withdrawn: []const bool = &.{},
 
@@ -696,6 +727,12 @@ pub const Offered = struct {
         var names = std.mem.splitScalar(u8, self.names, ',');
         while (names.next()) |candidate| if (candidate.len != 0 and std.mem.eql(u8, candidate, name)) return candidate;
         return null;
+    }
+
+    pub fn isApp(self: *const Offered, name: []const u8) bool {
+        var names = std.mem.splitScalar(u8, self.apps, ',');
+        while (names.next()) |candidate| if (candidate.len != 0 and std.mem.eql(u8, candidate, name)) return true;
+        return false;
     }
 
     pub fn wasWithdrawn(self: *const Offered, name: []const u8) bool {
@@ -836,6 +873,23 @@ fn expectAppPolicyDigests() !void {
     try std.testing.expect(!(AppPolicy{ .wait_ms = min_app_wait_ms - 1 }).valid());
 }
 
+// SH-160: a name the Host set lacks resolves to the lane's app record, and a name the Host set has resolves to its
+// Host record, even when an app record declares the same name.
+test "SH-160 an app record resolves after the Host set, and a Host record of the same name wins" {
+    const policy: AppPolicy = .{ .replay = .unsafe, .restart_limit = 0, .wait_ms = default_app_wait_ms };
+    const host_records = [_]Record{.{ .name = "bash", .owner = .rui, .input_schema = "{}" }};
+    const app_records = [_]Record{
+        .{ .name = "ask", .owner = .app, .input_schema = "{}", .app = policy },
+        .{ .name = "bash", .owner = .app, .input_schema = "{}", .app = policy },
+    };
+    const host_digests = [_][32]u8{recordDigest(&host_records[0])};
+    const app_digests = [_][32]u8{ recordDigest(&app_records[0]), recordDigest(&app_records[1]) };
+    const host_tool_set: HostToolSet = .{ .records = &host_records, .digests = &host_digests, .apps = &app_records, .app_digests = &app_digests };
+    try std.testing.expectEqual(@as(usize, 0), host_tool_set.resolve("bash").found);
+    try std.testing.expectEqual(@as(usize, 0), host_tool_set.resolve("ask").app);
+    try std.testing.expectEqualStrings("unknown_tool", @tagName(host_tool_set.resolve("lookup")));
+}
+
 test "MCP missing tools tool set resolution covers every empty-server combination" {
     const servers = [_][]const u8{ "notes", "other" };
     for (0..4) |mask| {
@@ -893,4 +947,222 @@ test "all result profiles fit the shared excerpt maximum" {
             },
         }
     }
+}
+
+/// The app tools a lane root declares: one JSON array document, validated in this one place.
+/// Every Store and Host path that accepts `appTools` calls `app_tools.parse`; no other path reads the document.
+/// It lives with the records it builds, so the declaration adds no module beside the record owner.
+pub const app_tools = struct {
+    const shape = @import("mcp/shape.zig");
+
+    /// Declared records per lane root. The Store's round budget for one configure is sized to this.
+    pub const max_records = tool_name.max_app_records;
+    /// The largest document `parse` accepts; a larger one is refused by name before it is read.
+    pub const max_document_bytes = 64 * 1024;
+    /// Bytes the parse may use for the document copy, the JSON tree and the saved text of one declaration.
+    pub const arena_bytes = 512 * 1024;
+    /// A declared set's names joined by commas: the widest text a reader of one declaration takes.
+    pub const max_names_bytes = max_records * tool_name.max_bytes + max_records - 1;
+
+    pub const Refusal = enum {
+        invalid_app_tools,
+        app_tools_too_large,
+        invalid_app_tool_name,
+        duplicate_app_tool_name,
+        app_tool_built_in_clash,
+        invalid_app_tool_policy,
+    };
+
+    /// A declaration that passed every check. Its slices point into the arena `parse` was given.
+    pub const Declaration = struct {
+        /// Sorted by name, which `HostToolSet` requires for `find` and `valid`.
+        records: []Record,
+        digests: [][32]u8,
+
+        pub fn toolSet(declaration: *const Declaration) HostToolSet {
+            return .{ .records = declaration.records, .digests = declaration.digests };
+        }
+    };
+
+    pub const Parsed = union(enum) { declared: Declaration, refused: Refusal };
+
+    const member_names = [_][]const u8{ "name", "description", "input_schema", "replay", "restart_limit", "wait_ms" };
+
+    /// Validates `bytes` as a declaration. `arena` owns every slice the result points to and must outlive it.
+    /// An arena that runs out is a refusal by size, never a partial declaration.
+    pub fn parse(arena: std.mem.Allocator, bytes: []const u8) Parsed {
+        if (bytes.len > max_document_bytes) return .{ .refused = .app_tools_too_large };
+        return parseInArena(arena, bytes) catch |err| switch (err) {
+            error.OutOfMemory => .{ .refused = .app_tools_too_large },
+            error.InvalidAppTools => .{ .refused = .invalid_app_tools },
+            error.InvalidAppToolName => .{ .refused = .invalid_app_tool_name },
+            error.DuplicateAppToolName => .{ .refused = .duplicate_app_tool_name },
+            error.AppToolBuiltInClash => .{ .refused = .app_tool_built_in_clash },
+            error.InvalidAppToolPolicy => .{ .refused = .invalid_app_tool_policy },
+        };
+    }
+
+    const ParseError = error{ OutOfMemory, InvalidAppTools, InvalidAppToolName, DuplicateAppToolName, AppToolBuiltInClash, InvalidAppToolPolicy };
+
+    fn parseInArena(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
+        const value = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .allocate = .alloc_if_needed, .parse_numbers = false }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidAppTools,
+        };
+        if (value != .array or value.array.items.len > max_records) return error.InvalidAppTools;
+        const records = try arena.alloc(Record, value.array.items.len);
+        for (value.array.items, records) |item, *entry| entry.* = try recordOf(arena, item);
+        std.mem.sort(Record, records, {}, byName);
+        for (records, 0..) |entry, index| {
+            if (index != 0 and std.mem.eql(u8, records[index - 1].name, entry.name)) return error.DuplicateAppToolName;
+        }
+        const digests = try arena.alloc([32]u8, records.len);
+        for (records, digests) |*entry, *digest| digest.* = recordDigest(entry);
+        const declaration: Declaration = .{ .records = records, .digests = digests };
+        std.debug.assert(declaration.toolSet().valid());
+        return .{ .declared = declaration };
+    }
+
+    fn byName(_: void, a: Record, b: Record) bool {
+        return std.mem.order(u8, a.name, b.name) == .lt;
+    }
+
+    fn recordOf(arena: std.mem.Allocator, item: std.json.Value) ParseError!Record {
+        if (item != .object) return error.InvalidAppTools;
+        var members = item.object.iterator();
+        while (members.next()) |member| {
+            var known = false;
+            for (member_names) |name| known = known or std.mem.eql(u8, member.key_ptr.*, name);
+            if (!known) return error.InvalidAppTools;
+        }
+        const name = item.object.get("name") orelse return error.InvalidAppTools;
+        if (name != .string) return error.InvalidAppTools;
+        if (!tool_name.valid(name.string)) return error.InvalidAppToolName;
+        if (built_in_tool_set.find(name.string) != null) return error.AppToolBuiltInClash;
+        const description = item.object.get("description") orelse return error.InvalidAppTools;
+        if (description != .string or !tool_presentation.ToolPresentation.validDescription(description.string)) return error.InvalidAppTools;
+        const schema = item.object.get("input_schema") orelse return error.InvalidAppTools;
+        if (schema != .object) return error.InvalidAppTools;
+        const schema_text = try std.json.Stringify.valueAlloc(arena, schema, .{});
+        shape.check(schema_text) catch return error.InvalidAppTools;
+        const policy: AppPolicy = .{
+            .replay = try replayOf(item.object.get("replay")),
+            .restart_limit = try integerOf(u8, item.object.get("restart_limit"), default_app_restart_limit),
+            .wait_ms = try integerOf(u32, item.object.get("wait_ms"), default_app_wait_ms),
+        };
+        if (!policy.valid()) return error.InvalidAppToolPolicy;
+        return .{
+            .name = name.string,
+            .description = description.string,
+            .input_schema = schema_text,
+            .owner = .app,
+            .app = policy,
+        };
+    }
+
+    fn replayOf(value: ?std.json.Value) ParseError!Replay {
+        const found = value orelse return .unsafe;
+        if (found != .string) return error.InvalidAppToolPolicy;
+        return std.meta.stringToEnum(Replay, found.string) orelse error.InvalidAppToolPolicy;
+    }
+
+    fn integerOf(comptime Int: type, value: ?std.json.Value, default: Int) ParseError!Int {
+        const found = value orelse return default;
+        // Numbers stay as their written text so a schema keeps its exact values; a policy integer is plain digits.
+        if (found != .number_string) return error.InvalidAppToolPolicy;
+        return std.fmt.parseInt(Int, found.number_string, 10) catch error.InvalidAppToolPolicy;
+    }
+
+    // SH-143: an input schema keeps every number exactly as written (integer, decimal and exponent forms), so its text
+    // and record digest never depend on floating-point rounding; policy integers accept only plain digits.
+    test "SH-143 app tools keep schema numbers exactly as written" {
+        const arena_memory = try std.testing.allocator.alloc(u8, arena_bytes);
+        defer std.testing.allocator.free(arena_memory);
+        const schemas = [_][]const u8{
+            "{\"maximum\":9007199254740993}",
+            "{\"maximum\":9007199254740993e0}",
+            "{\"multipleOf\":0.1000000000000000055511151231257827}",
+            "{\"minimum\":-1.5E+3}",
+        };
+        var digests: [schemas.len][32]u8 = undefined;
+        for (schemas, &digests) |schema, *digest| {
+            var fixed: std.heap.FixedBufferAllocator = .init(arena_memory);
+            var document: [256]u8 = undefined;
+            const text = try std.fmt.bufPrint(&document, "[{{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{s}}}]", .{schema});
+            const parsed = parse(fixed.allocator(), text);
+            try std.testing.expect(parsed == .declared);
+            try std.testing.expectEqualStrings(schema, parsed.declared.records[0].input_schema);
+            digest.* = parsed.declared.digests[0];
+            // The same text declared again keeps the same digest, so a repeated declaration deduplicates.
+            var again: std.heap.FixedBufferAllocator = .init(arena_memory[arena_bytes / 2 ..]);
+            const reparsed = parse(again.allocator(), text);
+            try std.testing.expectEqualSlices(u8, digest, &reparsed.declared.digests[0]);
+        }
+        try std.testing.expect(!std.mem.eql(u8, &digests[0], &digests[1]));
+        var fixed: std.heap.FixedBufferAllocator = .init(arena_memory);
+        for ([_][]const u8{ "5.0", "5e0", "-1", "\"5\"" }) |limit| {
+            fixed.reset();
+            var document: [256]u8 = undefined;
+            const text = try std.fmt.bufPrint(&document, "[{{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{{}},\"replay\":\"safe\",\"restart_limit\":{s}}}]", .{limit});
+            try std.testing.expectEqual(Parsed{ .refused = .invalid_app_tool_policy }, parse(fixed.allocator(), text));
+        }
+    }
+
+    // SH-143: the declaration validator accepts one well-formed list of records and names the refusal of every other
+    // document, over the whole domain of names, policies, sizes and counts.
+    test "SH-143 app tools validate one declaration with named refusals over its domain" {
+        const arena_memory = try std.testing.allocator.alloc(u8, arena_bytes);
+        defer std.testing.allocator.free(arena_memory);
+        const ok = "{\"name\":\"lookup\",\"description\":\"Look up a thing\",\"input_schema\":{\"type\":\"object\"}}";
+        const cases = [_]struct { document: []const u8, want: ?Refusal }{
+            .{ .document = "[]", .want = null },
+            .{ .document = "[" ++ ok ++ "]", .want = null },
+            .{ .document = "[{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{\"type\":\"object\"},\"replay\":\"safe\",\"restart_limit\":5,\"wait_ms\":2000}]", .want = null },
+            .{ .document = "[{\"name\":\"has.dot\",\"description\":\"d\",\"input_schema\":{}}]", .want = .invalid_app_tool_name },
+            .{ .document = "[" ++ ok ++ "," ++ ok ++ "]", .want = .duplicate_app_tool_name },
+            .{ .document = "[{\"name\":\"bash\",\"description\":\"d\",\"input_schema\":{}}]", .want = .app_tool_built_in_clash },
+            .{ .document = "[{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{},\"wait_ms\":0}]", .want = .invalid_app_tool_policy },
+            .{ .document = "[{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{},\"restart_limit\":17}]", .want = .invalid_app_tool_policy },
+            .{ .document = "[{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{},\"replay\":\"maybe\"}]", .want = .invalid_app_tool_policy },
+            .{ .document = "[{\"name\":\"a\",\"description\":\"\",\"input_schema\":{}}]", .want = .invalid_app_tools },
+            .{ .document = "[{\"name\":\"a\",\"description\":\"d\",\"input_schema\":[]}]", .want = .invalid_app_tools },
+            .{ .document = "[{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{},\"extra\":1}]", .want = .invalid_app_tools },
+            .{ .document = "[{\"description\":\"d\",\"input_schema\":{}}]", .want = .invalid_app_tools },
+            .{ .document = "{}", .want = .invalid_app_tools },
+            .{ .document = "[", .want = .invalid_app_tools },
+        };
+        for (cases) |case| {
+            var fixed: std.heap.FixedBufferAllocator = .init(arena_memory);
+            const parsed = parse(fixed.allocator(), case.document);
+            switch (parsed) {
+                .declared => |declaration| {
+                    try std.testing.expect(case.want == null);
+                    try std.testing.expect(declaration.toolSet().valid());
+                },
+                .refused => |refusal| try std.testing.expectEqual(case.want.?, refusal),
+            }
+        }
+        // The policy keeps its stated safe values; an unsafe call keeps restart_limit 0 (AppPolicy.canonical).
+        var fixed: std.heap.FixedBufferAllocator = .init(arena_memory);
+        const safe = parse(fixed.allocator(), cases[2].document).declared;
+        try std.testing.expectEqual(Replay.safe, safe.records[0].app.replay);
+        try std.testing.expectEqual(@as(u8, 5), safe.records[0].app.restart_limit);
+        try std.testing.expectEqual(@as(u32, 2000), safe.records[0].app.wait_ms);
+        var defaults: std.heap.FixedBufferAllocator = .init(arena_memory);
+        const unsafe = parse(defaults.allocator(), "[" ++ ok ++ "]").declared;
+        try std.testing.expectEqual(Replay.unsafe, unsafe.records[0].app.replay);
+        try std.testing.expectEqual(@as(u8, 0), unsafe.records[0].app.canonical().restart_limit);
+        // Size: a document over the cap is refused before it is read, and an arena too small is refused by size.
+        const too_long = try std.testing.allocator.alloc(u8, max_document_bytes + 1);
+        defer std.testing.allocator.free(too_long);
+        @memset(too_long, ' ');
+        var small_memory: [64]u8 = undefined;
+        var small: std.heap.FixedBufferAllocator = .init(&small_memory);
+        try std.testing.expectEqual(Refusal.app_tools_too_large, parse(fixed.allocator(), too_long).refused);
+        try std.testing.expectEqual(Refusal.app_tools_too_large, parse(small.allocator(), "[" ++ ok ++ "]").refused);
+    }
+};
+
+test {
+    _ = app_tools;
 }

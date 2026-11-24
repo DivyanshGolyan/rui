@@ -1,4 +1,6 @@
 const std = @import("std");
+const connection_names = @import("connection_names.zig");
+const provider_route = @import("provider_route.zig");
 const model_catalog = @import("model_catalog.zig");
 const gwidth = @import("terminal_width");
 const picker = @import("model_picker.zig");
@@ -77,7 +79,7 @@ fn format(buffer: []u8, entry: picker.Entry, row: picker.Row, id_width: usize, c
 }
 
 test "model picker view uses the Host's known flag for the displayed limit" {
-    var menu = try picker.testMenu(&.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\n" } } }});
+    var menu = try picker.testMenu(&.{.{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-6.1-sol\n" } } }});
     defer menu.deinit(std.testing.allocator);
     var entries = [_]picker.Entry{menu.entries[0]};
     entries[0].known = false;
@@ -91,8 +93,8 @@ test "model picker view uses the Host's known flag for the displayed limit" {
 }
 
 test "model picker shared ASCII model rows preserve compact mark gap and truncation" {
-    const entry: picker.Entry = .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = .initOne(.codex) };
-    const row = picker.Query.parse("").row(entry, .{ .model = entry.id, .provider = .codex }).?;
+    const entry: picker.Entry = .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) };
+    const row = picker.Query.parse("").row(entry, .{ .model = entry.id, .provider = provider_route.nameOf(.codex) }).?;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for (0..100) |width| {

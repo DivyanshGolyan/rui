@@ -196,7 +196,7 @@ pub const FindTools = struct {
         if (t.input.refusal != null or t.input.words.count == 0) return t.writeResult(r);
         t.pending = try arena.create(Candidates);
         t.pending.* = .{};
-        tool_offer.project(r, t.configured(), t.loadedIntent(), t.pending);
+        tool_offer.project(r, t.configured(), t.loadedIntent(), 0, t.pending);
         return .{ .round = .offer };
     }
 

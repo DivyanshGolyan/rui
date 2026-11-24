@@ -6,12 +6,33 @@ const Provider = provider_name.Provider;
 pub const Route = enum { unserved, endpoint, chatgpt_device, key_file, chatgpt_plan };
 
 /// The most connections one Host serves at once.
-pub const max_served = 16;
+pub const max_served = connection.max_served;
+comptime {
+    if (built_in_names.len > connection.max_built_in) @compileError("connection.max_built_in is below the built-in provider count");
+}
 
-/// One served connection: its name, how the Host reaches it, the wire codec
-/// its Sessions speak, and whether it runs web_search.
+/// A served connection's label, as the Host shows it.
+pub const Label = struct {
+    bytes: [connection.max_label_bytes]u8 = @splat(0),
+    len: u8 = 0,
+
+    pub fn parse(text: []const u8) ?Label {
+        if (text.len > connection.max_label_bytes) return null;
+        var label: Label = .{ .len = @intCast(text.len) };
+        @memcpy(label.bytes[0..text.len], text);
+        return label;
+    }
+
+    pub fn slice(self: *const Label) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+/// One served connection: its name, label, how the Host reaches it, the wire
+/// codec its Sessions speak, and whether it runs web_search.
 pub const Entry = struct {
     name: connection.Name,
+    label: Label,
     route: Route,
     codec: provider_name.Codec,
     web_search: bool,
@@ -66,10 +87,16 @@ pub const Served = struct {
     }
 };
 
+/// The name a built-in provider is served under: its enum tag.
+pub fn nameOf(provider: Provider) connection.Name {
+    return connection.Name.parse(@tagName(provider)).?;
+}
+
 /// A built-in provider as a served entry, named by its enum tag.
 pub fn builtIn(provider: Provider, route: Route) Entry {
     return .{
-        .name = connection.Name.parse(@tagName(provider)).?,
+        .name = nameOf(provider),
+        .label = Label.parse(provider.shown()).?,
         .route = route,
         .codec = provider.codec(),
         .web_search = provider.runsTool("web_search"),
@@ -88,6 +115,32 @@ pub fn builtIns(route: Route) Served {
     var served: Served = .{};
     inline for (std.enums.values(Provider)) |provider| served.put(builtIn(provider, route)) catch unreachable;
     return served;
+}
+
+/// Every built-in provider's name, in enum order.
+pub const built_in_names = blk: {
+    var names: [std.enums.values(Provider).len]connection.Name = undefined;
+    for (std.enums.values(Provider), 0..) |provider, at| names[at] = nameOf(provider);
+    break :blk names;
+};
+
+/// The label a name is shown under: the served entry's label, else the
+/// built-in provider's own, else the name itself. The one display lookup by name.
+pub fn shownOf(served: *const Served, name: connection.Name) []const u8 {
+    if (served.of(name.slice())) |entry| return entry.label.slice();
+    if (builtInOf(name)) |provider| return provider.shown();
+    return name.slice();
+}
+
+/// The login command a name is pointed at, or null when it has none: only a
+/// built-in provider names one.
+pub fn loginOf(name: connection.Name) ?[]const u8 {
+    return if (builtInOf(name)) |provider| provider.login() else null;
+}
+
+/// The sign-in a name is shown with: only a built-in provider has one.
+pub fn signInOf(name: connection.Name) ?[]const u8 {
+    return if (builtInOf(name)) |provider| provider.signIn() else null;
 }
 
 test "CM-49 served lookup finds exactly the listed names" {
@@ -129,4 +182,15 @@ test "built-in entries carry each provider's codec and web_search" {
         try std.testing.expect(entry.web_search);
         try std.testing.expectEqual(Route.endpoint, entry.route);
     }
+}
+
+test "a name's display label and login come from its served entry or built-in facts" {
+    var served: Served = .{};
+    try served.put(builtIn(.codex, .endpoint));
+    try served.put(.{ .name = connection.Name.parse("alpha").?, .label = Label.parse("Alpha Gateway").?, .route = .key_file, .codec = .@"openai-responses/3", .web_search = false });
+    try std.testing.expectEqualStrings("Alpha Gateway", shownOf(&served, connection.Name.parse("alpha").?));
+    try std.testing.expectEqualStrings("ChatGPT (device code)", shownOf(&served, connection.Name.parse("codex").?));
+    try std.testing.expectEqualStrings("beta", shownOf(&served, connection.Name.parse("beta").?));
+    try std.testing.expectEqualStrings("rui auth login chatgpt --device-code", loginOf(connection.Name.parse("codex").?).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), loginOf(connection.Name.parse("alpha").?));
 }

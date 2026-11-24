@@ -629,15 +629,15 @@ const builtin_names_sql = blk: {
 };
 
 const success_facts = rsql.Read(.{
-    .sql = "SELECT r.revision AS frozen_revision,coalesce(" ++ tool_set.namesSql("o.tool_set_id") ++ ",'') AS tool_names," ++
+    .sql = "SELECT r.revision AS frozen_revision,coalesce(" ++ tool_set.namesSql("o.tool_set_id") ++ ",'') AS tool_names,coalesce(" ++ tool_set.appNamesSql("o.tool_set_id") ++ ",'') AS app_names," ++
         "EXISTS(SELECT 1 FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE member.tool_set_id=o.tool_set_id AND tool.name NOT IN (" ++ builtin_names_sql ++ ") AND tool.owner<>'mcp') AS invalid_owner," ++
+        "WHERE member.tool_set_id=o.tool_set_id AND tool.name NOT IN (" ++ builtin_names_sql ++ ") AND tool.owner NOT IN ('mcp','app')) AS invalid_owner," ++
         "s.permission_mode,s.revision," ++
         "coalesce((SELECT max(e.entry_ordinal) FROM conversation_entry e WHERE e.session_ref=o.session_ref),0) AS entry_base " ++
         "FROM model_operation o LEFT JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { frozen_revision: ?rsql.Positive = null, tool_names: *Bounded(tool_set.max_offered_names_bytes), invalid_owner: bool = false, permission_mode: bool = false, revision: rsql.Positive = undefined, entry_base: u64 = 0 },
+    .Row = struct { frozen_revision: ?rsql.Positive = null, tool_names: *Bounded(tool_set.max_offered_names_bytes), app_names: *Bounded(tool_set.max_app_names_bytes), invalid_owner: bool = false, permission_mode: bool = false, revision: rsql.Positive = undefined, entry_base: u64 = 0 },
     .cardinality = .optional,
 });
 
@@ -929,6 +929,7 @@ const HistoryVisitor = struct {
 
 pub const Batch = struct {
     offered_names: Bounded(tool_set.max_offered_names_bytes),
+    offered_app_names: Bounded(tool_set.max_app_names_bytes),
     withdrawn: [batch_identities]bool,
     history_visitor: HistoryVisitor,
     history_needed: bool,
@@ -996,6 +997,15 @@ pub const Batch = struct {
         batch.stopped = failure;
         batch.end = if (failure == null) std.math.maxInt(u64) else at;
         batch.last = true;
+    }
+
+    fn offeredAppText(batch: *const Batch) []const u8 {
+        return batch.offered_app_names.slice();
+    }
+
+    /// Points the success read's app names at this Batch's buffer, which the read fills and the settlement's tools borrow.
+    fn pointOfferedApps(batch: *Batch, success: *success_facts.Row) void {
+        success.app_names = &batch.offered_app_names;
     }
 
     fn find(batch: *Batch, value: *const content_domain.Import) ?*Identity {
@@ -1192,6 +1202,10 @@ noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.
                             const fits = batch.add(.ofBytes(text, false));
                             std.debug.assert(fits);
                         } else |_| {}
+                    } else if (facts.tool != null and facts.tool.?.owner == .app) {
+                        // The unserved app result importCall records: one shared identity, like a rejection's text.
+                        const fits = batch.add(.ofBytes(tool_record.Runner.app.unservedText(), false));
+                        std.debug.assert(fits);
                     }
                 } else |_| {}
                 batch.ids.digests[batch.digest_count] = call_id_record.content_digest;
@@ -1283,7 +1297,8 @@ pub const SettleSuccess = struct {
     noinline fn queueFacts(t: *SettleSuccess, r: *transition.Round(SettleSuccess)) !transition.Next(SettleSuccess) {
         const batch = t.input.batch;
         const operation_id = t.input.binding.operation_id;
-        t.success = .{ .tool_names = &batch.offered_names };
+        t.success = .{ .tool_names = &batch.offered_names, .app_names = undefined };
+        batch.pointOfferedApps(&t.success);
         r.read(attempt_facts, .{ .operation_id = operation_id, .closes = true }, &t.facts);
         r.readInto(success_facts, .{ .operation_id = operation_id }, &t.success, &t.success_found);
         r.read(pending_messages, .{ .operation_id = operation_id }, &t.pending);
@@ -1318,7 +1333,7 @@ pub const SettleSuccess = struct {
             .positions = positions,
             .first_item_position = first_item_position,
             .purpose = purpose,
-            .tools = .{ .names = batch.offered_names.slice(), .historical_digests = &batch.identity_digests, .withdrawn = &batch.withdrawn },
+            .tools = .{ .names = batch.offered_names.slice(), .apps = batch.offeredAppText(), .historical_digests = &batch.identity_digests, .withdrawn = &batch.withdrawn },
             .settling = t.success,
             .call_items = call_items,
         };
@@ -1685,6 +1700,7 @@ const Settlement = struct {
         if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
         const call_facts = try inspectOutputCall(s.io, s.output.source, name, record, &s.tools);
         const rejection_code = tool_defs.classifyCall(&call_facts);
+        const app_call = if (call_facts.tool) |tool| rejection_code == null and tool.owner == .app else false;
         const rejection_content_id: ?u64 = if (rejection_code) |code| id: {
             var buffer: [192]u8 = undefined;
             const text = try rejectionText(s.io, s.output, code, &call_facts, name, &buffer);
@@ -1697,10 +1713,24 @@ const Settlement = struct {
             }
             break :id row.id;
         } else null;
-        try s.recordCall(a, &fields, .{ name_content_id, call_id_content_id, arguments_content_id }, &call_facts, rejection_code, rejection_content_id);
+        const unserved_content_id: ?u64 = if (app_call) try s.unservedContent(a, batch) else null;
+        try s.recordCall(a, &fields, .{ name_content_id, call_id_content_id, arguments_content_id }, &call_facts, rejection_code, rejection_content_id, unserved_content_id);
     }
 
-    noinline fn recordCall(s: *Settlement, a: anytype, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_defs.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64) !void {
+    /// The result of an app call no app serves yet: imported once per Batch, the same way a rejection's text is.
+    noinline fn unservedContent(s: *Settlement, a: anytype, batch: *Batch) !u64 {
+        const text = tool_record.Runner.app.unservedText();
+        if (s.faults.output_import) return error.InjectedContentImportFailure;
+        const value: content_domain.Import = .ofBytes(text, false);
+        const row = try content(a, batch, value);
+        if (try sinkFor(a, row, value.length)) |sink| {
+            defer sink.close();
+            try sink.write(text, 0);
+        }
+        return row.id;
+    }
+
+    noinline fn recordCall(s: *Settlement, a: anytype, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_defs.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64, unserved_content_id: ?u64) !void {
         const record = fields[2];
         const name_content_id, const call_id_content_id, const arguments_content_id = content_ids;
         var field_metadata: FieldCertificate.Bytes = undefined;
@@ -1723,7 +1753,8 @@ const Settlement = struct {
             .session = s.session,
         });
         if (rejection_code != null) return;
-        const authorized = call_facts.tool.?.runner() == .core or s.settling.permission_mode;
+        // An app call resolves at once, so it needs no approval.
+        const authorized = call_facts.tool.?.runner() == .core or s.settling.permission_mode or unserved_content_id != null;
         const action_id = try a.identity(.action_id);
         a.write(insert_action, .{
             .action_id = action_id,
@@ -1735,6 +1766,10 @@ const Settlement = struct {
             .timeout_ms = if (call_facts.bashArguments()) |arguments| arguments.timeout_ms else null,
             .approval_position = if (authorized) null else s.first_item_position + record.ordinal,
         });
+        if (unserved_content_id) |content_id| {
+            try action_domain.queueResolution(a, .{ .action_id = action_id, .parent_operation_id = s.binding.operation_id, .turn_id = s.binding.turn_id }, s.session, .failed, content_id);
+            return;
+        }
         if (!authorized) try forward_domain.queue(a, &s.session.ref, &s.session.ref, .approval, action_id);
     }
 };

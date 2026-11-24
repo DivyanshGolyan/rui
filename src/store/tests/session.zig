@@ -63,7 +63,7 @@ test "Store allocates six character IDs atomically retries collisions and replay
             var replay_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
             const replay = (try storage.configureInto(&second, &replay_receipt, .{})).accepted;
             try std.testing.expect(replay.configuration == &replay_receipt);
-            try std.testing.expectEqual(fresh_receipt.provider, replay_receipt.provider);
+            try std.testing.expectEqualStrings(fresh_receipt.connection.slice(), replay_receipt.connection.slice());
             try std.testing.expectEqualStrings(fresh_receipt.model.slice(), replay_receipt.model.slice());
             try std.testing.expectEqual(fresh_receipt.reasoning_effort, replay_receipt.reasoning_effort);
             try std.testing.expectEqualStrings(fresh_receipt.workspace.slice(), replay_receipt.workspace.slice());
@@ -165,7 +165,7 @@ fn insertSessionForTesting(storage: *Store, current: *const configuration_domain
             if (ran != 0) return .done;
             const head: rsql.SessionHead = .{ .ref = b.ref.*, .workspace_key = .of(b.current.workspace_key), .next_position = .of(1) };
             const digest = store_core.workspaceDigest(b.current.workspace.slice());
-            configuration_domain.insertSession(r, head, b.current, &digest, 1_000_000, null, null);
+            configuration_domain.insertSession(r, head, b.current, &digest, 1_000_000, null, null, null);
             return .round;
         }
     };

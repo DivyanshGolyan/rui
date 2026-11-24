@@ -6,7 +6,7 @@ const store_path = @import("store_path.zig");
 const workspace_path = @import("workspace_path.zig");
 const change_ring = @import("change_ring.zig");
 const cli_value = @import("cli_value.zig");
-const provider_name = @import("provider_name.zig");
+const connection = @import("connection.zig");
 const session_work = @import("session_work.zig");
 const content_value = @import("content_value.zig");
 const first_line = @import("first_line.zig");
@@ -65,7 +65,7 @@ pub const Row = struct {
     parent: ?[]const u8,
     creator: ?[]const u8 = null,
     workspace: []const u8,
-    provider: provider_name.Provider,
+    provider: connection.Name,
     model: []const u8,
     tools: []const []const u8,
     permission_mode: cli_value.PermissionMode,

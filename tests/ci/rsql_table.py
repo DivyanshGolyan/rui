@@ -8,14 +8,20 @@
 A collect build (-Drsql-collect=true) compiles the product and the unit roots on rsql's comptime path, and every
 statement, Store test fixture text and schema value exports what that path produced. This script reads the records back from the binaries
 and writes them as the table rsql.Read and rsql.Write look statements up in. Linux only: it reads ELF symbols.
+Per-binary record digests are diagnostic observations, not acceptance or provenance receipts. Compare them only after
+binding a successful run/attempt, source and changes, compiler and dependencies, target, flags and per-binary backend.
+A PATH candidate may not execute; a wrapper's digest names the wrapper, not its delegate.
 """
 import hashlib
 import os
 import re
+import shlex
+import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from select_tests import STATEMENT_TABLE_TARGETS
@@ -258,16 +264,61 @@ def schema_lines(schema):
     ]
 
 
-def collect(zig):
+def record_set_digest(records):
+    """Fingerprint a set of complete records independently of discovery order."""
+    digest = hashlib.sha256()
+    for record in sorted(set(records)):
+        digest.update(len(record).to_bytes(8, "big"))
+        digest.update(record)
+    return digest.hexdigest()
+
+
+def tool_digest(zig, root=ROOT):
+    if os.path.dirname(zig):
+        executable = zig if os.path.isabs(zig) else str(root / zig)
+    else:
+        executable = zig
+    search_path = os.pathsep.join(path if os.path.isabs(path) else str(root / path)
+                                  for path in os.get_exec_path())
+    executable_path = shutil.which(executable, path=search_path)
+    if executable_path is None:
+        return None
+    try:
+        with open(executable_path, "rb") as executable:
+            return hashlib.file_digest(executable, "sha256").hexdigest()
+    except OSError:
+        return None
+
+
+def collect(zig, root=ROOT):
     with tempfile.TemporaryDirectory(prefix="rsql-table-") as prefix:
         command = [zig, "build", "ci-build", "-Dpr-ci=true", "-Drsql-collect=true", f"-Dci-targets={TARGETS}",
-                   "-Dci-part=all", "--prefix", prefix]
-        subprocess.run(command, cwd=ROOT, check=True)
+                   "-Dci-part=all", "--prefix", prefix, "--summary", "all"]
+        kind = "explicit-path" if os.path.dirname(zig) else "path-candidate"
+        started = time.monotonic()
+        observed_tool = tool_digest(zig, root) or "unavailable"
+        print(f"RSQL collector {kind} sha256={observed_tool} elapsed_ms={(time.monotonic() - started) * 1000:.3f}",
+              file=sys.stderr, flush=True)
+        print(f"RSQL collector command: {shlex.join(command)}", file=sys.stderr, flush=True)
+        subprocess.run(command, cwd=root, check=True)
         records = set()
+        binaries = 0
         for binary in sorted((Path(prefix) / "bin").iterdir()):
-            records.update(elf_records(binary.read_bytes()))
+            data = binary.read_bytes()
+            if data[:4] != b"\x7fELF":
+                print(f"RSQL collector skipped non-ELF artifact={binary.name}", file=sys.stderr, flush=True)
+                continue
+            found = set(elf_records(data))
+            started = time.monotonic()
+            fingerprint = record_set_digest(found)
+            print(f"RSQL collector records binary={binary.name} count={len(found)} sha256={fingerprint} "
+                  f"elapsed_ms={(time.monotonic() - started) * 1000:.3f}", file=sys.stderr, flush=True)
+            records.update(found)
+            binaries += 1
     if not records:
         raise SystemExit("the collect build exported no statements")
+    print(f"RSQL collector extraction complete binaries={binaries} unique_records={len(records)}; "
+          "not a check verdict", file=sys.stderr, flush=True)
     return records
 
 
