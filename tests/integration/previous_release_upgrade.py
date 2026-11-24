@@ -135,11 +135,10 @@ def plain_start(binary, store, seed, root):
                                      start_new_session=True, stdin=subprocess.DEVNULL,
                                      stdout=output, stderr=subprocess.STDOUT)
     try:
-        deadline = time.monotonic() + 20
-        while seed.poll() is None:
+        def old_host_stopped():
             assert candidate.poll() is None, ("host start exited before the previous Host stopped", log.read_text())
-            assert time.monotonic() < deadline, "previous-release Host did not stop"
-            time.sleep(0.005)
+            return seed.poll() is not None
+        wait_for(old_host_stopped, "previous-release Host to stop", timeout=20, interval=0.005)
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(candidate.pid, signal.SIGKILL)
@@ -402,16 +401,15 @@ def main():
             if args.running_host and args.plain_start:
                 plain_start(binary, store, seed, root)
                 # The candidate's Host appears only after the coordinator's restart, so bound the wait.
-                deadline = time.monotonic() + 30
-                while True:
+                def candidate_ready():
                     try:
-                        assert_running_upgrade(dialect, binary, store, seed, ready, previous_status,
-                                               release_version(publisher), None)
-                        break
-                    except (AssertionError, subprocess.SubprocessError, OSError):
-                        if time.monotonic() >= deadline:
-                            raise
-                        time.sleep(0.1)
+                        return dialect.host_status(binary, store, 5)[0] == "ready"
+                    except subprocess.SubprocessError:
+                        return False
+                wait_for(candidate_ready,
+                         "candidate Host to serve the Store after the plain start", timeout=30, interval=0.1)
+                assert_running_upgrade(dialect, binary, store, seed, ready, previous_status,
+                                       release_version(publisher), None)
                 commands = ()
             elif args.running_host:
                 assert_running_upgrade(dialect, binary, store, seed, ready, previous_status,
