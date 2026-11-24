@@ -1636,7 +1636,7 @@ def provider_line_cases():
                         reuse_chatgpt(master)
                     overview_frame(master, overview_title)
                     if choice == "codex":
-                        assert "provider=codex\n" in (config / "preferences").read_text()
+                        assert "connection=codex\n" in (config / "preferences").read_text()
                     else:
                         assert not (config / "preferences").exists()
                         entry = json.loads((selected_store / "host.json").read_text())["providers"]["openai"]
@@ -1840,14 +1840,14 @@ def main(selected="all"):
         defaults(preferences_home, "--store", alias,
             "--connection", "codex", "--model", "gpt-6-luna")
         saved = preferences_home / ".config/rui/preferences"
-        assert saved.read_text() == f"version=4\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\n"
+        assert saved.read_text() == f"version=4\nstore={store.resolve()}\nconnection=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\n"
         preference_edits(preferences_home, store)
         original_preferences = saved.read_text()
         for invalid_saved in (
                 original_preferences.replace(f"store={store.resolve()}", "store=relative"),
                 original_preferences.replace("model=gpt-6-luna", "model=two words"),
-                original_preferences.replace("provider=codex", "provider=bad!provider"),
-                original_preferences.replace("provider=codex", "provider=")):
+                original_preferences.replace("connection=codex", "connection=bad!connection"),
+                original_preferences.replace("connection=codex", "connection=")):
             invalid_bytes = invalid_saved.encode()
             saved.write_bytes(invalid_bytes)
             for defaults_args in (("inspect",), ("configure", "--notifications", "on")):
@@ -1871,7 +1871,7 @@ def main(selected="all"):
         (linked_home / ".config/rui").symlink_to(saved.parent, target_is_directory=True)
         defaults(linked_home, "--store", store,
             "--connection", "codex", "--model", "gpt-6-luna", success=False)
-        assert saved.read_text() == f"version=4\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\n"
+        assert saved.read_text() == f"version=4\nstore={store.resolve()}\nconnection=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\n"
         backup = saved.parent / "saved-preferences"
         saved.rename(backup)
         os.mkfifo(saved, mode=0o600)
@@ -1961,7 +1961,7 @@ def main(selected="all"):
         finally:
             dispose_all(temp.unlink)
         codex_fixture.credentials(credential)
-        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
+        saved.write_text(f"version=1\nstore={store.resolve()}\nconnection=retired\nmodel=old-model\n")
         stale = defaults(preferences_home)
         assert stale["local_credentials"]["codex"] == "configured" and stale["next_session"] == {"status": "unsupported_provider"}, stale
         assert saved_fields(saved, "connection", "model") == ("retired", "old-model")
@@ -1969,9 +1969,9 @@ def main(selected="all"):
         assert saved_fields(saved, "connection", "model") == ("retired", "old-model")
         defaults(preferences_home, "--connection", "codex")
         assert saved_fields(saved, "connection", "model") == ("codex", "")
-        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
+        saved.write_text(f"version=1\nstore={store.resolve()}\nconnection=retired\nmodel=old-model\n")
         defaults(preferences_home, "--connection", "codex", "--model", "gpt-6-luna")
-        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=old-model\n")
+        saved.write_text(f"version=1\nstore={store.resolve()}\nconnection=codex\nmodel=old-model\n")
         prospective = defaults(preferences_home)["next_session"]
         assert prospective["status"] == "selected" and prospective["model"] == "old-model", prospective
         assert defaults(preferences_home)["model"] == "old-model", "inspection rewrote the stale pin"
@@ -2010,7 +2010,7 @@ def main(selected="all"):
             assert "Copy last answer" in chat_info_frame(master)
             terminal_step(master, "\x03", "Your chats keep working")
             assert entered.wait(timeout=5) == 0
-        saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
+        saved.write_text(f"version=1\nstore={state / 'missing'}\nconnection=codex\nmodel=gpt-6-luna\n")
         saved.chmod(0o600)
         assert run(preferences_home, "session", "inspect", "--session", session, success=False) == ""
         before_missing = run(preferences_home, "request", "list")
@@ -2025,7 +2025,7 @@ def main(selected="all"):
         assert entered.returncode == 6 and b"[store_unavailable]" in entered.stderr, entered.stderr
         assert not (state / "missing").exists()
         assert run(preferences_home, "request", "list") == before_missing
-        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
+        saved.write_text(f"version=1\nstore={store.resolve()}\nconnection=codex\nmodel=gpt-6-luna\n")
         assert json.loads(run(home, "session", "inspect", "--store", store, "--session", session))["work"]["state"]["kind"] == "idle"
         no_tty_home = state / "no-tty-home"
         no_tty_home.mkdir()
@@ -2206,7 +2206,7 @@ def main(selected="all"):
         blocked_config = blocked_home / ".config/rui"
         blocked_config.mkdir(parents=True, mode=0o700)
         (blocked_config / "preferences").write_text(
-            f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
+            f"version=1\nstore={store.resolve()}\nconnection=codex\nmodel=gpt-6-luna\n")
         (blocked_config / "preferences").chmod(0o600)
         (blocked_config / "requests").write_text("not a directory")
         codex_fixture.credentials(blocked_config / "codex.json")

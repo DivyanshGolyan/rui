@@ -319,11 +319,11 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         # Use explicit captures so HOME is not needed to choose a record path.
         preferences = home / ".config/rui/preferences"
         saved_preferences = preferences.read_bytes()
-        assert b"provider=openai\n" in saved_preferences, saved_preferences
+        assert b"connection=openai\n" in saved_preferences, saved_preferences
         try:
             for mode in ("no-home", "stale-provider"):
                 if mode == "stale-provider":
-                    preferences.write_bytes(saved_preferences.replace(b"provider=openai\n", b"provider=retired-provider\n"))
+                    preferences.write_bytes(saved_preferences.replace(b"connection=openai\n", b"connection=retired-provider\n"))
                 for door in ("configure", "start"):
                     for name, selected, extra, code in (cases[0], cases[1], cases[4], cases[5]):
                         key = f"attached-{mode}-{door}-{name}"

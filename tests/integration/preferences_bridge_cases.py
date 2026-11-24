@@ -23,7 +23,7 @@ def preferences_bridge(binary, root, store_settings, env):
     config = home / ".config/rui"
     config.mkdir(parents=True, mode=0o700)
     preferences = config / "preferences"
-    preferences.write_text("version=4\nstore=\nprovider=openai\nmodel=\nnotifications=on\n"
+    preferences.write_text("version=4\nstore=\nconnection=openai\nmodel=\nnotifications=on\n"
                            "reasoning_effort=max\npermission_mode=bypass\n")
     preferences.chmod(0o600)
     key_file = config / "openai.key"
@@ -149,7 +149,7 @@ def preferences_bridge(binary, root, store_settings, env):
                 # A saved provider must not replace an attached parent's provider.
                 # The selected model still uses the Host catalog for preferences.
                 original = preferences.read_bytes()
-                preferences.write_text(original.decode().replace("provider=openai", "provider=codex"))
+                preferences.write_text(original.decode().replace("connection=openai", "connection=codex"))
                 try:
                     for index, (model, effort, flags, field) in enumerate([
                         ("gpt-5.5", "max", (), "omitted"),
