@@ -989,6 +989,11 @@ pub const State = struct {
         return .wait;
     }
 
+    fn parentPressHeld(self: *const State) bool {
+        const pending = self.parent_click orelse return false;
+        return !pending.released;
+    }
+
     fn cancelParentClick(self: *State) void {
         self.parent_click = null;
     }
@@ -1491,7 +1496,8 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .input => |input| {
-            endCarry(state);
+            // Ignored keys must not discard the held parent press before its matching release arrives.
+            if (!state.parentPressHeld() or (!input.pasted and input.key != .ignored)) endCarry(state);
             if (input.list_origin and !input.pasted and !input.under and input.key != .ignored) {
                 const was_held = holding(state);
                 state.now_ms = @max(state.now_ms, input.at_ms orelse state.now_ms);
@@ -4475,7 +4481,7 @@ fn creatorClickCase() !void {
     const release_parent = Event{ .pointer = .{ .phase = .released, .over = target } };
     const last_before_deadline = 100 + ParentClick.interval_ms - 1;
     const deadline = last_before_deadline + 1;
-    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { single, double, childless, focus_left, drag, ignored, paste, navigation, held_single, late_drag, release_elsewhere })) |gesture| {
+    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { single, double, childless, focus_left, drag, ignored, paste, navigation, held_single, held_paste, late_drag, release_elsewhere })) |gesture| {
         var state = try opened(&.{
             session(&parent, .{ .working = ago(10) }, .{ .label = "Parent", .descendant_count = 1 }),
             session(&child, .{ .finished = ago(1) }, .{ .label = "Child", .creator = parent }),
@@ -4489,10 +4495,12 @@ fn creatorClickCase() !void {
         try expectOrder(&state, &.{ "Parent", "Child" });
         const after_deadline: Event = .{ .list_settled = .{ .wide = wide, .focused = true, .click_clock_ms = deadline + 1 } };
         switch (gesture) {
-            .held_single, .late_drag, .release_elsewhere => {
+            .held_single, .held_paste, .late_drag, .release_elsewhere => {
                 try expectEffects(&.{}, try step(&state, after_deadline));
                 switch (gesture) {
-                    .held_single => {
+                    .held_single, .held_paste => {
+                        const ignored = if (gesture == .held_paste) InputDelivery{ .key = .enter, .pasted = true } else InputDelivery{ .key = .ignored };
+                        try expectEffects(&.{}, try step(&state, .{ .input = ignored }));
                         try expectEffects(&.{}, try step(&state, release_parent));
                         try expectEffects(&.{ .{ .open = parent }, .list_models }, try step(&state, after_deadline));
                     },
