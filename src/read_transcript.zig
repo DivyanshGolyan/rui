@@ -162,7 +162,7 @@ const Shown = union(enum) {
             .text => |location| location.reference.length,
             .parts => |*parts| {
                 parts.next_index = 0;
-                return part_text.length(parts);
+                return part_text.length(parts, .detailed);
             },
         };
     }
@@ -176,7 +176,7 @@ const Shown = union(enum) {
                 if (offset > total) return error.InvalidOffset;
                 var sink: Collect = .{ .bytes = try arena.alloc(u8, @intCast(@min(maximum, total - offset))) };
                 parts.next_index = 0;
-                _ = try part_text.write(parts, .{ .start = offset, .length = sink.bytes.len }, &sink);
+                _ = try part_text.write(parts, .detailed, .{ .start = offset, .length = sink.bytes.len }, &sink);
                 if (sink.len != sink.bytes.len) return error.ShortCanonicalRead;
                 return sink.bytes;
             },

@@ -71,6 +71,7 @@ pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target
     configureBashPlatform(b, compile);
     configureHostLaunch(b, compile);
     configureTerminalEditor(b, compile);
+    configureClipboard(b, compile.root_module, target, pinned);
     configureTransport(b, compile, target, pinned);
     configureOpenApi(b, compile);
 }
@@ -152,6 +153,7 @@ fn addRuiWithIdentity(
     configureBashPlatform(b, executable);
     configureHostLaunch(b, executable);
     configureTerminalEditor(b, executable);
+    configureClipboard(b, executable.root_module, target, pinned_transport);
     configureTransportWithIdentity(b, executable, target, pinned_transport, identity);
     return executable;
 }
@@ -493,6 +495,30 @@ pub fn configureTerminalEditor(b: *std.Build, compile: *std.Build.Step.Compile) 
     compile.root_module.link_libc = true;
 }
 
+fn configureClipboard(
+    b: *std.Build,
+    module: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    pinned: ?PinnedTransport,
+) void {
+    if (target.result.os.tag != .macos) return;
+    if (pinned) |transport| {
+        module.addSystemFrameworkPath(transport.output.path(b, "sdk/System/Library/Frameworks"));
+        module.addSystemIncludePath(transport.output.path(b, "sdk/usr/include"));
+        module.addLibraryPath(transport.output.path(b, "sdk/usr/lib"));
+    } else if (b.graph.host.result.os.tag != .macos) {
+        // The unpinned macOS type check must work without an Apple SDK on Linux.
+        return;
+    }
+    module.addCSourceFile(.{
+        .file = b.path("src/clipboard_macos.m"),
+        .flags = &.{"-fobjc-arc"},
+    });
+    module.linkFramework("AppKit", .{});
+    module.linkFramework("CoreGraphics", .{});
+    module.linkFramework("ImageIO", .{});
+}
+
 fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
     const dependency = b.dependency("vaxis", .{
         .target = module.resolved_target.?,
@@ -500,7 +526,7 @@ fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
     });
     module.addImport("terminal_unicode", dependency.module("unicode"));
     module.addImport("terminal_width", dependency.module("gwidth"));
-    module.addImport("vaxis", dependency.module("vaxis"));
+    module.addImport("vaxis", @import("vaxis_overlay.zig").add(b, dependency));
 }
 
 fn addBindings(b: *std.Build, module: *std.Build.Module, name: []const u8, header: []const u8) Translator {

@@ -121,6 +121,7 @@ pub const ReferenceInput = union(enum) {
     enter,
     newline,
     slash,
+    paste_image,
 };
 
 /// The app's one reference list, in pairs across a fitting panel. Every row
@@ -145,6 +146,7 @@ pub const list = [_]Reference{
     .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.{ .key = .ctrl_o }} },
     .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.{ .key = .ctrl_p }}, .aliases = &.{.ctrl_n} },
     .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{.{ .key = .ctrl_r }} },
+    .{ .key = "ctrl+v", .meaning = "paste image", .keys = &.{.paste_image} },
     .{ .key = "/", .meaning = "skills", .keys = &.{.slash} },
     .{ .key = "alt+↑↓", .meaning = "switch chat", .keys = &.{ .{ .key = .alt_up }, .{ .key = .alt_down } } },
     .{ .key = "alt+a", .meaning = "archive", .keys = &.{.{ .key = .alt_a }} },
@@ -179,7 +181,7 @@ fn referenceError(rows: []const Reference, maps: anytype) ?ListError {
                 if (!bound.contains(key)) return .unbound_row;
                 shown.insert(key);
             },
-            .enter, .newline, .slash => {
+            .enter, .newline, .slash, .paste_image => {
                 const tag = std.meta.activeTag(input);
                 if (other_inputs.contains(tag)) return .duplicate_key;
                 other_inputs.insert(tag);

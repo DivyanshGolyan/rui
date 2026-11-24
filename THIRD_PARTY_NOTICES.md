@@ -2,22 +2,16 @@
 
 This file lists build-time and runtime-linked dependencies and measurement-only components distributed or used with Rui. Versions and source hashes are pinned in `build.zig.zon`; measurement-only Go modules are pinned in `tests/qualification/go.mod`.
 
-## libvaxis 0.6.0 (commit d4c3b3666e0c090e2b5092ca09893c6db15e0b79)
+## libvaxis 0.6.0 (commit d2276b086c33395354a3e4dd25fd0cd3b5b1d3d6)
 
 The alternate-screen conversation frontend uses libvaxis for cell drawing and
 terminal-sequence parsing. Rui retains terminal entry and restoration custody.
-`src/prepare_vaxis.sh` copies the pinned source into generated build output and
-applies `src/vaxis-parser.patch`; the dependency archive remains unchanged.
-The patch retains fragmented APC terminators, checks CSI associated-text scratch
-capacity before UTF-8 encoding, and propagates cell-allocation failures through
-rendering instead of logging and continuing. Width accumulation saturates at the
-public width type's maximum rather than overflowing, so Rui can reject clusters
-outside its cell/window limit through the normal restored-error path. A failed render may leave partial
-output and inaccurate cached terminal state. Rui restores the terminal and exits;
-another render or `queueRefresh` is not a recovery operation.
+`build/vaxis_overlay.zig` applies `build/vaxis_overlay.patch` to a generated copy
+of the pinned source. The overlay adds bounded OSC 5522 clipboard frames, the
+capability probe, and paste mode restoration.
 
-- Source: `https://github.com/rockorager/libvaxis` at `d4c3b3666e0c090e2b5092ca09893c6db15e0b79`
-- Zig package content hash: `vaxis-0.6.0-BWNV_O8ODQBFLRjA4D0q75pHPh63iPu_v0yhpCwsAMaM`
+- Source: `https://github.com/DivyanshGolyan/libvaxis` at `d2276b086c33395354a3e4dd25fd0cd3b5b1d3d6`
+- Zig package content hash: `vaxis-0.6.0-BWNV_Kr3DwDa3L4G9shCScFVTaDxscSyKQoXXWSi-IzB`
 - License: MIT, reproduced in the source distribution's `LICENSE` file
 
 Copyright (c) 2023 Tim Culverhouse
@@ -42,8 +36,7 @@ SOFTWARE.
 
 ### libvaxis transitive dependencies
 
-libvaxis pins zigimg at `734fa919fb15b7917d4eb124f53600348f4ffa30` and
-uucode at `1fb73433bba5d93366c57f23ff2e9d7939746500`. Rui uses uucode's
+libvaxis pins uucode at `1fb73433bba5d93366c57f23ff2e9d7939746500`. Rui uses uucode's
 Unicode tables, general categories and grapheme iteration. The MIT permission and warranty text
 above also applies to these copyright notices:
 

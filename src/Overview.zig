@@ -861,7 +861,10 @@ fn disposeSession(self: *Self, left: Left) void {
         inline for (.{ "scratch", "action", "inspection", "details", "parts" }) |name| @field(files, name).close(self.init.io);
         for (files.actions) |file| file.close(self.init.io);
     }
-    if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
+    if (left.frontend) |frontend| {
+        frontend.input.deinit();
+        self.init.gpa.destroy(frontend);
+    }
 }
 
 fn finishApp(self: *Self, ended: anyerror!void) !?Relaunch {
@@ -929,14 +932,24 @@ noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerro
 fn makeRelaunch(self: *Self, left: ?Left) !Relaunch {
     const gpa = self.init.gpa;
     if (left) |held| if (held.frontend) |frontend| {
-        try self.session_drafts.put(gpa, &held.session, frontend.input.snapshot());
+        try self.session_drafts.putDraft(gpa, &held.session, frontend.input.snapshot(), frontend.input.image());
     };
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const temporary = arena.allocator();
     var entries: std.ArrayList(handoff.Entry) = .empty;
-    defer entries.deinit(gpa);
     var drafts = self.session_drafts.iterator();
-    while (drafts.next()) |entry| try entries.append(gpa, .{ .id = entry.id, .snapshot = entry.snapshot });
+    const encoder = std.base64.standard.Encoder;
+    var version: u8 = 1;
+    while (drafts.next()) |entry| {
+        const encoded = if (entry.image) |image| blk: {
+            version = 2;
+            break :blk encoder.encode(try temporary.alloc(u8, encoder.calcSize(image.bytes.len)), image.bytes);
+        } else null;
+        try entries.append(temporary, .{ .id = entry.id, .snapshot = entry.snapshot, .image_base64 = encoded });
+    }
     const bytes = try handoff.encode(gpa, .{
-        .v = 1,
+        .v = version,
         .store = self.options.store,
         .open = if (left) |*held| &held.session else null,
         .overview = .{ .bytes = "", .cursor = 0 },
@@ -953,7 +966,17 @@ fn makeRelaunch(self: *Self, left: ?Left) !Relaunch {
 fn restoreRelaunch(self: *Self) !void {
     const value = self.options.restoration orelse return;
     self.options.restoration = null;
-    for (value.drafts) |entry| try self.session_drafts.put(self.init.gpa, entry.id, entry.snapshot);
+    for (value.drafts) |entry| {
+        const image = if (entry.image_base64) |encoded| image: {
+            const decoder = std.base64.standard.Decoder;
+            const bytes = try std.heap.page_allocator.alloc(u8, try decoder.calcSizeForSlice(encoded));
+            errdefer std.heap.page_allocator.free(bytes);
+            try decoder.decode(bytes, encoded);
+            break :image try @import("SessionInput.zig").Image.validate(bytes);
+        } else null;
+        defer if (image) |attachment| attachment.deinit();
+        try self.session_drafts.putDraft(self.init.gpa, entry.id, entry.snapshot, image);
+    }
     if (value.open) |id| self.options.open = id[0..session_id.bytes].*;
 }
 
@@ -1288,6 +1311,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
 }
 
 fn destroy(self: *Self) void {
+    self.root.deinitClipboard();
     self.sign_in.deinit();
     self.session_drafts.deinit(self.init.gpa);
     std.debug.assert(self.worker.thread == null);

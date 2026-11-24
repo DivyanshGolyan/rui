@@ -17,6 +17,7 @@ command_style: vaxis.Style = .{},
 /// The exact-match row's source word, derived by the completion owner.
 known_word: ?commands.Span = null,
 placeholder: []const u8 = "",
+image_attached: bool = false,
 ascii: bool = false,
 caret: bool = true,
 panel: ?vxfw.Widget = null,
@@ -44,16 +45,17 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (width == 0 or height == 0) return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{});
     const rule: u16 = if (height >= layout.min_rule_height) 1 else 0;
     const prefix: u16 = if (width >= 4) 3 else 0;
+    const image_rows: u16 = @intFromBool(self.image_attached and height > 2 * rule + 1);
     const area = &self.editor.area;
     area.style = self.style;
     area.show_cursor = true;
     area.width_method = self.method;
-    const text = try area.draw(ctx.withConstraints(.{}, .{ .width = width - prefix, .height = @min(height - 2 * rule, self.max_rows) }));
-    const panel = if (self.panel) |child| try child.draw(ctx.withConstraints(.{}, .{ .width = width, .height = height - text.size.height - 2 * rule })) else null;
+    const text = try area.draw(ctx.withConstraints(.{}, .{ .width = width - prefix, .height = @min(height - 2 * rule - image_rows, self.max_rows) }));
+    const panel = if (self.panel) |child| try child.draw(ctx.withConstraints(.{}, .{ .width = width, .height = height - text.size.height - 2 * rule - image_rows })) else null;
     const panel_rows: u16 = if (panel) |drawn| drawn.size.height else 0;
-    const text_row = rule + panel_rows;
+    const text_row = rule + panel_rows + image_rows;
     const shown = area.viewport();
-    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = text.size.height + 2 * rule + panel_rows });
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = text.size.height + 2 * rule + panel_rows + image_rows });
     @memset(surface.buffer, .{ .style = self.style });
     const command = if (self.known_word) |span| self.editor.text()[span.start..][0..span.len] else null;
     for (0..text.size.height) |row| for (0..text.size.width) |col| {
@@ -100,7 +102,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             .style = if (self.caret) self.style else self.quiet,
         }, .{ .wrap = .none });
     }
-    if (self.editor.text().len == 0) _ = window.child(.{ .x_off = prefix, .y_off = text_row, .height = 1 }).printSegment(.{ .text = self.placeholder, .style = self.quiet }, .{ .wrap = .none });
+    if (image_rows != 0) _ = window.child(.{ .x_off = prefix, .y_off = text_row - 1, .height = 1 }).printSegment(.{ .text = @import("part_text.zig").first_image, .style = self.quiet }, .{ .wrap = .none });
+    if (!self.image_attached and self.editor.text().len == 0) _ = window.child(.{ .x_off = prefix, .y_off = text_row, .height = 1 }).printSegment(.{ .text = self.placeholder, .style = self.quiet }, .{ .wrap = .none });
     if (self.caret) surface.cursor = .{ .row = text.cursor.?.row + text_row, .col = text.cursor.?.col + prefix, .shape = .block_blink };
     if (panel) |drawn| surface.children = try ctx.arena.dupe(vxfw.SubSurface, &.{.{ .origin = .{ .row = rule, .col = 0 }, .surface = drawn }});
     return surface;

@@ -330,10 +330,19 @@ fn apply(self: *Self, result: anyerror!void) !End {
     return .{ .rejected = .{ .kind = kind, .code = code } };
 }
 
-pub fn messageText(self: *const Self) ?[]const u8 {
+fn heldTicket(self: *const Self) ?Input.Ticket {
     const ticket = if (self.intent) |intent| intent.ticket() else null;
-    const held = ticket orelse if (self.settled_message) |settled| settled.ticket else return null;
-    return self.input.message(held) catch unreachable;
+    return ticket orelse if (self.settled_message) |settled| settled.ticket else null;
+}
+
+pub fn messageText(self: *const Self) ?[]const u8 {
+    const ticket = self.heldTicket() orelse return null;
+    return self.input.message(ticket) catch unreachable;
+}
+
+pub fn messageHasImage(self: *const Self) bool {
+    const ticket = self.heldTicket() orelse return false;
+    return (self.input.messageImage(ticket) catch unreachable) != null;
 }
 
 pub fn observeMessage(self: *Self, key: [36]u8) void {
@@ -401,11 +410,38 @@ fn submit(raw: *anyopaque, task: *Task) !void {
     if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
     self.publication = original_state.capturing(self.publication);
     self.captured = switch (self.intent.?) {
-        .message, .message_then_deny => try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = try self.input.message(self.intent.?.ticket().?), .require_model = true }, self.target).get(),
+        .message, .message_then_deny => try self.captureDraft(task.io, self.intent.?.ticket().?),
         .decision => |decision| try client.capturePermissionDecision(task.io, .{ .store = self.store, .session = self.session, .action_id = decision.action, .decision = decision.decision }, self.target),
     };
     self.publication = .published;
     self.reply = try task.requests().sendCaptured(&self.captured.?, self.environment, &self.reply_buffer).get();
+}
+
+fn captureDraft(self: *Self, io: std.Io, ticket: Input.Ticket) !client.CapturedRecord {
+    const text = try self.input.message(ticket);
+    var message: client.MessageInput = .{ .store = self.store, .session = self.session, .text_path = "", .text = text, .require_model = true };
+    var operands: [2]client.MessageOperand = undefined;
+    if (try self.input.messageImage(ticket)) |image| {
+        operands = .{ .{ .text = text }, .{ .image_bytes = image.bytes } };
+        message.text = null;
+        message.operands = operands[@intFromBool(text.len == 0)..];
+        message.operand_stdin = .none;
+    }
+    return client.captureMessage(io, message, self.target).get();
+}
+
+fn draftTarget(self: *const Self, ticket: Input.Ticket) !protocol_reply.MutationTarget {
+    const bytes = try self.input.message(ticket);
+    if (try self.input.messageImage(ticket)) |image| {
+        const parts = @import("input_parts.zig");
+        var manifest: parts.Manifest.Encoder = .{};
+        var encoded: [parts.Manifest.max_entry_bytes]u8 = undefined;
+        if (bytes.len != 0) _ = try manifest.append(&.{ .length = bytes.len, .digest = protocol.contentDigest(bytes), .kind = .text }, &encoded);
+        _ = try manifest.append(&image.identity, &encoded);
+        const identity = (try manifest.finish()).parts;
+        return .{ .message = .{ .bytes = identity.length, .digest = identity.digest, .form = .parts } };
+    }
+    return .{ .message = .{ .bytes = bytes.len, .digest = protocol.contentDigest(bytes) } };
 }
 
 test "submission reservation failure retains unsent intent ahead of accepted history" {
@@ -570,6 +606,42 @@ test "a chat Message captures require_model so the Host refuses a Session whose 
     try std.testing.expectEqualStrings("k7m2qx", parsed.value.object.get("session").?.string);
 }
 
+test "SUI-112 clipboard image submission recovers the original multipart identity" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_][]const u8{ "", "caption" }) |caption| {
+        var input: Input = undefined;
+        input.init();
+        defer input.deinit();
+        const attachment = try Input.Image.validate(@embedFile("codecs/fixtures/image-input/pixel.png"));
+        input.setImage(try attachment.clone());
+        _ = input.append(caption);
+        const ticket = input.typed("\r").message;
+        var self: Self = .{ .io = io, .store = root, .session = "k7m2qx", .directory = root, .input = &input, .environment = .empty };
+        defer self.close();
+        try self.begin(.{ .message = ticket });
+        _ = self.join();
+        const capture = self.captured orelse return error.TestExpectedCapture;
+        try std.testing.expectEqual(.parts, capture.target.message.form);
+        try std.testing.expectEqualDeep(try self.draftTarget(ticket), capture.target);
+        const key = self.key;
+        self.close();
+        _ = input.append("next draft");
+        try self.requestRecovery(&key);
+        _ = try self.advance();
+        _ = self.join();
+        const recovered = self.captured orelse return error.TestExpectedCapture;
+        try std.testing.expectEqualDeep(capture.target, recovered.target);
+        try std.testing.expectEqualSlices(u8, &key, &self.key);
+        try std.testing.expectEqualStrings("next draft", input.composition().bytes);
+        try std.testing.expectEqualSlices(u8, attachment.bytes, (try input.messageImage(ticket)).?.bytes);
+    }
+}
+
 test "submission recovery validates reopened originals and pins the saved reader through handoff" {
     const Failure = struct {
         fn sync(_: ?*anyopaque, _: std.Io.File) std.Io.File.SyncError!void {
@@ -655,10 +727,7 @@ fn resend(raw: *anyopaque, task: *Task) !void {
             self.captured = null;
         }
         const original: protocol_reply.MutationTarget = switch (self.intent.?) {
-            .message, .message_then_deny => blk: {
-                const bytes = try self.input.message(self.intent.?.ticket().?);
-                break :blk .{ .message = .{ .bytes = bytes.len, .digest = protocol.contentDigest(bytes) } };
-            },
+            .message, .message_then_deny => try self.draftTarget(self.intent.?.ticket().?),
             .decision => |decision| .{ .permission_decision = .{ .action = decision.action, .decision = decision.decision } },
         };
         const expected: client.Binding = .{ .store = self.store, .session = self.session, .key = &self.key, .target = original };

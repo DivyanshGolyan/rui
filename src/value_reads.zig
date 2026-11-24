@@ -38,7 +38,7 @@ pub const Display = struct {
         };
         var iterator: protocol_reply.PartIterator = undefined;
         try list.iterator(&iterator);
-        return .{ .display = .{ .length = try part_text.length(&iterator), .store = store, .session = session, .body = .{ .parts = list } } };
+        return .{ .display = .{ .length = try part_text.length(&iterator, labels(parts.owner)), .store = store, .session = session, .body = .{ .parts = list } } };
     }
 
     /// Feeds exactly `length` display bytes into `sink`. Every Text part is read whole and
@@ -54,9 +54,9 @@ pub const Display = struct {
                 };
             },
             .parts => |*list| {
-                var source: PartSource = .{ .requests = requests, .store = self.store, .session = self.session, .owner = list.value.owner, .iterator = undefined };
+                var source: PartSource = .{ .requests = requests, .store = self.store, .session = self.session, .list = list, .pass = if (list.value.owner == .message) .images else .stored };
                 try list.iterator(&source.iterator);
-                return part_text.write(&source, null, sink);
+                return part_text.write(&source, labels(list.value.owner), null, sink);
             },
         }
     }
@@ -81,12 +81,16 @@ pub fn firstLine(requests: client.Requests, store: []const u8, session: []const 
         .text => return requests.readPublicPartPrefix(store, session, parts.owner, first, buffer),
         .image => |image| {
             var out: [part_text.max_placeholder_bytes]u8 = undefined;
-            const text = part_text.placeholder(1, image, first.reference.length, &out);
+            const text = part_text.placeholder(labels(parts.owner), 1, image, first.reference.length, &out);
             const count = @min(text.len, buffer.len);
             @memcpy(buffer[0..count], text[0..count]);
             return .{ .line = buffer[0..count] };
         },
     }
+}
+
+fn labels(owner: content_value.Owner) part_text.Labels {
+    return if (owner == .message) .compact else .detailed;
 }
 
 /// Reads the owner's list into `scratch` and accepts it only for this value's owner and manifest.
@@ -114,19 +118,28 @@ const PartSource = struct {
     requests: client.Requests,
     store: []const u8,
     session: []const u8,
-    owner: content_value.Owner,
-    iterator: protocol_reply.PartIterator,
+    list: *const protocol_reply.PartList,
+    iterator: protocol_reply.PartIterator = undefined,
+    pass: enum { stored, images, text },
 
     pub const Stop = protocol_reply.ReadFailure;
 
     pub fn next(self: *PartSource) !?content_value.Part {
-        return self.iterator.next();
+        while (true) {
+            const part = (try self.iterator.next()) orelse {
+                if (self.pass != .images) return null;
+                try self.list.iterator(&self.iterator);
+                self.pass = .text;
+                continue;
+            };
+            if (self.pass == .stored or (self.pass == .images) == (part.kind == .image)) return part;
+        }
     }
 
     pub fn text(self: *PartSource, part: content_value.Part, start: u64, count: u64, sink: anytype) !?protocol_reply.ReadFailure {
         // A Display streams whole, so each Text part is asked for whole.
         std.debug.assert(start == 0 and count == part.reference.length);
-        return self.requests.readPublicPartContent(self.store, self.session, self.owner, part, sink);
+        return self.requests.readPublicPartContent(self.store, self.session, self.list.value.owner, part, sink);
     }
 };
 
