@@ -91,6 +91,7 @@ pub const Hooks = struct {
     activate: ?SignIn.Activate = null,
     ready: ?SignIn.Ready = null,
     start_host: *const fn (std.process.Init, []const u8) HostLaunch,
+    remote_departure: ?*const fn (SignIn.Departure) void = null,
 };
 
 pub const HostLaunch = @import("host_launch.zig").Summary;
@@ -869,7 +870,14 @@ fn disposeSession(self: *Self, left: Left) void {
 }
 
 fn finishApp(self: *Self, ended: anyerror!void) !?Relaunch {
-    const sign_in_ended = self.sign_in.stop();
+    const sign_in_result = self.sign_in.stop();
+    const sign_in_ended: anyerror!void = if (sign_in_result) |remote| if (remote) |cause| outcome: {
+        if (self.hooks.remote_departure) |report| {
+            report(cause);
+            break :outcome error.Reported;
+        }
+        break :outcome error.SignInRemoteFailure;
+    } else {} else |err| err;
     defer {
         for (self.retired.items) |retired| self.disposeSession(retired.left);
         self.retired.deinit(self.init.gpa);
@@ -1399,7 +1407,7 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
     self.job = next;
     self.worker.start(self.init.io, self, work) catch |err| {
         if (next != .start_host) return err;
-        self.host_launch = .{ .failed = .{ .kind = .worker, .err = err } };
+        self.host_launch = .{ .failed = .{ .kind = .worker, .err = .{ .local = err } } };
     };
 }
 
@@ -1501,7 +1509,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
     switch (self.job) {
         .start_host => {
             outcome catch |err| {
-                self.host_launch = .{ .failed = .{ .kind = .worker, .err = err } };
+                self.host_launch = .{ .failed = .{ .kind = .worker, .err = .{ .local = err } } };
                 return null;
             };
             const launch = answer.start_host.launch;
@@ -2097,7 +2105,7 @@ const listed_references = [_][]const u8{ "k7m2qx", "b4n8wd", "p3c6tz", "h5r9vy",
 const fake_operations: Operations = .{
     .start_host = struct {
         fn start(_: *Self) HostLaunch {
-            return .{ .failed = .{ .kind = .setup, .err = error.TestUnexpectedResult } };
+            return .{ .failed = .{ .kind = .setup, .err = .{ .local = error.TestUnexpectedResult } } };
         }
     }.start,
     .host = struct {
@@ -3479,7 +3487,7 @@ const HostRecovery = struct {
             if (after_start) |after| availability = after;
             return result;
         }
-        if (fail_start) return .{ .failed = .{ .kind = .child_refused, .err = error.HostStartupFailed } };
+        if (fail_start) return .{ .failed = .{ .kind = .child_refused, .err = .{ .local = error.HostStartupFailed } } };
         availability = .ready;
         return .{ .ready = {} };
     }
@@ -3990,13 +3998,13 @@ test "SUI-127 Host recovery renders the launch result cause without confusing fa
     const Case = struct { launch: HostLaunch, words: []const u8, retry: bool = false };
     const cases = [_]Case{
         .{ .launch = .{ .ready = {} }, .words = "" },
-        .{ .launch = .{ .failed = .{ .kind = .os_launch, .err = error.HostLaunchFailed } }, .words = "could not start", .retry = true },
-        .{ .launch = .{ .failed = .{ .kind = .child_refused, .err = error.HostStartupFailed } }, .words = "refused to start", .retry = true },
-        .{ .launch = .{ .failed = .{ .kind = .readiness_timeout, .err = error.HostReadinessUnconfirmed } }, .words = "start timed out", .retry = true },
-        .{ .launch = .{ .failed = .{ .kind = .store_identity, .err = error.StoreIdentityMismatch } }, .words = "not the same Store" },
-        .{ .launch = .{ .failed = .{ .kind = .incompatible, .err = error.IncompatibleHost } }, .words = "different Rui version" },
-        .{ .launch = .{ .failed = .{ .kind = .provider_unserved, .err = error.HostModelUnavailable } }, .words = "does not serve this provider" },
-        .{ .launch = .{ .failed = .{ .kind = .store_format, .err = error.HostStartupFailed } }, .words = "needs a compatible Rui" },
+        .{ .launch = .{ .failed = .{ .kind = .os_launch, .err = .{ .local = error.HostLaunchFailed } } }, .words = "could not start", .retry = true },
+        .{ .launch = .{ .failed = .{ .kind = .child_refused, .err = .{ .local = error.HostStartupFailed } } }, .words = "refused to start", .retry = true },
+        .{ .launch = .{ .failed = .{ .kind = .readiness_timeout, .err = .{ .local = error.HostReadinessUnconfirmed } } }, .words = "start timed out", .retry = true },
+        .{ .launch = .{ .failed = .{ .kind = .store_identity, .err = .{ .local = error.StoreIdentityMismatch } } }, .words = "not the same Store" },
+        .{ .launch = .{ .failed = .{ .kind = .incompatible, .err = .{ .local = error.IncompatibleHost } } }, .words = "different Rui version" },
+        .{ .launch = .{ .failed = .{ .kind = .provider_unserved, .err = .{ .local = error.HostModelUnavailable } } }, .words = "does not serve this provider" },
+        .{ .launch = .{ .failed = .{ .kind = .store_format, .err = .{ .local = error.HostStartupFailed } } }, .words = "needs a compatible Rui" },
         .{ .launch = Handover.summary(.{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "invalid") } }), .words = "settings refused", .retry = true },
         .{ .launch = Handover.summary(.{ .failed = .stopping }), .words = "stop failed", .retry = true },
         .{ .launch = Handover.summary(.{ .unconfirmed = .awaiting_retirement }), .words = "retire unconfirmed", .retry = true },
@@ -4186,7 +4194,7 @@ test "Host recovery retains a worker failure in the same typed launch result" {
     overview.job = .start_host;
     try std.testing.expect(try overview.deliver(error.SystemResources) == null);
     try std.testing.expectEqual(HostLaunch.Failure.Kind.worker, overview.host_launch.?.failed.kind);
-    try std.testing.expectEqual(error.SystemResources, overview.host_launch.?.failed.err);
+    try std.testing.expectEqual(error.SystemResources, overview.host_launch.?.failed.err.local);
     var shown = try rig.shown(46, 26);
     defer shown.deinit();
     try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Host stopped · could not start · retry") != null);
@@ -6787,8 +6795,8 @@ test "Overview mouse Host line without a start or retry has no hover or click ac
         switch (case) {
             .upgrading => overview.state.upgrade.after = .blocked,
             .starting => overview.queue(.start_host),
-            .incompatible => overview.host_launch = .{ .failed = .{ .kind = .incompatible, .err = error.IncompatibleHost } },
-            .store_identity => overview.host_launch = .{ .failed = .{ .kind = .store_identity, .err = error.StoreIdentityMismatch } },
+            .incompatible => overview.host_launch = .{ .failed = .{ .kind = .incompatible, .err = .{ .local = error.IncompatibleHost } } },
+            .store_identity => overview.host_launch = .{ .failed = .{ .kind = .store_identity, .err = .{ .local = error.StoreIdentityMismatch } } },
             else => {},
         }
         try std.testing.expectEqual(null, overview.hostNext());

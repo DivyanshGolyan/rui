@@ -376,6 +376,28 @@ pub fn build(b: *std.Build) void {
     if (pr_ci) upgrade_release.root_module.strip = true;
     const upgrade_fixture_step = b.step("upgrade-fixture", "Build the same-source native actor with synthetic release identity for upgrade evidence");
     upgrade_fixture_step.dependOn(&b.addInstallArtifact(upgrade_release, .{}).step);
+    // Build a same-source older-wire Host solely for the per-Store handover fixture.
+    // The generated tree leaves production sources untouched and needs no released binary.
+    const wire_source = b.root.root_dir.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ b.root.sub_path, "src/wire_version.zig" }), b.allocator, .limited(1024)) catch @panic("cannot read wire version");
+    const wire_start = (std.mem.indexOfScalar(u8, wire_source, '"') orelse @panic("missing wire version")) + 1;
+    const wire_end = std.mem.indexOfScalarPos(u8, wire_source, wire_start, '"') orelse @panic("missing wire version end");
+    const wire = std.fmt.parseInt(u32, wire_source[wire_start..wire_end], 10) catch @panic("invalid wire version");
+    if (wire == 0) @panic("wire version has no predecessor");
+    const older_sources = b.addWriteFiles();
+    _ = older_sources.addCopyDirectory(b.path("src"), "src", .{ .exclude_extensions = &.{"wire_version.zig"} });
+    _ = older_sources.add("src/wire_version.zig", b.fmt("pub const wire_version = \"{d}\";\n", .{wire - 1}));
+    const older_host = product.addIntegrationRui(b, target, "rui-handover-older-fixture", pinned_transport, pr_ci, .{
+        .version = b.fmt("0.{d}.9999", .{product.schemaVersion(b)}),
+        .revision = product.buildIdentity(b).revision,
+    });
+    older_host.root_module.root_source_file = older_sources.getDirectory().path(b, "src/cli.zig");
+    const handover_actors = b.step("start-handover-fixtures", "Build synthetic current and older-wire handover actors");
+    handover_actors.dependOn(&b.addInstallArtifact(upgrade_release, .{}).step);
+    handover_actors.dependOn(&b.addInstallArtifact(older_host, .{}).step);
+    const start_handover = b.addSystemCommand(&.{ "python3", "tests/integration/host_start_handover_integration.py" });
+    start_handover.addFileArg(ci.path(upgrade_release));
+    start_handover.addFileArg(ci.path(older_host));
+    b.step("start-handover-integration", "Run isolated ordinary-start detached handover custody cases").dependOn(&start_handover.step);
     const upgrade_integration = screen_module.screenCommand(b, screen, &.{});
     upgrade_integration.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     upgrade_integration.addArg("python3");

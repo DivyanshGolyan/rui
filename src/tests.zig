@@ -9,6 +9,7 @@ test {
     _ = @import("server_read_image.zig");
     _ = @import("host_start.zig");
     _ = @import("host_start_handover.zig");
+    _ = @import("host_coordinator_custody_test.zig");
     _ = @import("host_launch_transfer.zig");
     _ = @import("server_mcp_settings.zig");
     _ = @import("testing/host_settings.zig");

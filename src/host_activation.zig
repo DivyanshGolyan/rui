@@ -223,7 +223,17 @@ pub const Fault = struct {
     cause: anyerror,
 };
 
-pub const Execution = union(enum) { outcome: Outcome, fault: Fault };
+pub const RemoteFailure = struct {
+    cause: @import("bounded.zig").Bounded(256),
+    code: @import("caller_error.zig").Code,
+
+    pub fn from(err: anyerror) !RemoteFailure {
+        return .{ .cause = try @import("bounded.zig").Bounded(256).from(@errorName(err)), .code = @import("caller_error.zig").of(err) };
+    }
+};
+
+pub const RemoteFault = struct { effect: EffectTag, failure: RemoteFailure };
+pub const Execution = union(enum) { outcome: Outcome, fault: Fault, remote_fault: RemoteFault, remote_failure: RemoteFailure };
 
 /// The running Host a same-build activation leaves current when the target gives no
 /// settings frame to compare: one on the target executable that reports a digest.

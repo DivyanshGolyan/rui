@@ -128,6 +128,8 @@ FIXTURES = {
     "host-status-integration": ((I + "host_status_integration.py",), (I + "host_status_actor.zig",), (CALLER, HOST)),
     "host-stop-integration": ((I + "host_stop_integration.py",), (I + "host_status_actor.zig",),
                               (CALLER, "src/HostLifecycle.zig", "src/host_activation.zig", "src/server_host.zig")),
+    "start-handover-integration": ((I + "host_start_handover_integration.py",), (),
+                                   ("src/host_coordinator.zig", "src/host_start_handover.zig", "src/host_restart_all.zig", "src/HostLifecycle.zig")),
     "host-launch-integration": ((I + "host_launch_integration.py",), (),
                                 ("src/HostLifecycle.zig", "src/host_activation.zig", "src/descriptor_capacity.zig", "src/os/descriptor_limit.zig",
                                  "src/serve_grammar.zig")),
@@ -762,7 +764,7 @@ STORE_PATHS = ("src/store.zig", "src/store/*")
 # Targets the PR tier runs only when the diff touches their own files, never through an import:
 # the live-MySQL wire client (its MySQL 8.4 runs in its own Docker container, not the job's) and the
 # Go measurement packages.
-PR_OWN_FILE_TARGETS = frozenset({"mysql-wire-integration", "measurement-check"})
+PR_OWN_FILE_TARGETS = frozenset({"mysql-wire-integration", "measurement-check", "start-handover-integration"})
 # Targets the PR tier runs whenever the selector picks them. deep-modules (DEEP_MODULES) and its tool's tests
 # (DEEP_MODULES_TEST) are cheap Debug builds of the host tool and run beside the policy checks, so they are
 # selected the same way.
@@ -770,7 +772,7 @@ PR_SELECTED_TARGETS = frozenset({"deep-modules", "deep-modules-test"})
 # Promotion's own targets: the PR tier never runs these whatever the diff touches. ci_plan.py adds
 # them to every promotion, and the issue filer names a red's target as promotion-only with them.
 PROMOTION_CORE_TARGETS = frozenset({"check-full", "test-logic", "admission-debug-integration"})
-PROMOTION_EXTRA_TARGETS = frozenset({"deep-modules", "rsql-table", "mysql-wire-integration"})
+PROMOTION_EXTRA_TARGETS = frozenset({"deep-modules", "rsql-table", "mysql-wire-integration", "start-handover-integration"})
 # The targets the PR tier never runs, whatever the diff touches: the escape classifier's promotion-only set.
 # Own-file and selected targets are checked first in the classifier, so this is what remains of the extras.
 PR_NEVER_TARGETS = PROMOTION_EXTRA_TARGETS - PR_OWN_FILE_TARGETS - PR_SELECTED_TARGETS

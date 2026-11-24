@@ -301,6 +301,7 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
             break :state switch (HostLifecycle.activate(init, allocator, &observation, census, target.build, target.version, options.cancellation, options.progress)) {
                 .outcome => |outcome| .{ .outcome = outcome },
                 .fault => |fault| .{ .fault = .of(fault) },
+                .remote_fault, .remote_failure => unreachable,
             };
         };
     }

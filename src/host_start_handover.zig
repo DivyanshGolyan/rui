@@ -15,10 +15,22 @@ pub fn spawn(init: std.process.Init, request: host_start.Spawn, ops: host_start.
     if (result.outcome != .failed or result.outcome.failed.cause.kind != .incompatible or request.frozen != null) return;
     const execution = handover.activate(handover.context, init, request.dir) catch |err| {
         host_start.launchFailure(result, .setup, err, null);
+        if (err == error.HostRestartUnconfirmed) {
+            result.outcome.failed.cause.err = .unconfirmed;
+            result.outcome.failed.detail = .handover_unconfirmed;
+        }
         return;
     } orelse return;
     const outcome = switch (execution) {
         .outcome => |value| value,
+        .remote_fault => |fault| {
+            result.outcome = .{ .failed = .{ .cause = .{ .kind = .setup, .err = .{ .remote = .{ .failure = fault.failure, .unconfirmed = fault.effect.stage() != null } } }, .detail = .{ .handover_remote_fault = fault } } };
+            return;
+        },
+        .remote_failure => |failure| {
+            result.outcome = .{ .failed = .{ .cause = .{ .kind = .setup, .err = .{ .remote = .{ .failure = failure, .unconfirmed = false } } }, .detail = .{ .handover_remote_failure = failure } } };
+            return;
+        },
         .fault => |fault| {
             host_start.launchFailure(result, .setup, fault.cause, null);
             result.outcome.failed.detail = .{ .handover_fault = fault };
@@ -43,6 +55,7 @@ const Fixture = struct {
     initial: host_launch.Result.Cause.Kind = .incompatible,
     answer: ?activation.Outcome = null,
     fault: ?activation.Fault = null,
+    remote: ?activation.Execution = null,
     failure: ?anyerror = null,
     spawns: usize = 0,
     activations: usize = 0,
@@ -61,6 +74,7 @@ const Fixture = struct {
         self.directory = directory;
         if (self.failure) |err| return err;
         if (self.fault) |fault| return .{ .fault = fault };
+        if (self.remote) |remote| return remote;
         return if (self.answer) |answer| .{ .outcome = answer } else null;
     }
     fn run(self: *Fixture, init: std.process.Init, frozen: ?[]const u8) host_launch.Result {
@@ -92,7 +106,7 @@ test "SH-122 ordinary start hands over only eligible incompatible Hosts and pres
     for ([_]anyerror{ error.OutOfMemory, error.AccessDenied, error.FileNotFound, error.TestActivation }) |cause| {
         var failed: Fixture = .{ .failure = cause };
         const failed_result = failed.run(init, null);
-        try std.testing.expectEqual(cause, failed_result.outcome.failed.cause.err);
+        try std.testing.expectEqual(cause, failed_result.outcome.failed.cause.err.local);
         try std.testing.expect(failed_result.outcome.failed.detail == .none);
         try std.testing.expectEqual(@as(usize, 1), failed.activations);
     }
@@ -115,7 +129,7 @@ test "SH-122 ordinary start hands over only eligible incompatible Hosts and pres
         const result = fixture.run(init, null);
         try std.testing.expectEqual(@as(usize, 1), fixture.activations);
         try std.testing.expectEqual(@as(usize, 1), fixture.spawns);
-        try std.testing.expectEqual(case.cause, result.outcome.failed.cause.err);
+        try std.testing.expectEqual(case.cause, result.outcome.failed.cause.err.local);
         try std.testing.expectEqualDeep(fault, result.outcome.failed.detail.handover_fault);
         try std.testing.expectEqual(case.stage, fault.effect.stage());
         var bytes: [host_launch.max_report_bytes]u8 = undefined;
@@ -140,10 +154,34 @@ test "SH-122 ordinary start hands over only eligible incompatible Hosts and pres
             try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "unconfirmed") == null);
         }
     }
+    const remote_failure = try activation.RemoteFailure.from(error.OutOfMemory);
+    for (faults) |case| {
+        const remote_fault: activation.RemoteFault = .{ .effect = case.effect, .failure = remote_failure };
+        var remote_fixture: Fixture = .{ .remote = .{ .remote_fault = remote_fault } };
+        const remote_result = remote_fixture.run(init, null);
+        try std.testing.expectEqualDeep(remote_fault, remote_result.outcome.failed.detail.handover_remote_fault);
+        var bytes: [host_launch.max_report_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try host_launch.writeDiagnostics(&remote_result, &writer, 0);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "[OutOfMemory]") != null);
+        try std.testing.expectEqual(case.stage != null, std.mem.indexOf(u8, writer.buffered(), "unconfirmed") != null);
+    }
+    var remote_fixture: Fixture = .{ .remote = .{ .remote_failure = remote_failure } };
+    const remote_result = remote_fixture.run(init, null);
+    try std.testing.expectEqualDeep(remote_failure, remote_result.outcome.failed.detail.handover_remote_failure);
+    var unknown_fixture: Fixture = .{ .failure = error.HostRestartUnconfirmed };
+    const unknown_result = unknown_fixture.run(init, null);
+    try std.testing.expect(unknown_result.outcome.failed.detail == .handover_unconfirmed);
+    try std.testing.expectEqualStrings("handover unconfirmed", unknown_result.summary().failed.words());
+    var unknown_bytes: [host_launch.max_report_bytes]u8 = undefined;
+    var unknown_writer = std.Io.Writer.fixed(&unknown_bytes);
+    try host_launch.writeDiagnostics(&unknown_result, &unknown_writer, 0);
+    try std.testing.expect(std.mem.indexOf(u8, unknown_writer.buffered(), "Host state is unconfirmed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unknown_writer.buffered(), "inspect Host status") != null);
     var long_directory: [@import("protocol.zig").max_store_bytes + 1]u8 = @splat('x');
     var long_fixture: Fixture = .{ .requested = &long_directory, .failure = error.TestActivation };
     const long_result = long_fixture.run(init, null);
-    try std.testing.expectEqual(error.TestActivation, long_result.outcome.failed.cause.err);
+    try std.testing.expectEqual(error.TestActivation, long_result.outcome.failed.cause.err.local);
     try std.testing.expectEqualStrings(&long_directory, long_fixture.directory);
     const instance = [_]u8{ 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42 };
     const refusal = @import("start_report.zig").Failure.init(.settings_invalid, "specific refusal");
@@ -196,7 +234,7 @@ fn checkOutcome(init: std.process.Init, outcome: activation.Outcome, summary: []
     try std.testing.expectEqual(@as(usize, 1), fixture.activations);
     if (outcome == .ready) {
         try std.testing.expectEqual(@as(usize, 2), fixture.spawns);
-        try std.testing.expectEqual(error.TestSecondSpawn, result.outcome.failed.cause.err);
+        try std.testing.expectEqual(error.TestSecondSpawn, result.outcome.failed.cause.err.local);
         return;
     }
     try std.testing.expectEqual(@as(usize, 1), fixture.spawns);
@@ -214,7 +252,7 @@ fn checkOutcome(init: std.process.Init, outcome: activation.Outcome, summary: []
     if (outcome == .unconfirmed) try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "restart is unconfirmed") != null);
     if (outcome == .refused) {
         try std.testing.expectEqual(host_launch.Result.Cause.Kind.child_refused, result.outcome.failed.cause.kind);
-        try std.testing.expectEqual(error.HostStartupFailed, result.outcome.failed.cause.err);
+        try std.testing.expectEqual(error.HostStartupFailed, result.outcome.failed.cause.err.local);
         try std.testing.expectEqual(outcome.refused.failure.code, result.outcome.failed.cause.refusal_code.?);
         const view = result.outcome.failed.refusalView().?;
         try std.testing.expectEqual(outcome.refused.failure.code, view.failure.code);
@@ -226,7 +264,7 @@ fn checkOutcome(init: std.process.Init, outcome: activation.Outcome, summary: []
         try std.testing.expectEqual(expected[0], view.attempt);
         try std.testing.expectEqualStrings(expected[1], result.summary().failed.words());
     } else {
-        try std.testing.expectEqual(error.HostRestartFailed, result.outcome.failed.cause.err);
+        try std.testing.expectEqual(error.HostRestartFailed, result.outcome.failed.cause.err.local);
         try std.testing.expectEqual(host_launch.Result.Cause.Kind.setup, result.outcome.failed.cause.kind);
     }
 }

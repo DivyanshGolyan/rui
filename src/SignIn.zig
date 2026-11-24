@@ -34,7 +34,8 @@ const Outcome = union(enum) { cancelled, failed: struct { cause: anyerror, shown
 const Presentation = union(enum) { screen: *vxfw.EventContext, departure: *std.Io.Writer, native_departure };
 const max_receipt_bytes = @max(host_launch.max_report_bytes + 512, 4 * @import("host_settings.zig").max_path_bytes + 1024);
 const max_deferred_bytes = 16 * max_receipt_bytes;
-const Receipts = struct { file: std.Io.File, committed_end: u64 = 0, reported: u64 = 0, first_failure: ?anyerror = null };
+pub const Departure = struct { cause: host_launch.FailureCause, unconfirmed: bool };
+const Receipts = struct { file: std.Io.File, committed_end: u64 = 0, reported: u64 = 0, first_failure: ?host_launch.FailureCause = null, unconfirmed: bool = false };
 const ReceiptFailure = union(enum) {
     unavailable: anyerror,
     internal: anyerror,
@@ -270,15 +271,15 @@ fn closeForm(self: *Self) void {
 pub fn cancel(self: *Self) void {
     _ = self.gate.cmpxchgStrong(.cancellable, .cancelled, .acq_rel, .acquire);
 }
-pub fn stop(self: *Self) !void {
+pub fn stop(self: *Self) !?Departure {
     self.cancel();
     defer self.closeForm();
-    try self.settle(.native_departure);
+    return self.settle(.native_departure);
 }
-fn stopTo(self: *Self, writer: *std.Io.Writer) !void {
+fn stopTo(self: *Self, writer: *std.Io.Writer) !?Departure {
     self.cancel();
     defer self.closeForm();
-    try self.settle(.{ .departure = writer });
+    return self.settle(.{ .departure = writer });
 }
 pub fn deinit(self: *Self) void {
     std.debug.assert(self.task.thread == null);
@@ -321,6 +322,7 @@ noinline fn stageReceipt(self: *Self, fault: ?ReceiptFault) !void {
     kept.file.writePositionalAll(init_.io, receipt, end) catch |err| return self.retainFailure(.{ .unavailable = err });
     kept.committed_end += receipt.len;
     if (kept.first_failure == null) kept.first_failure = failure;
+    kept.unconfirmed = kept.unconfirmed or self.outcomeUnconfirmed();
     self.retention_failure = null;
     self.outcome = null;
 }
@@ -357,27 +359,35 @@ fn drainReceipts(self: *Self, presentation: Presentation) !void {
     }
 }
 
-noinline fn finishReceipts(self: *Self, presentation: Presentation) !void {
-    self.drainReceipts(presentation) catch |err| return self.receiptIoFailure(presentation, err);
+fn failedReceipt(self: *Self, presentation: Presentation, err: anyerror, unconfirmed: bool) !?Departure {
+    const cause = self.receiptIoFailure(presentation, err);
+    if (unconfirmed) return .{ .cause = .{ .local = cause }, .unconfirmed = true };
+    return cause;
+}
+
+noinline fn finishReceipts(self: *Self, presentation: Presentation) !?Departure {
+    var unconfirmed = self.outcomeUnconfirmed();
+    if (self.receipts) |kept| unconfirmed = unconfirmed or kept.unconfirmed;
+    self.drainReceipts(presentation) catch |err| return self.failedReceipt(presentation, err, unconfirmed);
     var bytes: [max_receipt_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
-    const current_failure = try self.writeOutcome(&writer);
+    const current_failure = self.writeOutcome(&writer) catch |err| return self.failedReceipt(presentation, err, unconfirmed);
     const receipt = writer.buffered();
     switch (presentation) {
-        .native_departure => @import("stderr.zig").writeReceiptBytes(receipt, &self.reported_current) catch |err| return self.receiptIoFailure(presentation, err),
+        .native_departure => @import("stderr.zig").writeReceiptBytes(receipt, &self.reported_current) catch |err| return self.failedReceipt(presentation, err, unconfirmed),
         .departure => |output| while (self.reported_current < receipt.len) {
-            const count = output.write(receipt[self.reported_current..]) catch |err| return self.receiptIoFailure(presentation, err);
-            if (count == 0) return self.receiptIoFailure(presentation, error.WriteFailed);
+            const count = output.write(receipt[self.reported_current..]) catch |err| return self.failedReceipt(presentation, err, unconfirmed);
+            if (count == 0) return self.failedReceipt(presentation, error.WriteFailed, unconfirmed);
             self.reported_current += count;
         },
         .screen => unreachable,
     }
-    var failure: ?anyerror = current_failure;
+    var failure: ?host_launch.FailureCause = current_failure;
     if (self.receipts) |kept| if (kept.first_failure != null) {
         failure = kept.first_failure;
     };
     if (failure == null) if (self.retention_failure) |retained| {
-        if (retained == .internal) failure = retained.cause();
+        if (retained == .internal) failure = .{ .local = retained.cause() };
     };
     self.outcome = null;
     self.reported_current = 0;
@@ -385,7 +395,11 @@ noinline fn finishReceipts(self: *Self, presentation: Presentation) !void {
     self.reporting_failure = null;
     if (self.receipts) |kept| kept.file.close(self.init.?.io);
     self.receipts = null;
-    if (failure) |err| return err;
+    if (failure) |cause| {
+        if (!unconfirmed and cause == .local) return cause.local;
+        return .{ .cause = cause, .unconfirmed = unconfirmed };
+    }
+    return null;
 }
 
 fn cancelled() bool {
@@ -536,7 +550,7 @@ fn setupFailed(self: *Self, ctx: *vxfw.EventContext, cause: anyerror) !void {
     if (self.form) |mapped| mapped.value.wipeKey();
     self.outcome = .{ .failed = .{ .cause = cause } };
     self.issue = "Couldn't begin sign-in. Try again.";
-    try self.settle(.{ .screen = ctx });
+    _ = try self.settle(.{ .screen = ctx });
 }
 fn advance(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.task.thread == null) return;
@@ -545,7 +559,7 @@ fn advance(self: *Self, ctx: *vxfw.EventContext) !void {
     self.shown_pending = false;
     self.task.mutex.unlock(self.init.?.io);
     ctx.redraw = ctx.redraw or pending;
-    if (self.task.completed()) try self.settle(.{ .screen = ctx });
+    if (self.task.completed()) _ = try self.settle(.{ .screen = ctx });
 }
 
 fn failedKind(self: *const Self, failure: @FieldType(Outcome, "failed")) core.Failure {
@@ -558,14 +572,22 @@ fn failedKind(self: *const Self, failure: @FieldType(Outcome, "failed")) core.Fa
     };
 }
 
-fn writeOutcome(self: *const Self, writer: *std.Io.Writer) !?anyerror {
+fn outcomeUnconfirmed(self: *const Self) bool {
+    const outcome = self.outcome orelse return false;
+    if (outcome != .published) return false;
+    const value = outcome.published.activation catch return false;
+    const launch = value.launch orelse return false;
+    return launch.handoverUnconfirmed();
+}
+
+fn writeOutcome(self: *const Self, writer: *std.Io.Writer) !?host_launch.FailureCause {
     if (self.retention_failure) |failure| try writer.print("Replacement sign-in was not started: previous report could not be retained ({s}).\n", .{@errorName(failure.cause())});
     const outcome = self.outcome orelse return null;
     switch (outcome) {
         .cancelled => return null,
         .failed => |failure| {
             try writer.print("{s} ({s})\n", .{ failureText(self.failedKind(failure)), @errorName(failure.cause) });
-            return @as(?anyerror, failure.cause);
+            return .{ .local = failure.cause };
         },
         .published => |published| {
             if (published.connection) |connection| switch (connection) {
@@ -574,7 +596,7 @@ fn writeOutcome(self: *const Self, writer: *std.Io.Writer) !?anyerror {
                     try writer.print("Connection settings publication unconfirmed ({s}). Retained private key ", .{@errorName(uncertain.cause)});
                     try @import("TerminalText.zig").writeShellWord(writer, uncertain.connection.key_file.slice());
                     try writer.writeAll(". Reopen Sign-in to recheck.\n");
-                    return @as(?anyerror, uncertain.cause);
+                    return .{ .local = uncertain.cause };
                 },
                 .failed => |failure| {
                     try writer.print("Connection not saved ({s})", .{@errorName(failure.cause)});
@@ -583,7 +605,7 @@ fn writeOutcome(self: *const Self, writer: *std.Io.Writer) !?anyerror {
                         try @import("TerminalText.zig").writeShellWord(writer, cleanup.key_file.slice());
                     }
                     try writer.writeByte('\n');
-                    return @as(?anyerror, failure.cause);
+                    return .{ .local = failure.cause };
                 },
             };
             const default_error: ?anyerror = if (published.defaults) |_| null else |err| err;
@@ -591,25 +613,25 @@ fn writeOutcome(self: *const Self, writer: *std.Io.Writer) !?anyerror {
             const activation = published.activation catch |err| {
                 try writer.print("Host activation failed ({s}).\n", .{@errorName(err)});
                 try writer.print("{s}\n", .{failureText(if (default_error != null) .defaults_and_host else .host)});
-                return @as(?anyerror, default_error orelse err);
+                return .{ .local = default_error orelse err };
             };
             if (activation.launch) |*launch| {
                 try host_launch.writeDiagnostics(launch, writer, 0);
                 if (launch.outcome == .failed) {
                     try writer.print("{s}\n", .{failureText(if (default_error != null) .defaults_and_host else .host)});
-                    return @as(?anyerror, default_error orelse launch.outcome.failed.cause.err);
+                    return if (default_error) |err| .{ .local = err } else launch.outcome.failed.cause.err;
                 }
             }
             if (activation.pending) {
                 try writer.writeAll("Connection saved, not active in the serving Host. Reopen Sign-in for pause/start instructions.\n");
-                return @as(?anyerror, default_error orelse error.ConnectionNotActive);
+                return .{ .local = default_error orelse error.ConnectionNotActive };
             }
             if (default_error != null) try writer.print("{s}\n", .{failureText(.defaults)});
-            return default_error;
+            return if (default_error) |err| .{ .local = err } else null;
         },
     }
 }
-fn settle(self: *Self, presentation: Presentation) anyerror!void {
+fn settle(self: *Self, presentation: Presentation) anyerror!?Departure {
     if (self.task.thread != null) {
         const joined = self.task.join();
         const shown = self.closeBrowser();
@@ -621,7 +643,7 @@ fn settle(self: *Self, presentation: Presentation) anyerror!void {
     }
     if (presentation != .screen) return self.finishReceipts(presentation);
     const ctx = presentation.screen;
-    const outcome = self.outcome orelse return;
+    const outcome = self.outcome orelse return null;
     switch (outcome) {
         .cancelled => try self.apply(ctx, self.state.step(.cancelled)),
         .failed => |failure| {
@@ -641,25 +663,25 @@ fn settle(self: *Self, presentation: Presentation) anyerror!void {
                     self.issue = "Settings publication unconfirmed. Recheck before using this connection.";
                     _ = self.state.step(.pending);
                     ctx.redraw = true;
-                    return;
+                    return null;
                 },
                 .failed => |failure| {
                     self.issue = if (failure.cleanup != null) "Connection not saved. Private key cleanup unconfirmed; exiting Rui prints its path." else "Connection not saved. Edit the fields and retry.";
                     _ = self.state.step(.{ .failed = .settings });
                     ctx.redraw = true;
-                    return;
+                    return null;
                 },
             };
             const default_error: ?anyerror = if (published.defaults) |_| null else |err| err;
             var activation = published.activation catch {
                 _ = self.state.step(if (self.saved != null) .pending else .{ .failed = if (default_error != null) .defaults_and_host else .host });
                 ctx.redraw = true;
-                return;
+                return null;
             };
             if (activation.launch) |launch| if (launch.outcome == .failed) {
                 _ = self.state.step(if (self.saved != null) .pending else .{ .failed = if (default_error != null) .defaults_and_host else .host });
                 ctx.redraw = true;
-                return;
+                return null;
             };
             if (activation.pending) {
                 _ = self.state.step(.pending);
@@ -671,6 +693,7 @@ fn settle(self: *Self, presentation: Presentation) anyerror!void {
         },
     }
     ctx.redraw = true;
+    return null;
 }
 
 fn failureText(failure: core.Failure) []const u8 {
@@ -1324,7 +1347,7 @@ const BrowserRig = struct {
     }
 
     fn close(self: *BrowserRig) void {
-        self.page.stop() catch @panic("browser attempt escaped its test");
+        _ = self.page.stop() catch @panic("browser attempt escaped its test");
         std.debug.assert(self.page.browser == null);
         self.arena.deinit();
         self.env.deinit();
@@ -2089,7 +2112,7 @@ test "Sign-in browser shows URL rejects stray long callback and switches only af
     try std.testing.expect(rig.page.task.thread == null and rig.page.browser == null and rig.page.receipts == null and rig.page.outcome == null);
     try std.testing.expect(rig.page.reported_current == 0 and rig.page.retention_failure == null and rig.page.reporting_failure == null);
     const reported = report.written().len;
-    try rig.page.stopTo(&report.writer);
+    _ = try rig.page.stopTo(&report.writer);
     try std.testing.expectEqual(reported, report.written().len);
 }
 
@@ -2169,7 +2192,7 @@ test "Sign-in both OAuth methods retry published Host failures without authentic
                 .activation = if (activation_error) error.HostReadinessUnconfirmed else activation,
             } },
         };
-        try page.settle(.{ .screen = &ctx });
+        _ = try page.settle(.{ .screen = &ctx });
         try std.testing.expect(page.state.page == .failed);
         try std.testing.expectEqual(if (defaults_failed) core.Failure.defaults_and_host else .host, page.state.page.failed.failure);
         const retry = page.state.step(.{ .activate = .{ .attempt = page.state.attempt, .page = .failed, .action = .retry } });
@@ -2179,9 +2202,135 @@ test "Sign-in both OAuth methods retry published Host failures without authentic
         const original: anyerror = if (defaults_failed) error.UnsupportedPreferencesVersion else if (activation_error) error.HostReadinessUnconfirmed else error.HostStartupFailed;
         try std.testing.expectError(original, page.stopTo(&report.writer));
         const count = report.written().len;
-        try page.stopTo(&report.writer);
+        _ = try page.stopTo(&report.writer);
         try std.testing.expectEqual(count, report.written().len);
     };
+}
+
+test "SUI-128 Sign-in departure retains remote handover cause and certainty" {
+    const activation = @import("host_activation.zig");
+    for ([_]activation.EffectTag{ .check_target, .verify }) |effect| for ([_]bool{ false, true }) |screen_first| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", "/synthetic-home");
+        const init_: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = &env, .preopens = .empty };
+        const remote = try activation.RemoteFailure.from(error.OutOfMemory);
+        var answer = try testingActivation(init_);
+        answer.launch = .{ .outcome = .{ .failed = .{
+            .cause = .{ .kind = .setup, .err = .{ .remote = .{ .failure = remote, .unconfirmed = effect.stage() != null } } },
+            .detail = .{ .handover_remote_fault = .{ .effect = effect, .failure = remote } },
+        } } };
+        var page: Self = .{ .init = init_, .state = .{ .page = .{ .saving = .existing } }, .outcome = .{ .published = .{ .defaults = {}, .activation = answer } } };
+        if (screen_first) {
+            var ctx: vxfw.EventContext = .{ .io = init_.io, .alloc = arena.allocator(), .cmds = .empty };
+            _ = try page.settle(.{ .screen = &ctx });
+            try std.testing.expect(page.state.page == .failed);
+        }
+        var report: std.Io.Writer.Allocating = .init(arena.allocator());
+        const failure = (try page.stopTo(&report.writer)).?;
+        try std.testing.expect(failure.cause == .remote);
+        try std.testing.expectEqualStrings("OutOfMemory", failure.cause.remote.failure.cause.slice());
+        try std.testing.expectEqual(@import("caller_error.zig").Code.memory_exhausted, failure.cause.remote.failure.code);
+        try std.testing.expectEqual(effect.stage() != null, failure.cause.remote.unconfirmed);
+        try std.testing.expect(std.mem.indexOf(u8, report.written(), "[OutOfMemory]") != null);
+        try std.testing.expectEqual(effect.stage() != null, std.mem.indexOf(u8, report.written(), "unconfirmed") != null);
+        try std.testing.expect((try page.stopTo(&report.writer)) == null);
+    };
+    const uncertainty_cases = [_]host_launch.Result.Failure.Detail{
+        .{ .handover = .{ .unconfirmed = .stopping } },
+        .{ .handover = .{ .unconfirmed = .awaiting_retirement } },
+        .{ .handover = .{ .unconfirmed = .starting } },
+        .{ .handover = .{ .unconfirmed = .verifying } },
+        .{ .handover_fault = .{ .effect = .stop, .cause = error.BrokenPipe } },
+        .{ .handover_fault = .{ .effect = .await_retirement, .cause = error.BrokenPipe } },
+        .{ .handover_fault = .{ .effect = .start, .cause = error.BrokenPipe } },
+        .{ .handover_fault = .{ .effect = .verify, .cause = error.BrokenPipe } },
+    };
+    for (uncertainty_cases) |detail| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", "/synthetic-home");
+        const init_: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = &env, .preopens = .empty };
+        var answer = try testingActivation(init_);
+        answer.launch = .failed(.setup, error.HostRestartFailed);
+        answer.launch.?.outcome.failed.detail = detail;
+        var page: Self = .{ .init = init_, .state = .{ .page = .{ .saving = .existing } }, .outcome = .{ .published = .{ .defaults = error.UnsupportedPreferencesVersion, .activation = answer } } };
+        var report: std.Io.Writer.Allocating = .init(arena.allocator());
+        const departure = (try page.stopTo(&report.writer)).?;
+        try std.testing.expect(departure.unconfirmed);
+        try std.testing.expectEqual(error.UnsupportedPreferencesVersion, departure.cause.local);
+        try std.testing.expect(std.mem.indexOf(u8, report.written(), "UnsupportedPreferencesVersion") != null);
+        try std.testing.expect(std.mem.indexOf(u8, report.written(), "unconfirmed") != null);
+    }
+    for ([_]bool{ false, true }) |prior_receipt| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", "/synthetic-home");
+        const init_: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = &env, .preopens = .empty };
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const remote = try activation.RemoteFailure.from(error.OutOfMemory);
+        var answer = try testingActivation(init_);
+        answer.launch = .{ .outcome = .{ .failed = .{
+            .cause = .{ .kind = .setup, .err = .{ .remote = .{ .failure = remote, .unconfirmed = true } } },
+            .detail = .{ .handover_remote_fault = .{ .effect = .verify, .failure = remote } },
+        } } };
+        var page: Self = .{ .init = init_, .state = .{ .page = .{ .saving = .existing } }, .outcome = .{ .published = .{ .defaults = error.UnsupportedPreferencesVersion, .activation = answer } } };
+        if (prior_receipt) {
+            const file = try tmp.dir.createFile(init_.io, "receipt", .{ .read = true });
+            const text = "Earlier failure (PriorOperationCause).\n";
+            try file.writePositionalAll(init_.io, text, 0);
+            page.receipts = .{ .file = file, .committed_end = text.len, .first_failure = .{ .local = error.PriorOperationCause } };
+        }
+        var report: std.Io.Writer.Allocating = .init(arena.allocator());
+        const departure = (try page.stopTo(&report.writer)).?;
+        try std.testing.expect(departure.unconfirmed);
+        try std.testing.expectEqual(if (prior_receipt) error.PriorOperationCause else error.UnsupportedPreferencesVersion, departure.cause.local);
+        try std.testing.expect(std.mem.indexOf(u8, report.written(), "UnsupportedPreferencesVersion") != null);
+        try std.testing.expect(std.mem.indexOf(u8, report.written(), "[OutOfMemory]") != null);
+        if (prior_receipt) try std.testing.expect(std.mem.indexOf(u8, report.written(), "PriorOperationCause") != null);
+    }
+    const Broken = struct {
+        writer: std.Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+        fn drain(_: *std.Io.Writer, _: []const []const u8, _: usize) std.Io.Writer.Error!usize {
+            return error.WriteFailed;
+        }
+    };
+    for ([_]bool{ false, true }) |retained| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", "/synthetic-home");
+        const init_: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = &env, .preopens = .empty };
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const remote = try activation.RemoteFailure.from(error.OutOfMemory);
+        var answer = try testingActivation(init_);
+        answer.launch = .{ .outcome = .{ .failed = .{ .cause = .{ .kind = .setup, .err = .{ .remote = .{ .failure = remote, .unconfirmed = true } } }, .detail = .{ .handover_remote_fault = .{ .effect = .verify, .failure = remote } } } } };
+        var page: Self = .{ .init = init_, .state = .{ .page = .{ .saving = .existing } }, .outcome = .{ .published = .{ .defaults = {}, .activation = answer } } };
+        if (retained) {
+            const file = try tmp.dir.createFile(init_.io, "receipt", .{ .read = true });
+            try file.writePositionalAll(init_.io, "unconfirmed receipt", 0);
+            page.receipts = .{ .file = file, .committed_end = "unconfirmed receipt".len, .first_failure = .{ .remote = .{ .failure = remote, .unconfirmed = true } }, .unconfirmed = true };
+            page.outcome = .cancelled;
+        }
+        var broken: Broken = .{};
+        const failed = (try page.stopTo(&broken.writer)).?;
+        try std.testing.expect(failed.unconfirmed);
+        try std.testing.expectEqual(error.WriteFailed, failed.cause.local);
+        try std.testing.expectEqual(error.WriteFailed, page.reporting_failure.?);
+        var report: std.Io.Writer.Allocating = .init(arena.allocator());
+        const retried = (try page.stopTo(&report.writer)).?;
+        try std.testing.expect(retried.unconfirmed);
+        try std.testing.expect(retried.cause == .remote);
+    }
 }
 
 test "Sign-in whole joined receipt survives screen settlement and departure reports exactly once" {
@@ -2236,7 +2385,7 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
         try std.testing.expect(page.state.page == .saving and page.gate.load(.acquire) == .publishing and page.task.thread != null);
         try std.testing.expect(std.mem.indexOf(u8, page.issue.?, "cannot be cancelled") != null);
         if (screen_first) {
-            try page.settle(.{ .screen = &ctx });
+            _ = try page.settle(.{ .screen = &ctx });
             try std.testing.expect(page.task.thread == null and page.outcome.? == .published);
             for (form.key_bank) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
             if (answer.launch) |launch| try std.testing.expectEqualStrings(launch.startup(), (try page.outcome.?.published.activation).launch.?.startup());
@@ -2250,7 +2399,7 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
             .pending => error.ConnectionNotActive,
             .success => null,
         };
-        if (expected) |err| try std.testing.expectError(err, ended) else try ended;
+        if (expected) |err| try std.testing.expectError(err, ended) else try std.testing.expect((try ended) == null);
         const text = report.written();
         try std.testing.expectEqual(defaults_failed, std.mem.indexOf(u8, text, "UnsupportedPreferencesVersion") != null);
         switch (case) {
@@ -2260,7 +2409,7 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
         }
         try std.testing.expect(page.task.thread == null and page.form == null and page.outcome == null);
         const count = text.len;
-        try page.stopTo(&report.writer);
+        _ = try page.stopTo(&report.writer);
         try std.testing.expectEqual(count, report.written().len);
     };
 }
@@ -2275,7 +2424,7 @@ test "Sign-in cleanup failure retains original error resource identity and depar
     try std.testing.expectError(error.DirectorySyncFailed, page.stopTo(&report.writer));
     for ([_][]const u8{ "DirectorySyncFailed", "AccessDenied", "rm -f -- $'/synthetic path/.openai-owned.key'" }) |needle| try std.testing.expect(std.mem.indexOf(u8, report.written(), needle) != null);
     const count = report.written().len;
-    try page.stopTo(&report.writer);
+    _ = try page.stopTo(&report.writer);
     try std.testing.expectEqual(count, report.written().len);
 }
 
@@ -2386,7 +2535,7 @@ test "Sign-in replacement retains whole prior launch and cleanup receipts across
         page.attempt = .existing;
         page.state = .{ .page = .{ .saving = .existing } };
         page.outcome = .{ .published = .{ .defaults = error.UnsupportedPreferencesVersion, .activation = answer } };
-        try page.settle(.{ .screen = &rig.ctx });
+        _ = try page.settle(.{ .screen = &rig.ctx });
         try std.testing.expect(page.state.page == .failed);
         try rig.send("\r");
         try rig.wait(testingCompleted);
@@ -2397,7 +2546,7 @@ test "Sign-in replacement retains whole prior launch and cleanup receipts across
         try key_file.set("/synthetic owned/.openai-retained.key");
         page.state = .{ .page = .{ .saving = .key } };
         page.outcome = .{ .published = .{ .defaults = {}, .activation = error.ConnectionNotActive, .connection = .{ .failed = .{ .cause = error.InjectedCredentialWriteFailure, .cleanup = .{ .cause = error.AccessDenied, .key_file = key_file } } } } };
-        try page.settle(.{ .screen = &rig.ctx });
+        _ = try page.settle(.{ .screen = &rig.ctx });
         try std.testing.expect(page.state.page == .failed);
         const committed = page.receipts.?.committed_end;
         try page.reset();
@@ -2420,7 +2569,7 @@ test "Sign-in replacement retains whole prior launch and cleanup receipts across
         try std.testing.expect(page.receipts == null and page.outcome == null);
         try std.testing.expect(std.c.fcntl(fd, std.c.F.GETFD) < 0);
         const count = text.len;
-        try page.stopTo(&report.writer);
+        _ = try page.stopTo(&report.writer);
         try std.testing.expectEqual(count, report.written().len);
     }
 }
@@ -2531,7 +2680,7 @@ test "Sign-in native departure fully acknowledged successful launch remains succ
         defer _ = std.c.close(saved_stderr);
         if (std.c.dup2(output.handle, 2) != 2) return error.TestRedirectFailed;
         defer std.debug.assert(std.c.dup2(saved_stderr, 2) == 2);
-        try page.stop();
+        _ = try page.stop();
         const bytes = try rig.arena.allocator().alloc(u8, expected.written().len + 1);
         const report = bytes[0..try output.readPositionalAll(page.init.?.io, bytes, 0)];
         try std.testing.expectEqualStrings(expected.written(), report);
@@ -2539,7 +2688,7 @@ test "Sign-in native departure fully acknowledged successful launch remains succ
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, report, "Replacement sign-in was not started"));
         try std.testing.expect(page.receipts == null and page.outcome == null and page.retention_failure == null and page.reporting_failure == null);
         if (fd) |handle| try std.testing.expect(std.c.fcntl(handle, std.c.F.GETFD) < 0);
-        try page.stop();
+        _ = try page.stop();
         try std.testing.expectEqual(@as(u64, report.len), (try output.stat(page.init.?.io)).size);
     }
 }
@@ -2604,7 +2753,7 @@ test "Sign-in deferred read failure retains custody and teardown closes the sing
     var report: std.Io.Writer.Allocating = .init(rig.arena.allocator());
     try std.testing.expectError(error.SignInReceiptReadFailed, page.stopTo(&report.writer));
     try std.testing.expect(page.receipts != null and page.receipts.?.reported == 0);
-    try std.testing.expect(page.receipts.?.first_failure.? == error.RetainedOperationFailure);
+    try std.testing.expect(page.receipts.?.first_failure.?.local == error.RetainedOperationFailure);
     try std.testing.expect(std.c.fcntl(fd, std.c.F.GETFD) >= 0);
     page.deinit();
     try std.testing.expect(page.receipts == null and page.outcome == null);
@@ -2689,7 +2838,7 @@ test "Sign-in departure resumes only acknowledged bytes after deferred or curren
         try std.testing.expectEqualStrings(expected.written(), bytes[0..sink.count]);
         try std.testing.expect(page.receipts == null and page.outcome == null);
         try std.testing.expect(std.c.fcntl(fd, std.c.F.GETFD) < 0);
-        try page.stopTo(&sink.writer);
+        _ = try page.stopTo(&sink.writer);
         try std.testing.expectEqual(bytes.len, sink.count);
     }
 }
@@ -2733,7 +2882,7 @@ test "Sign-in native departure contextualizes deferred read and current output f
         try std.testing.expectEqual(cause, page.reporting_failure.?);
         try std.testing.expect(page.receipts != null and page.outcome != null);
         try std.testing.expect(page.retention_failure == null);
-        try std.testing.expectEqual(error.FirstOperationCause, page.receipts.?.first_failure.?);
+        try std.testing.expectEqual(error.FirstOperationCause, page.receipts.?.first_failure.?.local);
         try std.testing.expectEqual(error.LastOperationCause, page.outcome.?.failed.cause);
         const acknowledged = if (failure == .deferred_read) 7 else first_length;
         try std.testing.expectEqual(@as(u64, acknowledged), page.receipts.?.reported);
@@ -2751,7 +2900,7 @@ test "Sign-in native departure contextualizes deferred read and current output f
         try std.testing.expect(page.receipts == null and page.outcome == null and page.reporting_failure == null);
         try std.testing.expectEqual(@as(usize, 0), page.reported_current);
         try std.testing.expect(std.c.fcntl(retained_fd, std.c.F.GETFD) < 0);
-        try page.stop();
+        _ = try page.stop();
         try std.testing.expectEqual(@as(u64, report.len), (try output.stat(io)).size);
     }
 }
@@ -2869,7 +3018,7 @@ test "Sign-in pending and uncertain API receipts survive replacement by either C
         page.attempt = .key;
         page.state = .{ .page = .{ .saving = .key } };
         page.outcome = .{ .published = .{ .defaults = {}, .activation = activation, .connection = if (uncertain) .{ .uncertain = .{ .connection = connection, .cause = error.DirectorySyncFailed } } else .{ .saved = connection } } };
-        try page.settle(.{ .screen = &rig.ctx });
+        _ = try page.settle(.{ .screen = &rig.ctx });
         try std.testing.expect(page.state.page == .pending and page.saved != null);
         try page.stageReceipt(null);
         try std.testing.expect(try page.freeze(next, .{ .method = if (next == .browser) .browser else .device }));
@@ -3006,7 +3155,7 @@ test "Sign-in matching recheck keeps original uncertainty authority and never ac
         page.frozen = .{ .intent = .{ .store = "/selected-store", .provider = "openai", .model = form.model.text() }, .provider = .openai, .model = form.model.text(), .key = .{ .provided = "" }, .endpoint = .{ .unchanged = connection.endpoint.slice() } };
         page.state.page = .{ .saving = .key };
         page.outcome = .{ .published = page.activatePublished(.{ .uncertain = .{ .connection = connection, .cause = error.DirectorySyncFailed } }) };
-        try page.settle(.{ .screen = &rig.ctx });
+        _ = try page.settle(.{ .screen = &rig.ctx });
         try std.testing.expect(page.state.page == .pending);
         try page.stageReceipt(null);
         try std.testing.expect(try page.freeze(.recheck, .recheck));
@@ -3017,7 +3166,7 @@ test "Sign-in matching recheck keeps original uncertainty authority and never ac
             .{ .published = page.activatePublished(.{ .uncertain = .{ .connection = connection, .cause = cause } }) }
         else
             .{ .failed = .{ .cause = cause } };
-        try page.settle(.{ .screen = &rig.ctx });
+        _ = try page.settle(.{ .screen = &rig.ctx });
         try std.testing.expectEqual(@as(usize, 0), Hooks.activations);
         try std.testing.expect(page.form.?.value == form and page.savedConnection() != null);
         try std.testing.expectEqualStrings(connection.key_file.slice(), page.savedConnection().?.key_file.slice());
@@ -3036,7 +3185,7 @@ test "Sign-in matching recheck keeps original uncertainty authority and never ac
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, report.written(), @errorName(cause)));
         try std.testing.expectEqual(@as(usize, if (renamed) 2 else 1), std.mem.count(u8, report.written(), connection.key_file.slice()));
         const count = report.written().len;
-        try page.stopTo(&report.writer);
+        _ = try page.stopTo(&report.writer);
         try std.testing.expectEqual(count, report.written().len);
     }
 }

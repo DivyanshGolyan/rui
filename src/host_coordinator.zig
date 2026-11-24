@@ -3,13 +3,16 @@ const HostLifecycle = @import("HostLifecycle.zig");
 const restart_all = @import("host_restart_all.zig");
 const release = @import("release_candidate.zig");
 const stderr = @import("stderr.zig");
+const activation = @import("host_activation.zig");
+const caller_error = @import("caller_error.zig");
 
 const input_limit = 12 * std.fs.max_path_bytes + 1024;
 const event_limit = input_limit;
 const Task = struct {
     home: []const u8,
     target: ?restart_all.Target = null,
-    report: enum { lines, events },
+    report: enum { lines, events, single },
+    directory: ?[]const u8 = null,
 };
 const Event = union(enum) {
     progress: HostLifecycle.Stage,
@@ -28,6 +31,9 @@ const Event = union(enum) {
     // Error sets are not JSON-decodable. Preserve cancellation semantically;
     // other global failures retain their original diagnostic in the worker.
     failure: enum { cancelled, unconfirmed },
+    single_ineligible,
+    single_fault: struct { effect: activation.EffectTag, cause: []const u8, code: caller_error.Code },
+    single_failure: struct { cause: []const u8, code: caller_error.Code },
     done,
 };
 
@@ -51,6 +57,53 @@ fn submit(init: std.process.Init, task: Task, stdout: std.process.SpawnOptions.S
     return child;
 }
 
+/// Complete an ordinary-start handover in a detached coordinator.
+pub fn activateOlderHostForStart(init: std.process.Init, directory: []const u8) !?activation.Execution {
+    var child = try submit(init, .{ .home = "", .directory = directory, .report = .single }, .pipe);
+    const received = readSingle(init.io, init.gpa, child.stdout.?);
+    child.stdout.?.close(init.io);
+    child.stdout = null;
+    const term = try waitResult(child.wait(init.io));
+    return settleSingle(received, term);
+}
+
+fn settleSingle(received: anyerror!?activation.Execution, term: std.process.Child.Term) !?activation.Execution {
+    if (!term.success()) return error.HostRestartUnconfirmed;
+    return received catch return error.HostRestartUnconfirmed;
+}
+
+fn readSingle(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File) !?activation.Execution {
+    var buffer: [event_limit]u8 = undefined;
+    var input = file.readerStreaming(io, &buffer);
+    const bytes = try input.interface.allocRemaining(allocator, .limited(event_limit));
+    defer allocator.free(bytes);
+    if (bytes.len == 0 or bytes[bytes.len - 1] != '\n') return error.InvalidCoordinatorEvent;
+    const parsed = try std.json.parseFromSlice(Event, allocator, bytes[0 .. bytes.len - 1], .{});
+    defer parsed.deinit();
+    return switch (parsed.value) {
+        .single_ineligible => null,
+        .entry => |entry| if (entry.socket != null or entry.directory != null or entry.store != null or entry.pid != null or entry.state != .outcome or entry.state.outcome == .refused)
+            error.InvalidCoordinatorEvent
+        else
+            .{ .outcome = entry.state.outcome },
+        .refused => |refusal| result: {
+            if (refusal.socket != null or refusal.directory != null or refusal.store != null or refusal.pid != null) return error.InvalidCoordinatorEvent;
+            const failure = (try @import("start_report.zig").parseLine(allocator, refusal.failure_line)) orelse return error.InvalidCoordinatorEvent;
+            break :result .{ .outcome = .{ .refused = .{ .stage = refusal.stage, .failure = failure } } };
+        },
+        .single_fault => |fault| result: {
+            if (fault.effect == .done or fault.cause.len == 0) return error.InvalidCoordinatorEvent;
+            const failure: activation.RemoteFailure = .{ .cause = try @import("bounded.zig").Bounded(256).from(fault.cause), .code = fault.code };
+            break :result .{ .remote_fault = .{ .effect = fault.effect, .failure = failure } };
+        },
+        .single_failure => |failure| result: {
+            if (failure.cause.len == 0) return error.InvalidCoordinatorEvent;
+            break :result .{ .remote_failure = .{ .cause = try @import("bounded.zig").Bounded(256).from(failure.cause), .code = failure.code } };
+        },
+        else => error.InvalidCoordinatorEvent,
+    };
+}
+
 pub fn restartAll(init: std.process.Init) !void {
     var child = try submit(init, .{ .home = init.environ_map.get("HOME") orelse return error.HomeNotFound, .report = .lines }, .inherit);
     const term = try waitResult(child.wait(init.io));
@@ -64,8 +117,14 @@ pub fn restartAll(init: std.process.Init) !void {
 }
 
 fn waitResult(result: anyerror!std.process.Child.Term) !std.process.Child.Term {
+    return waitResultTo(result, null);
+}
+
+fn waitResultTo(result: anyerror!std.process.Child.Term, output: ?*std.Io.Writer) !std.process.Child.Term {
     return result catch |err| {
-        stderr.diagnostic("Host coordinator wait failed ({s}); Host state is unconfirmed.\n", .{@errorName(err)});
+        var buffer: [1024]u8 = undefined;
+        const message = std.fmt.bufPrint(&buffer, "\nHost coordinator wait failed ({s}); Host state is unconfirmed.\n", .{@errorName(err)}) catch return error.HostRestartUnconfirmed;
+        if (output) |writer| writer.writeAll(message) catch {} else stderr.diagnosticBytes(message);
         return error.HostRestartUnconfirmed;
     };
 }
@@ -135,6 +194,7 @@ fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progr
                     .state = .{ .outcome = .{ .refused = .{ .stage = refusal.stage, .failure = failure } } },
                 });
             },
+            .single_ineligible, .single_fault, .single_failure => return error.InvalidCoordinatorEvent,
             .done => {
                 result.entries = try entries.toOwnedSlice(allocator);
                 return result;
@@ -198,12 +258,46 @@ fn event(init: std.process.Init, value: Event) void {
     };
 }
 
+// Single-Store activation emits nothing until its last effect has settled.
+fn singleEvent(init: std.process.Init, value: Event) void {
+    var buffer: [event_limit]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    writeEvent(value, &writer) catch return;
+    writer.writeByte('\n') catch return;
+    const ignored: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    var previous: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.PIPE, &ignored, &previous);
+    defer std.posix.sigaction(.PIPE, &previous, null);
+    std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered()) catch {};
+}
+
+fn singleTask(init: std.process.Init, task: Task, activate: *const fn (std.process.Init, []const u8) anyerror!?activation.Execution) void {
+    const directory = task.directory orelse return;
+    const execution = activate(init, directory) catch |err| {
+        singleEvent(init, .{ .single_failure = .{ .cause = @errorName(err), .code = caller_error.of(err) } });
+        return;
+    } orelse {
+        singleEvent(init, .single_ineligible);
+        return;
+    };
+    switch (execution) {
+        .outcome => |outcome| singleEvent(init, .{ .entry = .{ .state = .{ .outcome = outcome } } }),
+        .fault => |fault| singleEvent(init, .{ .single_fault = .{ .effect = fault.effect, .cause = @errorName(fault.cause), .code = caller_error.of(fault.cause) } }),
+        .remote_fault => |fault| singleEvent(init, .{ .single_fault = .{ .effect = fault.effect, .cause = fault.failure.cause.slice(), .code = fault.failure.code } }),
+        .remote_failure => |failure| singleEvent(init, .{ .single_failure = .{ .cause = failure.cause.slice(), .code = failure.code } }),
+    }
+}
+
 fn progressEvent(raw: *anyopaque, stage: HostLifecycle.Stage) void {
     const init: *std.process.Init = @ptrCast(@alignCast(raw));
     event(init.*, .{ .progress = stage });
 }
 
 pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
+    return runWith(init, allocator, restart_all.activateOlderHostForStart);
+}
+
+pub fn runWith(init: std.process.Init, allocator: std.mem.Allocator, activate: *const fn (std.process.Init, []const u8) anyerror!?activation.Execution) !void {
     if (std.c.setsid() < 0) return error.HostRestartFailed;
     var buffer: [2048]u8 = undefined;
     var input = std.Io.File.stdin().readerStreaming(init.io, &buffer);
@@ -212,6 +306,7 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
     const parsed = try std.json.parseFromSlice(Task, allocator, bytes, .{ .max_value_len = input_limit });
     defer parsed.deinit();
     const task = parsed.value;
+    if (task.report == .single) return singleTask(init, task, activate);
     if (task.report == .lines) return restart_all.run(init, allocator);
     var process_init = init;
     var batch = restart_all.restart(init, allocator, .{
@@ -403,11 +498,80 @@ test "SH-128 coordinator retains lifecycle faults and later Host outcomes" {
 }
 
 test "SH-130 coordinator exit preserves certainty across the child boundary" {
-    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try waitResult(.{ .exited = 0 }));
-    try std.testing.expectError(error.HostRestartUnconfirmed, waitResult(error.AccessDenied));
+    var buffer: [1024]u8 = undefined;
+    var output: std.Io.Writer = .fixed(&buffer);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try waitResultTo(.{ .exited = 0 }, &output));
+    try std.testing.expectEqualStrings("", output.buffered());
+    try std.testing.expectError(error.HostRestartUnconfirmed, waitResultTo(error.AccessDenied, &output));
+    try std.testing.expectEqualStrings("\nHost coordinator wait failed (AccessDenied); Host state is unconfirmed.\n", output.buffered());
     try lineResult(.{ .exited = 0 });
     try std.testing.expectError(error.HostRestartFailed, lineResult(.{ .exited = @backingInt(@import("caller_exit.zig").Status.environment) }));
     try std.testing.expectError(error.HostRestartUnconfirmed, lineResult(.{ .exited = @backingInt(@import("caller_exit.zig").Status.unconfirmed) }));
     try std.testing.expectError(error.HostRestartUnconfirmed, lineResult(.{ .exited = 1 }));
     try std.testing.expectError(error.HostRestartUnconfirmed, lineResult(.{ .unknown = 0 }));
+}
+
+fn readSingleFixture(dir: std.Io.Dir, bytes: []const u8) !?activation.Execution {
+    try dir.writeFile(std.testing.io, .{ .sub_path = "single-event", .data = bytes });
+    const file = try dir.openFile(std.testing.io, "single-event", .{});
+    defer file.close(std.testing.io);
+    return readSingle(std.testing.io, std.testing.allocator, file);
+}
+
+fn roundTripSingle(dir: std.Io.Dir, value: Event) !?activation.Execution {
+    var storage: [event_limit]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&storage);
+    try writeEvent(value, &writer);
+    try writer.writeByte('\n');
+    return readSingleFixture(dir, writer.buffered());
+}
+
+test "SH-132 single coordinator preserves every outcome and remote failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expect((try roundTripSingle(tmp.dir, .single_ineligible)) == null);
+    const info = @typeInfo(activation.Outcome).@"union";
+    inline for (info.field_names, info.field_types) |name, Payload| {
+        if (comptime std.mem.eql(u8, name, "refused")) continue;
+        const outcome = @unionInit(activation.Outcome, name, std.mem.zeroes(Payload));
+        const received = (try roundTripSingle(tmp.dir, .{ .entry = .{ .state = .{ .outcome = outcome } } })).?;
+        try std.testing.expectEqualDeep(outcome, received.outcome);
+    }
+    inline for (.{ .checking, .starting }) |stage| {
+        var refusal = @import("start_report.zig").Failure.init(.settings_invalid, "specific\nrefusal");
+        @memset(refusal.message.bytes[refusal.message.len..], 'X');
+        const received = (try roundTripSingle(tmp.dir, .{ .entry = .{ .state = .{ .outcome = .{ .refused = .{ .stage = stage, .failure = refusal } } } } })).?;
+        try std.testing.expectEqual(stage, received.outcome.refused.stage);
+        try std.testing.expectEqual(refusal.code, received.outcome.refused.failure.code);
+        try std.testing.expectEqualStrings(refusal.message.slice(), received.outcome.refused.failure.message.slice());
+    }
+    for (std.meta.tags(activation.EffectTag)) |effect| {
+        if (effect == .done) continue;
+        const result = (try roundTripSingle(tmp.dir, .{ .single_fault = .{ .effect = effect, .cause = "UnusualRealError", .code = .internal_unexpected } })).?;
+        try std.testing.expectEqual(effect, result.remote_fault.effect);
+        try std.testing.expectEqualStrings("UnusualRealError", result.remote_fault.failure.cause.slice());
+        try std.testing.expectEqual(caller_error.Code.internal_unexpected, result.remote_fault.failure.code);
+    }
+    const failure = (try roundTripSingle(tmp.dir, .{ .single_failure = .{ .cause = "AccessDenied", .code = caller_error.of(error.AccessDenied) } })).?;
+    try std.testing.expectEqualStrings("AccessDenied", failure.remote_failure.cause.slice());
+    try std.testing.expectEqual(caller_error.of(error.AccessDenied), failure.remote_failure.code);
+}
+
+test "SH-132 single coordinator rejects missing truncated oversized or invalid responses" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{
+        "",                                                                                                   "not json\n",                                                            "\"single_ineligible\"",                                                 "\"done\"\n", "\"single_ineligible\"\n\"done\"\n",
+        "{\"single_fault\":{\"effect\":\"done\",\"cause\":\"OutOfMemory\",\"code\":\"memory_exhausted\"}}\n", "{\"single_failure\":{\"cause\":\"\",\"code\":\"memory_exhausted\"}}\n", "{\"single_failure\":{\"cause\":\"Oops\",\"code\":\"invalid_code\"}}\n",
+    }) |bytes| try std.testing.expectError(error.HostRestartUnconfirmed, settleSingle(readSingleFixture(tmp.dir, bytes), .{ .exited = 0 }));
+    const oversized = try std.testing.allocator.alloc(u8, event_limit + 1);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, 'x');
+    try std.testing.expectError(error.StreamTooLong, readSingleFixture(tmp.dir, oversized));
+    try std.testing.expectError(error.HostRestartUnconfirmed, settleSingle(error.AccessDenied, .{ .exited = 0 }));
+    try std.testing.expectError(error.HostRestartUnconfirmed, settleSingle(null, .{ .exited = 1 }));
+    try std.testing.expect((try settleSingle(null, .{ .exited = 0 })) == null);
+    try std.testing.expectError(error.InvalidCoordinatorEvent, roundTripSingle(tmp.dir, .{ .refused = .{ .stage = .checking, .failure_line = "bad" } }));
+    const long_cause: [257]u8 = @splat('x');
+    try std.testing.expectError(error.ValueTooLong, roundTripSingle(tmp.dir, .{ .single_failure = .{ .cause = &long_cause, .code = .internal_unexpected } }));
 }

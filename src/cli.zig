@@ -1223,7 +1223,7 @@ const HostLaunchOps = struct {
 };
 
 fn activateStartHandover(_: ?*anyopaque, init: std.process.Init, directory: []const u8) !?@import("host_activation.zig").Execution {
-    return @import("host_restart_all.zig").activateOlderHostForStart(init, directory);
+    return @import("host_coordinator.zig").activateOlderHostForStart(init, directory);
 }
 
 fn startOverviewHost(init: std.process.Init, selected: []const u8) Overview.HostLaunch {
@@ -1264,23 +1264,32 @@ pub fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool
     var writer = std.Io.Writer.fixed(&bytes);
     if (result.outcome == .failed) {
         const failure = &result.outcome.failed;
-        if (failure.refusalView()) |refusal| return writeAttemptRefusal(io, refusal.attempt, refusal.failure, if (refusal.attempt == .check or (result.wait == null and failure.detail != .handover)) .invalid else caller_exit.knownError(failure.cause.err));
+        if (failure.refusalView()) |refusal| return writeAttemptRefusal(io, refusal.attempt, refusal.failure, if (refusal.attempt == .check or (result.wait == null and failure.detail != .handover)) .invalid else caller_exit.knownError(failure.cause.err.local));
     }
     try host_launch.writeDiagnostics(result, &writer, shown);
     if (writer.buffered().len != 0) _ = stderr.write(writer.buffered());
     switch (result.outcome) {
         .ready => |*ready| try reportStartedHost(io, ready, quiet, overrides and ready.adopted),
         .failed => |*failure| {
-            if (failure.detail == .handover) if (caller_exit.handover(failure.detail.handover)) |status| {
-                recordExit(status);
-                return error.Reported;
-            };
-            if (failure.detail == .handover_fault) {
-                const fault = failure.detail.handover_fault;
-                recordExit(if (fault.effect.stage() != null) .unconfirmed else caller_exit.knownError(fault.cause));
+            if (result.handoverUnconfirmed()) {
+                recordExit(.unconfirmed);
                 return error.Reported;
             }
-            return failure.cause.err;
+            if (failure.detail == .handover_remote_fault) {
+                const fault = failure.detail.handover_remote_fault;
+                recordExit(caller_exit.forCode(.not_sent, fault.failure.code));
+                return error.Reported;
+            }
+            if (failure.detail == .handover_remote_failure) {
+                recordExit(caller_exit.forCode(.not_sent, failure.detail.handover_remote_failure.code));
+                return error.Reported;
+            }
+            if (failure.detail == .handover_fault) {
+                const fault = failure.detail.handover_fault;
+                recordExit(caller_exit.knownError(fault.cause));
+                return error.Reported;
+            }
+            return failure.cause.err.local;
         },
     }
 }
@@ -1818,9 +1827,21 @@ fn openOverview(init: std.process.Init, options: Overview.Options) !void {
     defer init.gpa.destroy(directory_buffer);
     var with_directory = options;
     with_directory.directory = requestDirectory(init, directory_buffer) catch |err| return Overview.printFailure(err, options.store, options.open, null);
-    if (try Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .configure = sessionConfigure, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate, .activate = activateOverview, .ready = overviewProviderReady, .start_host = startOverviewHost })) |request| {
+    if (try Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .configure = sessionConfigure, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate, .activate = activateOverview, .ready = overviewProviderReady, .start_host = startOverviewHost, .remote_departure = reportSignInRemote })) |request| {
         defer request.deinit(init.gpa);
         finishRelaunch(init, with_directory, request, .{});
+    }
+}
+
+fn reportSignInRemote(departure: @import("SignIn.zig").Departure) void {
+    if (departure.unconfirmed) {
+        recordExit(.unconfirmed);
+        return;
+    }
+    switch (departure.cause) {
+        .remote => |remote| recordExit(if (remote.unconfirmed) .unconfirmed else caller_exit.forCode(.not_sent, remote.failure.code)),
+        .unconfirmed => recordExit(.unconfirmed),
+        .local => |err| recordExit(caller_exit.knownError(err)),
     }
 }
 
@@ -2329,8 +2350,25 @@ test "CLI-33 lifecycle faults retain cause, phase and exit certainty" {
         exit_status = .done;
         try std.testing.expectError(error.Reported, reportHostLaunch(std.testing.io, &result, false, false, 0));
         try std.testing.expectEqual(case.status, exit_status);
-        try std.testing.expectEqual(error.OutOfMemory, result.outcome.failed.cause.err);
+        try std.testing.expectEqual(error.OutOfMemory, result.outcome.failed.cause.err.local);
+        const remote: activation.RemoteFault = .{ .effect = case.effect, .failure = try activation.RemoteFailure.from(error.OutOfMemory) };
+        result.outcome.failed.detail = .{ .handover_remote_fault = remote };
+        writer = std.Io.Writer.fixed(&bytes);
+        try host_launch.writeDiagnostics(&result, &writer, 0);
+        try std.testing.expectEqualStrings(case.diagnostic, writer.buffered());
+        exit_status = .done;
+        try std.testing.expectError(error.Reported, reportHostLaunch(std.testing.io, &result, false, false, 0));
+        try std.testing.expectEqual(case.status, exit_status);
     }
+    var remote_result: HostLaunchResult = .failed(.setup, error.Reported);
+    remote_result.outcome.failed.detail = .{ .handover_remote_failure = try activation.RemoteFailure.from(error.OutOfMemory) };
+    exit_status = .done;
+    try std.testing.expectError(error.Reported, reportHostLaunch(std.testing.io, &remote_result, false, false, 0));
+    try std.testing.expectEqual(caller_exit.knownError(error.OutOfMemory), exit_status);
+    remote_result.outcome.failed.detail = .handover_unconfirmed;
+    exit_status = .done;
+    try std.testing.expectError(error.Reported, reportHostLaunch(std.testing.io, &remote_result, false, false, 0));
+    try std.testing.expectEqual(caller_exit.Status.unconfirmed, exit_status);
 }
 
 noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
@@ -4989,7 +5027,7 @@ test "Host launch owner returns one result for terminal and screen across its wh
             try std.testing.expectEqualStrings(case.words, summary.?.words());
             if (case.kind) |kind| {
                 try std.testing.expectEqual(kind, summary.?.failed.kind);
-                try std.testing.expectEqual(case.err.?, summary.?.failed.err);
+                try std.testing.expectEqual(case.err.?, summary.?.failed.err.local);
             }
         }
     };
@@ -5588,7 +5626,7 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
             };
         }
         if (case.kind != null) {
-            try std.testing.expectEqual(launch.outcome.failed.cause.err, reported_error.?);
+            try std.testing.expectEqual(launch.outcome.failed.cause.err.local, reported_error.?);
         } else try std.testing.expect(reported_error == null);
         var bytes: [host_launch.max_report_bytes]u8 = undefined;
         const n = try diagnostic_file.readPositionalAll(io, &bytes, 0);
@@ -5644,7 +5682,7 @@ test "Host launch guided activation requires frozen pair and exact fresh identit
         } else {
             try std.testing.expect(activation.launch.?.outcome == .failed);
             try std.testing.expectEqual(@as(host_launch.Summary.Failure.Kind, .provider_unserved), activation.launch.?.outcome.failed.cause.kind);
-            try std.testing.expectEqual(error.HostModelUnavailable, activation.launch.?.outcome.failed.cause.err);
+            try std.testing.expectEqual(error.HostModelUnavailable, activation.launch.?.outcome.failed.cause.err.local);
         }
         try std.testing.expectEqual(@as(usize, if (case.scenario == .already_ready) 0 else 1), fixture.launches);
         if (fixture.launches != 0) {
@@ -5746,7 +5784,7 @@ test "Host launch chosen usable bindings attach before startup document admissio
         if (!ready and invalid) {
             try std.testing.expect(launch.outcome == .failed);
             try std.testing.expectEqual(HostLaunchResult.Cause.Kind.child_refused, launch.outcome.failed.cause.kind);
-            try std.testing.expectEqual(error.HostStartupFailed, launch.outcome.failed.cause.err);
+            try std.testing.expectEqual(error.HostStartupFailed, launch.outcome.failed.cause.err.local);
             try std.testing.expectEqual(start_report.StartError.settings_invalid, launch.outcome.failed.detail.refusal.code);
             try std.testing.expectEqualStrings(store, launch.outcome.failed.store.slice());
             try std.testing.expectEqual(@as(usize, 0), fixture.launches);

@@ -1581,7 +1581,7 @@ pub const Ops = struct {
 };
 
 pub fn launchFailure(result: *HostLaunchResult, kind: HostLaunchResult.Cause.Kind, err: anyerror, store: ?[]const u8) void {
-    result.outcome = .{ .failed = .{ .cause = .{ .kind = kind, .err = err }, .store = .{ .len = 0 } } };
+    result.outcome = .{ .failed = .{ .cause = .{ .kind = kind, .err = .{ .local = err } }, .store = .{ .len = 0 } } };
     if (store) |canonical| result.outcome.failed.store.set(canonical) catch unreachable;
 }
 

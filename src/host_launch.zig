@@ -6,6 +6,8 @@ const HostStartupWait = @import("HostStartupWait.zig");
 const TerminalText = @import("TerminalText.zig");
 const activation = @import("host_activation.zig");
 
+pub const FailureCause = union(enum) { local: anyerror, remote: struct { failure: activation.RemoteFailure, unconfirmed: bool }, unconfirmed };
+
 pub const Summary = union(enum) {
     ready: void,
     failed: Failure,
@@ -23,7 +25,7 @@ pub const Summary = union(enum) {
     };
     pub const Failure = struct {
         kind: Kind,
-        err: anyerror,
+        err: FailureCause,
         refusal_code: ?start_report.StartError = null,
         handover_words: ?[]const u8 = null,
 
@@ -84,12 +86,12 @@ pub const Result = struct {
         os_error: ?c_int = null,
         detail: Detail = .none,
 
-        pub const Detail = union(enum) { none, refusal: start_report.Failure, handover: activation.Outcome, handover_fault: activation.Fault };
+        pub const Detail = union(enum) { none, refusal: start_report.Failure, handover: activation.Outcome, handover_fault: activation.Fault, handover_remote_fault: activation.RemoteFault, handover_remote_failure: activation.RemoteFailure, handover_unconfirmed };
         pub const RefusalView = struct { failure: *const start_report.Failure, attempt: start_report.Attempt };
 
         pub fn refusalView(self: *const Failure) ?RefusalView {
             return switch (self.detail) {
-                .none, .handover_fault => null,
+                .none, .handover_fault, .handover_remote_fault, .handover_remote_failure, .handover_unconfirmed => null,
                 .refusal => |*refusal| .{ .failure = refusal, .attempt = .start },
                 .handover => |*outcome| switch (outcome.*) {
                     .refused => |*refusal| .{ .failure = &refusal.failure, .attempt = if (refusal.stage == .checking) .check else .start },
@@ -100,7 +102,23 @@ pub const Result = struct {
     };
 
     pub fn failed(kind: Cause.Kind, err: anyerror) Result {
-        return .{ .outcome = .{ .failed = .{ .cause = .{ .kind = kind, .err = err }, .store = .{ .len = 0 } } } };
+        return .{ .outcome = .{ .failed = .{ .cause = .{ .kind = kind, .err = .{ .local = err } }, .store = .{ .len = 0 } } } };
+    }
+
+    pub fn handoverUnconfirmed(self: *const Result) bool {
+        if (self.outcome != .failed) return false;
+        const failure = self.outcome.failed;
+        return switch (failure.detail) {
+            .handover => |outcome| outcome == .unconfirmed,
+            .handover_fault => |fault| fault.effect.stage() != null,
+            .handover_remote_fault => |fault| fault.effect.stage() != null,
+            .handover_unconfirmed => true,
+            else => switch (failure.cause.err) {
+                .remote => |remote| remote.unconfirmed,
+                .unconfirmed => true,
+                .local => false,
+            },
+        };
     }
 
     pub fn summary(self: *const Result) Summary {
@@ -111,6 +129,9 @@ pub const Result = struct {
                 switch (failure.detail) {
                     .handover => |outcome| cause.handover_words = @import("host_activation_report.zig").summary(outcome),
                     .handover_fault => |fault| cause.handover_words = @import("host_activation_report.zig").faultSummary(fault),
+                    .handover_remote_fault => |fault| cause.handover_words = @import("host_activation_report.zig").effectSummary(fault.effect),
+                    .handover_remote_failure => cause.handover_words = "handover failed",
+                    .handover_unconfirmed => cause.handover_words = "handover unconfirmed",
                     else => {},
                 }
                 break :failed .{ .failed = cause };
@@ -140,6 +161,18 @@ pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: us
             if (result.startup_len != 0) try writer.writeAll(result.startup()[shown..]);
         },
         .failed => |*failure| {
+            if (failure.detail == .handover_unconfirmed) {
+                try writer.writeAll("Host handover: Host state is unconfirmed; inspect Host status before retrying.\n");
+                return;
+            }
+            if (failure.detail == .handover_remote_fault) {
+                try @import("host_activation_report.zig").writeRemoteFault(writer, failure.detail.handover_remote_fault);
+                return;
+            }
+            if (failure.detail == .handover_remote_failure) {
+                try @import("host_activation_report.zig").writeRemoteFailure(writer, failure.detail.handover_remote_failure);
+                return;
+            }
             if (failure.detail == .handover_fault) {
                 try @import("host_activation_report.zig").writeFault(writer, failure.detail.handover_fault);
                 return;
@@ -194,7 +227,7 @@ pub fn writeSignIn(writer: *std.Io.Writer, summary: Summary, default_failed: boo
 }
 
 pub fn failureOf(err: anyerror) Summary.Failure {
-    return .{ .err = err, .kind = switch (err) {
+    return .{ .err = .{ .local = err }, .kind = switch (err) {
         error.HostModelUnavailable => .provider_unserved,
         error.HostReadinessUnconfirmed => .readiness_timeout,
         error.IncompatibleHost => .incompatible,
