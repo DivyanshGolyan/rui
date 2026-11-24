@@ -676,7 +676,7 @@ test "background discovery domain covers version order publication failure cance
     }
 }
 
-test "SH-124 a requested run never acts on discovery's release" {
+test "SH-129 a requested run never acts on discovery's release" {
     const Worker = struct {
         var fail: bool = false;
 

@@ -718,7 +718,7 @@
   "UpgradeJob.test.background discovery domain covers version order publication failure cancellation and once-only retirement": 0.004499522999992678,
   "UpgradeJob.test.cleanup report retains copied paths and the worker error": 4.595999996581668e-06,
   "UpgradeJob.test.completed check starts install automatically only when eligible and not cancelled": 0.00021481300001369164,
-  "UpgradeJob.test.SH-124 a requested run never acts on discovery's release": 0.008901068999989548,
+  "UpgradeJob.test.SH-129 a requested run never acts on discovery's release": 0.008901068999989548,
   "UpgradeJob.test.failed check finishes without installation": 7.646500000646483e-05,
   "UpgradeJob.test.joined installation cancellation retains the actual publication receipt": 2.2573000023839995e-05,
   "UpgradeJob.test.relaunch job retains the result owner's guidance for every activation and installation": 8.871299999668736e-05,
