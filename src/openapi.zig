@@ -777,7 +777,7 @@ pub const Document = struct {
         if (@hasDecl(T, "openapi_list")) return d.object(.{ .type = Value{ .string = "array" }, .items = try d.typeRef(T.openapi_list) });
         if (@hasDecl(T, "openapi_tools")) return ToolNameList.openapi_inline(d);
         if (@hasDecl(T, "openapi_offered_tools")) return ToolNameListOf(true).openapi_inline(d);
-    if (@hasDecl(T, "openapi_app_tool_names")) return AppToolNameList.openapi_inline(d);
+        if (@hasDecl(T, "openapi_app_tool_names")) return AppToolNameList.openapi_inline(d);
         if (@hasDecl(T, "openapi_tool_name")) return toolName(d);
         if (@hasDecl(T, "openapi_content")) return Content.openapi_inline(d);
         const name = comptime componentName(T);
