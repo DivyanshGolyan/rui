@@ -233,7 +233,7 @@ A document with no `connections` list adds no connection: OpenAI is served, or n
 
 `rui auth login openai` saves its key as the connection named `openai` in the document's `connections` list, with the key in a private file beside the document. It leaves the other connections as they are. A connection named `openai` takes the place of the built-in `openai` provider, with its own endpoint, format and tools.
 
-Key connections are served by name, but the model picker does not list their models yet; per-name model lists are not in this change.
+This version serves a connection only under a built-in name (`codex`, `openai` or `chatgpt`), where it replaces that provider's entry; a connection under any other name is refused by name at start. The model picker does not list a connection's models yet.
 The [Host reference](contracts/host.md#platforms-and-server-lifetime) states the startup and shutdown guarantees.
 
 ## Export a failed model response

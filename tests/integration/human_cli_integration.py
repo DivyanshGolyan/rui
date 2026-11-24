@@ -1639,9 +1639,10 @@ def provider_line_cases():
                         assert "connection=codex\n" in (config / "preferences").read_text()
                     else:
                         assert not (config / "preferences").exists()
-                        entry = json.loads((selected_store / "host.json").read_text())["providers"]["openai"]
-                        assert isinstance(entry["key"], dict) and set(entry["key"]) == {"file"}
-                        key_path = pathlib.Path(entry["key"]["file"])
+                        # Sign-in saves its key as the connection named openai.
+                        entry = next(item for item in json.loads((selected_store / "host.json").read_text())["connections"] if item["name"] == "openai")
+                        assert entry["credential"]["kind"] == "key" and entry["credential"]["source"]["kind"] == "file", entry
+                        key_path = pathlib.Path(entry["credential"]["source"]["path"])
                         assert key_path.is_absolute() and key_path.is_relative_to(selected_store)
                         assert key_path.read_text() == "fixture-provider-choice-key\n"
                         assert stat.S_IMODE(key_path.stat().st_mode) == 0o600

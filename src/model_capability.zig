@@ -101,7 +101,7 @@ const provider_count = @typeInfo(provider_name.Provider).@"enum".field_names.len
 /// The capabilities of the served names, in the Readinesses order. Names point into the readiness they came from,
 /// so the list must not outlive it.
 pub const Capabilities = struct {
-    items: [connection.max_list]provider_selection.Capability = undefined,
+    items: [connection.max_served]provider_selection.Capability = undefined,
     len: usize = 0,
 
     pub fn slice(self: *const Capabilities) []const provider_selection.Capability {
@@ -264,18 +264,4 @@ test "selected facts alone own capability effort context and help" {
     help.clearRetainingCapacity();
     try writeEffortExceptions(&help.writer, &.{});
     try std.testing.expectEqualStrings("", help.written());
-}
-
-test "capabilities name each served connection by its name, so alpha and beta select by name" {
-    var readiness: provider_selection.Readinesses = .initFill(.missing);
-    const alpha = connection.Name.parse("alpha").?;
-    const beta = connection.Name.parse("beta").?;
-    readiness.set(alpha, .configured);
-    readiness.set(beta, .renewal_due);
-    const list = capabilities(&readiness).slice();
-    try std.testing.expectEqualStrings("alpha", list[list.len - 2].name);
-    try std.testing.expectEqualStrings("beta", list[list.len - 1].name);
-    try std.testing.expectEqualStrings("beta", (try provider_selection.resolve(list, "beta", null, null, null)).selected.provider);
-    try std.testing.expectEqual(provider_selection.Selection.chooser, try provider_selection.resolve(list, null, null, null, null));
-    try std.testing.expectError(error.UnsupportedSelectionProvider, provider_selection.resolve(list, "gamma", null, null, null));
 }

@@ -1329,7 +1329,8 @@ pub const Connections = struct {
             const encoded = try std.json.Stringify.valueAlloc(scratch, item, .{});
             switch (try parse(memory.allocator(), encoded, host_field)) {
                 .ok => |value| slot.* = .{ .value = value, .document = undefined },
-                .refused => |found| return .{ .index = index, .field = found.field, .reason = @tagName(found.reason) },
+                // The field may live in `memory`, which is freed on return; the caller owns `scratch`.
+                .refused => |found| return .{ .index = index, .field = try scratch.dupe(u8, found.field), .reason = @tagName(found.reason) },
             }
             const document = std.json.parseFromSliceLeaky(std.json.Value, memory.allocator(), encoded, .{ .allocate = .alloc_always, .parse_numbers = false }) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
