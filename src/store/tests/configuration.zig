@@ -629,7 +629,7 @@ test "loaded tools select saved records even after the Host tool set changes or 
             const loaded_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
                 "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
             try std.testing.expectEqual(saved_record, loaded_record);
-            const expected_loaded = tool_set_domain.Selection.of(&original, &update.configuration.loaded_tools).?;
+            const expected_loaded = tool_set_domain.Selection.of(&original, &update.configuration.loaded_tools, 0).?;
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set saved ON saved.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1 AND saved.digest=?2", .{ first.slice(), store_testing.Blob{ .bytes = &expected_loaded.digest } }));
 
             var removed_records: [records.len - 1]tool_defs.Record = undefined;

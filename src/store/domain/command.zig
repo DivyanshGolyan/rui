@@ -372,6 +372,7 @@ pub const SubmitMessage = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{.always},
         .replay = .{.branch},
+        .lane = .{.branch},
         .model = .{.branch},
         .saved_tools = .{.branch},
         .saved_loaded = .{.branch},
@@ -434,9 +435,9 @@ pub const SubmitMessage = struct {
         switch (at) {
             .facts => return t.decide(r),
             .replay => return t.replayed(),
-            .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => {
+            .lane, .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => {
                 if (try t.validate(r, switch (at) {
-                    inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
+                    inline .lane, .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
                     else => unreachable,
                 })) |next| return next;
                 return t.applyValidated(r);
@@ -487,7 +488,7 @@ pub const SubmitMessage = struct {
         }
         readMessage(r, t.input.selector, command, message);
         if (command.configuration) |*configuration| {
-            configuration_domain.prepareConfiguration(r, t.input.tools.host_tool_set, "", configuration, t.creation);
+            configuration_domain.prepareConfiguration(r, "", configuration, t.creation);
         } else {
             readTarget(r, command.session.slice(), &t.target);
             if (t.input.parts_saving == null) content_domain.lookup(r, &message.text);
@@ -1014,6 +1015,7 @@ pub const AgentStart = enum {
 pub const StartAgent = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{.always},
+        .lane = .{.branch},
         .model = .{.branch},
         .saved_tools = .{.branch},
         .saved_loaded = .{.branch},
@@ -1071,8 +1073,8 @@ pub const StartAgent = struct {
         const at = ran orelse return t.start(r);
         switch (at) {
             .facts => return t.decide(r),
-            .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => return t.validate(r, switch (at) {
-                inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
+            .lane, .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => return t.validate(r, switch (at) {
+                inline .lane, .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
                 else => unreachable,
             }),
             .app_set => return t.apply(r, .app_set),
@@ -1099,7 +1101,7 @@ pub const StartAgent = struct {
         t.creation = r.configurationReads();
         t.creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         t.creation.attach_parent = t.input.attached;
-        configuration_domain.prepareConfiguration(r, t.input.tools.host_tool_set, "", configuration, t.creation);
+        configuration_domain.prepareConfiguration(r, "", configuration, t.creation);
         return .{ .round = .facts };
     }
 
@@ -1234,6 +1236,7 @@ pub const StartAgent = struct {
 pub const Configure = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{.always},
+        .lane = .{.branch},
         .model = .{.branch},
         .saved_tools = .{.branch},
         .saved_loaded = .{.branch},
@@ -1296,8 +1299,8 @@ pub const Configure = struct {
                 if (!t.receipt_found.get()) return error.CorruptStore;
                 return t.finishReplay();
             },
-            .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => return t.validate(r, switch (at) {
-                inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
+            .lane, .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => return t.validate(r, switch (at) {
+                inline .lane, .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
                 else => unreachable,
             }),
             .app_set => return t.apply(r, .app_set),
@@ -1319,7 +1322,7 @@ pub const Configure = struct {
         t.reads = r.configurationReads();
         t.reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         lookupCommand(r, command.key.slice(), &t.reads.saved_command);
-        configuration_domain.prepareConfiguration(r, t.input.tools.host_tool_set, command.session.slice(), &command.configuration, t.reads);
+        configuration_domain.prepareConfiguration(r, command.session.slice(), &command.configuration, t.reads);
         return .{ .round = .facts };
     }
 

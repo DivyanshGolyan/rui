@@ -256,8 +256,13 @@ pub const HostToolSet = struct {
     digests: []const [32]u8,
 
     configured_servers: []const []const u8 = &.{},
+    /// The lane's app records, sorted by name, when the set is a lane's view of the Host set plus its declared app tools
+    /// (`configuration.zig` builds it); empty for the Host's own set.
+    apps: []const Record = &.{},
+    app_digests: []const [32]u8 = &.{},
 
-    pub const Resolution = union(enum) { found: usize, unknown_tool, mcp_server_unavailable };
+    /// `found` is a Host record, `app` a lane's app record; a name the Host set has is never `app`.
+    pub const Resolution = union(enum) { found: usize, app: usize, unknown_tool, mcp_server_unavailable };
     pub const max_refusal_message_bytes = 768;
 
     /// A missing tool's refusal. It records which configured servers had no tools
@@ -296,6 +301,7 @@ pub const HostToolSet = struct {
 
     pub fn resolve(self: *const HostToolSet, name: []const u8) Resolution {
         if (self.find(name)) |index| return .{ .found = index };
+        if (self.findApp(name)) |index| return .{ .app = index };
         var empty = self.emptyServers();
         if (empty.next() != null) return .mcp_server_unavailable;
         return .unknown_tool;
@@ -331,6 +337,20 @@ pub const HostToolSet = struct {
         while (low < high) {
             const middle = low + (high - low) / 2;
             switch (std.mem.order(u8, self.records[middle].name, name)) {
+                .eq => return middle,
+                .lt => low = middle + 1,
+                .gt => high = middle,
+            }
+        }
+        return null;
+    }
+
+    pub fn findApp(self: *const HostToolSet, name: []const u8) ?usize {
+        var low: usize = 0;
+        var high = self.apps.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            switch (std.mem.order(u8, self.apps[middle].name, name)) {
                 .eq => return middle,
                 .lt => low = middle + 1,
                 .gt => high = middle,
@@ -495,6 +515,15 @@ pub const Runner = enum {
             .mcp => @import("mcp/action_text.zig").indeterminate,
             .app => "The Host stopped while this app call was running. The app may have run it; it was not automatically repeated.",
             .core, .provider => unreachable,
+        };
+    }
+
+    /// The result of an app call while no app serves its tool. Only `.app` has one; the Store resolves
+    /// the call with it at once.
+    pub fn unservedText(self: Runner) []const u8 {
+        return switch (self) {
+            .app => "No app is serving this tool yet.",
+            else => unreachable,
         };
     }
 
@@ -689,6 +718,8 @@ comptime {
 
 pub const Offered = struct {
     names: []const u8 = "",
+    /// The subset of `names` that `owner = app` serves (comma-separated); every other name is an MCP name.
+    apps: []const u8 = "",
     historical_digests: []const [32]u8 = &.{},
     withdrawn: []const bool = &.{},
 
@@ -696,6 +727,12 @@ pub const Offered = struct {
         var names = std.mem.splitScalar(u8, self.names, ',');
         while (names.next()) |candidate| if (candidate.len != 0 and std.mem.eql(u8, candidate, name)) return candidate;
         return null;
+    }
+
+    pub fn isApp(self: *const Offered, name: []const u8) bool {
+        var names = std.mem.splitScalar(u8, self.apps, ',');
+        while (names.next()) |candidate| if (candidate.len != 0 and std.mem.eql(u8, candidate, name)) return true;
+        return false;
     }
 
     pub fn wasWithdrawn(self: *const Offered, name: []const u8) bool {
@@ -834,6 +871,23 @@ fn expectAppPolicyDigests() !void {
     try std.testing.expect(!(AppPolicy{ .restart_limit = max_app_restart_limit + 1 }).valid());
     try std.testing.expect((AppPolicy{ .restart_limit = max_app_restart_limit, .wait_ms = max_app_wait_ms }).valid());
     try std.testing.expect(!(AppPolicy{ .wait_ms = min_app_wait_ms - 1 }).valid());
+}
+
+// SH-160: a name the Host set lacks resolves to the lane's app record, and a name the Host set has resolves to its
+// Host record, even when an app record declares the same name.
+test "SH-160 an app record resolves after the Host set, and a Host record of the same name wins" {
+    const policy: AppPolicy = .{ .replay = .unsafe, .restart_limit = 0, .wait_ms = default_app_wait_ms };
+    const host_records = [_]Record{.{ .name = "bash", .owner = .rui, .input_schema = "{}" }};
+    const app_records = [_]Record{
+        .{ .name = "ask", .owner = .app, .input_schema = "{}", .app = policy },
+        .{ .name = "bash", .owner = .app, .input_schema = "{}", .app = policy },
+    };
+    const host_digests = [_][32]u8{recordDigest(&host_records[0])};
+    const app_digests = [_][32]u8{ recordDigest(&app_records[0]), recordDigest(&app_records[1]) };
+    const host_tool_set: HostToolSet = .{ .records = &host_records, .digests = &host_digests, .apps = &app_records, .app_digests = &app_digests };
+    try std.testing.expectEqual(@as(usize, 0), host_tool_set.resolve("bash").found);
+    try std.testing.expectEqual(@as(usize, 0), host_tool_set.resolve("ask").app);
+    try std.testing.expectEqualStrings("unknown_tool", @tagName(host_tool_set.resolve("lookup")));
 }
 
 test "MCP missing tools tool set resolution covers every empty-server combination" {

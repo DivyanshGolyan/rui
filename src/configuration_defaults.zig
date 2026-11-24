@@ -128,6 +128,8 @@ pub fn resolve(facts: []const catalog.Entry, request: Request) Resolved {
 
 pub const Parent = struct {
     tools: []const u8,
+    /// The app tool names the parent offers, comma-separated (the lane's app names it may use).
+    apps: []const u8 = "",
     permission_mode: @import("cli_value.zig").PermissionMode,
 };
 
@@ -141,14 +143,17 @@ pub const ParentRefusal = union(enum) {
 fn checkParent(parent: Parent, tools: *const input.ToolsField, permission: *const Choice) ?ParentRefusal {
     var requested = tools.iterator();
     while (requested.next()) |name| {
-        var allowed = std.mem.splitScalar(u8, parent.tools, ',');
-        while (allowed.next()) |member| {
-            if (std.mem.eql(u8, name, member)) break;
-        } else return .{ .tools_not_in_parent = name };
+        if (!listsName(parent.tools, name) and !listsName(parent.apps, name)) return .{ .tools_not_in_parent = name };
     }
     const mode = creationPermission(permission);
     if (parent.permission_mode == .ask and mode.state == .value and !mode.value.eql("ask")) return .permission_mode_wider_than_parent;
     return null;
+}
+
+fn listsName(list: []const u8, name: []const u8) bool {
+    var members = std.mem.splitScalar(u8, list, ',');
+    while (members.next()) |member| if (std.mem.eql(u8, name, member)) return true;
+    return false;
 }
 
 // Golden values below come from 3ebdd8b's completeCreation/client_defaults,

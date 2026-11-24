@@ -724,7 +724,7 @@ pub fn TestingConfiguring(comptime Check: type) type {
                 .prepare => {
                     b.reads = r.configurationReads();
                     b.reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-                    configuration_domain.prepareConfiguration(r, b.storage.hostTools().host_tool_set, b.session, b.configuration, b.reads);
+                    configuration_domain.prepareConfiguration(r, b.session, b.configuration, b.reads);
                     b.at = .{ .validate = null };
                     return .round;
                 },
