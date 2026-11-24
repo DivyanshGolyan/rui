@@ -64,17 +64,90 @@ const nowNs = server_host.nowNs;
 const executionFacts = server_host.executionFacts;
 const waitAtTestGate = server_host.waitAtTestGate;
 
-// Rare work with a 4 KiB capture of its own: noinline keeps the capture off
-// the frame of every session inspection.
-noinline fn captureFailedResponse(host: *Host, request: *const protocol.InspectSession, request_number: u64) !store_module.SessionReport {
-    const selection = request.failed_response.?;
-    const binding = try host.store.failedResponseBinding(request.session.slice(), selection.operation, selection.attempt);
-    var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
-    try capture.create(host.lease.paths.scratch.slice(), request_number, host.probes.fails(.report_unlink));
-    errdefer capture.deinit();
-    try failed_responses.exportRecord(host.io, host.lease.store_dir, binding, selection.part, &capture);
-    return capture.seal();
-}
+/// The one owner of report scratch. A capture takes its budget from the live retention queue, creates its file
+/// under the lease's scratch path, and is sealed whole or discarded whole. The caller supplies the storage, so each
+/// reply keeps its own allocation points: heap where the reply already holds state, stack otherwise.
+const ReportScratch = struct {
+    host: *Host,
+
+    fn capture(self: ReportScratch, storage: *store_module.SessionReportCapture, request_number: u64, producer: anytype) !store_module.SessionReport {
+        storage.* = .{ .io = self.host.io, .writer = null, .budget = self.host.retention.sharedBudget() };
+        try storage.create(self.host.lease.paths.scratch.slice(), request_number, self.host.probes.fails(.report_unlink));
+        errdefer storage.deinit();
+        try producer.produce(storage);
+        return storage.seal();
+    }
+
+    /// The one answer for a report whose scratch could not be cleaned up: dispatch fences on the read's phase and
+    /// the read answers 500.
+    fn cleanupFailed(host: *Host, reply: *Reply, phase: []const u8, err: anyerror) void {
+        host.lifecycle.fenceDispatch(phase, err);
+        respondStatic(reply, 500, .observation_error, "report_scratch_cleanup_failed");
+    }
+};
+
+/// Failed-response export of one record; its binding was read before any scratch existed.
+const FailedResponseExport = struct {
+    host: *Host,
+    binding: store_module.AttemptBinding,
+    part: protocol.FailedResponsePart,
+
+    fn produce(self: FailedResponseExport, storage: *store_module.SessionReportCapture) !void {
+        try failed_responses.exportRecord(self.host.io, self.host.lease.store_dir, self.binding, self.part, storage);
+    }
+};
+
+/// Heap state of one session report: the Store fills `reply` while the capture holds the bytes.
+const SessionReportState = struct {
+    capture: store_module.SessionReportCapture,
+    reply: session_report_reply.Reply(store_module.SessionReportCapture),
+};
+
+const SessionReportExport = struct {
+    host: *Host,
+    request: *const protocol.InspectSession,
+    reply: *session_report_reply.Reply(store_module.SessionReportCapture),
+
+    fn produce(self: SessionReportExport, storage: *store_module.SessionReportCapture) !void {
+        self.reply.* = .init(storage, executionFacts(self.host));
+        try self.host.store.readSessionReport(self.request.session.slice(), self.request.profile, self.reply);
+    }
+};
+
+const SessionListExport = struct {
+    host: *Host,
+    request: *const protocol.ListSessions,
+
+    fn produce(self: SessionListExport, storage: *store_module.SessionReportCapture) !void {
+        const reply = try createUnfilled(self.host.allocator, session_list_reply.Reply(store_module.SessionReportCapture));
+        defer self.host.allocator.destroy(reply);
+        reply.capture = storage;
+        reply.rows = 0;
+        const list_pages = try createUnfilled(self.host.allocator, store_module.SessionListPages);
+        defer self.host.allocator.destroy(list_pages);
+        try self.host.store.readSessionList(self.request, reply, list_pages);
+    }
+};
+
+/// Certifies the owner's parts once, then writes the whole list into the capture. A fault mid-walk discards the
+/// capture, so no partial list is ever delivered.
+const PublicPartsExport = struct {
+    host: *Host,
+    command: *const protocol.PublicParts,
+
+    fn produce(self: PublicPartsExport, storage: *store_module.SessionReportCapture) !void {
+        var reader = try store_module.PublicParts.Reader.init(self.command.session, self.command.owner);
+        defer reader.deinit();
+        var writer: protocol.public_parts_reply.Writer(store_module.SessionReportCapture) = .{ .capture = storage, .session = self.command.session.slice() };
+        while (true) switch (try self.host.store.readPublicParts(&reader)) {
+            .pending => {},
+            .certified => |value| try writer.head(value),
+            .part => |part| try writer.part(part),
+            .done => break,
+        };
+        try writer.finish();
+    }
+};
 
 const intake_worker_stack_bytes = 1024 * 1024;
 
@@ -2049,27 +2122,15 @@ noinline fn replyReadAction(host: *Host, fd: *Reply, command: *@FieldType(wire_r
 }
 
 noinline fn replyInspectSession(host: *Host, fd: *Reply, request_value: *@FieldType(wire_request.Request, "inspect_session"), request_number: u64) !void {
-    if (request_value.failed_response != null) {
-        const capture = captureFailedResponse(host, request_value, request_number) catch |err| {
-            if (err == error.ReportScratchCleanupFailed) {
-                host.lifecycle.fenceDispatch("failed response export scratch cleanup", err);
-                return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
-            }
-            if (host.store.isFenced()) {
-                host.lifecycle.fenceDispatch("failed response identity", err);
-                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-            }
-            return respondStatic(fd, 409, .failed_response_unavailable, @errorName(err));
-        };
-        try fd.setReport(capture);
-        try fd.prepareHeader(200, "application/octet-stream", capture.length);
-        return;
-    }
-    const report = captureSessionReport(host, request_value, request_number) catch |err| {
-        if (err == error.ReportScratchCleanupFailed) {
-            host.lifecycle.fenceDispatch("session report scratch cleanup", err);
-            return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
-        }
+    if (request_value.failed_response != null) return replyFailedResponse(host, fd, request_value, request_number);
+    const state = createUnfilled(host.allocator, SessionReportState) catch |err| return refuseRead(host, fd, "session inspection", err);
+    defer host.allocator.destroy(state);
+    const report = (ReportScratch{ .host = host }).capture(&state.capture, request_number, SessionReportExport{
+        .host = host,
+        .request = request_value,
+        .reply = &state.reply,
+    }) catch |err| {
+        if (err == error.ReportScratchCleanupFailed) return ReportScratch.cleanupFailed(host, fd, "session report scratch cleanup", err);
         return refuseRead(host, fd, "session inspection", err);
     };
     try fd.setReport(report);
@@ -2079,17 +2140,42 @@ noinline fn replyInspectSession(host: *Host, fd: *Reply, request_value: *@FieldT
     if (fd.gate != null) host.probes.traceSubject("test_gate_waiting", "path", host.probes.hooks.inspection_reply.gate_path.?);
 }
 
+/// Answers a failed-response export. The binding is read before any scratch exists, and the capture stays on this
+/// frame (noinline) so that session inspections do not carry its 4 KiB buffer.
+noinline fn replyFailedResponse(host: *Host, fd: *Reply, request: *const protocol.InspectSession, request_number: u64) !void {
+    const selection = request.failed_response.?;
+    const binding = host.store.failedResponseBinding(request.session.slice(), selection.operation, selection.attempt) catch |err| return failedResponseRefused(host, fd, err);
+    var storage: store_module.SessionReportCapture = undefined;
+    const capture = (ReportScratch{ .host = host }).capture(&storage, request_number, FailedResponseExport{
+        .host = host,
+        .binding = binding,
+        .part = selection.part,
+    }) catch |err| {
+        if (err == error.ReportScratchCleanupFailed) return ReportScratch.cleanupFailed(host, fd, "failed response export scratch cleanup", err);
+        return failedResponseRefused(host, fd, err);
+    };
+    try fd.setReport(capture);
+    try fd.prepareHeader(200, "application/octet-stream", capture.length);
+}
+
+fn failedResponseRefused(host: *Host, fd: *Reply, err: anyerror) void {
+    if (host.store.isFenced()) {
+        host.lifecycle.fenceDispatch("failed response identity", err);
+        return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+    }
+    respondStatic(fd, 409, .failed_response_unavailable, @errorName(err));
+}
+
 noinline fn replyListSessions(host: *Host, fd: *Reply, request_value: *@FieldType(wire_request.Request, "list_sessions"), request_number: u64) !void {
     if (request_value.since) |since| {
         if (request_value.changed == null and host.store.notModified(since)) {
             return fd.json(200, protocol.max_response_bytes, host_reply.renderSessionsNotModified, .{since});
         }
     }
-    const page = captureSessionList(host, request_value, request_number) catch |err| {
-        if (err == error.ReportScratchCleanupFailed) {
-            host.lifecycle.fenceDispatch("Session list scratch cleanup", err);
-            return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
-        }
+    request_value.validate() catch |err| return refuseRead(host, fd, "Session list", err);
+    var storage: store_module.SessionReportCapture = undefined;
+    const page = (ReportScratch{ .host = host }).capture(&storage, request_number, SessionListExport{ .host = host, .request = request_value }) catch |err| {
+        if (err == error.ReportScratchCleanupFailed) return ReportScratch.cleanupFailed(host, fd, "Session list scratch cleanup", err);
         return refuseRead(host, fd, "Session list", err);
     };
     try fd.setReport(page);
@@ -2126,12 +2212,10 @@ noinline fn replyActivitySearch(host: *Host, fd: *Reply, command: *@FieldType(wi
 }
 
 noinline fn replyPublicParts(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "public_parts"), request_number: u64) !void {
-    const report = capturePublicParts(host, fd, command, request_number) catch |err| switch (err) {
+    var storage: store_module.SessionReportCapture = undefined;
+    const report = (ReportScratch{ .host = host }).capture(&storage, request_number, PublicPartsExport{ .host = host, .command = command }) catch |err| switch (err) {
         error.ContentNotFound, error.ContentIsText => return respondStatic(fd, 409, .parts_unavailable, @errorName(err)),
-        error.ReportScratchCleanupFailed => {
-            host.lifecycle.fenceDispatch("public parts scratch cleanup", err);
-            return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
-        },
+        error.ReportScratchCleanupFailed => return ReportScratch.cleanupFailed(host, fd, "public parts scratch cleanup", err),
         else => return refuseRead(host, fd, "public parts", err),
     };
     try fd.setReport(report);
@@ -2217,23 +2301,6 @@ fn renderModelList(out: protocol.JsonOut, host: *Host, facts: []const @import("m
     out.writer.writeAll(protocol.model_list_reply.tail) catch return error.BufferTooLarge;
 }
 
-fn captureSessionReport(host: *Host, request: *const protocol.InspectSession, request_number: u64) !store_module.SessionReport {
-    const State = struct {
-        capture: store_module.SessionReportCapture,
-        reply: session_report_reply.Reply(store_module.SessionReportCapture),
-    };
-    const state = try createUnfilled(host.allocator, State);
-    defer host.allocator.destroy(state);
-    const capture = &state.capture;
-    capture.* = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
-    try capture.create(host.lease.paths.scratch.slice(), request_number, host.probes.fails(.report_unlink));
-    errdefer capture.deinit();
-    state.reply.capture = capture;
-    state.reply.execution = executionFacts(host);
-    try host.store.readSessionReport(request.session.slice(), request.profile, &state.reply);
-    return capture.seal();
-}
-
 test "Session report capture releases its heap state after sealing or scratch exhaustion" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2253,16 +2320,20 @@ test "Session report capture releases its heap state after sealing or scratch ex
     host.retention = &retention;
     var request: protocol.InspectSession = .{};
     try request.session.set("k7m2qx");
+    var state: SessionReportState = undefined;
     {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
         host.allocator = failing.allocator();
         defer host.allocator = std.testing.allocator;
-        try std.testing.expectError(error.OutOfMemory, captureSessionReport(&host, &request, 0));
+        var reply: Reply = .{ .io = host.io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyInspectSession(&host, &reply, &request, 0);
+        try std.testing.expect(std.meta.activeTag(reply.body) == .json);
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
         try std.testing.expect(!storage.isFenced());
     }
     {
-        var report = try captureSessionReport(&host, &request, 1);
+        var report = try (ReportScratch{ .host = &host }).capture(&state.capture, 1, SessionReportExport{ .host = &host, .request = &request, .reply = &state.reply });
         defer report.deinit();
         try std.testing.expect(report.length != 0);
         try std.testing.expectEqual(report.length, host.scratch_used.load(.acquire));
@@ -2273,29 +2344,14 @@ test "Session report capture releases its heap state after sealing or scratch ex
     }
     try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
     retention.budget.limit = 1;
-    try std.testing.expectError(error.ReportScratchExhausted, captureSessionReport(&host, &request, 2));
+    try std.testing.expectError(error.ReportScratchExhausted, (ReportScratch{ .host = &host }).capture(&state.capture, 2, SessionReportExport{ .host = &host, .request = &request, .reply = &state.reply }));
     try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
     try std.testing.expect(!storage.isFenced());
     retention.budget.limit = 9000;
     host.probes.arm(.report_unlink);
-    try std.testing.expectError(error.ReportScratchCleanupFailed, captureSessionReport(&host, &request, 3));
+    try std.testing.expectError(error.ReportScratchCleanupFailed, (ReportScratch{ .host = &host }).capture(&state.capture, 3, SessionReportExport{ .host = &host, .request = &request, .reply = &state.reply }));
     try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
     try std.testing.expect(!storage.isFenced());
-}
-
-fn captureSessionList(host: *Host, request: *const protocol.ListSessions, request_number: u64) !store_module.SessionReport {
-    try request.validate();
-    var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
-    try capture.create(host.lease.paths.scratch.slice(), request_number, host.probes.fails(.report_unlink));
-    errdefer capture.deinit();
-    const reply = try createUnfilled(host.allocator, session_list_reply.Reply(store_module.SessionReportCapture));
-    defer host.allocator.destroy(reply);
-    reply.capture = &capture;
-    reply.rows = 0;
-    const list_pages = try createUnfilled(host.allocator, store_module.SessionListPages);
-    defer host.allocator.destroy(list_pages);
-    try host.store.readSessionList(request, reply, list_pages);
-    return capture.seal();
 }
 
 /// One `T` on the heap whose bytes stay unwritten until its initializer or
@@ -2304,27 +2360,6 @@ fn captureSessionList(host: *Host, request: *const protocol.ListSessions, reques
 fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMemory}!*T {
     const bytes = allocator.rawAlloc(@sizeOf(T), .of(T), @returnAddress()) orelse return error.OutOfMemory;
     return @ptrCast(@alignCast(bytes));
-}
-
-/// Certifies the owner's parts once, then captures the whole list into report
-/// scratch under the shared retention budget. A fault mid-walk discards the
-/// capture, so no partial list is ever delivered.
-fn capturePublicParts(host: *Host, reply: *Reply, command: *const protocol.PublicParts, request_number: u64) !store_module.SessionReport {
-    const capture = &reply.parts_capture;
-    capture.* = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
-    try capture.create(host.lease.paths.scratch.slice(), request_number, host.probes.fails(.report_unlink));
-    errdefer capture.deinit();
-    var reader = try store_module.PublicParts.Reader.init(command.session, command.owner);
-    defer reader.deinit();
-    var writer: protocol.public_parts_reply.Writer(store_module.SessionReportCapture) = .{ .capture = capture, .session = command.session.slice() };
-    while (true) switch (try host.store.readPublicParts(&reader)) {
-        .pending => {},
-        .certified => |value| try writer.head(value),
-        .part => |part| try writer.part(part),
-        .done => break,
-    };
-    try writer.finish();
-    return capture.seal();
 }
 
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
@@ -2782,7 +2817,6 @@ fn respondStatic(reply: *Reply, status: u16, kind: protocol.ErrorType, code: []c
 }
 
 const Reply = struct {
-    parts_capture: store_module.SessionReportCapture = undefined,
     io: std.Io,
     allocator: std.mem.Allocator,
     header: [320]u8 = undefined,
@@ -5071,6 +5105,7 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expect(update_replay == .rejected and update_replay.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update_replay.rejected.code);
 }
+
 test "session archive renders accepted intent and completion for both archive and restore" {
     const protocol_reply = @import("protocol_reply.zig");
     var command: protocol.SessionArchiveCommand = .{};
@@ -6312,6 +6347,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
     }
     try std.testing.expectEqual(@as(u16, 0xff), covered);
 }
+
 test "every accepted control publishes exactly one hint before reply handling" {
     const native = @import("posix");
     const Probe = struct {

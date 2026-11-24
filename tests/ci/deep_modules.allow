@@ -394,7 +394,6 @@ field-leak server.Intake.stdin
 field-leak server.Intake.wake
 field-leak server.Reply.body
 field-leak server.Reply.end
-field-leak server.Reply.parts_capture
 field-leak server.Reply.timing
 field-leak server_execution.ProviderSlot.transfer
 field-leak server_mcp_relist.Relist.pending
