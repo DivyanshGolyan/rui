@@ -389,7 +389,6 @@ field-leak server.Intake.lines
 field-leak server.Intake.polls
 field-leak server.Intake.stdin
 field-leak server.Intake.wake
-field-leak server_execution.ProviderSlot.transfer
 field-leak server_mcp_relist.Relist.pending
 field-leak session_chrome.FooterSpans.text
 field-leak session_follow.Follow.pending
