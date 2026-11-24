@@ -8,7 +8,10 @@ thread: ?std.Thread = null,
 reply: []const u8,
 more: []const []const u8 = &.{},
 hold_reply: bool = false,
-/// Answers `subscriptions/listen` requests. Without it those requests take the ordinary replies.
+/// The 1-based ordinary request whose reply the test sends with `releaseGated`, or 0 for none.
+gate_request: usize = 0,
+gated_fd: std.atomic.Value(std.posix.fd_t) = .init(-1),
+/// Answers `subscriptions/listen` requests. Without it a subscribe is refused with 404 and takes no scripted reply.
 listening: ?*Listening = null,
 request_received: std.atomic.Value(bool) = .init(false),
 /// Requests answered so far, counted before the reply is sent.
@@ -151,12 +154,24 @@ fn serve(self: *Script, reply: []const u8) bool {
         if (read <= 0) return true;
         self.seen_len += @intCast(read);
     }
-    self.request_received.store(true, .release);
-    _ = self.requests.fetchAdd(1, .acq_rel);
-    if (self.listening) |listening| if (isSubscribe(self.seen[0..self.seen_len])) {
-        held = listening.open(fd_, subscribeId(self.seen[0..self.seen_len]));
+    // A subscription is not an ordinary request: with no listening stream it is refused, and it takes no scripted reply.
+    if (isSubscribe(self.seen[0..self.seen_len])) {
+        if (self.listening) |listening| {
+            held = listening.open(fd_, subscribeId(self.seen[0..self.seen_len]));
+        } else {
+            _ = sendAll(fd_, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
         return false;
-    };
+    }
+    self.request_received.store(true, .release);
+    if (self.gate_request == self.requests.load(.acquire) + 1) {
+        // The descriptor is published before the request counts, so a test that sees the count can release it.
+        self.gated_fd.store(fd_, .release);
+        held = true;
+        _ = self.requests.fetchAdd(1, .acq_rel);
+        return true;
+    }
+    _ = self.requests.fetchAdd(1, .acq_rel);
     if (self.hold_reply) {
         var byte: [1]u8 = undefined;
         const received = std.c.recv(fd_, &byte, byte.len, 0);
@@ -207,15 +222,29 @@ fn requestIn(self: *const Script) bool {
     return seen.len >= head_end + (std.fmt.parseInt(usize, seen[at..line_end], 10) catch unreachable);
 }
 
+/// Sends `reply` on the gated request's connection and closes it. Returns false when no gated request is waiting.
+pub fn releaseGated(self: *Script, reply: []const u8) bool {
+    const socket = self.gated_fd.swap(-1, .acq_rel);
+    if (socket < 0) return false;
+    _ = sendAll(socket, reply);
+    _ = std.c.close(socket);
+    return true;
+}
+
 pub fn stop(self: *Script) void {
     // Also release a scripted future accept when an assertion aborts a test.
     // A connection wakes it on every kernel; shutdown of the listener wakes
     // it only on Linux, and Darwin's accept would block forever.
     self.stopping.store(true, .release);
+    const gated = self.gated_fd.swap(-1, .acq_rel);
+    if (gated >= 0) _ = std.c.close(gated);
     var address = std.Io.net.IpAddress.parseLiteral("127.0.0.1:0") catch unreachable;
     address.setPort(self.port);
     if (address.connect(std.testing.io, .{ .mode = .stream })) |stream| stream.close(std.testing.io) else |_| {}
     if (self.thread) |thread| thread.join();
+    // The serve thread may have gated a request after the swap above; it has stopped now.
+    const late = self.gated_fd.swap(-1, .acq_rel);
+    if (late >= 0) _ = std.c.close(late);
     if (self.listening) |listening| listening.close();
     _ = std.c.close(self.listener);
 }

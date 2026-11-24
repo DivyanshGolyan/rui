@@ -7,7 +7,7 @@
 const std = @import("std");
 const relist = @import("relist.zig");
 
-pub const State = enum { closed, opening, open, unsupported };
+pub const State = enum { off, opening, open, unsupported };
 
 /// A stream that stayed acknowledged this long restarts reconnect backoff at its first step.
 pub const stable_ms: u64 = 60_000;
@@ -38,7 +38,7 @@ pub const Event = union(enum) {
 pub const Refusal = struct { status: ?u16, rpc_code: ?i64 };
 
 pub const Line = struct {
-    state: State = .closed,
+    state: State = .off,
     /// JSON-RPC id of the current (or most recent) subscribe request, which is also its subscriptionId.
     /// Bumped by `begin`.
     opens: u64 = 0,
@@ -53,12 +53,12 @@ pub const Line = struct {
 
     /// True when a closed line may open now.
     pub fn due(self: *const Line, now_ms: u64) bool {
-        return self.state == .closed and now_ms >= self.retry_at_ms;
+        return self.state == .off and now_ms >= self.retry_at_ms;
     }
 
     /// Closed -> opening. Returns the JSON-RPC id the subscribe request must carry. Precondition: closed.
     pub fn begin(self: *Line, now_ms: u64) u64 {
-        std.debug.assert(self.state == .closed);
+        std.debug.assert(self.state == .off);
         self.state = .opening;
         self.opens += 1;
         self.ack_due_ms = now_ms +| ack_deadline_ms;
@@ -124,7 +124,7 @@ pub const Line = struct {
     /// Unsupported -> closed with no failures, due at once. Every other state is unchanged, so it is idempotent.
     pub fn reprobe(self: *Line) void {
         if (self.state != .unsupported) return;
-        self.state = .closed;
+        self.state = .off;
         self.failures = 0;
         self.retry_at_ms = 0;
     }
@@ -133,7 +133,7 @@ pub const Line = struct {
     /// line's ack deadline. Null for open and unsupported lines, whose streams are read as they come.
     pub fn wakeAt(self: *const Line) ?u64 {
         return switch (self.state) {
-            .closed => self.retry_at_ms,
+            .off => self.retry_at_ms,
             .opening => self.ack_due_ms,
             .open, .unsupported => null,
         };
@@ -143,7 +143,7 @@ pub const Line = struct {
         const stable = self.state == .open and now_ms -| self.acked_at_ms >= stable_ms;
         self.failures = if (stable) 1 else self.failures +| 1;
         self.retry_at_ms = now_ms +| relist.jittered(relist.retryDelay(self.failures), seed);
-        self.state = .closed;
+        self.state = .off;
     }
 };
 
@@ -160,7 +160,7 @@ fn unsupportedRefusal(refusal: Refusal) bool {
     return status == 404 or status == 405 or status == 501;
 }
 
-const all_states = [_]State{ .closed, .opening, .open, .unsupported };
+const all_states = [_]State{ .off, .opening, .open, .unsupported };
 
 /// The states that hold a stream, in table order.
 const holding_states = [_]State{ .opening, .open };
@@ -199,22 +199,22 @@ const table = [_][events.len]Row{
         .{ .state = .open, .ask = true },
         .{ .state = .unsupported },
         .{ .state = .open, .ask = true },
-        .{ .state = .closed, .backoff = true },
+        .{ .state = .off, .backoff = true },
         .{ .state = .opening },
         .{ .state = .opening },
         .{ .state = .opening },
         .{ .state = .opening },
-        .{ .state = .closed, .backoff = true },
+        .{ .state = .off, .backoff = true },
         .{ .state = .opening },
         .{ .state = .unsupported },
         .{ .state = .unsupported },
         .{ .state = .unsupported },
         .{ .state = .unsupported },
-        .{ .state = .closed, .backoff = true },
-        .{ .state = .closed, .backoff = true },
-        .{ .state = .closed, .backoff = true },
-        .{ .state = .closed, .backoff = true },
-        .{ .state = .closed, .backoff = true },
+        .{ .state = .off, .backoff = true },
+        .{ .state = .off, .backoff = true },
+        .{ .state = .off, .backoff = true },
+        .{ .state = .off, .backoff = true },
+        .{ .state = .off, .backoff = true },
     },
     // open: every ack is ignored; list_changed asks unless foreign; a refusal of any kind, a drop and an own
     // ended back off; a timeout is ignored.
@@ -227,23 +227,23 @@ const table = [_][events.len]Row{
         .{ .state = .open, .ask = true },
         .{ .state = .open },
         .{ .state = .open },
-        .{ .state = .closed, .backoff = true },
+        .{ .state = .off, .backoff = true },
         .{ .state = .open },
-        .{ .state = .closed, .backoff = true },
-        .{ .state = .closed, .backoff = true },
-        .{ .state = .closed, .backoff = true },
-        .{ .state = .closed, .backoff = true },
-        .{ .state = .closed, .backoff = true },
-        .{ .state = .closed, .backoff = true },
-        .{ .state = .closed, .backoff = true },
-        .{ .state = .closed, .backoff = true },
+        .{ .state = .off, .backoff = true },
+        .{ .state = .off, .backoff = true },
+        .{ .state = .off, .backoff = true },
+        .{ .state = .off, .backoff = true },
+        .{ .state = .off, .backoff = true },
+        .{ .state = .off, .backoff = true },
+        .{ .state = .off, .backoff = true },
+        .{ .state = .off, .backoff = true },
         .{ .state = .open },
     },
 };
 
 fn lineIn(state: State) Line {
     return switch (state) {
-        .closed => .{ .state = .closed, .opens = 1 },
+        .off => .{ .state = .off, .opens = 1 },
         .opening => .{ .state = .opening, .opens = 1 },
         .open => .{ .state = .open, .opens = 1, .acked_at_ms = 0 },
         .unsupported => .{ .state = .unsupported, .opens = 1 },
@@ -276,7 +276,7 @@ test "EXR-71 a listen stream moves through every holding state x event as its ru
 }
 
 test "EXR-87 a line holding no stream ignores every late event and keeps its state" {
-    for ([_]State{ .closed, .unsupported }) |state| {
+    for ([_]State{ .off, .unsupported }) |state| {
         for (events, 0..) |event, column| {
             var line = lineIn(state);
             line.failures = 2;
@@ -329,7 +329,7 @@ test "EXR-73 an unsupported listen stream stays off until reprobe, then may open
     try std.testing.expect(!line.holdsStream());
 
     line.reprobe();
-    try std.testing.expectEqual(State.closed, line.state);
+    try std.testing.expectEqual(State.off, line.state);
     try std.testing.expectEqual(@as(u32, 0), line.failures);
     try std.testing.expect(line.due(0));
     try std.testing.expectEqual(@as(?u64, 0), line.wakeAt());
@@ -400,7 +400,7 @@ test "EXR-79 every backoff cell counts one failure or restarts at one, and its r
             const stable = start.state == .open and start.at_ms -| start.acked_at_ms >= stable_ms;
             errdefer std.debug.print("cell {s} start {d} failures {d}\n", .{ @tagName(cell.event), index, before });
             try std.testing.expect(!line.step(cell.event, start.at_ms, 11));
-            try std.testing.expectEqual(State.closed, line.state);
+            try std.testing.expectEqual(State.off, line.state);
             const want: u32 = if (stable) 1 else before + 1;
             try expectBackoff(&line, start.at_ms, want);
         }
@@ -419,7 +419,7 @@ test "EXR-80 an opening line times out at its ack deadline and backs off, and wa
 
     // The shell calls step(.timed_out) at the deadline; an unacknowledged line backs off like a drop.
     try std.testing.expect(!line.step(.timed_out, 1_000 + ack_deadline_ms, 3));
-    try std.testing.expectEqual(State.closed, line.state);
+    try std.testing.expectEqual(State.off, line.state);
     try expectBackoff(&line, 1_000 + ack_deadline_ms, 1);
     try std.testing.expectEqual(@as(?u64, line.retry_at_ms), line.wakeAt());
 
