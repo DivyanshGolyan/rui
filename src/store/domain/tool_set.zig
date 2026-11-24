@@ -51,10 +51,18 @@ pub fn appNamesSql(comptime set_column: []const u8) []const u8 {
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=" ++ set_column ++ " AND tool.owner='app')";
 }
 
+/// True when the Host set (its records, MCP ones included) has the name of the app record `alias`. The Host record
+/// is the one a name resolves to (`HostToolSet.resolve` checks the Host first), so such an app record is never offered:
+/// the offer and its stale check read this one rule; settlement reads the frozen offer's owners, never this rule.
+pub fn hostShadowsSql(comptime alias: []const u8) []const u8 {
+    return "EXISTS(SELECT 1 FROM host_tool_set host_s JOIN tool_set_member host_m ON host_m.tool_set_id=host_s.tool_set_id " ++
+        "JOIN tool_record host_t ON host_t.tool_record_id=host_m.tool_record_id WHERE host_s.slot=1 AND host_t.name=" ++ alias ++ ".name)";
+}
+
 pub const max_names_bytes = tool_name.max_names_bytes;
 pub const max_offered_names_bytes = tool_name.max_offered_names_bytes;
 /// An app set's names, joined by commas: at most `app_tools.max_records` names of `tool_name.max_bytes` each.
-pub const max_app_names_bytes = app_tools.max_records * tool_name.max_bytes + app_tools.max_records - 1;
+pub const max_app_names_bytes = tool_name.max_app_names_bytes;
 
 /// A selected name comes from the source set (?3), or from the lane's app set (?5) when the source does not name it as a
 /// Host tool: a host record wins over an app record of the same name.

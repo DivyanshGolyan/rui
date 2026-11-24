@@ -2046,7 +2046,7 @@ const Scratch = [scratch_bytes]u8;
 const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @sizeOf(model_settlement_domain.Batch));
 const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch));
 
-const accepted_settlement_growth = 15208;
+const accepted_settlement_growth = 16248;
 
 comptime {
     if (@sizeOf(configuration_domain.ConfigurationReads) != 23744 or scratch_bytes != 23744)
@@ -2059,7 +2059,7 @@ comptime {
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
 /// resident for the Store's life: at most 23744 bytes, a configure's
-/// reads; a settlement batch uses 20096.
+/// reads; a settlement batch uses 21136 (its offered names now budget the lane's app names too).
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
