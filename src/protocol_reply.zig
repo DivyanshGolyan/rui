@@ -4285,8 +4285,9 @@ test "keyed observation requires valid delta since and shape-specific facts" {
     }
 }
 
-pub fn decodeSkillSuggestions(gpa: std.mem.Allocator, bytes: []const u8) !@import("skill_suggestions.zig").Page {
+pub fn decodeSkillSuggestions(gpa: std.mem.Allocator, bytes: []const u8, query: []const u8) !@import("skill_suggestions.zig").Page {
     const suggestion = @import("skill_suggestions.zig");
+    const completion = @import("skill_completion.zig");
     const Text = @import("json_scalar.zig").Text;
     const Entry = struct { name: Text, description: Text };
     const Entries = struct {
@@ -4299,7 +4300,6 @@ pub fn decodeSkillSuggestions(gpa: std.mem.Allocator, bytes: []const u8) !@impor
                 const entry = try std.json.innerParse(Entry, a, source, options);
                 if (entry.name.slice.len == 0 or entry.name.slice.len > 64 or entry.description.slice.len == 0 or entry.description.slice.len > 4096) return error.LengthMismatch;
                 if (!std.unicode.utf8ValidateSlice(entry.name.slice) or !std.unicode.utf8ValidateSlice(entry.description.slice)) return error.InvalidCharacter;
-                if (values.items.len != 0 and std.mem.order(u8, values.items[values.items.len - 1].name.slice, entry.name.slice) != .lt) return error.InvalidCharacter;
                 try values.append(a, entry);
             }
             _ = try source.next();
@@ -4315,6 +4315,15 @@ pub fn decodeSkillSuggestions(gpa: std.mem.Allocator, bytes: []const u8) !@impor
     const revision = std.fmt.parseInt(u64, wire.revision.slice(), 10) catch return error.InvalidResponse;
     const total = std.fmt.parseInt(usize, wire.total.slice(), 10) catch return error.InvalidResponse;
     if (total > 4096 or wire.entries.values.len != @min(total, suggestion.capacity)) return error.InvalidResponse;
+    var previous: ?struct { name: []const u8, rank: completion.Rank } = null;
+    for (wire.entries.values) |entry| {
+        const name = entry.name.slice;
+        const matched = completion.match(query, name, entry.description.slice) orelse return error.InvalidResponse;
+        if (previous) |last| {
+            if (completion.order(last.rank, last.name, matched.rank, name) != .lt) return error.InvalidResponse;
+        }
+        previous = .{ .name = name, .rank = matched.rank };
+    }
     const entries = try gpa.alloc(suggestion.Entry, wire.entries.values.len);
     var initialized: usize = 0;
     errdefer {
@@ -4334,17 +4343,31 @@ pub fn decodeSkillSuggestions(gpa: std.mem.Allocator, bytes: []const u8) !@impor
     return .{ .entries = entries, .revision = revision, .total = total };
 }
 
-test "inline skills suggestion decoder owns bounded metadata and rejects path or count forgery" {
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"skill_suggestions\",\"revision\":\"7\",\"total\":\"1\",\"entries\":[";
-    var page = try decodeSkillSuggestions(std.testing.allocator, prefix ++ "{\"name\":\"demo\",\"description\":\"A skill\"}]}");
+test "CM-48 inline skills suggestion replies preserve Host relevance order" {
+    const header = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"skill_suggestions\",\"revision\":\"7\",\"total\":";
+    const exact = "{\"name\":\"research\",\"description\":\"Investigate a question\"}";
+    const prefix = "{\"name\":\"research-notes\",\"description\":\"Write notes\"}";
+    const inside = "{\"name\":\"market-research\",\"description\":\"Study a market\"}";
+    const description = "{\"name\":\"govuk-style\",\"description\":\"Edit research write-ups\"}";
+    const other_description = "{\"name\":\"writing\",\"description\":\"Summarise research\"}";
+    const ranked = header ++ "\"5\",\"entries\":[" ++ exact ++ "," ++ prefix ++ "," ++ inside ++ "," ++ description ++ "," ++ other_description ++ "]}";
+    var page = try decodeSkillSuggestions(std.testing.allocator, ranked, "RESEARCH");
     defer page.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("demo", page.entries[0].name);
     try std.testing.expectEqual(@as(u64, 7), page.revision);
+    try std.testing.expectEqual(@as(usize, 5), page.total);
+    const expected = [_][]const u8{ "research", "research-notes", "market-research", "govuk-style", "writing" };
+    for (expected, page.entries) |name, entry| try std.testing.expectEqualStrings(name, entry.name);
+    const single = header ++ "\"1\",\"entries\":[";
+    const pair = header ++ "\"2\",\"entries\":[";
     for ([_][]const u8{
-        prefix ++ "{\"name\":\"demo\",\"description\":\"A skill\",\"path\":\"/not-public\"}]}",
-        prefix ++ "]}",
-        prefix ++ "{\"name\":3,\"description\":\"A skill\"}]}",
-    }) |wire| try std.testing.expectError(error.InvalidResponse, decodeSkillSuggestions(std.testing.allocator, wire));
+        single ++ "{\"name\":\"research\",\"description\":\"A skill\",\"path\":\"/not-public\"}]}",
+        single ++ "]}",
+        single ++ "{\"name\":3,\"description\":\"A skill\"}]}",
+        single ++ "{\"name\":\"unrelated\",\"description\":\"A skill\"}]}",
+        pair ++ description ++ "," ++ exact ++ "]}",
+        pair ++ other_description ++ "," ++ description ++ "]}",
+        pair ++ exact ++ "," ++ exact ++ "]}",
+    }) |wire| try std.testing.expectError(error.InvalidResponse, decodeSkillSuggestions(std.testing.allocator, wire, "research"));
 }
 
 test "activity golden model call null evidence and zero usage roundtrip" {
