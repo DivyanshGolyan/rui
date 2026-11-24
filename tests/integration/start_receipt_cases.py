@@ -47,7 +47,7 @@ def main():
             host = fixture.start_host(store, None)
             proxy = canonical_fixture.ReplyProxy(host, "/v1/message", hold_create_response)
             record = root / "original.json"
-            args = ["session", "start", "--store", store, "--provider", "codex",
+            args = ["session", "start", "--store", store, "--connection", "codex",
                     "--model", DEFAULTS.recommended_model, "--workspace", workspace,
                     "--record", record, "--key", "receipt-original"]
             task = "retain the original creation receipt"
@@ -99,7 +99,7 @@ def main():
             configure_record = root / "lost-configure.json"
             lost_configure = subprocess.run(
                 [str(fixture.RUI), "session", "configure", "--store", str(store),
-                 "--provider", "codex", "--model", DEFAULTS.recommended_model,
+                 "--connection", "codex", "--model", DEFAULTS.recommended_model,
                  "--workspace", str(workspace), "--record", str(configure_record),
                  "--key", "receipt-configure-lost", "--test-drop-reply", "after-commit"],
                 env=environment, cwd=workspace, text=True, capture_output=True, timeout=20)

@@ -181,9 +181,9 @@ def flag_start_failures(root):
     ]
     removed = [
         ["--active-capacity", "2"],
-        ["--provider", "codex"],
-        ["--provider", "bogus"],
-        ["--provider", "codex", "--provider", "codex"],
+        ["--connection", "codex"],
+        ["--connection", "bogus"],
+        ["--connection", "codex", "--connection", "codex"],
         ["--provider-endpoint", endpoint],
         ["--provider-ca-file", "/ca.pem"],
         ["--bash-path", "/bin/bash"],

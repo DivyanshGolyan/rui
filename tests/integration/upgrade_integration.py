@@ -1374,7 +1374,7 @@ def tool_custody_cases(root, binary, releases, operation):
                 endpoint.responses.append(fixture.sse_tool_calls(name, [("bash", name, arguments)]))
                 endpoint.responses.append(fixture.sse_answer(name + "-after", "reason", "message", "done")[0])
                 session = origin.json("session", "configure", "--store", origin.store,
-                    "--workspace", origin.root, "--provider", "codex", "--model", "gpt-6-luna",
+                    "--workspace", origin.root, "--connection", "codex", "--model", "gpt-6-luna",
                     "--tools", "bash", "--permission-mode", "bypass")["answer"]["session"]
                 origin.json("session", "send", "--store", origin.store, "--session", session, input="upgrade now")
 
@@ -1422,14 +1422,14 @@ def terminal_setup(c):
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     credential = directory / "codex.json"
     credentials(credential)
-    c.run("defaults", "configure", "--provider", "codex", "--model", "gpt-6-luna")
+    c.run("defaults", "configure", "--connection", "codex", "--model", "gpt-6-luna")
     configured = c.json("session", "configure", "--store", c.store,
-        "--workspace", c.root, "--provider", "codex", "--model", "gpt-6-luna")
+        "--workspace", c.root, "--connection", "codex", "--model", "gpt-6-luna")
     return configured["answer"]["session"], credential.read_bytes()
 
 
 def overview_args(binary, c):
-    return [str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-luna"]
+    return [str(binary), "--store", str(c.store), "--connection", "codex", "--model", "gpt-6-luna"]
 
 
 def proof_relaunched(c, screen, process):

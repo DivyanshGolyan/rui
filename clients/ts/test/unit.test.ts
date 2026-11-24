@@ -448,7 +448,8 @@ test("non-UTF-8 environment names refuse without selecting a lossy replacement",
 
 test("presets preserve creation fields and use the existing spec writer", () => {
 	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["bash"] as const, permissionMode: "ask" as const, provider: "openai" as const, workspace: "/w", outputSchema: { type: "object" } };
-	assert.deepEqual(documentFor({ presets: { review: spec } }).presets, { review: spec });
+	const { provider, ...rest } = spec;
+	assert.deepEqual(documentFor({ presets: { review: spec } }).presets, { review: { ...rest, connection: provider } });
 	for (const text of ["[]", "false", "not JSON"]) {
 		// @ts-expect-error The runtime Host also refuses non-object schemas.
 		const invalid = documentFor({ presets: { review: { ...spec, outputSchema: text } } });

@@ -268,7 +268,7 @@ def assert_configure_defaults(root, store, env):
 
     module = (DEFAULTS.recommended_model, DEFAULTS.tools.split(","), DEFAULTS.permission_mode)
     assert settings(configure()) == module
-    addressed = configure("--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")
+    addressed = configure("--workspace", root, "--connection", "codex", "--model", "gpt-6-sol")
     assert settings(addressed) == ("gpt-6-sol", *module[1:])
     configure("--session", addressed, "--tools", "none", "--permission-mode", "ask")
     configure("--session", addressed, "--compaction-trigger", "12345")
@@ -548,7 +548,7 @@ def moved_store_identity(root, env, *, terminal=False):
             selected = original if alias else moved
             for command in (("interactive",) if terminal else ("serve", "start")):
                 if command == "interactive":
-                    with terminal_process([RUI, "--store", selected, "--provider", "codex"], env=interactive_env, cwd=root) as (caller, master):
+                    with terminal_process([RUI, "--store", selected, "--connection", "codex"], env=interactive_env, cwd=root) as (caller, master):
                         output = bytearray()
                         code = wait_for_terminal_exit(caller, master, output, time.monotonic() + COMMAND_TIMEOUT)
                         diagnostic = output.decode().replace("\r\n", "\n")
@@ -1137,7 +1137,7 @@ def saved_settings(root, env):
                 record = root / f"{name}-request.json"
                 command = subprocess.run([RUI, "session", "start",
                                           "--record", str(record), "--key", "placement-start",
-                                          "--provider", "codex", "--model", "gpt-5.5", "--workspace", str(root)],
+                                          "--connection", "codex", "--model", "gpt-5.5", "--workspace", str(root)],
                                          env=selected_env, input="Saved placement evidence", text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
                 assert command.returncode == 0, command
                 receipt = json.loads(command.stdout)
@@ -1150,7 +1150,7 @@ def saved_settings(root, env):
                                         env=selected_env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
                 assert replay.returncode == 0, replay
                 configured = subprocess.run([RUI, "session", "configure", "--store", moved, "--workspace", root,
-                                             "--provider", "codex", "--model", "gpt-5.5", "--tools", "none"],
+                                             "--connection", "codex", "--model", "gpt-5.5", "--tools", "none"],
                                             env=selected_env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
                 assert configured.returncode == 0, configured
                 reference = json.loads(configured.stdout)["answer"]["session"]
@@ -1326,7 +1326,7 @@ def saved_settings_served(root, env):
         assert started.returncode == 0, started.stderr
         configured = model_fixture.command(
             "session", "configure", "--store", tls_store, "--record", state / "tls-config.json", "--key", "tls-config",
-            "--workspace", model_fixture.ROOT, "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none")
+            "--workspace", model_fixture.ROOT, "--connection", "codex", "--model", "gpt-6-sol", "--tools", "none")
         assert configured["answer"]["status"] == "accepted", configured
         tls_session = configured["answer"]["session"]
         model_fixture.message(state, tls_store, "tls-message", tls_session, "over-tls")
@@ -1493,7 +1493,7 @@ def host_refusal_receipts(root, env):
     master, slave = open_pty()
     bare = None
     try:
-        bare = spawn([RUI, "--store", directory, "--provider", "codex"], env=selected_env, cwd=root, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        bare = spawn([RUI, "--store", directory, "--connection", "codex"], env=selected_env, cwd=root, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         _, diagnostic = bare.communicate(timeout=COMMAND_TIMEOUT)
         assert bare.returncode == 1 and diagnostic.decode() == child.stderr, (bare.returncode, diagnostic, child)
     finally:

@@ -123,7 +123,7 @@ def _preset_creation(binary, root, store_settings, env, runtime):
             invoke("host", "set", "--store", store_settings["sqlite"]["dir"], "interface.dir", runtime)
         launch({"restricted": preset})
         # Poison ordinary fresh preferences and cwd: none may replace the preset seed.
-        invoke("defaults", "configure", "--provider", "codex", "--model", "gpt-6-sol",
+        invoke("defaults", "configure", "--connection", "codex", "--model", "gpt-6-sol",
                "--permission-mode", "bypass", "--reasoning-effort", "high")
         before = sessions()
         base, captured = capture("--preset", "restricted", "--test-drop-reply", "after-commit")

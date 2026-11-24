@@ -46,7 +46,7 @@ function report(work: CurrentReport["work"], parent: string | null = null): Curr
 	return {
 		version: WIRE_VERSION, type: "session_report", delta: "full", since: null, profile: "current", archive_state: "active",
 		session: {
-			reference: "abc123", parent, workspace: "/work", provider: "openai", model: "model-a", revision: "1",
+			reference: "abc123", parent, workspace: "/work", connection: "openai", model: "model-a", revision: "1",
 			tools: ["bash"], loaded_tools: ["bash"], permission_mode: "ask", label: "Review", created_at: "1",
 			instructions: { type: "text", bytes: "0", sha256: "0".repeat(64) }, output_schema: null,
 			compaction_trigger: "100000", context_estimate: null, output_reservation: "0",

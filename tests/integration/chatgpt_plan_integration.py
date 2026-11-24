@@ -163,7 +163,7 @@ def run():
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
             "--key", "configure", "--workspace", fixture.ROOT,
-            "--provider", "chatgpt", "--model", "gpt-6-sol", "--tools", "none",
+            "--connection", "chatgpt", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]

@@ -141,7 +141,7 @@ class PeerModel(TestHTTPServer):
             f'rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label {shlex.quote(A_LABEL)} '
             "> a-label.out 2> a-label.err || exit 89; "
             f"rui session start --workspace {shlex.quote(str(self.workspace))} --label {shlex.quote(B_LABEL)} "
-            "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass > b-start.json 2> b-send.err; "
+            "--connection codex --model gpt-6-sol --tools bash --permission-mode bypass > b-start.json 2> b-send.err; "
             "status=$?; cat b-start.json; exit $status"
         ), stdin=message)
 
@@ -245,9 +245,9 @@ def main(report_source):
         foreign_host, _ = start_ready_process([installed, "host", "serve", "--store", foreign_store],
             env={"PATH": os.environ["PATH"], "HOME": str(home)}, required_fields={"execution": "unavailable"})
         foreign_session = allocated(run(installed, "session", "configure", "--store", foreign_store,
-            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol", home=home))
+            "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-sol", home=home))
         external_session = allocated(run(installed, "session", "configure", "--store", foreign_store,
-            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol", home=home))
+            "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-sol", home=home))
         foreign_listing = run(installed, "session", "list", "--store", foreign_store, "--all", home=home)
         invalid_selectors = [("--session", value, (b"[invalid_session_reference]",)) for value in
                              ('peer/a "quoted" \\ 雪', 'ABC123', 'k7m2qi', 'rui/k7m2qx')]
@@ -256,7 +256,7 @@ def main(report_source):
         for flag, invalid, diagnostic in invalid_selectors:
             rejected = subprocess.run([str(installed), "session", "configure", "--store", str(foreign_store),
                 flag, invalid, "--workspace", str(workspace),
-                "--provider", "codex", "--model", "gpt-6-sol", "--record", str(refused_record), "--key", "invalid-config"],
+                "--connection", "codex", "--model", "gpt-6-sol", "--record", str(refused_record), "--key", "invalid-config"],
                 env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=15)
             assert rejected.returncode == 2 and all(part in rejected.stderr for part in diagnostic), rejected
             assert rejected.stdout == b"" and not refused_record.exists(), rejected
@@ -283,7 +283,7 @@ def main(report_source):
         )
         instance = run(installed, "host", "status", "--store", store, home=home)["instance"]
         session_a = allocated(run(installed, "session", "configure", "--store", store, "--workspace", workspace,
-            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "bypass", home=home))
+            "--connection", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "bypass", home=home))
         endpoint.a = session_a
         run(installed, "defaults", "configure", "--store", store, home=home)
         ask = subprocess.run([str(installed), "session", "send", "--session", session_a], input="Ask peer/b for 6*7.",
@@ -526,7 +526,7 @@ class CohortModel(TestHTTPServer):
             "n=0; while [ ! -e cohort-create ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done; "
             "[ -e cohort-create ] || exit 124; "
             f"printf %s 'Report to parent ID {self.parent}' | rui session start --workspace {shlex.quote(str(self.workspace))} "
-            "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass "
+            "--connection codex --model gpt-6-sol --tools bash --permission-mode bypass "
             f'--record {shlex.quote(str(self.workspace.parent))}/cohort-$i.json --key cohort-$i '
             '> "cohort-$i-start.json" 2> "cohort-$i-start.err" '
             ') & pids="$pids $!"; done; touch cohort-create; '
@@ -649,11 +649,11 @@ def stdin_start_contract():
         second = destinations.pop()
         assert [row["reference"] for row in fixture.command("session", "list", "--store", store, "--all")["sessions"]] == [session, second]
         assert fixture.command("session", "inspect", "--store", store, "--session", second)["pending_messages"] == "1"
-        defaults_reply = invoke("defaults", "configure", "--provider", "codex", "--model", "gpt-6.1-sol",
+        defaults_reply = invoke("defaults", "configure", "--connection", "codex", "--model", "gpt-6.1-sol",
             "--reasoning-effort", "high")
         assert defaults_reply.returncode == 0, defaults_reply
         for arguments, model, effort, source in (
-            (("--provider", "codex", "--model", "gpt-6.1-sol"), "gpt-6.1-sol", "high", "saved"),
+            (("--connection", "codex", "--model", "gpt-6.1-sol"), "gpt-6.1-sol", "high", "saved"),
             (("--model", "gpt-6.1-sol"), "gpt-6.1-sol", "high", "saved"),
             (("--model", "gpt-6.1-sol", "--reasoning-effort", "xhigh"), "gpt-6.1-sol", "xhigh", "flag"),
             (("--model", "gpt-6.1-sol", "--reasoning-effort", "default"), "gpt-6.1-sol", start_effort("gpt-6.1-sol"), "flag"),
@@ -719,7 +719,7 @@ def concurrent_peers():
             env=environment, required_fields={"execution": "enabled"})
         run(installed, "defaults", "configure", "--store", store, home=home)
         parent = allocated(run(installed, "session", "configure", "--store", store,
-            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
+            "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-sol",
             "--tools", "bash", "--permission-mode", "bypass", home=home))
         endpoint.parent = parent
         started = run(installed, "session", "send", "--session", parent, input="Start ten peers", home=home)
@@ -768,7 +768,7 @@ def concurrent_peers():
         for kind in ("send", "configure"):
             args = (("session", "send", "--session", unknown) if kind == "send" else
                     ("session", "configure", "--store", store, "--session", unknown,
-                     "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol"))
+                     "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-sol"))
             refused = run(installed, *args, home=home, expect=3, input="must not run" if kind == "send" else None)
             assert refused["answer"]["status"] == "rejected" and refused["answer"]["code"] == "unknown_session", refused
             assert run(installed, "session", "inspect", "--store", store, "--session", unknown, home=home) == missing_before

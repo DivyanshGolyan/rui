@@ -106,7 +106,7 @@ def catalog_unusable_trust_run():
             assert listed and listed[0]["provider"] == "codex", listed
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
-            "--workspace", fixture.ROOT, "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none",
+            "--workspace", fixture.ROOT, "--connection", "codex", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]

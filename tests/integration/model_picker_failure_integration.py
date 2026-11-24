@@ -37,7 +37,7 @@ def main():
             assert result.returncode == 0, (args, result.stdout, result.stderr)
             return result.stdout
 
-        cli("defaults", "configure", "--store", store, "--provider", "codex", "--model", "gpt-5.5")
+        cli("defaults", "configure", "--store", store, "--connection", "codex", "--model", "gpt-5.5")
         master, slave = open_pty(columns=50, rows=12)
         catalog = AppModelCatalog(host)
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,

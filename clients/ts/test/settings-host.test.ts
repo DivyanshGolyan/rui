@@ -129,9 +129,9 @@ for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysq
 				...(adapter === "chatgpt" ? { presets: { drift: spec } } : {}),
 				tools: { bash: { timeoutMs: 37 }, mcp: { fixture: { url: `http://127.0.0.1:${mcpAddress.port}/mcp`, bearerToken: { env: tokenName }, callTimeoutMs: 1000 } } },
 			}, { binary });
-			assert.equal(rui.hostInfo?.capabilities.providers.codex, adapter === "codex" ? "endpoint" : "unserved");
-			assert.equal(rui.hostInfo?.capabilities.providers.openai, "unserved");
-			assert.equal(rui.hostInfo?.capabilities.providers.chatgpt, adapter === "chatgpt" ? "chatgpt_plan" : "unserved");
+			assert.equal((rui.hostInfo?.capabilities.connections.find((c) => c.name === "codex")?.route ?? "unserved"), adapter === "codex" ? "endpoint" : "unserved");
+			assert.equal((rui.hostInfo?.capabilities.connections.find((c) => c.name === "openai")?.route ?? "unserved"), "unserved");
+			assert.equal((rui.hostInfo?.capabilities.connections.find((c) => c.name === "chatgpt")?.route ?? "unserved"), adapter === "chatgpt" ? "chatgpt_plan" : "unserved");
 			assert.ok(methods.includes("tools/list"), "configured MCP Adapter must be listed during start");
 			if (adapter === "chatgpt") {
 				const deadline = AbortSignal.any([t.signal, AbortSignal.timeout(10_000)]);
@@ -141,7 +141,7 @@ for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysq
 						version: WIRE_VERSION, kind: "model_list", store: canonicalStore,
 					}), undefined, { idleMs: 1000 });
 					const reply = JSON.parse(bytes.toString("utf8")) as components["schemas"]["ModelListReply"];
-					const current = reply.providers.find((entry) => entry.provider === "chatgpt");
+					const current = reply.connections.find((entry) => entry.connection === "chatgpt");
 					if (current?.source === "live" && current.models.some((model) => model.id === "gpt-6.1-sol")) break;
 					await delay(100, undefined, { signal: deadline });
 				}

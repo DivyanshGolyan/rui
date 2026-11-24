@@ -1018,7 +1018,7 @@ def consent_boundary_cases(state):
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
             session = human.admit(home, "session", "configure", "--store", store,
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
+                "--workspace", root, "--connection", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
             caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", session], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                 env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
@@ -1105,12 +1105,12 @@ def fatal_reporting_cases(state):
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         session = human.admit(home, "session", "configure", "--store", store,
-            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
+            "--workspace", root, "--connection", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
         missing_session = "000000" if session != "000000" else "000001"
         diagnostics = [
             (["session", "resume", "--store", str(store), missing_session], b"[internal_unexpected]"),
-            (["defaults", "configure", "--provider", "unsupported"], b"[choice_unsupported]"),
-            (["--store", str(store), "--provider", "unsupported", "--model", "gpt-6-sol"], b"[choice_unsupported]"),
+            (["defaults", "configure", "--connection", "unsupported"], b"[choice_unsupported]"),
+            (["--store", str(store), "--connection", "unsupported", "--model", "gpt-6-sol"], b"[choice_unsupported]"),
         ]
         for args, error, stopped in ((args, error, stopped) for args, error in diagnostics for stopped in (False, True)):
             master, slave = open_pty()
@@ -1182,7 +1182,7 @@ def decision_reporting_cases(state):
         for decision, ending in cases:
             name = f"{decision}-{ending}"
             session = human.admit(home, "session", "configure", "--store", store,
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
+                "--workspace", root, "--connection", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             master, slave = open_pty()
             read_ready, write_ready = os.pipe()

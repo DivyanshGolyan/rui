@@ -192,7 +192,7 @@ def preferences_bridge(binary, root, store_settings, env):
                     master, slave = open_pty()
                     caller = None
                     try:
-                        caller = spawn([str(binary), "--store", store, "--provider", "openai", "--model", model],
+                        caller = spawn([str(binary), "--store", store, "--connection", "openai", "--model", model],
                                        cwd=workspace, env=clean, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                         overview_frame(master, overview_title)
                         open_new_chat(master)

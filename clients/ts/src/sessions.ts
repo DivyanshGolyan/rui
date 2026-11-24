@@ -22,7 +22,7 @@ export interface AgentSpec {
 	/** The Session Workspace, fixed for its life. Root creation requires it; children inherit it. */
 	workspace?: string;
 	/** `openai` or `codex`. Fixed for the Session's life. */
-	provider?: NonNullable<Schemas["AgentSpec"]["provider"]>;
+	provider?: NonNullable<Schemas["AgentSpec"]["connection"]>;
 	/** Creation requires a model, supplied directly or by a preset. May change within the fixed provider. */
 	model: string;
 	instructions?: string;
@@ -154,7 +154,7 @@ export interface ModelSummary {
 export function agentSpec(spec: Partial<SessionSpec>): Schemas["Configuration"] {
 	return {
 		...(spec.workspace === undefined ? {} : { workspace: spec.workspace }),
-		...(spec.provider === undefined ? {} : { provider: spec.provider }),
+		...(spec.provider === undefined ? {} : { connection: spec.provider }),
 		...(spec.model === undefined ? {} : { model: spec.model }),
 		...(spec.instructions === undefined ? {} : { instructions: spec.instructions }),
 		...(spec.tools === undefined ? {} : { tools: [...new Set(spec.tools)].sort() }),
@@ -520,7 +520,7 @@ export async function models(link: Link): Promise<ModelSummary[]> {
 			store,
 		} satisfies Schemas["ModelListRequest"])),
 	);
-	return reply.providers.flatMap((entry) => entry.models.map((model) => ({ provider: entry.provider, id: model.id, known: model.known })));
+	return reply.connections.flatMap((entry) => entry.models.map((model) => ({ provider: entry.connection, id: model.id, known: model.known })));
 }
 
 export async function setPaused(link: Link, paused: boolean): Promise<void> {

@@ -256,7 +256,7 @@ def run():
         )
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure.json", "--key", "configure",
-            "--workspace", fixture.ROOT, "--provider", "chatgpt", "--model", "gpt-6-sol", "--tools", "none",
+            "--workspace", fixture.ROOT, "--connection", "chatgpt", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]
@@ -264,7 +264,7 @@ def run():
         fixture.wait_for(lambda: fixture.completed_observation(store, "first"), "first plan answer")
         assert endpoint.bearers == ["Bearer " + first], endpoint.bearers
 
-        fixture.command("defaults", "configure", "--provider", "openai", "--model", "gpt-6-sol")
+        fixture.command("defaults", "configure", "--connection", "openai", "--model", "gpt-6-sol")
         login = Login(url)
         logins.append(login)
         link = login.link(base)
@@ -282,8 +282,8 @@ def run():
         facts = credential_facts(credential_file)
         assert (facts["generation"], facts["client_id"], facts["access_token"]) == ("2", CLIENT, second), facts
         assert default_receipt(stdout) == ("Rui: Your default provider for new Sessions is unchanged. "
-                          "To use ChatGPT instead: rui defaults configure --provider chatgpt\n"), stdout
-        assert start_line(stdout) == "Start a conversation with: rui --provider chatgpt\n", stdout
+                          "To use ChatGPT instead: rui defaults configure --connection chatgpt\n"), stdout
+        assert start_line(stdout) == "Start a conversation with: rui --connection chatgpt\n", stdout
         assert saved_default() == ("openai", "gpt-6-sol")
         assert host_id_file.read_text().strip() == host_id
         fixture.message(state, store, "second", session, "after a returning sign-in")
@@ -320,7 +320,7 @@ def run():
         assert len(endpoint.bearers) == 2, endpoint.bearers
 
         codex_fixture.credentials(device_file)
-        fixture.command("defaults", "configure", "--provider", "codex", "--model", "gpt-6-sol")
+        fixture.command("defaults", "configure", "--connection", "codex", "--model", "gpt-6-sol")
         login = Login(url)
         logins.append(login)
         link = login.link(base)
@@ -349,7 +349,7 @@ def run():
             endpoint.responses.append(fixture.sse_answer("device-1", "device-r1", "device-m1", "device-code answer")[0])
         device_session = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure-device.json", "--key", "configure-device",
-            "--workspace", fixture.ROOT, "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none",
+            "--workspace", fixture.ROOT, "--connection", "codex", "--model", "gpt-6-sol", "--tools", "none",
         )["answer"]["session"]
         fixture.message(state, store, "device", device_session, "device-code message")
         fixture.wait_for(lambda: fixture.completed_observation(store, "device"), "device-code answer")

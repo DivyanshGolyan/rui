@@ -90,7 +90,7 @@ def run(*, observed=False, intake=100):
         diagnostics = HostDiagnostics(host)
         configuration = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
-            "--workspace", fixture.ROOT, "--provider", "codex",
+            "--workspace", fixture.ROOT, "--connection", "codex",
             "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configuration["answer"]["status"] == "accepted"
@@ -229,7 +229,7 @@ def openai_base_url_run(*, catalog_available=False):
         fixture.wait_for(models_received, "the initial OpenAI models GET", timeout=20)
         configuration = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
-            "--workspace", fixture.ROOT, "--provider", "openai", "--model", "gpt-6-sol", "--tools", "none",
+            "--workspace", fixture.ROOT, "--connection", "openai", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configuration["answer"]["status"] == "accepted", configuration
         session = configuration["answer"]["session"]
@@ -403,7 +403,7 @@ def saved_catalog_run():
 
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", root / "changed.json", "--key", "changed",
-            "--workspace", fixture.ROOT, "--provider", "openai", "--model", shipped, "--tools", "none",
+            "--workspace", fixture.ROOT, "--connection", "openai", "--model", shipped, "--tools", "none",
             "--reasoning-effort", changed_effort, "--compaction-trigger", str(window),
         )
         assert configured["answer"]["status"] == "accepted", configured

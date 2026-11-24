@@ -94,7 +94,7 @@ def empty_creation(binary, root, store_settings, env):
 
             record = root / "cli.json"
             cli = invoke("session", "configure", "--store", store, "--record", record, "--key", "empty-creation:cli",
-                         "--provider", binding["provider"], "--model", binding["model"], "--workspace", workspace)
+                         "--connection", binding["provider"], "--model", binding["model"], "--workspace", workspace)
             assert json.loads(record.read_text())["configuration"] == binding
             assert check(inspect(cli["context"]["session"])) == resolved
 
@@ -103,7 +103,7 @@ def empty_creation(binary, root, store_settings, env):
             master, slave = open_pty()
             caller = None
             try:
-                caller = spawn([str(binary), "--store", store, "--provider", binding["provider"],
+                caller = spawn([str(binary), "--store", store, "--connection", binding["provider"],
                                 "--model", binding["model"]], cwd=workspace, env=clean,
                                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 overview_frame(master, overview_title)

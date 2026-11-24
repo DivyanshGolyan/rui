@@ -33,7 +33,7 @@ def main():
         env = {**os.environ, "HOME": str(home)}
         configured = subprocess.run(
             [str(fixture.RUI), "defaults", "configure", "--store", str(store),
-             "--provider", "codex", "--model", "gpt-5.5"],
+             "--connection", "codex", "--model", "gpt-5.5"],
             env=env, capture_output=True, text=True, timeout=20,
         )
         assert configured.returncode == 0, configured.stderr
@@ -96,7 +96,7 @@ def main():
 
         created = subprocess.run(
             [str(fixture.RUI), "session", "configure", "--store", str(store),
-             "--workspace", str(state), "--provider", "codex", "--model", "gpt-5.5"],
+             "--workspace", str(state), "--connection", "codex", "--model", "gpt-5.5"],
             env=env, capture_output=True, text=True, timeout=20,
         )
         assert created.returncode == 0, created.stderr

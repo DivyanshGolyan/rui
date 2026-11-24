@@ -142,9 +142,9 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                                                   required_fields={"execution": "enabled"})
         # These ordinary defaults and cwd would violate the attached contract if
         # the CLI inserted them before forwarding the parent-bearing spec.
-        invoke("defaults", "configure", "--store", directory, "--provider", "openai", "--model", "gpt-6.1-sol")
+        invoke("defaults", "configure", "--store", directory, "--connection", "openai", "--model", "gpt-6.1-sol")
         parent = value("session", "configure", "--store", directory, "--workspace", workspace,
-                       "--provider", "codex", *spec)["context"]["session"]
+                       "--connection", "codex", *spec)["context"]["session"]
         seed = invoke("session", "send", "--store", directory, "--session", parent,
                       input="seed the parent environment", mark="parent-original")
         wait(announced(seed))
@@ -156,7 +156,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         # Saved client bindings must not choose an attached child's compaction
         # policy. Both creating routes resolve against the inherited provider.
         for saved_provider in ("openai", "codex"):
-            invoke("defaults", "configure", "--provider", saved_provider, "--model", "gpt-6.1-sol")
+            invoke("defaults", "configure", "--connection", saved_provider, "--model", "gpt-6.1-sol")
             for door in ("configure", "start"):
                 for explicit in (False, True):
                     key = f"parent-compaction-{saved_provider}-{door}-{explicit}"
@@ -186,7 +186,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                     replay = value("request", "recover", "--store", directory, "--record", record,
                                    "--kind", "message" if door == "start" else "configure")
                     assert replay["answer"]["replayed"] is True and replay["context"]["session"] == child, replay
-        invoke("defaults", "configure", "--provider", "openai", "--model", "gpt-6.1-sol")
+        invoke("defaults", "configure", "--connection", "openai", "--model", "gpt-6.1-sol")
         assert configuration(parent) == saved_parent
         print("attached CLI: OpenAI/Codex saved bindings preserve inherited compaction and explicit overrides", flush=True)
         records = []
@@ -271,13 +271,13 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         assert configuration(parent) == saved_parent
         invoke("session", "configure", "--store", directory, "--session", parent, "--permission-mode", "ask")
         archived = value("session", "configure", "--store", directory, "--workspace", workspace,
-                         "--provider", "codex", *spec)["context"]["session"]
+                         "--connection", "codex", *spec)["context"]["session"]
         invoke("session", "archive", "--store", directory, "--session", archived)
         known = session_refs()
         unknown = next(f"{number:06d}" for number in range(len(known) + 1) if f"{number:06d}" not in known)
         rejected_records = []
         cases = [
-            ("provider", parent, ["--provider", "codex"], "parent_provider_forbidden"),
+            ("provider", parent, ["--connection", "codex"], "parent_provider_forbidden"),
             ("workspace", parent, ["--workspace", workspace], "parent_workspace_forbidden"),
             ("tools", parent, ["--tools", "bash,web_search"], "tools_not_in_parent"),
             ("permission", parent, ["--permission-mode", "bypass"], "permission_mode_wider_than_parent"),

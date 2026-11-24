@@ -40,7 +40,7 @@ def main():
             required_fields=host_process.READY_TRANSPORT)
         configured = subprocess.run(
             [str(fixture.RUI), "defaults", "configure", "--store", str(store),
-             "--provider", "codex", "--model", "gpt-5.5"],
+             "--connection", "codex", "--model", "gpt-5.5"],
             env=env, capture_output=True, text=True, timeout=20, check=False)
         assert configured.returncode == 0, configured.stderr
 
@@ -54,7 +54,7 @@ def main():
         for sign_in, provider in (("API key", "openai"), ("ChatGPT", "codex")):
             changed = subprocess.run(
                 [str(fixture.RUI), "defaults", "configure", "--store", str(store),
-                 "--provider", provider, "--model", "gpt-5.5"],
+                 "--connection", provider, "--model", "gpt-5.5"],
                 env=env, capture_output=True, text=True, timeout=20, check=False)
             assert changed.returncode == 0, changed.stderr
             master, slave = open_pty(columns=80, rows=24)

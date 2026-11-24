@@ -301,7 +301,7 @@ test("an explicitly named OpenAI environment source reaches the child, not the d
 	let rui: Rui | undefined;
 	try {
 		rui = await connect(newStore(), { providers: { openai: { key: { env: name } } } });
-		assert.equal(rui.hostInfo?.capabilities.providers.openai, "key_file");
+		assert.equal((rui.hostInfo?.capabilities.connections.find((c) => c.name === "openai")?.route ?? "unserved"), "key_file");
 		if (process.platform === "linux") {
 			assert.ok(readFileSync(`/proc/${rui.pid}/environ`, "utf8").split("\0").includes(`${name}=${key}`));
 			assert.ok(!readFileSync(`/proc/${rui.pid}/cmdline`, "utf8").includes(key));
