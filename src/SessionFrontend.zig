@@ -7424,6 +7424,35 @@ test "SUI-140 a page from an older Host cannot advance the current window" {
     try std.testing.expectEqualStrings("current queue", self.queuedRow().?.waiting.line);
 }
 
+test "SUI-140 Host replacement does not reuse an older Host queue preview" {
+    const Host = struct {
+        fn instance(_: *anyopaque) ?[16]u8 {
+            return @splat(2);
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.lender.host_instance = Host.instance;
+    self.reading.opening = false;
+    try std.testing.expect(self.queue_horizon.adopt(@splat(1), 100));
+    self.live.queued = .{ .count = 1, .oldest_position = 90, .newest_admission = 7, .newest_position = 90 };
+    self.live.queued_line = .{ .admission = 7, .line = .{} };
+    try self.live.queued_line.?.line.set("old Host preview");
+    try std.testing.expect(self.queuedRow() == null);
+    try std.testing.expectEqual(@as(u64, 0), self.queueLineForRead());
+    self.reading.phase = .activity;
+    self.reading.feed_read = .scan;
+    self.job.feed_page = FeedPolicy.request(.scan, self.feedState());
+    self.job.result.page_host = @splat(2);
+    self.job.result.queue_cutoff = 10;
+    self.job.result.queued = .{ .count = 1, .oldest_position = 9, .newest_admission = 7, .newest_position = 9 };
+    self.job.result.queued_line = .{ .admission = 7, .line = .{} };
+    try self.job.result.queued_line.?.line.set("new Host preview");
+    try self.applyReader(.complete);
+    try std.testing.expectEqualStrings("new Host preview", self.queuedRow().?.waiting.line);
+}
+
 test "SUI-17 SessionFrontend draws queued and taken Messages once across work" {
     for ([_]u16{ 46, 140 }) |width| {
         const fixture = try FeedFixture.create();
