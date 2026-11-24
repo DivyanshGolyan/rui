@@ -662,7 +662,7 @@ class CandidatePlanTest(unittest.TestCase):
             'upgrade-integration', 'test-logic', 'test-native'}),
         'slow fixture owner': (['src/Upgrade.zig'], {'deep-modules', 'upgrade-integration'}),
         'core owning no fixture': (['src/request_encoding.zig'], {'deep-modules', 'test-logic', 'test-native'}),
-        'core owning one fixture': (['src/session_skills.zig'], {'deep-modules', 'skills-integration', 'test-logic', 'test-native'}),
+        'core owning one fixture': (['src/session_skills.zig'], {'deep-modules', 'skills-integration', 'test-native'}),
         'Host source under check': (['src/wire_version.zig'], {'deep-modules', 'test-logic', 'test-native'}),
         'measurement own file': (['tests/qualification/call-classification/main.go'], {'measurement-check'}),
         'measurement non-own file': (['build/measurement.zig'], set()),

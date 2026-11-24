@@ -96,7 +96,8 @@ test {
     _ = @import("mcp/result_text.zig");
     _ = @import("mcp/result_text_golden_test.zig");
     _ = @import("tool_result.zig");
-    _ = @import("tool_settle.zig");
+    _ = @import("action_attempt.zig");
+    _ = @import("tool_delivery.zig");
     _ = @import("mcp/Running.zig");
     _ = @import("mcp/servers.zig");
     _ = @import("mcp/Listing.zig");

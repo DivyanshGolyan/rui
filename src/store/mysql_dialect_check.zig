@@ -24,6 +24,8 @@ const DatabaseNames = struct {
     // Short: the history Store's name keeps a namespace of 31 characters under the 40-byte testing database name.
     history: []const u8 = "rh",
     history_fresh: []const u8 = "rh_fresh",
+    // A template is "rht_<namespace>_<format><b|n>": 39 bytes at the longest namespace, under the 40-byte limit.
+    history_template: []const u8 = "rht",
 };
 
 var names: DatabaseNames = .{};
@@ -114,6 +116,9 @@ test "the history Store's database name keeps the longest namespace under the 40
     var buffer: [64]u8 = undefined;
     const name = try qualifiedDatabase(&buffer, (DatabaseNames{}).history, "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn");
     try std.testing.expect(name.len < 40);
+    // A template adds "_<format><b|n>" (at most 4 bytes for a two-digit format) to the qualified base.
+    const template = try qualifiedDatabase(&buffer, (DatabaseNames{}).history_template, "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn");
+    try std.testing.expect(template.len + "_99b".len < 40);
 }
 
 test "MySQL test schema namespace preserves defaults and separates concurrent processes" {
@@ -556,13 +561,9 @@ const migrated_database_sql = "{[migrated]s}";
 const fresh_database_sql = "{[fresh]s}";
 
 fn load(comptime name: []const u8, text: []const u8, unchecked: bool) !void {
-    try setupNamed("USE " ++ name);
-    if (unchecked) try setup("SET FOREIGN_KEY_CHECKS=0");
-    defer if (unchecked) restore("SET FOREIGN_KEY_CHECKS=1");
-    if (try run(text)) |refused| {
-        std.log.err("MySQL migration check: {s} refused: {f}", .{ name, refused });
-        return error.MysqlRefusedMigration;
-    }
+    const database = try std.fmt.allocPrint(std.testing.allocator, name, sqlNames(name, names));
+    defer std.testing.allocator.free(database);
+    try loadIn(database, text, unchecked);
 }
 
 fn writeResult(text: []const u8, out: *std.Io.Writer) !void {
@@ -660,16 +661,6 @@ pub fn historyDatabase() []const u8 {
     return names.history;
 }
 
-/// Empties the history Store's database and selects it. Runs with the dialect driver's root login.
-pub fn historyReset() !void {
-    const io = std.testing.io;
-    mutex.lockUncancelable(io);
-    defer mutex.unlock(io);
-    _ = connection() orelse return error.MysqlUnavailable;
-    try setupNamed("DROP DATABASE IF EXISTS " ++ history_sql ++ ";DROP DATABASE IF EXISTS " ++ history_fresh_sql ++
-        ";CREATE DATABASE " ++ history_sql ++ ";USE " ++ history_sql);
-}
-
 /// Runs `text` in the history Store's database. `unchecked` turns foreign key checks off for the statement,
 /// as the baseline rows and the shipped steps need (SQLite's build turns them off the same way).
 pub fn historyLoad(text: []const u8, unchecked: bool) !void {
@@ -678,6 +669,120 @@ pub fn historyLoad(text: []const u8, unchecked: bool) !void {
     defer mutex.unlock(io);
     _ = connection() orelse return error.MysqlUnavailable;
     try load(history_sql, text, unchecked);
+}
+
+/// Where a builder's statements run: one database, through the root login. Caller holds the mutex.
+pub const Loader = struct {
+    database: []const u8,
+
+    pub fn load(self: Loader, text: []const u8, unchecked: bool) !void {
+        try loadIn(self.database, text, unchecked);
+    }
+};
+
+/// A history Store's shape: its frozen format and whether it holds the baseline rows.
+pub const Shape = struct { format: u32, seeded: bool };
+
+/// Fills a shape's template through `loader`, with `selector` as its store_selector.
+pub const Fill = *const fn (loader: Loader, shape: Shape, selector: []const u8) anyerror!void;
+
+/// The store_selector a template holds. Every clone rewrites it to its own selector.
+const template_selector = "/rui-history-template";
+/// The shapes whose template is built in this process. A shape is added after its fill returns.
+var templates_built: [2 * schema.schema_version]Shape = undefined;
+var templates_built_len: usize = 0;
+
+fn templateBuilt(shape: Shape) bool {
+    for (templates_built[0..templates_built_len]) |built| if (built.format == shape.format and built.seeded == shape.seeded) return true;
+    return false;
+}
+
+/// Runs `text` in `database`, a run-time name; the one SQL loader every history and migration check uses. `unchecked`
+/// turns foreign key checks off for the statement and restores them. Caller holds the mutex.
+fn loadIn(database: []const u8, text: []const u8, unchecked: bool) !void {
+    var use_buffer: [128]u8 = undefined;
+    try setup(try std.fmt.bufPrint(&use_buffer, "USE {s}", .{database}));
+    if (unchecked) try setup("SET FOREIGN_KEY_CHECKS=0");
+    defer if (unchecked) restore("SET FOREIGN_KEY_CHECKS=1");
+    if (try run(text)) |refused| {
+        std.log.err("MySQL migration check: {s} refused: {f}", .{ database, refused });
+        return error.MysqlRefusedMigration;
+    }
+}
+
+/// Makes the history database hold the Store `fill` builds for `shape`, with `selector`. The first request for a shape
+/// in this process builds its template database through `fill`; every request then clones that template into the
+/// history database. Foreign keys survive the clone because each table is created from its SHOW CREATE TABLE text
+/// (CREATE TABLE ... LIKE drops them).
+pub fn historyFrom(shape: Shape, selector: []const u8, fill: Fill) !void {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return error.MysqlUnavailable;
+    var template_buffer: [64]u8 = undefined;
+    const template = try std.fmt.bufPrint(&template_buffer, "{s}_{d}{s}", .{ names.history_template, shape.format, if (shape.seeded) "b" else "n" });
+    if (!templateBuilt(shape)) {
+        const create = try std.fmt.allocPrint(std.testing.allocator, "DROP DATABASE IF EXISTS {s};CREATE DATABASE {s}", .{ template, template });
+        defer std.testing.allocator.free(create);
+        try setup(create);
+        try fill(.{ .database = template }, shape, template_selector);
+        templates_built[templates_built_len] = shape;
+        templates_built_len += 1;
+    }
+    try cloneInto(template, names.history, selector);
+}
+
+/// Replaces `target` with a copy of `template`, then sets its store_selector. Caller holds the mutex.
+fn cloneInto(template: []const u8, target: []const u8, selector: []const u8) !void {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try setup(try std.fmt.allocPrint(arena, "DROP DATABASE IF EXISTS {s};CREATE DATABASE {s}", .{ target, target }));
+    const tables = try queryValues(arena, try std.fmt.allocPrint(arena, "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='{s}' AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME", .{template}));
+    // Generated columns cannot be inserted, so each table copies its other columns by name, in position order.
+    const columns = try queryValues(arena, try std.fmt.allocPrint(arena, "SELECT TABLE_NAME,COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='{s}' AND EXTRA NOT LIKE '%GENERATED%' ORDER BY TABLE_NAME,ORDINAL_POSITION", .{template}));
+    for (tables) |table| {
+        const shown = try queryValues(arena, try std.fmt.allocPrint(arena, "SHOW CREATE TABLE `{s}`.`{s}`", .{ template, table }));
+        if (shown.len != 2) return error.MysqlRefusedQuery;
+        var list: std.Io.Writer.Allocating = .init(arena);
+        var first = true;
+        var pair: usize = 0;
+        while (pair < columns.len) : (pair += 2) {
+            if (!std.mem.eql(u8, columns[pair], table)) continue;
+            try list.writer.print("{s}`{s}`", .{ if (first) "" else ",", columns[pair + 1] });
+            first = false;
+        }
+        try loadIn(target, shown[1], true);
+        try loadIn(target, try std.fmt.allocPrint(arena, "INSERT INTO `{s}` ({s}) SELECT {s} FROM `{s}`.`{s}`", .{ table, list.written(), list.written(), template, table }), true);
+    }
+    try loadIn(target, try std.fmt.allocPrint(arena, "UPDATE store_meta SET meta_value='{s}' WHERE meta_key='store_selector'", .{selector}), false);
+}
+
+/// Runs a query and returns its values in row order, one per column, allocated in `arena`. Caller holds the mutex.
+fn queryValues(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
+    try driver.query(text);
+    var values: std.ArrayList([]const u8) = .empty;
+    var value: []u8 = &.{};
+    var filled: usize = 0;
+    var refused = false;
+    while (!driver.isReady()) switch (try driver.next()) {
+        .err => |err| {
+            std.log.err("MySQL history: err {d} {s}\n  {s}", .{ err.code, err.message, text });
+            refused = true;
+        },
+        .value => |length| {
+            value = try arena.alloc(u8, length orelse 0);
+            filled = 0;
+            try values.append(arena, value);
+        },
+        .bytes => |bytes| {
+            @memcpy(value[filled..][0..bytes.len], bytes);
+            filled += bytes.len;
+        },
+        else => {},
+    };
+    if (refused) return error.MysqlRefusedQuery;
+    return values.items;
 }
 
 /// The history Store's stored format (store_meta 'format').
