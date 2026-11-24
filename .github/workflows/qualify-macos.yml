@@ -74,7 +74,8 @@ jobs:
     needs: plan
     runs-on: ${{ needs.plan.outputs.platform == 'linux' && 'ubuntu-24.04' || 'macos-15' }}
     # A cold macos-15 compile of the native suite overran 15 minutes (run
-    # 42817865735); match check.yml's macos_build budget there.
+    # 42817865735). The budget is unchanged: this job already compiles every
+    # selected part in one run, so check.yml's macos_build rise does not apply.
     timeout-minutes: ${{ needs.plan.outputs.platform == 'linux' && 15 || 60 }}
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
@@ -104,11 +105,13 @@ jobs:
     needs: [plan, compile]
     name: ${{ needs.plan.outputs.platform }} / ${{ matrix.name }}
     runs-on: ${{ needs.plan.outputs.platform == 'linux' && 'ubuntu-24.04' || 'macos-15' }}
-    timeout-minutes: 30
+    # The macOS plan emits one row that replaces three 30-minute rows, so it takes
+    # 60 minutes, matching check.yml's macos_suites job.
+    timeout-minutes: ${{ needs.plan.outputs.platform == 'linux' && 30 || 60 }}
     strategy:
-      # Separate VMs avoid measuring concurrent qualification workloads on one Mac.
+      # Linux shards run in parallel; the single macOS row runs alone on its Mac.
       fail-fast: false
-      max-parallel: ${{ needs.plan.outputs.platform == 'linux' && 10 || 3 }}
+      max-parallel: ${{ needs.plan.outputs.platform == 'linux' && 10 || 1 }}
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Select runner-owned evidence directories

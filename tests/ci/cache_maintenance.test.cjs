@@ -293,7 +293,9 @@ test('compiled restores its v4 snapshot, then seeds from the v2 baseline', () =>
     for (const part of ['all', 'compiled', 'compiled-unit', 'compiled-other', 'codegen', 'baseline']) {
       if (platform === 'Linux-X64' && part === 'compiled') continue;
       const ordinary = keys(part, deps, sources, platform);
-      const prefix = `rui-build-v2-${platform}-0.17.1-${'a'.repeat(64)}-`;
+      // macOS compiled publishes under v3 so its combined build never exact-hits the rest-only v2 snapshot.
+      const version = platform === 'macOS-ARM64' && part === 'compiled' ? 'v3' : 'v2';
+      const prefix = `rui-build-${version}-${platform}-0.17.1-${'a'.repeat(64)}-`;
       assert.equal(ordinary.key, `${prefix}${part}.${deps}-${sources}`);
       const restoreKeys = order.map(field => ordinary[field]).filter(Boolean);
       assert.equal(new Set(restoreKeys).size, restoreKeys.length, `${platform}/${part} duplicates fallbacks`);
@@ -355,12 +357,16 @@ test('mixed runner-image fleet keeps the newest snapshot of each identity', asyn
     {id: 8, key: `rui-runner-v2-Linux-X64-0.17.1-${tools('a')}-${'e'.repeat(16)}-${seq(8)}`},
     {id: 9, key: `rui-runner-v2-Linux-X64-0.17.1-${tools('c')}-${'e'.repeat(16)}-${seq(9)}`},
     {id: 10, key: `rui-build-v2-macOS-ARM64-0.17.1-${tools('a')}-compiled.${tools('d')}-${seq(10)}`},
-    {id: 11, key: `rui-build-v2-macOS-ARM64-0.17.1-${tools('a')}-compiled.${tools('d')}-${seq(11)}`},
+    {id: 11, key: `rui-build-v3-macOS-ARM64-0.17.1-${tools('a')}-compiled.${tools('d')}-${seq(11)}`},
     {id: 12, key: `rui-build-v2-Linux-X64-0.17.1-${tools('c')}-baseline.${tools('d')}-${seq(12)}`},
+    {id: 13, key: `rui-build-v3-macOS-ARM64-0.17.1-${tools('a')}-compiled.${tools('d')}-${seq(13)}-partial-9-1`},
+    {id: 14, key: `rui-build-v3-macOS-ARM64-0.17.1-${tools('a')}-compiled-unit.${tools('d')}-${seq(14)}`},
   ].map(({id, key}) => ({...cache(id, main), key}));
   const mixed = await run(fleet);
   assert.ifError(mixed.error);
-  assert.deepEqual(mixed.ids, [2, 3, 5, 6, 7, 8, 9, 11, 12]);
+  // 10 is the leftover v2 macOS compiled snapshot, pruned by the v3 snapshot 11 of its identity.
+  // 13 is a v3 partial in its own partial group; 14 is a v3 compiled-unit look-alike in its own group.
+  assert.deepEqual(mixed.ids, [2, 3, 5, 6, 7, 8, 9, 11, 12, 13, 14]);
 });
 
 test('malformed v4 lookalikes never join the compiled group', async () => {
@@ -501,17 +507,20 @@ test('maintenance warms both producer parts on both platforms using the consumer
   assert.match(jobs.compiled, /runner: \[ubuntu-24.04, macos-15\]/);
   assert.match(jobs.compiled, /part: \[compiled, compiled-unit\]/);
   assert.match(jobs.compiled, /check-part: \$\{\{ matrix.part \}\}/);
-  assert.match(jobs.compiled, /matrix.part == 'compiled-unit' && 'unit' \|\| 'rest'/);
+  assert.match(jobs.compiled, /matrix.part == 'compiled-unit' && 'unit' \|\| matrix.runner == 'macos-15' && 'all' \|\| 'rest'/);
   const command = 'python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"';
   assert.ok(jobs.compiled.includes(command));
-  for (const platform of ['linux', 'macos']) {
-    assert.ok(consumers[`${platform}_build`].includes(command));
-    assert.match(consumers[`${platform}_build_unit`], /build_artifact.py build "\$TARGETS" --part unit/);
-    assert.match(consumers[`${platform}_build`], /check-part: compiled\s/);
-    assert.match(consumers[`${platform}_build_unit`], /check-part: compiled-unit\s/);
-    assert.match(consumers[`${platform}_build`], /^    timeout-minutes: 60$/m);
-    assert.match(consumers[`${platform}_build_unit`], new RegExp(`^    timeout-minutes: ${platform === 'linux' ? 15 : 60}$`, 'm'));
-  }
+  assert.ok(consumers.linux_build.includes(command));
+  assert.match(consumers.linux_build_unit, /build_artifact.py build "\$TARGETS" --part unit/);
+  assert.match(consumers.linux_build, /check-part: compiled\s/);
+  assert.match(consumers.linux_build_unit, /check-part: compiled-unit\s/);
+  assert.match(consumers.linux_build, /^    timeout-minutes: 60$/m);
+  assert.match(consumers.linux_build_unit, /^    timeout-minutes: 15$/m);
+  // macOS has one producer for every part: no unit job, and it compiles all of them.
+  assert.match(consumers.macos_build, /build "\$TARGETS" --part all/);
+  assert.match(consumers.macos_build, /check-part: compiled\s/);
+  assert.match(consumers.macos_build, /^    timeout-minutes: 90$/m);
+  assert.equal(consumers.macos_build_unit, undefined);
   assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration","stack-frames","deep-modules"\]/);
   assert.match(jobs.compiled, /\["check-full","test-logic","admission-debug-integration"\]/);
   assert.match(jobs.compiled, /^    timeout-minutes: 120$/m);
@@ -549,7 +558,7 @@ test('publishers save after work without capping setup or shard recovery', () =>
       for (const [index, step] of steps.entries()) {
         if (index === compile || !step.includes('timeout-minutes:')) continue;
         if (/name: Run (?:selected targets|required native targets)/.test(step)) {
-          assert.match(step, /timeout-minutes: 35\n/, label);
+          assert.match(step, name === 'macos_suites' ? /timeout-minutes: 45\n/ : /timeout-minutes: 35\n/, label);
         } else {
           assert.match(step, /name: Bisect .*promotion batch/, `${label} introduced an unrelated step cap`);
           assert.match(step, /timeout-minutes: 240\n/, label);
@@ -807,16 +816,26 @@ test('prune retains newest partial per build or CPU prefix independently of comp
   assert.deepEqual(result.ids, [4, 5, 6, 7, 9, 10, 12, 13, 14]);
 });
 
-test('existing job timeout budgets are not increased to make space for saves', () => {
+test('existing job timeout budgets rise only in a job that absorbs the budgets it replaces', () => {
   const directory = `${__dirname}/../../.github/workflows`;
+  // A job that absorbs others may take the sum of the budgets it replaces (CI-33); nothing else may rise.
+  const absorbed = {
+    // macos_build replaces macos_build (60) and macos_build_unit (60).
+    'check.yml': {macos_build: 120, macos_suites: 105 /* the three former suite rows at 35 each */},
+  };
   for (const [file, expected] of [
     ['cache-maintenance.yml', {baseline: '30', runner: '15', previous_release: '45'}],
-    ['check.yml', {linux_build: '60', linux_build_unit: '15', macos_build: '60', macos_build_unit: '60', macos_typecheck: '15', cache_execution: '20', linux_suites: '${{ inputs.promotion && 300 || 35 }}', macos_suites: '${{ inputs.promotion && 300 || 35 }}'}],
+    ['check.yml', {linux_build: '60', linux_build_unit: '15', macos_build: '90', macos_typecheck: '15', cache_execution: '20', linux_suites: '${{ inputs.promotion && 300 || 35 }}', macos_suites: '${{ inputs.promotion && 300 || 60 }}'}],
     ['renderer-contracts.yml', {contracts: '${{ inputs.batch-base && 300 || 45 }}', mutations: '60'}],
   ]) {
     const jobs = workflowJobs(readFileSync(`${directory}/${file}`, 'utf8'));
     for (const [name, budget] of Object.entries(expected)) {
       assert.equal(jobs[name].match(/^    timeout-minutes: (.*)$/m)[1], budget, `${file}/${name}`);
+      const replaced = absorbed[file]?.[name];
+      if (replaced !== undefined) {
+        const minutes = Number(budget.match(/\|\| (\d+) \}\}$/)?.[1] ?? budget);
+        assert.ok(minutes <= replaced, `${file}/${name} may not exceed the sum it absorbs (${replaced})`);
+      }
     }
   }
 });
@@ -834,13 +853,13 @@ test('new work deadlines derive a save window and cover recorded green durations
       linux_build: [851, '43732653500'],
       linux_build_unit: [480, '43819213128'],
       macos_typecheck: [449, '43819213128'],
-      macos_build: [1117, '43720387127'],
-      macos_build_unit: [760, '43720387127'],
+      // PROVISIONAL: the sum of the separate rest (1117 s) and unit (760 s) green runs, until a combined run is recorded.
+      macos_build: [1877, '43720387127'],
       cache_execution: [351, '42755585733'],
     },
     'cache-maintenance.yml': {
       baseline: [568, '43433947643'],
-      compiled: [1117, '43720387127'],
+      compiled: [1877, '43720387127'],
       runner: [99, '43381025988'],
       previous_release: [354, '43381025988'],
     },

@@ -27,14 +27,23 @@ class MatrixIdentityTest(unittest.TestCase):
                          (("test-native", "all"), ("check-full", "execution"), ("test-logic", "all")))
         self.assertEqual(matrix_targets("unknown"), (("unknown", "all"),))
 
-    def test_both_platforms_use_the_same_full_part_names(self):
-        for platform in ("linux", "macos"):
-            with self.subTest(platform=platform):
-                rows = shards(["check-full"], platform, mysql_suites=set())["include"]
-                self.assertEqual([(row["name"], row["targets"], row["part"]) for row in rows],
-                                 [("full-execution", ["check-full"], "execution"),
-                                  ("full-callers", ["check-full"], "callers")])
+    def test_linux_keeps_full_part_names_and_macos_runs_check_full_in_one_row(self):
+        rows = shards(["check-full"], "linux", mysql_suites=set())["include"]
+        self.assertEqual([(row["name"], row["targets"], row["part"]) for row in rows],
+                         [("full-execution", ["check-full"], "execution"),
+                          ("full-callers", ["check-full"], "callers")])
+        rows = shards(["check-full"], "macos", mysql_suites=set())["include"]
+        self.assertEqual([(row["name"], row["targets"], row["part"]) for row in rows],
+                         [("native", ["check-full"], "all")])
 
+    def test_macos_emits_one_native_row_beside_resource_rows(self):
+        targets = ["check-full", "test-logic", "admission-debug-integration", "measure-repeat-work"]
+        rows = shards(targets, "macos", mysql_suites=set())["include"]
+        self.assertEqual([(row["name"], row["targets"], row["part"]) for row in rows],
+                         [("native", ["check-full", "test-logic", "admission-debug-integration"], "all"),
+                          ("measure-repeat-work", ["measure-repeat-work"], "all")])
+        self.assertEqual(sum(1 for row in rows if not row["resource"]), 1)
+        self.assertEqual(matrix_targets("native"), (("native", "all"),))
 
 if __name__ == "__main__":
     unittest.main()
