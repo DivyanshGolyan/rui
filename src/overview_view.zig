@@ -987,11 +987,11 @@ pub const State = struct {
     }
 
     pub fn savedProvider(self: *const State, explicit: ?[]const u8, saved: ?[]const u8) ?[]const u8 {
-        return explicit orelse saved orelse if (self.default) |binding| binding.provider.slice() else null;
+        return explicit orelse saved orelse if (self.default) |*binding| binding.provider.slice() else null;
     }
 
     pub fn nextBinding(self: *const State) Binding {
-        return .{ .provider = if (self.default) |binding| binding.provider.slice() else null, .model = if (self.default) |*binding| binding.model.slice() else null };
+        return .{ .provider = if (self.default) |*binding| binding.provider.slice() else null, .model = if (self.default) |*binding| binding.model.slice() else null };
     }
     pub fn nextStart(self: *const State) ?Default {
         return self.default;
