@@ -1,4 +1,6 @@
 const std = @import("std");
+const connection_names = @import("connection_names.zig");
+const provider_route = @import("provider_route.zig");
 const host_endpoint = @import("host_endpoint.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const session_list = @import("session_list.zig");
@@ -4888,7 +4890,7 @@ test "chat footer background click and Alt-I share natural panel opening and Esc
             .id = if (index < 2) std.fmt.comptimePrint("luna-{d}", .{index}) else std.fmt.comptimePrint("model-{d}", .{index}),
             .known = false,
             .catalogued = false,
-            .providers = .initOne(.codex),
+            .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}),
         };
         break :blk result;
     };
@@ -4932,7 +4934,7 @@ test "chat footer background click and Alt-I share natural panel opening and Esc
         try std.testing.expectEqual(panel.origin, keyed_panel.origin);
         try std.testing.expectEqual(panel.surface.size, keyed_panel.surface.size);
         held.self.app_info.panel.selected = 4;
-        held.self.app_info.model_choice.open(&menu, .codex, "model-2");
+        held.self.app_info.model_choice.open(&menu, provider_route.nameOf(.codex), "model-2");
         const expanded_frame = try held.draw();
         const expanded_input = try held.drawnInput(expanded_frame.children[0].surface);
         const expanded_panel = try held.drawnPanel(expanded_frame.children[0].surface);

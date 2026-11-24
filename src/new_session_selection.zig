@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const model_capability = @import("model_capability.zig");
 const preferences = @import("preference_values.zig");
 const product_defaults = @import("product_defaults.zig");
@@ -75,7 +76,7 @@ pub const Binding = struct {
 
 fn codexOnly(state: provider_selection.Readiness) provider_selection.Readinesses {
     var readiness: provider_selection.Readinesses = .initFill(.missing);
-    readiness.set(.codex, state);
+    readiness.set(provider_route.nameOf(.codex), state);
     return readiness;
 }
 
@@ -180,7 +181,7 @@ test "a saved provider picks among ready ones, and none saved with two ready ask
     try snapshot.defaults.provider.set("openai");
     try std.testing.expectEqualStrings("openai", (try snapshot.resolve(&both)).?.provider.slice());
     var key_missing = both;
-    key_missing.set(.openai, .missing);
+    key_missing.set(provider_route.nameOf(.openai), .missing);
     try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(&key_missing));
 }
 

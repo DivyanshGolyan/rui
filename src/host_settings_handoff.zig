@@ -72,10 +72,10 @@ pub fn freeze(gpa: std.mem.Allocator, directory: []const u8, settings: *const hs
     return .{ .bytes = bytes };
 }
 
-pub fn decode(bytes: []const u8, selected: []const u8, settings: *hs.Settings, gpa: std.mem.Allocator, check: hs.PresetCheck, failure: *start_report.Failure) !ProviderIntent {
+pub fn decode(bytes: []const u8, selected: []const u8, settings: *hs.Settings, gpa: std.mem.Allocator, checks: hs.Checks, failure: *start_report.Failure) !ProviderIntent {
     const view = inspect(bytes) catch return invalid(failure, "missing, malformed or unsupported private settings handoff");
     if (!std.mem.eql(u8, view.directory, selected)) return invalid(failure, "private settings handoff names another Host directory");
-    try hs.applyComposed(settings, gpa, view.document, check, failure);
+    try hs.applyComposed(settings, gpa, view.document, checks, failure);
     if (!hs.unresolved(settings)) return invalid(failure, "private settings handoff must contain source descriptions only");
     return view.intent;
 }
@@ -99,16 +99,17 @@ test "frozen settings handoff preserves OS-byte selector intent and file-origin 
         defer owned.deinit(gpa);
         b.* = .{};
         defer b.deinit();
-        try std.testing.expectEqual(intent, try decode(owned.bytes, "/host-\xff", b, gpa, struct {
+        const no_checks: hs.Checks = .{ .preset = struct {
             fn check(_: std.mem.Allocator, _: std.json.ObjectMap) error{OutOfMemory}!?[]const u8 {
                 return null;
             }
-        }.check, &failure));
-        try std.testing.expectError(error.SettingsInvalid, decode(owned.bytes, "/other", b, gpa, struct {
-            fn check(_: std.mem.Allocator, _: std.json.ObjectMap) error{OutOfMemory}!?[]const u8 {
-                return null;
+        }.check, .host_field = struct {
+            fn none(_: []const u8) bool {
+                return false;
             }
-        }.check, &failure));
+        }.none };
+        try std.testing.expectEqual(intent, try decode(owned.bytes, "/host-\xff", b, gpa, no_checks, &failure));
+        try std.testing.expectError(error.SettingsInvalid, decode(owned.bytes, "/other", b, gpa, no_checks, &failure));
         try std.testing.expectError(error.SettingsInvalid, inspect(owned.bytes[0 .. owned.bytes.len - 1]));
         // Reject an over-bound declared composition without allocating or
         // beginning any launch. This bound belongs to the frame, not a layer.

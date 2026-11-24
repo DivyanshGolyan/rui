@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const catalog = @import("model_catalog.zig");
 const product_defaults = @import("product_defaults.zig");
 const provider_name = @import("provider_name.zig");
@@ -99,7 +100,7 @@ const provider_count = @typeInfo(provider_name.Provider).@"enum".field_names.len
 pub fn capabilities(readiness: *const provider_selection.Readinesses) [provider_count]provider_selection.Capability {
     var out: [provider_count]provider_selection.Capability = undefined;
     for (&out, std.enums.values(provider_name.Provider)) |*entry, provider|
-        entry.* = .{ .name = @tagName(provider), .recommended_model = product_defaults.recommended_model, .admits_model = validModelSyntax, .readiness = readiness.get(provider) };
+        entry.* = .{ .name = @tagName(provider), .recommended_model = product_defaults.recommended_model, .admits_model = validModelSyntax, .readiness = readiness.get(provider_route.nameOf(provider)) };
     return out;
 }
 
@@ -193,7 +194,7 @@ test "a new Session keeps saved effort unless its listed model excludes it" {
 
 test "selection admits any ID with valid syntax, listed or not" {
     var readiness: provider_selection.Readinesses = .initFill(.missing);
-    readiness.set(.codex, .configured);
+    readiness.set(provider_route.nameOf(.codex), .configured);
     const selectable = capabilities(&readiness);
     try std.testing.expectEqualStrings("family=variant", (try provider_selection.resolve(&selectable, null, "family=variant", null, null)).selected.model);
     try std.testing.expectEqualStrings("stale-pin", (try provider_selection.resolve(&selectable, null, null, "codex", "stale-pin")).selected.model);
@@ -206,8 +207,8 @@ test "every built-in provider is selectable by its label, and two ready ones ask
     const both = capabilities(&readiness);
     try std.testing.expectEqual(provider_selection.Selection.chooser, try provider_selection.resolve(&both, null, null, null, null));
     try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(&both, "openai", null, null, null)).selected.provider);
-    readiness.set(.codex, .missing);
-    readiness.set(.chatgpt, .missing);
+    readiness.set(provider_route.nameOf(.codex), .missing);
+    readiness.set(provider_route.nameOf(.chatgpt), .missing);
     const one = capabilities(&readiness);
     try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(&one, null, null, null, null)).selected.provider);
 }
