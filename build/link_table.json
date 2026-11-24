@@ -73,7 +73,7 @@
     "test-native": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "test-pg": ["nghttp2", "openssl", "translate_c"],
     "test-store": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
-    "test-vaxis-overlay": ["vaxis"],
+    "test-vaxis-clipboard": ["vaxis"],
     "transport-h2-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "ts-client": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "typecheck-macos": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
