@@ -121,6 +121,7 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
             .retireBody = streamsRetireBody,
             .settle = streamsSettle,
         },
+        .origins = &self.origins,
     };
 }
 
@@ -494,7 +495,7 @@ fn submitPending(self: *Engine) void {
         while (opening > 0 and pending.len > 0) : (opening -= 1) {
             const connection = self.freeConnection() orelse break;
             self.connection_serial += 1;
-            self.settleFailure(connection, connection.open(origin, @intCast(origin_index), self.connection_serial));
+            self.settleFailure(connection, connection.open(@intCast(origin_index), self.connection_serial));
         }
     }
 }

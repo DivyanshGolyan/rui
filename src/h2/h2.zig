@@ -14,6 +14,16 @@ pub const testing = if (@import("builtin").is_test) struct {
     pub const Peer = @import("testing/Peer.zig");
 } else struct {};
 
+pub const test_access = if (@import("builtin").is_test) struct {
+    pub fn engineOf(client: *Client) *Engine {
+        return engine(client);
+    }
+
+    pub fn recordOf(stream: *Stream) *Record {
+        return record(stream);
+    }
+} else struct {};
+
 pub const nghttp2_version = "1.71.0";
 pub const openssl_version = "3.6.5";
 
@@ -371,6 +381,9 @@ test {
     _ = @import("liveness.zig");
     _ = Record;
     _ = Engine;
+    _ = @import("Origin.zig");
+    _ = @import("Clock.zig");
+    _ = @import("Connection.zig");
     _ = @import("Resolver.zig");
     _ = @import("proxy.zig");
     _ = @import("tls.zig");

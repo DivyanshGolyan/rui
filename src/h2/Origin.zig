@@ -120,3 +120,58 @@ pub fn address(self: *const Origin, index: u8) ?Resolver.Address {
     const addresses = self.lookup.result().?.found();
     return if (index < addresses.len) addresses[index] else null;
 }
+
+fn awaitFinished(waker: *Waker, job: *Resolver.Job) !void {
+    var poll = [_]std.c.pollfd{.{ .fd = waker.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
+    var rounds: u32 = 0;
+    while (job.result() == null) : (rounds += 1) {
+        if (rounds == 10_000) return error.TimedOut;
+        _ = std.c.poll(&poll, 1, 5);
+    }
+}
+
+fn pendingJob(waker: *Waker) *Resolver.Job {
+    const job = std.heap.c_allocator.create(Resolver.Job) catch unreachable;
+    job.* = .{ .mutex = .{}, .references = 1, .state = .running, .waker = waker, .work = undefined };
+    return job;
+}
+
+test "connections of one origin share one lookup until the last releases a finished one" {
+    var waker = try Waker.init();
+    defer waker.deinit();
+    const target: Target = .{ .host = "127.0.0.1", .port = 443, .literal = null };
+    var lookup: SharedLookup = .{};
+    defer lookup.deinit();
+
+    try std.testing.expect(lookup.acquire(&waker, target));
+    const started = lookup.job.?;
+    try std.testing.expect(lookup.acquire(&waker, target));
+    try std.testing.expectEqual(started, lookup.job.?);
+    try std.testing.expectEqual(@as(u32, 2), lookup.users);
+    try awaitFinished(&waker, started);
+
+    lookup.release();
+    try std.testing.expectEqual(started, lookup.job.?);
+    try std.testing.expectEqual(@as(u32, 1), lookup.users);
+    lookup.release();
+    try std.testing.expectEqual(@as(?*Resolver.Job, null), lookup.job);
+    try std.testing.expectEqual(@as(u32, 0), lookup.users);
+
+    lookup.job = pendingJob(&waker);
+    const unfinished = lookup.job.?;
+    try std.testing.expect(lookup.acquire(&waker, target));
+    try std.testing.expectEqual(unfinished, lookup.job.?);
+    lookup.release();
+    try std.testing.expectEqual(unfinished, lookup.job.?);
+    try std.testing.expect(lookup.acquire(&waker, target));
+    try std.testing.expectEqual(unfinished, lookup.job.?);
+    lookup.release();
+
+    const literal = Resolver.Address.literal("127.0.0.1", 443).?;
+    lookup.job.?.release();
+    lookup.job = Resolver.answered(&waker, &.{literal}) orelse return error.OutOfMemory;
+    try std.testing.expect(lookup.acquire(&waker, target));
+    const fresh = lookup.job.?;
+    try std.testing.expectEqual(@as(u32, 1), lookup.users);
+    try awaitFinished(&waker, fresh);
+}

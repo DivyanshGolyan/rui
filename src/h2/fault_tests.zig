@@ -269,9 +269,9 @@ fn runSeed(seed: u64, totals: *Totals) !void {
         .cut = percents[random.uintLessThan(usize, percents.len)],
         .cut_span = spans[random.uintLessThan(usize, spans.len)],
     });
-    engineOf(&client).env.faults = &faults;
+    h2.test_access.engineOf(&client).env.faults = &faults;
     defer for (requests[0..count]) |*request| {
-        if (recordOf(&request.stream).state != .idle) client.cancel(&request.stream);
+        if (h2.test_access.recordOf(&request.stream).state != .idle) client.cancel(&request.stream);
         request.stream.deinit();
     };
     const endpoint = try client.addEndpoint(peer.url());
@@ -356,7 +356,7 @@ fn attemptsBefore(peer: *const Peer, stream: *const Peer.Stream) usize {
 }
 
 fn progress(client: *h2.Client, faults: *const Faults) u64 {
-    return faults.counts.moved +% client.finishedCount() +% engineOf(client).connection_serial;
+    return faults.counts.moved +% client.finishedCount() +% h2.test_access.engineOf(client).connection_serial;
 }
 
 fn readyNow(client: *h2.Client) bool {
@@ -467,7 +467,7 @@ test "seeded faults: a stream the peer reads after queueing GOAWAY above its las
     var client: h2.Client = undefined;
     try client.init(allocator, std.testing.io, .{ .stream_capacity = 4, .inactivity_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 30 * std.time.ns_per_s });
     defer client.deinit();
-    defer if (recordOf(&requests[0].stream).state != .idle) {
+    defer if (h2.test_access.recordOf(&requests[0].stream).state != .idle) {
         client.cancel(&requests[0].stream);
         requests[0].stream.deinit();
     };
@@ -481,14 +481,14 @@ test "seeded faults: a stream the peer reads after queueing GOAWAY above its las
     client.launch(&requests[0].stream);
 
     var steps: u32 = 0;
-    while (engineOf(&client).connections_len == 0 or engineOf(&client).connections[0].streams == 0) : (steps += 1) {
+    while (h2.test_access.engineOf(&client).connections_len == 0 or h2.test_access.engineOf(&client).connections[0].streams == 0) : (steps += 1) {
         if (steps > 2000) return error.Timeout;
         try client.drive(&run);
-        if (engineOf(&client).connections_len > 0 and engineOf(&client).connections[0].streams > 0) break;
+        if (h2.test_access.engineOf(&client).connections_len > 0 and h2.test_access.engineOf(&client).connections[0].streams > 0) break;
         try peer.pump();
         try client.wait(1);
     }
-    try Peer.awaitSocketDelivery(engineOf(&client).connections[0].socket);
+    try Peer.awaitSocketDelivery(h2.test_access.engineOf(&client).connections[0].socket);
     try std.testing.expectEqual(@as(usize, 0), peer.streams.items.len);
     run.goaway(peer, peer.connections.items[0]);
     try std.testing.expectEqual(@as(i32, 0), run.goaways.items[0].last);
@@ -504,12 +504,4 @@ test "seeded faults: a stream the peer reads after queueing GOAWAY above its las
     }
     try std.testing.expectEqual(peer.streams.items[0].test_id.items.len, 1);
     try std.testing.expectEqual(@as(?*Peer.Stream, null), unprovenResend(&run, peer, requests[0].id()));
-}
-
-fn engineOf(client: *h2.Client) *Engine {
-    return @ptrCast(client);
-}
-
-fn recordOf(stream: *h2.Stream) *Record {
-    return @ptrCast(stream);
 }

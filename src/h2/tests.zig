@@ -745,7 +745,7 @@ test "a read cap defers expiry only for streams on that connection" {
             return bytes >= h2.read_allowance_bytes;
         }
     };
-    const busy_socket = for (engineOf(&harness.client).connections[0..engineOf(&harness.client).connections_len]) |*connection| {
+    const busy_socket = for (h2.test_access.engineOf(&harness.client).connections[0..h2.test_access.engineOf(&harness.client).connections_len]) |*connection| {
         if (connection.streams == busy.len) break connection.socket;
     } else return error.TestUnexpectedResult;
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), busy_socket, Busy.queued);
@@ -976,7 +976,7 @@ const BlackHole = struct {
 fn launchRacing(harness: *Harness, stream: *h2.Stream, sink: []u8, before_peer: []const Resolver.Address) !void {
     try harness.launch(stream, bytesRequest(harness.endpoint, "x", sink));
     try harness.client.drive(&harness.receiver);
-    const engine = engineOf(&harness.client);
+    const engine = h2.test_access.engineOf(&harness.client);
     try std.testing.expectEqual(Connection.State.resolving, engine.connections[0].state);
     var addresses: [Resolver.max_addresses]Resolver.Address = undefined;
     @memcpy(addresses[0..before_peer.len], before_peer);
@@ -1545,7 +1545,7 @@ test "a large table stays unwritten until connections need it" {
         .connect_timeout_ns = std.time.ns_per_s,
     });
     defer client.deinit();
-    const engine = engineOf(&client);
+    const engine = h2.test_access.engineOf(&client);
     const page = std.heap.pageSize();
     for ([_][]u8{ std.mem.sliceAsBytes(engine.connections), std.mem.sliceAsBytes(engine.views), std.mem.sliceAsBytes(engine.pollfds) }) |table| {
         const start = std.mem.alignForward(usize, @intFromPtr(table.ptr), page);
@@ -1586,18 +1586,14 @@ test "drives walk only as far as the last connection not free" {
     };
     var receiver: Ignore = .{};
     try client.drive(&receiver);
-    try std.testing.expectEqual(@as(u32, 1), engineOf(&client).connections_len);
+    try std.testing.expectEqual(@as(u32, 1), h2.test_access.engineOf(&client).connections_len);
     var steps: u32 = 0;
     while (client.finishedCount() == 0) : (steps += 1) {
         if (steps > 2000) return error.Timeout;
         try client.drive(&receiver);
         try client.wait(1);
     }
-    try std.testing.expectEqual(@as(u32, 0), engineOf(&client).connections_len);
+    try std.testing.expectEqual(@as(u32, 0), h2.test_access.engineOf(&client).connections_len);
     _ = client.nextFinished();
     stream.deinit();
-}
-
-fn engineOf(client: *h2.Client) *Engine {
-    return @ptrCast(client);
 }

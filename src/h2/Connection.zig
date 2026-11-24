@@ -48,6 +48,7 @@ pub const Env = struct {
     connect_timeout_ns: u64,
     stream_capacity: u32,
     streams: Streams,
+    origins: *[h2.max_endpoints]Origin,
     faults: if (builtin.is_test) ?*Faults else void = if (builtin.is_test) null else {},
 };
 
@@ -55,7 +56,6 @@ env: *const Env,
 index: u32,
 state: State,
 origin: u8,
-origin_state: *Origin = undefined,
 carried_any: bool,
 received_any: bool,
 read_capped: bool,
@@ -209,12 +209,16 @@ fn pollEvents(self: *const Connection) ?i16 {
     };
 }
 
-pub fn open(self: *Connection, origin: *Origin, origin_index: u8, serial: u64) ?Failure {
+fn originOf(self: *const Connection) *Origin {
+    return &self.env.origins[self.origin];
+}
+
+pub fn open(self: *Connection, origin_index: u8, serial: u64) ?Failure {
     std.debug.assert(self.state == .free);
     self.origin = origin_index;
-    self.origin_state = origin;
     self.serial = serial;
     self.setup_deadline_ns = self.env.clock.now() +| self.env.connect_timeout_ns;
+    const origin = self.originOf();
     if (origin.target.literal != null) return self.advanceAttempts(false, self.env.clock.now());
     self.state = .resolving;
     if (!origin.lookup.acquire(self.env.waker, origin.target)) return .{ .setup = .local_failure };
@@ -223,7 +227,7 @@ pub fn open(self: *Connection, origin: *Origin, origin_index: u8, serial: u64) ?
 }
 
 pub fn finishLookup(self: *Connection) ?Failure {
-    const lookup = self.origin_state.lookup.result() orelse return null;
+    const lookup = self.originOf().lookup.result() orelse return null;
     if (lookup.found().len == 0) return .{ .setup = .resolve_failed };
     return self.advanceAttempts(false, self.env.clock.now());
 }
@@ -231,7 +235,7 @@ pub fn finishLookup(self: *Connection) ?Failure {
 fn stopUsingLookup(self: *Connection) void {
     if (!self.uses_lookup) return;
     self.uses_lookup = false;
-    self.origin_state.lookup.release();
+    self.originOf().lookup.release();
 }
 
 pub fn advanceConnect(self: *Connection, time: u64) ?Failure {
@@ -267,7 +271,7 @@ fn advanceAttempts(self: *Connection, failed: bool, time: u64) ?Failure {
     while (true) {
         switch (dial_policy.nextAttempt(.{
             .in_flight = @as(u8, @intFromBool(self.socket >= 0)) + @intFromBool(self.earlier >= 0),
-            .more_addresses = self.origin_state.address(self.address_index) != null,
+            .more_addresses = self.originOf().address(self.address_index) != null,
             .failed = refused,
             .delay_passed = self.next_attempt_ns != 0 and time >= self.next_attempt_ns,
         })) {
@@ -287,9 +291,9 @@ fn advanceAttempts(self: *Connection, failed: bool, time: u64) ?Failure {
 
 fn attempt(self: *Connection, time: u64) enum { connected, in_flight, refused, local_failure } {
     std.debug.assert(self.earlier < 0);
-    const address = self.origin_state.address(self.address_index).?;
+    const address = self.originOf().address(self.address_index).?;
     self.address_index += 1;
-    self.next_attempt_ns = if (self.origin_state.address(self.address_index) != null) time +| dial_policy.attempt_delay_ns else 0;
+    self.next_attempt_ns = if (self.originOf().address(self.address_index) != null) time +| dial_policy.attempt_delay_ns else 0;
     const fd = std.c.socket(address.family, std.c.SOCK.STREAM, 0);
     if (fd < 0) return .local_failure;
     self.earlier = self.socket;
@@ -333,7 +337,7 @@ fn connected(self: *Connection) ?Failure {
     self.dropEarlier();
     self.next_attempt_ns = 0;
     self.stopUsingLookup();
-    const origin = self.origin_state;
+    const origin = self.originOf();
     if (origin.scheme == .http) return self.startSession();
     if (origin.via != null) return self.startTunnel();
     return self.startTls();
@@ -350,7 +354,7 @@ fn startTunnel(self: *Connection) ?Failure {
 }
 
 fn tunnelRequest(self: *const Connection, buffer: *[proxy.max_request_bytes]u8) []const u8 {
-    const origin = self.origin_state;
+    const origin = self.originOf();
     return proxy.connectRequest(buffer, origin.host, origin.port, origin.via.?.credentials);
 }
 
@@ -385,7 +389,7 @@ pub fn continueTunnel(self: *Connection) ?Failure {
 }
 
 fn startTls(self: *Connection) ?Failure {
-    const origin = self.origin_state;
+    const origin = self.originOf();
     const context = &self.env.tls.*.?;
     self.ssl = context.newSession(self.socket, origin.server_name, if (origin.literal != null) .ip_literal else .dns_name) orelse
         return .{ .setup = .local_failure };
@@ -409,7 +413,7 @@ pub fn continueHandshake(self: *Connection) ?Failure {
 
 fn startVerification(self: *Connection) ?Failure {
     std.debug.assert(self.verification == null);
-    const server_name = self.origin_state.server_name;
+    const server_name = self.originOf().server_name;
     self.verification = sec_trust.Verification.start(self.env.waker, self.ssl.?, server_name) orelse
         return .{ .setup = .local_failure };
     self.state = .verifying;
@@ -926,7 +930,7 @@ fn onFrameRecv(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
         c.NGHTTP2_SETTINGS => {
             if (frame.*.hd.flags & c.NGHTTP2_FLAG_ACK != 0) return 0;
             self.peer_max_streams = c.nghttp2_session_get_remote_settings(self.session, c.NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS);
-            self.origin_state.learned_max_streams = self.peer_max_streams;
+            self.originOf().learned_max_streams = self.peer_max_streams;
             if (self.state == .awaiting_settings) self.becomeReady();
             self.sizeWindow();
         },
@@ -1033,4 +1037,38 @@ fn readBody(
     record.body_offset += wanted;
     if (record.body_offset == record.body_length) data_flags.* |= c.NGHTTP2_DATA_FLAG_EOF;
     return @intCast(wanted);
+}
+
+test "a failure is a setup failure until the session is ready, then a lost connection" {
+    var env: Env = undefined;
+    var connection = vacant(&env, 0);
+    const Row = struct { state: State, cause: policy.Cause, protocol: bool = false, expected: ?Failure };
+    const lost_connection: Failure = .{ .lost = .{ .cause = .connection_lost, .goaway_last_stream_id = 7 } };
+    const lost_protocol: Failure = .{ .lost = .{ .cause = .protocol_error, .goaway_last_stream_id = 7 } };
+    const rows = [_]Row{
+        .{ .state = .free, .cause = .connection_lost, .expected = null },
+        .{ .state = .resolving, .cause = .connection_lost, .expected = .{ .setup = .connect_failed } },
+        .{ .state = .resolving, .cause = .protocol_error, .expected = .{ .setup = .protocol_error } },
+        .{ .state = .connecting, .cause = .connection_lost, .expected = .{ .setup = .connect_failed } },
+        .{ .state = .connecting, .cause = .protocol_error, .expected = .{ .setup = .protocol_error } },
+        .{ .state = .tunneling, .cause = .connection_lost, .expected = .{ .setup = .connect_failed } },
+        .{ .state = .tunneling, .cause = .protocol_error, .expected = .{ .setup = .protocol_error } },
+        .{ .state = .handshaking, .cause = .connection_lost, .expected = .{ .setup = .connect_failed } },
+        .{ .state = .handshaking, .cause = .protocol_error, .expected = .{ .setup = .protocol_error } },
+        .{ .state = .verifying, .cause = .connection_lost, .expected = .{ .setup = .connect_failed } },
+        .{ .state = .verifying, .cause = .protocol_error, .expected = .{ .setup = .protocol_error } },
+        .{ .state = .awaiting_settings, .cause = .connection_lost, .expected = .{ .setup = .connect_failed } },
+        .{ .state = .awaiting_settings, .cause = .protocol_error, .expected = .{ .setup = .protocol_error } },
+        .{ .state = .ready, .cause = .connection_lost, .expected = lost_connection },
+        .{ .state = .ready, .cause = .connection_lost, .protocol = true, .expected = lost_protocol },
+        .{ .state = .ready, .cause = .protocol_error, .expected = lost_protocol },
+        .{ .state = .draining, .cause = .connection_lost, .expected = lost_connection },
+        .{ .state = .draining, .cause = .connection_lost, .protocol = true, .expected = lost_protocol },
+    };
+    for (rows) |row| {
+        connection.state = row.state;
+        connection.protocol_failure = row.protocol;
+        connection.goaway_last_stream_id = 7;
+        try std.testing.expectEqualDeep(row.expected, connection.failure(row.cause));
+    }
 }
