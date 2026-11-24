@@ -13,6 +13,7 @@ const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const cli_value = @import("../../cli_value.zig");
 const provider_name = @import("../../provider_name.zig");
+const connection = @import("../../connection.zig");
 const session_id = @import("../../session_id.zig");
 const content_custody = @import("../../content_custody.zig");
 const model_catalog = @import("../../model_catalog.zig");
@@ -49,7 +50,7 @@ fn requestedNames(requested: anytype) *const command_input.ToolsField {
     return if (@TypeOf(requested.tools) == *const command_input.ToolsField) requested.tools else &requested.tools;
 }
 
-fn toolsRejection(host_tool_set: *const tool_defs.HostToolSet, provider: provider_name.Provider, tools: *const command_input.ToolsField) ?configuration_admission.Rejection {
+fn toolsRejection(host_tool_set: *const tool_defs.HostToolSet, served: *const provider_route.Served, provider: connection.Name, tools: *const command_input.ToolsField) ?configuration_admission.Rejection {
     var names = tools.iterator();
     while (names.next()) |name| {
         const index = switch (host_tool_set.resolve(name)) {
@@ -57,7 +58,7 @@ fn toolsRejection(host_tool_set: *const tool_defs.HostToolSet, provider: provide
             .unknown_tool => return .unknown_tool,
             .mcp_server_unavailable => return .mcp_server_unavailable,
         };
-        if (host_tool_set.records[index].owner == .provider and !provider.runsTool(name)) return .provider_tool_missing;
+        if (host_tool_set.records[index].owner == .provider and !served.runsTool(provider.slice(), name)) return .provider_tool_missing;
     }
     return null;
 }
@@ -92,7 +93,7 @@ pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
 
 pub const CurrentConfiguration = struct {
     workspace: Bounded(workspace_path.max_bytes) = .{},
-    provider: provider_name.Provider = undefined,
+    provider: connection.Name = undefined,
     /// The codec of the current revision's bags; a Session never changes codec, so every revision carries the same one.
     codec: provider_name.Codec = undefined,
     model: Bounded(model_capability.max_model_bytes) = .{},
@@ -118,7 +119,7 @@ pub const CurrentConfiguration = struct {
 };
 
 pub const SessionFacts = struct {
-    provider: provider_name.Provider,
+    provider: connection.Name,
     model: Bounded(model_capability.max_model_bytes) = .{},
     permission_mode: u8,
     revision: u64,
@@ -169,9 +170,10 @@ fn tokenCount(text: []const u8, allow_zero: bool) !u64 {
 pub fn configurationBeforeWorkspace(
     selected_facts: []const model_catalog.Entry,
     host_tool_set: *const tool_defs.HostToolSet,
+    served: *const provider_route.Served,
     current: ?*const CurrentConfiguration,
     requested: anytype,
-    creation_provider: ?provider_name.Provider,
+    creation_provider: ?connection.Name,
 ) ?configuration_admission.Rejection {
     if (requested.compaction_trigger.state == .explicit_null) return .invalid_compaction_trigger;
     const compact_at = if (requested.compaction_trigger.state == .value)
@@ -182,16 +184,16 @@ pub fn configurationBeforeWorkspace(
         null;
     _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
     const provider = if (requested.provider.state == .value)
-        std.meta.stringToEnum(provider_name.Provider, requested.provider.value.slice()) orelse return .unsupported_provider
+        connection.Name.parse(requested.provider.value.slice()) orelse return .unsupported_provider
     else
         null;
     if (current) |existing| {
         if (provider) |value| {
-            if (value != existing.provider) return .provider_is_immutable;
+            if (!value.eql(existing.provider)) return .provider_is_immutable;
         }
     }
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
-    if (requested.tools.state == .value) if (toolsRejection(host_tool_set, provider orelse (if (current) |existing| existing.provider else creation_provider.?), requestedNames(requested))) |rejection| return rejection;
+    if (requested.tools.state == .value) if (toolsRejection(host_tool_set, served, provider orelse (if (current) |existing| existing.provider else creation_provider.?), requestedNames(requested))) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     if (compact_at) |tokens| if (model_catalog.find(selected_facts, model)) |known| {
         if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
@@ -248,7 +250,7 @@ pub fn planConfigurationUpdate(
         }
     }
 
-    if (requested.provider.state == .value) next.provider = std.meta.stringToEnum(provider_name.Provider, requested.provider.value.slice()).?;
+    if (requested.provider.state == .value) next.provider = connection.Name.parse(requested.provider.value.slice()).?;
     if (requested.model.state == .value) next.model = requested.model.value;
     if (requested.permission_mode.state == .value) {
         next.permission_mode = permissionModeCode(requested.permission_mode.value.slice());
@@ -313,7 +315,7 @@ pub const Applied = struct {
 };
 
 const Settings = struct {
-    provider: provider_name.Provider,
+    provider: connection.Name,
     model: Bounded(model_capability.max_model_bytes),
     instructions_id: ?i64,
     tool_set_id: u64,
@@ -382,7 +384,7 @@ const parent_settings = rsql.Read(.{
     .sql = "SELECT workspace,provider,coalesce(" ++ tool_set.namesSql("session.tool_set_id") ++ ",'') AS tools,permission_mode,session.app_lane FROM session WHERE session_ref=?1 " ++
         "AND session.archive_seq IS NULL",
     .Args = struct { session: []const u8 },
-    .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: provider_name.Provider, tools: *Bounded(tool_set.max_names_bytes), permission_mode: u8, app_lane: *Bounded(session_id.bytes) },
+    .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: connection.Name, tools: *Bounded(tool_set.max_names_bytes), permission_mode: u8, app_lane: *Bounded(session_id.bytes) },
     .cardinality = .optional,
 });
 
@@ -422,7 +424,7 @@ fn preferences(configuration: *const content_custody.Configuration) configuratio
     };
 }
 
-pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
+pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, served: *const provider_route.Served, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
     if (!reads.inherits_parent) return null;
     if (!reads.parent_found.get()) return .unknown_session;
     if (reads.parent_checked) return if (reads.parent_failure) |failure| failure.code else null;
@@ -449,7 +451,7 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration:
             .compaction_trigger = &configuration.compaction_trigger,
             .preferences = preferences(configuration),
         });
-        if (toolsRejection(host_tool_set, reads.inherited.provider, resolved.tools)) |code| return code;
+        if (toolsRejection(host_tool_set, served, reads.inherited.provider, resolved.tools)) |code| return code;
         if (resolved.parent_refusal) |failure| break :refusal ParentFailure.from(failure);
         break :refusal null;
     };
@@ -554,7 +556,7 @@ const insert_session = rsql.Write(.{
         tool_set_id: u64,
         permission_mode: u8,
         output_schema_id: ?u64,
-        provider: provider_name.Provider,
+        provider: connection.Name,
         compaction_trigger: ?u64,
         output_reservation: ?u64,
         reasoning_effort: ?model_capability.ReasoningEffort,
@@ -613,7 +615,7 @@ const update_session = rsql.Write(.{
         permission_mode: u8,
         output_schema_id: ?u64,
         revision: u64,
-        provider: provider_name.Provider,
+        provider: connection.Name,
         compaction_trigger: ?u64,
         output_reservation: ?u64,
         reasoning_effort: ?model_capability.ReasoningEffort,
@@ -788,7 +790,7 @@ pub const ValidatedConfiguration = struct {
 pub const Request = struct {
     io: std.Io,
     tools: *const store_core.HostTools,
-    served: provider_route.Routes,
+    served: *const provider_route.Served,
     session: []const u8,
     configuration: *const content_custody.Configuration,
     initial_skills: ?*const skills_domain.Initial,
@@ -807,7 +809,7 @@ pub const Validation = union(enum) {
 
 const Validating = struct {
     model: model_facts.Model,
-    creation_provider: ?provider_name.Provider,
+    creation_provider: ?connection.Name,
     workspace_matches: ?bool,
     tools: *const command_input.ToolsField,
     loaded: *const command_input.ToolsField,
@@ -860,18 +862,20 @@ test "a null or empty model is invalid and an omitted one is left to the missing
 const CreationCheck = union(enum) {
     missing: required_settings.Missing,
     unsupported_provider,
-    complete: struct { provider: provider_name.Provider },
+    unserved_connection,
+    complete: struct { provider: connection.Name },
 };
 
 /// The one creation check: every path that creates a Session (configure, a creating Message,
 /// start_agent) reaches it after the parent is read, so the reply names every missing setting.
-fn creationCheck(configuration: *const ConfigurationView, reads: *const ConfigurationReads, served: provider_route.Routes) CreationCheck {
-    const named: ?provider_name.Provider = if (reads.inherits_parent)
-        reads.inherited.provider
-    else if (configuration.provider.state == .value)
-        std.meta.stringToEnum(provider_name.Provider, configuration.provider.value.slice()) orelse return .unsupported_provider
+fn creationCheck(configuration: *const ConfigurationView, reads: *const ConfigurationReads, served: *const provider_route.Served) CreationCheck {
+    const explicit: ?connection.Name = if (configuration.provider.state == .value)
+        connection.Name.parse(configuration.provider.value.slice()) orelse return .unsupported_provider
     else
         null;
+    // Naming a connection the Host does not serve is refused; a default or inherited provider is not.
+    if (explicit) |name| if (served.codecOf(name.slice()) == null) return .unserved_connection;
+    const named: ?connection.Name = if (reads.inherits_parent) reads.inherited.provider else explicit;
     return switch (required_settings.check(.{
         .model = configuration.model.state == .value,
         .workspace = configuration.workspace.state == .value,
@@ -945,13 +949,14 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
     }
     if (reads.found.get()) try checkSaved(next);
     if (!creating and configuration.parent.state != .omitted) return .{ .rejected = .parent_on_update };
-    if (creating) if (try inheritParent(request.tools.host_tool_set, request.configuration, reads)) |code| return .{ .rejected = code };
-    const creation_provider: ?provider_name.Provider = if (creating) switch (creationCheck(configuration, reads, request.served)) {
+    if (creating) if (try inheritParent(request.tools.host_tool_set, request.served, request.configuration, reads)) |code| return .{ .rejected = code };
+    const creation_provider: ?connection.Name = if (creating) switch (creationCheck(configuration, reads, request.served)) {
         .missing => |missing| {
             reads.missing = missing;
             return .{ .rejected = .missing_settings };
         },
         .unsupported_provider => return .{ .rejected = .unsupported_provider },
+        .unserved_connection => return .{ .rejected = .connection_unserved },
         .complete => |complete| complete.provider,
     } else null;
     if (request.configuration.app_tools.state == .value) if (try declareAppTools(request, reads)) |code| return .{ .rejected = code };
@@ -973,7 +978,7 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     if (configuration.compaction_trigger.state == .value) _ = tokenCount(configuration.compaction_trigger.value.slice(), false) catch return .{ .rejected = .invalid_compaction_trigger };
     _ = configurationTokens(configuration.output_reservation, null, true) catch return .{ .rejected = .invalid_output_reservation };
     const provider = if (configuration.provider.state == .value)
-        std.meta.stringToEnum(provider_name.Provider, configuration.provider.value.slice()) orelse return .{ .rejected = .unsupported_provider }
+        connection.Name.parse(configuration.provider.value.slice()) orelse return .{ .rejected = .unsupported_provider }
     else if (current_configuration) |existing| existing.provider else v.creation_provider.?;
     const model = if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice();
     reads.defaults = configuration_defaults.resolve(v.model.facts(), .{
@@ -998,11 +1003,16 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     reads.configuration.permission_mode = &reads.defaults.permission_mode;
     reads.configuration.reasoning_effort = &reads.defaults.reasoning_effort;
     reads.configuration.compaction_trigger = &reads.defaults.compaction_trigger;
-    if (configurationBeforeWorkspace(v.model.facts(), request.tools.host_tool_set, current_configuration, configuration, v.creation_provider)) |rejection| {
+    if (configurationBeforeWorkspace(v.model.facts(), request.tools.host_tool_set, request.served, current_configuration, configuration, v.creation_provider)) |rejection| {
         return .{ .rejected = rejection };
     }
 
-    if (v.creation_provider) |provider_value| next.provider = provider_value;
+    if (v.creation_provider) |provider_value| {
+        next.provider = provider_value;
+        // A Host serving no provider still creates a Session on the product default. Its codec is that
+        // provider's built-in codec, which the Session keeps until a served connection of its name runs it.
+        next.codec = request.served.codecOf(provider_value.slice()) orelse return .{ .rejected = .connection_unserved };
+    }
     v.workspace_matches = if (creating and reads.inherits_parent) inherited: {
         validateWorkspace(io, next.workspace.slice(), &next.workspace) catch return .{ .rejected = .invalid_workspace };
         reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
@@ -1204,17 +1214,17 @@ fn accept(reads: *ConfigurationReads, head: rsql.SessionHead, target: []const u8
     applied.revision = reads.next.revision;
     // Interim: a Session pins the codec of its first revision (its provider then). A later revision
     // carries the codec of the revision before it, so a switch of codec is a later unit.
-    applied.codec = if (created) reads.next.provider.codec() else null;
+    applied.codec = if (created) reads.next.codec else null;
     applied.instructions_updated = created or reads.configuration.instructions.state == .value;
     applied.changes = if (reads.validated.before) |*saved| saved.changed(&reads.next) else .empty;
 }
 
-pub fn servesProviderOf(served: anytype, configuration: ?*const content_custody.Configuration, saved: ?provider_name.Provider) bool {
+pub fn servesProviderOf(served: anytype, configuration: ?*const content_custody.Configuration, saved: ?connection.Name) bool {
     const provider = if (configuration != null and configuration.?.provider.state == .value)
-        std.meta.stringToEnum(provider_name.Provider, configuration.?.provider.value.slice()) orelse return true
+        connection.Name.parse(configuration.?.provider.value.slice()) orelse return true
     else
         saved orelse (if (configuration != null) required_settings.resolveProvider(null, served) orelse return true else return true);
-    return provider_route.of(served, provider) != .unserved;
+    return served.route(provider.slice()) != .unserved;
 }
 
 pub noinline fn queueConfiguredCommand(
@@ -1308,7 +1318,7 @@ test "Session settings cover every hand-written Store SQL and schema projection"
 }
 
 test "Session settings changed detects each mutable value without comparing bounded tails" {
-    var current: CurrentConfiguration = .{ .provider = .openai, .tool_set_id = 1 };
+    var current: CurrentConfiguration = .{ .provider = connection.Name.parse("openai").?, .tool_set_id = 1 };
     try current.model.set("gpt-5");
     current.label = .{};
     try current.label.?.set("label");

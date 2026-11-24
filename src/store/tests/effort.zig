@@ -1,3 +1,4 @@
+const connection = @import("../../connection.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const provider_name = @import("../../provider_name.zig");
@@ -21,6 +22,8 @@ const completeConfiguration = store_testing.completeConfiguration;
 const completeMessage = store_testing.completeMessage;
 const settleItemsForTesting = store_testing.settleItemsForTesting;
 const submitTestMessage = store_testing.submitTestMessage;
+
+const served_builtins = @import("../../protocol.zig").servedBuiltIns(.endpoint);
 
 test "explicit null effort resets mixed updates while omitted legacy null remains invalid on a listed model" {
     try store_testing.forEachEngine(struct {
@@ -148,7 +151,7 @@ test "configuration validates effective effort across retained requested and tar
             const retained: ?protocol.ReasoningEffort = if (retained_index == 0) null else efforts[retained_index - 1];
             for ([_]bool{ false, true }) |legacy| {
                 for ([_]bool{ true, false }) |model_supplied| {
-                    var current: CurrentConfiguration = .{ .provider = .codex };
+                    var current: CurrentConfiguration = .{ .provider = connection.Name.parse("codex").? };
                     try current.model.set(if (model_supplied) "unlisted-source" else target);
                     current.reasoning_effort = if (legacy) null else retained;
                     current.previous_reasoning_effort = if (legacy) retained else null;
@@ -178,7 +181,7 @@ test "configuration validates effective effort across retained requested and tar
                             @tagName(requested.reasoning_effort.state),
                             if (selected) |value| @tagName(value) else null,
                         });
-                        try std.testing.expectEqual(expected, configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, &tool_defs.built_in_tool_set, &current, &requested, .codex));
+                        try std.testing.expectEqual(expected, configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, &tool_defs.built_in_tool_set, &served_builtins, &current, &requested, connection.Name.parse("codex").?));
                     }
                 }
             }
@@ -350,14 +353,14 @@ test "effort provenance excludes refused Operations across unrelated revisions" 
 }
 
 test "effective effort carries legacy history without inferring a fresh default" {
-    var current: CurrentConfiguration = .{ .provider = .codex };
+    var current: CurrentConfiguration = .{ .provider = connection.Name.parse("codex").? };
     try current.model.set("unlisted-model");
     try std.testing.expect(configuration_domain.effectiveReasoningEffort(&current) == null);
     current.previous_reasoning_effort = .high;
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), configuration_domain.effectiveReasoningEffort(&current));
     var requested: wire_request.Configuration = .{};
     requested.reasoning_effort.state = .explicit_null;
-    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, &tool_defs.built_in_tool_set, &current, &requested, .codex).?);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, &tool_defs.built_in_tool_set, &served_builtins, &current, &requested, connection.Name.parse("codex").?).?);
     current.reasoning_effort = .low;
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), configuration_domain.effectiveReasoningEffort(&current));
 }
@@ -365,7 +368,7 @@ test "effective effort carries legacy history without inferring a fresh default"
 const EffortCarryRead = struct {
     const query = rsql.Read(.{
         .sql = "SELECT " ++ historical_domain.effortBeforeSql("?1", "?2", .{ .provider = "?3", .codec = "?4", .model = "?5" }, "?6", "?7") ++ " AS effort",
-        .Args = struct { session: []const u8, boundary: u64, provider: provider_name.Provider, codec: provider_name.Codec, model: []const u8, floor: ?u64, first: ?protocol.ReasoningEffort },
+        .Args = struct { session: []const u8, boundary: u64, provider: connection.Name, codec: provider_name.Codec, model: []const u8, floor: ?u64, first: ?protocol.ReasoningEffort },
         .Row = struct { effort: ?protocol.ReasoningEffort },
         .cardinality = .one,
     });
@@ -405,7 +408,7 @@ test "admitted effort carry agrees with replay recipe across the owner domain" {
         fn run(case: *store_testing.Case) !void {
             const Recipe = @import("../../replay_recipe.zig").Recipe;
             const replay_binding = @import("../../replay_binding.zig");
-            const wire: replay_binding.Wire = .{ .connection = "codex", .dialect = .openai_responses };
+            const wire: replay_binding.Wire = .{ .connection = connection.Name.parse("codex").?, .dialect = .openai_responses };
             const Entry = struct { position: u64, model: []const u8, effort: ?protocol.ReasoningEffort };
             for ([_]?protocol.ReasoningEffort{ null, .low }) |top| {
                 var tmp = std.testing.tmpDir(.{});
@@ -460,7 +463,7 @@ test "admitted effort carry agrees with replay recipe across the owner domain" {
                             expected = item.effort;
                         };
                         if (declined) continue;
-                        try std.testing.expectEqual(expected, try EffortCarryRead.read(&storage, .{ .session = session.slice(), .boundary = boundary, .provider = .codex, .codec = provider_name.Provider.codex.codec(), .model = model, .floor = own_floor, .first = .medium }));
+                        try std.testing.expectEqual(expected, try EffortCarryRead.read(&storage, .{ .session = session.slice(), .boundary = boundary, .provider = connection.Name.parse("codex").?, .codec = provider_name.Provider.codex.codec(), .model = model, .floor = own_floor, .first = .medium }));
                     };
                 }
             }

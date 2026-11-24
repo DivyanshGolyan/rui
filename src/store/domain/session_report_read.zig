@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("../../provider_route.zig");
 const tool_fulfillment = @import("tool_fulfillment.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const built_in_tool = @import("../../built_in_tool.zig");
@@ -64,7 +65,7 @@ pub const Pressure = struct {
             if (err == error.PartsPressureRequired) {
                 self.needed = read.bytes_args;
                 self.needed_boundary = read.boundary;
-                self.needed_rule = @import("../../model_catalog.zig").imageCostRule(read.provider, read.model);
+                self.needed_rule = read.imageCostRule();
             }
             return err;
         };
@@ -369,7 +370,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
         .reference = session_ref,
         .parent = if (current.parent_ref) |*parent| parent.slice() else null,
         .workspace = current.workspace.slice(),
-        .provider = current.provider,
+        .provider = provider_route.builtInOf(current.provider) orelse unreachable,
         .model = current.model.slice(),
         .compaction_trigger = policy.compaction_trigger,
         .context_estimate = if (turn_policy.comparedPressure(facts.compaction.facts)) |value| @min(value, std.math.maxInt(i64)) else null,

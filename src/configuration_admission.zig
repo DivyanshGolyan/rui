@@ -40,6 +40,7 @@ pub const Rejection = enum {
     app_tool_built_in_clash,
     invalid_app_tool_policy,
     app_tools_on_child,
+    connection_unserved,
 };
 
 const std = @import("std");

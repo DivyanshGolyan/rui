@@ -62,10 +62,37 @@ pub const max_label_bytes = tool_presentation.max_label_bytes;
 pub const validLabel = tool_presentation.validLabel;
 pub const Provider = provider_name.Provider;
 pub const Route = provider_route.Route;
-pub const Routes = provider_route.Routes;
-pub const routesAll = provider_route.all;
-pub const routeOf = provider_route.of;
-pub const servesModel = provider_route.servesModel;
+pub const Served = provider_route.Served;
+pub const servedBuiltIns = provider_route.builtIns;
+pub const servedEntry = provider_route.builtIn;
+
+/// host_info's route holes, one per built-in provider: a projection of the
+/// served set until the wire carries connections.
+pub const Routes = std.enums.EnumFieldStruct(Provider, Route, null);
+
+pub fn routesOf(served: *const Served) Routes {
+    var out: Routes = undefined;
+    inline for (@typeInfo(Provider).@"enum".field_names) |name| @field(out, name) = served.route(name);
+    return out;
+}
+
+pub fn routesAll(route: Route) Routes {
+    var out: Routes = undefined;
+    inline for (@typeInfo(Provider).@"enum".field_names) |name| @field(out, name) = route;
+    return out;
+}
+
+pub fn routeOf(routes: Routes, provider: Provider) Route {
+    inline for (@typeInfo(Provider).@"enum".field_names, std.enums.values(Provider)) |name, value| {
+        if (provider == value) return @field(routes, name);
+    }
+    unreachable;
+}
+
+pub fn servesModel(routes: Routes) bool {
+    inline for (@typeInfo(Provider).@"enum".field_names) |name| if (@field(routes, name) != .unserved) return true;
+    return false;
+}
 
 pub const Codec = provider_name.Codec;
 pub const ReasoningEffort = model_capability.ReasoningEffort;

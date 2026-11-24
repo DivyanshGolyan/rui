@@ -8,6 +8,7 @@ export const REJECTION_SENTENCES: Readonly<Record<string, string>> = {
 	"archive_pending": "This Session is still settling its archive request.",
 	"background_unavailable": "This saved promotion was refused under an earlier Host policy.",
 	"compact_at_too_large": "The compaction trigger is larger than the model's context window.",
+	"connection_unserved": "This Host does not serve that connection.",
 	"duplicate_app_tool_name": "Two app tools share a name.",
 	"invalid_app_tool_name": "An app tool name is not a valid tool name.",
 	"invalid_app_tool_policy": "An app tool's replay, restart limit or wait is out of range.",

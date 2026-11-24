@@ -5,6 +5,7 @@ pub const Rejection = enum {
     invalid_sender_handle,
     unsupported_permission_mode,
     unsupported_provider,
+    connection_unserved,
     invalid_model,
     model_capability_unavailable,
     invalid_output_schema,

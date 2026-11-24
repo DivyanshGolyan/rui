@@ -102,12 +102,16 @@ pub const Store = struct {
     touched: change_ring.Touched = .{},
     changes: *change_ring.Ring,
     instance: [16]u8 = undefined,
-    served: provider_route.Routes = provider_route.all(.unserved),
     scratch_use: ScratchUse = .none,
     batch: write_batch.Phase = .none,
     savepoint: bool = false,
     release_bulk_memory: bool = false,
     testing_content_work: if (@import("builtin").is_test) TestingContentWork else void = if (@import("builtin").is_test) .{} else {},
+
+    /// The served connection set the Host opened this Store with.
+    pub fn servedSet(self: *Store) *provider_route.Served {
+        return &@as(*OutOfLine, @fieldParentPtr("ring", self.changes)).served;
+    }
 
     pub fn modelTimingSource(self: *Store) *@import("../model_timing.zig").Source {
         return &@as(*OutOfLine, @fieldParentPtr("ring", self.changes)).model_timings;
@@ -189,10 +193,11 @@ pub const Store = struct {
         errdefer destroyRing(changes);
         const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
         ids.* = .{ .next = undefined };
-        self.* = .{ .io = io, .engine = opened, .selector = stored_selector, .changes = changes, .served = options.served };
+        self.* = .{ .io = io, .engine = opened, .selector = stored_selector, .changes = changes };
+        @as(*OutOfLine, @fieldParentPtr("ring", changes)).served = options.served;
         opening = &self.engine;
         self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .closed = batchClosed, .arm = armRerun, .recover = recoverRerun, .settle = settleBatch });
-        try self.engine.serve(&self.served);
+        try self.engine.serve(self.servedSet());
         io.random(&self.instance);
         try self.engine.prepareRollback();
         try loadIdentities(self, .full);
@@ -671,7 +676,7 @@ pub const Store = struct {
         var reply: ConfigureReply = undefined;
         transition.apply(self, command_domain.Configure, .{
             .io = self.io,
-            .served = self.served,
+            .served = self.servedSet(),
             .tools = self.hostTools(),
             .command = command,
             .preset = preset,
@@ -790,7 +795,7 @@ pub const Store = struct {
         var reply: MessageReply = undefined;
         transition.apply(self, command_domain.SubmitMessage, .{
             .io = self.io,
-            .served = self.served,
+            .served = self.servedSet(),
             .tools = self.hostTools(),
             .selector = self.selector.slice(),
             .command = command,
@@ -1563,7 +1568,7 @@ pub const Store = struct {
         var result_buffer: [tool_record.HostToolSet.max_refusal_message_bytes]u8 = undefined;
         return transition.apply(self, command_domain.StartAgent, .{
             .io = self.io,
-            .served = self.served,
+            .served = self.servedSet(),
             .tools = self.hostTools(),
             .binding = binding,
             .caller = caller,
@@ -1957,7 +1962,7 @@ pub const SettlementTrace = struct {
 pub const AttemptBinding = attempt.AttemptBinding;
 
 pub const OpenOptions = struct {
-    served: provider_route.Routes = provider_route.all(.endpoint),
+    served: provider_route.Served = provider_route.builtIns(.endpoint),
     cache_spill: bool = true,
     cache_kib: u32 = 1024,
     found_schema_version: ?*u32 = null,
@@ -2028,6 +2033,8 @@ const OutOfLine = struct {
     synced_version: u32,
     /// The Access passes this Store ran, on every engine, in test builds (RoundMeter's pass budgets).
     testing_access_passes: if (@import("builtin").is_test) u64 else void,
+    /// The served connections, out of line so the Store keeps its size.
+    served: provider_route.Served,
     scratch: Scratch align(scratch_align),
 };
 
@@ -2040,9 +2047,9 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 14352;
 
 comptime {
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 19184 or scratch_bytes != 19184)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 19248 or scratch_bytes != 19248)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
-    if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
+    if (@sizeOf(model_settlement_domain.Batch) - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
 
 /// The change ring, and the scratch beside it, in pages of their own,
@@ -2062,6 +2069,7 @@ fn createRing() error{OutOfMemory}!*change_ring.Ring {
     owned.commit_subscriber = .init(null);
     owned.changes_lock = .init;
     owned.synced_version = 0;
+    owned.served = .{};
     if (@import("builtin").is_test) owned.testing_access_passes = 0;
     const ring: *change_ring.Ring = &owned.ring;
     const info = @typeInfo(change_ring.Ring).@"struct";

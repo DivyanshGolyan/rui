@@ -714,7 +714,7 @@ pub fn TestingConfiguring(comptime Check: type) type {
                 .io = b.storage.io,
                 .declarations = r.declarationArena(),
                 .tools = b.storage.hostTools(),
-                .served = b.storage.served,
+                .served = b.storage.servedSet(),
                 .session = b.session,
                 .configuration = b.configuration,
                 .initial_skills = null,

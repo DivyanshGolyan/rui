@@ -51,7 +51,7 @@ pub const Engine = union(Kind) {
         };
     }
 
-    pub fn serve(e: *Engine, served: *@import("../provider_route.zig").Routes) !void {
+    pub fn serve(e: *Engine, served: *@import("../provider_route.zig").Served) !void {
         switch (e.*) {
             .sqlite => |*s| try s.serve(served),
             .mysql => |*s| s.state.served = served,

@@ -475,7 +475,7 @@ print(json.dumps({'workspace': sys.argv[1], 'provider': 'anthropic', 'model': 'g
 PY
 )
 unknown_provider=$(not_accepted wire_configure unknown-provider "$records/unknown-provider.json" "$unknown_configuration")
-contains "$unknown_provider" '"code":"unsupported_provider"'
+contains "$unknown_provider" '"code":"connection_unserved"'
 require_test 'rejected providers create no Session' "$(session_refs)" = "$before_provider"
 require_test 'rejected provider releases all request scratch' -z "$(find "$store/scratch" -name 'request-*.tmp' -print)"
 
@@ -497,7 +497,7 @@ contains "$binding_current" '"permission_mode":"ask"'
 stop_host
 start_host
 unknown_replay=$(not_accepted "$rui" request recover --store "$store" --record "$records/unknown-provider.json" --kind configure)
-contains "$unknown_replay" '"code":"unsupported_provider"'
+contains "$unknown_replay" '"code":"connection_unserved"'
 contains "$unknown_replay" '"replayed":true'
 binding_full=$($rui session inspect --store "$store" --session "$binding_session" --profile full)
 contains "$binding_full" '"provider":"codex"'
