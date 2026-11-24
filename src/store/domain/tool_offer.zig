@@ -31,7 +31,7 @@ const projected = rsql.Read(.{
         "description.content_id,description.byte_length,member.tool_set_id AS source,1 AS loaded " ++
         "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "JOIN content description ON description.content_id=tool.description_content_id JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id " ++
-        "WHERE member.tool_set_id=?3 AND tool.owner='app' AND (NOT EXISTS(" ++ appNamesSql("?1") ++ ") OR tool.name IN (" ++ appNamesSql("?1") ++ ")) ORDER BY name",
+        "WHERE member.tool_set_id=?3 AND tool.owner='app' AND (NOT EXISTS(" ++ appNamesSql("?1") ++ ") OR tool.name IN (" ++ appNamesSql("?1") ++ ")) AND NOT " ++ tool_set.hostShadowsSql("tool") ++ " ORDER BY name",
     .Args = struct { allowed: u64, loaded: u64, app: u64 },
     .Row = struct {
         name: Bounded(tools.max_name_bytes),
@@ -117,7 +117,7 @@ fn offeredAppSql(comptime offered: []const u8) []const u8 {
 fn expectedAppSql(comptime session_alias: []const u8) []const u8 {
     return "SELECT e_member.tool_record_id FROM tool_set_member e_member JOIN tool_record e_tool ON e_tool.tool_record_id=e_member.tool_record_id " ++
         "WHERE e_member.tool_set_id=" ++ laneAppSetSql(session_alias) ++ " AND e_tool.owner='app' AND (NOT EXISTS(" ++ appNamesSql(session_alias ++ ".tool_set_id") ++
-        ") OR e_tool.name IN (" ++ appNamesSql(session_alias ++ ".tool_set_id") ++ "))";
+        ") OR e_tool.name IN (" ++ appNamesSql(session_alias ++ ".tool_set_id") ++ ")) AND NOT " ++ tool_set.hostShadowsSql("e_tool");
 }
 
 /// Stale when the frozen offer's app records differ from the expected ones, in either direction. A lane with no

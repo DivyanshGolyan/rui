@@ -629,7 +629,7 @@ const builtin_names_sql = blk: {
 };
 
 const success_facts = rsql.Read(.{
-    .sql = "SELECT r.revision AS frozen_revision,coalesce(" ++ tool_set.namesSql("o.tool_set_id") ++ ",'') AS tool_names,coalesce(" ++ tool_set.appNamesSql("o.tool_set_id") ++ ",'') AS app_names," ++
+    .sql = "SELECT r.revision AS frozen_revision,coalesce(" ++ tool_set.namesSql("o.tool_set_id") ++ ",'') AS tool_names,coalesce(" ++ tool_set.offeredAppNamesSql("o.tool_set_id") ++ ",'') AS app_names," ++
         "EXISTS(SELECT 1 FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=o.tool_set_id AND tool.name NOT IN (" ++ builtin_names_sql ++ ") AND tool.owner NOT IN ('mcp','app')) AS invalid_owner," ++
         "s.permission_mode,s.revision," ++

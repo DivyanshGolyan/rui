@@ -38,6 +38,7 @@ pub const Rejection = enum {
     invalid_app_tool_name,
     duplicate_app_tool_name,
     app_tool_built_in_clash,
+    app_tool_host_clash,
     invalid_app_tool_policy,
     app_tools_on_child,
     connection_unserved,

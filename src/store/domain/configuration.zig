@@ -890,6 +890,8 @@ fn declareAppTools(request: *const Request, reads: *ConfigurationReads) !?config
         },
         .declared => |declared| declared,
     };
+    // A Host tool, built-in or from an MCP server, never shares its name with an app tool: the offer keeps the Host's.
+    for (declaration.records) |*record| if (request.tools.host_tool_set.find(record.name) != null) return .app_tool_host_clash;
     reads.apps.declaration = declaration;
     return null;
 }

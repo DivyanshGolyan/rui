@@ -1778,3 +1778,133 @@ test "SH-160 configure and start_agent resolve a lane's names alike: a Host tool
         }
     }.run);
 }
+
+// SH-173: an app tool never shares a name with a Host tool. A declaration that names a Host tool, an MCP tool included, is
+// refused by name on configure. An app tool that a Host tool of its name arrives beside is not offered on the next request,
+// narrowed or not, and the Host tool takes the name in the offer.
+test "SH-173 an app tool never shares a name with a Host tool: a clashing declaration is refused by name, and a later Host tool takes the name in the offer" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+
+            // An MCP tool named like the declared app tool is in the Host set: the declaration is refused by name.
+            const clash = comptime testingHostToolRecords(&.{.{ .name = "ask", .owner = .mcp, .server = "notes", .description = "Saved tool", .input_schema = "{\"type\":\"object\"}" }});
+            var clash_digests: [clash.len][32]u8 = undefined;
+            for (&clash, &clash_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            try storage.saveHostToolSet(&.{ .records = &clash, .digests = &clash_digests });
+            var refused_create = try store_testing.completeConfiguration("sh173-clash", "", workspace, "model-a");
+            declareAppTools(&refused_create.configuration, ask_app_tool);
+            const refused = try storage.configure(&refused_create, .{});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.app_tool_host_clash, refused.rejected.code);
+
+            // With no clash, an unnarrowed root offers both its app tools, and a root that names one offers that one alone.
+            try storage.saveHostToolSet(&tool_defs.built_in_tool_set);
+            var buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh173-root", two_app_tools, &buffer);
+            const first = try admitMessage(&storage, &tmp, "sh173-first", root);
+            var before: Offered = undefined;
+            try offerOf(&storage, first, &before);
+            try std.testing.expectEqual(tool_record.Owner.app, before.owner("ask").?);
+            try std.testing.expectEqual(tool_record.Owner.app, before.owner("other").?);
+
+            var narrow_buffer: [128]u8 = undefined;
+            const narrowed = try createRoot(&storage, "sh173-narrow", two_app_tools, &narrow_buffer);
+            var names: wire_request.ConfigureCommand = .{};
+            try names.key.set("sh173-narrow-names");
+            try names.session.set(narrowed);
+            names.configuration.tools = try .of(&.{ "ask", "find_tools" });
+            try std.testing.expect((try storage.configure(&names, .{})) == .accepted);
+            var narrow: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh173-narrow-first", narrowed), &narrow);
+            try std.testing.expectEqual(tool_record.Owner.app, narrow.owner("ask").?);
+            try std.testing.expect(narrow.owner("other") == null);
+
+            // A Host tool named `other` arrives: the root's next request offers the Host tool, not the app tool, and keeps `ask`.
+            const shadow = comptime testingHostToolRecords(&.{.{ .name = "other", .owner = .mcp, .server = "notes", .description = "Later tool", .input_schema = "{\"type\":\"object\"}" }});
+            var shadow_digests: [shadow.len][32]u8 = undefined;
+            for (&shadow, &shadow_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            try storage.saveHostToolSet(&.{ .records = &shadow, .digests = &shadow_digests });
+            const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"};
+            try settleItemsForTesting(&storage, &tmp, first, &items, "answer");
+            var after: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh173-second", root), &after);
+            try std.testing.expectEqual(tool_record.Owner.mcp, after.owner("other").?);
+            try std.testing.expectEqual(tool_record.Owner.app, after.owner("ask").?);
+        }
+    }.run);
+}
+
+// SH-174: a request's offer holds the Host's whole tool set beside every app tool a lane declares, with each app name at
+// the full 64 bytes. The offer is sized from max_offered_tools, which counts the Host tools (stop_action among them) and
+// the app records, so this is the largest offer the owner admits.
+test "SH-174 a request offers the Host's full tool set beside every app tool a lane declares, at the largest name sizes" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const tool_name = @import("../../tool_name.zig");
+            const host_extras = comptime blk: {
+                @setEvalBranchQuota(10_000_000);
+                const count = tool_name.max_offered_tools - app_tools.max_records - tool_defs.built_in_tool_set.records.len;
+                var records: [count]tool_defs.Record = undefined;
+                const bytes = protocol.max_tool_list_name_bytes - "find_tools".len;
+                for (&records, 0..) |*record, index| {
+                    const prefix = std.fmt.comptimePrint("stub{d:0>3}", .{index});
+                    const length = bytes / records.len + @intFromBool(index < bytes % records.len);
+                    const name = prefix ++ @as([length - prefix.len]u8, @splat('x'));
+                    record.* = .{
+                        .name = name,
+                        .remote_name = name,
+                        .owner = .mcp,
+                        .server = "docs",
+                        .description = "Read a page.",
+                        .input_schema = "{\"type\":\"object\"}",
+                    };
+                }
+                break :blk records;
+            };
+            const records = comptime testingHostToolRecords(&host_extras);
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try storage.saveHostToolSet(&.{ .records = &records, .digests = &digests });
+
+            // Every app name is 64 bytes, so the app names take the whole app-name budget.
+            var document: [app_tools.max_document_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&document);
+            try writer.writeByte('[');
+            for (0..app_tools.max_records) |index| {
+                var name: [tool_name.max_bytes]u8 = @splat('x');
+                _ = try std.fmt.bufPrint(&name, "app{d:0>2}", .{index});
+                if (index != 0) try writer.writeByte(',');
+                try writer.print("{{\"name\":\"{s}\",\"description\":\"App {d}.\",\"input_schema\":{{\"type\":\"object\"}}}}", .{ name[0..], index });
+            }
+            try writer.writeByte(']');
+
+            var root_buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh174-root", writer.buffered(), &root_buffer);
+            var offered: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh174-first", root), &offered);
+            try std.testing.expectEqual(@as(usize, tool_name.max_offered_tools), offered.count);
+            var app_count: usize = 0;
+            for (offered.owners[0..offered.count]) |kind| {
+                if (kind == .app) app_count += 1;
+            }
+            try std.testing.expectEqual(@as(usize, app_tools.max_records), app_count);
+            for (0..app_tools.max_records) |index| {
+                var name: [tool_name.max_bytes]u8 = @splat('x');
+                _ = try std.fmt.bufPrint(&name, "app{d:0>2}", .{index});
+                try std.testing.expectEqual(tool_record.Owner.app, offered.owner(name[0..]).?);
+            }
+            try std.testing.expectEqual(tool_record.Owner.mcp, offered.owner(host_extras[host_extras.len - 1].name).?);
+        }
+    }.run);
+}

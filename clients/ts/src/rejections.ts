@@ -3,6 +3,7 @@ export const REJECTION_SENTENCES: Readonly<Record<string, string>> = {
 	"action_not_backgroundable": "This core tool does not run as a background Action.",
 	"action_not_pending": "That Action is not awaiting a permission decision.",
 	"app_tool_built_in_clash": "An app tool has the name of a built-in tool.",
+	"app_tool_host_clash": "An app tool has the name of a tool this Host offers.",
 	"app_tools_on_child": "A child Session cannot declare app tools; its lane root declares them.",
 	"app_tools_too_large": "The app tools declaration is larger than the Host accepts.",
 	"archive_pending": "This Session is still settling its archive request.",
