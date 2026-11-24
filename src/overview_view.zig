@@ -10548,6 +10548,26 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
     try std.testing.expectEqual(@as(u64, 0x55abcd8ea50af260), bytes_and_styles);
 }
 
+fn projectionArchivedFullWalkCase() !void {
+    const ref = "b4n8wd".*;
+    var state = try testState();
+    defer state.deinit();
+    _ = try step(&state, .{ .tick = test_now_s * 1000 });
+    const active = session(&ref, .{ .working = ago(10) }, .{ .label = "Archive target", .read_version = testToken(10) });
+    _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{active}, .answer = null } } });
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    const read = effects.slice()[0].read_archived;
+    const archived = session(&ref, .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .{ .label = "Archive target", .archive_state = .archived, .archive_seq = 10 });
+    _ = try step(&state, .{ .archived = .{ .read = read, .page = .{ .since = testToken(11), .rows = &.{archived}, .first = 10, .last = 10, .more_above = false, .more_below = false } } });
+    _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{}, .answer = .{ .delta = .full, .since = testToken(10) } } } });
+    const row = state.find(ref).?;
+    try std.testing.expectEqual(ArchiveState.archived, row.archive_state);
+    try std.testing.expectEqual(@as(?u64, 10), row.archive_seq);
+    try std.testing.expectEqualDeep(testToken(10), row.read_version.?);
+    try std.testing.expectEqual(Kind.working, std.meta.activeTag(row.state));
+}
+
 fn projectionArchivedFoldCase() !void {
     const ref = "b4n8wd".*;
     var state = try opened(&.{session(&ref, .{ .working = ago(10) }, .{ .label = "Archive target", .descendant_count = 2, .descendant_needs_you_count = 1 })});
@@ -10570,6 +10590,7 @@ fn projectionArchivedFoldCase() !void {
 }
 
 test "SUI-3 overview_projection" {
+    try projectionArchivedFullWalkCase();
     try projectionArchivedFoldCase();
     try projectionCase4();
     try projectionCase5();
