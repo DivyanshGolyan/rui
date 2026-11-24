@@ -121,6 +121,7 @@ poll_at: i96 = 0,
 reading: struct {
     phase: ReadPhase = .activity,
     opening: bool = true,
+    opening_generation: u64 = 0,
     output_started: bool = false,
     feed_read: feed_reads.Read = .opening,
     fills: FeedPolicy.Fills = .{},
@@ -198,6 +199,11 @@ fn freeze(self: *Self, phase: ReadPhase) *Job {
 
     const job = &self.job;
     job.latest_ending = self.live.latest_ending;
+    if ((phase == .activity or phase == .fill or phase == .permission) and self.submission.messageHeld()) {
+        job.accepted_probe = self.submission.appliedProbe();
+        job.accepted_observe = phase == .activity and self.reading.opening;
+    }
+    job.accepted_refresh = self.reading.opening_generation;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
         job.watch_status = self.statusShown();
@@ -2543,8 +2549,13 @@ fn recover(self: *Self, key: ?[]const u8) !void {
     }
 }
 
-fn refreshAcceptedMessage(self: *Self) void {
+fn requestOpening(self: *Self) void {
     self.reading.opening = true;
+    self.reading.opening_generation +%= 1;
+}
+
+fn refreshAcceptedMessage(self: *Self) void {
+    self.requestOpening();
     self.reading.fills = .{};
     self.poll_at = 0;
     self.notice = "Message accepted; refreshing conversation.";
@@ -2899,7 +2910,7 @@ fn jumpToEnd(self: *Self) !void {
     try self.screen.latest();
     switch (feed_reads.jumpToEnd(self.screen.feed.at_end)) {
         .follow => self.screen.anchor.follow(),
-        .opening_keep_frame => self.reading.opening = true,
+        .opening_keep_frame => self.requestOpening(),
     }
     self.new_below = 0;
     self.reading.fills = .{};
@@ -3032,6 +3043,33 @@ fn heldFailure(self: *const Self) ?@TypeOf(self.failure.?) {
 
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
+    const activity = self.reading.phase == .activity or self.reading.phase == .fill or self.reading.phase == .permission;
+    var guard_failure = self.job.result.accepted_observation_failed;
+    var guarded = end == .complete and self.job.result.accepted_guard_failed;
+    if (end == .complete and activity and !guarded) if (self.submission.appliedProbe()) |held| {
+        if (held.store.len == 0) {
+            guard_failure = .identity_missing;
+            guarded = true;
+        } else if (self.job.result.activity_store.len == 0) {
+            guard_failure = .unavailable;
+            guarded = true;
+        } else if (!held.store.eql(self.job.result.activity_store.slice())) {
+            guard_failure = .store_changed;
+            guarded = true;
+        }
+    };
+    if (guarded) {
+        if (self.reading.phase == .fill) self.reading.fills = self.reading.fills.failed(self.reading.feed_read, self.job.feed_page.?);
+        self.reading.opening = self.reading.opening_generation != self.job.accepted_refresh;
+        self.notice = switch (guard_failure.?) {
+            .store_changed => "! Store changed; original Message still held.",
+            .identity_missing => "! Original Store identity unavailable; Message held.",
+            .unavailable => "! Could not check earlier Message; Enter retries refresh.",
+        };
+        self.poll_at = feed_reads.scanDue(std.Io.Clock.awake.now(self.init.io).nanoseconds, false);
+        self.dirty = true;
+        return;
+    }
     const fenced = if (self.reading.pending_diagnostic) |pending|
         pending.failure.status == 503 and std.mem.eql(u8, pending.failure.diagnostic.code.slice(), "dispatch_fenced")
     else
@@ -3359,7 +3397,25 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             self.live.latest_ending = result.latest_ending;
             const cursor = result.cursor;
             self.live.scan = self.live.scan.landed(self.job.feed_page.?, if (cursor.position != 0) .{ .position = cursor.position, .ordinal = cursor.ordinal orelse std.math.maxInt(u64) } else null, cursor.end);
-            if (read == .opening) self.reading.opening = false;
+            if (read == .opening) {
+                const held = if (self.submission.messageHeld()) self.submission.messageKey() else null;
+                const newer = self.reading.opening_generation != self.job.accepted_refresh;
+                self.reading.opening = newer or if (held) |key| if (self.job.accepted_probe) |asked| !std.mem.eql(u8, &key, &asked.key) else true else false;
+                if (result.accepted_observation) |observation| {
+                    if (self.submission.messageHeld()) self.notice = switch (try self.submission.observeApplied(result.accepted_store.slice(), observation)) {
+                        .taken => "Message taken · see history.",
+                        .queued => "Message was queued at last check; next draft kept.",
+                        .excluded => "Message stopped before it ran; see history.",
+                        .unverified => "! Could not verify earlier Message; Enter retries refresh.",
+                    };
+                } else if (result.accepted_observation_failed) |failure| if (self.submission.messageHeld()) {
+                    self.notice = switch (failure) {
+                        .store_changed => "! Store changed; original Message still held.",
+                        .identity_missing => "! Original Store identity unavailable; Message held.",
+                        .unavailable => "! Could not check earlier Message; Enter retries refresh.",
+                    };
+                };
+            }
             self.upgrade_stale = false;
             self.poll_at = feed_reads.scanDue(std.Io.Clock.awake.now(self.init.io).nanoseconds, self.inspection.status_requested);
         }
@@ -6516,6 +6572,168 @@ fn optimisticInputRows() !void {
     }
 }
 
+test "SUI-146 an applied receipt releases an off-page accepted Message without consuming the next draft" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    self.session = "k7m2qx";
+    self.submission.session = self.session;
+    const ticket = self.input.submitText("original text");
+    self.submission.settled_message = .{ .ticket = ticket, .key = key, .admission = 37, .store = try .from("unused") };
+    defer if (self.submission.messageHeld()) self.submission.disposeMessage();
+    _ = self.input.append("next draft");
+    self.reading.opening = true;
+    const job = self.freeze(.activity);
+    try std.testing.expectEqual(key, job.accepted_probe.?.key);
+    var observed: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = .message, .target = .{}, .state = .processing, .queue = .{ .admission = 37, .admitted_at = 1 }, .binding = .{ .turn = 2, .operation = 3, .attempt = 1 }, .input = .{ .text = .{ .length = "original text".len, .digest = protocol.contentDigest("original text") } } };
+    try observed.key.set(&key);
+    try observed.target.?.set("k7m2qx");
+    job.result.accepted_observation = observed;
+    try job.result.accepted_store.set("unused");
+    try self.applyReader(.complete);
+    try std.testing.expect(!self.submission.messageHeld());
+    try std.testing.expect(!self.reading.opening);
+    try std.testing.expect(self.sendFacts().allowed());
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("Message taken · see history.", self.notice.?);
+}
+
+test "SUI-146 non-applied or unavailable observations preserve the accepted loan and next draft" {
+    const Variant = enum { queued, excluded, mismatch, unavailable, store_changed, identity_missing };
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    for (std.enums.values(Variant)) |variant| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const self = &fixture.held.self;
+        self.store = "/private-store";
+        self.session = "k7m2qx";
+        self.submission.store = self.store;
+        self.submission.session = self.session;
+        const ticket = self.input.submitText("original text");
+        self.submission.settled_message = .{ .ticket = ticket, .key = key, .admission = 37, .store = try .from("/private-store") };
+        defer self.submission.disposeMessage();
+        _ = self.input.append("next draft");
+        self.reading.opening = true;
+        const job = self.freeze(.activity);
+        switch (variant) {
+            .queued, .excluded, .mismatch => {
+                var observed: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = .message, .target = .{}, .state = if (variant == .excluded) .cancelled else .queued, .queue = .{ .admission = 37, .admitted_at = 1 }, .input = .{ .text = .{ .length = "original text".len, .digest = protocol.contentDigest(if (variant == .mismatch) "different text" else "original text") } } };
+                try observed.key.set(&key);
+                try observed.target.?.set("k7m2qx");
+                job.result.accepted_observation = observed;
+                try job.result.accepted_store.set("/private-store");
+            },
+            .unavailable => job.result.accepted_observation_failed = .unavailable,
+            .store_changed => job.result.accepted_observation_failed = .store_changed,
+            .identity_missing => job.result.accepted_observation_failed = .identity_missing,
+        }
+        try self.applyReader(.complete);
+        try std.testing.expect(self.submission.messageHeld());
+        try std.testing.expect(!self.reading.opening and !self.sendFacts().allowed());
+        try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+        try std.testing.expectEqualStrings(switch (variant) {
+            .queued => "Message was queued at last check; next draft kept.",
+            .excluded => "Message stopped before it ran; see history.",
+            .mismatch => "! Could not verify earlier Message; Enter retries refresh.",
+            .unavailable => "! Could not check earlier Message; Enter retries refresh.",
+            .store_changed => "! Store changed; original Message still held.",
+            .identity_missing => "! Original Store identity unavailable; Message held.",
+        }, self.notice.?);
+    }
+}
+
+test "SUI-146 a pre-admission opening cannot consume a later accepted refresh" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    self.reading.opening = true;
+    const old = self.freeze(.activity);
+    try std.testing.expect(old.accepted_probe == null);
+    const ticket = self.input.submitText("original text");
+    self.submission.settled_message = .{ .ticket = ticket, .key = key, .admission = 37, .store = try .from("unused") };
+    defer if (self.submission.messageHeld()) self.submission.disposeMessage();
+    _ = self.input.append("next draft");
+    try self.applyReader(.complete);
+    try std.testing.expect(self.reading.opening and self.submission.messageHeld());
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+    const replacement = self.freeze(.activity);
+    try std.testing.expectEqual(key, replacement.accepted_probe.?.key);
+}
+
+test "SUI-146 a foreign Store page cannot release a late or already accepted loan" {
+    const Worker = struct {
+        fn done(_: *anyopaque, _: *Task) !void {}
+    };
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    for ([_]bool{ false, true }) |late| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const self = &fixture.held.self;
+        self.store = "/selected";
+        self.session = "k7m2qx";
+        self.submission.store = self.store;
+        self.submission.session = self.session;
+        self.reading.opening = true;
+        const ticket = self.input.submitText("original text");
+        if (!late) self.submission.settled_message = .{ .ticket = ticket, .key = key, .admission = 37, .store = try .from("/original-store") };
+        const job = self.freeze(.activity);
+        if (late) self.submission.settled_message = .{ .ticket = ticket, .key = key, .admission = 37, .store = try .from("/original-store") };
+        defer self.submission.disposeMessage();
+        _ = self.input.append("next draft");
+        try fixture.file.writePositionalAll(std.testing.io, "original text", 0);
+        job.result.row_count = 1;
+        job.result.rows[0] = .{ .key = .{ .position = 1 }, .offset = 0, .length = "original text".len, .tight = false, .provisional = false, .message_key = key };
+        job.result.low = .{ .position = 1 };
+        job.result.high = .{ .position = 1 };
+        job.result.at_end = true;
+        try job.result.activity_store.set("/other-store");
+        try self.launch(job, Worker.done);
+        try self.settleReader();
+        try std.testing.expect(self.submission.messageHeld());
+        try std.testing.expectEqual(@as(usize, 0), self.screen.feed.count);
+        try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+        try std.testing.expectEqualStrings("! Store changed; original Message still held.", self.notice.?);
+    }
+}
+
+test "SUI-146 a later same-key refresh survives an older queued observation" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    self.store = "/private-store";
+    self.session = "k7m2qx";
+    self.submission.store = self.store;
+    self.submission.session = self.session;
+    const ticket = self.input.submitText("original text");
+    self.submission.settled_message = .{ .ticket = ticket, .key = key, .admission = 37, .store = try .from("/private-store") };
+    defer if (self.submission.messageHeld()) self.submission.disposeMessage();
+    _ = self.input.append("next draft");
+    self.reading.opening = true;
+    const old = self.freeze(.activity);
+    try std.testing.expectEqual(key, old.accepted_probe.?.key);
+    self.refreshAcceptedMessage();
+    var observed: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = .message, .target = .{}, .state = .queued, .queue = .{ .admission = 37, .admitted_at = 1 }, .input = .{ .text = .{ .length = "original text".len, .digest = protocol.contentDigest("original text") } } };
+    try observed.key.set(&key);
+    try observed.target.?.set("k7m2qx");
+    old.result.accepted_observation = observed;
+    try old.result.accepted_store.set("/private-store");
+    try self.applyReader(.complete);
+    try std.testing.expect(self.reading.opening and self.submission.messageHeld());
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+    const next = self.freeze(.activity);
+    try std.testing.expect(next.accepted_observe and next.accepted_refresh == self.reading.opening_generation);
+    observed.state = .processing;
+    observed.binding = .{ .turn = 2, .operation = 3, .attempt = 1 };
+    next.result.accepted_observation = observed;
+    try next.result.accepted_store.set("/private-store");
+    try self.applyReader(.complete);
+    try std.testing.expect(!self.submission.messageHeld() and !self.reading.opening);
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+}
+
 test "App Session accepted message refresh keeps the next draft intact without projection" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
@@ -7239,6 +7457,10 @@ const FeedFixture = struct {
         const job = frontend.freeze(if (read == .fill_above or read == .fill_below) .fill else .activity);
         frontend.reading.feed_read = read;
         job.feed_page = FeedPolicy.request(read, frontend.feedState());
+        if (frontend.submission.settled_message) |*settled| {
+            if (settled.store.len == 0) try settled.store.set(frontend.store);
+            frontend.job.result.activity_store = settled.store;
+        }
         frontend.job.result.row_count = rows.len;
         frontend.job.result.at_start = start;
         frontend.job.result.at_end = end;
@@ -7786,6 +8008,7 @@ fn stageMessageForRetryTest(self: *Self, accepted: bool) !void {
         .target = .{ .message = .{ .bytes = bytes.len, .digest = protocol.contentDigest(bytes) } },
         .answer = .{ .replayed = false, .result = if (accepted) .{ .accepted = .{ .message = .{ .admission = 37 } } } else .{ .rejected = code } },
     };
+    try self.submission.reply.?.context.store.set(self.store);
     try self.submission.task.start(self.init.io, &self.submission, Worker.done);
     try test_poll.waitUntil(self.init.io, test_poll.after(self.init.io, .fromSeconds(2)), &self.submission, Worker.completed);
 }

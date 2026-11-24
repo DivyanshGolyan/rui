@@ -312,9 +312,16 @@ pub const Requests = struct {
         try protocol_reply.validateIdentityInputs("", session);
         try cursor.validate();
         const paths = try resolveClientPaths(self.io, store_path);
+        return self.activityPageAt(&paths, session, cursor);
+    }
+
+    pub fn activityPageAt(self: Requests, paths: *const platform.Paths, session: []const u8, cursor: protocol_reply.ActivityCursor) !protocol_reply.ActivityPageReply {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        try cursor.validate();
         var body: protocol.RequestBuffer = .{};
         try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ paths.store_identity.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
-        const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
+        const fd = try openRead(self, paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
             buffer: protocol.FixedJsonBuffer(activity_reply.max_page_bytes) = .{},
@@ -4332,6 +4339,7 @@ test "client read boundaries reject noncanonical Sessions before path or socket 
     const file = try tmp.dir.createFile(std.testing.io, "destination", .{ .read = true });
     defer file.close(std.testing.io);
     var reply: ReplyBuffer = .{};
+    const paths: platform.Paths = .{};
     for ([_][]const u8{ "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", "01234567-89ab-4cde-8012-3456789abcde" }) |session| {
         try std.testing.expectError(error.InvalidSession, protocol_reply.MessageAddress.init("/never-open", session, "key\x00雪"));
         try std.testing.expectError(error.InvalidSession, requests.inspectSession("/never-open", session, .current, file, &reply));
@@ -4342,6 +4350,7 @@ test "client read boundaries reject noncanonical Sessions before path or socket 
         try std.testing.expectError(error.InvalidSession, requests.conversationPage("/never-open", session, .{ .end = 0 }));
         try std.testing.expectError(error.InvalidSession, requests.readConversationContent("/never-open", session, 1, 0, null, file));
         try std.testing.expectError(error.InvalidSession, requests.activityPage("/never-open", session, .{}));
+        try std.testing.expectError(error.InvalidSession, requests.activityPageAt(&paths, session, .{}));
         try std.testing.expectError(error.InvalidSession, requests.readActivityContent("/never-open", session, 1, 0, null, file));
     }
     for ([_]u64{ 0, std.math.maxInt(u64) }) |action_id| {

@@ -66,7 +66,10 @@ accepted: ?Accepted = null,
 retry: ?[36]u8 = null,
 retain_message: bool = false,
 projected: bool = false,
-settled_message: ?struct { ticket: Input.Ticket, key: [36]u8 } = null,
+settled_message: ?struct { ticket: Input.Ticket, key: [36]u8, admission: ?u64 = null, store: protocol.Bounded(protocol.max_store_bytes) = .{} } = null,
+
+pub const AppliedProbe = struct { key: [36]u8, store: protocol.Bounded(protocol.max_store_bytes) };
+pub const AppliedResult = enum { taken, queued, excluded, unverified };
 
 pub fn view(self: *const Self) ?View {
     const intent = self.intent orelse return null;
@@ -317,7 +320,7 @@ fn apply(self: *Self, result: anyerror!void) !End {
         const denies: ?u64 = if (intent == .message_then_deny) intent.message_then_deny.action else null;
         if (self.retain_message and intent.ticket() != null and !self.projected) {
             std.debug.assert(self.settled_message == null);
-            self.settled_message = .{ .ticket = intent.ticket().?, .key = self.key };
+            self.settled_message = .{ .ticket = intent.ticket().?, .key = self.key, .admission = admission, .store = self.reply.?.context.store };
             self.retire();
             return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission, .denies = denies } };
         }
@@ -355,6 +358,38 @@ pub fn observeMessage(self: *Self, key: [36]u8) void {
     if (self.intent) |intent| if (intent.ticket() != null and std.mem.eql(u8, &key, &self.key)) {
         self.projected = true;
     };
+}
+
+/// The canonical Store belongs to the accepted receipt, not a later selector resolution.
+pub fn appliedProbe(self: *const Self) ?AppliedProbe {
+    const held = self.settled_message orelse return null;
+    return .{ .key = held.key, .store = held.store };
+}
+
+/// An applied Host observation can account for an accepted ticket outside the loaded feed.
+/// It cannot settle an uncertain intent or a queued/excluded admission.
+pub fn observeApplied(self: *Self, store_identity: []const u8, observed: protocol_reply.CommandObservation) !AppliedResult {
+    const held = self.settled_message orelse return .unverified;
+    if (held.store.len == 0 or !held.store.eql(store_identity) or !observed.key.eql(&held.key) or
+        observed.status != .accepted or observed.kind != .message or
+        observed.target == null or !observed.target.?.eql(self.session)) return .unverified;
+    const state = observed.state orelse return .unverified;
+    const input = observed.input orelse return .unverified;
+    const queue = observed.queue orelse return .unverified;
+    if (held.admission) |admission| if (queue.admission != admission) return .unverified;
+    if (!@import("mutation_answer.zig").matchesMessageAdmission(input, queue.admission)) return .unverified;
+    const expected = (try self.draftTarget(held.ticket)).message;
+    const identity = input.identity();
+    if (std.meta.activeTag(input) != expected.form or identity.length != expected.bytes or
+        !std.mem.eql(u8, &identity.digest, &expected.digest)) return .unverified;
+    if (observed.binding == null) return switch (state) {
+        .queued => .queued,
+        .cancelled => .excluded,
+        else => .unverified,
+    };
+    if (state == .queued or state == .rejected) return .unverified;
+    self.observeMessage(held.key);
+    return .taken;
 }
 
 pub fn messageKey(self: *const Self) ?[36]u8 {
@@ -825,10 +860,13 @@ test "accepted native Message keeps its exact input loan until canonical inserti
     const ticket = input.submitText("same text\nsecond line");
     var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .intent = .{ .message = ticket }, .key = @splat('A'), .state = .submitting, .retain_message = true };
     self.reply = .{ .status = 200, .context = .{ .kind = .message }, .target = .{ .message = .{ .bytes = 21, .digest = protocol.contentDigest("same text\nsecond line") } }, .answer = .{ .replayed = false, .result = .{ .accepted = .{ .message = .{ .admission = 37 } } } } };
+    try self.reply.?.context.store.set("/canonical-store");
     const end = try self.apply({});
     try std.testing.expect(end == .accepted);
     try std.testing.expect(self.intent == null and self.view() == null);
     try std.testing.expect(self.messageHeld());
+    try std.testing.expect(self.appliedProbe().?.store.eql("/canonical-store"));
+    try std.testing.expectEqual(@as(?u64, 37), self.settled_message.?.admission);
     try std.testing.expectEqualStrings("same text\nsecond line", self.messageText().?);
     try std.testing.expectEqual(@as([36]u8, @splat('A')), self.messageKey().?);
     _ = input.append("next draft");
@@ -852,6 +890,148 @@ test "accepted native Message keeps its exact input loan until canonical inserti
     try std.testing.expectEqualStrings("next draft", self.messageText().?);
     self.state = .rejected;
     try self.discardRejected();
+}
+
+test "SUI-146 applied observation releases only the exact accepted Message identity" {
+    const Variant = enum { exact, completed, failed, cancelled_bound, permission_bound, wrong_store, wrong_key, wrong_session, absent, rejected, wrong_kind, queued, forged_queue, excluded, unbound, missing_input, missing_queue, wrong_admission, wrong_length, wrong_digest, wrong_form, wrong_parts_owner };
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    for ([_]bool{ false, true }) |image| for (std.enums.values(Variant)) |variant| {
+        var input: Input = undefined;
+        input.init();
+        defer input.deinit();
+        if (image) {
+            const attachment = try Input.Image.validate(@embedFile("codecs/fixtures/image-input/pixel.png"));
+            input.setImage(try attachment.clone());
+        }
+        _ = input.append("original text");
+        const ticket = input.typed("\r").message;
+        var self: Self = .{ .io = std.testing.io, .store = "/private-store", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .settled_message = .{ .ticket = ticket, .key = key, .admission = 37, .store = try .from("/private-store") } };
+        _ = input.append("next draft");
+        const expected = (try self.draftTarget(ticket)).message;
+        const reference: @import("content_value.zig").Reference = .{ .length = expected.bytes, .digest = expected.digest };
+        var observed: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = .message, .target = .{}, .state = .processing, .queue = .{ .admission = 37, .admitted_at = 1 }, .binding = .{ .turn = 2, .operation = 3, .attempt = 1 } };
+        try observed.key.set(&key);
+        try observed.target.?.set("k7m2qx");
+        observed.input = if (image) .{ .parts = .{ .identity = reference, .owner = .{ .message = 37 } } } else .{ .text = reference };
+        switch (variant) {
+            .exact, .wrong_store => {},
+            .completed => observed.state = .completed,
+            .failed => observed.state = .failed,
+            .cancelled_bound => observed.state = .cancelled,
+            .permission_bound => observed.state = .waiting_for_permission,
+            .absent => observed.status = .absent,
+            .wrong_key => try observed.key.set("01234567-89ab-4cde-8012-0123456789ac"),
+            .wrong_session => try observed.target.?.set("a1b2c3"),
+            .rejected => observed.status = .rejected,
+            .wrong_kind => observed.kind = .configure,
+            .queued => {
+                observed.state = .queued;
+                observed.binding = null;
+            },
+            .forged_queue => observed.state = .queued,
+            .excluded => {
+                observed.state = .cancelled;
+                observed.binding = null;
+            },
+            .unbound => observed.binding = null,
+            .missing_input => observed.input = null,
+            .missing_queue => observed.queue = null,
+            .wrong_admission => observed.queue.?.admission = 38,
+            .wrong_length => switch (observed.input.?) {
+                .text => |*value| value.length += 1,
+                .parts => |*value| value.identity.length += 1,
+            },
+            .wrong_digest => switch (observed.input.?) {
+                .text => |*value| value.digest[0] ^= 1,
+                .parts => |*value| value.identity.digest[0] ^= 1,
+            },
+            .wrong_form => observed.input = if (image) .{ .text = reference } else .{ .parts = .{ .identity = reference, .owner = .{ .message = 37 } } },
+            .wrong_parts_owner => if (image) {
+                observed.input.?.parts.owner = .{ .message = 38 };
+            },
+        }
+        const matches = variant == .exact or variant == .completed or variant == .failed or variant == .cancelled_bound or variant == .permission_bound or (variant == .wrong_parts_owner and !image);
+        const result: AppliedResult = if (matches) .taken else switch (variant) {
+            .queued => .queued,
+            .excluded => .excluded,
+            else => .unverified,
+        };
+        try std.testing.expectEqual(result, try self.observeApplied(if (variant == .wrong_store) "/other-store" else "/private-store", observed));
+        try std.testing.expectEqual(!matches, self.messageHeld());
+        try std.testing.expectEqualStrings("next draft", input.composition().bytes);
+        if (!matches) self.disposeMessage();
+    };
+}
+
+test "SUI-146 an alias retarget cannot substitute a different Store for the accepted receipt" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    try tmp.dir.createDir(io, "first", .fromMode(0o700));
+    try tmp.dir.createDir(io, "second", .fromMode(0o700));
+    try tmp.dir.symLink(io, "first", "alias", .{ .is_directory = true });
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const alias = try std.fmt.bufPrint(&path_buffer, "{s}/alias", .{root});
+    const original = try client.resolveClientPaths(io, alias);
+    try tmp.dir.deleteFile(io, "alias");
+    try tmp.dir.symLink(io, "second", "alias", .{ .is_directory = true });
+    const retargeted = try client.resolveClientPaths(io, alias);
+    try std.testing.expect(!original.store_identity.eql(retargeted.store_identity.slice()));
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    var input: Input = undefined;
+    input.init();
+    defer input.deinit();
+    const ticket = input.submitText("original text");
+    var self: Self = .{ .io = io, .store = alias, .session = "k7m2qx", .directory = root, .input = &input, .environment = .empty, .settled_message = .{ .ticket = ticket, .key = key, .admission = 37, .store = original.store_identity } };
+    defer if (self.messageHeld()) self.disposeMessage();
+    _ = input.append("next draft");
+    var observed: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = .message, .target = .{}, .state = .processing, .queue = .{ .admission = 37, .admitted_at = 1 }, .binding = .{ .turn = 2, .operation = 3, .attempt = 1 }, .input = .{ .text = .{ .length = "original text".len, .digest = protocol.contentDigest("original text") } } };
+    try observed.key.set(&key);
+    try observed.target.?.set("k7m2qx");
+    try std.testing.expectEqual(AppliedResult.unverified, try self.observeApplied(retargeted.store_identity.slice(), observed));
+    try std.testing.expect(self.messageHeld());
+    try std.testing.expectEqualStrings("next draft", input.composition().bytes);
+    try std.testing.expectEqual(AppliedResult.taken, try self.observeApplied(original.store_identity.slice(), observed));
+}
+
+test "SUI-146 applied Message evidence preserves a separate unconfirmed Decision" {
+    const a: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const b: [36]u8 = "01234567-89ab-4cde-8012-0123456789ac".*;
+    var input: Input = undefined;
+    input.init();
+    defer input.deinit();
+    const ticket = input.submitText("reason");
+    var self: Self = .{ .io = std.testing.io, .store = "/private-store", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .settled_message = .{ .ticket = ticket, .key = a, .admission = 37, .store = try .from("/private-store") }, .intent = .{ .decision = .{ .action = 19, .decision = .deny } }, .state = .unconfirmed, .publication = .published, .key = b };
+    var observed: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = .message, .target = .{}, .state = .processing, .queue = .{ .admission = 37, .admitted_at = 1 }, .binding = .{ .turn = 2, .operation = 3, .attempt = 1 }, .input = .{ .text = .{ .length = "reason".len, .digest = protocol.contentDigest("reason") } } };
+    try observed.key.set(&a);
+    try observed.target.?.set("k7m2qx");
+    try std.testing.expectEqual(AppliedResult.taken, try self.observeApplied("/private-store", observed));
+    try std.testing.expect(!self.messageHeld());
+    try std.testing.expectEqual(State.unconfirmed, self.view().?.state);
+    try std.testing.expectEqual(b, self.view().?.key);
+    try self.requestRecovery(&b);
+    try std.testing.expectEqual(b, self.retry.?);
+}
+
+test "SUI-146 an applied observation never releases an unconfirmed original" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    var input: Input = undefined;
+    input.init();
+    defer input.deinit();
+    const ticket = input.submitText("original text");
+    var self: Self = .{ .io = std.testing.io, .store = "/private-store", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .intent = .{ .message = ticket }, .key = key, .state = .unconfirmed, .publication = .published };
+    _ = input.append("next draft");
+    var observed: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = .message, .target = .{}, .state = .processing, .queue = .{ .admission = 37, .admitted_at = 1 }, .binding = .{ .turn = 2, .operation = 3, .attempt = 1 }, .input = .{ .text = .{ .length = "original text".len, .digest = protocol.contentDigest("original text") } } };
+    try observed.key.set(&key);
+    try observed.target.?.set("k7m2qx");
+    try std.testing.expectEqual(AppliedResult.unverified, try self.observeApplied("/private-store", observed));
+    try std.testing.expectEqual(State.unconfirmed, self.view().?.state);
+    try self.requestRecovery(&key);
+    try std.testing.expectEqual(key, self.retry.?);
+    try std.testing.expectEqualStrings("next draft", input.composition().bytes);
 }
 
 test "uncertain canonical observation hides only the echo and retains original recovery" {

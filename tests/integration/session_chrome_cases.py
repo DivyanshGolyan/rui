@@ -89,7 +89,7 @@ class Chrome:
 
     def __enter__(self):
         self.host = fixture.start_host(self.store, f"http://127.0.0.1:{self.endpoint.server_port}/responses")
-        run(self.home, "defaults", "configure", "--store", self.store)
+        private_chrome_command(self, "defaults", "configure", "--store", self.store)
         return self
 
     def __exit__(self, kind, value, traceback):
@@ -115,8 +115,11 @@ class Chrome:
     def open(self, session, ready, *, columns=80, height=ROWS):
         master, slave = open_pty(columns, height)
         self.descriptors += [master, slave]
-        caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
-            env={**os.environ, "HOME": str(self.home)}, cwd=str(self.workspace),
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in ("RUI_STORE", "RUI_ADDRESS", "RUI_SENDER_HANDLE")}
+        environment["HOME"] = str(self.home)
+        caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(self.store), "--", session],
+            env=environment, cwd=str(self.workspace),
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         self.callers.append(caller)
         screen = self.frame(master, b"", lambda screen: ready(screen) and composing(screen, "") and "Opening…" not in screen)
@@ -542,7 +545,96 @@ def opening_case():
     print("session chrome: a reopened Session shows ◌ 2 · the newest waiting Message under the running call; Ctrl-O selects the lowest tool or Message, and reopening keeps tools folded", flush=True)
 
 
+
+def private_chrome_command(chrome, *arguments, input=None):
+    assert "--store" in arguments, ("private Store must be explicit", arguments)
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ("RUI_STORE", "RUI_ADDRESS", "RUI_SENDER_HANDLE")}
+    environment["HOME"] = str(chrome.home)
+    result = subprocess.run([str(fixture.RUI), *map(str, arguments)], env=environment,
+                            cwd=chrome.workspace, capture_output=True, text=True, input=input, timeout=20)
+    assert result.returncode == 0, (arguments, result.stdout, result.stderr)
+    return result.stdout
+
+
+def verify_private_chrome(chrome):
+    expected_endpoint = f"providers.codex.endpoint=http://127.0.0.1:{chrome.endpoint.server_port}/responses"
+    assert chrome.host.poll() is None and expected_endpoint in chrome.host.args, chrome.host.args
+    assert "providers.codex.unauthenticated=true" in chrome.host.args, chrome.host.args
+    status = json.loads(private_chrome_command(chrome, "host", "status", "--store", chrome.store))
+    assert status["store"] == str(chrome.store), status
+    assert len(chrome.endpoint.requests) == 0
+
+
+def accepted_off_page_case():
+    # SUI-146: accepted custody is released by exact applied evidence, even if
+    # newer Activity pages no longer contain the original row.
+    first = threading.Event()
+    entered = threading.Event()
+    release = threading.Event()
+    responses = [(fixture.sse_answer("first", "r0", "m0", "FIRST DONE")[0], first)]
+    responses += [fixture.sse_answer(f"answer-{i}", f"r{i}", f"m{i}", f"ANSWER {i}")[0] for i in range(10)]
+    with Chrome("rui-chrome-accepted-off-page.", responses) as chrome:
+        verify_private_chrome(chrome)
+        session = json.loads(private_chrome_command(chrome, "session", "configure", "--store", chrome.store,
+            "--workspace", chrome.workspace, "--provider", "codex", "--model", "gpt-6.1-terra",
+            "--reasoning-effort", "high"))["answer"]["session"]
+        private_chrome_command(chrome, "session", "send", "--store", chrome.store, "--session", session, input="busy")
+        fixture.wait_for(lambda: len(chrome.endpoint.requests) == 1, "first gated provider request")
+        master, caller, _ = chrome.open(session, lambda frame: "Thinking" in frame, columns=100, height=24)
+        def gate(response):
+            if not entered.is_set():
+                entered.set()
+                assert release.wait(30), "Activity gate not released"
+            return response
+        proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/activity-page", gate)
+        try:
+            assert entered.wait(10), "Activity page was not gated"
+            def full():
+                return json.loads(private_chrome_command(chrome, "session", "inspect", "--store", chrome.store,
+                                                         "--session", session, "--profile", "full"))
+            chrome.frame(master, b"original off page\r", lambda frame: "original off page" in frame)
+            admitted = fixture.wait_for(full, "original admitted", timeout=10,
+                ready=lambda data: any(row["content"].get("text") == "original off page" for row in data["full"]["messages"]))
+            original = next(row for row in admitted["full"]["messages"] if row["content"].get("text") == "original off page")
+            preserved = chrome.frame(master, b"next draft\r", lambda frame:
+                                     "next draft" in frame and "refreshing conversation" in frame, timeout=15)
+            assert "next draft" in preserved, preserved
+            first.set()
+            fixture.wait_for(full, "original completed", timeout=20,
+                ready=lambda data: any(row["command_key"] == original["command_key"] and row["outcome"] is not None for row in data["full"]["messages"]))
+            for index in range(8):
+                name = f"later-{index}"
+                private_chrome_command(chrome, "session", "send", "--store", chrome.store, "--session", session, input=name)
+                fixture.wait_for(full, f"{name} completed", timeout=20,
+                    ready=lambda data: any(row["content"].get("text") == name and row["outcome"] is not None for row in data["full"]["messages"]))
+            release.set()
+            chrome.frame(master, b"", lambda frame: "ANSWER 8" in frame and "next draft" in frame, timeout=20)
+            previous = len(proxy.exchanges)
+            os.write(master, b"\r")
+            def result():
+                data = full()
+                count = sum(row["content"].get("text") == "next draft" for row in data["full"]["messages"])
+                if count:
+                    return ("admitted", count, data)
+                if len(proxy.exchanges) >= previous + 2:
+                    return ("still held", count, data)
+                return None
+            outcome, count, final = fixture.wait_for(result, "next draft or completed repeated refresh", timeout=20)
+            assert outcome == "admitted" and count == 1, ("off-page accepted Message blocked next send", outcome, final)
+            assert sum(row["command_key"] == original["command_key"] for row in final["full"]["messages"]) == 1, final
+            history = chrome.frame(master, b"\x1b[5~" * 20, lambda frame: "original off page" in conversation_text(frame), timeout=20)
+            assert conversation_text(history).count("original off page") == 1, history
+            assert "◌ original off page" not in conversation_text(history), history
+            chrome.leave(master, caller)
+        finally:
+            first.set()
+            release.set()
+            proxy.close()
+    print("session chrome: exact applied receipt releases off-page custody and admits the next draft once", flush=True)
+
 def main():
+    accepted_off_page_case()
     send_recovery_case()
     activity_case()
     thinking_queue_case()

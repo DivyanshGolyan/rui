@@ -130,15 +130,15 @@ pub const Hint = union(enum) {
     line: Bounded(session_line.max_line_bytes),
 };
 
-fn readHint(requests: client.Requests, job: *const Job, first: Line.First) !Hint {
-    const line = try readFirstLine(requests, job, first.position, first.content, .absent) orelse return .absent;
+fn readHint(requests: client.Requests, job: *const Job, store: []const u8, first: Line.First) !Hint {
+    const line = try readFirstLine(requests, job, store, first.position, first.content, .absent) orelse return .absent;
     return if (line.len == 0) .absent else .{ .line = line };
 }
 
 /// The first display line of the Message at `position`, whose stored value is `value`.
-fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, value: content_value.Value, refused: enum { absent, fails }) !?queued_line.Line {
+fn readFirstLine(requests: client.Requests, job: *const Job, store: []const u8, position: u64, value: content_value.Value, refused: enum { absent, fails }) !?queued_line.Line {
     var buffer: [session_line.max_line_bytes + 1]u8 = undefined;
-    const reply = value_reads.firstLine(requests, job.store, job.session, position, value, job.files.parts, &buffer) catch |err| switch (err) {
+    const reply = value_reads.firstLine(requests, store, job.session, position, value, job.files.parts, &buffer) catch |err| switch (err) {
         error.InvalidResponse => return if (refused == .absent) null else err,
         else => return err,
     };
@@ -200,6 +200,9 @@ pub const Job = struct {
     latest_ending: ?LatestEnding = null,
     retry: ?Key = null,
     queued_line: u64 = 0,
+    accepted_probe: ?Submission.AppliedProbe = null,
+    accepted_observe: bool = false,
+    accepted_refresh: u64 = 0,
     inspection_kind: Inspection = .requests,
     interrupted: *client.Cancellation = undefined,
     command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
@@ -228,6 +231,11 @@ pub const Job = struct {
         new_rows: usize = 0,
         queued: protocol.Queued = .{},
         queued_line: ?queued_line.Shown = null,
+        accepted_observation: ?protocol_reply.CommandObservation = null,
+        accepted_store: protocol.Bounded(protocol.max_store_bytes) = .{},
+        activity_store: protocol.Bounded(protocol.max_store_bytes) = .{},
+        accepted_observation_failed: ?enum { unavailable, store_changed, identity_missing } = null,
+        accepted_guard_failed: bool = false,
         live: View.Live = .{},
         latest_ending: ?LatestEnding = null,
         cursor: protocol_reply.ActivityCursor = .{},
@@ -497,7 +505,34 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         .continuing = !job.opening and job.cursor.end != null,
         .novelty_after = if (job.opening or job.cursor.position == 0) null else .{ .position = job.cursor.position, .ordinal = job.cursor.ordinal orelse std.math.maxInt(u64) },
     };
-    const page = switch (try requests.activityPage(job.store, job.session, pageCursor(job, plan))) {
+    const cursor = pageCursor(job, plan);
+    if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
+    try protocol_reply.validateIdentityInputs("", job.session);
+    try cursor.validate();
+    const paths = client.resolveClientPaths(task.io, job.store) catch |err| {
+        if (job.accepted_probe != null and @as(anyerror, err) != error.Cancelled and @as(anyerror, err) != error.Canceled and @as(anyerror, err) != error.CanonicalStoreFailure) {
+            job.result.accepted_guard_failed = true;
+            job.result.accepted_observation_failed = .unavailable;
+            return;
+        }
+        return err;
+    };
+    if (job.accepted_probe) |probe| {
+        if (probe.store.len == 0) {
+            job.result.accepted_guard_failed = true;
+            job.result.accepted_observation_failed = .identity_missing;
+            return;
+        }
+        if (!probe.store.eql(paths.store_identity.slice())) {
+            job.result.accepted_guard_failed = true;
+            job.result.accepted_observation_failed = .store_changed;
+            return;
+        }
+    }
+    job.result.activity_store = paths.store_identity;
+    const store = paths.selector();
+    const response = try requests.activityPageAt(&paths, job.session, cursor);
+    const page = switch (response) {
         .page => |page| page,
         .failure => |failure| return requests.failRead(failure),
     };
@@ -505,7 +540,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.work = page.facts.work;
         const line_stale = Line.stale(job.line_read, &page.facts);
         if (job.open_status or job.watch_status or line_stale) {
-            const current = try View.current(requests, job.store, job.session, job.files.scratch);
+            const current = try View.current(requests, store, job.session, job.files.scratch);
             if (line_stale) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
             if (job.open_status or job.watch_status) {
                 job.result.status = try job.status(task.io, &current, job.files.scratch, job.status_taken, if (job.open_status) null else job.status_shown, job.status_actions);
@@ -514,16 +549,16 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.latest_ending = if (job.opening) null else job.latest_ending;
         for (page.facts.items[0..page.facts.count]) |item| observeEnding(&job.result.latest_ending, item, job.session, job.sessionProvider());
         if (job.opening and job.result.latest_ending == null and page.facts.more) {
-            try latestEnding(requests, job, page.facts.end);
+            try latestEnding(requests, job, store, page.facts.end);
         }
         if (job.result.line) |*line| if (job.hint_wanted and line.label == null) if (line.first) |first| {
-            job.result.hint = try readHint(requests, job, first);
+            job.result.hint = try readHint(requests, job, store, first);
         };
         job.result.live = View.Live.init(page.facts.call_activity);
         job.result.queued = page.facts.queued;
         const queued = page.facts.queued;
         if (queued.count != 0 and queued.newest_admission != job.queued_line) {
-            job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(requests, job, queued.newest_position, queued.newest_content orelse return error.InvalidActivityPage, .fails)).? };
+            job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(requests, job, store, queued.newest_position, queued.newest_content orelse return error.InvalidActivityPage, .fails)).? };
         }
     }
     try job.files.inspection.setLength(task.io, 0);
@@ -548,7 +583,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = .{ .text = answer.content } },
             else => null,
         } };
-        row.provisional = try View.render(requests, job.store, job.session, job.files.parts, job.sessionProvider(), item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
+        row.provisional = try View.render(requests, store, job.session, job.files.parts, job.sessionProvider(), item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
         row.tight = View.tight(item.value);
         try capture.finish();
         row.length = capture.length;
@@ -572,6 +607,26 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     if (plan.kinds == .all) {
         job.result.cursor = if (plan.direction == .backward) .{ .position = page.facts.end } else page.continuation() orelse .{ .position = page.facts.end };
     }
+    if (job.accepted_observe) {
+        const probe = job.accepted_probe.?;
+        var observation_buffer: client.ObservationBuffer = .{};
+        const reply = requests.observeCommandAt(&paths, &probe.key, null, &observation_buffer, null) catch |err| {
+            if (@as(anyerror, err) == error.Cancelled or @as(anyerror, err) == error.Canceled or @as(anyerror, err) == error.CanonicalStoreFailure) return err;
+            job.result.accepted_observation_failed = .unavailable;
+            return;
+        };
+        switch (reply) {
+            .observation => |observation| {
+                job.result.accepted_store = paths.store_identity;
+                job.result.accepted_observation = observation.facts;
+            },
+            .failure => |failure| {
+                if (failure.err() == error.CanonicalStoreFailure) return requests.failRead(failure);
+                job.result.accepted_observation_failed = .unavailable;
+            },
+            .not_modified => job.result.accepted_observation_failed = .unavailable,
+        }
+    }
 }
 
 fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: []const u8, provider: ?protocol.Provider) void {
@@ -586,10 +641,10 @@ fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: [
     latest.* = .{ .key = key, .cause = cause };
 }
 
-fn latestEnding(requests: client.Requests, job: *Job, end: u64) !void {
+fn latestEnding(requests: client.Requests, job: *Job, store: []const u8, end: u64) !void {
     var cursor: protocol_reply.ActivityCursor = .{ .end = end, .direction = .backward, .kinds = .initMany(&.{ .turn_ended, .stop }) };
     while (true) {
-        const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
+        const page = switch (try requests.activityPage(store, job.session, cursor)) {
             .page => |page| page,
             .failure => |failure| return requests.failRead(failure),
         };
@@ -1391,6 +1446,70 @@ test "SUI-49 Message placement preserves provenance across pages" {
     var host: FakeHost = .{ .history = 0, .tail = &.{}, .end = 0 };
     var domain: Domain = .{};
     try host.withHost(&domain);
+}
+
+test "SUI-146 a resolved Activity route stays bound after an alias retarget" {
+    const Host = struct {
+        pub fn answer(_: *@This(), fd: std.posix.fd_t) !void {
+            var request_buffer: [8192]u8 = undefined;
+            const request = try fake_host.readRequest(fd, &request_buffer) orelse return;
+            try std.testing.expect(request.is("/v1/activity-page"));
+            var storage: [2048]u8 = undefined;
+            var arena = std.heap.FixedBufferAllocator.init(&storage);
+            const body = try std.json.parseFromSliceLeaky(struct { store: []const u8 }, arena.allocator(), request.body, .{ .ignore_unknown_fields = true });
+            var page: protocol.ActivityFacts = .{ .end = 0, .direction = .forward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+            try page.work.workspace.set(body.store);
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            try activity_reply.writePage(&output.writer, &page);
+            fake_host.respond(fd, "200 OK", "application/json", "", output.written());
+        }
+    };
+    const Action = struct {
+        pub fn run(_: *@This(), host: *Host, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            try dir.createDir(io, "other", .fromMode(0o700));
+            try dir.symLink(io, ".", "alias", .{ .is_directory = true });
+            var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias", .{root});
+            const paths = try client.resolveClientPaths(io, alias);
+            try dir.deleteFile(io, "alias");
+            try dir.symLink(io, "other", "alias", .{ .is_directory = true });
+            const retargeted = try client.resolveClientPaths(io, alias);
+            try std.testing.expect(!paths.store_identity.eql(retargeted.store_identity.slice()));
+            const reply = try (client.Requests{ .io = io }).activityPageAt(&paths, "k7m2qx", .{});
+            try std.testing.expect(reply == .page);
+            try std.testing.expectEqualStrings(paths.store_identity.slice(), reply.page.facts.work.workspace.slice());
+            _ = host;
+        }
+    };
+    var host: Host = .{};
+    var action: Action = .{};
+    try fake_host.withHost(&host, &action);
+}
+
+test "SUI-146 an alias retarget is refused before reading an accepted loan's Activity" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    try tmp.dir.createDir(io, "first", .fromMode(0o700));
+    try tmp.dir.createDir(io, "second", .fromMode(0o700));
+    try tmp.dir.symLink(io, "first", "alias", .{ .is_directory = true });
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const alias = try std.fmt.bufPrint(&path_buffer, "{s}/alias", .{root});
+    const original = try client.resolveClientPaths(io, alias);
+    try tmp.dir.deleteFile(io, "alias");
+    try tmp.dir.symLink(io, "second", "alias", .{ .is_directory = true });
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    var job: Job = .{ .store = alias, .session = "k7m2qx", .opening = true, .accepted_probe = .{ .key = key, .store = original.store_identity }, .accepted_observe = true };
+    var task: Task = .{ .io = io };
+    try scan(&job, &task);
+    try std.testing.expect(job.result.accepted_guard_failed);
+    try std.testing.expectEqual(@as(@TypeOf(job.result.accepted_observation_failed), .store_changed), job.result.accepted_observation_failed);
+    try std.testing.expect(job.result.accepted_observation == null and job.result.row_count == 0);
 }
 
 test "session_reads opening reads one Activity page whatever the history before it" {
