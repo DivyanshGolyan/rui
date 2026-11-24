@@ -2793,8 +2793,8 @@ const Capture = struct {
         try self.write("{");
         var separator: []const u8 = "";
         inline for (@import("session_settings.zig").spec_entries) |entry| {
-            // Not saved yet: no client input until its save step (session_settings.unsaved_fields).
-            if (comptime !@import("session_settings.zig").isSaved(entry)) continue;
+            // The TypeScript client sends appTools in its own step; the Zig CLI has no option for it.
+            if (comptime entry.kind == .app_tools) continue;
             const value = @field(input, entry.field);
             const present = switch (entry.kind) {
                 .content => value.state != .omitted,
@@ -6479,7 +6479,7 @@ test "Session settings client writes every setting and the Host parser preserves
     var missing_buffer: [4096]u8 = undefined;
     var missing: std.Io.Writer = .fixed(&missing_buffer);
     inline for (session_settings.entries) |entry| {
-        if (comptime !session_settings.isSaved(entry)) continue;
+        if (comptime entry.kind == .app_tools) continue;
         if (@field(configuration, entry.field).state != .value)
             try missing.print("{s}: ConfigureInput fixture / client.Capture.writeConfiguration / Host Parser\n", .{entry.field});
     }

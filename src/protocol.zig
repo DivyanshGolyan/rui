@@ -43,7 +43,7 @@ pub const max_workspace_bytes = workspace_path.max_bytes;
 const spec_content_count = count: {
     var total: usize = 0;
     for (session_settings.entries) |entry| {
-        if (entry.kind == .content) total += 1;
+        if (entry.kind == .content or entry.kind == .app_tools) total += 1;
     }
     break :count total;
 };
@@ -1057,12 +1057,13 @@ fn ParserOf(comptime Custody: type) type {
                     .preferences => try self.skipValue(),
                     inline else => |tag| {
                         const entry = session_settings.spec_entries[@backingInt(tag)];
-                        if (entry.kind == .content) {
-                            self.skipWhitespace() catch |err| return if (err == error.NeedInput and self.content_ordinal >= self.captured.len) (if (entry.json_object) error.NeedSchema else error.NeedContent) else err;
+                        if (entry.kind == .content or entry.kind == .app_tools) {
+                            const document = entry.json_object or entry.kind == .app_tools;
+                            self.skipWhitespace() catch |err| return if (err == error.NeedInput and self.content_ordinal >= self.captured.len) (if (document) error.NeedSchema else error.NeedContent) else err;
                             if (!try self.readNull()) {
                                 if (self.content_ordinal == max_request_contents) return error.UnexpectedField;
                                 var counted: ContentField = .{};
-                                if (entry.json_object) try self.readSchema(&counted) else try self.readContentString(&counted);
+                                if (document) try self.readSchema(&counted) else try self.readContentString(&counted);
                             }
                         } else try self.skipValue();
                     },
@@ -1266,7 +1267,8 @@ fn ParserOf(comptime Custody: type) type {
                             .content => if (entry.json_object) try self.readSchema(value) else try self.readContentString(value),
                             .tools => try self.readToolList(value),
                             .decimal_policy => try self.readSpecDecimal(&value.value),
-                            .app_tools => return error.AppToolsNotSupportedYet,
+                            // The declaration's bytes arrive as a captured document, like an output schema; app_tools.zig validates them.
+                            .app_tools => try self.readSchema(value),
                         }
                     },
                 }

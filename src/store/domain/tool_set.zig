@@ -4,6 +4,7 @@ const content_string = @import("../../content_string.zig");
 const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const tool_record = @import("../../tool_record.zig");
+const app_tools = @import("../../app_tools.zig");
 const rsql = @import("../rsql.zig");
 const content_domain = @import("content.zig");
 const store_core = @import("../Store.zig");
@@ -86,16 +87,21 @@ pub fn toolSetDigest(tool_set: *const tool_record.HostToolSet) [32]u8 {
 
 pub const records_per_transaction = 2;
 
-pub const SavingRecords = struct {
+/// The texts and records rounds both tool-set owners run: a host set saves them two records a transaction,
+/// an app set saves its whole declaration inside one configure transaction.
+pub fn SavingRecordsOf(comptime capacity: usize) type {
+    return struct {
+    const SavingRecords = @This();
+
     records: []const tool_record.Record,
-    pairs: [records_per_transaction]content_domain.Pair = undefined,
-    descriptions: [records_per_transaction]content_domain.Import = undefined,
-    schemas: [records_per_transaction]content_domain.Import = undefined,
-    content_ids: [records_per_transaction][2]u64 = undefined,
-    existing: [records_per_transaction]lookup_record.Result = undefined,
+    pairs: [capacity]content_domain.Pair = undefined,
+    descriptions: [capacity]content_domain.Import = undefined,
+    schemas: [capacity]content_domain.Import = undefined,
+    content_ids: [capacity][2]u64 = undefined,
+    existing: [capacity]lookup_record.Result = undefined,
 
     pub fn lookup(saving: *SavingRecords, a: anytype) void {
-        std.debug.assert(saving.records.len <= records_per_transaction);
+        std.debug.assert(saving.records.len <= capacity);
         for (saving.records, 0..) |*each, index| {
             saving.descriptions[index] = .ofBytes(each.description, false);
             saving.schemas[index] = .ofBytes(each.input_schema, false);
@@ -131,7 +137,11 @@ pub const SavingRecords = struct {
             a.write(insert_record, .{ .id = id, .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .replay = policy.replay, .restart_limit = policy.restart_limit, .wait_ms = policy.wait_ms, .description = ids[0], .input_schema = ids[1] });
         };
     }
-};
+    };
+}
+
+pub const SavingRecords = SavingRecordsOf(records_per_transaction);
+pub const AppSaving = SavingRecordsOf(app_tools.max_records);
 
 pub const SaveHostToolSet = struct {
     pub const rounds = transition.rounds(.{ .set = .{.branch}, .texts = .{.branch}, .records = .{.branch} });
@@ -301,6 +311,15 @@ pub fn insertHostToolSet(a: anytype, tool_set: *const tool_record.HostToolSet, d
             .wait_ms = policy.wait_ms,
         });
     }
+}
+
+/// The app tool set a configure saves: its records, then its set row, interned by digest. No Host points at
+/// it; the Session's app_tool_set_id does. Returns the set's id.
+pub fn insertAppToolSet(a: anytype, saving: *AppSaving, declaration: *const app_tools.Declaration, digest: *const [32]u8) !u64 {
+    try saving.insert(a);
+    const set_id = try a.identity(.tool_set_id);
+    insertHostToolSet(a, &declaration.toolSet(), digest, set_id);
+    return set_id;
 }
 
 /// The Store's form of a record's app policy: `replay` is '' for every non-app record, and an unsafe

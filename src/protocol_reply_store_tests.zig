@@ -99,7 +99,6 @@ test "Session settings Current report and typed Settings round trip every settin
     var missing_buffer: [8192]u8 = undefined;
     var missing: std.Io.Writer = .fixed(&missing_buffer);
     inline for (settings.entries) |entry| {
-        if (comptime !settings.isSaved(entry)) continue;
         if (comptime !@hasField(@import("session_report.zig").Current, entry.field))
             try missing.print("{s}: session_report.Current / Store session_report_read current producer\n", .{entry.field});
         if (comptime !@hasField(reply.Current.Settings, entry.field))
@@ -120,7 +119,6 @@ test "Session settings Current report and typed Settings round trip every settin
     var round = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, round_writer.buffered(), .{});
     defer round.deinit();
     inline for (settings.entries) |entry| {
-        if (comptime !settings.isSaved(entry)) continue;
         const value = round.value.object.get(entry.field);
         if (value == null) {
             try missing.print("{s}: protocol_reply.Current.Settings round trip\n", .{entry.field});

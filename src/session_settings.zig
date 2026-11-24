@@ -36,18 +36,10 @@ pub const entries = [_]Entry{
     .{ .field = "output_reservation", .spec = "outputReservation", .kind = .decimal_policy, .nullable = true, .cli = .{ .name = "output-reservation" }, .column = "output_reservation" },
     .{ .field = "reasoning_effort", .spec = "effort", .kind = .{ .choice = 16 }, .nullable = true, .cli = .{ .name = "reasoning-effort" }, .column = "reasoning_effort" },
     .{ .field = "label", .spec = "label", .kind = .{ .text = 100 }, .nullable = true, .cli = .{ .name = "label" }, .column = "label" },
-    // Not changeable until the Store saves it (its save step replaces this): configure refuses it by name.
-    .{ .field = "app_tools", .spec = "appTools", .kind = .app_tools, .nullable = true, .changeable = false, .cli = null, .digest = .unless_omitted, .column = "app_tool_set_id", .since_refused = true },
+    // The declared app tools of a lane root: the document is validated by app_tools.zig, saved as a tool set
+    // and read back as the declared list. Only a lane root may declare them (a child refuses by name).
+    .{ .field = "app_tools", .spec = "appTools", .kind = .app_tools, .nullable = true, .cli = null, .digest = .unless_omitted, .column = "app_tool_set_id", .since_refused = true },
 };
-
-/// Settings held in Configuration but not saved, reported or sent yet. Each save step removes its name here,
-/// and until then the Store, the report and the client leave it out; configure refuses it by name.
-pub const unsaved_fields = [_][]const u8{"app_tools"};
-
-pub fn isSaved(entry: Entry) bool {
-    for (unsaved_fields) |field| if (std.mem.eql(u8, field, entry.field)) return false;
-    return true;
-}
 
 pub const relations = [_]Entry{
     .{ .field = "parent", .spec = "parent", .kind = .{ .text = 6 }, .changeable = false, .cli = null, .digest = .unless_omitted, .column = "parent_ref" },

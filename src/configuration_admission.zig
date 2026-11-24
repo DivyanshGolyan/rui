@@ -33,6 +33,13 @@ pub const Rejection = enum {
     revision_exhausted,
     skills_unavailable,
     preferences_on_update,
+    invalid_app_tools,
+    app_tools_too_large,
+    invalid_app_tool_name,
+    duplicate_app_tool_name,
+    app_tool_built_in_clash,
+    invalid_app_tool_policy,
+    app_tools_on_child,
 };
 
 const std = @import("std");

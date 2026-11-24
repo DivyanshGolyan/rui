@@ -25,6 +25,7 @@ const command_domain = @import("command.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const tool_set = @import("tool_set.zig");
+const app_tools = @import("../../app_tools.zig");
 const skills_domain = @import("skills.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
@@ -110,6 +111,10 @@ pub const CurrentConfiguration = struct {
     workspace_key: u64 = 0,
     parent_ref: ?Bounded(session_id.bytes) = null,
     previous_reasoning_effort: ?model_capability.ReasoningEffort = null,
+    /// The app tool set this Session declares (its lane root declares it); null: none.
+    app_tool_set_id: ?u64 = null,
+    /// The lane root this Session runs on; a root is its own lane.
+    app_lane: ?Bounded(session_id.bytes) = null,
 };
 
 pub const SessionFacts = struct {
@@ -316,6 +321,7 @@ const Settings = struct {
     output_reservation: ?u64,
     reasoning_effort: ?model_capability.ReasoningEffort,
     label: ?Bounded(tool_presentation.max_label_bytes),
+    app_tool_set_id: ?u64,
 
     fn of(current: *const CurrentConfiguration) Settings {
         return .{
@@ -330,6 +336,7 @@ const Settings = struct {
             .output_reservation = current.output_reservation,
             .reasoning_effort = current.reasoning_effort,
             .label = current.label,
+            .app_tool_set_id = current.app_tool_set_id,
         };
     }
 
@@ -507,6 +514,8 @@ pub const ConfigurationReads = struct {
     parent_failure: ?ParentFailure = null,
     /// Set with a `missing_settings` rejection: the settings the new Session lacks.
     missing: ?required_settings.Missing = null,
+    /// The validated app declaration and the app tool set it saves as.
+    apps: tool_set.AppSet = .{},
 
     fn instructionsValue(reads: *ConfigurationReads, configuration: *const content_custody.Configuration) *content_domain.Import {
         return if (configuration.instructions.state == .value) &reads.instructions else &reads.empty;
@@ -516,7 +525,7 @@ pub const ConfigurationReads = struct {
 const saved_session = rsql.Read(.{
     .sql = "SELECT workspace,provider,codec,model,instructions_content_id AS instructions_id,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
-        reasoningEffortOverrideSql("session") ++ " AS reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
+        reasoningEffortOverrideSql("session") ++ " AS reasoning_effort,label,created_at,workspace_key,parent_ref,app_tool_set_id,app_lane," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = CurrentConfiguration,
     .cardinality = .optional,
@@ -532,8 +541,8 @@ const creation_facts = rsql.Read(.{
 
 const insert_session = rsql.Write(.{
     .sql = "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,next_position," ++
-        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id,creator_ref,app_lane) " ++
-        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17,?18,?19,COALESCE(?20,@session(?1)))",
+        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id,creator_ref,app_lane,app_tool_set_id) " ++
+        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17,?18,?19,COALESCE(?20,@session(?1)),?21)",
     .Args = struct {
         session: rsql.SessionHead,
         workspace: []const u8,
@@ -556,6 +565,7 @@ const insert_session = rsql.Write(.{
         creator: ?Bounded(session_id.bytes),
         /// The parent's lane for a child; null makes the new Session its own lane root.
         lane: ?Bounded(session_id.bytes),
+        app_tool_set_id: ?u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -587,12 +597,13 @@ pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentCon
         .loaded_tool_set_id = next.loaded_tool_set_id,
         .creator = if (creator) |reference| Bounded(session_id.bytes).from(reference) catch unreachable else null,
         .lane = lane,
+        .app_tool_set_id = next.app_tool_set_id,
     });
 }
 
 const update_session = rsql.Write(.{
     .sql = "UPDATE session SET model=?2,instructions_content_id=?3,tool_set_id=?4,permission_mode=?5,output_schema_content_id=?6,revision=?7,provider=?8," ++
-        "compaction_trigger=?9,output_reservation=?10,reasoning_effort=?11,label=?12,loaded_tool_set_id=?13 WHERE session_ref=@session(?1)",
+        "compaction_trigger=?9,output_reservation=?10,reasoning_effort=?11,label=?12,loaded_tool_set_id=?13,app_tool_set_id=?14 WHERE session_ref=@session(?1)",
     .Args = struct {
         session: rsql.SessionHead,
         model: []const u8,
@@ -607,6 +618,7 @@ const update_session = rsql.Write(.{
         reasoning_effort: ?model_capability.ReasoningEffort,
         label: ?[]const u8,
         loaded_tool_set_id: ?u64,
+        app_tool_set_id: ?u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.SessionUpdateFailed } },
 });
@@ -614,9 +626,9 @@ const update_session = rsql.Write(.{
 pub const update_session_sql = update_session.sql;
 
 const insert_revision = rsql.Write(.{
-    .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id," ++
+    .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id,app_tool_set_id," ++
         "permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) " ++
-        "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,provider," ++
+        "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tool_set_id,loaded_tool_set_id,app_tool_set_id,permission_mode,output_schema_content_id,provider," ++
         "compaction_trigger,output_reservation,reasoning_effort,label,CASE WHEN revision=1 OR ?4 THEN revision ELSE (SELECT prior.effort_source_revision FROM session_revision prior WHERE prior.session_ref=session.session_ref AND prior.revision=session.revision-1) END FROM session WHERE session_ref=@session(?1)",
     .Args = struct { session: rsql.SessionHead, command_key: []const u8, instructions_updated: bool, effort_choice: bool },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -778,6 +790,8 @@ pub const Request = struct {
     configuration: *const content_custody.Configuration,
     initial_skills: ?*const skills_domain.Initial,
     saved: *tool_set.SavedSelection,
+    /// Where a validated declaration keeps its parsed records for this transaction; reset by the Store per transaction.
+    declarations: std.mem.Allocator,
 };
 
 pub const ValidationRound = enum { model, saved_tools, saved_loaded, loaded_source, loaded };
@@ -991,7 +1005,7 @@ fn finishValidation(request: *const Request, reads: *ConfigurationReads) Validat
     return .{ .ready = &reads.validated };
 }
 
-pub const ApplyRound = enum { creation, catalog };
+pub const ApplyRound = enum { app_set, app_texts, app_records, creation, catalog };
 
 pub const Applying = union(enum) {
     round: ApplyRound,
@@ -1006,6 +1020,23 @@ const ApplyState = struct {
 pub fn applyStep(a: anytype, request: *const Request, faults: Faults, reads: *ConfigurationReads, ran: ?ApplyRound) !Applying {
     const at = ran orelse return applyContent(a, request, faults, reads);
     switch (at) {
+        .app_set => {
+            const apps = &reads.apps;
+            if (apps.set) |row| {
+                apps.set_id = row.tool_set_id.get();
+                apps.phase = .done;
+                return applyContent(a, request, faults, reads);
+            }
+            apps.phase = .saving;
+            apps.saving = .{ .records = apps.declaration.?.records };
+            apps.saving.lookup(a);
+            return .{ .round = .app_texts };
+        },
+        .app_texts => {
+            if (try reads.apps.saving.importTexts(a)) return .{ .round = .app_records };
+            return appInsert(a, request, faults, reads);
+        },
+        .app_records => return appInsert(a, request, faults, reads),
         .creation => {
             if (reads.creation.taken) return drawReference(a, request.io, reads);
             return insertCreated(a, request, reads);
@@ -1017,6 +1048,14 @@ pub fn applyStep(a: anytype, request: *const Request, faults: Faults, reads: *Co
     }
 }
 
+/// Writes the declared app tool set once its records are interned, then carries on with the other settings.
+fn appInsert(a: anytype, request: *const Request, faults: Faults, reads: *ConfigurationReads) !Applying {
+    const apps = &reads.apps;
+    apps.set_id = try tool_set.insertAppToolSet(a, &apps.saving, &apps.declaration.?, &apps.digest);
+    apps.phase = .done;
+    return applyContent(a, request, faults, reads);
+}
+
 fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *ConfigurationReads) !Applying {
     const io = request.io;
     const session = request.session;
@@ -1025,6 +1064,15 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
     const created = !reads.found.get();
     const next = &reads.next;
     const content_actions = reads.validated.content_actions;
+    if (reads.apps.phase == .idle) {
+        if (reads.apps.declaration) |*declaration| if (declaration.records.len != 0) {
+            reads.apps.phase = .looking;
+            reads.apps.digest = tool_set.toolSetDigest(&declaration.toolSet());
+            tool_set.lookupHostToolSet(a, &reads.apps.digest, &reads.apps.set);
+            return .{ .round = .app_set };
+        };
+        reads.apps.phase = .done;
+    }
     reads.step = .{ .applying = undefined };
     const applied = &reads.applied;
     applied.instructions_id = null;
@@ -1055,6 +1103,8 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
     } else if (creating or configuration.loaded_tools.state == .value or configuration.tools.state == .value) {
         next.loaded_tool_set_id = null;
     }
+    // An omitted appTools keeps the saved declaration; a list (empty or not) or null replaces it.
+    if (configuration.app_tools.state != .omitted) next.app_tool_set_id = reads.apps.set_id;
     if (created) {
         std.debug.assert(next.revision == 1);
         reads.step.applying.created_seq = try a.identity(.created_seq);
@@ -1075,6 +1125,7 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
         .output_reservation = next.output_reservation,
         .reasoning_effort = next.reasoning_effort,
         .label = if (next.label) |*label| label.slice() else null,
+        .app_tool_set_id = next.app_tool_set_id,
     });
     try accept(reads, head, session);
     return .{ .accepted = applied };
@@ -1187,7 +1238,6 @@ test "Session settings cover every hand-written Store SQL and schema projection"
     var buffer: [16 * 1024]u8 = undefined;
     var missing: std.Io.Writer = .fixed(&buffer);
     inline for (session_settings.entries) |entry| {
-        if (comptime !session_settings.isSaved(entry)) continue;
         inline for (.{ "session", "session_revision" }) |table_name| {
             var found = false;
             for (schema.tables) |table| {
