@@ -171,24 +171,17 @@ const Limits = server_host.Limits;
 const SettlementTrace = server_host.SettlementTrace;
 const default_bash_path = server_host.default_bash_path;
 const test_pause = @import("testing/pause.zig");
-const pause = server_host.pause;
-const bashReclaimHeld = server_host.bashReclaimHeld;
-const retryRecovered = server_host.retryRecovered;
 
 fn reachAction(run: *Run, point: test_pause.Point, binding: store_module.ActionAttemptBinding) void {
-    if (comptime test_pause.enabled) if (run.host.probes.pause_owner) |owner| {
-        _ = owner.reach(point, .{
-            .operation = binding.parent_operation_id,
-            .action = binding.action_id,
-            .attempt = @import("attempt.zig").action_attempt_ordinal,
-        }) catch {};
-    };
+    run.host.probes.reach(point, .{
+        .operation = binding.parent_operation_id,
+        .action = binding.action_id,
+        .attempt = @import("attempt.zig").action_attempt_ordinal,
+    });
 }
 
 fn reachModel(run: *Run, point: test_pause.Point, binding: store_module.AttemptBinding) void {
-    if (comptime test_pause.enabled) if (run.host.probes.pause_owner) |owner| {
-        _ = owner.reach(point, .{ .operation = binding.operation_id, .attempt = binding.attempt_ordinal }) catch {};
-    };
+    run.host.probes.reach(point, .{ .operation = binding.operation_id, .attempt = binding.attempt_ordinal });
 }
 
 const AttemptOwner = struct {
@@ -1029,7 +1022,7 @@ const NativeTurn = struct {
             self.fenced = true;
             return error.Fence;
         };
-        if (recovered) retryRecovered(self.run.host);
+        if (recovered) self.run.host.probes.retryRecovered();
         return recovered;
     }
 
@@ -1986,7 +1979,7 @@ fn launchPreparedBash(run: *Run, slot: *ExecutionSlot, prepared: *bash.Prepared)
     const action_binding = slot.bash_preparing.attempt.binding;
     // This blocking pause holds the shared execution loop until release.
     if (comptime test_pause.enabled) reachAction(run, .action_before_handoff, action_binding);
-    pause(run.host, .{ .action_launch = action_binding });
+    run.host.probes.holdAt(.{ .action_launch = action_binding });
     if (!run.host.lifecycle.launchAllowed()) {
         discardBashResources(run, slot, prepared.takeCleanup());
         return;
@@ -2099,7 +2092,7 @@ noinline fn completeBash(run: *Run, slot: *ExecutionSlot) void {
     const materialized = materializeBashResult(run, slot, result) orelse return;
     const code = materialized.code;
     const value = materialized.value;
-    pause(run.host, .{ .action_result = binding });
+    run.host.probes.holdAt(.{ .action_result = binding });
     // This blocking pause holds the shared execution loop until release.
     if (comptime test_pause.enabled) reachAction(run, .action_result_ready, binding);
     const delivered = active.attempt.settle(.{ .result = .{ .code = code, .value = value, .retained = result } });
@@ -2151,7 +2144,7 @@ fn reclaimBash(run: *Run, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) boo
     const active = &slot.bash;
     const closed = &active.delivery.closed;
     const retry_at = now.addDuration(.{ .raw = .fromMilliseconds(100), .clock = .awake });
-    if (bashReclaimHeld(run.host, active.attempt.binding, closed.reclaim_failed)) {
+    if (run.host.probes.bashReclaimHeld(active.attempt.binding, closed.reclaim_failed)) {
         closed.reclaim_at = retry_at;
         return false;
     }
@@ -2558,7 +2551,7 @@ fn launchPreparedRequest(
     run.host.probes.noteTransferStarted();
     // This blocking pause holds the shared execution loop until release.
     if (comptime test_pause.enabled) reachModel(run, .model_before_handoff, binding);
-    pause(run.host, .{ .model_launch = binding });
+    run.host.probes.holdAt(.{ .model_launch = binding });
     run.custody.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(run.host.io, .awake)) catch |err| {
         active.transfer.deinit();
         stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
@@ -2836,9 +2829,9 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
     const validated = &accepted.output;
     run.host.probes.traceOperation("validation_completed", owner.binding);
     if (comptime test_pause.enabled) reachModel(run, .model_result_ready, owner.binding);
-    pause(run.host, .{ .model_result = owner.binding });
+    run.host.probes.holdAt(.{ .model_result = owner.binding });
     if (!run.custody.claimTerminalDelivery(owner.token)) return .cleanup;
-    var settlement_trace = SettlementTrace.init(run.host, owner.binding);
+    var settlement_trace = SettlementTrace.init(run.host.probes, owner.binding);
     workspace.settlement = .{
         .source = validated.source,
         .source_length = validated.source_length,
@@ -2948,9 +2941,7 @@ fn shutdownExecution(run: *Run, slots: []ExecutionSlot, workspace: *Workspace) v
             finishCustodyNow(run, slot);
         },
     };
-    if (comptime test_pause.enabled) if (run.host.probes.pause_owner) |owner| {
-        _ = owner.reach(.host_shutdown_signalled, .{}) catch {};
-    };
+    if (comptime test_pause.enabled) run.host.probes.reach(.host_shutdown_signalled, .{});
     var retained_cleanup_at = std.Io.Clock.Timestamp.now(run.host.io, .awake);
     while (hasOwnedSlots(slots)) {
         var made_progress = advanceBash(run, slots, workspace);
@@ -4072,7 +4063,7 @@ test "Bash releases both spills after lost custody or fenced settlement" {
         var owner = test_pause.PauseController.init(std.testing.io, std.heap.c_allocator);
         defer owner.deinit();
         try owner.arm(.{ .point = .action_result_ready });
-        host.probes.pause_owner = &owner;
+        host.probes.attachPauseOwner(&owner);
         var completion: Completion = .{ .state = &run, .slot = &slot };
         const thread = try std.Thread.spawn(.{}, Completion.run, .{&completion});
         var joined = false;
@@ -4095,7 +4086,7 @@ test "Bash releases both spills after lost custody or fenced settlement" {
         try owner.release(arrival.id, .proceed);
         thread.join();
         joined = true;
-        host.probes.pause_owner = null;
+        host.probes.attachPauseOwner(null);
         try std.testing.expect(slot == .bash and slot.bash.delivery == .closed);
         try execution_state.custody.checkDetached(token, .{ .action = binding });
         try std.testing.expectEqual(outcome == .lost, host.lifecycle.launchAllowed());
