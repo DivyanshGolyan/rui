@@ -56,7 +56,7 @@ test("connect starts a ready Host and close stops it", { skip }, async () => {
 	const rui = await connect(store);
 	const info = await hostInfo(rui);
 	assert.equal(info.active_capacity, "2");
-	assert.equal(info.capabilities.providers.openai, "key_file");
+	assert.equal(info.capabilities.connections.find((entry: { name: string }) => entry.name === "openai")?.route, "key_file");
 	assert.equal(info.store, realpathSync(store));
 	assert.equal(rui.hostInfo?.innodb_doublewrite, undefined);
 	assert.equal(Object.hasOwn(info, "innodb_doublewrite"), false);
