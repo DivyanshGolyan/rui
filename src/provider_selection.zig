@@ -153,3 +153,16 @@ test "CM-57 served-name selection resolves by name across counts, readiness and 
 fn built_ins_first() connection.Name {
     return provider_route.built_in_names[0];
 }
+
+test "a custom name a live Host serves is selectable by explicit name; an absent name is refused" {
+    const model_capability = @import("model_capability.zig");
+    const alpha = connection.Name.parse("alpha").?;
+    var readiness: Readinesses = .initFill(.missing);
+    // The live Host serves alpha, so the served set reads it as configured.
+    readiness.set(alpha, .configured);
+    var caps = model_capability.capabilities(&readiness);
+    const selected = try resolve(caps.slice(), "alpha", "custom-model", null, null);
+    try std.testing.expectEqualStrings("alpha", selected.selected.provider);
+    try std.testing.expectEqualStrings("custom-model", selected.selected.model);
+    try std.testing.expectError(error.UnsupportedSelectionProvider, resolve(caps.slice(), "gamma", null, null, null));
+}

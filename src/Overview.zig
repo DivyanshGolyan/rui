@@ -28,6 +28,7 @@ const stderr = @import("stderr.zig");
 const test_poll = @import("test_poll");
 const app_events = @import("testing/app_events.zig");
 const view = @import("overview_view.zig");
+const provider_selection = @import("provider_selection.zig");
 const ClientTask = @import("ClientTask.zig");
 const UpgradeJob = @import("UpgradeJob.zig");
 const ReleaseWatch = @import("ReleaseWatch.zig");
@@ -1602,17 +1603,23 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
 
 fn savedDefault(self: *const Self) ?view.Default {
     if (!self.options.selectors.needsPreferences() or self.options.home.len == 0) return null;
-    return resolveDefault(&self.state, .{
+    const snapshot: new_session_selection.Snapshot = .{
         .intent = self.options.selectors,
         .defaults = preferences.load(self.options.home) catch return null,
-    });
+    };
+    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const destination = snapshot.destination(self.options.home, &fallback) catch return null;
+    // The hook is the Store's served readiness, the same owner the CLI doors read.
+    var usable = if (self.hooks.ready) |ready| ready(self.init, destination.path) else provider_selection.Readinesses.initFill(.configured);
+    for (usable.names()) |name| usable.set(name, .configured);
+    return resolveDefault(&self.state, snapshot, &usable);
 }
 
-fn resolveDefault(state: *const view.State, saved: new_session_selection.Snapshot) ?view.Default {
+fn resolveDefault(state: *const view.State, saved: new_session_selection.Snapshot, usable: *const provider_selection.Readinesses) ?view.Default {
     if (!saved.intent.needsPreferences()) return null;
     var snapshot = saved;
     snapshot.intent.provider = state.savedProvider(snapshot.intent.provider, if (snapshot.defaults.provider.len != 0) snapshot.defaults.provider.slice() else null);
-    const binding = (snapshot.resolve(&.initFill(.configured)) catch return null) orelse return null;
+    const binding = (snapshot.resolve(usable) catch return null) orelse return null;
     return view.Default.of(binding.provider.slice(), binding.model.slice());
 }
 
