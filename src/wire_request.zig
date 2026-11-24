@@ -249,25 +249,13 @@ pub const Ingress = struct {
         const request = &self.request;
         var moved: usize = 0;
         switch (request.*) {
-            .configure => |*command| {
-                for ([_]*ContentField{ &command.configuration.instructions, &command.configuration.output_schema, &command.configuration.app_tools }) |field| {
-                    if (field.state != .value) continue;
-                    self.take(field);
-                    moved += 1;
-                }
-            },
+            .configure => |*command| moved += self.takeConfiguration(&command.configuration),
             .action_publish => |*command| {
                 self.take(&command.text);
                 moved += 1;
             },
             .message => |*command| {
-                if (command.configuration) |*configuration| {
-                    for ([_]*ContentField{ &configuration.instructions, &configuration.output_schema }) |field| {
-                        if (field.state != .value) continue;
-                        self.take(field);
-                        moved += 1;
-                    }
-                }
+                if (command.configuration) |*configuration| moved += self.takeConfiguration(configuration);
                 if (command.text.state == .value) {
                     self.take(&command.text);
                     moved += 1;
@@ -279,6 +267,19 @@ pub const Ingress = struct {
         self.metadata.deinit(self.allocator);
         self.metadata = .empty;
         return request;
+    }
+
+    /// Moves every captured document of a configuration out of its capture slots and returns how many moved.
+    /// Each configuration document a request can hold is listed here once, so a document captured for a field
+    /// that no branch takes cannot leave the count unmatched.
+    fn takeConfiguration(self: *Ingress, configuration: *Configuration) usize {
+        var moved: usize = 0;
+        for ([_]*ContentField{ &configuration.instructions, &configuration.output_schema, &configuration.app_tools }) |field| {
+            if (field.state != .value) continue;
+            self.take(field);
+            moved += 1;
+        }
+        return moved;
     }
 
     fn take(self: *Ingress, field: *ContentField) void {
@@ -842,6 +843,48 @@ test "initial Message ingress streams the plain spec and transfers all three con
             try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
             try std.testing.expect(retained == null);
         }
+    }
+}
+
+test "app tools declared on a create or a configure are captured and taken by the request" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    const tools = "[{\"name\":\"lookup\",\"description\":\"Find.\",\"inputSchema\":{\"type\":\"object\"}}]";
+    const message = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"task\"},\"configuration\":{\"model\":\"custom\",\"effort\":null,\"compactAt\":1000,\"tools\":[],\"permissionMode\":\"ask\",\"appTools\":" ++ tools ++ "}}";
+    const configure = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{\"instructions\":\"first\\n\",\"appTools\":" ++ tools ++ "}}";
+    const cases = [_]struct { bytes: []const u8, kind: protocol.Kind }{
+        .{ .bytes = message, .kind = .message },
+        .{ .bytes = configure, .kind = .configure },
+    };
+    var used = std.atomic.Value(u64).init(0);
+    var retained: ?named_scratch.Owner = null;
+    for (cases, 0..) |case, index| {
+        var ingress: Ingress = undefined;
+        ingress.init(std.testing.allocator, .{
+            .io = io,
+            .content_length = case.bytes.len,
+            .scratch_path = root[0..root_len],
+            .request_number = 90 + index,
+            .retained_scratch = &retained,
+            .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
+            .expected_kind = case.kind,
+        });
+        defer ingress.deinit();
+        try ingress.feed(case.bytes);
+        const request = try ingress.finish();
+        defer request.removeTemporaryContent(io) catch unreachable;
+        const app_tools = switch (request.*) {
+            .message => |command| command.configuration.?.app_tools,
+            .configure => |command| command.configuration.app_tools,
+            else => unreachable,
+        };
+        try std.testing.expect(app_tools.hasFile());
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(tools), &app_tools.digest);
+        try request.removeTemporaryContent(io);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
 }
 
