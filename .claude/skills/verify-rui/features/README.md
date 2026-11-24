@@ -8,7 +8,7 @@ Use these names when describing a change or a screenshot. Panels and notices cou
 
 | Screen | How to get there | Main actions (keyboard and mouse) | Feature |
 | --- | --- | --- | --- |
-| Overview | Run `rui`; Esc back from a chat | Up/Down, Home/End select; Enter or click opens; Left/Right collapse or expand descendants; Alt-? opens the next question; Alt-Up/Down switch; Ctrl-X stops; Alt-A archives | [Overview and session list](./overview.md) |
+| Overview | Run `rui`; Esc back from a chat | Up/Down, Home/End select; Enter, Right or click opens; Alt-Left/Right collapse or expand descendants and double-click toggles them; Alt-? opens the next question; Alt-Up/Down switch; Ctrl-X stops; Alt-A archives | [Overview and session list](./overview.md) |
 | Chat | Open a list row or **+ New chat** | Type and Enter send; Shift-Enter adds a line; Ctrl-P/Ctrl-N recall messages; PgUp/PgDn, arrows or wheel scroll; click **↓**, Esc, End (empty draft) or Ctrl-G return to latest; Left focuses the list; Enter on the open row or a click returns to chat | [Compose and submit](./compose-submit.md), [New Session](./new-chat.md), [navigation](./status-navigation.md) |
 | App settings | End then Enter on Overview, or click **Settings** | Up/Down then Enter, or click a field/choice; **Version** starts Upgrade; Esc goes back | [App settings and Keys](./app-settings.md) |
 | Keys | Open **Keys** in Settings | Read the key reference; Esc returns to Settings | [App settings and Keys](./app-settings.md) |

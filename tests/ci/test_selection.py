@@ -464,7 +464,7 @@ class BuildModuleTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertNotEqual(before, after)
                 result = select([table], "review", AVAILABLE | {"new-integration"}, contents={table: (before, after)})
-                self.assertEqual(set(result["targets"]) - {"stack-frames"}, expected - {"stack-frames"})
+                self.assertEqual(set(result["targets"]), expected)
                 if native is not None:
                     self.assertEqual(set(result["native_targets"]), native)
                 self.assertTrue(result["typecheck_macos"])
@@ -476,7 +476,7 @@ class BuildModuleTest(unittest.TestCase):
 
     def test_a_module_edit_selects_the_targets_it_defines(self):
         selectable = ({target for _, checks, native, _ in RULES for target in (*checks, *native)}
-                      | UNIT_ROOTS.keys() | FIXTURES.keys() | CHECK_COVERS | {"check", "check-full", "stack-frames", "test-full"})
+                      | UNIT_ROOTS.keys() | FIXTURES.keys() | CHECK_COVERS | {"check", "check-full", "test-full"})
         defined = build_files.steps()
         for module, targets in BUILD_MODULES.items():
             with self.subTest(module=module):
@@ -797,17 +797,6 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/request_encoding.zig"], "review", AVAILABLE)
         self.assertIn("test-logic", result["targets"])
         self.assertNotIn("check", result["targets"])
-
-    def test_host_frame_inputs_select_the_linux_frame_gate(self):
-        for path in ("src/request_encoding.zig", "src/h2/Engine.zig", "src/bash_platform.c", "build.zig",
-                     "src/preferences.zig", "src/store.zig", "tests/ci/stack_frames.json", "tests/ci/stack_frames.py"):
-            with self.subTest(path=path):
-                result = select([path], "review", AVAILABLE)
-                self.assertIn("stack-frames", result["targets"])
-                self.assertNotIn("stack-frames", result["native_targets"])
-        for path in ("src/SessionFrontend.zig", "src/tests.zig", "src/logic_tests.zig", "src/store/wire/pg.zig"):
-            with self.subTest(path=path):
-                self.assertNotIn("stack-frames", select([path], "review", AVAILABLE)["targets"])
 
     def test_logic_root_selects_its_executable_root(self):
         for path in ("src/logic_tests.zig", "src/core_boundary.zig"):
@@ -1191,7 +1180,7 @@ class SelectionTest(unittest.TestCase):
             native = sorted(["bash-integration", "bash-lifecycle-integration", "bash-owner-integration",
                              "bash-recovery-integration", "test", "test-logic"])
             self.assertEqual(result["native_targets"], native, path)
-            self.assertEqual(result["targets"], sorted(native + ["deep-modules", "stack-frames"]), path)
+            self.assertEqual(result["targets"], sorted(native + ["deep-modules"]), path)
 
     def test_codex_credential_values_keep_portable_and_native_owner_checks(self):
         for path in ("src/codex_credential_policy.zig", "src/codex_token_wire.zig"):
@@ -1200,7 +1189,7 @@ class SelectionTest(unittest.TestCase):
             native = sorted(["chatgpt-login-integration", "chatgpt-plan-integration", "codex-credential-integration",
                              "codex-h2-integration", "codex-integration", "test", "test-logic"])
             self.assertEqual(result["native_targets"], native)
-            self.assertEqual(result["targets"], sorted(native + ["deep-modules", "stack-frames"]))
+            self.assertEqual(result["targets"], sorted(native + ["deep-modules"]))
 
     def test_union_deduplicates_only_checks_owned_by_broad_gate(self):
         result = select(["tests/integration/host_process.py", "src/codex_credentials.zig"], "review", AVAILABLE)
@@ -1383,7 +1372,7 @@ class SelectionTest(unittest.TestCase):
                 (["tests/ci/caller_errors.py"], every - {"formal"}),
                 (["tests/ci/import_architecture.py"], every - {"formal"}),
                 (["tests/ci/host_settings_locality.py"], every - {"formal"}),
-                (["tests/ci/stack_frames.json"], every - {"formal"})):
+                ):
             for phase in ("development", "review"):
                 with self.subTest(paths=paths, phase=phase):
                     skips = select(paths, phase, AVAILABLE)["policy_skips"]
@@ -1677,7 +1666,7 @@ fi
 
     def test_long_gate_runs_alone_and_short_suites_share_three_shards(self):
         short = [f"suite-{index}-integration" for index in range(14)]
-        for gates in (["check"], ["test"], ["check-full"], ["check-full", "stack-frames"]):
+        for gates in (["check"], ["test"], ["check-full"], ["check-full", "rsql-table"]):
             with self.subTest(gates=gates):
                 rows = shards(sorted(gates + short))["include"]
                 packed = [row for row in rows if not LONG_GATES.intersection(row["targets"])]
@@ -2660,8 +2649,8 @@ class PolicySelfCheckTableTest(unittest.TestCase):
 
 MANIFEST = (ROOT / "build.zig.zon").read_text()
 PR_ROOTS = sorted(PR_UNIT_ROOTS)
-# build.zig.zon is a frame gate input and a deep-modules input, so a manifest change also runs both on the PR.
-MANIFEST_PR_SET = sorted(PR_UNIT_ROOTS | {"deep-modules", "stack-frames"})
+# build.zig.zon is a deep-modules input, so a manifest change also runs it on the PR.
+MANIFEST_PR_SET = sorted(PR_UNIT_ROOTS | {"deep-modules"})
 BUILD_MODULE_PATHS = tuple(BUILD_MODULES)
 CONTENT_RULE_PATHS = tuple(pattern for patterns, _ in CONTENT_RULES.values() for pattern in patterns)
 
@@ -2739,7 +2728,7 @@ class LinkedDependencySelectionTest(unittest.TestCase):
     def test_manifest_edit_outside_dependencies_keeps_bootstrap_selection(self):
         after = MANIFEST.replace('.version = "0.1.0"', '.version = "0.1.1"', 1)
         self.assertEqual(changed_dependencies(MANIFEST, after), [])
-        self.assertEqual(self.manifest_change(MANIFEST, after)["fast_targets"], ["deep-modules", "stack-frames", "test-logic"])
+        self.assertEqual(self.manifest_change(MANIFEST, after)["fast_targets"], ["deep-modules", "test-logic"])
 
     def test_every_manifest_dependency_is_linked_by_some_target(self):
         linked = {name for packages in tree_graph().links.values() for name in packages}
@@ -2814,7 +2803,6 @@ class SuspectAttributionTest(unittest.TestCase):
         return attribute(path, self.graph, self.available, read, contents=contents, fixture_literals=self.literals)
 
     def test_a_targets_own_script_or_source_is_direct(self):
-        self.assertEqual(self.reach("tests/ci/stack_frames.py")["stack-frames"], DIRECT)
         self.assertEqual(self.reach("src/bash.zig")["bash-integration"], DIRECT)
         self.assertEqual(self.reach("src/store/rsql.zig")["rsql-table"], DIRECT)
 

@@ -53,8 +53,6 @@ const unmapZeroed = pages.unmapZeroed;
 const Limits = server_host.Limits;
 const SettlementTrace = server_host.SettlementTrace;
 const default_bash_path = server_host.default_bash_path;
-const beginTestObservation = server_host.beginTestObservation;
-const writeTestTrace = server_host.writeTestTrace;
 const traceSubject = server_host.traceSubject;
 const traceServiceBoundary = server_host.traceServiceBoundary;
 const traceLifecycleService = server_host.traceLifecycleService;
@@ -71,12 +69,11 @@ const test_pause = @import("testing/pause.zig");
 const traceTransfer = server_host.traceTransfer;
 const pause = server_host.pause;
 const bashReclaimHeld = server_host.bashReclaimHeld;
-const retryRecoveryHeld = server_host.retryRecoveryHeld;
 const retryRecovered = server_host.retryRecovered;
 const observeUnprocessedCompletions = server_host.observeUnprocessedCompletions;
 
 fn reachAction(host: *Host, point: test_pause.Point, binding: store_module.ActionAttemptBinding) void {
-    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+    if (comptime test_pause.enabled) if (host.probes.pause_owner) |owner| {
         _ = owner.reach(point, .{
             .operation = binding.parent_operation_id,
             .action = binding.action_id,
@@ -86,7 +83,7 @@ fn reachAction(host: *Host, point: test_pause.Point, binding: store_module.Actio
 }
 
 fn reachModel(host: *Host, point: test_pause.Point, binding: store_module.AttemptBinding) void {
-    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+    if (comptime test_pause.enabled) if (host.probes.pause_owner) |owner| {
         _ = owner.reach(point, .{ .operation = binding.operation_id, .attempt = binding.attempt_ordinal }) catch {};
     };
 }
@@ -539,7 +536,7 @@ pub fn executionMain(host: *Host) void {
         unmapZeroed(bash_work);
     }
     const budget = host.retention.sharedBudget().narrowed(
-        if (host.hooks.fails(.request_scratch_acquire)) 0 else host.limits.request_scratch_limit_bytes,
+        if (host.probes.fails(.request_scratch_acquire)) 0 else host.limits.request_scratch_limit_bytes,
     );
     var listing_urls: std.EnumArray(provider.ListingKind, ?[]const u8) = .initFill(null);
     defer for (listing_urls.values, std.enums.values(provider.ListingKind)) |url, kind| {
@@ -791,14 +788,14 @@ const NativeTurn = struct {
                 break;
             };
             if (!interrupt) continue;
-            const reply = self.host.store.backgroundAction(.{ .live_action = watch.binding.action_id }, self.host.hooks.storeFaults(.action_result));
+            const reply = self.host.store.backgroundAction(.{ .live_action = watch.binding.action_id }, self.host.probes.storeFaults(.action_result));
             if (reply == .infrastructure_failure or reply == .conflict) {
                 self.host.lifecycle.fenceDispatch("Message Action promotion", error.ActionPromotionFailed);
                 break;
             }
         }
         while (self.host.custody.nextBackgroundDue(observed, self.host.background_after_ms)) |binding| {
-            const reply = self.host.store.backgroundAction(.{ .live_action = binding.action_id }, self.host.hooks.storeFaults(.action_result));
+            const reply = self.host.store.backgroundAction(.{ .live_action = binding.action_id }, self.host.probes.storeFaults(.action_result));
             if (reply == .infrastructure_failure or reply == .conflict) {
                 self.host.lifecycle.fenceDispatch("automatic Action promotion", error.ActionPromotionFailed);
                 break;
@@ -877,7 +874,7 @@ const NativeTurn = struct {
     }
 
     pub noinline fn recoverExhaustedRetry(self: *NativeTurn) error{Fence}!bool {
-        if (retryRecoveryHeld(self.host)) return false;
+        if (self.host.probes.releaseRetryRecovery()) return false;
         const active_slots = ActiveSlots{ .slots = self.slots };
         const active_filter = store_module.ActiveOperationFilter{
             .context = &active_slots,
@@ -993,7 +990,7 @@ const NativeTurn = struct {
         if (preparation.pendingReady()) return false;
         const progress = self.host.store.admitModelAttemptStep(
             preparation.kind.?,
-            self.host.hooks.storeFaults(.attempt_admission),
+            self.host.probes.storeFaults(.attempt_admission),
             null,
             preparation,
         ) catch |err| {
@@ -1167,7 +1164,7 @@ const slotsHaveBash = hasBash;
 
 fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot, workspace: *Workspace) bool {
     const active_reactor = reactor orelse return false;
-    const completion = active_reactor.nextCompletion(host.hooks.fails(.response_seal)) catch |err| {
+    const completion = active_reactor.nextCompletion(host.probes.fails(.response_seal)) catch |err| {
         host.lifecycle.fenceDispatch("transport completion", err);
         return false;
     } orelse return false;
@@ -1476,7 +1473,7 @@ noinline fn runMessageDecline(host: *Host, action_id: u64, session: []const u8) 
     command.session.set(session) catch unreachable;
     const key = std.fmt.bufPrint(&command.key.bytes, "rui.core/message-decline/{d}", .{action_id}) catch unreachable;
     command.key.len = key.len;
-    switch (host.store.declineForMessage(&command, host.hooks.storeFaults(.action_result))) {
+    switch (host.store.declineForMessage(&command, host.probes.storeFaults(.action_result))) {
         .accepted, .rejected, .conflict => return .admitted,
         .infrastructure_failure => {
             host.lifecycle.fenceDispatch("Message approval decline", error.CanonicalStoreFailure);
@@ -1488,7 +1485,7 @@ noinline fn runMessageDecline(host: *Host, action_id: u64, session: []const u8) 
 noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) execution_turn.Admission {
     var command: protocol.SessionStopCommand = .{ .key = owed.key };
     command.session.set(owed.session.slice()) catch unreachable;
-    switch (host.store.stopOwedSession(&command, host.hooks.storeFaults(.action_result))) {
+    switch (host.store.stopOwedSession(&command, host.probes.storeFaults(.action_result))) {
         .accepted, .rejected, .conflict => {},
         .infrastructure_failure => {
             host.lifecycle.fenceDispatch("owed stop", error.CanonicalStoreFailure);
@@ -1512,7 +1509,7 @@ noinline fn runOwedEnding(host: *Host, owed: *const store_module.OwedEnding) exe
         }
     else
         null;
-    _ = host.store.deliverChildEndingBound(owed.turn_id, if (captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| {
+    _ = host.store.deliverChildEndingBound(owed.turn_id, if (captured) |*value| value else null, host.probes.storeFaults(.action_result)) catch |err| {
         host.lifecycle.fenceDispatch("child ending", err);
         return .retry_later;
     };
@@ -1520,7 +1517,7 @@ noinline fn runOwedEnding(host: *Host, owed: *const store_module.OwedEnding) exe
 }
 
 noinline fn runSessionForward(host: *Host, forward_id: u64) execution_turn.Admission {
-    _ = host.store.deliverSessionForward(forward_id, host.hooks.storeFaults(.action_result)) catch |err| {
+    _ = host.store.deliverSessionForward(forward_id, host.probes.storeFaults(.action_result)) catch |err| {
         host.lifecycle.fenceDispatch("session forward", err);
         return .retry_later;
     };
@@ -1568,7 +1565,7 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
             return .retry_later;
         },
     };
-    _ = host.store.deliverAgentMessageBound(input.binding, arguments.id.slice(), text.list.items, if (captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    _ = host.store.deliverAgentMessageBound(input.binding, arguments.id.slice(), text.list.items, if (captured) |*value| value else null, host.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.StaleActionAttemptBinding => return .admitted,
         else => {
             host.lifecycle.fenceDispatch("core tool command", err);
@@ -1592,7 +1589,7 @@ noinline fn runFindTools(host: *Host, input: *const store_module.CoreActionInput
         // The report writer fails only when the arena is out of memory, the same retry as the search's.
         call.words.report = findToolsReload(host, arena.allocator()) catch return .retry_later;
     }
-    find_tools.settle(host.store, input, &call, arena.allocator(), host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    find_tools.settle(host.store, input, &call, arena.allocator(), host.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         error.StaleActionAttemptBinding => return .admitted,
         else => {
@@ -1616,7 +1613,7 @@ fn findToolsReload(host: *Host, arena: std.mem.Allocator) ![]const u8 {
 noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     var arena: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena.deinit();
-    read_transcript.run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    read_transcript.run(host.store, arena.allocator(), input, host.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         error.StaleActionAttemptBinding => return .admitted,
         else => {
@@ -1630,7 +1627,7 @@ noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreAction
 noinline fn runStopAction(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     var arena: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena.deinit();
-    @import("stop_action_tool.zig").run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    @import("stop_action_tool.zig").run(host.store, arena.allocator(), input, host.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         error.StaleActionAttemptBinding => return .admitted,
         else => {
@@ -1644,7 +1641,7 @@ noinline fn runStopAction(host: *Host, input: *const store_module.CoreActionInpu
 noinline fn runReadAction(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     var arena: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena.deinit();
-    read_action_tool.run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    read_action_tool.run(host.store, arena.allocator(), input, host.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         error.StaleActionAttemptBinding => return .admitted,
         else => {
@@ -1677,7 +1674,7 @@ noinline fn runSkill(host: *Host, input: *const store_module.CoreActionInput) ex
             if (err != error.OutOfMemory) host.lifecycle.fenceDispatch("skill capture", err);
             return .retry_later;
         };
-    _ = host.store.settleSkillTool(input.binding, arena, &captured, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    _ = host.store.settleSkillTool(input.binding, arena, &captured, host.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.StaleActionAttemptBinding => return .admitted,
         error.OutOfMemory => return .retry_later,
         else => {
@@ -1707,7 +1704,7 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
         .accepted => {},
         .rejected => |reason| {
             const result = std.fmt.allocPrint(arena, "Rui could not start the agent: {s}. Nothing was started.", .{reason}) catch return .retry_later;
-            _ = host.store.failCoreCall(input.binding, result, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+            _ = host.store.failCoreCall(input.binding, result, host.probes.storeFaults(.action_result)) catch |err| switch (err) {
                 error.StaleActionAttemptBinding => {},
                 else => host.lifecycle.fenceDispatch("core tool command", err),
             };
@@ -1719,7 +1716,7 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
     const committed = inheritance.messageCallback();
     const parent_skills = host.store.readSkills(arena, input.session.slice()) catch return .retry_later;
     const prepared = session_skills.prepareCreation(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home, .{ .bytes = start.task }) catch return .retry_later;
-    _ = host.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, prepared.initial, if (prepared.captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    _ = host.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, prepared.initial, if (prepared.captured) |*value| value else null, host.probes.storeFaults(.action_result)) catch |err| switch (err) {
         error.StaleActionAttemptBinding => return .admitted,
         else => {
             host.lifecycle.fenceDispatch("core tool command", err);
@@ -1739,7 +1736,7 @@ fn admitBashAttempt(
         return .retry_later;
     }) orelse return .no_work;
     const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.admitActionAttempt(selected, host.bash_timeout_ms, host.hooks.storeFaults(.attempt_admission)) catch |err| {
+    var admission = host.store.admitActionAttempt(selected, host.bash_timeout_ms, host.probes.storeFaults(.attempt_admission)) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         host.lifecycle.fenceDispatch("Bash Attempt admission", err);
         return .retry_later;
@@ -1775,7 +1772,7 @@ fn admitBashAttempt(
         host.lease.paths.selector(),
         host.bash_path,
         action_binding.action_id,
-        host.hooks.bashFaults(),
+        host.probes.bashFaults(),
     )) |failure| {
         var owned = failure;
         finishBashPreparationFailure(host, slot, &owned);
@@ -2083,7 +2080,7 @@ fn admitNewAttempt(
     }
     if (pending.pending() and !pending.pendingReady()) return .progress;
     const token = host.custody.reserve() orelse return .no_work;
-    const progress = host.store.admitModelAttemptStep(kind, host.hooks.storeFaults(.attempt_admission), .{
+    const progress = host.store.admitModelAttemptStep(kind, host.probes.storeFaults(.attempt_admission), .{
         .view = &preparation.page,
         .settings = &preparation.settings,
         .remembered = model_adapter.remembered(&host.history_memos),
@@ -2115,7 +2112,7 @@ fn admitRetryAttempt(
     due_ms: *?u64,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.tryAdmitNextModelRetry(active, host.hooks.storeFaults(.attempt_admission), due_ms) catch |err| {
+    var admission = host.store.tryAdmitNextModelRetry(active, host.probes.storeFaults(.attempt_admission), due_ms) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         host.lifecycle.fenceDispatch("retry Attempt admission", err);
         return .retry_later;
@@ -2149,7 +2146,7 @@ fn beginAdmittedAttempt(
         host.scratch_budget.?,
         host.providers.routes(),
         &host.history_memos,
-        host.hooks.preparationFaults(),
+        host.probes.preparationFaults(),
         &retained_scratch,
     ) catch |err| {
         finishModelPreparationFailure(host, slot, slot.model_preparing, err, retained_scratch);
@@ -2403,7 +2400,7 @@ fn launchPreparedRequest(
         .timing = host.custody.modelTiming(token) catch unreachable,
         .credential = headers.takeCredential(),
         .routing = .{ .turn_id = binding.turn_id, .owner = served.credential.routingOwner(lease) },
-        .faults = host.hooks.transferFaults(host.hook_progress.response_write_once_spent),
+        .faults = host.probes.transferFaults(),
         .response_workspace_bytes = if (owner.purpose == .compaction) @sizeOf(PendingFailure) else 0,
     }, &retained_response) catch |err| {
         request.deinit(host.io, host.scratch_budget.?);
@@ -2424,7 +2421,7 @@ fn launchPreparedRequest(
         finishCustodyNow(host, slot);
         return;
     };
-    host.hook_progress.response_write_once_spent = host.hooks.fails(.response_write_once);
+    host.probes.noteTransferStarted();
     // This blocking pause holds the shared execution loop until release.
     if (comptime test_pause.enabled) reachModel(host, .model_before_handoff, binding);
     pause(host, .{ .model_launch = binding });
@@ -2659,7 +2656,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
         host.lease.paths.scratch.slice(),
         metadata_name,
         metadata_budget,
-        host.hooks.fails(.response_metadata_unlink),
+        host.probes.fails(.response_metadata_unlink),
         &retained_metadata,
     ) catch |err| {
         if (retained_metadata) |retained| {
@@ -2689,7 +2686,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
     defer event_data.deinit();
     traceOperation(host, "validation_started", owner.binding);
     const operation = owner.purpose;
-    metadata.fail_writes = host.hooks.fails(.response_metadata);
+    metadata.fail_writes = host.probes.fails(.response_metadata);
     output_decode.interpret(&workspace.interpret, codec, host.io, response.file, response.length, &metadata, event_data, operation, .{
         .openai = openai_model.slice(),
         .alternate = x_openai_model.slice(),
@@ -2720,7 +2717,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
         .model_evidence = accepted.model_evidence,
         .request_id = answered.request_id,
     };
-    host.store.settleModelSuccess(owner.binding, &workspace.settlement, host.hooks.storeFaults(.{ .model_output = settlement_trace.storeTrace() })) catch |err| {
+    host.store.settleModelSuccess(owner.binding, &workspace.settlement, host.probes.storeFaults(.{ .model_output = settlement_trace.storeTrace() })) catch |err| {
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
@@ -2814,7 +2811,7 @@ fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace)
             finishCustodyNow(host, slot);
         },
     };
-    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+    if (comptime test_pause.enabled) if (host.probes.pause_owner) |owner| {
         _ = owner.reach(.host_shutdown_signalled, .{}) catch {};
     };
     var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
@@ -2906,7 +2903,7 @@ fn failedAtProviderPrepare(
     binding: store_module.AttemptBinding,
     request: *provider.PreparedRequest,
 ) bool {
-    if (!host.hooks.fails(.provider_prepare)) return false;
+    if (!host.probes.fails(.provider_prepare)) return false;
     request.deinit(host.io, host.scratch_budget.?);
     settleUnansweredFailure(host, token, binding, "provider_transport_failure", failureClass(host, .temporary, null, null));
     finishCustodyNow(host, slot);
@@ -2935,7 +2932,7 @@ fn settleFailure(
 }
 
 fn saveImmediateFailure(host: *Host, binding: store_module.AttemptBinding, failure: store_module.ModelFailure, disposition: store_module.ModelFailureClass) void {
-    const settled = host.store.settleModelAttemptFailurePrepared(binding, failure, disposition, host.hooks.storeFaults(.model_failure), null) catch |err| {
+    const settled = host.store.settleModelAttemptFailurePrepared(binding, failure, disposition, host.probes.storeFaults(.model_failure), null) catch |err| {
         if (err != error.SupersededByControl) host.lifecycle.fenceDispatch("model failure save", err);
         return;
     };
@@ -2954,7 +2951,7 @@ fn beginOverflowFailure(
 ) ?bool {
     if (owner.purpose != .compaction or disposition != .context_overflow) return null;
     if (!host.custody.claimTerminalDelivery(owner.token)) return false;
-    const settled = host.store.settleModelAttemptFailurePrepared(owner.binding, failure, disposition, host.hooks.storeFaults(.model_failure), null) catch |err| {
+    const settled = host.store.settleModelAttemptFailurePrepared(owner.binding, failure, disposition, host.probes.storeFaults(.model_failure), null) catch |err| {
         if (err != error.SupersededByControl) host.lifecycle.fenceDispatch("model failure save", err);
         return false;
     };
@@ -2992,7 +2989,7 @@ fn advancePendingFailure(host: *Host, slots: []ExecutionSlot, workspace: *Worksp
             owner.binding,
             pending.value(),
             .context_overflow,
-            host.hooks.storeFaults(.model_failure),
+            host.probes.storeFaults(.model_failure),
             &pending.floor.prepared.?,
         ) catch |err| {
             if (err != error.SupersededByControl) host.lifecycle.fenceDispatch("model failure save", err);
@@ -3013,7 +3010,7 @@ fn advancePendingFailure(host: *Host, slots: []ExecutionSlot, workspace: *Worksp
 }
 
 fn finishCustodyNow(host: *Host, slot: *ExecutionSlot) void {
-    const traced = if (host.hooks.phase_trace) host.custody.binding(slotToken(slot).?) catch unreachable else null;
+    const traced = if (host.probes.hooks.phase_trace) host.custody.binding(slotToken(slot).?) catch unreachable else null;
     moveSlot(host, slot, .free, {});
     if (traced) |binding| switch (binding) {
         .model => |model| traceOperation(host, "cleanup_completed", model),
@@ -3377,11 +3374,11 @@ test "HTTP error capture retires before execution custody" {
             .allocator = std.testing.allocator,
             .lease = undefined,
             .store = undefined,
-            .hooks = .{ .phase_trace = true },
             .custody = execution.CustodyPool.initialize(&records),
         };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, undefined);
+        host_parts.probes.hooks = .{ .phase_trace = true };
         const token = host.custody.reserve().?;
         var permit = store_module.DispatchPermit{ .binding = .{
             .turn_id = 3,
@@ -3514,11 +3511,11 @@ test "forced refresh captures retire before custody publication across Store cla
             .allocator = std.testing.allocator,
             .lease = undefined,
             .store = &fixture.storage,
-            .hooks = .{ .phase_trace = true },
             .custody = execution.CustodyPool.initialize(&fixture.records),
         };
         var fixture_parts: TestParts = undefined;
         fixture_parts.attach(&fixture.host, undefined);
+        fixture_parts.probes.hooks = .{ .phase_trace = true };
         fixture.host.scratch_used.store(17, .release);
         const budget = ScratchBudget{ .used = &fixture.host.scratch_used, .limit = 4 * 1024 * 1024 };
         const token = fixture.host.custody.reserve().?;
@@ -3648,11 +3645,11 @@ test "cleanup publication follows complete execution retirement" {
         .allocator = std.testing.allocator,
         .lease = undefined,
         .store = undefined,
-        .hooks = .{ .phase_trace = true },
         .custody = execution.CustodyPool.initialize(&records),
     };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
+    host_parts.probes.hooks = .{ .phase_trace = true };
     var slot: ExecutionSlot = .free;
     boundary.slot = &slot;
     boundary.custody = &host.custody;
@@ -3781,7 +3778,7 @@ test "cleanup publication follows complete execution retirement" {
     boundary.token = token;
     boundary.observed = false;
     var gate_path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
-    host.hooks.bash_reclaim_gate_path = try std.fmt.bufPrint(&gate_path_buffer, "{s}/released-gate", .{root});
+    host.probes.hooks.bash_reclaim_gate_path = try std.fmt.bufPrint(&gate_path_buffer, "{s}/released-gate", .{root});
     slot.bash.execution.stdout_capture.cleanup_fault = .persistent;
     boundary.release_expected = true;
     try std.testing.expect(reclaimBash(&host, &slot, deadline));
@@ -3913,12 +3910,12 @@ test "Bash releases both spills after lost custody or fenced settlement" {
         try std.testing.expectEqual(@as(u64, 48_000), host.scratch_used.load(.acquire));
         if (outcome == .lost) {
             try std.testing.expectEqual(tool_settle.Delivered.delivered, tool_settle.fixed(&host, .{ .token = token, .binding = binding, .publication_phase = "prior result" }, .succeeded, "prior result"));
-        } else host.hooks.failures.insert(.result_before_commit);
+        } else host.probes.arm(.result_before_commit);
 
         var owner = test_pause.PauseController.init(std.testing.io, std.heap.c_allocator);
         defer owner.deinit();
         try owner.arm(.{ .point = .action_result_ready });
-        host.pause_owner = &owner;
+        host.probes.pause_owner = &owner;
         var completion: Completion = .{ .host = &host, .slot = &slot };
         const thread = try std.Thread.spawn(.{}, Completion.run, .{&completion});
         var joined = false;
@@ -3941,7 +3938,7 @@ test "Bash releases both spills after lost custody or fenced settlement" {
         try owner.release(arrival.id, .proceed);
         thread.join();
         joined = true;
-        host.pause_owner = null;
+        host.probes.pause_owner = null;
         try std.testing.expect(slot == .bash and slot.bash.delivery == .closed);
         try host.custody.checkDetached(token, .{ .action = binding });
         try std.testing.expectEqual(outcome == .lost, host.lifecycle.launchAllowed());
@@ -4395,11 +4392,11 @@ test "failed admission releases its reservation and fences the Store and dispatc
                 .allocator = std.testing.allocator,
                 .lease = undefined,
                 .store = &storage,
-                .hooks = .{ .failures = if (kind == .message) .initOne(.attempt_before_commit) else .empty },
                 .custody = execution.CustodyPool.initialize(&records),
             };
             var host_parts: TestParts = undefined;
             host_parts.attach(&host, undefined);
+            host_parts.probes.hooks = .{ .failures = if (kind == .message) .initOne(.attempt_before_commit) else .empty };
             var slots = [_]ExecutionSlot{ .free, .free, .free };
             const sibling = if (with_sibling) host.custody.reserve().? else null;
             if (sibling) |token| {

@@ -1506,6 +1506,14 @@ while True:
         self.assertEqual(states["tools-running"]["expect"],
                          ["◝ Build the docs", "Run the slow tests", "ctrl+x stop"])
 
+    def test_default_frames_cover_keys_reference(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        keys = next(state for state in scenario["states"] if state["name"] == "keys")
+        for meaning in ("next focus", "previous focus", "ctrl+o   tool output", "ctrl+c   leave",
+                        "open chat · info actions", "fold / expand tree"):
+            self.assertIn(meaning, keys["expect"])
+        self.assertIn("/help", keys["absent"])
+
     def test_default_frames_cover_inline_tool_folds(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
@@ -1535,22 +1543,16 @@ while True:
         self.assertIn("    … 14 more lines", states["tool-open-long"]["expect"])
         self.assertIn({"gone": "/details"}, states["slash"]["steps"])
         self.assertNotIn("help", states)
-        self.assertIn("ctrl+o   tool output", states["keys"]["expect"])
-        self.assertIn("ctrl+c   leave", states["keys"]["expect"])
-        self.assertEqual(len(states["keys"]["expect"]), 14)
-        for meaning in ("next focus", "previous focus", "fold tree · info actions"):
-            self.assertIn(meaning, states["keys"]["expect"])
-        self.assertIn("/help", states["keys"]["absent"])
         self.assertIn("× Fail with exit 127", states["chat"]["expect"])
-        self.assertIn("exit 127", states["chat"]["expect"])
 
-    def test_tool_frames_require_adjacent_rows_and_explicit_exit_fields(self):
+    def test_tool_frames_require_adjacent_rows_without_exit_fields(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
         for name in ("chat", "tool-open", "tool-open-two", "tool-open-nocolor"):
             with self.subTest(state=name):
-                self.assertIn("exit 127", states[name]["expect"])
-                self.assertIn("exit 1", states[name]["expect"])
+                self.assertNotIn("exit 127", states[name]["expect"])
+                self.assertNotIn("exit 1", states[name]["expect"])
+                self.assertIn(r"× Fail with an excerpt[ \t]+exit 1[ \t]*$", states[name]["absent_regex"])
                 self.assertEqual(states[name]["expect_next"]["× Fail with exit 127"], "× Fail with an excerpt")
                 self.assertIn("Fail with exit 127 · 127", states[name]["absent"])
 

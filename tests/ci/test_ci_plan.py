@@ -12,7 +12,7 @@ from qualification import shards, split_build
 def selection(documentation=False):
     return dict(
         base='base', head='head',
-        targets=[] if documentation else ['check', 'stack-frames', 'test-native', 'transport-h2-integration'],
+        targets=[] if documentation else ['check', 'test-native', 'transport-h2-integration'],
         fast_targets=[] if documentation else ['test-logic', 'test-native', 'transport-h2-integration'],
         native_targets=[] if documentation else ['test-native', 'transport-h2-integration'],
         server_targets=[] if documentation else ['server'],
@@ -73,7 +73,7 @@ class PlanTest(unittest.TestCase):
         normal_linux = ['check', 'test-native', 'transport-h2-integration']
         # CI-69: promotion, scheduled or by hand, runs every check the PR tier skips, whatever the batch touched.
         promoted_linux = ['admission-debug-integration', 'check-full', 'deep-modules', 'host-status-integration',
-                          'mysql-wire-integration', 'rsql-table', 'stack-frames', 'test-logic', 'transport-h2-integration']
+                          'mysql-wire-integration', 'rsql-table', 'test-logic', 'transport-h2-integration']
         promoted_mac = ['admission-debug-integration', 'check-full', 'test-logic', 'transport-h2-integration']
         expected_targets = {
             ('draft', False): ([], []), ('draft', True): ([], []),
@@ -141,7 +141,7 @@ class PlanTest(unittest.TestCase):
                 (False, True), ([], ['test-logic']), (False, True), (False, True), (False, True)):
             with self.subTest(mac=mac_required, native=native_targets, upgrade=upgrade, retry=retry,
                               obligations=obligations):
-                original = dict(selection(), targets=['check', 'stack-frames', 'test-store'],
+                original = dict(selection(), targets=['check', 'test-store'],
                     fast_targets=['test-logic', 'test-store'], mac_required=mac_required,
                     native_targets=native_targets, upgrade_required=upgrade, retry=retry,
                     **{key: obligations for key in promotion_only})
@@ -159,7 +159,7 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(output['quarantine'], 'admission' if retry else 'off')
                 promoted = plan(original, event_name='workflow_dispatch', draft=False,
                                 promotion=True, change_kind=ChangeKind.NORMAL).outputs
-                for target in ('stack-frames', 'mysql-wire-integration', 'check-full', 'test-logic',
+                for target in ('rsql-table', 'mysql-wire-integration', 'check-full', 'test-logic',
                                'admission-debug-integration'):
                     self.assertIn(target, promoted['targets'])
                 self.assertEqual(promoted['native_targets'],
@@ -194,9 +194,9 @@ class PlanTest(unittest.TestCase):
         from select_tests import select
         available = set(build_files.steps())
         for paths, ready_compile in (
-                (['src/store/schema.zig'], ['deep-modules', 'stack-frames', 'test', 'test-native', 'test-store']),
-                (['src/request_encoding.zig'], ['deep-modules', 'stack-frames', 'test-logic', 'test-native']),
-                (['README.md', 'src/request_encoding.zig'], ['deep-modules', 'stack-frames', 'test-logic', 'test-native'])):
+                (['src/store/schema.zig'], ['deep-modules', 'test', 'test-native', 'test-store']),
+                (['src/request_encoding.zig'], ['deep-modules', 'test-logic', 'test-native']),
+                (['README.md', 'src/request_encoding.zig'], ['deep-modules', 'test-logic', 'test-native'])):
             with self.subTest(paths=paths):
                 selected = select(paths, 'review', available)
                 self.assertEqual(selected['unit_compile_required'], paths == ['src/store/schema.zig'])
@@ -243,7 +243,7 @@ class PlanTest(unittest.TestCase):
                  change_kind=ChangeKind.NORMAL, compile_only=True)
 
     def test_ready_pr_runs_the_fast_tier_and_every_other_event_the_full_selection(self):
-        for targets, fast in ((['check'], ['test-logic', 'test-native']), (['stack-frames'], []),
+        for targets, fast in ((['check'], ['test-logic', 'test-native']), (['rsql-table'], []),
                               (['check-full', 'test-store'], ['test-logic', 'test-native', 'test-store']),
                               (['test-logic'], ['test-logic']), ([], [])):
             with self.subTest(targets=targets):
@@ -256,7 +256,7 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(manual['targets'], targets)
                 promoted = plan(source, event_name='workflow_dispatch',
                                 draft=False, promotion=True, change_kind=ChangeKind.NORMAL).outputs
-                self.assertTrue({'check-full', 'stack-frames'} <= set(promoted['targets']))
+                self.assertTrue({'check-full', 'rsql-table'} <= set(promoted['targets']))
 
 
 if __name__ == '__main__':

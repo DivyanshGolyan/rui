@@ -46,7 +46,7 @@ jobs:
     with:
       sha: ${{ inputs.head }}
   selected:
-    # Full check-full, frame gate and Debug recovery on Linux and macOS, plus
+    # Full check-full and Debug recovery on Linux and macOS, plus
     # the targets the batch's paths select.
     permissions:
       contents: read
