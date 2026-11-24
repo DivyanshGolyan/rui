@@ -6638,7 +6638,6 @@ test "socket upgrade discovery shares one refusal window and settles an unanswer
     _ = try std.Io.Dir.cwd().statFile(io, socket, .{ .follow_symlinks = false });
     // Once its holder is gone, the next look proves it dead and removes it.
     candidates.items[0].result = .{ .unanswered = error.ConnectionRefused };
-    endpoint.held.?.lock.close(io);
     endpoint.held.?.dir.close(io);
     endpoint.held = null;
     settleUnansweredSockets(allocator, io, &candidates);

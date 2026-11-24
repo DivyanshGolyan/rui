@@ -1542,15 +1542,15 @@ while True:
             self.assertIn(meaning, states["keys"]["expect"])
         self.assertIn("/help", states["keys"]["absent"])
         self.assertIn("× Fail with exit 127", states["chat"]["expect"])
-        self.assertIn("exit 127", states["chat"]["expect"])
 
-    def test_tool_frames_require_adjacent_rows_and_explicit_exit_fields(self):
+    def test_tool_frames_require_adjacent_rows_without_exit_fields(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
         for name in ("chat", "tool-open", "tool-open-two", "tool-open-nocolor"):
             with self.subTest(state=name):
-                self.assertIn("exit 127", states[name]["expect"])
-                self.assertIn("exit 1", states[name]["expect"])
+                self.assertNotIn("exit 127", states[name]["expect"])
+                self.assertNotIn("exit 1", states[name]["expect"])
+                self.assertIn(r"× Fail with an excerpt[ \t]+exit 1[ \t]*$", states[name]["absent_regex"])
                 self.assertEqual(states[name]["expect_next"]["× Fail with exit 127"], "× Fail with an excerpt")
                 self.assertIn("Fail with exit 127 · 127", states[name]["absent"])
 
@@ -2515,12 +2515,11 @@ while True:
         self.assertIsNotNone(failure(state, wrong))
         self.assertIsNone(failure(state, wrong.replace("Old completed answer", "Stopped")))
 
-    def test_chat_frames_require_loaded_sidebar_rows_and_a_last_row_footer(self):
+    def test_chat_frames_require_loaded_sidebar_rows_and_a_footer_above_the_inset(self):
         states = {state["name"]: state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]}
         for name in ("chat-no-new-session", "chat-sidebar-rows"):
             state = states[name]
             self.assertIn("+ New chat", state["absent"])
-            self.assertEqual(state["expect_last"], "gpt-6.1-sol")
             self.assertIn("alt+i info", state["absent"])
         self.assertEqual(states["chat-no-new-session"]["sizes"][0], (140, 40))
         self.assertIn({"wait": "Schema migration"}, states["chat-no-new-session"]["steps"])
@@ -2528,12 +2527,15 @@ while True:
         for label in ("Schema migration", "Sidebar chat", "Batch job"):
             self.assertIn(label, states["chat-sidebar-rows"]["expect"])
         failure = self.helper["frame_row_failure"]
-        state = {"expect_last": "gpt-6.1-sol"}
-        for height in (30, 40):
-            good = "\n" * (height - 1) + "gpt-6.1-sol · high\n"
-            self.assertIsNone(failure(state, good))
-            self.assertIsNotNone(failure(state, good + "\n"))
-            self.assertIsNotNone(failure(state, good + "   Settings  ┆\n"))
+        for name in ("chat-no-new-session", "chat-sidebar-rows", "chat-footer-below-half"):
+            state = states[name]
+            for _, height in state["sizes"]:
+                with self.subTest(state=name, height=height):
+                    footer = "\n" * (height - 2) + "gpt-6.1-sol · high"
+                    self.assertIsNone(failure(state, footer + "\n"))
+                    self.assertIsNotNone(failure(state, "\n" + footer))
+                    self.assertIsNotNone(failure(state, footer + "\n   Settings  ┆"))
+                    self.assertIsNotNone(failure(state, footer + "\n\n"))
 
     def test_chat_footer_frames_hide_permanent_info_and_unused_context(self):
         states = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
@@ -2551,7 +2553,6 @@ while True:
         self.assertEqual(fresh["sizes"], [(140, 40), (46, 30)])
         self.assertEqual(fresh["open"], "Context budget witness")
         self.assertEqual(fresh["cast"][0]["messages"], ["Check context budget"])
-        self.assertEqual(fresh["expect_last"], "gpt-6.1-sol")
         for text in ("context left", "100% left", "alt+i info"):
             self.assertIn(text, fresh["absent"])
 

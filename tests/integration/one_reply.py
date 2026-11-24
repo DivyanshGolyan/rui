@@ -34,18 +34,16 @@ def one_reply(path, response, *, timeout=10):
         sockets.append(listener)
         cancel, wake = socket.socketpair()
         sockets.extend((cancel, wake))
-        # The mock claims D the way a Host does: it holds D/rui.lock while it
-        # serves, so no census proves D dead under it.
+        # The mock claims D the way a Host does: it holds an exclusive flock on
+        # D itself while it serves, so no census proves D dead under it.
         if not path.parent.exists():
             path.parent.mkdir(mode=0o700)
             parent_made = True
         def claim():
-            # One attempt: the held fd, or None after closing every fd it opened.
+            # One attempt: the held D descriptor, or None after closing every fd it opened.
             nonlocal parent_made, acquired
             try:
-                fd = os.open(path.parent / "rui.lock",
-                             os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
-                             0o600)
+                fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             except FileNotFoundError:
                 try:
                     path.parent.mkdir(mode=0o700)
@@ -57,7 +55,7 @@ def one_reply(path, response, *, timeout=10):
                 os.close(fd)
                 return None
             try:
-                named = os.stat(path.parent / "rui.lock", follow_symlinks=False).st_ino
+                named = os.stat(path.parent, follow_symlinks=False).st_ino
             except FileNotFoundError:
                 named = None
             if named != os.fstat(fd).st_ino:
@@ -169,7 +167,6 @@ def one_reply(path, response, *, timeout=10):
 
         dispose_all(retire, *(sock.close for sock in sockets),
                     lambda: path.unlink(missing_ok=True) if bound else None,
-                    lambda: (path.parent / "rui.lock").unlink(missing_ok=True) if lock_fd is not None else None,
                     lambda: _remove_empty_directory(path.parent) if parent_made else None,
                     lambda: os.close(lock_fd) if lock_fd is not None else None)
 
