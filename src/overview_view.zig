@@ -2137,8 +2137,8 @@ fn placeArchived(state: *State, read: ArchivedRead, page: ArchivedPage) error{Ou
     const selected_key = if (selected_ref) |reference| if (state.find(reference)) |row| row.archive_seq else null else null;
     const range: [2]u64 = switch (read.from) {
         .head => .{ 0, std.math.maxInt(u64) },
-        .below => |key| .{ page.last orelse 0, key - 1 },
-        .above => |key| .{ key + 1, page.first orelse std.math.maxInt(u64) },
+        .below => |key| .{ if (page.more_below) page.last orelse 0 else 0, key - 1 },
+        .above => |key| .{ key + 1, if (page.more_above) page.first orelse std.math.maxInt(u64) else std.math.maxInt(u64) },
         .tail => unreachable,
     };
     const authority_range: [2]u64 = if (read.from == .head and page.more_below)
@@ -6322,9 +6322,12 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     var tail = session("eeeeee", .{ .finished = ago(5) }, .{ .label = "tail archived" });
     tail.archive_state = .archived;
     tail.archive_seq = 11;
-    refresh_effects = .{};
-    readArchived(&views, &refresh_effects, .{ .below = 20 });
-    head_read = refresh_effects.slice()[0].read_archived;
+    const next_page = try step(&views, .{ .viewport = .{ .first = 0, .end = 1 } });
+    try std.testing.expectEqual(@as(usize, 1), next_page.len);
+    try std.testing.expect(next_page.items[0] == .read_archived);
+    try std.testing.expect(next_page.items[0].read_archived.from == .below);
+    try std.testing.expectEqual(@as(u64, 20), next_page.items[0].read_archived.from.below);
+    head_read = next_page.items[0].read_archived;
     _ = try step(&views, .{ .archived = .{ .read = head_read, .page = .{ .rows = &.{ middle, tail }, .first = 14, .last = 11, .more_above = false, .more_below = false } } });
     try std.testing.expect(views.selected == .none);
     try std.testing.expectEqualStrings("aaaaaa", &views.conversing.?);
@@ -6332,6 +6335,23 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     try expectEffects(&.{}, try press(&views, .open_session));
     try expectEffects(&.{}, try press(&views, .archive));
     try expectNotice(&views, no_selection);
+
+    // A completed newer-page answer also proves omissions above its newest returned key.
+    var above = try opened(&.{});
+    defer above.deinit();
+    var above_effects: Effects = .{};
+    try changeArchiveView(&above, .archived, &above_effects);
+    const initial_read = above_effects.slice()[0].read_archived;
+    const selected_archived = session("zz0001", .{ .finished = ago(1) }, .{ .archive_state = .archived, .archive_seq = 30 });
+    _ = try step(&above, .{ .archived = .{ .read = initial_read, .page = .{ .rows = &.{selected_archived}, .first = 30, .last = 30, .more_above = false, .more_below = false } } });
+    above.selected = .{ .session = selected_archived.reference };
+    const above_page_row = session("zz0002", .{ .finished = ago(2) }, .{ .archive_state = .archived, .archive_seq = 25 });
+    above_effects = .{};
+    readArchived(&above, &above_effects, .{ .above = 20 });
+    const above_read = above_effects.slice()[0].read_archived;
+    _ = try step(&above, .{ .archived = .{ .read = above_read, .page = .{ .rows = &.{above_page_row}, .first = 25, .last = 25, .more_above = false, .more_below = true } } });
+    try std.testing.expect(above.selected == .none);
+
     _ = try press(&views, .previous);
     try std.testing.expect(views.selected == .archived);
     _ = try step(&views, .{ .input = .{ .key = .left } });
@@ -7405,7 +7425,7 @@ test "SUI-132 a trim preserves the selected Archived identity through conversati
 
     _ = try step(&state, .{ .conversation = span.first });
     try std.testing.expectEqualSlices(u8, &selected, &state.selected.session);
-    try std.testing.expectEqualSlices(u8, &selected, &state.conversing.?);
+    try std.testing.expectEqualSlices(u8, &span.first, &state.conversing.?);
     _ = try refresh(&state, .changed, testToken(2), &.{});
     try std.testing.expectEqualSlices(u8, &selected, &state.selected.session);
     try std.testing.expectEqual(state.find(selected).?.archive_seq, selected_key);
@@ -7437,7 +7457,7 @@ test "SUI-132 a trim preserves the selected Archived identity through conversati
     };
     _ = try step(&state, .{ .archived = .{ .read = read, .page = head } });
     try std.testing.expect(state.selected == .none);
-    try std.testing.expectEqualSlices(u8, &selected, &state.conversing.?);
+    try std.testing.expectEqualSlices(u8, &span.first, &state.conversing.?);
     try std.testing.expect(selected_key >= head.last.?);
 }
 
