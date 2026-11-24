@@ -754,10 +754,10 @@ def normalize(targets: set) -> set:
 WHOLE_SUITE_GATES = frozenset({"check", "check-full", "test", "test-full"})
 PR_UNIT_ROOTS = frozenset({"test-native", "test-store", "test-logic", "test-h2", "test-pg"})
 
-# The targets a changed dependency may add: the PR unit roots and the targets the whole-suite gates run
-# (CHECK_COVERS, FIXTURE_COVERS). A link to any other target (measurement, cross, typecheck, upgrade ...) is not added.
+# A changed dependency adds PR unit roots, whole-suite targets, and the Vaxis clipboard owner tests.
+# Links to other targets (measurement, cross, typecheck, upgrade ...) are not added.
 CI_RUNNABLE = frozenset(PR_UNIT_ROOTS | CHECK_COVERS | {covered for cases in FIXTURE_COVERS.values() for covered in cases}
-                        | set(FIXTURE_COVERS))
+                        | set(FIXTURE_COVERS) | {"test-vaxis-clipboard"})
 # Store unit tests run on a PR only for a change to the Store itself.
 STORE_PATHS = ("src/store.zig", "src/store/*")
 
