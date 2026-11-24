@@ -603,7 +603,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 
 fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const semantic = listKey(input, delivery, self.root.input.listFocused());
+    const semantic = listKey(input, delivery);
     const before = self.state.selected;
     try self.appNext(ctx, try self.event(.{ .input = .{
         .key = semantic,
@@ -620,8 +620,8 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
     ctx.consumeAndRedraw();
 }
 
-fn listKey(input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery, focused: bool) view.Input {
-    if (focused and delivery.list_origin and delivery.under == .main and !delivery.pasted and input == .key_press) {
+fn listKey(input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) view.Input {
+    if (delivery.list_origin and delivery.under == .main and !delivery.pasted and input == .key_press) {
         // Ghostty can send Option-arrows as the same word-motion keys used by the composer.
         const alias: ?keymap.Key = switch (keypress.classify(input.key_press)) {
             .edit => |edit| switch (edit) {

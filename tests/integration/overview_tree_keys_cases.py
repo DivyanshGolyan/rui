@@ -56,7 +56,15 @@ def tree_key_custody():
                 screen.keys(b"\x1b")
                 screen.wait(lambda frame: task in frame and "Notifications" not in frame,
                             "paste, Settings and Keys leave the tree expanded")
-                screen.keys(FIRST_ROW + RIGHT)
+                screen.keys(FIRST_ROW)
+                screen.wait(lambda _: screen.style("Tree parent").bold, "parent selected after Settings")
+                for left, right in ENCODINGS:
+                    screen.keys(left)
+                    screen.wait(lambda frame: task not in frame and "▸ 1" in frame,
+                                "parent folds after returning from Settings")
+                    screen.keys(right)
+                    screen.contains(task)
+                screen.keys(RIGHT)
                 screen.contains("Parent answer")
                 for left, right in ENCODINGS:
                     screen.keys(b"first draft")
@@ -67,6 +75,18 @@ def tree_key_custody():
                     screen.wait(lambda _: screen.capture.draft("first _draft!", 15), "composer word right")
                     screen.keys(b"\x15")
                     screen.wait(lambda _: screen.capture.draft("", 2), "composer cleared")
+                if columns == 140:
+                    screen.keys(LEFT)
+                    screen.wait(lambda _: screen.style("Tree parent").bold, "split list focused")
+                    for left, right in ENCODINGS:
+                        screen.keys(left)
+                        screen.wait(lambda frame: task not in frame and "▸ 1" in frame and "Parent answer" in frame,
+                                    "split list folds without replacing the chat")
+                        screen.keys(right)
+                        screen.wait(lambda frame: task in frame and "Parent answer" in frame,
+                                    "split list expands without replacing the chat")
+                    screen.keys(RIGHT + b"retained")
+                    screen.wait(lambda _: screen.capture.draft("retained", 10), "Right returns to composer")
 
         rows = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
         child, = (entry["reference"] for entry in rows if entry["creator"] == parent)
