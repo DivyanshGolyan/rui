@@ -143,7 +143,7 @@ FIXTURES = {
     "canonical-failure-integration": ((I + "canonical_failure_integration.py",), (),
                                       (CALLER, "src/SessionFrontend.zig", "src/failure_class.zig", "src/model_adapter.zig")),
     "overview-integration": ((I + "overview_integration.py", I + "overview_fixture.py", I + "overview_groups_cases.py", I + "overview_counts_cases.py",
-                              I + "overview_clicks_cases.py", I + "overview_keyboard_cases.py"), (),
+                              I + "overview_clicks_cases.py", I + "overview_keyboard_cases.py", I + "overview_tree_counts_cases.py"), (),
                              ("src/Overview.zig", "src/overview_view.zig", "src/OverviewLines.zig", "src/GroupedList.zig",
                               "src/process_memory.zig", "src/host_identity.zig", "src/host_identity.c")),
     "model-picker-integration": ((I + "model_picker_integration.py", I + "model_picker_signin_integration.py",
