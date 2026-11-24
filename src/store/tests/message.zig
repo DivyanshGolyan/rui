@@ -40,11 +40,11 @@ test "a creating Message with require_model creates nothing without a model" {
             message.text = try testingBytesContent(&tmp, "composer-message", "start here");
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
 
-            storage.served = protocol.routesAll(.unserved);
+            storage.servedSet().* = protocol.Served{};
             const refused = storage.submitMessageWithModel(&message, null, .{});
             try std.testing.expectEqual(protocol.MessageRejection.model_capability_unavailable, refused.rejected.code);
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
-            storage.served = protocol.routesAll(.endpoint);
+            storage.servedSet().* = protocol.servedBuiltIns(.endpoint);
             try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}).rejected.replayed);
             var unconditional = message;
             unconditional.require_model = false;
@@ -75,7 +75,7 @@ test "a Message to an existing Session with require_model is refused only while 
                 .{ .served = false, .require_model = true, .key = "existing-unserved-required", .file = "existing-unserved-required" },
             };
             for (cases) |item| {
-                storage.served = protocol.routesAll(if (item.served) .endpoint else .unserved);
+                storage.servedSet().* = (if (item.served) protocol.servedBuiltIns(.endpoint) else protocol.Served{});
                 var message: wire_request.MessageCommand = .{ .require_model = item.require_model };
                 try message.key.set(item.key);
                 try message.session.set(session.slice());
@@ -105,7 +105,7 @@ test "a Message to an existing Session with require_model is refused only while 
             try std.testing.expect(storage.submitMessageWithModel(&dropped_condition, null, .{}) == .conflict);
 
             // A refused key stays refused after the provider is served again; the person sends a new Message.
-            storage.served = protocol.routesAll(.endpoint);
+            storage.servedSet().* = protocol.servedBuiltIns(.endpoint);
             var replay = wire_request.MessageCommand{ .require_model = true };
             try replay.key.set("existing-unserved-required");
             try replay.session.set(session.slice());
@@ -187,7 +187,7 @@ test "a Message with require_model follows the Session's archive state and provi
                 message.text = try testingBytesContent(&tmp, row.name ++ "-msg", "hello again");
                 defer message.removeTemporaryContent(std.testing.io) catch unreachable;
 
-                storage.served = protocol.routesAll(if (row.served_first) .endpoint else .unserved);
+                storage.servedSet().* = (if (row.served_first) protocol.servedBuiltIns(.endpoint) else protocol.Served{});
                 const first = storage.submitMessageWithModel(&message, null, .{});
                 if (row.refused) |code| {
                     try std.testing.expect(first == .rejected and !first.rejected.replayed);
@@ -199,7 +199,7 @@ test "a Message with require_model follows the Session's archive state and provi
                 try std.testing.expect(observation.found);
                 try std.testing.expectEqual(row.state, observation.archive_state);
 
-                storage.served = protocol.routesAll(if (row.served_replay) .endpoint else .unserved);
+                storage.servedSet().* = (if (row.served_replay) protocol.servedBuiltIns(.endpoint) else protocol.Served{});
                 const replay = storage.submitMessageWithModel(&message, null, .{});
                 if (row.refused) |code| {
                     try std.testing.expect(replay == .rejected and replay.rejected.replayed);

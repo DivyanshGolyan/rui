@@ -1404,7 +1404,7 @@ test "A faded screen holds what rendering shows: children above their parents in
     try std.testing.expectEqualStrings("nabb" ++ "aabc", &text);
 }
 
-test "SUI-130 Root routes captured selection through divider and footer as the sole hit" {
+test "SUI-142 Root routes captured selection through divider and footer as the sole hit" {
     const Probe = struct {
         count: usize = 0,
         last: vaxis.Mouse = undefined,

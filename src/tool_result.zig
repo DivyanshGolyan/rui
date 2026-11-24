@@ -21,7 +21,7 @@ pub const SeekableStream = struct {
     adopt: *const fn (*anyopaque) ?retention.Spill,
 };
 
-pub const Value = union(enum) { text: []const u8, parts: InputCapture.Loan };
+pub const Value = @import("tool_delivery.zig").Value;
 pub const Rejection = union(enum) { reason: []const u8, failure: Failure };
 pub const ImageProgress = union(enum) { pending, kept, rejected: Rejection, failed: Failure };
 pub const Finished = union(enum) { value: Value, failed: struct { failure: Failure, seal: bool } };

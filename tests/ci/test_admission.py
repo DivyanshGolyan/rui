@@ -139,7 +139,7 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('- name: Require PR Shape\n        id: shape', plan)
         self.assertIn('python3 tests/ci/pr_shape.py "$BASE"', plan)
         self.assertEqual(admission.count("if: ${{ needs.plan.outputs.screens_required == 'true' }}"), 1)
-        self.assertIn('sparse-checkout: tests/ci', admission)
+        self.assertIn('sparse-checkout: |\n            tests/ci\n', admission)
         self.assertIn('ref: ${{ needs.plan.outputs.candidate_ref }}', admission)
         self.assertIn('run: python3 tests/ci/pr_shape.py --screens', admission)
         self.assertLess(admission.index('- name: Require screen evidence'),
@@ -662,7 +662,7 @@ class CandidatePlanTest(unittest.TestCase):
             'upgrade-integration', 'test-logic', 'test-native'}),
         'slow fixture owner': (['src/Upgrade.zig'], {'deep-modules', 'upgrade-integration'}),
         'core owning no fixture': (['src/request_encoding.zig'], {'deep-modules', 'test-logic', 'test-native'}),
-        'core owning one fixture': (['src/session_skills.zig'], {'deep-modules', 'skills-integration', 'test-logic', 'test-native'}),
+        'core owning one fixture': (['src/session_skills.zig'], {'deep-modules', 'skills-integration', 'test-native'}),
         'Host source under check': (['src/wire_version.zig'], {'deep-modules', 'test-logic', 'test-native'}),
         'measurement own file': (['tests/qualification/call-classification/main.go'], {'measurement-check'}),
         'measurement non-own file': (['build/measurement.zig'], set()),

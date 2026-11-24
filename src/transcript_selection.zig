@@ -237,7 +237,7 @@ fn rowColumnsMap() !void {
     try std.testing.expectEqualSlices(bool, &@as([10]bool, @splat(false)), &columns);
 }
 
-test "SUI-133 transcript projection leaves generated gutters and preserves authored blank rows" {
+test "SUI-145 transcript projection leaves generated gutters and preserves authored blank rows" {
     try rowColumnsMap();
     const testing = std.testing;
     const DocumentType = viewport.Sized(256, true);
@@ -393,11 +393,12 @@ test "selection contrasts with sent bands and padding at both widths" {
             const old_text = row_cells[4].style.reverse;
             const old_unselected = row_cells[1].style.reverse;
             try testing.expectEqual(!colour, old);
-            try testing.expect(columns[0] and columns[4]);
+            const top_cap = position.row == 0;
+            try testing.expectEqual(!top_cap, columns[0] and columns[4]);
             columns[1] = false;
             highlight(row_cells, columns[0..width]);
-            try testing.expectEqual(!old, row_cells[0].style.reverse);
-            try testing.expectEqual(!old_text, row_cells[4].style.reverse);
+            try testing.expectEqual(if (top_cap) old else !old, row_cells[0].style.reverse);
+            try testing.expectEqual(if (top_cap) old_text else !old_text, row_cells[4].style.reverse);
             try testing.expectEqual(old_unselected, row_cells[1].style.reverse);
         }
     };

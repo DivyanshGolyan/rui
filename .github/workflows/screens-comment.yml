@@ -68,21 +68,13 @@ jobs:
           GEN: ${{ inputs.gen }}
         run: |
           python3 tests/ci/screens_comment.py --diff "$RUNNER_TEMP/diff.json" --shots "$RUNNER_TEMP/shots.json" --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --gen "$GEN" --base "$BASE"
-      - name: Rerun latest failed admission job
+      - name: Recheck the current admission after publishing screens
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
           HEAD_SHA: ${{ inputs.head }}
-        run: |
-          set -euo pipefail
-          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/check.yml/runs?head_sha=$HEAD_SHA&per_page=100" > "$RUNNER_TEMP/check-runs.json"
-          while IFS= read -r run_id; do
-            job_id=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=latest&per_page=100" | jq -r '[.[].jobs[] | select(.name == "admission" and .conclusion == "failure")] | first | .id // empty')
-            if [ -n "$job_id" ]; then
-              gh api --method POST "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/rerun"
-              break
-            fi
-          done < <(jq -r '[.[].workflow_runs[]] | sort_by(.created_at) | reverse | .[].id' "$RUNNER_TEMP/check-runs.json")
+        run: python3 -B tests/ci/screens_recheck.py
   cleanup:
     if: ${{ github.event_name == 'pull_request_target' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04

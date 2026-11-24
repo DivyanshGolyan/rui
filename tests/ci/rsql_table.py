@@ -85,7 +85,7 @@ def slot(text):
         return ".now"
     if text[0] == "a":
         return ".{ .argument = %d }" % int(text[1:])
-    return ".{ .served = .%s }" % text[1:]
+    return ".{ .served = %d }" % int(text[1:])
 
 
 def mysql_template(parts, slots):
