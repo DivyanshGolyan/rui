@@ -962,7 +962,7 @@ test "start_agent and configure parse the same plain agent spec into the same Co
                 try std.testing.expectEqual(a.count, b.count);
                 try std.testing.expectEqualStrings(a.names.slice(), b.names.slice());
             },
-            .content => {
+            .content, .app_tools => {
                 try std.testing.expectEqual(a.length, b.length);
                 try std.testing.expectEqualSlices(u8, &a.digest, &b.digest);
                 try std.testing.expect(b.hasFile());
@@ -979,14 +979,15 @@ test "start_agent spec schema covers every noninherited Session setting" {
     const properties = schema.object.get("properties").?.object.get("spec").?.object.get("properties").?.object;
     try std.testing.expect(!properties.contains("workspace") and !properties.contains("provider"));
     try std.testing.expect(properties.contains("loadedTools") and properties.contains("outputReservation"));
+    // A child cannot declare app tools (its lane root does), so start_agent's spec leaves appTools out.
     inline for (@import("session_settings.zig").entries) |entry| {
-        if (comptime !std.mem.eql(u8, entry.field, "workspace") and !std.mem.eql(u8, entry.field, "provider"))
+        if (comptime !std.mem.eql(u8, entry.field, "workspace") and !std.mem.eql(u8, entry.field, "provider") and !std.mem.eql(u8, entry.field, "app_tools"))
             try std.testing.expect(properties.contains(entry.spec));
     }
     const preferences = properties.get("preferences").?.object;
     try std.testing.expect(preferences.get("properties").?.object.contains("reasoning_effort"));
     try std.testing.expect(preferences.get("properties").?.object.contains("permission_mode"));
-    try std.testing.expectEqual(@import("session_settings.zig").entries.len - 1, properties.count());
+    try std.testing.expectEqual(@import("session_settings.zig").entries.len - 2, properties.count());
 }
 
 test "read_action accepts only own-Session bounded canonical decimal arguments" {

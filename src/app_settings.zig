@@ -25,6 +25,7 @@ pub const Backend = struct {
     save_state: *const fn (*anyopaque) SaveState,
     upgrade: *const fn (*anyopaque) anyerror!void,
     run: *const fn (*anyopaque) ?upgrade_status.Run,
+    available: ?*const fn (*anyopaque) ?upgrade_status.Version = null,
     caps: *const fn (*anyopaque) view.Caps,
     memory: ?*const fn (*anyopaque) ?view.Memory = null,
     models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
@@ -160,8 +161,8 @@ fn tail(self: *Self, row: Row) ?[]const u8 {
     if (self.failures.get(row)) |failure| return failure;
     if (row != .version) return null;
     const backend = self.backend orelse return null;
-    const run = backend.run(backend.context) orelse return null;
-    return upgrade_status.fieldTail(run, &self.upgrade_buffer);
+    const available = if (backend.available) |read| read(backend.context) else null;
+    return upgrade_status.versionTail(backend.run(backend.context), available, &self.upgrade_buffer);
 }
 
 fn bind(self: *Self) void {

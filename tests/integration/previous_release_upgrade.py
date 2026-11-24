@@ -9,6 +9,7 @@ import pathlib
 import re
 import resource
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -63,7 +64,13 @@ def build_candidate_release(candidate, root):
     return prefix / "bin/rui-upgrade-release-fixture"
 
 
-def install_candidate_release(candidate, publisher, root):
+RESTART_ALL_BLOCK = """if ! "$prefix/bin/rui" host restart --all; then
+    printf '%s\\n' 'Rui was installed, but some Hosts could not be restarted; follow the instructions above and retry rui host restart --all.' >&2
+fi
+"""
+
+
+def install_candidate_release(candidate, publisher, root, *, restart=True):
     sys.path.insert(0, str(candidate / "tests/ci"))
     import release
 
@@ -78,11 +85,17 @@ def install_candidate_release(candidate, publisher, root):
     with archive.open("rb") as packed:
         digest = hashlib.file_digest(packed, "sha256").hexdigest()
     script = root / "install.sh"
-    script.write_text(release.installer(
+    rendered = release.installer(
         (candidate / "release/install.sh").read_text(), version,
         {target: digest for target in release.PLATFORMS},
         (candidate / "release/publish.sh").read_text(),
-        release.download_policy((candidate / "src/download_policy.zig").read_text())))
+        release.download_policy((candidate / "src/download_policy.zig").read_text()))
+    if not restart:
+        # The installer's only restart is its final `host restart --all`; drop that block so the
+        # candidate is laid out exactly as the installer lays it out, with no Host restarted.
+        assert rendered.count(RESTART_ALL_BLOCK) == 1, "installer restart block changed"
+        rendered = rendered.replace(RESTART_ALL_BLOCK, "")
+    script.write_text(rendered)
     tools = root / "tools"
     tools.mkdir()
     curl = tools / "curl"
@@ -110,6 +123,29 @@ os.execv(os.environ["RUI_UPGRADE_REAL_CURL"], ["curl", *args])
     return pathlib.Path(os.environ["HOME"], ".local/bin/rui"), output
 
 
+def plain_start(binary, store, seed, root):
+    """Start the candidate as a user does, in a process group the old Host kills when it stops.
+
+    The old Host kills its Bash tool groups when it stops, which takes this `rui` with them. The
+    coordinator must keep running in its own session, so the Store still gets a ready Host.
+    """
+    log = root / "plain-start.log"
+    with log.open("w") as output:
+        candidate = subprocess.Popen([binary, "host", "start", "--store", str(store)],
+                                     start_new_session=True, stdin=subprocess.DEVNULL,
+                                     stdout=output, stderr=subprocess.STDOUT)
+    try:
+        def old_host_stopped():
+            assert candidate.poll() is None, ("host start exited before the previous Host stopped", log.read_text())
+            return seed.poll() is not None
+        wait_for(old_host_stopped, "previous-release Host to stop", timeout=20, interval=0.005)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(candidate.pid, signal.SIGKILL)
+        candidate.wait(timeout=5)
+    print(f"Killed the plain host start process group after the previous Host stopped; log {log}", flush=True)
+
+
 def assert_running_upgrade(dialect, binary, store, seed, ready, previous, version, output):
     state, shown = dialect.host_status(binary, store, 5)
     assert state == "ready", shown
@@ -123,27 +159,17 @@ def assert_running_upgrade(dialect, binary, store, seed, ready, previous, versio
         assert served == previous["capabilities"]["providers"].get(provider, "unserved"), (previous, current)
     with os_semantics.unix_stream() as connection:
         connection.settimeout(5)
-        connection.connect(ready["socket"])
+        connection.connect(str(host_process.store_endpoint(store)))
         pid = os_semantics.socket_peer_pid(connection)
     assert pid != seed.pid, "installer kept the previous-release process"
     executable = os_semantics.process_executable(pid)
     assert executable == binary.resolve(), (executable, binary.resolve())
     assert release_version(binary) == version, "installer did not select the candidate version"
     assert release_version(executable) == version, "serving Host is not the candidate version"
-    assert f"{store}: restarted on {version}" in output, output
+    if output is not None:
+        assert f"{store}: restarted on {version}" in output, output
     wait_for(lambda: seed.poll() is not None, "previous-release Host retirement", timeout=10)
     print(f"Running Host upgraded to {version}, instance {previous['instance']} → {current['instance']}", flush=True)
-
-
-def assert_endpoint_layout_break(previous_cli, previous_artifact, store, seed, previous_status, output):
-    # #2120 moved the endpoint into a per-Host folder. A baseline from before it
-    # cannot be found by the candidate, so the installer names the Host it left.
-    assert "left running: ownership is unconfirmed" in output, output
-    assert "1 left unchanged" in output, output
-    assert seed.poll() is None, "installer stopped the previous-release Host"
-    state, shown = previous_cli.host_status(previous_artifact, store, 5)
-    assert state == "ready", shown
-    assert json.loads(shown)["instance"] == previous_status["instance"], (previous_status, shown)
 
 
 def supported_format(checkout):
@@ -268,17 +294,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--running-host", action="store_true",
                         help="previous is an unpacked release; leave its Host running during release/install.sh")
+    parser.add_argument("--plain-start", action="store_true",
+                        help="with --running-host: install without the installer's restart, then start the candidate with rui host start in a process group that is killed when the previous Host stops")
     parser.add_argument("--candidate-release", type=pathlib.Path,
                         help="with --running-host: install this release executable instead of building the upgrade fixture")
-    parser.add_argument("--baseline-layout", choices=("current", "before-endpoint-dirs"), default="current",
-                        help="with --running-host: before-endpoint-dirs asserts the accepted break for a previous release that predates per-Host endpoint folders (#2120)")
     parser.add_argument("previous", type=pathlib.Path)
     parser.add_argument("candidate", type=pathlib.Path)
     args = parser.parse_args()
     if args.candidate_release and not args.running_host:
         parser.error("--candidate-release requires --running-host")
-    if args.baseline_layout != "current" and not args.running_host:
-        parser.error("--baseline-layout requires --running-host")
+    if args.plain_start and not args.running_host:
+        parser.error("--plain-start requires --running-host")
     previous, candidate = args.previous.resolve(), args.candidate.resolve()
     if not args.running_host:
         previous_format = supported_format(previous)
@@ -321,12 +347,7 @@ def main():
 
         def stop_installed_host():
             nonlocal host_released
-            if args.running_host and args.baseline_layout == "before-endpoint-dirs":
-                # The candidate cannot reach a Host the baseline started, so only the previous CLI can release it.
-                if not host_released:
-                    stop_detached(previous_cli, previous_artifact, store)
-                    host_released = True
-            elif args.running_host:
+            if args.running_host:
                 stop_detached(candidate_cli, publisher, store)
                 host_released = True
             elif attempted_restart:
@@ -358,7 +379,8 @@ def main():
                 assert state == "ready" and seed.poll() is None, shown
                 previous_status = json.loads(shown)
                 print(f"Leaving previous release {release_version(previous_artifact)} running: {shown}", flush=True)
-                binary, installer_output = install_candidate_release(candidate, publisher, root)
+                binary, installer_output = install_candidate_release(
+                    candidate, publisher, root, restart=not args.plain_start)
             else:
                 subprocess.run([binary, *dialect.pause, "--store", store], check=True, timeout=10)
                 assert seed.wait(timeout=10) != 0
@@ -376,12 +398,18 @@ def main():
             assert hashlib.sha256(previous_artifact.read_bytes()).digest() == previous_hash, "old build changed"
             fixture.RUI = binary
             dialect = candidate_cli = Dialect(binary)
-            if args.running_host and args.baseline_layout == "before-endpoint-dirs":
-                # The saved-work checks below run through the previous CLI, which is the only one that reaches this Host.
-                assert_endpoint_layout_break(previous_cli, previous_artifact, store, seed, previous_status,
-                                             installer_output)
-                fixture.RUI = previous_artifact
-                dialect = previous_cli
+            if args.running_host and args.plain_start:
+                plain_start(binary, store, seed, root)
+                # The candidate's Host appears only after the coordinator's restart, so bound the wait.
+                def candidate_ready():
+                    try:
+                        return dialect.host_status(binary, store, 5)[0] == "ready"
+                    except subprocess.SubprocessError:
+                        return False
+                wait_for(candidate_ready,
+                         "candidate Host to serve the Store after the plain start", timeout=30, interval=0.1)
+                assert_running_upgrade(dialect, binary, store, seed, ready, previous_status,
+                                       release_version(publisher), None)
                 commands = ()
             elif args.running_host:
                 assert_running_upgrade(dialect, binary, store, seed, ready, previous_status,
@@ -442,11 +470,7 @@ def main():
             for field, value in configuration.items():
                 assert after[field] == value, (field, value, after)
             assert len(endpoint.requests) == 1, "upgrade replayed completed work"
-            if args.running_host and args.baseline_layout == "before-endpoint-dirs":
-                stop_detached(previous_cli, previous_artifact, store)
-                host_released = True
-                print("Endpoint layout break accepted: previous Host left running and reachable by its own CLI; saved work intact", flush=True)
-            elif args.running_host:
+            if args.running_host:
                 # A ready socket alone cannot show the endpoint/network source
                 # survived. New work must reach the same actual provider peer.
                 dialect.message(root, store, "fresh-upgrade-message", session, "Check the retained endpoint.")
@@ -473,9 +497,9 @@ def main():
         raise
     else:
         shutil.rmtree(directory)
-        print(("Running-release install passed: installer exited 0 and named the restart; candidate Host version/new instance; "
-               if args.running_host and args.baseline_layout == "current" else
-               "Running-release install passed: installer exited 0 and named the left Host; "
+        print(("Running-release plain start passed: candidate host start survived its old Host's process group; candidate Host version/new instance; "
+               if args.running_host and args.plain_start else
+               "Running-release install passed: installer exited 0 and named the restart; candidate Host version/new instance; "
                if args.running_host else
                "Compatibility passed: supported startup readiness/migration backup or unsupported-format refusal; ") +
               "exact saved work/configuration and no replay", flush=True)

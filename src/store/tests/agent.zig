@@ -1094,3 +1094,85 @@ test "start_agent validates its model before parent tool authority" {
         }
     }.run);
 }
+
+// SES-22: a child's app lane is its creator's lane whether it is attached or detached, a root is its own lane, and
+// configure after creation and a replayed creation keep the lane fixed. Each engine runs the same Store API calls.
+fn expectAppLane(storage: *Store, session: []const u8, lane: []const u8) !void {
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND app_lane=?2", .{ session, lane }));
+}
+
+fn childCreation(key: []const u8, parent: []const u8) !wire_request.ConfigureCommand {
+    var command: wire_request.ConfigureCommand = .{};
+    try command.key.set(key);
+    command.configuration = try shared_fixtures.testingAgentSpec(&.{}, "bypass");
+    command.configuration.parent.state = .value;
+    try command.configuration.parent.value.set(parent);
+    command.configuration.model.state = .value;
+    try command.configuration.model.value.set("model-a");
+    return command;
+}
+
+test "SES-22 a child's app lane is its creator's lane when attached or detached, and configure and replay keep it" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("lane-root", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"start_agent"});
+            const root = (try storage.configure(&create, .{})).accepted.session;
+            try expectAppLane(&storage, root.slice(), root.slice());
+
+            var attached_command = try childCreation("lane-attached", root.slice());
+            const attached = (try storage.configure(&attached_command, .{})).accepted.session;
+            try expectAppLane(&storage, attached.slice(), root.slice());
+
+            var grandchild_command = try childCreation("lane-grandchild", attached.slice());
+            const grandchild = (try storage.configure(&grandchild_command, .{})).accepted.session;
+            try expectAppLane(&storage, grandchild.slice(), root.slice());
+
+            // A configure after creation changes the child's settings and never its lane.
+            var label_command: wire_request.ConfigureCommand = .{};
+            try label_command.key.set("lane-attached-label");
+            try label_command.session.set(attached.slice());
+            label_command.configuration.label.state = .value;
+            try label_command.configuration.label.value.set("renamed");
+            try std.testing.expect((try storage.configure(&label_command, .{})) == .accepted);
+            try expectAppLane(&storage, attached.slice(), root.slice());
+
+            // Replaying the creation answers the same Session and leaves its lane as it was.
+            const replay = try storage.configure(&attached_command, .{});
+            try std.testing.expect(replay.accepted.replayed);
+            try std.testing.expectEqualStrings(attached.slice(), replay.accepted.session.slice());
+            try expectAppLane(&storage, attached.slice(), root.slice());
+
+            // A detached child started by the root's start_agent call takes the root's lane too.
+            try submitTestMessage(&storage, &tmp, "lane-detached-message", "lane-detached-key", root.slice(), "start a child");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const arguments = "{\"task\":\"read\",\"attached\":false,\"spec\":{\"model\":\"model-a\",\"effort\":null,\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\"}}";
+            const encoded = try std.json.Stringify.valueAlloc(arena.allocator(), arguments, .{});
+            var calls = [_]TestingCall{.{ .item_id = "lane-detached-item", .name = "start_agent", .encoded_call_id = "lane-detached-call", .decoded_call_id = "lane-detached-call", .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments }};
+            try settleCallsForTesting(&storage, &tmp, model, "lane-detached-calls", &calls);
+            const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+            const core_tools = @import("../../core_tools.zig");
+            const start = try arena.allocator().create(core_tools.StartAgent);
+            try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
+            const Capture = struct {
+                child: protocol.Bounded(protocol.session_id_bytes) = .{},
+                fn call(context: *anyopaque, admission: Store.MessageAdmission) void {
+                    const self: *@This() = @ptrCast(@alignCast(context));
+                    self.child.set(admission.session) catch unreachable;
+                }
+            };
+            var capture: Capture = .{};
+            try std.testing.expect(try storage.startAgent(action.binding, root.slice(), start.task, start.attached, &start.configuration, .{ .context = &capture, .call = Capture.call }, .{}) == .started);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND creator_ref=?2 AND parent_ref IS NULL AND app_lane=?2", .{ capture.child.slice(), root.slice() }));
+        }
+    }.run);
+}

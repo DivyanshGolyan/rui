@@ -97,6 +97,13 @@ pub const Code = enum {
     preset_on_update,
     parent_on_update,
     preferences_on_update,
+    invalid_app_tools,
+    app_tools_too_large,
+    invalid_app_tool_name,
+    duplicate_app_tool_name,
+    app_tool_built_in_clash,
+    invalid_app_tool_policy,
+    app_tools_on_child,
     parent_provider_forbidden,
     parent_workspace_forbidden,
     tools_not_in_parent,
@@ -239,7 +246,7 @@ fn mapped(err: anyerror) ?Code {
         error.OutOfMemory => .memory_exhausted,
         error.SavedRequestWireVersionMismatch => .request_wire_incompatible,
         error.HostNotServing => .host_not_serving,
-        error.HostRestartFailed, error.UnsupportedHostConfiguration => .host_restart_failed,
+        error.HostRestartFailed, error.HostRestartUnconfirmed, error.UnsupportedHostConfiguration => .host_restart_failed,
         error.IncompatibleHost => .host_incompatible,
         error.InvalidHostInfo, error.HostPeerNotServing, error.HostServeArgumentsUnreadable, error.HostServeStoreMissing, error.HostServeStoreRelative, error.HostSocketStoreMismatch, error.HostPeerPidMismatch, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot, error.HostDirectoryUnavailable, error.ForeignHostStatusFailed, error.InvalidForeignHostStatus => .host_identity_unconfirmed,
         error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
@@ -357,6 +364,7 @@ pub const Input = enum {
     action,
     arguments,
     key,
+    app_tools,
 
     fn spelling(self: Input) ?[]const u8 {
         inline for (session_settings.entries) |entry| {
@@ -418,7 +426,7 @@ pub fn facts(code: Code) Facts {
         .upgrade_download_failed => .{ .act = .operate, .input = null, .accepted = .none, .says = "Rui could not download release information or the archive from GitHub.", .next = "Check network access, then retry; nothing was changed." },
         .upgrade_preparation_failed => .{ .act = .operate, .input = null, .accepted = .none, .says = "Release preparation or validation failed.", .next = "Check network access, disk space and the published archive. The selected build and Host were not changed before publication." },
         .host_not_serving => .{ .act = .operate, .input = null, .accepted = .none, .says = "No Host serves this Store.", .next = "Start its Host with the command below, then retry the same saved request unchanged." },
-        .host_incompatible => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host serving this Store runs a different Rui version that does not speak this rui's protocol.", .next = "Pause it with the Rui version that started it, then start it again with rui host start --store PATH." },
+        .host_incompatible => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host serving this Store runs a different Rui version that does not speak this rui's protocol.", .next = "Run rui host restart --all to hand over eligible managed Hosts, and follow its per-Host instructions." },
         .host_stopping => .{ .act = .wait, .input = null, .accepted = .none, .says = "The Host for this Store is shutting down and no longer accepts requests.", .next = "Wait for it to exit, then start it again with rui host start --store PATH and retry." },
         .mysql_host_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The launched MySQL Host for this Store is unavailable.", .next = "Check this Store's settings-based Host and RUI_RUNTIME_DIR, then retry unchanged." },
         .store_path_malformed => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "a nonempty UTF-8 filesystem path without controls, whose canonical form is at most 492 bytes" }, .says = "The Store path is malformed.", .next = "Supply --store PATH naming a private Store directory." },
@@ -470,6 +478,13 @@ pub fn facts(code: Code) Facts {
         .connection_unserved => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a connection this Host serves; see rui host status" }, .says = "This Host does not serve that connection.", .next = "Use a connection this Host serves, or add it to the Host's settings and restart the Host." },
         .invalid_model => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a nonempty model ID; see rui session configure --help for syntax and suggested IDs" }, .says = "The model ID is empty.", .next = "Supply a nonempty --model; unlisted IDs are allowed and use default limits." },
         .model_capability_unavailable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a provider served by this Host; see rui host status" }, .says = "This Host does not serve the Session's required provider.", .next = "Use a Host serving the required provider, or create a Session with a provider listed by rui host status." },
+        .invalid_app_tools => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "a JSON array of up to 16 app tools, each {name, description, input_schema and optionally replay, restart_limit, wait_ms}" }, .says = "The app tools are not a valid declaration.", .next = "Fix the declaration, or omit appTools." },
+        .app_tools_too_large => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "an app tools declaration of at most 65536 bytes" }, .says = "The app tools declaration is larger than the Host accepts.", .next = "Declare fewer app tools or shorter schemas." },
+        .invalid_app_tool_name => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "a name of 1 to 64 ASCII letters, digits, '_' or '-'" }, .says = "An app tool name is not a valid tool name.", .next = "Rename the app tool." },
+        .duplicate_app_tool_name => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "distinct names across the declaration" }, .says = "Two app tools share a name.", .next = "Give each app tool a distinct name." },
+        .app_tool_built_in_clash => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "a name that is not a built-in tool's name" }, .says = "An app tool has the name of a built-in tool.", .next = "Rename the app tool." },
+        .invalid_app_tool_policy => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "replay safe or unsafe, restart_limit 0 to 16, wait_ms 1000 to 3600000" }, .says = "An app tool's replay, restart limit or wait is out of range.", .next = "Use an accepted replay, restart limit and wait." },
+        .app_tools_on_child => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "appTools only on a Session that is its own lane root" }, .says = "A child Session cannot declare app tools; its lane root declares them.", .next = "Declare the app tools on the lane root." },
         .invalid_output_schema => .{ .act = .fix, .input = .output_schema, .accepted = .{ .grammar = "a file containing valid JSON for the provider's output schema" }, .says = "The output schema is not valid JSON.", .next = "Fix the JSON in --output-schema FILE, or omit the schema." },
         .invalid_compaction_trigger => .{ .act = .fix, .input = .compaction_trigger, .accepted = .{ .grammar = "default or a decimal from 1 to " ++ std.fmt.comptimePrint("{d}", .{std.math.maxInt(i64)}) }, .says = "The compaction trigger is not a positive token count.", .next = "Use --compaction-trigger default or a positive decimal in the accepted range." },
         .compact_at_too_large => .{ .act = .fix, .input = .compaction_trigger, .accepted = .{ .grammar = "a token count no larger than the model's context window" }, .says = "The compaction trigger is larger than the model's context window.", .next = "Use --compaction-trigger default, or a smaller token count." },
@@ -879,6 +894,7 @@ test "settings admission has a caller refusal fallback outside startup reporting
 
 test "an escaped replay preflight failure keeps the restart repair" {
     try std.testing.expectEqual(Code.host_restart_failed, of(error.UnsupportedHostConfiguration));
+    try std.testing.expectEqual(Code.host_restart_failed, of(error.HostRestartUnconfirmed));
 }
 
 test "guided sign-in native caller outcomes keep truthful repair without reclassifying context-free I/O" {

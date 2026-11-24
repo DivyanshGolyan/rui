@@ -5,11 +5,11 @@ const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 const tools = @import("tools.zig");
 const execution = @import("execution.zig");
-const Host = @import("server_host.zig").Host;
 const mcp = @import("server_mcp.zig");
 const tool_result = @import("tool_result.zig");
 const action_attempt = @import("action_attempt.zig");
 const Script = @import("mcp/test_server.zig");
+const Fixture = if (@import("builtin").is_test) @import("server_host_testing.zig").Fixture else void;
 const poll = @import("test_poll");
 
 const records = blk: {
@@ -172,7 +172,7 @@ fn run(case: Case) !void {
         queue.cleanupAll();
     }
     var custody: [2]execution.CustodyRecord = @splat(.{});
-    const host = try allocator.create(Host);
+    const host = try allocator.create(Fixture);
     defer allocator.destroy(host);
     host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .mcp_servers = .{ .entries = &servers }, .retention = &queue };
     var host_parts: TestParts = undefined;

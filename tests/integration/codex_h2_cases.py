@@ -17,7 +17,7 @@ import model_fixture as fixture
 import os_semantics
 
 
-ORDINARY_EXCHANGE_DESCRIPTORS = 5
+ORDINARY_EXCHANGE_DESCRIPTORS = os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS
 DEFAULT_CLIENT_DESCRIPTORS = 100 * ORDINARY_EXCHANGE_DESCRIPTORS + 3
 # Open lines: src/line.zig capacity, outside intake's exchange population.
 LINE_DESCRIPTORS = 16

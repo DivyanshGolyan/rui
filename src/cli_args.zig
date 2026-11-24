@@ -233,6 +233,7 @@ fn settingOption(comptime field: []const u8) Option {
             .content => value(cli.name, if (entry.nullable) "FILE|-" else "-"),
             .tools => value(cli.name, if (std.mem.eql(u8, field, "tools")) tool_choices else "a,b|none"),
             .decimal_policy => value(cli.name, "TOKENS|default"),
+            .app_tools => @compileError("app_tools has no CLI option"),
             .choice => if (std.mem.eql(u8, field, "provider")) choice(cli.name, provider_name.Provider) else if (std.mem.eql(u8, field, "permission_mode")) choice(cli.name, cli_value.PermissionMode) else if (std.mem.eql(u8, field, "reasoning_effort")) choice(cli.name, cli_value.ReasoningChoice) else @compileError("choose CLI values for " ++ field),
         };
     }

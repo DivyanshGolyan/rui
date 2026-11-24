@@ -470,6 +470,19 @@ pub const Store = struct {
         return @ptrCast(self.scratch(.settlement));
     }
 
+    /// The arena one transaction's app declaration parses into. Store entries are serialized, so each entry
+    /// resets it before it starts.
+    pub fn declarationArena(self: *Store) std.mem.Allocator {
+        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+        return owned.declarations.allocator();
+    }
+
+    /// Empties the arena; a transition calls it once, in its first step, so its rounds share one declaration.
+    pub fn resetDeclarations(self: *Store) void {
+        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+        owned.declarations = .init(&owned.declaration_bytes);
+    }
+
     pub fn configurationReads(self: *Store) *configuration_domain.ConfigurationReads {
         return @ptrCast(self.scratch(.configuration));
     }
@@ -2004,6 +2017,9 @@ pub const CommitSubscriber = struct {
 };
 
 const OutOfLine = struct {
+    /// The parse arena for one transaction's app declaration (tool_record.app_tools); reset by `declarationArena`.
+    declaration_bytes: [@import("../tool_record.zig").app_tools.arena_bytes]u8 = undefined,
+    declarations: std.heap.FixedBufferAllocator = undefined,
     model_timings: @import("../model_timing.zig").Source,
     ring: change_ring.Ring,
     queue: Queue,
@@ -2031,9 +2047,9 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 14352;
 
 comptime {
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 15960 or scratch_bytes != 19048)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 19248 or scratch_bytes != 19248)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
-    if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
+    if (@sizeOf(model_settlement_domain.Batch) - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
 
 /// The change ring, and the scratch beside it, in pages of their own,
