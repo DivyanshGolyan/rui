@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
             @panic("Missing CI CPU identity");
         if (!std.mem.eql(u8, recorded, ci_cpu)) @panic("CI CPU identity mismatch");
     }
+    @import("build/vaxis_clipboard.zig").add(b, ci, target, optimize);
     const pinned_transport = product.addPinnedTransport(b, target);
 
     const test_pauses = b.option(bool, "test-pauses", "Enable test pause points in the product executable") orelse false;
