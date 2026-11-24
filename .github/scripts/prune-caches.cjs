@@ -51,7 +51,7 @@ module.exports = async function pruneCaches({github, context, core}) {
 // The native tool identity that build and build-runner keys carry after the
 // compiler version (.github/actions/setup/caches/action.yml).
 function toolIdentity(key) {
-  const match = /^rui-(?:build-v[24]|runner-v2)-(?:Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-([a-f0-9]{64})-/.exec(key);
+  const match = /^rui-(?:build-v[234]|runner-v2)-(?:Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-([a-f0-9]{64})-/.exec(key);
   return match ? match[1] : null;
 }
 
@@ -63,6 +63,11 @@ function mainGroup(key) {
   }
   if (/^rui-build-v4-Linux-X64-0\.17\.[0-9]+-[a-f0-9]{64}-compiled\.[a-f0-9]{64}-[a-f0-9]{64}$/.test(key)) {
     return 'build/Linux-X64/compiled';
+  }
+  // macOS compiled moved to v3 when it began compiling every part in one producer; the
+  // leftover v2 macOS snapshot maps to the same group through the reordered rule below.
+  if (/^rui-build-v3-macOS-ARM64-0\.17\.[0-9]+-[a-f0-9]{64}-compiled\.[a-f0-9]{64}-[a-f0-9]{64}$/.test(key)) {
+    return 'build/macOS-ARM64/compiled';
   }
   const reordered = /^rui-build-v2-(Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-[a-f0-9]{64}-([a-z][a-z0-9-]*)\.[a-f0-9]{64}-[a-f0-9]{64}$/.exec(key);
   if (reordered) return `build/${reordered[1]}/${reordered[2]}`;

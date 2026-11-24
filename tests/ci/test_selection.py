@@ -1064,41 +1064,34 @@ class SelectionTest(unittest.TestCase):
         for targets in ([], ["test"], ["test-native"], ["test-store"], ["test-logic", "admission-debug-integration"]):
             self.assertFalse(split_build(targets), targets)
 
-    def test_macos_split_workflow_uses_the_shared_handoff(self):
+    def test_macos_builds_once_and_never_splits(self):
         workflow = Path('.github/workflows/check.yml').read_text()
         jobs = dict(re.findall(r'(?ms)^  ([a-z_]+):\n(.*?)(?=^  [a-z_]+:|\Z)', workflow))
-        self.assertIn('macos_split: ${{ steps.select.outputs.macos_split }}', jobs['plan'])
-        for name, part, artifact in (('macos_build', 'compiled', 'compiled-macos'),
-                                     ('macos_build_unit', 'compiled-unit', 'compiled-macos-unit')):
-            job = jobs[name]
-            self.assertIn('needs: [plan, mac_runner]', job)
-            self.assertIn("runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '\"macos-15\"') }}", job)
-            self.assertIn('timeout-minutes: 60', job)
-            self.assertIn('check-part: ' + part + '\n', job)
-            self.assertIn('TARGETS: ${{ needs.plan.outputs.native_targets }}', job)
-            self.assertIn('artifact: ${{ steps.publish.outputs.artifact-id }}', job)
-            self.assertIn('name: ' + artifact + '-${{ github.run_attempt }}', job)
-            self.assertIn('if-no-files-found: error', job)
-        self.assertIn("if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.macos_split == 'true' }}", jobs['macos_build_unit'])
-        self.assertIn('build "$TARGETS" --part unit', jobs['macos_build_unit'])
-        self.assertIn("PART: ${{ needs.plan.outputs.macos_split == 'true' && 'rest' || 'all' }}",
-                      jobs['macos_build'])
-        self.assertIn('build "$TARGETS" --part "$PART"', jobs['macos_build'])
+        self.assertNotIn('macos_build_unit', jobs)
+        self.assertNotIn('macos_split', workflow)
+        self.assertNotIn('macos_split', Path('tests/ci/ci_plan.py').read_text())
+        job = jobs['macos_build']
+        self.assertIn('needs: [plan, mac_runner]', job)
+        self.assertIn('timeout-minutes: 90', job)
+        self.assertIn('check-part: compiled\n', job)
+        self.assertIn('TARGETS: ${{ needs.plan.outputs.native_targets }}', job)
+        self.assertIn('artifact: ${{ steps.publish.outputs.artifact-id }}', job)
+        self.assertIn('name: compiled-macos-${{ github.run_attempt }}', job)
+        self.assertIn('if-no-files-found: error', job)
+        self.assertIn('build "$TARGETS" --part all', job)
         suites = jobs['macos_suites']
-        self.assertIn('needs: [plan, mac_runner, macos_build, macos_build_unit]', suites)
-        self.assertIn('max-parallel: 3', suites)
+        self.assertIn('needs: [plan, mac_runner, macos_build]', suites)
         self.assertIn('ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}', suites)
-        self.assertIn('UNIT_ARTIFACT_ID: ${{ needs.macos_build_unit.outputs.artifact }}', suites)
-        restore = 'run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"'
-        for name in ('linux_suites', 'macos_suites'):
-            self.assertIn(restore, jobs[name])
-        self.assertIn('needs: [plan, macos_build, macos_build_unit, macos_suites]', jobs['macos'])
-        self.assertIn('UNIT_RESULT: ${{ needs.macos_build_unit.result }}', jobs['macos'])
-        self.assertIn('SPLIT: ${{ needs.plan.outputs.macos_split }}', jobs['macos'])
-        for name in ('admission',):
-            self.assertRegex(jobs[name], r'needs: \[[^\n]*\bmacos\b')
+        self.assertNotIn('UNIT_ARTIFACT_ID', suites)
+        restore = 'run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"'
+        self.assertIn(restore, suites)
+        self.assertIn('        timeout-minutes: 45', suites)
+        self.assertIn('    timeout-minutes: ${{ inputs.promotion && 300 || 60 }}', suites)
+        self.assertIn('needs: [plan, macos_build, macos_suites]', jobs['macos'])
+        self.assertNotIn('UNIT_RESULT', jobs['macos'])
+        self.assertRegex(jobs['admission'], r'needs: \[[^\n]*\bmacos\b')
 
-    def test_macos_suites_and_aggregate_require_the_expected_unit_result(self):
+    def test_macos_suites_and_aggregate_require_the_build_and_suites(self):
         workflow = Path('.github/workflows/check.yml').read_text()
         suites = re.search(r'(?ms)^  macos_suites:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
         gate = re.search(r'(?ms)^  macos:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
@@ -1107,26 +1100,21 @@ class SelectionTest(unittest.TestCase):
         expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', 'and').replace('||', 'or'))
         self.assertIn('always()', gate)
         script = dedent(gate.split('run: |\n', 1)[1].split('\n      - ', 1)[0])
-        for split in ('true', 'false'):
-            for unit in ('success', 'skipped', 'failure', 'cancelled'):
-                for build, native in (('success', 'success'), ('failure', 'skipped'),
-                                      ('cancelled', 'skipped'), ('skipped', 'skipped'),
-                                      ('success', 'failure'), ('success', 'cancelled'),
-                                      ('success', 'skipped')):
-                    with self.subTest(split=split, unit=unit, build=build, native=native):
-                        expected_unit = unit == ('success' if split == 'true' else 'skipped')
-                        needs = SimpleNamespace(
-                            plan=SimpleNamespace(outputs=SimpleNamespace(native='true', macos_split=split)),
-                            macos_build=SimpleNamespace(result=build),
-                            macos_build_unit=SimpleNamespace(result=unit))
-                        admitted = eval(expression, {'__builtins__': {}, 'cancelled': lambda: False,
-                                                     'needs': needs})
-                        self.assertEqual(admitted, build == 'success' and expected_unit)
-                        result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
-                                                env=dict(os.environ, PLAN_RESULT='success', BUILD_RESULT=build,
-                                                         NATIVE_RESULT=native, SPLIT=split, UNIT_RESULT=unit))
-                        self.assertEqual(result.returncode == 0,
-                                         build == native == 'success' and expected_unit)
+        self.assertNotIn('UNIT', script)
+        for build, native in (('success', 'success'), ('failure', 'skipped'), ('cancelled', 'skipped'),
+                              ('skipped', 'skipped'), ('success', 'failure'), ('success', 'cancelled'),
+                              ('success', 'skipped')):
+            with self.subTest(build=build, native=native):
+                result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
+                                        env=dict(os.environ, PLAN_RESULT='success', BUILD_RESULT=build,
+                                                 NATIVE_RESULT=native))
+                self.assertEqual(result.returncode == 0, build == native == 'success')
+        needs = SimpleNamespace(plan=SimpleNamespace(outputs=SimpleNamespace(native='true')),
+                                macos_build=SimpleNamespace(result='success'))
+        self.assertTrue(eval(expression, {'__builtins__': {}, 'cancelled': lambda: False, 'needs': needs}))
+        needs.macos_build.result = 'skipped'
+        self.assertFalse(eval(expression, {'__builtins__': {}, 'cancelled': lambda: False, 'needs': needs}))
+        needs.macos_build.result = 'success'
         needs.plan.outputs.native = 'false'
         self.assertFalse(eval(expression, {'__builtins__': {}, 'cancelled': lambda: False, 'needs': needs}))
         needs.plan.outputs.native = 'true'
@@ -1134,7 +1122,7 @@ class SelectionTest(unittest.TestCase):
         for plan in ('failure', 'cancelled', 'skipped'):
             result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
                                     env=dict(os.environ, PLAN_RESULT=plan, BUILD_RESULT='success',
-                                             NATIVE_RESULT='success', SPLIT='true', UNIT_RESULT='success'))
+                                             NATIVE_RESULT='success'))
             self.assertNotEqual(result.returncode, 0)
 
     def test_shared_state_and_unknown_code_fail_closed(self):
@@ -1669,53 +1657,17 @@ fi
         self.assertEqual([row["targets"] for row in shards(["test", "test-logic"])["include"]], [["test"], ["test-logic"]])
         self.assertTrue(all(len(row["targets"]) == 1 for row in shards(["check", *short], limit=None)["include"]))
 
-    def test_macos_native_work_fits_three_workers_without_losing_selected_checks(self):
+    def test_macos_native_work_is_one_row_without_losing_selected_checks(self):
         rows = qualification("native", "macos")["include"]
-        self.assertEqual(len(rows), 3, "avoid queuing twelve setup/build copies on three Mac workers")
-        execution = next(row for row in rows if row["part"] == "execution")
-        self.assertEqual(execution["targets"], ["check-full", "test-logic"])
-        self.assertEqual(execution_batches(execution["targets"], execution["part"]),
-                         [["check-full", "-Dcheck-part=execution"], ["test-logic"]])
-        callers = next(row for row in rows if row["part"] == "callers")
-        self.assertEqual(callers["targets"], ["check-full"])
-        batches = [batch for row in rows for batch in execution_batches(row["targets"], row["part"])]
+        self.assertEqual(len(rows), 1, "one hosted job pays one queue, setup and artifact restore")
+        row = rows[0]
+        self.assertEqual((row["name"], row["part"]), ("native", "all"))
+        batches = execution_batches(row["targets"], row["part"])
         selected = [target for batch in batches for target in batch if not target.startswith("-")]
-        self.assertCountEqual(selected, [*NATIVE, "check-full"])
-        self.assertEqual(sum("-Dcheck-part=execution" in batch for batch in batches), 1)
-        self.assertEqual(sum("-Dcheck-part=callers" in batch for batch in batches), 1)
-
-    def test_native_and_all_include_standalone_installer(self):
-        for platform in ("linux", "macos"):
-            for suite in ("native", "all"):
-                with self.subTest(platform=platform, suite=suite):
-                    rows = qualification(suite, platform)["include"]
-                    self.assertEqual(sum("installer-integration" in row["targets"] for row in rows), 1)
-
-    def test_qualification_uses_existing_platform_targets_and_isolates_resources(self):
-        for platform in ("linux", "macos"):
-            rows = qualification("all", platform)["include"]
-            targets = {target for row in rows for target in row["targets"]}
-            self.assertTrue(targets <= AVAILABLE)
-            resources = set(RESOURCES) if platform == "macos" else {
-                "measure-repeat-work", "measure-model-output", "measure-model-queue",
-                "measure-model-control", "measure-call-classification", "measure-execution-service",
-            }
-            self.assertTrue(set(NATIVE) | resources <= targets)
-            self.assertEqual("login-signal-integration" in targets, platform == "linux")
-            self.assertEqual("stack-frames" in targets, platform == "linux")
-            self.assertEqual({row["targets"][0] for row in rows if row["resource"]}, resources)
-            self.assertTrue(all(len(row["targets"]) == 1 for row in rows if row["resource"] or platform == "linux"))
-        self.assertEqual(qualification("footprint", "macos"), shards(["measure-repeat-work"]))
-        self.assertFalse(any(row["resource"] for row in qualification("native", "linux")["include"]))
-
-    def test_output_shards_retain_growth_spill_and_every_two_round_capacity(self):
-        rows = shards(["measure-model-output"])["include"]
-        self.assertEqual([row["args"] for row in rows], [
-            ["--growth-only"], ["--capacity", "1"], ["--capacity", "8"],
-            ["--capacity", "16"], ["--capacity", "100"],
-        ])
-        self.assertEqual(len({row["name"] for row in rows}), 5)
-        self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
+        self.assertCountEqual(selected, NATIVE)
+        self.assertIn(["check-full"], batches)
+        self.assertEqual(sum("-Dcheck-part=execution" in batch or "-Dcheck-part=callers" in batch
+                             for batch in batches), 0)
 
     def test_requested_ref_cannot_publish_shared_caches(self):
         read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'release-build.yml',
@@ -1780,10 +1732,10 @@ fi
                     workflow = workflow.replace(diagnostic_gate, '', 1)
                     mac_gate = ("publish-caches: ${{ github.ref == 'refs/heads/main' && "
                                 "needs.mac_runner.outputs.self_hosted != 'true' && 'true' || 'false' }}")
-                    for name in ('macos_build', 'macos_build_unit', 'macos_suites'):
+                    for name in ('macos_build', 'macos_suites'):
                         native = re.search(r'(?ms)^  ' + name + r':\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
                         self.assertEqual(native.count(mac_gate), 1, name)
-                    self.assertEqual(workflow.count(mac_gate), 3)
+                    self.assertEqual(workflow.count(mac_gate), 2)
                     workflow = workflow.replace(mac_gate, '')
                     pr_job = re.search(r'(?ms)^  pr_linux:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
                     self.assertIn("if: ${{ needs.plan.outputs.pr_job == 'true' }}", pr_job)
@@ -1905,6 +1857,7 @@ fi
         self.assertIn(actionlint, check)
         self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(actionlint, actionlint + "-2")))
         self.assertFalse(cache("build/new.zig", None, 'const std = @import("std");\n'))
+        self.assertIn('rui-build-v2-macOS-ARM64-*) PREFIX="rui-build-v3-${PREFIX#rui-build-v2-}" ;;', caches)
         deps = re.search(r"(?m)^\s+PREFIX: rui-build-v2-", caches)[0]
         self.assertTrue(cache(".github/actions/setup/caches/action.yml", caches, caches.replace(deps, deps.replace("v2", "v3"))))
         default = re.search(r"(?ms)^  publish-caches:\n.*?default: (.*?)$", action)
