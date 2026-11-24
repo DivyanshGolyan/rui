@@ -5,6 +5,7 @@ const server_mcp_relist = @import("server_mcp_relist.zig");
 const server_mcp_settings = @import("server_mcp_settings.zig");
 const tool_record = @import("tool_record.zig");
 const server_read_image = @import("server_read_image.zig");
+const action_attempt = @import("action_attempt.zig");
 const bash = @import("bash.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
@@ -613,6 +614,7 @@ pub fn executionMain(host: *Host) void {
     if (reactor != null) host.scratch_budget = budget;
     defer host.scratch_budget = null;
     var mcp_calls: server_mcp.Calls = .{};
+    const attempts: action_attempt.Parts = .{ .store = host.store, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &host.custody };
     workspace.image_calls = .{};
     defer workspace.image_calls.shutdown(host);
     defer shutdownExecution(host, slots, workspace);
@@ -631,6 +633,7 @@ pub fn executionMain(host: *Host) void {
             .measurement = &measurement,
             .mcp = &mcp_calls,
             .images = &workspace.image_calls,
+            .attempts = attempts,
             .fenced = false,
         };
         host.lifecycle.resetDispatchWake();
@@ -703,6 +706,7 @@ const NativeTurn = struct {
     measurement: *LifecycleMeasurement,
     mcp: *server_mcp.Calls,
     images: ?*server_read_image.Calls = null,
+    attempts: action_attempt.Parts,
     fenced: bool,
     scheduled_retry: execution_turn.ScheduledRetry = .unknown,
 
@@ -898,7 +902,7 @@ const NativeTurn = struct {
     }
 
     pub fn runCoreAction(self: *NativeTurn) execution_turn.Admission {
-        return runNextCoreAction(self.host, self.mcp, self.images);
+        return runNextCoreAction(self.host, self.attempts, self.mcp, self.images);
     }
 
     pub noinline fn admitBash(self: *NativeTurn) execution_turn.Admission {
@@ -1444,7 +1448,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
     return made_progress;
 }
 
-noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls, images: ?*server_read_image.Calls) execution_turn.Admission {
+noinline fn runNextCoreAction(host: *Host, attempts: action_attempt.Parts, mcp: *server_mcp.Calls, images: ?*server_read_image.Calls) execution_turn.Admission {
     const work = (host.store.nextCoreWork(host.custody.dispatchCapacity(!mcp.full())) catch |err| {
         host.lifecycle.fenceDispatch("core tool selection", err);
         return .retry_later;
@@ -1452,7 +1456,7 @@ noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls, images: ?*ser
     return switch (work) {
         .stop => |*owed| runOwedStop(host, owed),
         .mcp => |call| mcp.admit(host, call),
-        .read_image => |call| if (images) |calls| calls.admit(host, call) else .retry_later,
+        .read_image => |call| if (images) |calls| calls.admit(host, attempts, call) else .retry_later,
         .ending => |*owed| runOwedEnding(host, owed),
         .forward => |id| runSessionForward(host, id),
         .auto_deny => |decision| runMessageDecline(host, decision.action_id, decision.session.slice()),
@@ -4190,6 +4194,7 @@ test "compound admission preflight releases transient custody and cancels its re
             .workspace = workspace,
             .measurement = &measurement,
             .mcp = &mcp,
+            .attempts = .{ .store = &storage, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &host.custody },
             .fenced = false,
         };
         const generation = storage.commitGeneration();
@@ -5416,6 +5421,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
         .slots = &.{},
         .workspace = undefined,
         .measurement = undefined,
+        .attempts = .{ .store = &storage, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &host.custody },
         .fenced = false,
     };
     try std.testing.expect(native.runCoreAction() == .admitted);
