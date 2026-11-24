@@ -807,7 +807,7 @@ fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
     const job = &self.upgrade_job;
     if (job.discovering()) {
         const cancelled = self.state.upgrade.run.? == .cancelling;
-        if (!try job.retireDiscovery(cancelled)) return;
+        if (!try job.retireDiscovery()) return;
         if (cancelled) job.cancel();
         _ = try self.event(.{ .available_upgrade = null });
     }

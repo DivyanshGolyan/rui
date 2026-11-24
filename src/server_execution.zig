@@ -1,4 +1,5 @@
 const std = @import("std");
+const tool_result = @import("tool_result.zig");
 const server_mcp = @import("server_mcp.zig");
 const server_mcp_relist = @import("server_mcp_relist.zig");
 const server_mcp_settings = @import("server_mcp_settings.zig");
@@ -154,6 +155,11 @@ const Run = struct {
     bash_work: []BashWork = &.{},
     slot_changes: u64 = 0,
 };
+
+/// The tool-result owner every execution path creates results through.
+fn toolResults(run: *const Run) tool_result.Results {
+    return .{ .allocator = run.host.allocator, .io = run.host.io, .retention = run.host.retention };
+}
 
 /// Settings the execution thread reads for its whole life, passed in by the thread's spawn.
 pub const Settings = struct {
@@ -750,9 +756,9 @@ pub fn executionMain(host: *Host, settings: Settings, execution_state: *executio
     var mcp_calls: server_mcp.Calls = .{};
     const attempts: action_attempt.Parts = run.execution.attempts(run.host.store, run.host.probes);
     workspace.image_calls = .{};
-    defer workspace.image_calls.shutdown(run.host);
+    defer workspace.image_calls.shutdown(toolResults(&run));
     defer shutdownExecution(&run, slots, workspace);
-    defer mcp_calls.shutdown(run.host);
+    defer mcp_calls.shutdown(toolResults(&run));
 
     workspace.turn_state = .{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
@@ -937,9 +943,9 @@ const NativeTurn = struct {
                 break;
             }
         }
-        const mcp_progress = self.mcp.service(self.run.host);
+        const mcp_progress = self.mcp.service(toolResults(self.run));
         const relist_progress = serviceRelist(self.run);
-        const image_progress = if (self.images) |images| images.service(self.run.host) else false;
+        const image_progress = if (self.images) |images| images.service(toolResults(self.run)) else false;
         return advanceBash(self.run, self.slots, self.workspace) or mcp_progress or relist_progress or image_progress;
     }
 
@@ -1587,8 +1593,8 @@ noinline fn runNextCoreAction(run: *Run, attempts: action_attempt.Parts, mcp: *s
     }) orelse return .no_work;
     return switch (work) {
         .stop => |*owed| runOwedStop(run, owed),
-        .mcp => |call| mcp.admit(run.host, attempts, call),
-        .read_image => |call| if (images) |calls| calls.admit(run.host, attempts, call) else .retry_later,
+        .mcp => |call| mcp.admit(attempts, toolResults(run), run.host.mcp_servers, call),
+        .read_image => |call| if (images) |calls| calls.admit(attempts, toolResults(run), call) else .retry_later,
         .ending => |*owed| runOwedEnding(run, owed),
         .forward => |id| runSessionForward(run, id),
         .auto_deny => |decision| runMessageDecline(run, decision.action_id, decision.session.slice()),
@@ -2084,7 +2090,7 @@ noinline fn completeBash(run: *Run, slot: *ExecutionSlot) void {
     const active = &slot.bash;
     const binding = active.attempt.binding;
     const profile = tool_record.Runner.bash.resultProfile(true);
-    const result = @import("tool_result.zig").Result.create(run.host, binding.action_id, profile) catch |err| {
+    const result = toolResults(run).create(binding.action_id, profile) catch |err| {
         _ = failBash(run, slot, "Bash result allocation", err);
         return;
     };
@@ -5574,7 +5580,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
     execution_state.init(&custody, null, &host_parts.lifecycle, &host.scratch_used, null);
     var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
     var mcp_calls: server_mcp.Calls = .{};
-    defer mcp_calls.shutdown(&host);
+    defer mcp_calls.shutdown(.{ .allocator = host.allocator, .io = host.io, .retention = host.retention });
     var native: NativeTurn = .{
         .mcp = &mcp_calls,
         .run = &run,

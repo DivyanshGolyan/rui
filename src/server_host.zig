@@ -1613,6 +1613,18 @@ test "SH-126 an asked stop leaves the stop record only when it is what stops the
 
 test "SH-127 a draining stop holds new Turns, only tightens, outlives an operator release, and records how it ended" {
     const io = std.testing.io;
+    // The Lifecycle reads a fixed awake clock, so every deadline is exact.
+    const Clock = struct {
+        const at_ns: i96 = 5 * std.time.ns_per_s;
+        fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            if (clock != .awake) return std.testing.io.vtable.now(userdata, clock);
+            return .fromNanoseconds(at_ns);
+        }
+    };
+    var clock_vtable = std.testing.io.vtable.*;
+    clock_vtable.now = Clock.now;
+    var clock_io = std.testing.io;
+    clock_io.vtable = &clock_vtable;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1623,17 +1635,17 @@ test "SH-127 a draining stop holds new Turns, only tightens, outlives an operato
         var lease = try platform.StoreLease.acquire(io, path);
         defer lease.release();
         try lease.prepareForServing(false);
-        var lifecycle = Lifecycle.init(io, &lease, false, null);
+        var lifecycle = Lifecycle.init(clock_io, &lease, false, null);
         try std.testing.expect(!lifecycle.turnsHeld());
         const first = lifecycle.askStop(try .seconds(60));
-        try std.testing.expect(first == .drain and first.drain.changed);
+        try std.testing.expectEqual(host_drain.Ask{ .drain = .{ .until_ns = Clock.at_ns + 60 * std.time.ns_per_s, .changed = true } }, first);
         try std.testing.expect(lifecycle.turnsHeld() and !lifecycle.stopping());
         try std.testing.expectEqual(host_drain.Record.draining, platform.StoreLease.stopRecord(io, path));
         // A longer repeat leaves the deadline; a shorter one brings it in.
         const longer = lifecycle.askStop(try .seconds(600));
         try std.testing.expectEqual(host_drain.Ask{ .drain = .{ .until_ns = first.drain.until_ns, .changed = false } }, longer);
         const shorter = lifecycle.askStop(try .seconds(1));
-        try std.testing.expect(shorter == .drain and shorter.drain.changed and shorter.drain.until_ns < first.drain.until_ns);
+        try std.testing.expectEqual(host_drain.Ask{ .drain = .{ .until_ns = Clock.at_ns + std.time.ns_per_s, .changed = true } }, shorter);
         try std.testing.expectEqual(shorter.drain.until_ns, lifecycle.drainUntil().?);
         // The operator's release does not end a drain's hold.
         lifecycle.setTurnsPaused(false);
