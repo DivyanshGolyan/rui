@@ -389,229 +389,226 @@ fn testChunk(transaction: *Transaction, epoch: u64, header: []const u8, data: []
     try testInput(transaction, epoch, packet[0 .. header.len + body.len]);
 }
 
-test "offers prefer PNG, then JPEG, then text; TIFF alone can use the local clipboard" {
-    const cases = [_]struct { list: []const u8, type_payload: ?[]const u8 = null, local: bool = false }{
-        .{ .list = "text/plain image/jpeg image/tiff image/png\n", .type_payload = "aW1hZ2UvcG5n" },
-        .{ .list = "image/png\timage/jpeg", .type_payload = "aW1hZ2UvcG5n" },
-        .{ .list = "image/tiff text/plain image/jpeg\r\n", .type_payload = "aW1hZ2UvanBlZw==" },
-        .{ .list = "image/tiff text/plain blah\n", .type_payload = "dGV4dC9wbGFpbg==" },
-        .{ .list = "text/html image/tiff", .local = true },
-        .{ .list = "text/uri-list text/html text/plain-extra" },
-        .{ .list = "" },
-    };
-    for (cases) |case| {
+test "SUI-116 clipboard offers request only a supported representation" {
+    {
+        const cases = [_]struct { list: []const u8, type_payload: ?[]const u8 = null, local: bool = false }{
+            .{ .list = "text/plain image/jpeg image/tiff image/png\n", .type_payload = "aW1hZ2UvcG5n" },
+            .{ .list = "image/png\timage/jpeg", .type_payload = "aW1hZ2UvcG5n" },
+            .{ .list = "image/tiff text/plain image/jpeg\r\n", .type_payload = "aW1hZ2UvanBlZw==" },
+            .{ .list = "image/tiff text/plain blah\n", .type_payload = "dGV4dC9wbGFpbg==" },
+            .{ .list = "text/html image/tiff", .local = true },
+            .{ .list = "text/uri-list text/html text/plain-extra" },
+            .{ .list = "" },
+        };
+        for (cases) |case| {
+            var transaction: Transaction = .{};
+            defer transaction.deinit(testing.allocator);
+            const result = try testOffer(&transaction, 17, case.list);
+            if (case.type_payload) |encoded| {
+                var output: [128]u8 = undefined;
+                const expected = try std.fmt.bufPrint(&output, "\x1b]5522;type=read:id=1;{s}\x1b\\", .{encoded});
+                try testing.expectEqualStrings(expected, result.?.read.bytes());
+            } else if (case.local) {
+                try testing.expectEqual(@as(u64, 17), result.?.local_image);
+            } else {
+                try testing.expectEqual(null, result);
+            }
+        }
+    }
+    {
         var transaction: Transaction = .{};
         defer transaction.deinit(testing.allocator);
-        const result = try testOffer(&transaction, 17, case.list);
-        if (case.type_payload) |encoded| {
-            var output: [128]u8 = undefined;
-            const expected = try std.fmt.bufPrint(&output, "\x1b]5522;type=read:id=1;{s}\x1b\\", .{encoded});
-            try testing.expectEqualStrings(expected, result.?.read.bytes());
-        } else if (case.local) {
-            try testing.expectEqual(@as(u64, 17), result.?.local_image);
-        } else {
-            try testing.expectEqual(null, result);
+        try testInput(&transaction, 41, "type=read:status=OK:loc=primary:pw=c2VjcmV0NDU2");
+        try testChunk(&transaction, 41, "type=read:status=DATA:mime=Lg==:pw=c2VjcmV0NDU2;", "text/html text/plain\n");
+        const read = transaction.receive(testing.allocator, "type=read:status=DONE:pw=c2VjcmV0NDU2", 41).?.read;
+        try testing.expectEqualStrings("\x1b]5522;type=read:id=1:loc=primary:pw=c2VjcmV0NDU2:name=UGFzdGUgZXZlbnQ=;dGV4dC9wbGFpbg==\x1b\\", read.bytes());
+        try testInput(&transaction, 41, "type=read:status=OK:loc=primary");
+        try testInput(&transaction, 41, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;SGVsbG8sIA==");
+        try testInput(&transaction, 41, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;d29ybGQh");
+        const text = transaction.receive(testing.allocator, "type=read:status=DONE", 41).?.text;
+        defer testing.allocator.free(text.bytes);
+        try testing.expectEqual(@as(u64, 41), text.epoch);
+        try testing.expectEqualStrings("Hello, world!", text.bytes);
+    }
+    {
+        var transaction: Transaction = .{};
+        defer transaction.deinit(testing.allocator);
+        try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==;", "text/plain");
+        try testInput(&transaction, 1, "type=read:status=DONE");
+        for ([_][]const u8{
+            "type=read:status=OK:pw=YWJj\x1b\\",
+            "type=read:status=OK:pw=YWJj:pw=YWJj",
+            "type=read:status=OK:pw=/w==",
+            "type=read:status=OK:pw=YR==",
+            "type=read:status=OK:loc=invalid",
+            "type=read:status=OK:pw=b3RoZXI=",
+        }) |frame| {
+            try testInput(&transaction, 1, frame);
+            try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==:pw=YWJj;", "text/plain");
+            try testInput(&transaction, 1, "type=read:status=DONE");
         }
+        try testInput(&transaction, 2, "type=read:status=OK");
+        try testChunk(&transaction, 2, "type=read:status=DATA:mime=Lg==;", "text/plain");
+        try testInput(&transaction, 3, "type=read:status=DONE");
+        try testing.expect((try testOffer(&transaction, 3, "text/plain")) != null);
+    }
+    {
+        var transaction: Transaction = .{};
+        defer transaction.deinit(testing.allocator);
+        try testInput(&transaction, 1, "type=read:status=OK:loc=primary");
+        try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==;", "image/tiff");
+        try testInput(&transaction, 1, "type=read:status=DONE");
+        try testInput(&transaction, 1, "type=read:status=OK");
+        transaction.abort(testing.allocator);
+        try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==;", "image/tiff");
+        try testInput(&transaction, 1, "type=read:status=DONE");
+    }
+    {
+        var transaction: Transaction = .{ .next_id = std.math.maxInt(u64) - 1 };
+        defer transaction.deinit(testing.allocator);
+        const password: [128]u8 = @splat('p');
+        var encoded: [password_limit]u8 = undefined;
+        const token = base64.Encoder.encode(&encoded, &password);
+        var ok_frame: [header_limit]u8 = undefined;
+        try testInput(&transaction, 7, try std.fmt.bufPrint(&ok_frame, "type=read:status=OK:loc=primary:pw={s}", .{token}));
+        try testChunk(&transaction, 7, "type=read:status=DATA:mime=Lg==;", "text/plain");
+        const request = transaction.receive(testing.allocator, "type=read:status=DONE", 7).?.read;
+        try testing.expect(std.mem.startsWith(u8, request.bytes(), "\x1b]5522;type=read:id=18446744073709551615:loc=primary:pw="));
+        try testing.expect(std.mem.endsWith(u8, request.bytes(), ":name=UGFzdGUgZXZlbnQ=;dGV4dC9wbGFpbg==\x1b\\"));
     }
 }
 
-test "Ghostty's repeated token and primary location produce the authenticated read" {
-    var transaction: Transaction = .{};
-    defer transaction.deinit(testing.allocator);
-    try testInput(&transaction, 41, "type=read:status=OK:loc=primary:pw=c2VjcmV0NDU2");
-    try testChunk(&transaction, 41, "type=read:status=DATA:mime=Lg==:pw=c2VjcmV0NDU2;", "text/html text/plain\n");
-    const read = transaction.receive(testing.allocator, "type=read:status=DONE:pw=c2VjcmV0NDU2", 41).?.read;
-    try testing.expectEqualStrings("\x1b]5522;type=read:id=1:loc=primary:pw=c2VjcmV0NDU2:name=UGFzdGUgZXZlbnQ=;dGV4dC9wbGFpbg==\x1b\\", read.bytes());
-    try testInput(&transaction, 41, "type=read:status=OK:loc=primary");
-    try testInput(&transaction, 41, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;SGVsbG8sIA==");
-    try testInput(&transaction, 41, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;d29ybGQh");
-    const text = transaction.receive(testing.allocator, "type=read:status=DONE", 41).?.text;
-    defer testing.allocator.free(text.bytes);
-    try testing.expectEqual(@as(u64, 41), text.epoch);
-    try testing.expectEqualStrings("Hello, world!", text.bytes);
-}
-
-test "tagged replies ignore old identifiers and serialize an overlapping offer" {
-    var transaction: Transaction = .{};
-    defer transaction.deinit(testing.allocator);
-    _ = (try testOffer(&transaction, 6, "image/jpeg")).?.read;
-    try testInput(&transaction, 6, "type=read:status=OK:id=99");
-    try testInput(&transaction, 6, "type=read:status=DATA:id=99:mime=aW1hZ2UvanBlZw==;broken");
-    try testInput(&transaction, 6, "type=read:status=DONE:id=99");
-    try testInput(&transaction, 6, "type=read:status=OK:id=1");
-    try testInput(&transaction, 6, "type=read:status=OK:pw=c2VjcmV0");
-    try testChunk(&transaction, 6, "type=read:status=DATA:mime=Lg==;", "text/plain\n");
-    try testInput(&transaction, 6, "type=read:status=DONE");
-    try testInput(&transaction, 6, "type=read:status=DATA:id=1:mime=aW1hZ2UvanBlZw==;/9j/2Q==");
-    const image = transaction.receive(testing.allocator, "type=read:status=DONE:id=1", 6).?.image;
-    defer testing.allocator.free(image.bytes);
-    try testing.expectEqual(@as(u64, 6), image.epoch);
-    try testing.expectEqual(.jpeg, image.mime);
-    try testing.expectEqualSlices(u8, &.{ 0xff, 0xd8, 0xff, 0xd9 }, image.bytes);
-    const request = (try testOffer(&transaction, 7, "image/png")).?.read;
-    try testing.expectEqualStrings("\x1b]5522;type=read:id=2;aW1hZ2UvcG5n\x1b\\", request.bytes());
-}
-
-test "stale focus, explicit abort and malformed reads drain through their own DONE" {
-    const cases = [_]enum { focus, abort, missing_ok, bad_data, bad_mime, bad_utf8, bad_done, unexpected_offer }{
-        .focus, .abort, .missing_ok, .bad_data, .bad_mime, .bad_utf8, .bad_done, .unexpected_offer,
-    };
-    for (cases) |case| {
+test "SUI-117 clipboard reads settle only the live transaction" {
+    {
+        var transaction: Transaction = .{};
+        defer transaction.deinit(testing.allocator);
+        _ = (try testOffer(&transaction, 6, "image/jpeg")).?.read;
+        try testInput(&transaction, 6, "type=read:status=OK:id=99");
+        try testInput(&transaction, 6, "type=read:status=DATA:id=99:mime=aW1hZ2UvanBlZw==;broken");
+        try testInput(&transaction, 6, "type=read:status=DONE:id=99");
+        try testInput(&transaction, 6, "type=read:status=OK:id=1");
+        try testInput(&transaction, 6, "type=read:status=OK:pw=c2VjcmV0");
+        try testChunk(&transaction, 6, "type=read:status=DATA:mime=Lg==;", "text/plain\n");
+        try testInput(&transaction, 6, "type=read:status=DONE");
+        try testInput(&transaction, 6, "type=read:status=DATA:id=1:mime=aW1hZ2UvanBlZw==;/9j/2Q==");
+        const image = transaction.receive(testing.allocator, "type=read:status=DONE:id=1", 6).?.image;
+        defer testing.allocator.free(image.bytes);
+        try testing.expectEqual(@as(u64, 6), image.epoch);
+        try testing.expectEqual(.jpeg, image.mime);
+        try testing.expectEqualSlices(u8, &.{ 0xff, 0xd8, 0xff, 0xd9 }, image.bytes);
+        const request = (try testOffer(&transaction, 7, "image/png")).?.read;
+        try testing.expectEqualStrings("\x1b]5522;type=read:id=2;aW1hZ2UvcG5n\x1b\\", request.bytes());
+    }
+    {
+        const cases = [_]enum { focus, abort, missing_ok, bad_data, bad_mime, bad_utf8, bad_done, unexpected_offer }{
+            .focus, .abort, .missing_ok, .bad_data, .bad_mime, .bad_utf8, .bad_done, .unexpected_offer,
+        };
+        for (cases) |case| {
+            var transaction: Transaction = .{};
+            defer transaction.deinit(testing.allocator);
+            _ = (try testOffer(&transaction, 1, "text/plain")).?.read;
+            if (case != .missing_ok) try testInput(&transaction, 1, "type=read:status=OK:id=1");
+            switch (case) {
+                .abort => {
+                    try testChunk(&transaction, 1, "type=read:status=DATA:id=1:mime=dGV4dC9wbGFpbg==;", "discarded bytes");
+                    transaction.abort(testing.allocator);
+                },
+                .bad_data => try testInput(&transaction, 1, "type=read:status=DATA:id=1:mime=dGV4dC9wbGFpbg==;e!=="),
+                .bad_mime => try testInput(&transaction, 1, "type=read:status=DATA:id=1:mime=aW1hZ2UvcG5n;eA=="),
+                .bad_utf8 => try testChunk(&transaction, 1, "type=read:status=DATA:id=1:mime=dGV4dC9wbGFpbg==;", "\xff"),
+                .unexpected_offer => try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==;", "text/plain"),
+                else => {},
+            }
+            try testChunk(&transaction, if (case == .focus) 2 else 1, "type=read:status=DATA:id=1:mime=dGV4dC9wbGFpbg==;", "tail");
+            try testInput(&transaction, 1, "type=read:status=DONE:id=99");
+            try testInput(&transaction, 1, if (case == .bad_done) "type=read:status=DONE:id=1;bad" else "type=read:status=DONE:id=1");
+            const request = (try testOffer(&transaction, 2, "text/plain")).?.read;
+            try testing.expectEqualStrings("\x1b]5522;type=read:id=2;dGV4dC9wbGFpbg==\x1b\\", request.bytes());
+        }
+    }
+    {
         var transaction: Transaction = .{};
         defer transaction.deinit(testing.allocator);
         _ = (try testOffer(&transaction, 1, "text/plain")).?.read;
-        if (case != .missing_ok) try testInput(&transaction, 1, "type=read:status=OK:id=1");
-        switch (case) {
-            .abort => {
-                try testChunk(&transaction, 1, "type=read:status=DATA:id=1:mime=dGV4dC9wbGFpbg==;", "discarded bytes");
-                transaction.abort(testing.allocator);
-            },
-            .bad_data => try testInput(&transaction, 1, "type=read:status=DATA:id=1:mime=dGV4dC9wbGFpbg==;e!=="),
-            .bad_mime => try testInput(&transaction, 1, "type=read:status=DATA:id=1:mime=aW1hZ2UvcG5n;eA=="),
-            .bad_utf8 => try testChunk(&transaction, 1, "type=read:status=DATA:id=1:mime=dGV4dC9wbGFpbg==;", "\xff"),
-            .unexpected_offer => try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==;", "text/plain"),
-            else => {},
-        }
-        try testChunk(&transaction, if (case == .focus) 2 else 1, "type=read:status=DATA:id=1:mime=dGV4dC9wbGFpbg==;", "tail");
-        try testInput(&transaction, 1, "type=read:status=DONE:id=99");
-        try testInput(&transaction, 1, if (case == .bad_done) "type=read:status=DONE:id=1;bad" else "type=read:status=DONE:id=1");
-        const request = (try testOffer(&transaction, 2, "text/plain")).?.read;
-        try testing.expectEqualStrings("\x1b]5522;type=read:id=2;dGV4dC9wbGFpbg==\x1b\\", request.bytes());
+        try testInput(&transaction, 1, "type=read:status=EPERM:id=1");
+        try testing.expect((try testOffer(&transaction, 1, "text/plain")) != null);
     }
-}
-
-test "invalid and inconsistent offer tokens, unsolicited data and stale offers emit no request" {
-    var transaction: Transaction = .{};
-    defer transaction.deinit(testing.allocator);
-    try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==;", "text/plain");
-    try testInput(&transaction, 1, "type=read:status=DONE");
-    for ([_][]const u8{
-        "type=read:status=OK:pw=YWJj\x1b\\",
-        "type=read:status=OK:pw=YWJj:pw=YWJj",
-        "type=read:status=OK:pw=/w==",
-        "type=read:status=OK:pw=YR==",
-        "type=read:status=OK:loc=invalid",
-        "type=read:status=OK:pw=b3RoZXI=",
-    }) |frame| {
-        try testInput(&transaction, 1, frame);
-        try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==:pw=YWJj;", "text/plain");
-        try testInput(&transaction, 1, "type=read:status=DONE");
-    }
-    try testInput(&transaction, 2, "type=read:status=OK");
-    try testChunk(&transaction, 2, "type=read:status=DATA:mime=Lg==;", "text/plain");
-    try testInput(&transaction, 3, "type=read:status=DONE");
-    try testing.expect((try testOffer(&transaction, 3, "text/plain")) != null);
-}
-
-test "TIFF from primary selection and an unanswered offer drop without a local effect" {
-    var transaction: Transaction = .{};
-    defer transaction.deinit(testing.allocator);
-    try testInput(&transaction, 1, "type=read:status=OK:loc=primary");
-    try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==;", "image/tiff");
-    try testInput(&transaction, 1, "type=read:status=DONE");
-    try testInput(&transaction, 1, "type=read:status=OK");
-    transaction.abort(testing.allocator);
-    try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==;", "image/tiff");
-    try testInput(&transaction, 1, "type=read:status=DONE");
-}
-
-test "terminal permission refusal releases the read with no requirement for DONE" {
-    var transaction: Transaction = .{};
-    defer transaction.deinit(testing.allocator);
-    _ = (try testOffer(&transaction, 1, "text/plain")).?.read;
-    try testInput(&transaction, 1, "type=read:status=EPERM:id=1");
-    try testing.expect((try testOffer(&transaction, 1, "text/plain")) != null);
-}
-
-test "decoded text and image limits accept exactly the bound and discard one byte over" {
-    const cases = [_]struct { mime: []const u8, wire: []const u8, limit: usize }{
-        .{ .mime = "text/plain", .wire = "dGV4dC9wbGFpbg==", .limit = 65_537 },
-        .{ .mime = "image/png", .wire = "aW1hZ2UvcG5n", .limit = 16 * 1024 * 1024 },
-    };
-    for (cases) |case| for ([_]bool{ false, true }) |overflow| {
+    {
         var transaction: Transaction = .{};
         defer transaction.deinit(testing.allocator);
-        _ = (try testOffer(&transaction, 4, case.mime)).?.read;
+        try testing.expect(!transaction.pending());
+        try testInput(&transaction, 1, "type=read:status=OK");
+        try testing.expect(transaction.pending());
+        try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==;", "text/plain");
+        _ = transaction.receive(testing.allocator, "type=read:status=DONE", 1).?.read;
+        try testing.expect(transaction.pending());
+        try testInput(&transaction, 1, "type=read:status=OK:id=1");
+        try testChunk(&transaction, 1, "type=read:status=DATA:id=1:mime=dGV4dC9wbGFpbg==;", "timed out");
+        transaction.abort(testing.allocator);
+        try testing.expect(transaction.pending());
+        transaction.deinit(testing.allocator);
+        try testing.expect(!transaction.pending());
+        const read = (try testOffer(&transaction, 2, "text/plain")).?.read;
+        try testing.expectEqualStrings("\x1b]5522;type=read:id=2;dGV4dC9wbGFpbg==\x1b\\", read.bytes());
+        try testInput(&transaction, 2, "type=read:status=DONE:id=1");
+        try testing.expect(transaction.pending());
+        try testInput(&transaction, 2, "type=read:status=DONE:id=2");
+        try testing.expect(!transaction.pending());
+    }
+}
+
+test "SUI-118 clipboard reads keep data within their byte bounds" {
+    {
+        const cases = [_]struct { mime: []const u8, wire: []const u8, limit: usize }{
+            .{ .mime = "text/plain", .wire = "dGV4dC9wbGFpbg==", .limit = 65_537 },
+            .{ .mime = "image/png", .wire = "aW1hZ2UvcG5n", .limit = 16 * 1024 * 1024 },
+        };
+        for (cases) |case| for ([_]bool{ false, true }) |overflow| {
+            var transaction: Transaction = .{};
+            defer transaction.deinit(testing.allocator);
+            _ = (try testOffer(&transaction, 4, case.mime)).?.read;
+            try testInput(&transaction, 4, "type=read:status=OK");
+            var header: [128]u8 = undefined;
+            const frame = try std.fmt.bufPrint(&header, "type=read:status=DATA:mime={s};", .{case.wire});
+            const chunk: [chunk_limit]u8 = @splat('z');
+            for (0..case.limit / chunk_limit) |_| try testChunk(&transaction, 4, frame, &chunk);
+            if (case.limit % chunk_limit != 0) try testChunk(&transaction, 4, frame, chunk[0 .. case.limit % chunk_limit]);
+            if (overflow) try testChunk(&transaction, 4, frame, "x");
+            const result = transaction.receive(testing.allocator, "type=read:status=DONE", 4);
+            if (overflow) {
+                try testing.expectEqual(null, result);
+            } else {
+                const bytes = switch (result.?) {
+                    .image => |image| image.bytes,
+                    .text => |text| text.bytes,
+                    else => return error.UnexpectedEffect,
+                };
+                defer testing.allocator.free(bytes);
+                try testing.expectEqual(case.limit, bytes.len);
+                try testing.expectEqual(@as(u8, 'z'), bytes[case.limit - 1]);
+            }
+            try testing.expect((try testOffer(&transaction, 4, "text/plain")) != null);
+        };
+    }
+    {
+        var transaction: Transaction = .{};
+        defer transaction.deinit(testing.allocator);
+        _ = (try testOffer(&transaction, 4, "text/plain")).?.read;
         try testInput(&transaction, 4, "type=read:status=OK");
-        var header: [128]u8 = undefined;
-        const frame = try std.fmt.bufPrint(&header, "type=read:status=DATA:mime={s};", .{case.wire});
-        const chunk: [chunk_limit]u8 = @splat('z');
-        for (0..case.limit / chunk_limit) |_| try testChunk(&transaction, 4, frame, &chunk);
-        if (case.limit % chunk_limit != 0) try testChunk(&transaction, 4, frame, chunk[0 .. case.limit % chunk_limit]);
-        if (overflow) try testChunk(&transaction, 4, frame, "x");
-        const result = transaction.receive(testing.allocator, "type=read:status=DONE", 4);
-        if (overflow) {
-            try testing.expectEqual(null, result);
-        } else {
-            const bytes = switch (result.?) {
-                .image => |image| image.bytes,
-                .text => |text| text.bytes,
-                else => return error.UnexpectedEffect,
-            };
-            defer testing.allocator.free(bytes);
-            try testing.expectEqual(case.limit, bytes.len);
-            try testing.expectEqual(@as(u8, 'z'), bytes[case.limit - 1]);
-        }
-        try testing.expect((try testOffer(&transaction, 4, "text/plain")) != null);
-    };
-}
-
-test "an oversized data frame is refused even when the total fits" {
-    var transaction: Transaction = .{};
-    defer transaction.deinit(testing.allocator);
-    _ = (try testOffer(&transaction, 4, "text/plain")).?.read;
-    try testInput(&transaction, 4, "type=read:status=OK");
-    const chunk: [chunk_limit + 1]u8 = @splat('z');
-    try testChunk(&transaction, 4, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;", &chunk);
-    try testInput(&transaction, 4, "type=read:status=DONE");
-}
-
-test "maximum password and identifier fit the read command" {
-    var transaction: Transaction = .{ .next_id = std.math.maxInt(u64) - 1 };
-    defer transaction.deinit(testing.allocator);
-    const password: [128]u8 = @splat('p');
-    var encoded: [password_limit]u8 = undefined;
-    const token = base64.Encoder.encode(&encoded, &password);
-    var ok_frame: [header_limit]u8 = undefined;
-    try testInput(&transaction, 7, try std.fmt.bufPrint(&ok_frame, "type=read:status=OK:loc=primary:pw={s}", .{token}));
-    try testChunk(&transaction, 7, "type=read:status=DATA:mime=Lg==;", "text/plain");
-    const request = transaction.receive(testing.allocator, "type=read:status=DONE", 7).?.read;
-    try testing.expect(std.mem.startsWith(u8, request.bytes(), "\x1b]5522;type=read:id=18446744073709551615:loc=primary:pw="));
-    try testing.expect(std.mem.endsWith(u8, request.bytes(), ":name=UGFzdGUgZXZlbnQ=;dGV4dC9wbGFpbg==\x1b\\"));
-}
-
-test "pending includes offer and drain; timeout drops stored data and preserves request sequence" {
-    var transaction: Transaction = .{};
-    defer transaction.deinit(testing.allocator);
-    try testing.expect(!transaction.pending());
-    try testInput(&transaction, 1, "type=read:status=OK");
-    try testing.expect(transaction.pending());
-    try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==;", "text/plain");
-    _ = transaction.receive(testing.allocator, "type=read:status=DONE", 1).?.read;
-    try testing.expect(transaction.pending());
-    try testInput(&transaction, 1, "type=read:status=OK:id=1");
-    try testChunk(&transaction, 1, "type=read:status=DATA:id=1:mime=dGV4dC9wbGFpbg==;", "timed out");
-    transaction.abort(testing.allocator);
-    try testing.expect(transaction.pending());
-    transaction.deinit(testing.allocator);
-    try testing.expect(!transaction.pending());
-    const read = (try testOffer(&transaction, 2, "text/plain")).?.read;
-    try testing.expectEqualStrings("\x1b]5522;type=read:id=2;dGV4dC9wbGFpbg==\x1b\\", read.bytes());
-    try testInput(&transaction, 2, "type=read:status=DONE:id=1");
-    try testing.expect(transaction.pending());
-    try testInput(&transaction, 2, "type=read:status=DONE:id=2");
-    try testing.expect(!transaction.pending());
-}
-
-test "allocation failure discards the read until its DONE" {
-    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    const allocator = failing.allocator();
-    var transaction: Transaction = .{};
-    defer transaction.deinit(allocator);
-    _ = (try testOffer(&transaction, 1, "text/plain")).?.read;
-    try testing.expectEqual(null, transaction.receive(allocator, "type=read:status=OK", 1));
-    try testing.expectEqual(null, transaction.receive(allocator, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;eA==", 1));
-    try testing.expect(transaction.pending());
-    try testing.expectEqual(null, transaction.receive(allocator, "type=read:status=DONE", 1));
-    try testing.expect(!transaction.pending());
+        const chunk: [chunk_limit + 1]u8 = @splat('z');
+        try testChunk(&transaction, 4, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;", &chunk);
+        try testInput(&transaction, 4, "type=read:status=DONE");
+    }
+    {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        const allocator = failing.allocator();
+        var transaction: Transaction = .{};
+        defer transaction.deinit(allocator);
+        _ = (try testOffer(&transaction, 1, "text/plain")).?.read;
+        try testing.expectEqual(null, transaction.receive(allocator, "type=read:status=OK", 1));
+        try testing.expectEqual(null, transaction.receive(allocator, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;eA==", 1));
+        try testing.expect(transaction.pending());
+        try testing.expectEqual(null, transaction.receive(allocator, "type=read:status=DONE", 1));
+        try testing.expect(!transaction.pending());
+    }
 }

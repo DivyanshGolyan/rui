@@ -96,83 +96,80 @@ fn runClipboard(io: std.Io, environment: *const std.process.Environ.Map, argv: [
     return null;
 }
 
-test "clipboard image refuses SSH sessions even with local display variables" {
-    var environment = std.process.Environ.Map.init(std.testing.allocator);
-    defer environment.deinit();
-    try environment.put("WAYLAND_DISPLAY", "wayland-0");
-    try environment.put("DISPLAY", ":0");
-    for ([_][]const u8{ "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY" }) |name| {
-        try environment.put(name, "set");
+test "SUI-119 clipboard image reads the supported local clipboard" {
+    {
+        var environment = std.process.Environ.Map.init(std.testing.allocator);
+        defer environment.deinit();
+        try environment.put("WAYLAND_DISPLAY", "wayland-0");
+        try environment.put("DISPLAY", ":0");
+        for ([_][]const u8{ "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY" }) |name| {
+            try environment.put(name, "set");
+            try std.testing.expectEqual(null, try read(std.testing.io, &environment));
+            _ = environment.swapRemove(name);
+        }
+    }
+    if (builtin.os.tag == .linux) {
+        var environment = std.process.Environ.Map.init(std.testing.allocator);
+        defer environment.deinit();
         try std.testing.expectEqual(null, try read(std.testing.io, &environment));
-        _ = environment.swapRemove(name);
     }
-}
+    if (builtin.os.tag == .linux) {
+        const testing = std.testing;
+        var fixture = testing.tmpDir(.{});
+        defer fixture.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root = path[0..try fixture.dir.realPath(testing.io, &path)];
+        var environment = std.process.Environ.Map.init(testing.allocator);
+        defer environment.deinit();
+        try environment.put("PATH", root);
+        try environment.put("WAYLAND_DISPLAY", "wayland-fixture");
+        try environment.put("DISPLAY", ":0");
+        const block = try environment.createPosixBlock(testing.allocator, .{});
+        defer block.deinit(testing.allocator);
+        var threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .{ .block = block } });
+        defer threaded.deinit();
+        const io = threaded.io();
 
-test "Linux clipboard image returns null without a local display" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
-    var environment = std.process.Environ.Map.init(std.testing.allocator);
-    defer environment.deinit();
-    try std.testing.expectEqual(null, try read(std.testing.io, &environment));
-}
+        const png = @embedFile("../codecs/fixtures/image-input/pixel.png");
+        const jpeg = @embedFile("../testing/fixtures/input-baseline.jpg");
+        const x11_png = @embedFile("../codecs/fixtures/image-input/pixel-multi-window.png");
+        try fixture.dir.writeFile(io, .{ .sub_path = "image.png", .data = png });
+        try fixture.dir.writeFile(io, .{ .sub_path = "image.jpg", .data = jpeg });
+        try fixture.dir.writeFile(io, .{ .sub_path = "x11.png", .data = x11_png });
+        try fixture.dir.writeFile(io, .{
+            .sub_path = "wl-paste",
+            .data =
+            \\#!/bin/sh
+            \\case "$FIXTURE_FORMAT:$*" in
+            \\  png:--no-newline\ --type\ image/png) exec /bin/cat "$PATH/image.png" ;;
+            \\  jpeg:--no-newline\ --type\ image/jpeg) exec /bin/cat "$PATH/image.jpg" ;;
+            \\  *) exit 1 ;;
+            \\esac
+            ,
+            .flags = .{ .permissions = .fromMode(0o700) },
+        });
+        try fixture.dir.writeFile(io, .{
+            .sub_path = "xclip",
+            .data =
+            \\#!/bin/sh
+            \\[ "$*" = '-selection clipboard -out -target image/png' ] || exit 1
+            \\exec /bin/cat "$PATH/x11.png"
+            ,
+            .flags = .{ .permissions = .fromMode(0o700) },
+        });
 
-// The clipboard process receives its own environment, and PATH lookup uses the Io's environment.
-test "Linux clipboard image finds a supported local representation and preserves its bytes" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
-    const testing = std.testing;
-    var fixture = testing.tmpDir(.{});
-    defer fixture.cleanup();
-    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root = path[0..try fixture.dir.realPath(testing.io, &path)];
-    var environment = std.process.Environ.Map.init(testing.allocator);
-    defer environment.deinit();
-    try environment.put("PATH", root);
-    try environment.put("WAYLAND_DISPLAY", "wayland-fixture");
-    try environment.put("DISPLAY", ":0");
-    const block = try environment.createPosixBlock(testing.allocator, .{});
-    defer block.deinit(testing.allocator);
-    var threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .{ .block = block } });
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    const png = @embedFile("../codecs/fixtures/image-input/pixel.png");
-    const jpeg = @embedFile("../testing/fixtures/input-baseline.jpg");
-    const x11_png = @embedFile("../codecs/fixtures/image-input/pixel-multi-window.png");
-    try fixture.dir.writeFile(io, .{ .sub_path = "image.png", .data = png });
-    try fixture.dir.writeFile(io, .{ .sub_path = "image.jpg", .data = jpeg });
-    try fixture.dir.writeFile(io, .{ .sub_path = "x11.png", .data = x11_png });
-    try fixture.dir.writeFile(io, .{
-        .sub_path = "wl-paste",
-        .data =
-        \\#!/bin/sh
-        \\case "$FIXTURE_FORMAT:$*" in
-        \\  png:--no-newline\ --type\ image/png) exec /bin/cat "$PATH/image.png" ;;
-        \\  jpeg:--no-newline\ --type\ image/jpeg) exec /bin/cat "$PATH/image.jpg" ;;
-        \\  *) exit 1 ;;
-        \\esac
-        ,
-        .flags = .{ .permissions = .fromMode(0o700) },
-    });
-    try fixture.dir.writeFile(io, .{
-        .sub_path = "xclip",
-        .data =
-        \\#!/bin/sh
-        \\[ "$*" = '-selection clipboard -out -target image/png' ] || exit 1
-        \\exec /bin/cat "$PATH/x11.png"
-        ,
-        .flags = .{ .permissions = .fromMode(0o700) },
-    });
-
-    for ([_]struct { format: []const u8, bytes: []const u8 }{
-        .{ .format = "png", .bytes = png },
-        .{ .format = "jpeg", .bytes = jpeg },
-        .{ .format = "x11", .bytes = x11_png },
-    }) |case| {
-        try environment.put("FIXTURE_FORMAT", case.format);
-        const bytes = (try read(io, &environment)) orelse return error.TestUnexpectedResult;
-        defer allocator.free(bytes);
-        try testing.expectEqualSlices(u8, case.bytes, bytes);
+        for ([_]struct { format: []const u8, bytes: []const u8 }{
+            .{ .format = "png", .bytes = png },
+            .{ .format = "jpeg", .bytes = jpeg },
+            .{ .format = "x11", .bytes = x11_png },
+        }) |case| {
+            try environment.put("FIXTURE_FORMAT", case.format);
+            const bytes = (try read(io, &environment)) orelse return error.TestUnexpectedResult;
+            defer allocator.free(bytes);
+            try testing.expectEqualSlices(u8, case.bytes, bytes);
+        }
+        try fixture.dir.deleteFile(io, "wl-paste");
+        try fixture.dir.deleteFile(io, "xclip");
+        try testing.expectEqual(null, try read(io, &environment));
     }
-    try fixture.dir.deleteFile(io, "wl-paste");
-    try fixture.dir.deleteFile(io, "xclip");
-    try testing.expectEqual(null, try read(io, &environment));
 }
