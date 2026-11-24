@@ -91,7 +91,7 @@ pub const records_per_transaction = 2;
 /// an app set saves its whole declaration inside one configure transaction.
 pub fn SavingRecordsOf(comptime capacity: usize) type {
     return struct {
-    const SavingRecords = @This();
+    const Self = @This();
 
     records: []const tool_record.Record,
     pairs: [capacity]content_domain.Pair = undefined,
@@ -100,7 +100,7 @@ pub fn SavingRecordsOf(comptime capacity: usize) type {
     content_ids: [capacity][2]u64 = undefined,
     existing: [capacity]lookup_record.Result = undefined,
 
-    pub fn lookup(saving: *SavingRecords, a: anytype) void {
+    pub fn lookup(saving: *Self, a: anytype) void {
         std.debug.assert(saving.records.len <= capacity);
         for (saving.records, 0..) |*each, index| {
             saving.descriptions[index] = .ofBytes(each.description, false);
@@ -109,7 +109,7 @@ pub fn SavingRecordsOf(comptime capacity: usize) type {
         }
     }
 
-    pub fn importTexts(saving: *SavingRecords, a: anytype) !bool {
+    pub fn importTexts(saving: *Self, a: anytype) !bool {
         var known = false;
         for (saving.records, 0..) |*each, index| {
             content_domain.foundPair(&saving.pairs[index], &saving.descriptions[index], &saving.schemas[index]);
@@ -129,7 +129,7 @@ pub fn SavingRecordsOf(comptime capacity: usize) type {
         return known;
     }
 
-    pub fn insert(saving: *SavingRecords, a: anytype) !void {
+    pub fn insert(saving: *Self, a: anytype) !void {
         for (saving.records, 0..) |*each, index| if (saving.existing[index] == null) {
             const ids = saving.content_ids[index];
             const id = try a.identity(.tool_record_id);
@@ -312,6 +312,16 @@ pub fn insertHostToolSet(a: anytype, tool_set: *const tool_record.HostToolSet, d
         });
     }
 }
+
+/// A configure's app declaration: the validated records, and the app tool set they intern as.
+pub const AppSet = struct {
+    declaration: ?app_tools.Declaration = null,
+    phase: enum { idle, looking, saving, done } = .idle,
+    digest: [32]u8 = undefined,
+    set: lookup_tool_set.Result = null,
+    saving: AppSaving = undefined,
+    set_id: ?u64 = null,
+};
 
 /// The app tool set a configure saves: its records, then its set row, interned by digest. No Host points at
 /// it; the Session's app_tool_set_id does. Returns the set's id.

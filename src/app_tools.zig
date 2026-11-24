@@ -120,3 +120,57 @@ fn integerOf(comptime Int: type, value: ?std.json.Value, default: Int) ParseErro
     if (found != .integer) return error.InvalidAppToolPolicy;
     return std.math.cast(Int, found.integer) orelse error.InvalidAppToolPolicy;
 }
+
+// SH-121: the declaration validator accepts one well-formed list of records and names the refusal of every other
+// document, over the whole domain of names, policies, sizes and counts.
+test "SH-121 app tools validate one declaration with named refusals over its domain" {
+    const arena_memory = try std.testing.allocator.alloc(u8, arena_bytes);
+    defer std.testing.allocator.free(arena_memory);
+    const ok = "{\"name\":\"lookup\",\"description\":\"Look up a thing\",\"input_schema\":{\"type\":\"object\"}}";
+    const cases = [_]struct { document: []const u8, want: ?Refusal }{
+        .{ .document = "[]", .want = null },
+        .{ .document = "[" ++ ok ++ "]", .want = null },
+        .{ .document = "[{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{\"type\":\"object\"},\"replay\":\"safe\",\"restart_limit\":5,\"wait_ms\":2000}]", .want = null },
+        .{ .document = "[{\"name\":\"has.dot\",\"description\":\"d\",\"input_schema\":{}}]", .want = .invalid_app_tool_name },
+        .{ .document = "[" ++ ok ++ "," ++ ok ++ "]", .want = .duplicate_app_tool_name },
+        .{ .document = "[{\"name\":\"bash\",\"description\":\"d\",\"input_schema\":{}}]", .want = .app_tool_built_in_clash },
+        .{ .document = "[{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{},\"wait_ms\":0}]", .want = .invalid_app_tool_policy },
+        .{ .document = "[{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{},\"restart_limit\":17}]", .want = .invalid_app_tool_policy },
+        .{ .document = "[{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{},\"replay\":\"maybe\"}]", .want = .invalid_app_tool_policy },
+        .{ .document = "[{\"name\":\"a\",\"description\":\"\",\"input_schema\":{}}]", .want = .invalid_app_tools },
+        .{ .document = "[{\"name\":\"a\",\"description\":\"d\",\"input_schema\":[]}]", .want = .invalid_app_tools },
+        .{ .document = "[{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{},\"extra\":1}]", .want = .invalid_app_tools },
+        .{ .document = "[{\"description\":\"d\",\"input_schema\":{}}]", .want = .invalid_app_tools },
+        .{ .document = "{}", .want = .invalid_app_tools },
+        .{ .document = "[", .want = .invalid_app_tools },
+    };
+    for (cases) |case| {
+        var fixed: std.heap.FixedBufferAllocator = .init(arena_memory);
+        const parsed = parse(fixed.allocator(), case.document);
+        switch (parsed) {
+            .declared => |declaration| {
+                try std.testing.expect(case.want == null);
+                try std.testing.expect(declaration.toolSet().valid());
+            },
+            .refused => |refusal| try std.testing.expectEqual(case.want.?, refusal),
+        }
+    }
+    // The policy keeps its stated safe values; an unsafe call keeps restart_limit 0 (AppPolicy.canonical).
+    var fixed: std.heap.FixedBufferAllocator = .init(arena_memory);
+    const safe = parse(fixed.allocator(), cases[2].document).declared;
+    try std.testing.expectEqual(tool_record.Replay.safe, safe.records[0].app.replay);
+    try std.testing.expectEqual(@as(u8, 5), safe.records[0].app.restart_limit);
+    try std.testing.expectEqual(@as(u32, 2000), safe.records[0].app.wait_ms);
+    var defaults: std.heap.FixedBufferAllocator = .init(arena_memory);
+    const unsafe = parse(defaults.allocator(), "[" ++ ok ++ "]").declared;
+    try std.testing.expectEqual(tool_record.Replay.unsafe, unsafe.records[0].app.replay);
+    try std.testing.expectEqual(@as(u8, 0), unsafe.records[0].app.canonical().restart_limit);
+    // Size: a document over the cap is refused before it is read, and an arena too small is refused by size.
+    const too_long = try std.testing.allocator.alloc(u8, max_document_bytes + 1);
+    defer std.testing.allocator.free(too_long);
+    @memset(too_long, ' ');
+    var small_memory: [64]u8 = undefined;
+    var small: std.heap.FixedBufferAllocator = .init(&small_memory);
+    try std.testing.expectEqual(Refusal.app_tools_too_large, parse(fixed.allocator(), too_long).refused);
+    try std.testing.expectEqual(Refusal.app_tools_too_large, parse(small.allocator(), "[" ++ ok ++ "]").refused);
+}

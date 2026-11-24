@@ -712,6 +712,7 @@ pub fn TestingConfiguring(comptime Check: type) type {
         pub fn step(b: *Self, r: anytype, _: u32) !TestingAsk {
             const request: configuration_domain.Request = .{
                 .io = b.storage.io,
+                .declarations = r.declarationArena(),
                 .tools = b.storage.hostTools(),
                 .served = b.storage.served,
                 .session = b.session,

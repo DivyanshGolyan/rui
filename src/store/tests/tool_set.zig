@@ -1145,3 +1145,69 @@ test "SH-118 a tool record read back from the Store through the offer, the selec
         }
     }.run);
 }
+
+// SH-122: a lane root's configure saves its declared app tools as one tool set that the Session names; replacing the
+// declaration changes that set, an empty list clears it, a child refuses a declaration by name, and a replayed
+// create keeps one set. Both engines run the same Store API calls.
+fn declareAppTools(configuration: *wire_request.Configuration, bytes: []const u8) void {
+    configuration.app_tools = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
+}
+
+test "SH-122 a lane root saves its app tools as one set; replacing, clearing and a child's refusal hold on both engines" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const first = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"},\"replay\":\"safe\",\"restart_limit\":2,\"wait_ms\":5000}]";
+            const second = "[{\"name\":\"other\",\"description\":\"Other.\",\"input_schema\":{\"type\":\"object\"}}]";
+            var create = try store_testing.completeConfiguration("app-root", "", workspace, "model-a");
+            declareAppTools(&create.configuration, first);
+            const root_reply = try storage.configure(&create, .{});
+            try std.testing.expect(root_reply == .accepted);
+            const root = root_reply.accepted.session.slice();
+            const first_set = try store_testing.queryU64(&storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root});
+            try std.testing.expect(first_set > 0);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM tool_set WHERE tool_set_id=?1", .{first_set}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE owner='app' AND name='ask' AND replay='safe' AND restart_limit=2 AND wait_ms=5000", .{}));
+            // A replayed create answers the same Session and keeps its set.
+            const replay = try storage.configure(&create, .{});
+            try std.testing.expect(replay.accepted.replayed);
+            try std.testing.expectEqual(first_set, try store_testing.queryU64(&storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root}));
+
+            // A configure with a new declaration replaces the set and records the change once.
+            var replace: wire_request.ConfigureCommand = .{};
+            try replace.key.set("app-root-replace");
+            try replace.session.set(root);
+            declareAppTools(&replace.configuration, second);
+            try std.testing.expect((try storage.configure(&replace, .{})) == .accepted);
+            const second_set = try store_testing.queryU64(&storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root});
+            try std.testing.expect(second_set != first_set);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND field='app_tools'", .{root}));
+
+            // An empty list clears the declaration: the Session names no set.
+            var clear: wire_request.ConfigureCommand = .{};
+            try clear.key.set("app-root-clear");
+            try clear.session.set(root);
+            declareAppTools(&clear.configuration, "[]");
+            try std.testing.expect((try storage.configure(&clear, .{})) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND app_tool_set_id IS NULL", .{root}));
+
+            // A child, attached to the root, may not declare app tools.
+            var child: wire_request.ConfigureCommand = .{};
+            try child.key.set("app-child");
+            child.configuration = try shared_fixtures.testingAgentSpec(&.{}, "bypass");
+            child.configuration.parent.state = .value;
+            try child.configuration.parent.value.set(root);
+            child.configuration.model.state = .value;
+            try child.configuration.model.value.set("model-a");
+            declareAppTools(&child.configuration, second);
+            const refused = try storage.configure(&child, .{});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.app_tools_on_child, refused.rejected.code);
+        }
+    }.run);
+}

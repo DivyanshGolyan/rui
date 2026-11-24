@@ -376,6 +376,9 @@ pub const SubmitMessage = struct {
         .saved_loaded = .{.branch},
         .loaded_source = .{.branch},
         .loaded = .{.branch},
+        .app_set = .{.branch},
+        .app_texts = .{.branch},
+        .app_records = .{.branch},
         .creation = .{.paged},
         .catalog = .{.branch},
         .text = .{.branch},
@@ -437,6 +440,9 @@ pub const SubmitMessage = struct {
                 })) |next| return next;
                 return t.applyValidated(r);
             },
+            .app_set => return t.apply(r, .app_set),
+            .app_texts => return t.apply(r, .app_texts),
+            .app_records => return t.apply(r, .app_records),
             .creation => return t.apply(r, .creation),
             .catalog => return t.apply(r, .catalog),
             .text => {
@@ -464,6 +470,7 @@ pub const SubmitMessage = struct {
     }
 
     noinline fn start(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        r.resetDeclarations();
         const command = t.input.command;
         if (command.configuration != null) {
             t.creation = r.configurationReads();
@@ -601,8 +608,9 @@ pub const SubmitMessage = struct {
         return (try t.validate(r, null)).?;
     }
 
-    fn request(t: *SubmitMessage) configuration_domain.Request {
+    fn request(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) configuration_domain.Request {
         return .{
+            .declarations = r.declarationArena(),
             .io = t.input.io,
             .tools = t.input.tools,
             .served = t.input.served,
@@ -614,7 +622,7 @@ pub const SubmitMessage = struct {
     }
 
     noinline fn validate(t: *SubmitMessage, r: *transition.Round(SubmitMessage), ran: ?configuration_domain.ValidationRound) !?transition.Next(SubmitMessage) {
-        return switch (try configuration_domain.validateStep(r, &t.request(), t.creation, ran)) {
+        return switch (try configuration_domain.validateStep(r, &t.request(r), t.creation, ran)) {
             .round => |round| .{ .round = switch (round) {
                 inline else => |tag| @field(rounds.At, @tagName(tag)),
             } },
@@ -640,7 +648,7 @@ pub const SubmitMessage = struct {
             try checkFreshSelection(&t.scratch.fresh, t.creation);
             t.fresh_checked = true;
         }
-        switch (try configuration_domain.applyStep(r, &t.request(), r.faults(), t.creation, ran)) {
+        switch (try configuration_domain.applyStep(r, &t.request(r), r.faults(), t.creation, ran)) {
             .round => |round| {
                 if (round == .creation and !t.fresh_checked) if (t.input.receipt) |receipt| {
                     t.scratch = .{ .fresh = undefined };
@@ -1010,6 +1018,9 @@ pub const StartAgent = struct {
         .saved_loaded = .{.branch},
         .loaded_source = .{.branch},
         .loaded = .{.branch},
+        .app_set = .{.branch},
+        .app_texts = .{.branch},
+        .app_records = .{.branch},
         .creation = .{.paged},
         .catalog = .{.branch},
         .outcome = .{.always},
@@ -1063,6 +1074,9 @@ pub const StartAgent = struct {
                 inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
                 else => unreachable,
             }),
+            .app_set => return t.apply(r, .app_set),
+            .app_texts => return t.apply(r, .app_texts),
+            .app_records => return t.apply(r, .app_records),
             .creation => return t.apply(r, .creation),
             .catalog => return t.apply(r, .catalog),
             .outcome => return t.settle(r),
@@ -1071,6 +1085,7 @@ pub const StartAgent = struct {
     }
 
     noinline fn start(t: *StartAgent, r: *transition.Round(StartAgent)) !transition.Next(StartAgent) {
+        r.resetDeclarations();
         const binding = t.input.binding;
         const configuration = t.input.configuration;
         t.key = std.fmt.bufPrint(&t.key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
@@ -1113,8 +1128,9 @@ pub const StartAgent = struct {
         return t.validate(r, null);
     }
 
-    fn request(t: *StartAgent) configuration_domain.Request {
+    fn request(t: *StartAgent, r: *transition.Round(StartAgent)) configuration_domain.Request {
         return .{
+            .declarations = r.declarationArena(),
             .io = t.input.io,
             .tools = t.input.tools,
             .served = t.input.served,
@@ -1126,7 +1142,7 @@ pub const StartAgent = struct {
     }
 
     noinline fn validate(t: *StartAgent, r: *transition.Round(StartAgent), ran: ?configuration_domain.ValidationRound) !transition.Next(StartAgent) {
-        return switch (try configuration_domain.validateStep(r, &t.request(), t.creation, ran)) {
+        return switch (try configuration_domain.validateStep(r, &t.request(r), t.creation, ran)) {
             .round => |round| .{ .round = switch (round) {
                 inline else => |tag| @field(rounds.At, @tagName(tag)),
             } },
@@ -1145,7 +1161,7 @@ pub const StartAgent = struct {
     }
 
     noinline fn apply(t: *StartAgent, r: *transition.Round(StartAgent), ran: ?configuration_domain.ApplyRound) !transition.Next(StartAgent) {
-        const applied = switch (try configuration_domain.applyStep(r, &t.request(), r.faults(), t.creation, ran)) {
+        const applied = switch (try configuration_domain.applyStep(r, &t.request(r), r.faults(), t.creation, ran)) {
             .round => |round| return .{ .round = switch (round) {
                 inline else => |tag| @field(rounds.At, @tagName(tag)),
             } },
@@ -1222,6 +1238,9 @@ pub const Configure = struct {
         .saved_loaded = .{.branch},
         .loaded_source = .{.branch},
         .loaded = .{.branch},
+        .app_set = .{.branch},
+        .app_texts = .{.branch},
+        .app_records = .{.branch},
         .creation = .{.paged},
         .catalog = .{.branch},
         .skills = .{.branch},
@@ -1280,6 +1299,9 @@ pub const Configure = struct {
                 inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
                 else => unreachable,
             }),
+            .app_set => return t.apply(r, .app_set),
+            .app_texts => return t.apply(r, .app_texts),
+            .app_records => return t.apply(r, .app_records),
             .creation => return t.apply(r, .creation),
             .catalog => return t.apply(r, .catalog),
             .skills => return t.reload(r, .latest),
@@ -1291,6 +1313,7 @@ pub const Configure = struct {
     }
 
     noinline fn start(t: *Configure, r: *transition.Round(Configure)) transition.Next(Configure) {
+        r.resetDeclarations();
         const command = t.input.command;
         t.reads = r.configurationReads();
         t.reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
@@ -1350,8 +1373,9 @@ pub const Configure = struct {
         return .{ .done = {} };
     }
 
-    fn request(t: *Configure) configuration_domain.Request {
+    fn request(t: *Configure, r: *transition.Round(Configure)) configuration_domain.Request {
         return .{
+            .declarations = r.declarationArena(),
             .io = t.input.io,
             .tools = t.input.tools,
             .served = t.input.served,
@@ -1363,7 +1387,7 @@ pub const Configure = struct {
     }
 
     noinline fn validate(t: *Configure, r: *transition.Round(Configure), ran: ?configuration_domain.ValidationRound) !transition.Next(Configure) {
-        return switch (try configuration_domain.validateStep(r, &t.request(), t.reads, ran)) {
+        return switch (try configuration_domain.validateStep(r, &t.request(r), t.reads, ran)) {
             .round => |round| .{ .round = switch (round) {
                 inline else => |tag| @field(rounds.At, @tagName(tag)),
             } },
@@ -1379,7 +1403,7 @@ pub const Configure = struct {
             try checkFreshSelection(&t.projection.fresh, t.reads);
             t.fresh_checked = true;
         }
-        const applied = switch (try configuration_domain.applyStep(r, &t.request(), r.faults(), t.reads, ran)) {
+        const applied = switch (try configuration_domain.applyStep(r, &t.request(r), r.faults(), t.reads, ran)) {
             .round => |round| {
                 if (round == .creation and creating and !t.fresh_checked) if (t.input.receipt) |receipt| {
                     t.projection = .{ .fresh = undefined };

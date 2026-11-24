@@ -110,11 +110,11 @@ pub const CurrentConfiguration = struct {
     created_at: u64 = 0,
     workspace_key: u64 = 0,
     parent_ref: ?Bounded(session_id.bytes) = null,
-    previous_reasoning_effort: ?model_capability.ReasoningEffort = null,
-    /// The app tool set this Session declares (its lane root declares it); null: none.
+    /// The app tool set this Session declares (its lane root declares it); null: none. Column order follows saved_session.
     app_tool_set_id: ?u64 = null,
     /// The lane root this Session runs on; a root is its own lane.
     app_lane: ?Bounded(session_id.bytes) = null,
+    previous_reasoning_effort: ?model_capability.ReasoningEffort = null,
 };
 
 pub const SessionFacts = struct {
@@ -881,6 +881,39 @@ fn creationCheck(configuration: *const ConfigurationView, reads: *const Configur
     };
 }
 
+/// Validates the declared app tools once: the document's bytes, then app_tools.parse. A child (a Session whose lane
+/// is another Session) may not declare any; a lane root's declaration is kept for the apply rounds.
+fn declareAppTools(request: *const Request, reads: *ConfigurationReads) !?configuration_admission.Rejection {
+    const field = &request.configuration.app_tools;
+    if (field.length > app_tools.max_document_bytes) return .app_tools_too_large;
+    const bytes = declarationBytes(request.io, field, request.declarations) catch return .invalid_app_tools;
+    const declaration = switch (app_tools.parse(request.declarations, bytes)) {
+        .refused => |refusal| return switch (refusal) {
+            inline else => |tag| @field(configuration_admission.Rejection, @tagName(tag)),
+        },
+        .declared => |declared| declared,
+    };
+    if (declaration.records.len != 0 and isChild(request, reads)) return .app_tools_on_child;
+    reads.apps.declaration = declaration;
+    return null;
+}
+
+fn isChild(request: *const Request, reads: *const ConfigurationReads) bool {
+    if (request.session.len == 0) return reads.inherits_parent;
+    const lane = reads.next.app_lane orelse return false;
+    return !std.mem.eql(u8, lane.slice(), request.session);
+}
+
+/// The declaration's whole bytes: borrowed from the request, or read from its file into the declaration arena.
+fn declarationBytes(io: std.Io, field: *const content_custody.ContentField, arena: std.mem.Allocator) ![]const u8 {
+    if (field.borrowedBytes()) |bytes| return bytes;
+    const file = field.file orelse return error.MissingContentCustody;
+    const bytes = try arena.alloc(u8, @intCast(field.length));
+    const read = try file.readPositionalAll(io, bytes, 0);
+    if (read != bytes.len) return error.ContentChanged;
+    return bytes;
+}
+
 fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
     const session = request.session;
     const configuration = &reads.configuration;
@@ -917,6 +950,7 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
         .unsupported_provider => return .{ .rejected = .unsupported_provider },
         .complete => |complete| complete.provider,
     } else null;
+    if (request.configuration.app_tools.state == .value) if (try declareAppTools(request, reads)) |code| return .{ .rejected = code };
     reads.step = .{ .validating = undefined };
     const v = &reads.step.validating;
     v.creation_provider = creation_provider;
@@ -1104,7 +1138,7 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
         next.loaded_tool_set_id = null;
     }
     // An omitted appTools keeps the saved declaration; a list (empty or not) or null replaces it.
-    if (configuration.app_tools.state != .omitted) next.app_tool_set_id = reads.apps.set_id;
+    if (request.configuration.app_tools.state != .omitted) next.app_tool_set_id = reads.apps.set_id;
     if (created) {
         std.debug.assert(next.revision == 1);
         reads.step.applying.created_seq = try a.identity(.created_seq);
