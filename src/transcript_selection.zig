@@ -280,7 +280,7 @@ test "SUI-145 transcript projection leaves generated gutters and preserves autho
                 try testing.expect(document.inlineDecoration(space_at));
                 try testing.expect(!document.selectable(space_at));
                 const decorated_space = row.spot(@intCast(column + 1));
-                try testing.expectEqual(Spot.point(document.origin + marker_at), decorated_space);
+                try testing.expectEqual(Spot.point(document.origin + space_at), decorated_space);
                 try testing.expect(all.covers(decorated_space));
                 try testing.expect(!columns[column + 1]);
                 for (columns[0 .. column + 2]) |selected| try testing.expect(!selected);
@@ -416,7 +416,7 @@ test "selection contrasts with sent bands and padding at both widths" {
             } else if (position.row == 1) {
                 try testing.expectEqual(@as(?usize, null), document.cellOffset(row_cells[0]));
                 const first_body_cell = document.cellOffset(row_cells[4]) orelse return error.MissingFirstBodyCell;
-                try testing.expectEqual(@as(usize, 2), first_body_cell);
+                try testing.expectEqual(@as(usize, "› ".len), first_body_cell);
                 try testing.expect(document.selectable(first_body_cell));
                 const inset_point = row.spot(0);
                 try testing.expectEqual(Spot.point(document.origin), inset_point);
