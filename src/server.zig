@@ -351,7 +351,7 @@ const Intake = struct {
             if (self.reply) |reply| return reply;
             const reply = try createUnfilled(self.owner.facts.allocator, Reply);
             const deadline: ?i128 = if (self.state == .header or self.route == .host_info) @as(i128, self.accepted_at_ns) + 10 * std.time.ns_per_s else null;
-            reply.* = Reply.init(self.owner.facts.io, self.owner.facts.allocator, deadline);
+            reply.init(self.owner.facts.io, self.owner.facts.allocator, deadline);
             self.reply = reply;
             return reply;
         }
@@ -3743,7 +3743,8 @@ test "creation receipt survives dropped and failed reply allocation" {
     var receipt_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     host.allocator = receipt_failure.allocator();
     var replies = Replies.init(&host);
-    var reply = Reply.init(std.testing.io, std.testing.allocator, null);
+    var reply: Reply = undefined;
+    reply.init(std.testing.io, std.testing.allocator, null);
     defer reply.deinit();
     try std.testing.expectError(error.OutOfMemory, prepareTest(&replies, &reply, header, request, null, null));
     try std.testing.expect(!try storage.commandExists(request.configure.key.slice()));
@@ -3753,14 +3754,14 @@ test "creation receipt survives dropped and failed reply allocation" {
     var output_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     reply.deinit();
     replies = Replies.init(&host);
-    reply = Reply.init(std.testing.io, output_failure.allocator(), null);
+    reply.init(std.testing.io, output_failure.allocator(), null);
     try prepareTest(&replies, &reply, header, request, null, null);
     try std.testing.expect(reply.next(0) == .retire);
     try std.testing.expect(try storage.commandExists(request.configure.key.slice()));
     try std.testing.expect(accounting.allocations > 0);
     try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
     reply.deinit();
-    reply = Reply.init(std.testing.io, std.testing.allocator, null);
+    reply.init(std.testing.io, std.testing.allocator, null);
     try prepareTest(&replies, &reply, header, request, null, null);
     const first_body = try sentBody(std.testing.allocator, &reply);
     defer std.testing.allocator.free(first_body);
@@ -5011,7 +5012,8 @@ test "SH-65 Host wire admits image bytes in order and preserves refusal identity
             var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
             defer offer.deinit(std.testing.allocator);
             var replies = Replies.init(owner);
-            var reply = Reply.init(std.testing.io, std.testing.allocator, null);
+            var reply: Reply = undefined;
+            reply.init(std.testing.io, std.testing.allocator, null);
             defer reply.deinit();
             try replies.prepare(&reply, .{ .socket = -1, .drop = .none, .instance = null, .needs_instance = false, .number = 991, .accepted_at_ns = 0, .request = request, .environment = &offer, .parts = ingress.parts_loan });
             const sent = try sentBody(std.testing.allocator, &reply);

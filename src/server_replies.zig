@@ -593,7 +593,8 @@ pub const Replies = struct {
     }
 
     fn deliverConversationContent(self: *Replies, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
-        var reply = Reply.init(self.io, self.allocator, null);
+        var reply: Reply = undefined;
+        reply.init(self.io, self.allocator, null);
         defer reply.deinit();
         try Replies.prepareConversationContent(self, &reply, &command);
         sendReply(self.io, fd, &reply) catch |err| self.fenceIfStoreFailed("public content", err);
@@ -685,7 +686,7 @@ const SessionReportExport = struct {
     reply: *session_report_reply.Reply(store_module.SessionReportCapture),
 
     fn produce(self: SessionReportExport, storage: *store_module.SessionReportCapture) !void {
-        self.reply.* = .init(storage, executionFacts(self.replies.host));
+        self.reply.init(storage, executionFacts(self.replies.host));
         try self.replies.store.readSessionReport(self.request.session.slice(), self.request.profile, self.reply);
     }
 };
@@ -1062,7 +1063,8 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     request.server = .{};
     try request.server.?.set("missing");
     {
-        var reply = Reply.init(io, std.testing.allocator, null);
+        var reply: Reply = undefined;
+        reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
         var replies = Replies.init(&host);
         try Replies.replyToolsReload(&replies, &reply, &request);
@@ -1077,7 +1079,8 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     // A fenced Host refuses the ask before recording it.
     _ = host.lifecycle.advance(.stopping);
     {
-        var reply = Reply.init(io, std.testing.allocator, null);
+        var reply: Reply = undefined;
+        reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
         request.server = null;
         var replies = Replies.init(&host);
@@ -1094,7 +1097,8 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     request.server = .{};
     try request.server.?.set("notes");
     {
-        var reply = Reply.init(io, std.testing.allocator, null);
+        var reply: Reply = undefined;
+        reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
         var replies = Replies.init(&host);
         try Replies.replyToolsReload(&replies, &reply, &request);
@@ -1111,7 +1115,8 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     host.lifecycle.resetDispatchWake();
     request.server = null;
     {
-        var reply = Reply.init(io, std.testing.allocator, null);
+        var reply: Reply = undefined;
+        reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
         var replies = Replies.init(&host);
         try Replies.replyToolsReload(&replies, &reply, &request);
@@ -1123,7 +1128,8 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
 
     // The status reply lists every configured server, lock-free, with the same instance.
     {
-        var reply = Reply.init(io, std.testing.allocator, null);
+        var reply: Reply = undefined;
+        reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
         var replies = Replies.init(&host);
         try Replies.replyToolsStatus(&replies, &reply);
@@ -1137,7 +1143,8 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     var bare_parts: TestParts = undefined;
     bare_parts.attach(&bare, undefined);
     {
-        var reply = Reply.init(io, std.testing.allocator, null);
+        var reply: Reply = undefined;
+        reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
         var bare_replies = Replies.init(&bare);
         try Replies.replyToolsReload(&bare_replies, &reply, &.{});
@@ -1146,7 +1153,8 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
         try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"" ++ instance_hex ++ "\",\"asked\":[]}", server_reply.bodyOf(wire));
     }
     {
-        var reply = Reply.init(io, std.testing.allocator, null);
+        var reply: Reply = undefined;
+        reply.init(io, std.testing.allocator, null);
         defer reply.deinit();
         var bare_replies = Replies.init(&bare);
         try Replies.replyToolsStatus(&bare_replies, &reply);
@@ -1292,7 +1300,8 @@ test "every accepted control publishes exactly one hint before reply handling" {
                     }
                     const accepted = result == .accepted;
                     var probe: Probe = .{ .host = &host, .observation = &observation, .accepted = accepted };
-                    var reply = Reply.init(std.testing.io, probe.allocator(), null);
+                    var reply: Reply = undefined;
+                    reply.init(std.testing.io, probe.allocator(), null);
                     defer reply.deinit();
                     const key = try protocol.Bounded(protocol.max_key_bytes).from("control-domain");
                     const timing = ControlTiming.init(host.probes, host.io, key, @tagName(kind), 1);
@@ -1608,7 +1617,8 @@ test "SH-123 report scratch is sealed whole or discarded whole within the shared
         var replies = Replies.init(&host);
         var request: wire_request.Request = .{ .inspect_session = inspect };
         {
-            var reply = Reply.init(host.io, std.testing.allocator, null);
+            var reply: Reply = undefined;
+            reply.init(host.io, std.testing.allocator, null);
             defer reply.deinit();
             if (row.armed_unlink) host.probes.arm(.report_unlink);
             try replies.prepare(&reply, .{ .socket = -1, .drop = .none, .instance = null, .needs_instance = false, .number = 1, .accepted_at_ns = 0, .request = &request, .environment = null, .parts = null });

@@ -103,8 +103,9 @@ pub const Reply = struct {
     gate: ?std.posix.fd_t = null,
     not_before_ns: i128 = 0,
 
-    pub fn init(io: std.Io, allocator: std.mem.Allocator, absolute_deadline: ?i128) Reply {
-        return .{ .io = io, .allocator = allocator, .absolute_deadline = absolute_deadline };
+    /// Fills `self` in place: a Reply carries a 4 KiB window, so it is never returned by value.
+    pub fn init(self: *Reply, io: std.Io, allocator: std.mem.Allocator, absolute_deadline: ?i128) void {
+        self.* = .{ .io = io, .allocator = allocator, .absolute_deadline = absolute_deadline };
     }
 
     /// Installs `answer` and its hooks. Returns whether a delivery gate holds the reply.
@@ -484,14 +485,16 @@ fn httpReason(status: u16) []const u8 {
 
 /// Test client: sends `bytes` as a reply would, within the reply's inactivity budget.
 fn writeHttpUntil(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8, deadline: ?i128) !void {
-    var reply = Reply.init(io, std.testing.allocator, deadline);
+    var reply: Reply = undefined;
+    reply.init(io, std.testing.allocator, deadline);
     defer reply.deinit();
     _ = try reply.start(try Answer.json(std.testing.allocator, status, 64 * 1024, .reserved, protocol.JsonOut.append, .{body}), .{});
     try reply.deliver(fd);
 }
 
 fn writeAll(io: std.Io, fd: std.posix.fd_t, bytes: []const u8) !void {
-    var reply = Reply.init(io, std.testing.allocator, null);
+    var reply: Reply = undefined;
+    reply.init(io, std.testing.allocator, null);
     defer reply.deinit();
     try reply.deliverBytes(fd, bytes);
 }
@@ -758,7 +761,8 @@ test "SH-122 answer shaping sends nothing when reserved bytes cannot be allocate
         .{ .status = 503, .kind = .host_unavailable, .code = "dispatch_fenced" },
     };
     for (refusals) |row| {
-        var reply = Reply.init(std.testing.io, std.testing.allocator, null);
+        var reply: Reply = undefined;
+        reply.init(std.testing.io, std.testing.allocator, null);
         defer reply.deinit();
         refuse(&reply, row.status, row.kind, row.code);
         const wire = try sentWire(std.testing.io, std.testing.allocator, &reply);
@@ -771,7 +775,8 @@ test "SH-122 answer shaping sends nothing when reserved bytes cannot be allocate
 
     // A reserved answer whose bytes cannot be allocated sends nothing: the peer reads zero bytes.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    var silent = Reply.init(std.testing.io, failing.allocator(), null);
+    var silent: Reply = undefined;
+    silent.init(std.testing.io, failing.allocator(), null);
     defer silent.deinit();
     refuse(&silent, 500, .observation_error, "OutOfMemory");
     const silent_wire = try sentWire(std.testing.io, std.testing.allocator, &silent);
