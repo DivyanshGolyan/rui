@@ -1242,13 +1242,6 @@ fn serveOpened(
     };
     var lifecycle: server_host.Lifecycle = .init(io, lease, settings.execution.paused.value, intake_wake[1]);
     var probes: server_host.Probes = .init(io, hooks);
-    const execution_settings: server_execution.Settings = .{
-        .bash_path = bash_path,
-        .bash_timeout_ms = bash_timeout_ms,
-        .background_after_ms = settings.execution.background_after_ms.value,
-        .catalog_url = if (settings.models.catalog_url) |*url| url.slice() else null,
-        .failed_response_store = lease.store_dir,
-    };
     var execution_state: execution_owner.Execution = undefined;
     var host = Host{
         .io = io,
@@ -1322,7 +1315,31 @@ fn serveOpened(
     StopSignals.attach(intake.wake[1]);
     defer StopSignals.detach();
     if (comptime test_pause.enabled) if (pause_adapter) |adapter| try adapter.waitStart();
-    const execution_thread = try signal_stack.spawn(.{}, executionMain, .{ &host, execution_settings, &execution_state });
+    const execution_shared: server_execution.Shared = .{
+        .io = host.io,
+        .allocator = host.allocator,
+        .lease = host.lease,
+        .store = host.store,
+        .lifecycle = host.lifecycle,
+        .probes = host.probes,
+        .retention = host.retention,
+        .model_lists = &host.model_lists,
+        .environments = host.environments,
+        .allowance_diagnostic = &host.allowance_diagnostic,
+    };
+    const execution_settings: server_execution.Settings = .{
+        .bash_path = bash_path,
+        .bash_timeout_ms = bash_timeout_ms,
+        .background_after_ms = settings.execution.background_after_ms.value,
+        .catalog_url = if (settings.models.catalog_url) |*url| url.slice() else null,
+        .failed_response_store = lease.store_dir,
+        .limits = host.limits,
+        .providers = host.providers,
+        .presets = host.presets,
+        .bash_facts = host.bash_facts,
+        .mcp_servers = host.mcp_servers,
+    };
+    const execution_thread = try signal_stack.spawn(.{}, executionMain, .{ execution_shared, execution_settings, &execution_state });
     defer {
         if (listener_open) {
             listener.deinit(io);
