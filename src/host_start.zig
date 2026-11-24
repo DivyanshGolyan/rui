@@ -3395,7 +3395,8 @@ test "SH-155 connection key sources load a valid key and refuse missing, invalid
         defer arena.deinit();
         const a = arena.allocator();
         const sub = try std.fmt.allocPrint(a, "{s}-{s}", .{ @tagName(source_kind), @tagName(state) });
-        var sub_dir = try tmp.dir.createDirPathOpen(std.testing.io, sub, .{ .permissions = .fromMode(0o700) });
+        const config = try std.fmt.allocPrint(a, "{s}/.config/rui", .{sub});
+        var sub_dir = try tmp.dir.createDirPathOpen(std.testing.io, config, .{ .permissions = .fromMode(0o700) });
         sub_dir.close(std.testing.io);
         const dir = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, sub });
         try environment.put("HOME", dir);
