@@ -15,6 +15,8 @@ pub const Limitation = enum {
     application_owned,
     configuration_unavailable,
     target_capability,
+    /// An ordinary start's handover found this Host ineligible; it is left running and untouched.
+    not_start_eligible,
 };
 
 /// The steps after a Host was asked to stop.
@@ -22,6 +24,31 @@ pub const Stage = enum { stopping, awaiting_retirement, starting, verifying };
 
 /// The target-build steps before any stop; a failure there leaves the Host untouched.
 pub const TargetStep = enum { resolving, checking };
+
+pub const EffectTag = enum {
+    resolve_target,
+    confirm_current,
+    reconstruct_sources,
+    check_target,
+    reobserve,
+    snapshot,
+    stop,
+    await_retirement,
+    start,
+    verify,
+    done,
+
+    /// A stop request may already have taken effect from this point onward.
+    pub fn stage(self: EffectTag) ?Stage {
+        return switch (self) {
+            .stop => .stopping,
+            .await_retirement => .awaiting_retirement,
+            .start => .starting,
+            .verify => .verifying,
+            else => null,
+        };
+    }
+};
 
 /// How one Host's restart ended. `HostLifecycle` re-exports it as
 /// `ActivationOutcome`; `host_coordinator` serializes it by field name.
@@ -36,6 +63,9 @@ pub const Outcome = union(enum) {
     unsupported: Limitation,
     replacement_observed,
     cancelled,
+    /// An unexpected effect failure. Certainty is derived from the effect, never stored:
+    /// `effect.stage() == null` means nothing was stopped; otherwise the result is unconfirmed at that stage.
+    faulted: struct { effect: EffectTag, cause: protocol.Bounded(64) },
     /// The target build could not be resolved or checked; nothing was stopped (#1791, #1793).
     target_unusable: TargetStep,
     refused: struct { stage: enum { checking, starting }, failure: start_report.Failure },
@@ -63,6 +93,93 @@ pub const Seen = struct {
     /// A second read found the same Host in the same process generation.
     confirmed: ?bool = null,
 };
+
+/// An ordinary start may hand over an older foreign Host only to its own selected build.
+pub fn startHandoverEligible(foreign: bool, order: std.math.Order, selected_matches: bool) bool {
+    return foreign and order == .lt and selected_matches;
+}
+
+test "SH-133 start activation requires an older foreign Host and the selected client" {
+    const rows = [_]struct { foreign: bool, order: std.math.Order, selected: bool, eligible: bool }{
+        .{ .foreign = false, .order = .lt, .selected = false, .eligible = false },
+        .{ .foreign = false, .order = .lt, .selected = true, .eligible = false },
+        .{ .foreign = false, .order = .eq, .selected = false, .eligible = false },
+        .{ .foreign = false, .order = .eq, .selected = true, .eligible = false },
+        .{ .foreign = false, .order = .gt, .selected = false, .eligible = false },
+        .{ .foreign = false, .order = .gt, .selected = true, .eligible = false },
+        .{ .foreign = true, .order = .lt, .selected = false, .eligible = false },
+        .{ .foreign = true, .order = .lt, .selected = true, .eligible = true },
+        .{ .foreign = true, .order = .eq, .selected = false, .eligible = false },
+        .{ .foreign = true, .order = .eq, .selected = true, .eligible = false },
+        .{ .foreign = true, .order = .gt, .selected = false, .eligible = false },
+        .{ .foreign = true, .order = .gt, .selected = true, .eligible = false },
+    };
+    for (rows) |row| try std.testing.expectEqual(row.eligible, startHandoverEligible(row.foreign, row.order, row.selected));
+}
+
+/// Whether an ordinary start that found an incompatible Host hands it over. A frozen launch never does.
+pub fn startHandoverWanted(incompatible: bool, frozen: bool) bool {
+    return incompatible and !frozen;
+}
+
+/// What an ordinary start does next with its Store's handover outcome.
+pub const StartStep = enum { attach, keep_incompatible, report };
+
+/// The one rule an ordinary start applies to a handover outcome: attach to a Host that is
+/// now serving this Store (or none is left to replace), keep the original incompatible
+/// report when nothing was touched, or report the Store's answer as the start's failure.
+pub fn startStep(selected: Selected) StartStep {
+    return switch (selected) {
+        .outcome => |outcome| switch (outcome) {
+            .ready, .already_ready, .superseded, .not_needed => .attach,
+            .unsupported, .target_unusable, .cancelled => .keep_incompatible,
+            .refused, .failed, .unconfirmed, .faulted, .replacement_observed, .client_incompatible => .report,
+        },
+        // Nothing was stopped, but the Store's Host was never confirmed, so the start reports it.
+        .failed => .report,
+    };
+}
+
+test "SH-132 an ordinary start hands over only an incompatible start and attaches, keeps or reports each outcome" {
+    const wanted = [_]struct { incompatible: bool, frozen: bool, expected: bool }{
+        .{ .incompatible = true, .frozen = false, .expected = true },
+        .{ .incompatible = true, .frozen = true, .expected = false },
+        .{ .incompatible = false, .frozen = false, .expected = false },
+        .{ .incompatible = false, .frozen = true, .expected = false },
+    };
+    for (wanted) |row| try std.testing.expectEqual(row.expected, startHandoverWanted(row.incompatible, row.frozen));
+    const instance: protocol.InstanceId = @splat(7);
+    const cause = try protocol.Bounded(64).from("TestCause");
+    const Row = struct { selected: Selected, step: StartStep };
+    const observation: Selected = .{ .failed = .of(.observation, error.OutOfMemory) };
+    const selection: Selected = .{ .failed = .of(.selection, error.NoVerifiedRelease) };
+    const rows = [_]Row{
+        .{ .selected = .{ .outcome = .not_needed }, .step = .attach },
+        .{ .selected = .{ .outcome = .superseded }, .step = .attach },
+        .{ .selected = .{ .outcome = .{ .already_ready = .{ .instance = instance, .pid = 1 } } }, .step = .attach },
+        .{ .selected = .{ .outcome = .{ .ready = .{ .instance = instance, .pid = 1 } } }, .step = .attach },
+        .{ .selected = .{ .outcome = .{ .unsupported = .not_start_eligible } }, .step = .keep_incompatible },
+        .{ .selected = .{ .outcome = .{ .unsupported = .inaccessible } }, .step = .keep_incompatible },
+        .{ .selected = .{ .outcome = .{ .target_unusable = .checking } }, .step = .keep_incompatible },
+        .{ .selected = .{ .outcome = .cancelled }, .step = .keep_incompatible },
+        .{ .selected = .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = start_report.Failure.init(.settings_invalid, "refused") } } }, .step = .report },
+        .{ .selected = .{ .outcome = .{ .failed = .stopping } }, .step = .report },
+        .{ .selected = .{ .outcome = .{ .unconfirmed = .verifying } }, .step = .report },
+        .{ .selected = .{ .outcome = .{ .faulted = .{ .effect = .resolve_target, .cause = cause } } }, .step = .report },
+        .{ .selected = .{ .outcome = .{ .faulted = .{ .effect = .stop, .cause = cause } } }, .step = .report },
+        .{ .selected = .{ .outcome = .replacement_observed }, .step = .report },
+        .{ .selected = .{ .outcome = .{ .client_incompatible = 3 } }, .step = .report },
+        .{ .selected = observation, .step = .report },
+        .{ .selected = selection, .step = .report },
+    };
+    // Every Outcome variant needs a row above; a new variant must add one.
+    var seen: [std.meta.tags(std.meta.Tag(Outcome)).len]bool = @splat(false);
+    for (rows) |row| {
+        try std.testing.expectEqual(row.step, startStep(row.selected));
+        if (row.selected == .outcome) seen[@backingInt(std.meta.activeTag(row.selected.outcome))] = true;
+    }
+    for (seen) |covered| try std.testing.expect(covered);
+}
 
 /// The next fact an observation reads, or what the running Host is.
 pub const Eligibility = union(enum) {
@@ -152,7 +269,7 @@ pub const Facts = struct {
 };
 
 /// The next effect of one activation, or how it ended.
-pub const Effect = union(enum) {
+pub const Effect = union(EffectTag) {
     resolve_target,
     confirm_current,
     reconstruct_sources,
@@ -337,19 +454,74 @@ pub const Counts = struct {
     }
 };
 
+/// The short words an Overview shows for one outcome.
+pub fn words(outcome: Outcome) []const u8 {
+    return switch (outcome) {
+        .not_needed => "no longer running",
+        .superseded => "newer build already running",
+        .already_ready => "already on selected build",
+        .ready => "restarted",
+        .client_incompatible => "restarted; client incompatible",
+        .unsupported => |limitation| switch (limitation) {
+            .inaccessible => "Host inaccessible",
+            .incompatible => "Host protocol unsupported",
+            .ownership_status => "Host status unavailable",
+            .ownership_observation => "Host observation failed",
+            .ownership_directory_unavailable => "Host directory unavailable",
+            .ownership_directory_mismatch => "Host directories differ",
+            .ownership_confirmation => "Host identity unconfirmed",
+            .application_owned => "application-owned Host",
+            .configuration_unavailable => "launch configuration unavailable",
+            .target_capability => "target cannot check restart",
+            .not_start_eligible => "not eligible to start",
+        },
+        .replacement_observed => "replacement Host observed",
+        .cancelled => "activation cancelled",
+        .faulted => |fault| if (fault.effect.stage()) |stage| words(.{ .unconfirmed = stage }) else "handover failed",
+        .target_unusable => |step| switch (step) {
+            .resolving => "target resolution failed",
+            .checking => "target check failed",
+        },
+        .refused => |refusal| switch (refusal.stage) {
+            .checking => "settings refused",
+            .starting => "refused to start",
+        },
+        .failed => |stage| switch (stage) {
+            .stopping => "stop failed",
+            .awaiting_retirement => "retire failed",
+            .starting => "start failed",
+            .verifying => "verify failed",
+        },
+        .unconfirmed => |stage| switch (stage) {
+            .stopping => "stop unconfirmed",
+            .awaiting_retirement => "retire unconfirmed",
+            .starting => "start unconfirmed",
+            .verifying => "verify unconfirmed",
+        },
+    };
+}
+
+/// The count a selected answer falls in: a failed entry is a failed Host.
+pub fn selectedCategory(selected: Selected) Category {
+    return switch (selected) {
+        .outcome => |outcome| category(outcome),
+        .failed => .failed,
+    };
+}
+
 pub fn category(outcome: Outcome) Category {
     return switch (outcome) {
         .ready, .client_incompatible => .restarted,
         .already_ready => .current,
         .superseded, .not_needed, .unsupported => .skipped,
-        .replacement_observed, .cancelled, .target_unusable, .failed, .unconfirmed, .refused => .failed,
+        .replacement_observed, .cancelled, .faulted, .target_unusable, .failed, .unconfirmed, .refused => .failed,
     };
 }
 
 /// Whether the outcome leaves recovery instructions for the person.
 pub fn guides(outcome: Outcome) bool {
     return switch (outcome) {
-        .unsupported, .replacement_observed, .cancelled, .target_unusable, .failed, .unconfirmed, .refused => true,
+        .unsupported, .replacement_observed, .cancelled, .faulted, .target_unusable, .failed, .unconfirmed, .refused => true,
         .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
     };
 }
@@ -358,7 +530,52 @@ pub fn guides(outcome: Outcome) bool {
 pub fn clientSafe(outcome: Outcome) bool {
     return switch (outcome) {
         .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
+        .faulted => |fault| fault.effect.stage() == null,
         .not_needed, .superseded, .already_ready, .ready, .unsupported, .cancelled, .target_unusable => true,
+    };
+}
+
+/// Where a restart entry failed before any activation: discovery, observation or selection.
+pub const EntryStage = enum { discovery, observation, selection };
+
+/// A restart entry that failed before activation. Nothing was stopped by it, so its
+/// certainty is an ordinary failure; the restart report renders `stage` and `cause`.
+pub const EntryFailure = struct {
+    stage: EntryStage,
+    /// A copy of the error name, so the answer outlives the Batch that recorded it. Error names
+    /// fit the bound, as `Outcome.faulted.cause` relies on.
+    cause: protocol.Bounded(64),
+
+    pub fn of(stage: EntryStage, err: anyerror) EntryFailure {
+        return .{ .stage = stage, .cause = protocol.Bounded(64).from(@errorName(err)) catch unreachable };
+    }
+};
+
+/// A Store's answer to a handover: the activation outcome, or the failure that ended its
+/// entry before activation. Every reader of a batch's own Store takes this one value.
+pub const Selected = union(enum) {
+    outcome: Outcome,
+    failed: EntryFailure,
+};
+
+/// The short words an Overview shows for a selected answer.
+pub fn selectedWords(selected: Selected) []const u8 {
+    return switch (selected) {
+        .outcome => |outcome| words(outcome),
+        .failed => |failure| switch (failure.stage) {
+            .discovery => "sources unreadable",
+            .observation => "observation failed",
+            .selection => "build unverified",
+        },
+    };
+}
+
+/// Whether the client may keep talking to its own Store's Host. A failed entry never
+/// read its Host, so the client may not assume compatibility.
+pub fn selectedClientSafe(selected: Selected) bool {
+    return switch (selected) {
+        .outcome => |outcome| clientSafe(outcome),
+        .failed => false,
     };
 }
 
@@ -367,7 +584,7 @@ pub fn clientSafe(outcome: Outcome) bool {
 /// the entry names neither.
 pub const Line = struct {
     place: enum { own, other, unlocated },
-    state: union(enum) { outcome: Outcome, failed },
+    state: union(enum) { outcome: Outcome, failed: EntryFailure },
 };
 
 /// A batch that could not finish as a whole.
@@ -377,8 +594,9 @@ pub const BatchFailure = enum { cancelled, other };
 pub const Summary = struct {
     counts: Counts,
     guidance: bool,
-    /// The client's own Store's outcome; an entry that failed there is unconfirmed.
-    own: Outcome,
+    /// The client's own Store's answer: its entry's outcome or failure; with no entry there,
+    /// `not_needed`, or unconfirmed when a batch failed or an entry was unlocated.
+    own: Selected,
 };
 
 /// Folds a batch's lines in order. Every line counts once; only the first
@@ -386,19 +604,22 @@ pub const Summary = struct {
 pub const Tally = struct {
     counts: Counts = .{},
     guidance: bool = false,
-    own: ?Outcome = null,
+    own: ?Selected = null,
     unlocated: bool = false,
 
     pub fn add(self: *Tally, line: Line) void {
-        const outcome: ?Outcome = switch (line.state) {
-            .outcome => |value| value,
-            .failed => null,
+        const selected: Selected = switch (line.state) {
+            .outcome => |value| .{ .outcome = value },
+            .failed => |failure| .{ .failed = failure },
         };
-        self.counts.add(if (outcome) |value| category(value) else .failed);
-        self.guidance = self.guidance or (if (outcome) |value| guides(value) else true);
+        self.counts.add(selectedCategory(selected));
+        self.guidance = self.guidance or switch (selected) {
+            .outcome => |value| guides(value),
+            .failed => true,
+        };
         switch (line.place) {
             .own => if (self.own == null) {
-                self.own = outcome orelse .{ .unconfirmed = .verifying };
+                self.own = selected;
             },
             .other => {},
             .unlocated => self.unlocated = true,
@@ -411,12 +632,12 @@ pub const Tally = struct {
         return .{
             .counts = counts,
             .guidance = self.guidance or failure != null,
-            .own = self.own orelse if (failure == .cancelled)
+            .own = self.own orelse .{ .outcome = if (failure == .cancelled)
                 .cancelled
             else if (self.unlocated or failure != null)
                 .{ .unconfirmed = .verifying }
             else
-                .not_needed,
+                .not_needed },
         };
     }
 };
@@ -425,6 +646,7 @@ pub const Tally = struct {
 /// `host_restart_all.Batch.hasGuidance` and `upgrade.compatible`, typed by hand.
 const sh60 = struct {
     const Row = struct { outcome: Outcome, category: Category, guides: bool, safe: bool };
+    const fault_cause = protocol.Bounded(64).from("TypedFault") catch unreachable;
     const failure = start_report.Failure.init(.settings_invalid, "typed refusal");
     const rows = [_]Row{
         .{ .outcome = .not_needed, .category = .skipped, .guides = false, .safe = true },
@@ -444,6 +666,17 @@ const sh60 = struct {
         .{ .outcome = .{ .unsupported = .target_capability }, .category = .skipped, .guides = true, .safe = true },
         .{ .outcome = .replacement_observed, .category = .failed, .guides = true, .safe = false },
         .{ .outcome = .cancelled, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .resolve_target, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .confirm_current, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .reconstruct_sources, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .check_target, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .reobserve, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .snapshot, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .stop, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = false },
+        .{ .outcome = .{ .faulted = .{ .effect = .await_retirement, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = false },
+        .{ .outcome = .{ .faulted = .{ .effect = .start, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = false },
+        .{ .outcome = .{ .faulted = .{ .effect = .verify, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = false },
+        .{ .outcome = .{ .faulted = .{ .effect = .done, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
         .{ .outcome = .{ .target_unusable = .resolving }, .category = .failed, .guides = true, .safe = true },
         .{ .outcome = .{ .target_unusable = .checking }, .category = .failed, .guides = true, .safe = true },
         .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = failure } }, .category = .failed, .guides = true, .safe = false },
@@ -458,14 +691,23 @@ const sh60 = struct {
         .{ .outcome = .{ .unconfirmed = .verifying }, .category = .failed, .guides = true, .safe = false },
     };
 
-    fn expectSummary(expected: struct { restarted: usize = 0, current: usize = 0, skipped: usize = 0, failed: usize = 0, guidance: bool, own: Outcome, safe: bool }, actual: Summary) !void {
+    const entry_failure: EntryFailure = .of(.observation, error.OutOfMemory);
+
+    fn expectSummary(expected: struct { restarted: usize = 0, current: usize = 0, skipped: usize = 0, failed: usize = 0, guidance: bool, own: Selected, safe: bool }, actual: Summary) !void {
         try std.testing.expectEqual(expected.restarted, actual.counts.restarted);
         try std.testing.expectEqual(expected.current, actual.counts.current);
         try std.testing.expectEqual(expected.skipped, actual.counts.skipped);
         try std.testing.expectEqual(expected.failed, actual.counts.failed);
         try std.testing.expectEqual(expected.guidance, actual.guidance);
-        try std.testing.expect(std.meta.eql(expected.own, actual.own));
-        try std.testing.expectEqual(expected.safe, clientSafe(actual.own));
+        try std.testing.expectEqual(std.meta.activeTag(expected.own), std.meta.activeTag(actual.own));
+        switch (expected.own) {
+            .outcome => |outcome| try std.testing.expect(std.meta.eql(outcome, actual.own.outcome)),
+            .failed => |entry| {
+                try std.testing.expectEqual(entry.stage, actual.own.failed.stage);
+                try std.testing.expectEqualStrings(entry.cause.slice(), actual.own.failed.cause.slice());
+            },
+        }
+        try std.testing.expectEqual(expected.safe, selectedClientSafe(actual.own));
     }
 };
 
@@ -488,18 +730,16 @@ test "SH-69 every outcome counts once and only the client's own Store decides it
         const row: ?sh60.Row = if (index < sh60.rows.len) sh60.rows[index] else null;
         for ([_]@FieldType(Line, "place"){ .own, .other, .unlocated }) |place| for (failures) |failure| {
             var tally: Tally = .{};
-            tally.add(.{ .place = place, .state = if (row) |value| .{ .outcome = value.outcome } else .failed });
-            const own: Outcome = if (place == .own)
-                (if (row) |value| value.outcome else .{ .unconfirmed = .verifying })
+            tally.add(.{ .place = place, .state = if (row) |value| .{ .outcome = value.outcome } else .{ .failed = sh60.entry_failure } });
+            const own: Selected = if (place == .own)
+                (if (row) |value| .{ .outcome = value.outcome } else .{ .failed = sh60.entry_failure })
             else if (failure == .cancelled)
-                .cancelled
+                .{ .outcome = .cancelled }
             else if (place == .unlocated or failure != null)
-                .{ .unconfirmed = .verifying }
+                .{ .outcome = .{ .unconfirmed = .verifying } }
             else
-                .not_needed;
-            const own_safe = for (sh60.rows) |candidate| {
-                if (std.meta.eql(candidate.outcome, own)) break candidate.safe;
-            } else unreachable;
+                .{ .outcome = .not_needed };
+            const own_safe = selectedClientSafe(own);
             const kind: Category = if (row) |value| value.category else .failed;
             const batch_failed: usize = @intFromBool(failure != null);
             try sh60.expectSummary(.{
@@ -517,37 +757,43 @@ test "SH-69 every outcome counts once and only the client's own Store decides it
     // Whole batches, moved from the former `upgrade.zig` test "upgrade restart results retain unknown
     // failures and other Store guidance without borrowing compatibility".
     const ready: Outcome = .{ .ready = .{ .instance = @splat(1), .pid = 42 } };
-    const Batch = struct { lines: []const Line, failure: ?BatchFailure = null, restarted: usize = 0, current: usize = 0, skipped: usize = 0, failed: usize = 0, guidance: bool, own: Outcome, safe: bool };
+    const Batch = struct { lines: []const Line, failure: ?BatchFailure = null, restarted: usize = 0, current: usize = 0, skipped: usize = 0, failed: usize = 0, guidance: bool, own: Selected, safe: bool };
+    const failed_own: Selected = .{ .failed = sh60.entry_failure };
     for ([_]Batch{
-        .{ .lines = &.{}, .guidance = false, .own = .not_needed, .safe = true },
-        .{ .lines = &.{}, .failure = .other, .failed = 1, .guidance = true, .own = .{ .unconfirmed = .verifying }, .safe = false },
-        .{ .lines = &.{}, .failure = .cancelled, .failed = 1, .guidance = true, .own = .cancelled, .safe = true },
+        .{ .lines = &.{}, .guidance = false, .own = .{ .outcome = .not_needed }, .safe = true },
+        .{ .lines = &.{}, .failure = .other, .failed = 1, .guidance = true, .own = .{ .outcome = .{ .unconfirmed = .verifying } }, .safe = false },
+        .{ .lines = &.{}, .failure = .cancelled, .failed = 1, .guidance = true, .own = .{ .outcome = .cancelled }, .safe = true },
         .{ .lines = &.{
             .{ .place = .other, .state = .{ .outcome = .{ .client_incompatible = 123 } } },
             .{ .place = .own, .state = .{ .outcome = ready } },
-        }, .restarted = 2, .guidance = false, .own = ready, .safe = true },
+        }, .restarted = 2, .guidance = false, .own = .{ .outcome = ready }, .safe = true },
         .{ .lines = &.{
             .{ .place = .other, .state = .{ .outcome = .{ .failed = .starting } } },
             .{ .place = .own, .state = .{ .outcome = ready } },
-        }, .restarted = 1, .failed = 1, .guidance = true, .own = ready, .safe = true },
+        }, .restarted = 1, .failed = 1, .guidance = true, .own = .{ .outcome = ready }, .safe = true },
         .{ .lines = &.{
-            .{ .place = .unlocated, .state = .failed },
+            .{ .place = .unlocated, .state = .{ .failed = sh60.entry_failure } },
             .{ .place = .own, .state = .{ .outcome = ready } },
-        }, .restarted = 1, .failed = 1, .guidance = true, .own = ready, .safe = true },
+        }, .restarted = 1, .failed = 1, .guidance = true, .own = .{ .outcome = ready }, .safe = true },
         .{ .lines = &.{
-            .{ .place = .unlocated, .state = .failed },
-        }, .failed = 1, .guidance = true, .own = .{ .unconfirmed = .verifying }, .safe = false },
+            .{ .place = .unlocated, .state = .{ .failed = sh60.entry_failure } },
+        }, .failed = 1, .guidance = true, .own = .{ .outcome = .{ .unconfirmed = .verifying } }, .safe = false },
+        // A failed entry at the client's Store is its own answer, with its cause and stage kept.
+        .{ .lines = &.{
+            .{ .place = .own, .state = .{ .failed = sh60.entry_failure } },
+            .{ .place = .own, .state = .{ .outcome = ready } },
+        }, .failed = 1, .restarted = 1, .guidance = true, .own = failed_own, .safe = false },
         // The first entry at the client's Store decides; later ones still count.
         .{ .lines = &.{
             .{ .place = .own, .state = .{ .outcome = ready } },
             .{ .place = .own, .state = .{ .outcome = .{ .client_incompatible = 7 } } },
             .{ .place = .other, .state = .{ .outcome = .{ .unsupported = .application_owned } } },
             .{ .place = .other, .state = .{ .outcome = .{ .already_ready = .{ .instance = @splat(3), .pid = 9 } } } },
-        }, .restarted = 2, .current = 1, .skipped = 1, .guidance = true, .own = ready, .safe = true },
+        }, .restarted = 2, .current = 1, .skipped = 1, .guidance = true, .own = .{ .outcome = ready }, .safe = true },
         .{ .lines = &.{
-            .{ .place = .own, .state = .failed },
+            .{ .place = .own, .state = .{ .failed = sh60.entry_failure } },
             .{ .place = .own, .state = .{ .outcome = ready } },
-        }, .failure = .cancelled, .restarted = 1, .failed = 2, .guidance = true, .own = .{ .unconfirmed = .verifying }, .safe = false },
+        }, .failure = .cancelled, .restarted = 1, .failed = 2, .guidance = true, .own = failed_own, .safe = false },
     }) |batch| {
         var tally: Tally = .{};
         for (batch.lines) |line| tally.add(line);
@@ -788,6 +1034,7 @@ test "SH-81 after the stop every ending names a stage" {
             try fixture.expectEffect(expected, actual);
             if (actual == .done) switch (actual.done) {
                 .cancelled, .unsupported, .not_needed, .superseded, .already_ready, .target_unusable => return error.TestUnexpectedResult,
+                .faulted => return error.TestUnexpectedResult,
                 .unconfirmed, .failed => {},
                 .refused => |refused| try std.testing.expectEqual(.starting, refused.stage),
                 .ready, .client_incompatible, .replacement_observed => {},

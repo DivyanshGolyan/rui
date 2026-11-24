@@ -1,3 +1,4 @@
+const connection = @import("../../connection.zig");
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -1099,7 +1100,7 @@ fn compoundPressureReadForTesting(storage: *Store, session: []const u8, parts: *
     var access: @import("../access.zig").Access(.read, error{}) = .open(&entry);
     defer access.deinit();
     const domain = @import("../domain/model_admission.zig");
-    var read = domain.CompactionRead.init(session, std.math.maxInt(i64), .codex, .@"openai-responses/2", "model-a", model_capability.compactionPolicy("model-a", true, 1000, 0));
+    var read = domain.CompactionRead.init(session, std.math.maxInt(i64), connection.Name.parse("codex").?, .@"openai-responses/2", "model-a", model_capability.compactionPolicy("model-a", true, 1000, 0));
     read.pressure = if (parts.ready) parts else null;
     while (read.queue(&access)) {
         try @import("../access.zig").runAs(&access, error.CorruptStore);

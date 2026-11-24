@@ -48,10 +48,46 @@ fn validImage(bytes: []const u8) bool {
     return true;
 }
 
+/// Clipboards a Linux process can read, from its environment. Under WSL the Windows clipboard is the user's
+/// clipboard: WSLg hands its images to Wayland only as BMP, and Windows Terminal keeps Ctrl+V for text.
+const Sources = struct {
+    windows: bool,
+    wayland: bool,
+    x11: bool,
+
+    fn of(environment: *const std.process.Environ.Map) Sources {
+        return .{
+            .windows = environment.contains("WSL_INTEROP") or environment.contains("WSL_DISTRO_NAME"),
+            .wayland = environment.contains("WAYLAND_DISPLAY"),
+            .x11 = environment.contains("DISPLAY"),
+        };
+    }
+
+    fn any(self: Sources) bool {
+        return self.windows or self.wayland or self.x11;
+    }
+
+    /// A cold powershell.exe start from WSL takes over a second.
+    fn deadline(self: Sources) std.Io.Duration {
+        return .fromMilliseconds(if (self.windows) 5000 else 1000);
+    }
+};
+
+/// Writes the Windows clipboard's image, or its one copied file within `max_bytes`, to stdout as raw bytes; the caller
+/// validates them. The file's size is checked before it is read, so a large copied file is never loaded.
+const windows_clipboard_script =
+    "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;" ++
+    "$o=[Console]::OpenStandardOutput();" ++
+    "$i=[Windows.Forms.Clipboard]::GetImage();" ++
+    "if($i){$m=[IO.MemoryStream]::new();$i.Save($m,[Drawing.Imaging.ImageFormat]::Png);$o.Write($m.ToArray(),0,$m.Length);$o.Flush();exit 0};" ++
+    "$f=[Windows.Forms.Clipboard]::GetFileDropList();" ++
+    "if($f.Count -eq 1 -and [IO.FileInfo]::new($f[0]).Length -le " ++ std.fmt.comptimePrint("{d}", .{max_bytes}) ++ "){$b=[IO.File]::ReadAllBytes($f[0]);$o.Write($b,0,$b.Length);$o.Flush();exit 0};" ++
+    "exit 1";
+const windows_argv = [_][]const u8{ "powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-Command", windows_clipboard_script };
+
 fn readLinux(io: std.Io, environment: *const std.process.Environ.Map) !?[]u8 {
-    const wayland = environment.contains("WAYLAND_DISPLAY");
-    const x11 = environment.contains("DISPLAY");
-    if (!wayland and !x11) return null;
+    const sources = Sources.of(environment);
+    if (!sources.any()) return null;
 
     const Result = union(enum) { read: anyerror!?[]u8, deadline: std.Io.Cancelable!void };
     var storage: [2]Result = undefined;
@@ -61,20 +97,21 @@ fn readLinux(io: std.Io, environment: *const std.process.Environ.Map) !?[]u8 {
         .read => |outcome| if (outcome catch null) |bytes| allocator.free(bytes),
         .deadline => {},
     };
-    try pending.concurrent(.read, readLinuxDisplays, .{ io, environment, wayland, x11 });
-    try pending.concurrent(.deadline, std.Io.sleep, .{ io, .fromMilliseconds(1000), .awake });
+    try pending.concurrent(.read, readLinuxSources, .{ io, environment, sources });
+    try pending.concurrent(.deadline, std.Io.sleep, .{ io, sources.deadline(), .awake });
     return switch (try pending.await()) {
         .read => |outcome| outcome,
         .deadline => null,
     };
 }
 
-fn readLinuxDisplays(io: std.Io, environment: *const std.process.Environ.Map, wayland: bool, x11: bool) !?[]u8 {
+fn readLinuxSources(io: std.Io, environment: *const std.process.Environ.Map, sources: Sources) !?[]u8 {
     const formats: []const input_media.Format = &.{ .png, .jpeg };
-    if (wayland) for (formats) |format| {
+    if (sources.windows) if (try runClipboard(io, environment, &windows_argv)) |bytes| return bytes;
+    if (sources.wayland) for (formats) |format| {
         if (try runClipboard(io, environment, &.{ "wl-paste", "--no-newline", "--type", format.mime() })) |bytes| return bytes;
     };
-    if (x11) for (formats) |format| {
+    if (sources.x11) for (formats) |format| {
         if (try runClipboard(io, environment, &.{ "xclip", "-selection", "clipboard", "-out", "-target", format.mime() })) |bytes| return bytes;
     };
     return null;
@@ -102,74 +139,122 @@ test "SUI-119 clipboard image reads the supported local clipboard" {
         defer environment.deinit();
         try environment.put("WAYLAND_DISPLAY", "wayland-0");
         try environment.put("DISPLAY", ":0");
+        try environment.put("WSL_DISTRO_NAME", "Ubuntu");
         for ([_][]const u8{ "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY" }) |name| {
             try environment.put(name, "set");
             try std.testing.expectEqual(null, try read(std.testing.io, &environment));
             _ = environment.swapRemove(name);
         }
     }
-    if (builtin.os.tag == .linux) {
-        var environment = std.process.Environ.Map.init(std.testing.allocator);
-        defer environment.deinit();
-        try std.testing.expectEqual(null, try read(std.testing.io, &environment));
-    }
-    if (builtin.os.tag == .linux) {
-        const testing = std.testing;
-        var fixture = testing.tmpDir(.{});
-        defer fixture.cleanup();
-        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const root = path[0..try fixture.dir.realPath(testing.io, &path)];
-        var environment = std.process.Environ.Map.init(testing.allocator);
-        defer environment.deinit();
-        try environment.put("PATH", root);
-        try environment.put("WAYLAND_DISPLAY", "wayland-fixture");
-        try environment.put("DISPLAY", ":0");
-        const block = try environment.createPosixBlock(testing.allocator, .{});
-        defer block.deinit(testing.allocator);
-        var threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .{ .block = block } });
-        defer threaded.deinit();
-        const io = threaded.io();
+    if (builtin.os.tag != .linux) return;
+    const testing = std.testing;
+    var fixture = testing.tmpDir(.{});
+    defer fixture.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = path[0..try fixture.dir.realPath(testing.io, &path)];
+    var environment = std.process.Environ.Map.init(testing.allocator);
+    defer environment.deinit();
+    try environment.put("PATH", root);
+    const block = try environment.createPosixBlock(testing.allocator, .{});
+    defer block.deinit(testing.allocator);
+    var threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .{ .block = block } });
+    defer threaded.deinit();
+    const io = threaded.io();
 
-        const png = @embedFile("../codecs/fixtures/image-input/pixel.png");
-        const jpeg = @embedFile("../testing/fixtures/input-baseline.jpg");
-        const x11_png = @embedFile("../codecs/fixtures/image-input/pixel-multi-window.png");
-        try fixture.dir.writeFile(io, .{ .sub_path = "image.png", .data = png });
-        try fixture.dir.writeFile(io, .{ .sub_path = "image.jpg", .data = jpeg });
-        try fixture.dir.writeFile(io, .{ .sub_path = "x11.png", .data = x11_png });
-        try fixture.dir.writeFile(io, .{
-            .sub_path = "wl-paste",
-            .data =
-            \\#!/bin/sh
-            \\case "$FIXTURE_FORMAT:$*" in
-            \\  png:--no-newline\ --type\ image/png) exec /bin/cat "$PATH/image.png" ;;
-            \\  jpeg:--no-newline\ --type\ image/jpeg) exec /bin/cat "$PATH/image.jpg" ;;
-            \\  *) exit 1 ;;
-            \\esac
-            ,
-            .flags = .{ .permissions = .fromMode(0o700) },
-        });
-        try fixture.dir.writeFile(io, .{
-            .sub_path = "xclip",
-            .data =
-            \\#!/bin/sh
-            \\[ "$*" = '-selection clipboard -out -target image/png' ] || exit 1
-            \\exec /bin/cat "$PATH/x11.png"
-            ,
-            .flags = .{ .permissions = .fromMode(0o700) },
-        });
+    const png = @embedFile("../codecs/fixtures/image-input/pixel.png");
+    const jpeg = @embedFile("../testing/fixtures/input-baseline.jpg");
+    const x11_png = @embedFile("../codecs/fixtures/image-input/pixel-multi-window.png");
+    try fixture.dir.writeFile(io, .{ .sub_path = "image.png", .data = png });
+    try fixture.dir.writeFile(io, .{ .sub_path = "image.jpg", .data = jpeg });
+    try fixture.dir.writeFile(io, .{ .sub_path = "x11.png", .data = x11_png });
+    // Each helper answers its own clipboard: the image it holds, text, or nothing.
+    try fixture.dir.writeFile(io, .{
+        .sub_path = "powershell.exe",
+        .data =
+        \\#!/bin/sh
+        \\[ "$1 $2 $3 $4" = '-NoProfile -NonInteractive -STA -Command' ] || exit 2
+        \\case "$5" in *GetImage*GetFileDropList*Length*) ;; *) exit 2 ;; esac
+        \\case "$FIXTURE_WINDOWS" in
+        \\  jpeg) exec /bin/cat "$PATH/image.jpg" ;;
+        \\  text) printf 'not an image'; exit 0 ;;
+        \\esac
+        \\exit 1
+        ,
+        .flags = .{ .permissions = .fromMode(0o700) },
+    });
+    try fixture.dir.writeFile(io, .{
+        .sub_path = "wl-paste",
+        .data =
+        \\#!/bin/sh
+        \\case "$FIXTURE_WAYLAND:$*" in
+        \\  png:--no-newline\ --type\ image/png) exec /bin/cat "$PATH/image.png" ;;
+        \\  jpeg:--no-newline\ --type\ image/jpeg) exec /bin/cat "$PATH/image.jpg" ;;
+        \\  text:*) printf 'not an image'; exit 0 ;;
+        \\esac
+        \\exit 1
+        ,
+        .flags = .{ .permissions = .fromMode(0o700) },
+    });
+    try fixture.dir.writeFile(io, .{
+        .sub_path = "xclip",
+        .data =
+        \\#!/bin/sh
+        \\[ "$*" = '-selection clipboard -out -target image/png' ] || exit 1
+        \\[ "$FIXTURE_X11" = png ] || exit 1
+        \\exec /bin/cat "$PATH/x11.png"
+        ,
+        .flags = .{ .permissions = .fromMode(0o700) },
+    });
 
-        for ([_]struct { format: []const u8, bytes: []const u8 }{
-            .{ .format = "png", .bytes = png },
-            .{ .format = "jpeg", .bytes = jpeg },
-            .{ .format = "x11", .bytes = x11_png },
-        }) |case| {
-            try environment.put("FIXTURE_FORMAT", case.format);
-            const bytes = (try read(io, &environment)) orelse return error.TestUnexpectedResult;
-            defer allocator.free(bytes);
-            try testing.expectEqualSlices(u8, case.bytes, bytes);
-        }
-        try fixture.dir.deleteFile(io, "wl-paste");
-        try fixture.dir.deleteFile(io, "xclip");
-        try testing.expectEqual(null, try read(io, &environment));
+    const Holds = enum { png, jpeg, text, empty };
+    const Expected = enum { none, windows, wayland_png, wayland_jpeg, x11 };
+    // Eligibility comes from the environment alone; a WSL marker puts the Windows clipboard ahead of WSLg's displays,
+    // and a source without a supported image falls through to the next.
+    for ([_]struct { wsl: ?[]const u8 = null, wayland: bool = false, x11: bool = false, windows: Holds = .empty, wayland_holds: Holds = .empty, x11_holds: Holds = .empty, expected: Expected }{
+        .{ .windows = .jpeg, .wayland_holds = .png, .x11_holds = .png, .expected = .none },
+        .{ .wayland = true, .x11 = true, .wayland_holds = .png, .x11_holds = .png, .expected = .wayland_png },
+        .{ .wayland = true, .wayland_holds = .jpeg, .expected = .wayland_jpeg },
+        .{ .wayland = true, .wayland_holds = .text, .expected = .none },
+        .{ .wayland = true, .x11 = true, .wayland_holds = .empty, .x11_holds = .png, .expected = .x11 },
+        .{ .x11 = true, .wayland_holds = .png, .x11_holds = .png, .expected = .x11 },
+        .{ .wsl = "WSL_DISTRO_NAME", .windows = .jpeg, .wayland_holds = .png, .expected = .windows },
+        .{ .wsl = "WSL_INTEROP", .windows = .jpeg, .expected = .windows },
+        .{ .wsl = "WSL_DISTRO_NAME", .windows = .text, .expected = .none },
+        .{ .wsl = "WSL_DISTRO_NAME", .wayland = true, .x11 = true, .windows = .jpeg, .wayland_holds = .png, .x11_holds = .png, .expected = .windows },
+        .{ .wsl = "WSL_DISTRO_NAME", .wayland = true, .windows = .text, .wayland_holds = .png, .expected = .wayland_png },
+        .{ .wsl = "WSL_DISTRO_NAME", .wayland = true, .windows = .empty, .wayland_holds = .png, .expected = .wayland_png },
+        .{ .wsl = "WSL_DISTRO_NAME", .wayland = true, .x11 = true, .expected = .none },
+    }) |case| {
+        for ([_][]const u8{ "WSL_DISTRO_NAME", "WSL_INTEROP", "WAYLAND_DISPLAY", "DISPLAY" }) |name| _ = environment.swapRemove(name);
+        if (case.wsl) |name| try environment.put(name, "set");
+        if (case.wayland) try environment.put("WAYLAND_DISPLAY", "wayland-0");
+        if (case.x11) try environment.put("DISPLAY", ":0");
+        try environment.put("FIXTURE_WINDOWS", @tagName(case.windows));
+        try environment.put("FIXTURE_WAYLAND", @tagName(case.wayland_holds));
+        try environment.put("FIXTURE_X11", @tagName(case.x11_holds));
+        const expected: ?[]const u8 = switch (case.expected) {
+            .none => null,
+            .windows, .wayland_jpeg => jpeg,
+            .wayland_png => png,
+            .x11 => x11_png,
+        };
+        const bytes = try read(io, &environment);
+        defer if (bytes) |held| allocator.free(held);
+        if (expected) |want| try testing.expectEqualSlices(u8, want, bytes orelse return error.TestUnexpectedResult) else try testing.expectEqual(null, bytes);
     }
+
+    // A missing helper (WSL interop off, no wl-clipboard) is an unavailable source, and the next one answers.
+    try environment.put("WAYLAND_DISPLAY", "wayland-0");
+    try environment.put("FIXTURE_WINDOWS", "jpeg");
+    try environment.put("FIXTURE_WAYLAND", "png");
+    try fixture.dir.deleteFile(io, "powershell.exe");
+    {
+        const bytes = (try read(io, &environment)) orelse return error.TestUnexpectedResult;
+        defer allocator.free(bytes);
+        try testing.expectEqualSlices(u8, png, bytes);
+    }
+    try fixture.dir.deleteFile(io, "wl-paste");
+    try fixture.dir.deleteFile(io, "xclip");
+    try environment.put("DISPLAY", ":0");
+    try testing.expectEqual(null, try read(io, &environment));
 }

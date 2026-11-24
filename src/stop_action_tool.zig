@@ -1,5 +1,5 @@
 const std = @import("std");
-const tool_settle = @import("tool_settle.zig");
+const tool_delivery = @import("tool_delivery.zig");
 const core = @import("core_tools.zig");
 const storage = @import("store.zig");
 const action_read = @import("action_read.zig");
@@ -30,12 +30,12 @@ pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storag
     const rendered = try arena.alloc(u8, protocol.action_read_reply.max_bytes);
     var writer: std.Io.Writer = .fixed(rendered);
     try host_reply.renderActionRead(.{ .writer = &writer }, result);
-    _ = try tool_settle.deliver(store, .{ .core = input.binding }, .succeeded, .{ .text = writer.buffered() }, faults);
+    _ = try tool_delivery.deliver(store, .{ .core = input.binding }, .succeeded, .{ .text = writer.buffered() }, faults);
 }
 
 fn fail(store: *storage.Store, arena: std.mem.Allocator, input: *const storage.CoreActionInput, reason: []const u8, faults: storage.Faults) !void {
     const text = try std.fmt.allocPrint(arena, "Rui could not stop the Action: {s}.", .{reason});
-    _ = try tool_settle.deliver(store, .{ .core = input.binding }, .failed, .{ .text = text }, faults);
+    _ = try tool_delivery.deliver(store, .{ .core = input.binding }, .failed, .{ .text = text }, faults);
 }
 
 fn queueCallsForTesting(database: *storage.Store, tmp: *std.testing.TmpDir, arena: std.mem.Allocator, binding: storage.AttemptBinding, prefix: []const u8, name: []const u8, arguments: []const []const u8) !void {

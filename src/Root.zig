@@ -31,6 +31,7 @@ pub const FocusOwner = struct {
     context: *anyopaque,
     /// Non-focus side effects of app navigation (pending choice, notices).
     changed: *const fn (*anyopaque) void,
+    cancel_pointer: ?*const fn (*anyopaque) void = null,
     accepts_tab: ?*const fn (*anyopaque) bool = null,
     /// Live event custody; unlike the candidate order this is not draw state.
     modal: ?*const fn (*anyopaque) bool = null,
@@ -251,10 +252,11 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
             self.settings_page.keys_open = false;
         },
     }
-    // The retained Session must also retire a pending footer read when the
-    // transition hides it (for example Tab/click to a narrow list). A mouse
-    // motion, wheel, modal click or pasted click has no focus effect.
-    if (effects.field != null or (effects.focus != null and routed != null)) if (self.session_focus) |owner| owner.changed(owner.context);
+    // Retire UI holds owned by a Session when focus or a footer field moves.
+    if (effects.field != null or effects.focus != null) if (self.session_focus) |owner| {
+        if (owner.cancel_pointer) |cancel| cancel(owner.context);
+        if (effects.field != null or routed != null) owner.changed(owner.context);
+    };
     if (effects.activate) |target| for (self.drawn_focus[0..self.focus_frame.len]) |candidate| {
         if (candidate.target == target) {
             if (candidate.activate) |activate| try activate(candidate.activation_context orelse candidate.widget.userdata, ctx);
@@ -342,10 +344,12 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
 }
 
 fn captureSelection(self: *Self, ctx: *vxfw.EventContext, mouse: vaxis.Mouse) !bool {
-    if ((mouse.type != .drag and mouse.type != .release) or
-        (mouse.button != .left and mouse.button != .none) or self.session == null or
-        self.chooseLayout().pane != .session or self.input.layer.signInOpen() or self.input.layer.settingsOpen())
-        return false;
+    if (self.session == null) return false;
+    const route = switch (mouse.type) {
+        .press, .motion => true,
+        .drag, .release => mouse.button == .left or mouse.button == .none,
+    };
+    if (!route) return false;
     var captured = mouse;
     if (self.size.width >= split_at) captured.col -= @intCast(list_width + 1);
     try self.session.?.captureEvent(ctx, .{ .mouse = captured });
@@ -1400,7 +1404,7 @@ test "A faded screen holds what rendering shows: children above their parents in
     try std.testing.expectEqualStrings("nabb" ++ "aabc", &text);
 }
 
-test "Root routes captured selection through divider and footer as the sole hit" {
+test "SUI-142 Root routes captured selection through divider and footer with one active handler" {
     const Probe = struct {
         count: usize = 0,
         last: vaxis.Mouse = undefined,
@@ -1450,8 +1454,11 @@ test "Root routes captured selection through divider and footer as the sole hit"
     }) |mouse| {
         hits.clearRetainingCapacity();
         try frame.hitTest(arena.allocator(), &hits, .{ .row = @intCast(mouse.row), .col = @intCast(mouse.col) });
-        try std.testing.expectEqual(@as(usize, 1), hits.items.len);
-        try std.testing.expect(hits.items[0].widget.eql(root.widget()));
+        var root_hits: usize = 0;
+        for (hits.items) |hit| {
+            if (hit.widget.eql(root.widget())) root_hits += 1 else try std.testing.expect(inert(hit.widget));
+        }
+        try std.testing.expectEqual(@as(usize, 1), root_hits);
         ctx.consume_event = false;
         try Pointer.mouse(&ctx, frame, mouse);
         try std.testing.expect(ctx.consume_event);
@@ -1461,7 +1468,7 @@ test "Root routes captured selection through divider and footer as the sole hit"
     try std.testing.expectEqual(@as(usize, 3), session.count);
     try std.testing.expectEqual(@as(i16, 14), session.last.col);
     try std.testing.expectEqual(@as(i16, 24), session.last.row);
-    try std.testing.expectEqual(@as(usize, 1), session.releases);
+    try std.testing.expectEqual(@as(usize, 2), session.releases);
 }
 
 test "Sign-in captures every mouse action above settings without background activation" {

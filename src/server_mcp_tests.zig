@@ -1,4 +1,5 @@
 const std = @import("std");
+const execution_owner = @import("execution_owner.zig");
 const store = @import("store.zig");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
@@ -6,6 +7,8 @@ const tools = @import("tools.zig");
 const execution = @import("execution.zig");
 const Host = @import("server_host.zig").Host;
 const mcp = @import("server_mcp.zig");
+const tool_result = @import("tool_result.zig");
+const action_attempt = @import("action_attempt.zig");
 const Script = @import("mcp/test_server.zig");
 const poll = @import("test_poll");
 
@@ -171,21 +174,24 @@ fn run(case: Case) !void {
     var custody: [2]execution.CustodyRecord = @splat(.{});
     const host = try allocator.create(Host);
     defer allocator.destroy(host);
-    host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .custody = execution.CustodyPool.initialize(custody[0..(if (case == .concurrent) 2 else 1)]), .mcp_servers = .{ .entries = &servers }, .retention = &queue };
+    host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .mcp_servers = .{ .entries = &servers }, .retention = &queue };
     var host_parts: TestParts = undefined;
     host_parts.attach(host, undefined);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(custody[0..(if (case == .concurrent) 2 else 1)], null, &host_parts.lifecycle, &host.scratch_used, null);
+    const parts: action_attempt.Parts = .{ .store = storage, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &execution_state.custody };
     if (case == .retention_settlement_failure or case == .retention_settlement_unlink_failure) host.probes.arm(.result_before_commit);
     var active: mcp.Calls = .{};
     defer {
         _ = host.lifecycle.advance(.stopping);
-        active.shutdown(host);
+        active.shutdown(.{ .allocator = host.allocator, .io = host.io, .retention = host.retention });
     }
     var action_binding: store.ActionAttemptBinding = undefined;
     for (0..count) |ordinal| {
         const work = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?;
         try expectHere(@src(), work == .mcp);
-        try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, work.mcp));
-        if (case == .image or case == .image_exhausted) action_binding = active.entries[0].?.binding;
+        try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(parts, .{ .allocator = host.allocator, .io = host.io, .retention = host.retention }, host.mcp_servers, work.mcp));
+        if (case == .image or case == .image_exhausted) action_binding = active.entries[0].?.attempt.binding;
         if (case != .down) {
             const input = try allocator.create(store.ActionExecutionInput);
             defer allocator.destroy(input);
@@ -195,21 +201,21 @@ fn run(case: Case) !void {
         if (case == .two_calls and ordinal == 0) try std.testing.expectEqual(work.mcp.action_id + 1, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id);
         const Context = struct {
             active: *mcp.Calls,
-            host: *Host,
+            results: tool_result.Results,
             script: *Script,
             fn done(self: @This()) bool {
-                _ = self.active.service(self.host);
+                _ = self.active.service(self.results);
                 return !self.active.any();
             }
             fn sent(self: @This()) bool {
-                _ = self.active.service(self.host);
+                _ = self.active.service(self.results);
                 return self.script.request_received.load(.acquire);
             }
         };
-        const context: Context = .{ .active = &active, .host = host, .script = script };
+        const context: Context = .{ .active = &active, .results = .{ .allocator = host.allocator, .io = host.io, .retention = host.retention }, .script = script };
         if (case == .image_stop_race) {
             try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.sent);
-            const stopped_binding = active.entries[0].?.binding;
+            const stopped_binding = active.entries[0].?.attempt.binding;
             var stop: protocol.SessionStopCommand = .{};
             try stop.key.set("mcp-image-stop");
             stop.session = session;
@@ -217,7 +223,7 @@ fn run(case: Case) !void {
             // Model a completed image arriving just after the stop committed.
             try std.testing.expectEqual(store.ActionSettlement.Outcome.session_stop, (try settleImageParts(storage, &tmp, stopped_binding)).outcome);
             _ = host.lifecycle.advance(.stopping);
-            active.shutdown(host);
+            active.shutdown(.{ .allocator = host.allocator, .io = host.io, .retention = host.retention });
             try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM action_operation WHERE resolution_code='succeeded'", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM content WHERE digest=?1 AND byte_length=?2", .{ store.testing.Blob{ .bytes = &protocol.contentDigest(image_png) }, image_png.len }));
             return;
@@ -238,17 +244,17 @@ fn run(case: Case) !void {
             const other_work = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?;
             try expectHere(@src(), other_work == .mcp);
             try expectHere(@src(), other_work.mcp.action_id != work.mcp.action_id);
-            try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, other_work.mcp));
+            try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(parts, .{ .allocator = host.allocator, .io = host.io, .retention = host.retention }, host.mcp_servers, other_work.mcp));
             const Other = struct {
                 active: *mcp.Calls,
-                host: *Host,
+                results: tool_result.Results,
                 action: u64,
                 fn done(self: @This()) bool {
-                    _ = self.active.service(self.host);
+                    _ = self.active.service(self.results);
                     return !self.active.contains(self.action);
                 }
             };
-            try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), Other{ .active = &active, .host = host, .action = other_work.mcp.action_id }, Other.done);
+            try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), Other{ .active = &active, .results = .{ .allocator = host.allocator, .io = host.io, .retention = host.retention }, .action = other_work.mcp.action_id }, Other.done);
             try expectHere(@src(), active.contains(work.mcp.action_id));
             try expectHere(@src(), !script.connection_closed.load(.acquire));
             const other_report = try store.testingSessionReportWithProfile(storage, &tmp, other_session.slice(), 1024 * 1024, .full);
@@ -257,13 +263,13 @@ fn run(case: Case) !void {
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(other_binding.turn_id, next.turn_id);
             _ = host.lifecycle.advance(.stopping);
-            active.shutdown(host);
+            active.shutdown(.{ .allocator = host.allocator, .io = host.io, .retention = host.retention });
             try expectHere(@src(), try storage.recoverOneUncertainAction(.empty()));
         }
         if (case == .shutdown) {
             try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.sent);
             _ = host.lifecycle.advance(.stopping);
-            active.shutdown(host);
+            active.shutdown(.{ .allocator = host.allocator, .io = host.io, .retention = host.retention });
             try expectHere(@src(), try storage.recoverOneUncertainAction(.empty()));
             try expectHere(@src(), !try storage.recoverOneUncertainAction(.empty()));
             try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) == null);
@@ -303,7 +309,7 @@ fn run(case: Case) !void {
     if (case == .timeout or case == .stop or case == .shutdown or case == .concurrent) {
         try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), &script.connection_closed, poll.isSet);
     }
-    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    try std.testing.expectEqual(@as(usize, 0), execution_state.custody.occupied());
     if (case == .retention_settlement_failure or case == .retention_settlement_unlink_failure) {
         try std.testing.expect(storage.isFenced());
         try std.testing.expect(!host.lifecycle.launchAllowed());
@@ -480,7 +486,7 @@ fn expectNextRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: s
         _ = owner.reclaim(root) catch unreachable;
     };
     preparation.page.open(binding);
-    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     var advances: usize = 0;
     while (true) {

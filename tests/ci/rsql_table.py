@@ -85,7 +85,7 @@ def slot(text):
         return ".now"
     if text[0] == "a":
         return ".{ .argument = %d }" % int(text[1:])
-    return ".{ .served = .%s }" % text[1:]
+    return ".{ .served = %d }" % int(text[1:])
 
 
 def mysql_template(parts, slots):
@@ -261,7 +261,7 @@ def schema_lines(schema):
 def collect(zig):
     with tempfile.TemporaryDirectory(prefix="rsql-table-") as prefix:
         command = [zig, "build", "ci-build", "-Dpr-ci=true", "-Drsql-collect=true", f"-Dci-targets={TARGETS}",
-                   "-Dci-part=all", "--prefix", prefix]
+                   "-Dci-part=all", "--prefix", prefix, "--summary", "all"]
         subprocess.run(command, cwd=ROOT, check=True)
         records = set()
         for binary in sorted((Path(prefix) / "bin").iterdir()):

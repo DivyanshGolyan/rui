@@ -1,11 +1,13 @@
 const std = @import("std");
+const execution_owner = @import("execution_owner.zig");
 const execution = @import("execution.zig");
 const Host = @import("server_host.zig").Host;
+const tool_result = @import("tool_result.zig");
 const store = @import("store.zig");
 const protocol = @import("protocol.zig");
 const Running = @import("mcp/Running.zig");
 const offered = @import("mcp/offered.zig");
-const tool_settle = @import("tool_settle.zig");
+const action_attempt = @import("action_attempt.zig");
 const result_fault = @import("result_fault.zig");
 
 pub const Server = @import("mcp/servers.zig").Server;
@@ -13,17 +15,22 @@ pub const Servers = @import("mcp/servers.zig").Servers;
 
 pub const capacity = 16;
 
+const labels: action_attempt.Labels = .{
+    .admission = "MCP admission",
+    .custody = "MCP custody attachment",
+    .stop = "MCP stop reconciliation",
+    .result = "MCP settlement",
+    .failure = "MCP settlement",
+};
+
 pub const Active = struct {
-    token: execution.CustodyToken,
-    binding: store.ActionAttemptBinding,
+    attempt: action_attempt.Attempt = undefined,
+    /// Taken from the admitted Parts, so later reads and settlement never reach through Host.
+    store: *store.Store = undefined,
     arena: std.heap.ArenaAllocator,
     running: Running = undefined,
     started: bool = false,
     profile: @import("tool_record.zig").Profile = undefined,
-
-    fn slot(self: *const Active) tool_settle.Slot {
-        return .{ .token = self.token, .binding = self.binding, .publication_phase = "MCP settlement" };
-    }
 
     fn freeLocal(self: *Active, allocator: std.mem.Allocator) void {
         if (self.started) self.running.deinit();
@@ -31,18 +38,10 @@ pub const Active = struct {
         allocator.destroy(self);
     }
 
-    fn releaseUnused(self: *Active, host: *Host) void {
-        const token = self.token;
-        self.freeLocal(host.allocator);
-        host.custody.releaseUnused(token) catch unreachable;
-    }
-
-    fn destroy(self: *Active, host: *Host) void {
-        const token = self.token;
-        std.debug.assert(!host.custody.holdsUndeliveredAction(token) or !host.lifecycle.launchAllowed());
-        self.freeLocal(host.allocator);
-        host.custody.detach(token) catch unreachable;
-        host.custody.cleanupComplete(token) catch unreachable;
+    fn destroy(self: *Active, results: tool_result.Results) void {
+        const closing = self.attempt.close();
+        self.freeLocal(results.allocator);
+        closing.finish();
     }
 };
 
@@ -61,69 +60,62 @@ pub const Calls = struct {
 
     pub fn contains(self: *const Calls, action_id: u64) bool {
         for (self.entries) |entry| if (entry) |active| {
-            if (active.binding.action_id == action_id) return true;
+            if (active.attempt.binding.action_id == action_id) return true;
         };
         return false;
     }
 
-    pub noinline fn admit(self: *Calls, host: *Host, call: store.ReadyAction) @import("execution_turn.zig").Admission {
+    pub noinline fn admit(self: *Calls, parts: action_attempt.Parts, results: tool_result.Results, servers: Servers, call: store.ReadyAction) @import("execution_turn.zig").Admission {
         var place: ?*?*Active = null;
         for (&self.entries) |*entry| if (entry.* == null) {
             place = entry;
             break;
         };
         const entry = place orelse return .retry_later;
-        const token = host.custody.reserve() orelse return .retry_later;
-        const active = host.allocator.create(Active) catch {
-            host.custody.releaseUnused(token) catch unreachable;
-            return .retry_later;
-        };
-        active.* = .{ .token = token, .binding = undefined, .arena = .init(host.allocator) };
-        const timeout_ms = for (host.mcp_servers.entries) |*server| {
+        const active = results.allocator.create(Active) catch return .retry_later;
+        active.* = .{ .store = parts.store, .arena = .init(results.allocator) };
+        const timeout_ms = for (servers.entries) |*server| {
             if (std.mem.eql(u8, server.name, call.server.slice())) break server.timeout_ms;
         } else @import("mcp/servers.zig").default_timeout_ms;
-        var admission = (host.store.admitActionAttempt(call, timeout_ms, host.probes.storeFaults(.attempt_admission)) catch |err| {
-            active.releaseUnused(host);
-            host.lifecycle.fenceDispatch("MCP admission", err);
-            return .retry_later;
-        }) orelse {
-            active.releaseUnused(host);
-            return .admitted;
+        active.attempt = switch (action_attempt.admit(parts, call, timeout_ms, labels)) {
+            .attempt => |attempt| attempt,
+            .busy, .refused => {
+                active.freeLocal(results.allocator);
+                return .retry_later;
+            },
+            .none, .unattached => {
+                active.freeLocal(results.allocator);
+                return .admitted;
+            },
         };
-        const binding = host.custody.attach(token, &admission.permit) catch |err| {
-            active.releaseUnused(host);
-            host.lifecycle.fenceDispatch("MCP custody attachment", err);
-            return .admitted;
-        };
-        active.binding = binding;
-        prepare(host, active) catch |err| {
-            preparationFailed(host, active, err);
-            active.destroy(host);
+        prepare(results, servers, active) catch |err| {
+            preparationFailed(active, err);
+            active.destroy(results);
             return .admitted;
         };
         if (!active.started) {
-            active.destroy(host);
+            active.destroy(results);
             return .admitted;
         }
         entry.* = active;
         return .admitted;
     }
 
-    pub fn service(self: *Calls, host: *Host) bool {
+    pub fn service(self: *Calls, results: tool_result.Results) bool {
         var progress = false;
         for (&self.entries) |*entry| if (entry.*) |active| {
-            const stopped = host.store.actionSupersededByStop(active.binding) catch |err| {
-                host.lifecycle.fenceDispatch("MCP stop reconciliation", err);
-                return progress;
-            };
-            if (stopped != null) {
-                cancel(host, active);
-                active.destroy(host);
-                entry.* = null;
-                progress = true;
-                continue;
+            switch (active.attempt.stopped()) {
+                .fenced => return progress,
+                .stopped => {
+                    cancel(active);
+                    active.destroy(results);
+                    entry.* = null;
+                    progress = true;
+                    continue;
+                },
+                .running => {},
             }
-            const now = nowMs(host);
+            const now = nowMs(results.io);
             const fd = active.running.fd();
             if (fd >= 0 and now < active.running.deadlineMs()) {
                 var poll: std.c.pollfd = .{ .fd = fd, .events = active.running.events(), .revents = 0 };
@@ -132,20 +124,17 @@ pub const Calls = struct {
             }
             var ended: ?@import("mcp/result_text.zig").Ended = null;
             if (!active.running.requestSent()) {
-                host.store.withActionDispatchHandoff(active.binding, .{ .host = host, .active = active, .now = now, .ended = &ended }, struct {
-                    fn handoff(context: anytype) !void {
-                        try context.host.lifecycle.withEffectLaunch(context, send);
-                    }
+                active.attempt.dispatch(.{ .active = active, .now = now, .ended = &ended }, struct {
                     fn send(context: anytype) !void {
                         context.ended.* = context.active.running.poll(context.now);
                     }
-                }.handoff) catch |err| {
+                }.send) catch |err| {
                     switch (err) {
-                        error.SupersededByControl => cancel(host, active),
+                        error.SupersededByControl => cancel(active),
                         error.HostDispatchSuppressed => {},
-                        else => host.lifecycle.fenceDispatch("MCP dispatch", err),
+                        else => _ = active.attempt.settle(.{ .fence = .{ .phase = "MCP dispatch", .fault = .{ .store = err } } }),
                     }
-                    active.destroy(host);
+                    active.destroy(results);
                     entry.* = null;
                     progress = true;
                     continue;
@@ -154,8 +143,8 @@ pub const Calls = struct {
                 ended = active.running.poll(now);
             }
             if (ended) |finished| {
-                complete(host, active, finished);
-                active.destroy(host);
+                complete(results, active, finished);
+                active.destroy(results);
                 entry.* = null;
                 progress = true;
             }
@@ -163,9 +152,9 @@ pub const Calls = struct {
         return progress;
     }
 
-    pub fn shutdown(self: *Calls, host: *Host) void {
+    pub fn shutdown(self: *Calls, results: tool_result.Results) void {
         for (&self.entries) |*entry| if (entry.*) |active| {
-            active.destroy(host);
+            active.destroy(results);
             entry.* = null;
         };
     }
@@ -249,16 +238,16 @@ const ResultSink = struct {
 };
 
 /// Complete while Running still owns the response and any borrowed bytes.
-noinline fn complete(host: *Host, active: *Active, ended: @import("mcp/result_text.zig").Ended) void {
-    const result = @import("tool_result.zig").Result.create(host, active.binding.action_id, active.profile) catch |err| {
-        _ = tool_settle.fence(host, "MCP result creation", .{ .capture = err });
+noinline fn complete(results: tool_result.Results, active: *Active, ended: @import("mcp/result_text.zig").Ended) void {
+    const result = results.create(active.attempt.binding.action_id, active.profile) catch |err| {
+        _ = active.attempt.settle(.{ .fence = .{ .phase = "MCP result creation", .fault = .{ .capture = err } } });
         return;
     };
     defer result.destroy();
     const rendered = renderResult(result, ended);
     const code = switch (rendered) {
         .failed => |failure| {
-            settleFailure(host, active, failure, false);
+            settleFailure(active, failure, false);
             return;
         },
         .code => |code| code,
@@ -272,60 +261,59 @@ noinline fn complete(host: *Host, active: *Active, ended: @import("mcp/result_te
     };
     const finished = result.finish();
     switch (finished) {
-        .failed => |failed| settleFailure(host, active, failed.failure, failed.seal),
-        .value => |value| _ = tool_settle.result(host, active.slot(), active.profile, resolution, value, result),
+        .failed => |failed| settleFailure(active, failed.failure, failed.seal),
+        .value => |value| _ = active.attempt.settle(.{ .result = .{ .code = resolution, .value = value, .retained = result } }),
     }
 }
 
-fn settleFailure(host: *Host, active: *Active, failure: result_fault.Failure, seal: bool) void {
+fn settleFailure(active: *Active, failure: result_fault.Failure, seal: bool) void {
     if (seal) {
-        _ = tool_settle.fence(host, "MCP image sealing", failure);
+        _ = active.attempt.settle(.{ .fence = .{ .phase = "MCP image sealing", .fault = failure } });
     } else if (result_fault.classify(failure) == .storage_full) {
-        _ = tool_settle.failure(host, active.slot(), "MCP result capture", failure);
+        _ = active.attempt.settle(.{ .failure = .{ .fault = failure, .phase = "MCP result capture" } });
     } else {
-        _ = tool_settle.fence(host, "MCP result capture", failure);
+        _ = active.attempt.settle(.{ .fence = .{ .phase = "MCP result capture", .fault = failure } });
     }
 }
 
-fn nowMs(host: *const Host) u64 {
-    return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(host.io, .awake).raw.nanoseconds, std.time.ns_per_ms));
+fn nowMs(io: std.Io) u64 {
+    return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds, std.time.ns_per_ms));
 }
 
-fn settle(host: *Host, active: *Active, code: store.ActionResolutionCode, text: []const u8) void {
-    _ = tool_settle.fixed(host, active.slot(), code, text);
+fn settle(active: *Active, code: store.ActionResolutionCode, text: []const u8) void {
+    _ = active.attempt.settle(.{ .text = .{ .code = code, .text = text } });
 }
 
-fn preparationFailed(host: *Host, active: *Active, err: anyerror) void {
-    if (host.store.isFenced()) {
-        host.lifecycle.fenceDispatch("MCP input", err);
+fn preparationFailed(active: *Active, err: anyerror) void {
+    if (active.store.isFenced()) {
+        _ = active.attempt.settle(.{ .fence = .{ .phase = "MCP input", .fault = .{ .store = err } } });
     } else if (err == error.SupersededByControl) {
-        cancel(host, active);
+        cancel(active);
     } else {
-        settle(host, active, .spawn_failed, "Failed, not run: the Host could not prepare this MCP call.");
+        settle(active, .spawn_failed, "Failed, not run: the Host could not prepare this MCP call.");
     }
 }
 
-noinline fn prepare(host: *Host, active: *Active) !void {
+noinline fn prepare(results: tool_result.Results, servers: Servers, active: *Active) !void {
     const arena = active.arena.allocator();
     const input = try arena.create(store.ActionExecutionInput);
-    try host.store.readActionExecutionInput(.mcp, active.binding, input);
+    try active.store.readActionExecutionInput(.mcp, active.attempt.binding, input);
     active.profile = @import("tool_record.zig").Runner.mcp.resultProfile(input.runner.mcp.bash_offered);
-    const config = for (host.mcp_servers.entries) |*server| {
+    const config = for (servers.entries) |*server| {
         if (std.mem.eql(u8, server.name, input.runner.mcp.server.slice())) break server;
     } else {
         const text = try std.fmt.allocPrint(arena, "Failed, not run: MCP server {s} is not available (mcp_server_unavailable).", .{input.runner.mcp.server.slice()});
-        settle(host, active, .spawn_failed, text);
+        settle(active, .spawn_failed, text);
         return;
     };
-    const arguments = try readContent(host, arena, input.arguments);
+    const arguments = try readContent(active.store, arena, input.arguments);
     var turn: std.Io.Writer.Allocating = .init(arena);
-    try protocol.writeShape(&turn.writer, .{protocol.Hole.decimal}, .{active.binding.turn_id});
-    try host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding }, std.Io.Clock.Timestamp.now(host.io, .awake));
+    try protocol.writeShape(&turn.writer, .{protocol.Hole.decimal}, .{active.attempt.binding.turn_id});
     const start: Running.Input = .{
         .server = .{ .target = config.target, .bearer_token = config.token },
         .client = offered.client,
         .name = @import("tools.zig").remoteNameOf(input.runner.mcp.name.slice(), input.runner.mcp.remote_name.slice()),
-        .input_schema = try readContent(host, arena, input.runner.mcp.input_schema),
+        .input_schema = try readContent(active.store, arena, input.runner.mcp.input_schema),
         .arguments = arguments,
         .caller = .{
             .session_id = input.session.slice(),
@@ -337,19 +325,21 @@ noinline fn prepare(host: *Host, active: *Active) !void {
         .server_name = config.name,
         .timeout_ms = input.timeout_ms,
     };
-    try host.store.withActionLaunchHandoff(active.binding, .{ .host = host, .active = active, .input = start }, struct {
-        fn handoff(context: anytype, cutoff: u64) !void {
-            try context.active.running.start(context.host.allocator, context.input, nowMs(context.host));
-            context.active.started = true;
-            try context.host.custody.watchMessages(context.active.token, cutoff);
-        }
-    }.handoff);
+    switch (active.attempt.launch(.channel, std.Io.Clock.Timestamp.now(results.io, .awake), .{ .results = results, .active = active, .input = start }, begin)) {
+        .started => {},
+        .authority, .handoff => |err| return err,
+    }
 }
 
-fn readContent(host: *Host, allocator: std.mem.Allocator, reference: store.ContentReference) ![]const u8 {
+fn begin(context: anytype) !void {
+    try context.active.running.start(context.results.allocator, context.input, nowMs(context.results.io));
+    context.active.started = true;
+}
+
+fn readContent(canonical: *store.Store, allocator: std.mem.Allocator, reference: store.ContentReference) ![]const u8 {
     const bytes = try allocator.alloc(u8, std.math.cast(usize, reference.length) orelse return error.OutOfMemory);
     var reader: store.ContentReader = undefined;
-    reader.open(try host.store.openContent(reference));
+    reader.open(try canonical.openContent(reference));
     defer reader.close();
     var offset: usize = 0;
     while (offset < bytes.len) {
@@ -361,20 +351,20 @@ fn readContent(host: *Host, allocator: std.mem.Allocator, reference: store.Conte
     return bytes;
 }
 
-fn cancel(host: *Host, active: *Active) void {
+fn cancel(active: *Active) void {
     const sent = active.started and active.running.requestSent();
     const text = @import("mcp/action_text.zig");
-    settle(host, active, if (sent) .indeterminate else .cancelled, if (sent) text.stop_unknown else text.stop_not_sent);
+    settle(active, if (sent) .indeterminate else .cancelled, if (sent) text.stop_unknown else text.stop_not_sent);
 }
 
 const TestParts = if (@import("builtin").is_test) @import("server_host_testing.zig").TestParts else void;
 
 test "MCP Host call bound refuses admission before touching the Store" {
-    var active: Active = .{ .token = undefined, .binding = .{ .action_id = 1, .parent_operation_id = 1, .turn_id = 1 }, .arena = .init(std.testing.allocator) };
+    var active: Active = .{ .attempt = .{ .parts = undefined, .token = undefined, .labels = undefined, .binding = .{ .action_id = 1, .parent_operation_id = 1, .turn_id = 1 } }, .arena = .init(std.testing.allocator) };
     defer active.arena.deinit();
     var calls: Calls = .{ .entries = @splat(&active) };
     try std.testing.expect(calls.full());
-    try std.testing.expectEqual(@import("execution_turn.zig").Admission.retry_later, calls.admit(undefined, .{ .action_id = 17, .runner = .mcp, .server = .{} }));
+    try std.testing.expectEqual(@import("execution_turn.zig").Admission.retry_later, calls.admit(undefined, undefined, undefined, .{ .action_id = 17, .runner = .mcp, .server = .{} }));
     calls.entries[0] = null;
     try std.testing.expect(!calls.full());
 }
@@ -434,27 +424,30 @@ test "MCP full output hints follow the frozen Bash offer despite later settings"
         var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = Running.max_answer_bytes }, &entries);
         defer retention.cleanupAll();
         var custody_records: [2]execution.CustodyRecord = @splat(.{});
-        var host: Host = .{ .custody = execution.CustodyPool.initialize(&custody_records), .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = &configs }, .retention = &retention };
+        var host: Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = &configs }, .retention = &retention };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, undefined);
+        const results: tool_result.Results = .{ .io = std.testing.io, .allocator = host.allocator, .retention = &retention };
+        var execution_state: execution_owner.Execution = undefined;
+        execution_state.init(&custody_records, null, &host_parts.lifecycle, &host.scratch_used, null);
         var calls: Calls = .{};
-        defer calls.shutdown(&host);
-        try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, calls.admit(&host, selected));
+        defer calls.shutdown(results);
+        try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, calls.admit(.{ .store = &storage, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &execution_state.custody }, results, host.mcp_servers, selected));
         const Drive = struct {
             calls: *Calls,
-            host: *Host,
+            results: tool_result.Results,
             fn step(self: *@This()) !bool {
-                _ = self.calls.service(self.host);
+                _ = self.calls.service(self.results);
                 return !self.calls.any();
             }
         };
-        var drive: Drive = .{ .calls = &calls, .host = &host };
+        var drive: Drive = .{ .calls = &calls, .results = results };
         try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(10)), &drive, Drive.step);
         try std.testing.expect(script.request_received.load(.acquire));
         try std.testing.expect(!storage.isFenced());
-        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
-        const recycled = host.custody.reserve().?;
-        try host.custody.releaseUnused(recycled);
+        try std.testing.expectEqual(@as(usize, 0), execution_state.custody.occupied());
+        const recycled = execution_state.custody.reserve().?;
+        try execution_state.custody.releaseUnused(recycled);
         const report = try store.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 128 * 1024, .full);
         defer gpa.free(report);
         const parsed = try std.json.parseFromSlice(std.json.Value, gpa, report, .{});
@@ -513,21 +506,24 @@ test "MCP call of a prefixed tool sends the name its server listed" {
     var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = Running.max_answer_bytes }, &entries);
     defer retention.cleanupAll();
     var custody_records: [2]execution.CustodyRecord = @splat(.{});
-    var host: Host = .{ .custody = execution.CustodyPool.initialize(&custody_records), .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = &configs }, .retention = &retention };
+    var host: Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = &configs }, .retention = &retention };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
+    const results: tool_result.Results = .{ .io = std.testing.io, .allocator = host.allocator, .retention = &retention };
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&custody_records, null, &host_parts.lifecycle, &host.scratch_used, null);
     var calls: Calls = .{};
-    defer calls.shutdown(&host);
-    try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, calls.admit(&host, selected));
+    defer calls.shutdown(results);
+    try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, calls.admit(.{ .store = &storage, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &execution_state.custody }, results, host.mcp_servers, selected));
     const Drive = struct {
         calls: *Calls,
-        host: *Host,
+        results: tool_result.Results,
         fn step(self: *@This()) !bool {
-            _ = self.calls.service(self.host);
+            _ = self.calls.service(self.results);
             return !self.calls.any();
         }
     };
-    var drive: Drive = .{ .calls = &calls, .host = &host };
+    var drive: Drive = .{ .calls = &calls, .results = results };
     try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(10)), &drive, Drive.step);
     try std.testing.expect(script.request_received.load(.acquire));
     const sent = script.seen[0..script.seen_len];
@@ -572,60 +568,65 @@ test "MCP ordinary custody covers preparation failure init failure stop shutdown
         defer retention.cleanupAll();
         var custody_records: [2]execution.CustodyRecord = @splat(.{});
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = if (case == .allocation) 0 else 1 });
-        var host: Host = .{ .custody = execution.CustodyPool.initialize(&custody_records), .io = std.testing.io, .allocator = if (case == .allocation or case == .preparation) failing.allocator() else std.testing.allocator, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = if (case == .unavailable) &.{} else &configs }, .retention = &retention };
+        var host: Host = .{ .io = std.testing.io, .allocator = if (case == .allocation or case == .preparation) failing.allocator() else std.testing.allocator, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = if (case == .unavailable) &.{} else &configs }, .retention = &retention };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, undefined);
+        const results: tool_result.Results = .{ .io = std.testing.io, .allocator = host.allocator, .retention = &retention };
+        var execution_state: execution_owner.Execution = undefined;
+        execution_state.init(&custody_records, null, &host_parts.lifecycle, &host.scratch_used, null);
+        const parts: action_attempt.Parts = .{ .store = &storage, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &execution_state.custody };
         if (case == .capacity_zero or case == .capacity_occupied or case == .capacity_detached) {
-            if (case == .capacity_zero) host.custody = execution.CustodyPool.initialize(&.{});
+            if (case == .capacity_zero) execution_state.custody = execution.CustodyPool.initialize(&.{});
             const detached = if (case == .capacity_detached) detach: {
-                host.custody = execution.CustodyPool.initialize(custody_records[0..1]);
-                const token = host.custody.reserve().?;
+                execution_state.custody = execution.CustodyPool.initialize(custody_records[0..1]);
+                const token = execution_state.custody.reserve().?;
                 var permit: store.DispatchPermit = .{ .binding = .{ .turn_id = 97, .operation_id = 98, .attempt_ordinal = 1 } };
-                _ = try host.custody.attach(token, &permit);
-                try host.custody.detach(token);
+                _ = try execution_state.custody.attach(token, &permit);
+                try execution_state.custody.detach(token);
                 break :detach token;
             } else null;
-            const held = if (case == .capacity_occupied) host.custody.reserve() else null;
-            const other = if (case == .capacity_occupied) host.custody.reserve() else null;
+            const held = if (case == .capacity_occupied) execution_state.custody.reserve() else null;
+            const other = if (case == .capacity_occupied) execution_state.custody.reserve() else null;
             var blocked: Calls = .{};
-            try std.testing.expectEqual(@import("execution_turn.zig").Admission.retry_later, blocked.admit(&host, selected));
+            try std.testing.expectEqual(@import("execution_turn.zig").Admission.retry_later, blocked.admit(parts, results, host.mcp_servers, selected));
             try std.testing.expect(!blocked.any());
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT attempt_ordinal FROM action_operation WHERE action_id=?1", .{selected.action_id}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT authorized FROM action_operation WHERE action_id=?1", .{selected.action_id}));
-            if (held) |token| try host.custody.releaseUnused(token);
-            if (other) |token| try host.custody.releaseUnused(token);
+            if (held) |token| try execution_state.custody.releaseUnused(token);
+            if (other) |token| try execution_state.custody.releaseUnused(token);
             if (detached) |token| {
-                try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
-                try host.custody.cleanupComplete(token);
-                const recycled = host.custody.reserve().?;
-                try std.testing.expectError(error.StaleCustody, host.custody.cleanupComplete(token));
-                try host.custody.releaseUnused(recycled);
+                try std.testing.expectEqual(@as(usize, 1), execution_state.custody.occupied());
+                try execution_state.custody.cleanupComplete(token);
+                const recycled = execution_state.custody.reserve().?;
+                try std.testing.expectError(error.StaleCustody, execution_state.custody.cleanupComplete(token));
+                try execution_state.custody.releaseUnused(recycled);
             }
             continue;
         }
         if (case == .stop_preparation) {
-            const token = host.custody.reserve().?;
-            const active = try host.allocator.create(Active);
-            active.* = .{ .token = token, .binding = undefined, .arena = .init(host.allocator) };
-            var admission = (try storage.admitActionAttempt(selected, 30_000, .{})).?;
-            active.binding = try host.custody.attach(token, &admission.permit);
+            const attempt = switch (action_attempt.admit(parts, selected, 30_000, labels)) {
+                .attempt => |value| value,
+                else => return error.TestUnexpectedResult,
+            };
+            const active = try results.allocator.create(Active);
+            active.* = .{ .attempt = attempt, .store = &storage, .arena = .init(results.allocator) };
             var stop = try store.testingCompleteSessionStop("stop-preparation", session.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            if (prepare(&host, active)) |_| return error.TestUnexpectedResult else |err| {
+            if (prepare(results, host.mcp_servers, active)) |_| return error.TestUnexpectedResult else |err| {
                 try std.testing.expectEqual(error.SupersededByControl, err);
-                preparationFailed(&host, active, err);
+                preparationFailed(active, err);
             }
-            active.destroy(&host);
+            active.destroy(results);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code='cancelled'", .{selected.action_id}));
-            try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+            try std.testing.expectEqual(@as(usize, 0), execution_state.custody.occupied());
             continue;
         }
         var calls: Calls = .{};
         defer {
             _ = host.lifecycle.advance(.stopping);
-            calls.shutdown(&host);
+            calls.shutdown(results);
         }
-        const admitted = calls.admit(&host, selected);
+        const admitted = calls.admit(parts, results, host.mcp_servers, selected);
         if (case == .allocation) {
             try std.testing.expectEqual(@import("execution_turn.zig").Admission.retry_later, admitted);
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT attempt_ordinal FROM action_operation WHERE action_id=?1", .{selected.action_id}));
@@ -634,19 +635,19 @@ test "MCP ordinary custody covers preparation failure init failure stop shutdown
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT attempt_ordinal FROM action_operation WHERE action_id=?1", .{selected.action_id}));
             if (case != .preparation and case != .unavailable) {
                 const active = calls.entries[0].?;
-                try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
+                try std.testing.expectEqual(@as(usize, 1), execution_state.custody.occupied());
                 try std.testing.expectEqual(@as(std.posix.fd_t, -1), active.running.fd());
-                try std.testing.expectError(error.DispatchPermitConsumed, host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding }, std.Io.Clock.Timestamp.now(host.io, .awake)));
+                try std.testing.expectError(error.DispatchPermitConsumed, execution_state.custody.consumeLaunchAuthority(active.attempt.token, .{ .action = active.attempt.binding }, std.Io.Clock.Timestamp.now(host.io, .awake)));
                 if (case == .shutdown) {
                     _ = host.lifecycle.advance(.stopping);
-                    calls.shutdown(&host);
+                    calls.shutdown(results);
                 } else {
                     if (case == .stop) {
                         var stop = try store.testingCompleteSessionStop("stop", session.slice());
                         try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
                     }
                     if (case == .settlement) host.probes.arm(.result_before_commit);
-                    try std.testing.expect(calls.service(&host));
+                    try std.testing.expect(calls.service(results));
                 }
             }
             const unresolved: u64 = @intFromBool(case == .shutdown or case == .settlement);
@@ -655,9 +656,9 @@ test "MCP ordinary custody covers preparation failure init failure stop shutdown
             if (case == .stop) try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code='cancelled'", .{selected.action_id}));
         }
         try std.testing.expect(!calls.any());
-        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
-        const recycled = host.custody.reserve().?;
-        try host.custody.releaseUnused(recycled);
+        try std.testing.expectEqual(@as(usize, 0), execution_state.custody.occupied());
+        const recycled = execution_state.custody.reserve().?;
+        try execution_state.custody.releaseUnused(recycled);
     }
 }
 // Helpers for MCP adapter tests; keep the returned ending alive with Running.
@@ -709,6 +710,8 @@ test "MCP Result renders and retains text across outcomes and frozen offers" {
     var host: @import("server_host.zig").Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     const running = try gpa.create(Running);
     defer gpa.destroy(running);
     const Case = struct { length: usize, kind: enum { text, mixed_error, structured, rpc_error, refused } = .text };
@@ -749,7 +752,8 @@ test "MCP Result renders and retains text across outcomes and frozen offers" {
             try running.start(gpa, adapterTestInput(script.port), 0);
             defer running.deinit();
             const ended = try adapterTestDrive(running);
-            const result = try @import("tool_result.zig").Result.create(&host, 17, .{ .excerpt_bytes = adapter_test_text.excerpt_bytes, .retain = bash_offered });
+            const results: tool_result.Results = .{ .io = std.testing.io, .allocator = host.allocator, .retention = &queue };
+            const result = try results.create(17, .{ .excerpt_bytes = adapter_test_text.excerpt_bytes, .retain = bash_offered });
             defer result.destroy();
             const rendered = renderResult(result, ended);
             const expected_code: adapter_test_text.Code = switch (case.kind) {
@@ -827,10 +831,13 @@ test "MCP Result reports retention refusal without changing success" {
         var host: @import("server_host.zig").Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, undefined);
+        var execution_state: execution_owner.Execution = undefined;
+        execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
         try running.start(gpa, adapterTestInput(script.port), 0);
         defer running.deinit();
         const ended = try adapterTestDrive(running);
-        const result = try @import("tool_result.zig").Result.create(&host, 17, .{ .excerpt_bytes = adapter_test_text.excerpt_bytes, .retain = true });
+        const results: tool_result.Results = .{ .io = std.testing.io, .allocator = host.allocator, .retention = &queue };
+        const result = try results.create(17, .{ .excerpt_bytes = adapter_test_text.excerpt_bytes, .retain = true });
         defer result.destroy();
         const rendered = renderResult(result, ended);
         try std.testing.expect(rendered == .code);
@@ -857,6 +864,8 @@ test "Running oversized JSON and SSE answers preserve borrowed evidence until re
     var host: @import("server_host.zig").Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     const running = try gpa.create(Running);
     defer gpa.destroy(running);
     const response = try gpa.alloc(u8, Running.max_answer_bytes + 1024);
@@ -893,7 +902,8 @@ test "Running oversized JSON and SSE answers preserve borrowed evidence until re
             };
             try std.testing.expect(std.mem.indexOf(u8, answer.bytes, case.prefix) != null);
             try std.testing.expect(answer.bytes.len > adapter_test_text.excerpt_bytes);
-            const result = try @import("tool_result.zig").Result.create(&host, 17, .{ .excerpt_bytes = adapter_test_text.excerpt_bytes, .retain = true });
+            const results: tool_result.Results = .{ .io = std.testing.io, .allocator = host.allocator, .retention = &queue };
+            const result = try results.create(17, .{ .excerpt_bytes = adapter_test_text.excerpt_bytes, .retain = true });
             defer result.destroy();
             const rendered = renderResult(result, ended);
             try std.testing.expect(rendered == .code);
@@ -942,6 +952,8 @@ test "MCP image part limit accounts for empty text tails" {
         var host: Host = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = undefined, .retention = &queue };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, undefined);
+        var execution_state: execution_owner.Execution = undefined;
+        execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
         var content: std.Io.Writer.Allocating = .init(allocator);
         defer content.deinit();
         try content.writer.writeByte('[');
@@ -952,7 +964,8 @@ test "MCP image part limit accounts for empty text tails" {
         try content.writer.writeAll(case.tail);
         try content.writer.writeByte(']');
         const ended: @import("mcp/result_text.zig").Ended = .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = content.written(), .structured = null, .is_error = false } } } };
-        const result = try @import("tool_result.zig").Result.create(&host, 1, .{ .excerpt_bytes = 10_000, .retain = false });
+        const results: tool_result.Results = .{ .io = std.testing.io, .allocator = host.allocator, .retention = &queue };
+        const result = try results.create(1, .{ .excerpt_bytes = 10_000, .retain = false });
         defer result.destroy();
         const rendered = renderResult(result, ended);
         try std.testing.expect(rendered == .code and rendered.code == .succeeded);
@@ -1020,7 +1033,6 @@ test "MCP retained response follows the actual delivery outcome" {
         };
         try store.settleCallsForTesting(storage, &tmp, model, "mcp-spill-calls", calls[0..if (case == .direct_stop) 2 else 1]);
         const selected = (try storage.nextAction(.mcp, .fromFree(2, true))).?;
-        var admission = (try storage.admitActionAttempt(selected, 30_000, .{})).?;
         const root_buffer = try allocator.create([protocol.max_store_bytes]u8);
         defer allocator.destroy(root_buffer);
         const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, root_buffer)];
@@ -1031,16 +1043,22 @@ test "MCP retained response follows the actual delivery outcome" {
         var custody_records: [1]execution.CustodyRecord = @splat(.{});
         const host = try allocator.create(Host);
         defer allocator.destroy(host);
-        host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .custody = execution.CustodyPool.initialize(&custody_records), .retention = &queue };
+        host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .retention = &queue };
         var host_parts: TestParts = undefined;
         host_parts.attach(host, undefined);
-        const token = host.custody.reserve().?;
-        const binding = try host.custody.attach(token, &admission.permit);
+        var execution_state: execution_owner.Execution = undefined;
+        execution_state.init(&custody_records, null, &host_parts.lifecycle, &host.scratch_used, null);
+        const parts: action_attempt.Parts = .{ .store = storage, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &execution_state.custody };
+        const attempt = switch (action_attempt.admit(parts, selected, 30_000, labels)) {
+            .attempt => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        const token = attempt.token;
         defer {
-            host.custody.detach(token) catch unreachable;
-            host.custody.cleanupComplete(token) catch unreachable;
+            execution_state.custody.detach(token) catch unreachable;
+            execution_state.custody.cleanupComplete(token) catch unreachable;
         }
-        var active: Active = .{ .token = token, .binding = binding, .arena = .init(allocator), .profile = @import("tool_record.zig").Runner.mcp.resultProfile(true) };
+        var active: Active = .{ .attempt = attempt, .arena = .init(allocator), .profile = @import("tool_record.zig").Runner.mcp.resultProfile(true) };
         defer active.arena.deinit();
         switch (case) {
             .direct_stop => {
@@ -1053,11 +1071,11 @@ test "MCP retained response follows the actual delivery outcome" {
                 stop.session = session;
                 try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
             },
-            .lost => try std.testing.expect(host.custody.claimTerminalDelivery(token)),
+            .lost => try std.testing.expect(execution_state.custody.claimTerminalDelivery(token)),
             .fenced => host.probes.arm(.result_before_commit),
             .normal => {},
         }
-        complete(host, &active, ended);
+        complete(.{ .allocator = host.allocator, .io = host.io, .retention = host.retention }, &active, ended);
         var filename_buffer: [128]u8 = undefined;
         const filename = try std.fmt.bufPrint(&filename_buffer, "mcp-output-{d}-1.tmp", .{selected.action_id});
         const kept = case == .normal or case == .session_stop;
