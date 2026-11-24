@@ -1,7 +1,7 @@
 const std = @import("std");
 const CiArtifacts = @import("ci.zig").CiArtifacts;
 
-pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ci_names: *std.Build.Step) void {
     const dependency = b.dependency("vaxis", .{ .target = target, .optimize = optimize });
     const vaxis = dependency.module("vaxis");
     const tests = b.addTest(.{
@@ -31,15 +31,6 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, opt
         }),
         .filters = &.{ "c api: conformance with vaxis.h", "c api: ignores internal clipboard protocol events" },
     });
-    const ci_names = b.addTest(.{
-        .name = "test-ci-artifact-names",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("build/ci.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-        .filters = &.{"CI artifact names"},
-    });
     const owners = b.addSystemCommand(&.{ "python3", "-B" });
     owners.addFileArg(b.path("tests/ci/verify_vaxis_test_owners.py"));
     owners.addFileArg(b.path("tests/ci/vaxis_test_owners.json"));
@@ -48,6 +39,6 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, opt
     const step = b.step("test-vaxis-clipboard", "Test Vaxis OSC 5522 transport and C compatibility");
     step.dependOn(&ci.run(tests).step);
     step.dependOn(&ci.run(c_tests).step);
-    step.dependOn(&ci.run(ci_names).step);
+    step.dependOn(ci_names);
     step.dependOn(&owners.step);
 }

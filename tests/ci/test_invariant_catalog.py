@@ -43,7 +43,7 @@ class InvariantCatalogTest(unittest.TestCase):
         duplicates = duplicate_ids('\n'.join(path.read_text() for path in catalogs))
         self.assertEqual(duplicates, [], f'duplicate invariant IDs: {", ".join(duplicates)}')
 
-    def test_external_owners_require_the_pin_and_exact_source(self):
+    def assert_external_owners_require_the_pin_and_exact_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             revision = "a" * 40
@@ -71,10 +71,11 @@ class InvariantCatalogTest(unittest.TestCase):
 
     def test_named_migrated_owners_exist_once(self):
         """CI-87: Migrated owner names identify one source test."""
+        self.assert_external_owners_require_the_pin_and_exact_source()
         # Unmigrated catalog rows name future owners without an ID prefix.
         # Enforce the ID-prefixed owners that the migration has landed.
         tests = defaultdict(list)
-        for root, suffix in ((ROOT / 'src', '*.zig'), (ROOT / 'clients/ts/test', '*.ts')):
+        for root, suffix in ((ROOT / 'src', '*.zig'), (ROOT / 'build', '*.zig'), (ROOT / 'clients/ts/test', '*.ts')):
             for path in root.rglob(suffix):
                 for name in TEST.findall(path.read_text()):
                     tests[name].append(path.relative_to(ROOT))

@@ -617,15 +617,23 @@ def clipboard_paste_case(*, protocol_only=False):
             frames.insert(at, corrupt if malformed == "oversized" else corrupt[:-2])
         os.write(master, frame(b"OK" + prefix) + b"".join(frames) + frame(b"DONE" + prefix))
 
-    def assert_no_draft_image(master):
-        screen = current_screen(master)
+    def draft_area(screen):
         bounds = composer_bounds(screen)
         assert bounds is not None, "composer bounds were not rendered"
-        assert "[Image 1]" not in "\n".join(screen.splitlines()[bounds[0] + 1:bounds[1]]), "a stale image reached the draft"
+        return "\n".join(screen.splitlines()[bounds[0] + 1:bounds[1]])
+
+    def assert_no_draft_image(master):
+        assert "[Image 1]" not in draft_area(current_screen(master)), "a stale image reached the draft"
+
+    def reopen_fixture(master):
+        capture = terminal_capture(master)
+        first_row = b"\x1b[H\x1b[1;2B\x1b[1;2B"
+        keyed_frame(master, first_row, lambda screen, x, y: (cell := capture.style("Clipboard fixture")) is not None and cell.bold)
+        return keyed_frame(master, b"\x1b[C", lambda screen, x, y: composer_ready(screen, x, y) and "Image received." in conversation_text(screen))
 
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        session = create_session(home, "--store", store, "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+        session = create_session(home, "--store", store, "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol", "--label", "Clipboard fixture")
         with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                 env={**os.environ, "HOME": str(home), "SSH_CONNECTION": "clipboard-fixture"}, cwd=state) as (caller, master):
             capture = terminal_capture(master)
@@ -667,8 +675,8 @@ def clipboard_paste_case(*, protocol_only=False):
             handle = re.search(rb"type=read:id=([0-9]+)", request).group(1)
             prefix = b":id=" + handle
             complete_data = frame(b"DATA:mime=aW1hZ2UvcG5n" + prefix, delayed_png)
-            overview_frame(master, lambda screen: True, frame(b"OK" + prefix) + complete_data + b"\x1b[27u")
-            keyed_frame(master, b"\x1b[13u", lambda screen, x, y: composer_ready(screen, x, y))
+            overview_frame(master, lambda screen: "Clipboard fixture" in screen, frame(b"OK" + prefix) + complete_data + b"\x1b[27u")
+            reopen_fixture(master)
             os.write(master, frame(b"DONE" + prefix) + b"cancelled")
             raw_output(master, lambda screen: "cancelled" in screen)
             assert_no_draft_image(master)
@@ -679,8 +687,8 @@ def clipboard_paste_case(*, protocol_only=False):
             handle = re.search(rb"type=read:id=([0-9]+)", request).group(1)
             prefix = b":id=" + handle
             os.write(master, frame(b"OK" + prefix) + b"\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n" + prefix + b";" + encoded[:12])
-            overview_frame(master, lambda screen: True, b"\x1b[27u")
-            keyed_frame(master, b"\x1b[13u", lambda screen, x, y: composer_ready(screen, x, y))
+            overview_frame(master, lambda screen: "Clipboard fixture" in screen, b"\x1b[27u")
+            reopen_fixture(master)
             os.write(master, b"\x1b[200~" + encoded[12:] + b"\r\t\x7f\x1b[120;1;120u\x1b[201~\x1b\\" + frame(b"DONE" + prefix))
             os.write(master, b"safe")
             shown = raw_output(master, lambda screen: "safe" in screen)
@@ -695,8 +703,9 @@ def clipboard_paste_case(*, protocol_only=False):
             handle = re.search(rb"type=read:id=([0-9]+)", request).group(1)
             prefix = b":id=" + handle
             os.write(master, frame(b"OK" + prefix) + b"\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n" + prefix + b";" + encoded[:12])
-            overview_frame(master, lambda screen: True, b"\x1b[27u")
-            keyed_frame(master, b"\x1b[13u", lambda screen, x, y: composer_ready(screen, x, y))
+            overview_frame(master, lambda screen: "Clipboard fixture" in screen, b"\x1b[27u")
+            reopened = reopen_fixture(master)
+            assert "safe" in draft_area(reopened), "returning to the Session lost the draft"
             os.write(master, b"unframedtext\x01\x05\x1b[200~blockedpaste\x1b[121;1;121u\x1b[201~\x1b[120;1;120u")
             raw_output(master, lambda screen: "safex" in screen)
             current = current_screen(master)

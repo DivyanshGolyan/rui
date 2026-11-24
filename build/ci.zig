@@ -36,31 +36,40 @@ pub const CiCollection = struct {
     }
 };
 
-fn sourceStem(path: std.Build.LazyPath) []const u8 {
-    const name = switch (path) {
+pub fn testArtifactName(allocator: std.mem.Allocator, name: []const u8, root: std.Build.LazyPath) (std.mem.Allocator.Error || error{UnsupportedTestRoot})![]u8 {
+    const path = switch (root) {
         .src_path => |source| source.sub_path,
         .dependency => |source| source.sub_path,
-        .cwd_relative => |source| source,
-        .generated => |source| source.sub_path,
-        .relative => |source| source.sub_path,
+        else => return error.UnsupportedTestRoot,
     };
-    return if (name.len == 0) path.getDisplayName() else std.fs.path.stem(name);
+    if (path.len == 0) return error.UnsupportedTestRoot;
+    return std.fmt.allocPrint(allocator, "{s}-{s}", .{ name, std.fs.path.stem(path) });
 }
 
 fn ciName(b: *std.Build, compile: *std.Build.Step.Compile) []const u8 {
     return if (compile.kind == .@"test")
-        b.fmt("{s}-{s}", .{ compile.name, sourceStem(compile.root_module.root_source_file.?) })
+        testArtifactName(b.allocator, compile.name, compile.root_module.root_source_file.?) catch @panic("Unsupported CI test root or out of memory")
     else
         compile.name;
 }
 
-test "CI artifact names accept source and dependency roots" {
-    const source: std.Build.LazyPath = .{ .src_path = .{ .owner = undefined, .sub_path = "src/tests.zig" } };
-    const local_c: std.Build.LazyPath = .{ .src_path = .{ .owner = undefined, .sub_path = "src/c_api.zig" } };
-    const dependency: std.Build.LazyPath = .{ .dependency = .{ .dependency = undefined, .sub_path = "src/c_api.zig" } };
-    try std.testing.expectEqualStrings("tests", sourceStem(source));
-    try std.testing.expectEqualStrings("c_api", sourceStem(dependency));
-    try std.testing.expectEqualStrings(sourceStem(local_c), sourceStem(dependency));
+test "CI-101 CI artifact names preserve root identity" {
+    const cases = [_]std.Build.LazyPath{
+        .{ .src_path = .{ .owner = undefined, .sub_path = "src/c_api.zig" } },
+        .{ .dependency = .{ .dependency = undefined, .sub_path = "src/c_api.zig" } },
+    };
+    for (cases) |root| {
+        const actual = try testArtifactName(std.testing.allocator, "reader", root);
+        defer std.testing.allocator.free(actual);
+        try std.testing.expectEqualStrings("reader-c_api", actual);
+    }
+    for ([_]std.Build.LazyPath{
+        .{ .src_path = .{ .owner = undefined, .sub_path = "" } },
+        .{ .dependency = .{ .dependency = undefined, .sub_path = "" } },
+        .{ .cwd_relative = "tmp/tests.zig" },
+        .{ .generated = .{ .index = @fromBackingInt(@intCast(0)) } },
+        .{ .relative = .{ .base = .local_cache, .sub_path = "tmp/output.zig" } },
+    }) |root| try std.testing.expectError(error.UnsupportedTestRoot, testArtifactName(std.testing.allocator, "reader", root));
 }
 
 pub const CiArtifacts = struct {
@@ -81,6 +90,19 @@ pub const CiArtifacts = struct {
         return command;
     }
 };
+
+pub fn nameTests(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+    const tests = b.addTest(.{
+        .name = "test-ci-artifact-names",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("build/ci.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"CI artifact names"},
+    });
+    return &ci.run(tests).step;
+}
 
 /// Keep acceptance fresh while allowing Zig to overlap independent commands.
 /// Inherited stdio holds Zig's global stderr lock for the command's lifetime.

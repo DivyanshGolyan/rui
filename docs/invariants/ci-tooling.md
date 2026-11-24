@@ -103,6 +103,7 @@ CI policy is a caller-facing interface to contributors and release operators; ch
 | CI-95 | Module | Release publishes the Host memory section from the qualification tier's `rui-host-memory` artifact without measuring, and says `Not measured` when that artifact is absent. | Publish workflow text over its steps, which the policy reads as its only measurement boundary | `InstallerTemplateTest.test_publication_pastes_the_promotion_table_without_measuring` in `tests/ci/test_release.py` | .github/workflows/release.yml; issue #2113 |
 
 | CI-99 | Module | A fixture retains its root while an owned descendant can still write and removes it only after the whole driver group retires. | Full-check driver cleanup over held fixture processes | `FullCheckPartitionTest.test_root_disposal_requires_the_whole_group_to_retire` in `tests/ci/test_selection.py`: delayed and lost stop delivery keep a real held descendant until release. | CODING_STANDARDS.md#evidence; docs/verification/testing.md#flake-sources-and-their-root-fixes |
+| CI-101 | Module | Test artifact names retain the compile name and source stem for local and dependency roots, and unsupported root forms fail closed. | Build artifact naming API over source paths | `CI-101 CI artifact names preserve root identity` in `build/ci.zig`, run by `test-logic` and `test-vaxis-clipboard`. | `build/ci.zig` |
 
 Owned elsewhere: SH-21 (installer archive and version validation).
 

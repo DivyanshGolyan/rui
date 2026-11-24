@@ -41,7 +41,6 @@ pub fn build(b: *std.Build) void {
             @panic("Missing CI CPU identity");
         if (!std.mem.eql(u8, recorded, ci_cpu)) @panic("CI CPU identity mismatch");
     }
-    @import("build/vaxis_clipboard.zig").add(b, ci, target, optimize);
     const pinned_transport = product.addPinnedTransport(b, target);
 
     const test_pauses = b.option(bool, "test-pauses", "Enable test pause points in the product executable") orelse false;
@@ -53,6 +52,9 @@ pub fn build(b: *std.Build) void {
     if (ci.directory != null and test_filters.len != 0) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
     const units = unit_module.add(b, ci, target, pinned_transport, test_filters, pr_ci);
+    const ci_names = ci_module.nameTests(b, ci, target, optimize);
+    if (test_filters.len == 0) b.top_level_steps.get("test-logic").?.step.dependOn(ci_names);
+    @import("build/vaxis_clipboard.zig").add(b, ci, target, optimize, ci_names);
     var unit_runs = units.runs;
 
     const openapi_emitter = b.addExecutable(.{
