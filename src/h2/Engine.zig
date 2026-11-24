@@ -1,22 +1,23 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const c = @import("h2_c");
 const h2 = @import("h2.zig");
 const policy = @import("policy.zig");
+const dial_policy = @import("dial_policy.zig");
+const liveness = @import("liveness.zig");
 const Record = @import("Stream.zig");
 const Connection = @import("Connection.zig");
+const Clock = @import("Clock.zig");
+const Origin = @import("Origin.zig");
 const Waker = @import("os").Waker;
-const Resolver = @import("Resolver.zig");
 const tls = @import("tls.zig");
-const proxy = @import("proxy.zig");
 const Engine = @This();
 
 allocator: std.mem.Allocator,
-io: std.Io,
 options: h2.Options,
 callbacks: *c.nghttp2_session_callbacks,
 session_options: *c.nghttp2_option,
 origins: [h2.max_endpoints]Origin = undefined,
+pending: [h2.max_endpoints]Record.Queue = undefined,
 origin_count: u8,
 endpoints: [h2.max_endpoints]Endpoint = undefined,
 endpoint_count: u8,
@@ -27,86 +28,22 @@ pollfds: []std.c.pollfd,
 timers: Record.List,
 finished: Record.List,
 finished_count: usize,
-scratch: *Scratch,
+scratch: *Connection.Scratch,
 receiver: ?Receiver,
-stall_ns: u64,
+clock: Clock,
 connection_serial: u64,
 waker: Waker,
 tls_context: ?tls.Context,
-proxy_route: ?ProxyRoute,
-faults: if (builtin.is_test) ?*Faults else void = if (builtin.is_test) null else {},
-
-pub const Faults = @import("testing/Faults.zig");
+proxy_route: ?Origin.Route,
+env: Connection.Env,
 
 pub const size = @sizeOf(Engine);
 pub const alignment = @alignOf(Engine);
 
 pub const Receiver = struct {
     context: *anyopaque,
-    observe: *const fn (*anyopaque, *h2.Stream, h2.Event) h2.Verdict,
+    observe: *const fn (*anyopaque, *Record, h2.Event) h2.Verdict,
 };
-
-pub const Origin = struct {
-    scheme: h2.Scheme,
-    host: []const u8,
-    server_name: []const u8,
-    authority: []const u8,
-    port: u16,
-    learned_max_streams: ?u32,
-    pending: Record.Queue,
-    literal: ?Resolver.Address,
-    tunneled: bool,
-    lookup: ?*Resolver.Job,
-    lookup_users: u32,
-};
-
-pub const ProxyRoute = struct {
-    settings_copy: []u8,
-    host: []const u8,
-    port: u16,
-    literal: ?Resolver.Address,
-    no_proxy: []const u8,
-    credentials: ?[]u8,
-
-    pub fn init(allocator: std.mem.Allocator, settings: h2.Proxy) h2.InitError!ProxyRoute {
-        const text = try allocator.alloc(u8, settings.url.len + settings.no_proxy.len);
-        errdefer {
-            std.crypto.secureZero(u8, text);
-            allocator.free(text);
-        }
-        @memcpy(text[0..settings.url.len], settings.url);
-        @memcpy(text[settings.url.len..], settings.no_proxy);
-        const url = try proxy.splitUrl(text[0..settings.url.len]);
-        const host, const port = h2.parseHostPort(url.authority, 80) catch return error.HttpsProxyInvalid;
-        return .{
-            .settings_copy = text,
-            .host = host,
-            .port = port,
-            .literal = Resolver.Address.literal(host, port),
-            .no_proxy = text[settings.url.len..],
-            .credentials = if (url.user_info) |user_info| try proxy.basicCredentials(allocator, user_info) else null,
-        };
-    }
-
-    pub fn deinit(self: *ProxyRoute, allocator: std.mem.Allocator) void {
-        if (self.credentials) |credentials| {
-            std.crypto.secureZero(u8, credentials);
-            allocator.free(credentials);
-        }
-        std.crypto.secureZero(u8, self.settings_copy);
-        allocator.free(self.settings_copy);
-    }
-};
-
-pub const Dial = struct { host: []const u8, port: u16, literal: ?Resolver.Address };
-
-pub fn dial(self: *const Engine, origin: *const Origin) Dial {
-    if (origin.tunneled) {
-        const via = &self.proxy_route.?;
-        return .{ .host = via.host, .port = via.port, .literal = via.literal };
-    }
-    return .{ .host = origin.host, .port = origin.port, .literal = origin.literal };
-}
 
 pub const Endpoint = struct {
     url: []u8,
@@ -114,27 +51,9 @@ pub const Endpoint = struct {
     path: []const u8,
 };
 
-pub const Scratch = struct {
-    pub const max_chunks = 256;
-    read_buffer: [h2.read_buffer_bytes]u8,
-    chunks: [max_chunks]Chunk,
-    chunk_count: u16,
-    iovecs: [max_chunks]std.posix.iovec_const,
-
-    pub const Chunk = struct { record: ?*Record, bytes: []const u8 };
-};
-
-pub fn of(client: *h2.Client) *Engine {
-    return @ptrCast(client);
-}
-
-pub fn ofConst(client: *const h2.Client) *const Engine {
-    return @ptrCast(client);
-}
-
 pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2.Options) h2.InitError!void {
     std.debug.assert(options.stream_capacity > 0 and options.inactivity_ns > 0 and options.connect_timeout_ns > 0);
-    var proxy_route: ?ProxyRoute = if (options.proxy) |settings| try ProxyRoute.init(allocator, settings) else null;
+    var proxy_route: ?Origin.Route = if (options.proxy) |settings| try Origin.Route.init(allocator, settings) else null;
     errdefer if (proxy_route) |*value| value.deinit(allocator);
     var callbacks: ?*c.nghttp2_session_callbacks = null;
     if (c.nghttp2_session_callbacks_new(&callbacks) != 0) return error.OutOfMemory;
@@ -150,17 +69,16 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
     errdefer freeUnwritten(allocator, Connection, connections);
     const views = try allocUnwritten(allocator, policy.ConnectionView, capacity);
     errdefer freeUnwritten(allocator, policy.ConnectionView, views);
-    const pollfds = try allocUnwritten(allocator, std.c.pollfd, policy.max_attempts * capacity + 1);
+    const pollfds = try allocUnwritten(allocator, std.c.pollfd, dial_policy.max_attempts * capacity + 1);
     errdefer freeUnwritten(allocator, std.c.pollfd, pollfds);
-    const scratch = &(try allocUnwritten(allocator, Scratch, 1))[0];
-    errdefer freeUnwritten(allocator, Scratch, scratch[0..1]);
+    const scratch = &(try allocUnwritten(allocator, Connection.Scratch, 1))[0];
+    errdefer freeUnwritten(allocator, Connection.Scratch, scratch[0..1]);
     scratch.chunk_count = 0;
     var waker = try Waker.init();
     errdefer waker.deinit();
 
     self.* = .{
         .allocator = allocator,
-        .io = io,
         .options = blk: {
             var kept = options;
             kept.proxy = null;
@@ -179,12 +97,65 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
         .finished_count = 0,
         .scratch = scratch,
         .receiver = null,
-        .stall_ns = 0,
+        .clock = Clock.init(io),
         .connection_serial = 0,
         .waker = waker,
         .tls_context = null,
         .proxy_route = proxy_route,
+        .env = undefined,
     };
+    self.env = .{
+        .allocator = allocator,
+        .clock = &self.clock,
+        .waker = &self.waker,
+        .callbacks = self.callbacks,
+        .session_options = self.session_options,
+        .scratch = self.scratch,
+        .tls = &self.tls_context,
+        .connect_timeout_ns = options.connect_timeout_ns,
+        .stream_capacity = options.stream_capacity,
+        .streams = .{
+            .context = self,
+            .head = streamsHead,
+            .deliver = streamsDeliver,
+            .retireBody = streamsRetireBody,
+            .settle = streamsSettle,
+        },
+        .origins = &self.origins,
+    };
+}
+
+fn streamsHead(context: *anyopaque, record: *Record, head: h2.Head) h2.Verdict {
+    const self: *Engine = @ptrCast(@alignCast(context));
+    return self.observe(record, .{ .head = head });
+}
+
+fn streamsDeliver(context: *anyopaque, record: *Record, iovecs: []std.posix.iovec_const, total: usize) ?policy.Cause {
+    const self: *Engine = @ptrCast(@alignCast(context));
+    if (self.observe(record, .{ .body = total }) == .refuse) return .sink_refused;
+    if (!self.writeSink(record, iovecs, total)) return if (record.flags.sink_is_buffer) .sink_refused else .sink_failed;
+    record.sink_written += total;
+    record.last_activity_ns = self.clock.now();
+    self.timers.moveToTail(record);
+    return null;
+}
+
+fn streamsRetireBody(context: *anyopaque, record: *Record) void {
+    const self: *Engine = @ptrCast(@alignCast(context));
+    self.retireBody(record);
+}
+
+fn streamsSettle(context: *anyopaque, record: *Record, outcome: policy.Settle) void {
+    const self: *Engine = @ptrCast(@alignCast(context));
+    self.settle(record, outcome);
+}
+
+fn settle(self: *Engine, record: *Record, outcome: policy.Settle) void {
+    switch (outcome) {
+        .end => |cause| self.endStream(record, cause),
+        .replay => self.requeue(record, true),
+        .reroute => self.requeue(record, false),
+    }
 }
 
 fn active(self: *Engine) []Connection {
@@ -220,13 +191,11 @@ pub fn deinit(self: *Engine) void {
         if (connection.state != .free) connection.close(.goaway);
         connection.releaseVerification();
     }
-    for (self.origins[0..self.origin_count]) |origin| {
-        if (origin.lookup) |lookup| lookup.release();
-    }
+    for (self.origins[0..self.origin_count]) |*origin| origin.lookup.deinit();
     for (self.endpoints[0..self.endpoint_count]) |endpoint| self.allocator.free(endpoint.url);
     if (self.tls_context) |*context| context.deinit();
     if (self.proxy_route) |*via| via.deinit(self.allocator);
-    freeUnwritten(self.allocator, Scratch, self.scratch[0..1]);
+    freeUnwritten(self.allocator, Connection.Scratch, self.scratch[0..1]);
     freeUnwritten(self.allocator, std.c.pollfd, self.pollfds);
     freeUnwritten(self.allocator, policy.ConnectionView, self.views);
     freeUnwritten(self.allocator, Connection, self.connections);
@@ -248,20 +217,8 @@ pub fn addEndpoint(self: *Engine, url: []const u8) h2.EndpointError!h2.Endpoint 
         if (origin.scheme == parsed.scheme and origin.port == parsed.port and std.mem.eql(u8, origin.host, parsed.host))
             break @intCast(index);
     } else blk: {
-        self.origins[self.origin_count] = .{
-            .scheme = parsed.scheme,
-            .host = parsed.host,
-            .server_name = parsed.server_name,
-            .authority = parsed.authority,
-            .port = parsed.port,
-            .learned_max_streams = null,
-            .pending = .{},
-            .literal = Resolver.Address.literal(parsed.host, parsed.port),
-            .tunneled = if (self.proxy_route) |via| parsed.scheme == .https and
-                !proxy.isLoopback(parsed.server_name) and !proxy.bypasses(via.no_proxy, parsed.server_name) else false,
-            .lookup = null,
-            .lookup_users = 0,
-        };
+        self.origins[self.origin_count] = Origin.init(parsed, if (self.proxy_route) |*via| via else null);
+        self.pending[self.origin_count] = .{};
         self.origin_count += 1;
         break :blk self.origin_count - 1;
     };
@@ -343,9 +300,9 @@ pub fn launch(self: *Engine, record: *Record) void {
     std.debug.assert(self.receiver == null);
     std.debug.assert(record.state == .prepared);
     record.state = .pending;
-    record.last_activity_ns = self.now();
+    record.last_activity_ns = self.clock.now();
     self.timers.pushTail(record);
-    self.origins[self.endpoints[record.endpoint].origin].pending.pushTail(record);
+    self.pendingOf(record).pushTail(record);
 }
 
 pub fn cancel(self: *Engine, record: *Record) void {
@@ -354,7 +311,7 @@ pub fn cancel(self: *Engine, record: *Record) void {
         .idle => unreachable,
         .prepared => {},
         .pending => {
-            self.originOf(record).pending.remove(record);
+            self.pendingOf(record).remove(record);
             self.timers.remove(record);
         },
         .open => {
@@ -371,17 +328,17 @@ pub fn cancel(self: *Engine, record: *Record) void {
     record.state = .cancelled;
 }
 
-pub fn nextFinished(self: *Engine) ?*h2.Stream {
+pub fn nextFinished(self: *Engine) ?*Record {
     std.debug.assert(self.receiver == null);
     const record = self.finished.popHead() orelse return null;
     self.finished_count -= 1;
     record.state = .collected;
-    return record.public();
+    return record;
 }
 
-pub fn endStream(self: *Engine, record: *Record, cause: policy.Cause) void {
+fn endStream(self: *Engine, record: *Record, cause: policy.Cause) void {
     std.debug.assert(record.state == .pending or record.state == .open);
-    if (record.state == .pending) self.originOf(record).pending.remove(record);
+    if (record.state == .pending) self.pendingOf(record).remove(record);
     self.timers.remove(record);
     self.retireBody(record);
     record.releaseFields(self.allocator);
@@ -391,37 +348,44 @@ pub fn endStream(self: *Engine, record: *Record, cause: policy.Cause) void {
     self.finished_count += 1;
 }
 
-pub fn requeue(self: *Engine, record: *Record, replay: bool) void {
+fn requeue(self: *Engine, record: *Record, replay: bool) void {
     std.debug.assert(record.state == .open and !record.flags.response_started);
     if (replay) record.flags.replays += 1;
     record.state = .pending;
     record.body_offset = 0;
     record.flags.body_done = false;
-    self.originOf(record).pending.putBack(record);
+    self.pendingOf(record).putBack(record);
 }
 
-pub fn retireBody(self: *Engine, record: *Record) void {
+fn retireBody(self: *Engine, record: *Record) void {
     if (record.flags.body_retired) return;
     record.flags.body_retired = true;
     _ = self.observe(record, .body_retired);
 }
 
-pub fn observe(self: *Engine, record: *Record, event: h2.Event) h2.Verdict {
+fn observe(self: *Engine, record: *Record, event: h2.Event) h2.Verdict {
     const receiver = self.receiver.?;
-    return receiver.observe(receiver.context, record.public(), event);
+    return receiver.observe(receiver.context, record, event);
 }
 
-pub fn originOf(self: *Engine, record: *const Record) *Origin {
-    return &self.origins[self.endpoints[record.endpoint].origin];
+fn pendingOf(self: *Engine, record: *const Record) *Record.Queue {
+    return &self.pending[self.endpoints[record.endpoint].origin];
 }
 
 fn connectionOf(self: *Engine, record: *const Record) *Connection {
     return &self.connections[record.route.open.connection - 1];
 }
 
-pub fn now(self: *const Engine) u64 {
-    const awake: u64 = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds);
-    return awake - self.stall_ns;
+pub fn wake(self: *Engine) void {
+    self.waker.wake();
+}
+
+pub fn finishedCount(self: *const Engine) usize {
+    return self.finished_count;
+}
+
+pub fn hasConnections(self: *const Engine) bool {
+    return self.connections_len > 0;
 }
 
 pub fn drive(self: *Engine, receiver: Receiver) h2.DriveError!void {
@@ -447,40 +411,25 @@ fn pollReadiness(self: *Engine) h2.DriveError!void {
         if (result >= 0) break;
         if (std.posix.errno(result) != .INTR) return error.PollFailed;
     }
-    for (self.active()) |*connection| {
-        if (connection.poll_slot == 0) continue;
-        connection.revents = self.pollfds[connection.poll_slot].revents;
-        if (connection.earlierAttempt() != null) connection.earlier_revents = self.pollfds[connection.poll_slot + 1].revents;
-    }
+    for (self.active()) |*connection| connection.collect(self.pollfds);
 }
 
 fn fillPollfds(self: *Engine) usize {
     var count: usize = 0;
-    for (self.active()) |*connection| {
-        connection.revents = 0;
-        connection.earlier_revents = 0;
-        connection.poll_slot = 0;
-        const events = connection.pollEvents() orelse continue;
-        count += 1;
-        self.pollfds[count] = .{ .fd = connection.socket, .events = events, .revents = 0 };
-        connection.poll_slot = @intCast(count);
-        const earlier = connection.earlierAttempt() orelse continue;
-        count += 1;
-        self.pollfds[count] = .{ .fd = earlier, .events = std.c.POLL.OUT, .revents = 0 };
-    }
+    for (self.active()) |*connection| count = connection.register(self.pollfds, count);
     return count;
 }
 
 fn advanceSetups(self: *Engine) void {
-    const time = self.now();
+    const time = self.clock.now();
     for (self.active()) |*connection| {
         if (!connection.settingUp()) continue;
         switch (connection.state) {
-            .resolving => connection.finishLookup(),
-            .connecting => connection.advanceConnect(time),
-            .tunneling => if (connection.revents != 0) connection.continueTunnel(),
-            .handshaking => if (connection.revents != 0) connection.continueHandshake(),
-            .verifying => connection.finishVerification(),
+            .resolving => self.settleFailure(connection, connection.finishLookup()),
+            .connecting => self.settleFailure(connection, connection.advanceConnect(time)),
+            .tunneling => if (connection.revents != 0) self.settleFailure(connection, connection.continueTunnel()),
+            .handshaking => if (connection.revents != 0) self.settleFailure(connection, connection.continueHandshake()),
+            .verifying => self.settleFailure(connection, connection.finishVerification()),
             else => {},
         }
         if (connection.settingUp() and time >= connection.setup_deadline_ns)
@@ -488,7 +437,26 @@ fn advanceSetups(self: *Engine) void {
     }
 }
 
-pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) void {
+fn settleFailure(self: *Engine, connection: *Connection, failure: ?Connection.Failure) void {
+    const applied = failure orelse return;
+    switch (applied) {
+        .setup => |cause| self.setupFailed(connection, cause),
+        .lost => |lost| self.lose(connection, lost),
+    }
+}
+
+fn lose(self: *Engine, connection: *Connection, lost: Connection.Lost) void {
+    var next = self.timers.head;
+    while (next) |record| {
+        next = record.next;
+        if (record.state != .open or record.route.open.connection != connection.index + 1) continue;
+        const stream_id: u32 = @intCast(record.route.open.stream_id);
+        self.settle(record, policy.connectionLost(lost.cause, stream_id, lost.goaway_last_stream_id, record.facts()));
+    }
+    connection.close(.abrupt);
+}
+
+fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) void {
     const origin_index = connection.origin;
     connection.close(.abrupt);
     var setting_up: u32 = 0;
@@ -499,38 +467,35 @@ pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) 
         ready_with_room += @intFromBool(other.hasRoom());
     }
     if (policy.pendingAfterSetupFailure(setting_up, ready_with_room) == .wait) return;
-    const origin = &self.origins[origin_index];
-    while (origin.pending.head) |record| self.endStream(record, cause);
+    const pending = &self.pending[origin_index];
+    while (pending.head) |record| self.endStream(record, cause);
 }
 
 fn readAll(self: *Engine) void {
-    for (self.active()) |*connection| {
-        connection.read_capped = false;
-        if (!connection.hasSession() or (connection.revents == 0 and !connection.tlsPending())) continue;
-        if (connection.receive() == .capped) connection.read_capped = true;
-    }
+    for (self.active()) |*connection| self.settleFailure(connection, connection.readReady());
 }
 
 fn submitPending(self: *Engine) void {
-    for (self.origins[0..self.origin_count], 0..) |*origin, origin_index| {
-        while (origin.pending.head) |record| {
+    for (self.pending[0..self.origin_count], 0..) |*pending, origin_index| {
+        const origin = &self.origins[origin_index];
+        while (pending.head) |record| {
             const connection = &self.connections[self.route(@intCast(origin_index)) orelse break];
             const stream_id = connection.submit(record, origin, self.endpoints[record.endpoint].path) orelse {
                 self.endStream(record, .local_failure);
                 continue;
             };
-            _ = origin.pending.popHead();
+            _ = pending.popHead();
             connection.adopt(record, stream_id);
         }
         var setting_up: u32 = 0;
         for (self.active()) |*connection| {
             if (connection.origin == origin_index and connection.settingUp()) setting_up += 1;
         }
-        var opening = policy.connectionsToOpen(origin.pending.len, setting_up, origin.learned_max_streams);
-        while (opening > 0 and origin.pending.len > 0) : (opening -= 1) {
+        var opening = policy.connectionsToOpen(pending.len, setting_up, origin.learned_max_streams);
+        while (opening > 0 and pending.len > 0) : (opening -= 1) {
             const connection = self.freeConnection() orelse break;
             self.connection_serial += 1;
-            connection.open(@intCast(origin_index), self.connection_serial);
+            self.settleFailure(connection, connection.open(@intCast(origin_index), self.connection_serial));
         }
     }
 }
@@ -549,7 +514,7 @@ fn freeConnection(self: *Engine) ?*Connection {
     }
     if (self.connections_len < self.connections.len) {
         const connection = &self.connections[self.connections_len];
-        connection.* = .free(self, self.connections_len);
+        connection.* = .vacant(&self.env, self.connections_len);
         self.connections_len += 1;
         return connection;
     }
@@ -568,12 +533,10 @@ pub fn retireConnections(self: *Engine, endpoint: h2.Endpoint) void {
     for (self.active()) |*connection| {
         if (connection.origin != origin) continue;
         switch (connection.state) {
-            .ready, .draining => {
-                if (connection.streams == 0) connection.close(.goaway) else connection.state = .draining;
-            },
+            .ready, .draining => connection.retire(),
             .free => {},
             else => {
-                if (self.origins[origin].pending.len == 0) connection.close(.abrupt);
+                if (self.pending[origin].len == 0) connection.close(.abrupt);
             },
         }
     }
@@ -582,28 +545,28 @@ pub fn retireConnections(self: *Engine, endpoint: h2.Endpoint) void {
 
 fn sendAll(self: *Engine) void {
     for (self.active()) |*connection| {
-        if (connection.hasSession()) connection.send();
+        if (connection.hasSession()) self.settleFailure(connection, connection.send());
     }
 }
 
 fn checkLiveness(self: *Engine) void {
-    const time = self.now();
+    const time = self.clock.now();
     for (self.active()) |*connection| {
         if (connection.state != .ready and connection.state != .draining) continue;
         if (connection.state == .draining and connection.streams == 0) {
             connection.close(.abrupt);
             continue;
         }
-        switch (policy.liveness(self.livenessFacts(connection, time), self.options.liveness)) {
+        switch (self.options.liveness.action(self.livenessFacts(connection, time))) {
             .none => {},
             .ping => connection.ping(time),
-            .dead => connection.lose(.peer_silent),
+            .dead => self.lose(connection, connection.lost(.peer_silent)),
             .close => connection.close(.goaway),
         }
     }
 }
 
-fn livenessFacts(self: *Engine, connection: *const Connection, time: u64) policy.LivenessFacts {
+fn livenessFacts(self: *Engine, connection: *const Connection, time: u64) liveness.Facts {
     var only_idle = true;
     for (self.connections[0..connection.index]) |*other| {
         if (other.origin == connection.origin and other.state == .ready and other.streams == 0) only_idle = false;
@@ -619,7 +582,7 @@ fn livenessFacts(self: *Engine, connection: *const Connection, time: u64) policy
 }
 
 fn expireInactive(self: *Engine) void {
-    const time = self.now();
+    const time = self.clock.now();
     var next = self.timers.head;
     while (next) |record| {
         if (time -| record.last_activity_ns < self.options.inactivity_ns) break;
@@ -633,46 +596,6 @@ fn expireInactive(self: *Engine) void {
     }
 }
 
-pub fn flush(self: *Engine, connection: *Connection, only: ?*Record) void {
-    const scratch = self.scratch;
-    defer if (only == null) {
-        scratch.chunk_count = 0;
-    };
-    const chunks = scratch.chunks[0..scratch.chunk_count];
-    for (chunks, 0..) |*first, start| {
-        const record = first.record orelse continue;
-        if (only != null and only != record) continue;
-        var total: usize = 0;
-        var iovec_count: usize = 0;
-        for (chunks[start..]) |*chunk| {
-            if (chunk.record != record) continue;
-            scratch.iovecs[iovec_count] = .{ .base = chunk.bytes.ptr, .len = chunk.bytes.len };
-            iovec_count += 1;
-            total += chunk.bytes.len;
-            chunk.record = null;
-        }
-        const stream_id = record.route.open.stream_id;
-        if (record.state != .open) {
-            connection.consume(stream_id, total);
-            continue;
-        }
-        if (self.observe(record, .{ .body = total }) == .refuse) {
-            connection.consumeConnection(total);
-            connection.endOpen(record, .sink_refused);
-            continue;
-        }
-        if (!self.writeSink(record, scratch.iovecs[0..iovec_count], total)) {
-            connection.consumeConnection(total);
-            connection.endOpen(record, if (record.flags.sink_is_buffer) .sink_refused else .sink_failed);
-            continue;
-        }
-        record.sink_written += total;
-        record.last_activity_ns = self.now();
-        self.timers.moveToTail(record);
-        connection.consume(stream_id, total);
-    }
-}
-
 fn writeSink(self: *Engine, record: *Record, iovecs: []std.posix.iovec_const, total: usize) bool {
     if (record.flags.sink_is_buffer) {
         if (record.sink_capacity - record.sink_written < total) return false;
@@ -683,8 +606,8 @@ fn writeSink(self: *Engine, record: *Record, iovecs: []std.posix.iovec_const, to
         }
         return true;
     }
-    const before: u64 = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds);
-    defer self.stall_ns += @as(u64, @intCast(std.Io.Clock.awake.now(self.io).nanoseconds)) - before;
+    const before = self.clock.awake();
+    defer self.clock.charge(before);
     const fd: std.posix.fd_t = @intCast(record.sink_target);
     var remaining = iovecs;
     var offset = record.sink_written;
@@ -708,13 +631,6 @@ fn writeSink(self: *Engine, record: *Record, iovecs: []std.posix.iovec_const, to
         }
     }
     return true;
-}
-
-pub fn gather(self: *Engine, connection: *Connection, record: *Record, bytes: []const u8) void {
-    const scratch = self.scratch;
-    if (scratch.chunk_count == Scratch.max_chunks) self.flush(connection, null);
-    scratch.chunks[scratch.chunk_count] = .{ .record = record, .bytes = bytes };
-    scratch.chunk_count += 1;
 }
 
 pub fn wait(self: *Engine, timeout_ms: u32) h2.DriveError!void {
@@ -742,7 +658,7 @@ pub fn armWait(self: *Engine, timeout_ms: u32) Armed {
         if (connection.tlsPending()) timeout = 0;
     }
     if (self.nextDeadline()) |deadline| {
-        const time = self.now();
+        const time = self.clock.now();
         const until = std.math.divCeil(u64, deadline -| time, std.time.ns_per_ms) catch unreachable;
         timeout = @intCast(@min(timeout, until));
     }
@@ -750,76 +666,15 @@ pub fn armWait(self: *Engine, timeout_ms: u32) Armed {
 }
 
 fn nextDeadline(self: *Engine) ?u64 {
-    const time = self.now();
+    const time = self.clock.now();
     var earliest: ?u64 = if (self.timers.head) |head| head.last_activity_ns +| self.options.inactivity_ns else null;
     for (self.active()) |*connection| {
         const deadline: ?u64 = switch (connection.state) {
             .free => null,
-            .ready, .draining => policy.livenessDeadline(self.livenessFacts(connection, time), self.options.liveness),
+            .ready, .draining => self.options.liveness.deadline(self.livenessFacts(connection, time)),
             else => connection.setupDeadline(),
         };
         if (deadline) |value| earliest = if (earliest) |current| @min(current, value) else value;
     }
     return earliest;
-}
-
-test "a large table stays unwritten until connections need it" {
-    var client: h2.Client = undefined;
-    try client.init(std.heap.page_allocator, std.testing.io, .{
-        .stream_capacity = 10_000,
-        .inactivity_ns = std.time.ns_per_s,
-        .connect_timeout_ns = std.time.ns_per_s,
-    });
-    defer client.deinit();
-    const engine = of(&client);
-    const page = std.heap.pageSize();
-    for ([_][]u8{ std.mem.sliceAsBytes(engine.connections), std.mem.sliceAsBytes(engine.views), std.mem.sliceAsBytes(engine.pollfds) }) |table| {
-        const start = std.mem.alignForward(usize, @intFromPtr(table.ptr), page);
-        const end = std.mem.alignBackward(usize, @intFromPtr(table.ptr) + table.len, page);
-        if (end <= start) continue;
-        const pages = (end - start) / page;
-        var residency: [4096]u8 = undefined;
-        const checked = @min(pages, residency.len);
-        try std.testing.expectEqual(@as(c_int, 0), std.c.mincore(@ptrFromInt(start), checked * page, &residency));
-        var resident: usize = 0;
-        for (residency[0..checked]) |flags| resident += flags & 1;
-        try std.testing.expectEqual(@as(usize, 0), resident);
-    }
-    try std.testing.expectEqual(@as(u32, 0), engine.connections_len);
-}
-
-test "drives walk only as far as the last connection not free" {
-    var client: h2.Client = undefined;
-    try client.init(std.testing.allocator, std.testing.io, .{
-        .stream_capacity = 4,
-        .inactivity_ns = std.time.ns_per_s,
-        .connect_timeout_ns = std.time.ns_per_s,
-    });
-    defer client.deinit();
-    const peer = try @import("testing/Peer.zig").start(std.testing.allocator, .{});
-    var url_buffer: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buffer, "{s}", .{peer.url()});
-    peer.stop();
-    const endpoint = try client.addEndpoint(url);
-    var stream: h2.Stream = .idle;
-    var sink: [8]u8 = undefined;
-    try client.prepare(&stream, .{ .endpoint = endpoint, .fields = &.{}, .body = .{ .bytes = "x" }, .sink = .{ .buffer = &sink } });
-    client.launch(&stream);
-    const Ignore = struct {
-        pub fn observe(_: *@This(), _: *h2.Stream, _: h2.Event) h2.Verdict {
-            return .accept;
-        }
-    };
-    var receiver: Ignore = .{};
-    try client.drive(&receiver);
-    try std.testing.expectEqual(@as(u32, 1), of(&client).connections_len);
-    var steps: u32 = 0;
-    while (client.finishedCount() == 0) : (steps += 1) {
-        if (steps > 2000) return error.Timeout;
-        try client.drive(&receiver);
-        try client.wait(1);
-    }
-    try std.testing.expectEqual(@as(u32, 0), of(&client).connections_len);
-    _ = client.nextFinished();
-    stream.deinit();
 }

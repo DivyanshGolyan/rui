@@ -300,6 +300,20 @@ test "the HTTP/2 client's policy stays within the core boundary" {
     }
 }
 
+test "the HTTP/2 client's liveness stays within the core boundary" {
+    if (core_boundary.check(@embedFile("h2/liveness.zig"), &.{})) |violation| {
+        std.debug.print("h2/liveness.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
+        return error.CoreBoundaryViolation;
+    }
+}
+
+test "the HTTP/2 client's dial policy stays within the core boundary" {
+    if (core_boundary.check(@embedFile("h2/dial_policy.zig"), &.{"policy.zig"})) |violation| {
+        std.debug.print("h2/dial_policy.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
+        return error.CoreBoundaryViolation;
+    }
+}
+
 const overview_view = @import("overview_view.zig");
 const GroupedList = @import("GroupedList.zig");
 const protocol = @import("protocol.zig");

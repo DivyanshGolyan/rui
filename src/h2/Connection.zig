@@ -4,18 +4,55 @@ const c = @import("h2_c");
 const openssl = @import("tls_client").c;
 const h2 = @import("h2.zig");
 const policy = @import("policy.zig");
+const dial_policy = @import("dial_policy.zig");
 const Record = @import("Stream.zig");
-const Engine = @import("Engine.zig");
+const Origin = @import("Origin.zig");
 const Resolver = @import("Resolver.zig");
 const tls = @import("tls.zig");
 const proxy = @import("proxy.zig");
 const sec_trust = @import("sec_trust.zig");
 const socket_os = @import("os").socket;
+const Clock = @import("Clock.zig");
+const Faults = @import("testing/Faults.zig");
+const Waker = @import("os").Waker;
 const Connection = @This();
 
 pub const State = enum(u8) { free = 0, resolving, connecting, tunneling, handshaking, verifying, awaiting_settings, ready, draining };
 
-engine: *Engine,
+pub const Scratch = struct {
+    pub const max_chunks = 256;
+    read_buffer: [h2.read_buffer_bytes]u8,
+    chunks: [max_chunks]Chunk,
+    chunk_count: u16,
+    iovecs: [max_chunks]std.posix.iovec_const,
+
+    pub const Chunk = struct { record: ?*Record, bytes: []const u8 };
+};
+
+pub const Streams = struct {
+    context: *anyopaque,
+    head: *const fn (context: *anyopaque, record: *Record, head: h2.Head) h2.Verdict,
+    deliver: *const fn (context: *anyopaque, record: *Record, iovecs: []std.posix.iovec_const, total: usize) ?policy.Cause,
+    retireBody: *const fn (context: *anyopaque, record: *Record) void,
+    settle: *const fn (context: *anyopaque, record: *Record, settle: policy.Settle) void,
+};
+
+pub const Env = struct {
+    allocator: std.mem.Allocator,
+    clock: *const Clock,
+    waker: *Waker,
+    callbacks: *c.nghttp2_session_callbacks,
+    session_options: *c.nghttp2_option,
+    scratch: *Scratch,
+    tls: *?tls.Context,
+    connect_timeout_ns: u64,
+    stream_capacity: u32,
+    streams: Streams,
+    origins: *[h2.max_endpoints]Origin,
+    faults: if (builtin.is_test) ?*Faults else void = if (builtin.is_test) null else {},
+};
+
+env: *const Env,
 index: u32,
 state: State,
 origin: u8,
@@ -64,9 +101,12 @@ pub const Head = struct {
     refs: std.ArrayList(*c.nghttp2_rcbuf) = .empty,
 };
 
-pub fn free(engine: *Engine, index: u32) Connection {
+pub const Lost = struct { cause: policy.Cause, goaway_last_stream_id: ?u32 };
+pub const Failure = union(enum) { setup: policy.Cause, lost: Lost };
+
+pub fn vacant(env: *const Env, index: u32) Connection {
     return .{
-        .engine = engine,
+        .env = env,
         .index = index,
         .state = .free,
         .origin = 0,
@@ -135,7 +175,28 @@ pub fn view(self: *const Connection) policy.ConnectionView {
     };
 }
 
-pub fn pollEvents(self: *const Connection) ?i16 {
+pub fn register(self: *Connection, pollfds: []std.c.pollfd, used: usize) usize {
+    self.revents = 0;
+    self.earlier_revents = 0;
+    self.poll_slot = 0;
+    var count = used;
+    const events = self.pollEvents() orelse return count;
+    count += 1;
+    pollfds[count] = .{ .fd = self.socket, .events = events, .revents = 0 };
+    self.poll_slot = @intCast(count);
+    const earlier = self.earlierAttempt() orelse return count;
+    count += 1;
+    pollfds[count] = .{ .fd = earlier, .events = std.c.POLL.OUT, .revents = 0 };
+    return count;
+}
+
+pub fn collect(self: *Connection, pollfds: []const std.c.pollfd) void {
+    if (self.poll_slot == 0) return;
+    self.revents = pollfds[self.poll_slot].revents;
+    if (self.earlierAttempt() != null) self.earlier_revents = pollfds[self.poll_slot + 1].revents;
+}
+
+fn pollEvents(self: *const Connection) ?i16 {
     return switch (self.state) {
         .free, .resolving, .verifying => null,
         .connecting => std.c.POLL.OUT,
@@ -148,52 +209,36 @@ pub fn pollEvents(self: *const Connection) ?i16 {
     };
 }
 
-pub fn open(self: *Connection, origin_index: u8, serial: u64) void {
+fn originOf(self: *const Connection) *Origin {
+    return &self.env.origins[self.origin];
+}
+
+pub fn open(self: *Connection, origin_index: u8, serial: u64) ?Failure {
     std.debug.assert(self.state == .free);
-    const engine = self.engine;
-    const origin = &engine.origins[origin_index];
     self.origin = origin_index;
     self.serial = serial;
-    self.setup_deadline_ns = engine.now() +| engine.options.connect_timeout_ns;
-    const dial = engine.dial(origin);
-    if (dial.literal != null) return self.advanceAttempts(false, engine.now());
+    self.setup_deadline_ns = self.env.clock.now() +| self.env.connect_timeout_ns;
+    const origin = self.originOf();
+    if (origin.target.literal != null) return self.advanceAttempts(false, self.env.clock.now());
     self.state = .resolving;
-    if (origin.lookup) |lookup| if (origin.lookup_users == 0 and lookup.result() != null) {
-        lookup.release();
-        origin.lookup = null;
-    };
-    if (origin.lookup == null) origin.lookup = Resolver.start(&engine.waker, dial.host, dial.port) orelse
-        return engine.setupFailed(self, .local_failure);
-    origin.lookup_users += 1;
+    if (!origin.lookup.acquire(self.env.waker, origin.target)) return .{ .setup = .local_failure };
     self.uses_lookup = true;
+    return null;
 }
 
-pub fn finishLookup(self: *Connection) void {
-    const lookup = self.engine.origins[self.origin].lookup.?.result() orelse return;
-    if (lookup.found().len == 0) return self.engine.setupFailed(self, .resolve_failed);
-    self.advanceAttempts(false, self.engine.now());
-}
-
-fn addressAt(self: *Connection, index: u8) ?Resolver.Address {
-    const origin = &self.engine.origins[self.origin];
-    if (self.engine.dial(origin).literal) |literal| return if (index == 0) literal else null;
-    const addresses = origin.lookup.?.result().?.found();
-    return if (index < addresses.len) addresses[index] else null;
+pub fn finishLookup(self: *Connection) ?Failure {
+    const lookup = self.originOf().lookup.result() orelse return null;
+    if (lookup.found().len == 0) return .{ .setup = .resolve_failed };
+    return self.advanceAttempts(false, self.env.clock.now());
 }
 
 fn stopUsingLookup(self: *Connection) void {
     if (!self.uses_lookup) return;
     self.uses_lookup = false;
-    const origin = &self.engine.origins[self.origin];
-    origin.lookup_users -= 1;
-    const lookup = origin.lookup.?;
-    if (origin.lookup_users == 0 and lookup.result() != null) {
-        lookup.release();
-        origin.lookup = null;
-    }
+    self.originOf().lookup.release();
 }
 
-pub fn advanceConnect(self: *Connection, time: u64) void {
+pub fn advanceConnect(self: *Connection, time: u64) ?Failure {
     var failed = false;
     if (self.earlier >= 0 and self.earlier_revents != 0) {
         if (connectSucceeded(self.earlier)) {
@@ -208,7 +253,7 @@ pub fn advanceConnect(self: *Connection, time: u64) void {
         self.dropNewest();
         failed = true;
     }
-    self.advanceAttempts(failed, time);
+    return self.advanceAttempts(failed, time);
 }
 
 pub fn earlierAttempt(self: *const Connection) ?std.posix.fd_t {
@@ -220,35 +265,35 @@ pub fn setupDeadline(self: *const Connection) u64 {
     return @min(self.next_attempt_ns, self.setup_deadline_ns);
 }
 
-fn advanceAttempts(self: *Connection, failed: bool, time: u64) void {
+fn advanceAttempts(self: *Connection, failed: bool, time: u64) ?Failure {
     self.state = .connecting;
-    var failure = failed;
+    var refused = failed;
     while (true) {
-        switch (policy.nextAttempt(.{
+        switch (dial_policy.nextAttempt(.{
             .in_flight = @as(u8, @intFromBool(self.socket >= 0)) + @intFromBool(self.earlier >= 0),
-            .more_addresses = self.addressAt(self.address_index) != null,
-            .failed = failure,
+            .more_addresses = self.originOf().address(self.address_index) != null,
+            .failed = refused,
             .delay_passed = self.next_attempt_ns != 0 and time >= self.next_attempt_ns,
         })) {
-            .wait => return,
-            .fail => return self.engine.setupFailed(self, .connect_failed),
+            .wait => return null,
+            .fail => return .{ .setup = .connect_failed },
             .replace_oldest => self.dropEarlier(),
             .start => {},
         }
         switch (self.attempt(time)) {
             .connected => return self.connected(),
-            .in_flight => return,
-            .refused => failure = true,
-            .local_failure => return self.engine.setupFailed(self, .local_failure),
+            .in_flight => return null,
+            .refused => refused = true,
+            .local_failure => return .{ .setup = .local_failure },
         }
     }
 }
 
 fn attempt(self: *Connection, time: u64) enum { connected, in_flight, refused, local_failure } {
     std.debug.assert(self.earlier < 0);
-    const address = self.addressAt(self.address_index).?;
+    const address = self.originOf().address(self.address_index).?;
     self.address_index += 1;
-    self.next_attempt_ns = if (self.addressAt(self.address_index) != null) time +| policy.attempt_delay_ns else 0;
+    self.next_attempt_ns = if (self.originOf().address(self.address_index) != null) time +| dial_policy.attempt_delay_ns else 0;
     const fd = std.c.socket(address.family, std.c.SOCK.STREAM, 0);
     if (fd < 0) return .local_failure;
     self.earlier = self.socket;
@@ -288,106 +333,108 @@ fn closeSocket(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
 }
 
-fn connected(self: *Connection) void {
+fn connected(self: *Connection) ?Failure {
     self.dropEarlier();
     self.next_attempt_ns = 0;
     self.stopUsingLookup();
-    const origin = &self.engine.origins[self.origin];
+    const origin = self.originOf();
     if (origin.scheme == .http) return self.startSession();
-    if (origin.tunneled) return self.startTunnel();
-    self.startTls();
+    if (origin.via != null) return self.startTunnel();
+    return self.startTls();
 }
 
-fn startTunnel(self: *Connection) void {
+fn startTunnel(self: *Connection) ?Failure {
     var request: [proxy.max_request_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &request);
     self.tunnel_request_len = @intCast(self.tunnelRequest(&request).len);
     self.tunnel_sent = 0;
     self.tunnel_answer = .{};
     self.state = .tunneling;
-    self.continueTunnel();
+    return self.continueTunnel();
 }
 
 fn tunnelRequest(self: *const Connection, buffer: *[proxy.max_request_bytes]u8) []const u8 {
-    const origin = &self.engine.origins[self.origin];
-    return proxy.connectRequest(buffer, origin.host, origin.port, self.engine.proxy_route.?.credentials);
+    const origin = self.originOf();
+    return proxy.connectRequest(buffer, origin.host, origin.port, origin.via.?.credentials);
 }
 
-pub fn continueTunnel(self: *Connection) void {
+pub fn continueTunnel(self: *Connection) ?Failure {
     if (self.tunnel_sent < self.tunnel_request_len) {
         var request: [proxy.max_request_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &request);
         switch (self.writeSome(self.tunnelRequest(&request)[self.tunnel_sent..])) {
             .bytes => |count| self.tunnel_sent += @intCast(count),
-            .again => return,
-            .closed => return self.engine.setupFailed(self, .proxy_failed),
+            .again => return null,
+            .closed => return .{ .setup = .proxy_failed },
         }
-        if (self.tunnel_sent < self.tunnel_request_len) return;
+        if (self.tunnel_sent < self.tunnel_request_len) return null;
     }
     var buffer: [512]u8 = undefined;
     while (true) {
         const count = switch (self.readSome(&buffer)) {
             .bytes => |count| count,
-            .again => return,
-            .closed => return self.engine.setupFailed(self, .proxy_failed),
+            .again => return null,
+            .closed => return .{ .setup = .proxy_failed },
         };
         switch (self.tunnel_answer.feed(buffer[0..count])) {
             .more => {},
-            .malformed => return self.engine.setupFailed(self, .proxy_failed),
+            .malformed => return .{ .setup = .proxy_failed },
             .done => |answer| {
-                if (policy.tunnelRefusal(answer.status)) |cause| return self.engine.setupFailed(self, cause);
-                if (answer.used != count) return self.engine.setupFailed(self, .proxy_failed);
+                if (dial_policy.tunnelRefusal(answer.status)) |cause| return .{ .setup = cause };
+                if (answer.used != count) return .{ .setup = .proxy_failed };
                 return self.startTls();
             },
         }
     }
 }
 
-fn startTls(self: *Connection) void {
-    const origin = &self.engine.origins[self.origin];
-    const context = &self.engine.tls_context.?;
+fn startTls(self: *Connection) ?Failure {
+    const origin = self.originOf();
+    const context = &self.env.tls.*.?;
     self.ssl = context.newSession(self.socket, origin.server_name, if (origin.literal != null) .ip_literal else .dns_name) orelse
-        return self.engine.setupFailed(self, .local_failure);
+        return .{ .setup = .local_failure };
     self.state = .handshaking;
-    self.continueHandshake();
+    return self.continueHandshake();
 }
 
-pub fn continueHandshake(self: *Connection) void {
+pub fn continueHandshake(self: *Connection) ?Failure {
     switch (tls.handshake(self.ssl.?)) {
         .done => {
             self.tls_wants_write = false;
-            if (sec_trust.enabled and self.engine.tls_context.?.deferred) return self.startVerification();
-            self.startTrustedSession();
+            if (sec_trust.enabled and self.env.tls.*.?.deferred) return self.startVerification();
+            return self.startTrustedSession();
         },
         .want_read => self.tls_wants_write = false,
         .want_write => self.tls_wants_write = true,
-        .failed => |cause| self.engine.setupFailed(self, cause),
+        .failed => |cause| return .{ .setup = cause },
     }
+    return null;
 }
 
-fn startVerification(self: *Connection) void {
+fn startVerification(self: *Connection) ?Failure {
     std.debug.assert(self.verification == null);
-    const server_name = self.engine.origins[self.origin].server_name;
-    self.verification = sec_trust.Verification.start(&self.engine.waker, self.ssl.?, server_name) orelse
-        return self.engine.setupFailed(self, .local_failure);
+    const server_name = self.originOf().server_name;
+    self.verification = sec_trust.Verification.start(self.env.waker, self.ssl.?, server_name) orelse
+        return .{ .setup = .local_failure };
     self.state = .verifying;
+    return null;
 }
 
-pub fn finishVerification(self: *Connection) void {
+pub fn finishVerification(self: *Connection) ?Failure {
     if (!sec_trust.enabled) unreachable else {
-        const verdict = (self.verification.?.result() orelse return).verdict;
+        const verdict = (self.verification.?.result() orelse return null).verdict;
         self.releaseVerification();
-        switch (verdict) {
+        return switch (verdict) {
             .trusted => self.startTrustedSession(),
-            .untrusted => self.engine.setupFailed(self, .untrusted_peer),
-            .failed => self.engine.setupFailed(self, .local_failure),
-        }
+            .untrusted => .{ .setup = .untrusted_peer },
+            .failed => .{ .setup = .local_failure },
+        };
     }
 }
 
-fn startTrustedSession(self: *Connection) void {
-    if (!tls.choseH2(self.ssl.?)) return self.engine.setupFailed(self, .h2_refused);
-    self.startSession();
+fn startTrustedSession(self: *Connection) ?Failure {
+    if (!tls.choseH2(self.ssl.?)) return .{ .setup = .h2_refused };
+    return self.startSession();
 }
 
 /// Our SETTINGS refuse push, grant each stream `stream_window_bytes` and
@@ -395,11 +442,10 @@ fn startTrustedSession(self: *Connection) void {
 /// counts 32 bytes more per field than `onHeader`'s check, so a peer that
 /// keeps to it never trips that check. The
 /// connection window is set once the peer's stream limit is known.
-fn startSession(self: *Connection) void {
-    const engine = self.engine;
+fn startSession(self: *Connection) ?Failure {
     var session: ?*c.nghttp2_session = null;
-    if (c.nghttp2_session_client_new3(&session, engine.callbacks, self, engine.session_options, null) != 0)
-        return engine.setupFailed(self, .local_failure);
+    if (c.nghttp2_session_client_new3(&session, self.env.callbacks, self, self.env.session_options, null) != 0)
+        return .{ .setup = .local_failure };
     self.session = session;
     const settings = [_]c.nghttp2_settings_entry{
         .{ .settings_id = c.NGHTTP2_SETTINGS_ENABLE_PUSH, .value = 0 },
@@ -407,26 +453,25 @@ fn startSession(self: *Connection) void {
         .{ .settings_id = c.NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE, .value = h2.max_field_block_bytes },
     };
     if (c.nghttp2_submit_settings(session, c.NGHTTP2_FLAG_NONE, &settings, settings.len) != 0)
-        return engine.setupFailed(self, .local_failure);
+        return .{ .setup = .local_failure };
     self.state = .awaiting_settings;
-    self.send();
+    return self.send();
 }
 
 fn becomeReady(self: *Connection) void {
-    const engine = self.engine;
-    const time = engine.now();
+    const time = self.env.clock.now();
     self.state = .ready;
     self.idle_since_ns = time;
     self.last_inbound_ns = time;
 }
 
 fn sizeWindow(self: *Connection) void {
-    const carried: u64 = @min(self.peer_max_streams, self.engine.options.stream_capacity);
+    const carried: u64 = @min(self.peer_max_streams, self.env.stream_capacity);
     const window: i32 = @intCast(@min(@as(u64, h2.stream_window_bytes) * @max(carried, 1), std.math.maxInt(i32)));
     self.check(c.nghttp2_session_set_local_window_size(self.session, c.NGHTTP2_FLAG_NONE, 0, window));
 }
 
-pub fn submit(self: *Connection, record: *Record, origin: *const Engine.Origin, path: []const u8) ?i32 {
+pub fn submit(self: *Connection, record: *Record, origin: *const Origin, path: []const u8) ?i32 {
     std.debug.assert(self.hasRoom());
     var nva: [h2.max_fields + 6]c.nghttp2_nv = undefined;
     const borrowed: u8 = c.NGHTTP2_NV_FLAG_NO_COPY_NAME | c.NGHTTP2_NV_FLAG_NO_COPY_VALUE;
@@ -495,7 +540,12 @@ pub fn detach(self: *Connection, record: *Record) void {
 
 pub fn endOpen(self: *Connection, record: *Record, cause: policy.Cause) void {
     self.detach(record);
-    self.engine.endStream(record, cause);
+    self.settle(record, .{ .end = cause });
+}
+
+fn settle(self: *Connection, record: *Record, outcome: policy.Settle) void {
+    const port = self.env.streams;
+    port.settle(port.context, record, outcome);
 }
 
 pub fn consume(self: *Connection, stream_id: i32, bytes: usize) void {
@@ -506,6 +556,46 @@ pub fn consumeConnection(self: *Connection, bytes: usize) void {
     self.check(c.nghttp2_session_consume_connection(self.session, bytes));
 }
 
+fn flush(self: *Connection, only: ?*Record) void {
+    const scratch = self.env.scratch;
+    defer if (only == null) {
+        scratch.chunk_count = 0;
+    };
+    const chunks = scratch.chunks[0..scratch.chunk_count];
+    for (chunks, 0..) |*first, start| {
+        const record = first.record orelse continue;
+        if (only != null and only != record) continue;
+        var total: usize = 0;
+        var iovec_count: usize = 0;
+        for (chunks[start..]) |*chunk| {
+            if (chunk.record != record) continue;
+            scratch.iovecs[iovec_count] = .{ .base = chunk.bytes.ptr, .len = chunk.bytes.len };
+            iovec_count += 1;
+            total += chunk.bytes.len;
+            chunk.record = null;
+        }
+        const stream_id = record.route.open.stream_id;
+        if (record.state != .open) {
+            self.consume(stream_id, total);
+            continue;
+        }
+        const streams_port = self.env.streams;
+        if (streams_port.deliver(streams_port.context, record, scratch.iovecs[0..iovec_count], total)) |cause| {
+            self.consumeConnection(total);
+            self.endOpen(record, cause);
+            continue;
+        }
+        self.consume(stream_id, total);
+    }
+}
+
+fn gather(self: *Connection, record: *Record, bytes: []const u8) void {
+    const scratch = self.env.scratch;
+    if (scratch.chunk_count == Scratch.max_chunks) self.flush(null);
+    scratch.chunks[scratch.chunk_count] = .{ .record = record, .bytes = bytes };
+    scratch.chunk_count += 1;
+}
+
 fn check(self: *Connection, result: c_int) void {
     if (result != 0) self.local_failure = true;
 }
@@ -514,67 +604,75 @@ pub fn ping(self: *Connection, time: u64) void {
     if (c.nghttp2_submit_ping(self.session, c.NGHTTP2_FLAG_NONE, null) == 0) self.ping_sent_ns = time;
 }
 
-pub const ReadOutcome = enum { drained, capped, closed };
+const ReadOutcome = union(enum) { drained, capped, closed, failed: Failure };
 
-pub fn receive(self: *Connection) ReadOutcome {
-    const engine = self.engine;
-    const buffer = &engine.scratch.read_buffer;
+pub fn readReady(self: *Connection) ?Failure {
+    self.read_capped = false;
+    if (!self.hasSession() or (self.revents == 0 and !self.tlsPending())) return null;
+    switch (self.receive()) {
+        .drained, .closed => return null,
+        .capped => {
+            self.read_capped = true;
+            return null;
+        },
+        .failed => |found| return found,
+    }
+}
+
+fn receive(self: *Connection) ReadOutcome {
+    const buffer = &self.env.scratch.read_buffer;
     var total: usize = 0;
     self.tls_wants_write = false;
     while (total < h2.read_allowance_bytes) {
         const bytes = switch (self.readSome(buffer)) {
             .bytes => |count| buffer[0..count],
             .again => return .drained,
-            .closed => {
-                self.fail(.connection_lost);
-                return .closed;
-            },
+            .closed => return self.closedBy(.connection_lost),
         };
-        self.last_inbound_ns = engine.now();
+        self.last_inbound_ns = self.env.clock.now();
         self.ping_sent_ns = null;
         if (!self.received_any and self.state == .awaiting_settings and self.ssl == null) {
             self.received_any = true;
             // An HTTP/1 server answers the preface with a status line; an
             // HTTP/2 one starts with a SETTINGS frame, whose first byte is 0.
-            if (std.mem.startsWith(u8, "HTTP/", bytes[0..@min(bytes.len, 5)])) {
-                engine.setupFailed(self, .h2_refused);
-                return .closed;
-            }
+            if (std.mem.startsWith(u8, "HTTP/", bytes[0..@min(bytes.len, 5)]))
+                return .{ .failed = .{ .setup = .h2_refused } };
         }
         const decoded = c.nghttp2_session_mem_recv2(self.session, bytes.ptr, bytes.len);
-        engine.flush(self, null);
+        self.flush(null);
         if (decoded < 0) {
             self.protocol_failure = true;
-            self.fail(.protocol_error);
-            return .closed;
+            return self.closedBy(.protocol_error);
         }
-        if (self.local_failure) {
-            self.fail(.local_failure);
-            return .closed;
-        }
+        if (self.local_failure) return self.closedBy(.local_failure);
         total += bytes.len;
     }
     return .capped;
 }
 
-pub fn send(self: *Connection) void {
-    if (self.local_failure) return self.fail(.local_failure);
+fn closedBy(self: *const Connection, cause: policy.Cause) ReadOutcome {
+    return if (self.failure(cause)) |found| .{ .failed = found } else .closed;
+}
+
+pub fn send(self: *Connection) ?Failure {
+    if (self.local_failure) return self.failure(.local_failure);
     while (true) {
         if (self.unsent.len == 0) {
             var data: [*c]const u8 = undefined;
             const packed_len = c.nghttp2_session_mem_send2(self.session, &data);
-            if (packed_len < 0) return self.fail(.protocol_error);
+            if (packed_len < 0) return self.failure(.protocol_error);
             if (packed_len == 0) break;
             self.unsent = data[0..@intCast(packed_len)];
         }
         switch (self.writeSome(self.unsent)) {
             .bytes => |count| self.unsent = self.unsent[count..],
-            .again => return,
-            .closed => return self.fail(.connection_lost),
+            .again => return null,
+            .closed => return self.failure(.connection_lost),
         }
     }
     if (c.nghttp2_session_want_read(self.session) == 0 and c.nghttp2_session_want_write(self.session) == 0)
-        self.fail(if (self.protocol_failure) .protocol_error else .connection_lost);
+        return self.failure(if (self.protocol_failure) .protocol_error else .connection_lost);
+    return null;
 }
 
 const Transfer = union(enum) { bytes: usize, again, closed };
@@ -589,8 +687,8 @@ fn writeSome(self: *Connection, bytes: []const u8) Transfer {
     return self.withFaults(.write, bytes, writeSocket);
 }
 
-fn withFaults(self: *Connection, comptime direction: Engine.Faults.Direction, bytes: anytype, transfer: fn (*Connection, @TypeOf(bytes)) Transfer) Transfer {
-    const faults = self.engine.faults orelse return transfer(self, bytes);
+fn withFaults(self: *Connection, comptime direction: Faults.Direction, bytes: anytype, transfer: fn (*Connection, @TypeOf(bytes)) Transfer) Transfer {
+    const faults = self.env.faults orelse return transfer(self, bytes);
     const allowed = switch (faults.admit(self.serial, direction, bytes.len, self.ssl != null)) {
         .pass => |count| count,
         .again => return .again,
@@ -640,29 +738,24 @@ fn writeSocket(self: *Connection, bytes: []const u8) Transfer {
     }
 }
 
-fn fail(self: *Connection, cause: policy.Cause) void {
-    switch (self.state) {
-        .free => {},
-        .ready, .draining => self.lose(cause),
-        else => self.engine.setupFailed(self, if (cause == .connection_lost) .connect_failed else cause),
-    }
+fn failure(self: *const Connection, cause: policy.Cause) ?Failure {
+    return switch (self.state) {
+        .free => null,
+        .ready, .draining => .{ .lost = self.lost(cause) },
+        else => .{ .setup = if (cause == .connection_lost) .connect_failed else cause },
+    };
 }
 
-pub fn lose(self: *Connection, cause: policy.Cause) void {
-    const engine = self.engine;
-    const effective = if (self.protocol_failure and cause == .connection_lost) .protocol_error else cause;
-    var next = engine.timers.head;
-    while (next) |record| {
-        next = record.next;
-        if (record.state != .open or record.route.open.connection != self.index + 1) continue;
-        const stream_id: u32 = @intCast(record.route.open.stream_id);
-        switch (policy.connectionLost(effective, stream_id, self.goaway_last_stream_id, record.facts())) {
-            .end => |end| engine.endStream(record, end),
-            .replay => engine.requeue(record, true),
-            .reroute => engine.requeue(record, false),
-        }
-    }
-    self.close(.abrupt);
+pub fn lost(self: *const Connection, cause: policy.Cause) Lost {
+    return .{
+        .cause = if (self.protocol_failure and cause == .connection_lost) .protocol_error else cause,
+        .goaway_last_stream_id = self.goaway_last_stream_id,
+    };
+}
+
+pub fn retire(self: *Connection) void {
+    std.debug.assert(self.state == .ready or self.state == .draining);
+    if (self.streams == 0) self.close(.goaway) else self.state = .draining;
 }
 
 pub fn close(self: *Connection, mode: enum { goaway, abrupt }) void {
@@ -690,10 +783,10 @@ pub fn close(self: *Connection, mode: enum { goaway, abrupt }) void {
     if (self.socket >= 0) closeSocket(self.socket);
     self.dropEarlier();
     self.releaseHead();
-    self.head.fields.deinit(self.engine.allocator);
-    self.head.refs.deinit(self.engine.allocator);
+    self.head.fields.deinit(self.env.allocator);
+    self.head.refs.deinit(self.env.allocator);
     const verification = self.verification;
-    self.* = .free(self.engine, self.index);
+    self.* = .vacant(self.env, self.index);
     self.verification = verification;
 }
 
@@ -752,7 +845,7 @@ fn onFrameSend(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
             if (frame.*.hd.flags & c.NGHTTP2_FLAG_END_STREAM == 0) return 0;
             const record = self.recordOf(frame.*.hd.stream_id) orelse return 0;
             record.flags.body_done = true;
-            if (record.flags.response_started) self.engine.retireBody(record);
+            if (record.flags.response_started) self.retireBody(record);
         },
         c.NGHTTP2_GOAWAY => if (frame.*.goaway.error_code != c.NGHTTP2_NO_ERROR) {
             self.protocol_failure = true;
@@ -765,8 +858,13 @@ fn onFrameSend(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
 fn responseStarted(self: *Connection, record: *Record) void {
     if (record.flags.response_started) return;
     record.flags.response_started = true;
-    record.releaseFields(self.engine.allocator);
-    if (record.flags.body_done) self.engine.retireBody(record);
+    record.releaseFields(self.env.allocator);
+    if (record.flags.body_done) self.retireBody(record);
+}
+
+fn retireBody(self: *Connection, record: *Record) void {
+    const streams_port = self.env.streams;
+    streams_port.retireBody(streams_port.context, record);
 }
 
 fn onBeginHeaders(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_data: ?*anyopaque) callconv(.c) c_int {
@@ -799,7 +897,7 @@ fn onHeader(
     }
     if (name.len > 0 and name[0] == ':') return 0;
     self.head.bytes += name.len + value.len;
-    const allocator = self.engine.allocator;
+    const allocator = self.env.allocator;
     if (self.head.bytes > h2.max_field_block_bytes) {
         self.releaseHead();
         self.endOpen(record, .rejected_headers);
@@ -832,7 +930,7 @@ fn onFrameRecv(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
         c.NGHTTP2_SETTINGS => {
             if (frame.*.hd.flags & c.NGHTTP2_FLAG_ACK != 0) return 0;
             self.peer_max_streams = c.nghttp2_session_get_remote_settings(self.session, c.NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS);
-            self.engine.origins[self.origin].learned_max_streams = self.peer_max_streams;
+            self.originOf().learned_max_streams = self.peer_max_streams;
             if (self.state == .awaiting_settings) self.becomeReady();
             self.sizeWindow();
         },
@@ -874,11 +972,12 @@ fn emitHead(self: *Connection, record: *Record) void {
                 return self.endOpen(record, .encoded_response);
         }
     }
-    const verdict = self.engine.observe(record, .{ .head = .{
+    const streams_port = self.env.streams;
+    const verdict = streams_port.head(streams_port.context, record, .{
         .kind = kind,
         .status = if (kind == .trailers) 0 else status,
         .fields = self.head.fields.items,
-    } });
+    });
     if (verdict == .refuse) self.endOpen(record, .rejected_headers);
 }
 
@@ -889,27 +988,22 @@ fn onDataChunk(_: ?*c.nghttp2_session, _: u8, stream_id: i32, data: [*c]const u8
         return 0;
     };
     self.responseStarted(record);
-    self.engine.gather(self, record, data[0..length]);
+    self.gather(record, data[0..length]);
     return 0;
 }
 
 fn onStreamClose(_: ?*c.nghttp2_session, stream_id: i32, error_code: u32, user_data: ?*anyopaque) callconv(.c) c_int {
     const self = of(user_data);
-    const engine = self.engine;
     self.streams -= 1;
-    if (self.streams == 0) self.idle_since_ns = engine.now();
+    if (self.streams == 0) self.idle_since_ns = self.env.clock.now();
     const closing = self.recordOf(stream_id) orelse return 0;
     self.closing_stream_id = stream_id;
     defer self.closing_stream_id = 0;
-    engine.flush(self, closing);
+    self.flush(closing);
     const record = self.recordOf(stream_id) orelse return 0;
     _ = c.nghttp2_session_set_stream_user_data(self.session, stream_id, null);
     if (self.head.record == record) self.releaseHead();
-    switch (policy.streamClosed(@fromBackingInt(@intCast(error_code)), record.facts())) {
-        .end => |cause| engine.endStream(record, cause),
-        .replay => engine.requeue(record, true),
-        .reroute => engine.requeue(record, false),
-    }
+    self.settle(record, policy.streamClosed(@fromBackingInt(@intCast(error_code)), record.facts()));
     return 0;
 }
 
