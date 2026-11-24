@@ -1159,7 +1159,7 @@ test "SES-22 a child's app lane is its creator's lane when attached or detached,
             };
             var capture: Capture = .{};
             try std.testing.expect(try storage.startAgent(action.binding, root.slice(), start.task, start.attached, &start.configuration, .{ .context = &capture, .call = Capture.call }, .{}) == .started);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND parent_ref=?2 AND app_lane=?2", .{ capture.child.slice(), root.slice() }));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND creator_ref=?2 AND parent_ref IS NULL AND app_lane=?2", .{ capture.child.slice(), root.slice() }));
         }
     }.run);
 }
