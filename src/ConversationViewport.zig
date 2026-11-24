@@ -276,7 +276,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             comptime std.debug.assert(styled);
             if (position >= self.text().len) return null;
             const uri = self.address(position);
-            return if (std.mem.startsWith(u8, uri, TerminalText.session_link)) uri[TerminalText.session_link.len..] else null;
+            return TerminalText.sessionTarget(uri);
         }
 
         pub fn cellOffset(self: *const Self, cell: vaxis.Cell) ?usize {

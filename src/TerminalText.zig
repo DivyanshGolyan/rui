@@ -18,6 +18,13 @@ pub const link_close = link_open ++ link_end;
 pub const max_link_bytes = 2048;
 pub const session_link = "rui-session:";
 
+/// Returns only a canonical, same-Store Session destination.
+pub fn sessionTarget(uri: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, uri, session_link)) return null;
+    const id = uri[session_link.len..];
+    return if (@import("session_id.zig").valid(id)) id else null;
+}
+
 pub const user_message_on = "\x1b[202m";
 pub const user_message_off = "\x1b[203m";
 

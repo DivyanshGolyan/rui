@@ -966,6 +966,12 @@ class SelectionTest(unittest.TestCase):
                         "review", AVAILABLE)
         self.assertNotIn("terminal-restoration-integration", result["targets"])
 
+    def test_assistant_session_links_select_peer_journey(self):
+        for path in ("src/AnswerRenderer.zig", "src/ConversationViewport.zig", "src/TerminalText.zig", "src/FeedView.zig"):
+            with self.subTest(path=path):
+                targets = set(select([path], "review", AVAILABLE)["targets"])
+                self.assertTrue(covers("peer-integration", targets), (path, targets))
+
     def test_renderer_diff_skips_check_before_landing(self):
         for paths in (["src/SessionFrontend.zig"], ["src/TerminalText.zig"], ["src/AnswerRenderer.zig"],
                       ["src/ConversationViewport.zig"],
