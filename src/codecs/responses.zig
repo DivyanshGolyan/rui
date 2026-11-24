@@ -2,6 +2,8 @@ const std = @import("std");
 const codec_abi = @import("../codec_abi.zig");
 const json = @import("json.zig");
 
+pub const dialect: codec_abi.Dialect = .openai_responses;
+
 pub const manifest: codec_abi.Manifest = .{
     .observe = .{
         .request_id = "x-request-id",

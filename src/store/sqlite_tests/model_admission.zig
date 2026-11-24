@@ -571,13 +571,13 @@ test "runnable discovery measures eligible ineligible and history populations in
         };
 
         fn reset(database: *c.sqlite3, eligible: usize, ineligible: usize, history: usize) !void {
-            try sqlite.exec(database, "DELETE FROM message_admission; DELETE FROM session_stop; DELETE FROM model_operation; DELETE FROM turn; DELETE FROM session");
+            try sqlite.exec(database, "DELETE FROM message_admission; DELETE FROM session_stop; DELETE FROM model_operation; DELETE FROM turn; DELETE FROM session_revision; DELETE FROM session");
             if (ineligible != 0) {
                 try sqlite.exec(
                     database,
-                    "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
+                    "INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tool_set_id,permission_mode," ++
                         "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-                        "VALUES('st0ped','/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,1000000,zeroblob(32),1000000)",
+                        "VALUES('st0ped','/','codex','model-a',1,1,0,NULL,1,1,1,1000000,zeroblob(32),1000000)",
                 );
                 const insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
@@ -593,9 +593,9 @@ test "runnable discovery measures eligible ineligible and history populations in
             }
             const eligible_insert = try std.testing.allocator.printSentinel(
                 "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
-                    "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
+                    "INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tool_set_id,permission_mode," ++
                     "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-                    "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,value+1,zeroblob(32),value+1 FROM sequence; " ++
+                    "SELECT printf('%06d',value),'/','codex','model-a',1,1,0,NULL,1,1,1,value+1,zeroblob(32),value+1 FROM sequence; " ++
                     "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,source_kind) " ++
                     "SELECT {1}+value,printf('%06d',value),printf('eligible-%d',value),1,NULL,1,1 FROM sequence",
@@ -604,6 +604,7 @@ test "runnable discovery measures eligible ineligible and history populations in
             );
             defer std.testing.allocator.free(eligible_insert);
             try sqlite.exec(database, eligible_insert);
+            try store_testing.fixtureRevisions(database);
             if (history != 0) {
                 const history_insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++

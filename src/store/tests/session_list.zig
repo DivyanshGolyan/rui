@@ -975,10 +975,10 @@ test "creating a Session takes the same work however many Sessions exist, in rou
             const few = TwinRounds.start(&storage);
             _ = try configureTestSession(&storage, "creation-rounds-few");
             const few_rounds = few.taken();
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tool_set_id,permission_mode," ++
                 "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
                 "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
-                "SELECT 100000+value,'/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
+                "SELECT 100000+value,'/','codex','model-a',1,1,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
             const many = TwinRounds.start(&storage);
             _ = try configureTestSession(&storage, "creation-rounds-many");
             try std.testing.expectEqual(few_rounds, many.taken());

@@ -393,11 +393,12 @@ test "retry admission and exhausted recovery use their selection indexes" {
 fn insertTestingSessionsForOperations(database: *c.sqlite3) !void {
     try sqlite.exec(
         database,
-        "INSERT OR IGNORE INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id," ++
+        "INSERT OR IGNORE INTO session(session_ref,workspace,provider,model,instructions_content_id,tool_set_id," ++
             "permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-            "SELECT session_ref,'/w','codex','openai-responses/1','m',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0,1,1,1,base+row_number() OVER (ORDER BY session_ref),zeroblob(32),base+1 " ++
+            "SELECT session_ref,'/w','codex','m',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0,1,1,1,base+row_number() OVER (ORDER BY session_ref),zeroblob(32),base+1 " ++
             "FROM (SELECT DISTINCT session_ref FROM model_operation),(SELECT coalesce(max(created_seq),0) AS base FROM session)",
     );
+    try store_testing.fixtureRevisions(database);
 }
 
 test "retry due index excludes future population and preserves age ordering" {

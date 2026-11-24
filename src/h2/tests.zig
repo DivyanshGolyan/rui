@@ -745,7 +745,7 @@ test "a read cap defers expiry only for streams on that connection" {
             return bytes >= h2.read_allowance_bytes;
         }
     };
-    const busy_socket = for (Engine.of(&harness.client).connections[0..Engine.of(&harness.client).connections_len]) |*connection| {
+    const busy_socket = for (h2.test_access.engineOf(&harness.client).connections[0..h2.test_access.engineOf(&harness.client).connections_len]) |*connection| {
         if (connection.streams == busy.len) break connection.socket;
     } else return error.TestUnexpectedResult;
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), busy_socket, Busy.queued);
@@ -976,14 +976,14 @@ const BlackHole = struct {
 fn launchRacing(harness: *Harness, stream: *h2.Stream, sink: []u8, before_peer: []const Resolver.Address) !void {
     try harness.launch(stream, bytesRequest(harness.endpoint, "x", sink));
     try harness.client.drive(&harness.receiver);
-    const engine = Engine.of(&harness.client);
+    const engine = h2.test_access.engineOf(&harness.client);
     try std.testing.expectEqual(Connection.State.resolving, engine.connections[0].state);
     var addresses: [Resolver.max_addresses]Resolver.Address = undefined;
     @memcpy(addresses[0..before_peer.len], before_peer);
     addresses[before_peer.len] = Resolver.Address.literal("127.0.0.1", harness.peer.port).?;
     const origin = &engine.origins[0];
-    origin.lookup.?.release();
-    origin.lookup = Resolver.answered(&engine.waker, addresses[0 .. before_peer.len + 1]) orelse return error.OutOfMemory;
+    origin.lookup.job.?.release();
+    origin.lookup.job = Resolver.answered(&engine.waker, addresses[0 .. before_peer.len + 1]) orelse return error.OutOfMemory;
 }
 
 test "https by name: an address that never answers does not keep the next from connecting" {
@@ -1535,4 +1535,65 @@ test "exchange: a refused connection is positive evidence nothing was sent" {
     const outcome = try h2.exchange(std.testing.io, exchangeRequest(url, &response));
     try std.testing.expectEqual(h2.End{ .cause = .connect_failed, .request_sent = false }, outcome.failed);
     try std.testing.expectError(error.InvalidUrl, h2.exchange(std.testing.io, exchangeRequest("://", &response)));
+}
+
+test "a large table stays unwritten until connections need it" {
+    var client: h2.Client = undefined;
+    try client.init(std.heap.page_allocator, std.testing.io, .{
+        .stream_capacity = 10_000,
+        .inactivity_ns = std.time.ns_per_s,
+        .connect_timeout_ns = std.time.ns_per_s,
+    });
+    defer client.deinit();
+    const engine = h2.test_access.engineOf(&client);
+    const page = std.heap.pageSize();
+    for ([_][]u8{ std.mem.sliceAsBytes(engine.connections), std.mem.sliceAsBytes(engine.views), std.mem.sliceAsBytes(engine.pollfds) }) |table| {
+        const start = std.mem.alignForward(usize, @intFromPtr(table.ptr), page);
+        const end = std.mem.alignBackward(usize, @intFromPtr(table.ptr) + table.len, page);
+        if (end <= start) continue;
+        const pages = (end - start) / page;
+        var residency: [4096]u8 = undefined;
+        const checked = @min(pages, residency.len);
+        try std.testing.expectEqual(@as(c_int, 0), std.c.mincore(@ptrFromInt(start), checked * page, &residency));
+        var resident: usize = 0;
+        for (residency[0..checked]) |flags| resident += flags & 1;
+        try std.testing.expectEqual(@as(usize, 0), resident);
+    }
+    try std.testing.expectEqual(@as(u32, 0), engine.connections_len);
+}
+
+test "drives walk only as far as the last connection not free" {
+    var client: h2.Client = undefined;
+    try client.init(std.testing.allocator, std.testing.io, .{
+        .stream_capacity = 4,
+        .inactivity_ns = std.time.ns_per_s,
+        .connect_timeout_ns = std.time.ns_per_s,
+    });
+    defer client.deinit();
+    const peer = try @import("testing/Peer.zig").start(std.testing.allocator, .{});
+    var url_buffer: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buffer, "{s}", .{peer.url()});
+    peer.stop();
+    const endpoint = try client.addEndpoint(url);
+    var stream: h2.Stream = .idle;
+    var sink: [8]u8 = undefined;
+    try client.prepare(&stream, .{ .endpoint = endpoint, .fields = &.{}, .body = .{ .bytes = "x" }, .sink = .{ .buffer = &sink } });
+    client.launch(&stream);
+    const Ignore = struct {
+        pub fn observe(_: *@This(), _: *h2.Stream, _: h2.Event) h2.Verdict {
+            return .accept;
+        }
+    };
+    var receiver: Ignore = .{};
+    try client.drive(&receiver);
+    try std.testing.expectEqual(@as(u32, 1), h2.test_access.engineOf(&client).connections_len);
+    var steps: u32 = 0;
+    while (client.finishedCount() == 0) : (steps += 1) {
+        if (steps > 2000) return error.Timeout;
+        try client.drive(&receiver);
+        try client.wait(1);
+    }
+    try std.testing.expectEqual(@as(u32, 0), h2.test_access.engineOf(&client).connections_len);
+    _ = client.nextFinished();
+    stream.deinit();
 }
