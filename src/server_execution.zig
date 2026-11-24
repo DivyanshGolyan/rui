@@ -750,9 +750,9 @@ pub fn executionMain(host: *Host, settings: Settings, execution_state: *executio
     var mcp_calls: server_mcp.Calls = .{};
     const attempts: action_attempt.Parts = run.execution.attempts(run.host.store, run.host.probes);
     workspace.image_calls = .{};
-    defer workspace.image_calls.shutdown(run.host);
+    defer workspace.image_calls.shutdown(.{ .allocator = run.host.allocator, .io = run.host.io, .retention = run.host.retention });
     defer shutdownExecution(&run, slots, workspace);
-    defer mcp_calls.shutdown(run.host);
+    defer mcp_calls.shutdown(.{ .allocator = run.host.allocator, .io = run.host.io, .retention = run.host.retention });
 
     workspace.turn_state = .{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
@@ -937,9 +937,9 @@ const NativeTurn = struct {
                 break;
             }
         }
-        const mcp_progress = self.mcp.service(self.run.host);
+        const mcp_progress = self.mcp.service(.{ .allocator = self.run.host.allocator, .io = self.run.host.io, .retention = self.run.host.retention });
         const relist_progress = serviceRelist(self.run);
-        const image_progress = if (self.images) |images| images.service(self.run.host) else false;
+        const image_progress = if (self.images) |images| images.service(.{ .allocator = self.run.host.allocator, .io = self.run.host.io, .retention = self.run.host.retention }) else false;
         return advanceBash(self.run, self.slots, self.workspace) or mcp_progress or relist_progress or image_progress;
     }
 
@@ -1587,8 +1587,8 @@ noinline fn runNextCoreAction(run: *Run, attempts: action_attempt.Parts, mcp: *s
     }) orelse return .no_work;
     return switch (work) {
         .stop => |*owed| runOwedStop(run, owed),
-        .mcp => |call| mcp.admit(run.host, attempts, call),
-        .read_image => |call| if (images) |calls| calls.admit(run.host, attempts, call) else .retry_later,
+        .mcp => |call| mcp.admit(attempts, .{ .allocator = run.host.allocator, .io = run.host.io, .retention = run.host.retention }, run.host.mcp_servers, call),
+        .read_image => |call| if (images) |calls| calls.admit(attempts, .{ .allocator = run.host.allocator, .io = run.host.io, .retention = run.host.retention }, call) else .retry_later,
         .ending => |*owed| runOwedEnding(run, owed),
         .forward => |id| runSessionForward(run, id),
         .auto_deny => |decision| runMessageDecline(run, decision.action_id, decision.session.slice()),
@@ -2084,7 +2084,7 @@ noinline fn completeBash(run: *Run, slot: *ExecutionSlot) void {
     const active = &slot.bash;
     const binding = active.attempt.binding;
     const profile = tool_record.Runner.bash.resultProfile(true);
-    const result = @import("tool_result.zig").Result.create(run.host, binding.action_id, profile) catch |err| {
+    const result = (@import("tool_result.zig").Results{ .allocator = run.host.allocator, .io = run.host.io, .retention = run.host.retention }).create(binding.action_id, profile) catch |err| {
         _ = failBash(run, slot, "Bash result allocation", err);
         return;
     };
@@ -5574,7 +5574,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
     execution_state.init(&custody, null, &host_parts.lifecycle, &host.scratch_used, null);
     var run: Run = .{ .host = &host, .execution = &execution_state, .custody = &execution_state.custody, .settings = .{} };
     var mcp_calls: server_mcp.Calls = .{};
-    defer mcp_calls.shutdown(&host);
+    defer mcp_calls.shutdown(.{ .allocator = host.allocator, .io = host.io, .retention = host.retention });
     var native: NativeTurn = .{
         .mcp = &mcp_calls,
         .run = &run,
