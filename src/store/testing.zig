@@ -791,10 +791,10 @@ fn dropFormat93AppToolsCheck(storage: *Store) !void {
         return;
     }
     const schema = @import("schema.zig");
-    // Format 66's rebuild text is the format 92 table. Its copy statement names only six columns, so the rows
-    // are copied here with every column, keeping the refusal columns that the format 93 CHECK relates.
+    // The step from format 65 rebuilt session_change to the format 92 table (renaming it _before_66). Its copy
+    // statement names only six columns, so the rows are copied here with every column, keeping the refusal columns.
     try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE session_change RENAME TO session_change_before_66");
-    for (schema.migrations[66 - schema.migration_baseline].sqlite) |sql| {
+    for (schema.migrations[65 - schema.migration_baseline].sqlite) |sql| {
         if (std.mem.startsWith(u8, sql, "CREATE TABLE session_change(")) try sqlite.exec(storage.sqliteDatabase(), sql);
     }
     try sqlite.exec(storage.sqliteDatabase(), "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) SELECT session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id FROM session_change_before_66");

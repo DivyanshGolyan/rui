@@ -2793,8 +2793,8 @@ const Capture = struct {
         try self.write("{");
         var separator: []const u8 = "";
         inline for (@import("session_settings.zig").spec_entries) |entry| {
-            // app_tools has no client input until its declaration step.
-            if (comptime entry.kind == .app_tools) continue;
+            // Not saved yet: no client input until its save step (session_settings.unsaved_fields).
+            if (comptime !@import("session_settings.zig").isSaved(entry)) continue;
             const value = @field(input, entry.field);
             const present = switch (entry.kind) {
                 .content => value.state != .omitted,

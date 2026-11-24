@@ -1187,6 +1187,7 @@ test "Session settings cover every hand-written Store SQL and schema projection"
     var buffer: [16 * 1024]u8 = undefined;
     var missing: std.Io.Writer = .fixed(&buffer);
     inline for (session_settings.entries) |entry| {
+        if (comptime !session_settings.isSaved(entry)) continue;
         inline for (.{ "session", "session_revision" }) |table_name| {
             var found = false;
             for (schema.tables) |table| {
