@@ -1662,9 +1662,9 @@ def provider_line_cases():
                     sign_in_focus(master, b"\t\t", "API key", "[ Connect ]")
                     os.write(master, b"\r")
                     overview_frame(master, overview_title)
-                    entry = json.loads((selected_store / "host.json").read_text())["providers"]["openai"]
-                    assert isinstance(entry["key"], dict) and set(entry["key"]) == {"file"}
-                    key_path = pathlib.Path(entry["key"]["file"])
+                    entry = next(item for item in json.loads((selected_store / "host.json").read_text())["connections"] if item["name"] == "openai")
+                    assert entry["credential"]["kind"] == "key" and entry["credential"]["source"]["kind"] == "file", entry
+                    key_path = pathlib.Path(entry["credential"]["source"]["path"])
                     assert key_path.is_absolute() and key_path.is_relative_to(selected_store)
                     assert key_path.read_text() == "sk-screen-secret\n"
                     assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
