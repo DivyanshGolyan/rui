@@ -530,7 +530,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         }
     }
     job.result.activity_store = paths.store_identity;
-    const store = paths.selector();
+    const store = if (job.accepted_probe != null) paths.selector() else job.store;
     const response = try requests.activityPageAt(&paths, job.session, cursor);
     const page = switch (response) {
         .page => |page| page,
