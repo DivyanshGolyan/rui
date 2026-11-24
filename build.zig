@@ -491,6 +491,18 @@ pub fn build(b: *std.Build) void {
     fast_integrations.step.dependOn(&units.signal_stack_probe.step);
     fast_integrations.step.dependOn(&units.run_os_tests.step);
     check_step.dependOn(&fast_integrations.step);
+    // Not a dependency of `check`: Promote measures the release archive once, in its own job.
+    const host_memory_step = b.step(
+        "host-memory",
+        "Fail when an agent waiting on the model costs the Host more than its per-agent memory budget (Linux only; -Drui-under-test=<rui> measures that executable)",
+    );
+    if (target.result.os.tag == .linux) {
+        const host_memory = b.addSystemCommand(&.{ "python3", "-B" });
+        host_memory.addFileArg(b.path("tests/ci/host_memory.py"));
+        host_memory.addFileArg(release_safe);
+        host_memory.has_side_effects = true;
+        host_memory_step.dependOn(&host_memory.step);
+    }
     const rsql_table_step = b.step(
         "rsql-table",
         "Fail when src/store/rsql_table.zig differs from what rsql's comptime path renders (Linux only)",

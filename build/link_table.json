@@ -1,5 +1,5 @@
 {
-  "inputs": "de9f9a139bb7109cae5e29d42226fc17",
+  "inputs": "3c26c14e49102118559e826eac9fd48e",
   "targets": {
     "activity-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "admission-debug-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
@@ -32,6 +32,7 @@
     "dispatch-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "host-allocator-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "host-launch-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
+    "host-memory": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "host-status-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "host-stop-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "human-cli-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
