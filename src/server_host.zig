@@ -1386,9 +1386,10 @@ fn withTraceSink(io: std.Io, plan: TestObservation.Plan, hooks: Hooks, dir: std.
     try body(&probes, descriptors[0], dir);
 }
 
-/// Counts the trace frames naming `phase` that were written since the last count, draining the pipe.
-/// Each frame carries its own length prefix, so frames that one read returns together are counted apart.
-fn countTraces(read_fd: c_int, phase: []const u8) usize {
+/// Counts the trace frames written since the last count, draining the pipe; every frame must name `phase`.
+/// Each frame carries its own length prefix, so frames that one read returns together are counted apart,
+/// and a frame naming any other phase fails the count instead of being drained unseen.
+fn countTraces(read_fd: c_int, phase: []const u8) error{TestUnexpectedResult}!usize {
     const native = @import("posix");
     var count: usize = 0;
     var bytes: [4 * TestObservation.record_bytes]u8 = undefined;
@@ -1400,7 +1401,8 @@ fn countTraces(read_fd: c_int, phase: []const u8) usize {
         while (held - start >= 2) {
             const frame = std.mem.readInt(u16, bytes[start..][0..2], .little);
             if (frame < 2 or held - start < frame) break;
-            if (std.mem.indexOf(u8, bytes[start..][0..frame], phase) != null) count += 1;
+            if (std.mem.indexOf(u8, bytes[start..][0..frame], phase) == null) return error.TestUnexpectedResult;
+            count += 1;
             start += frame;
         }
         std.mem.copyForwards(u8, bytes[0 .. held - start], bytes[start..held]);
@@ -1421,7 +1423,7 @@ const HoldSleep = struct {
 
     fn sleep(_: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
         requested = timeout;
-        traced_before = countTraces(read_fd, phase);
+        traced_before = countTraces(read_fd, phase) catch std.math.maxInt(usize);
     }
 };
 
@@ -1445,16 +1447,15 @@ fn holdCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
         try std.testing.expectEqual(@as(i96, hold_row.delay_ms) * std.time.ns_per_ms, requested.duration.raw.nanoseconds);
         try std.testing.expectEqual(std.Io.Clock.awake, requested.duration.clock);
     }
-    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "prepared_before_handoff"));
-    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "sealed_before_settlement"));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, hold_row.phase));
 }
 
 fn retryCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
-    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "exhausted_retry_recovery_held"));
     try dir.writeFile(std.testing.io, .{ .sub_path = "retry-gate", .data = "" });
     probes.retryRecovered();
     probes.retryRecovered();
-    try std.testing.expectEqual(@as(usize, 1), countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try std.testing.expectEqual(@as(usize, 1), try countTraces(read_fd, "exhausted_retry_recovery_held"));
     try std.testing.expect(probes.releaseRetryRecovery());
     try dir.deleteFile(std.testing.io, "retry-gate");
     try std.testing.expect(!probes.releaseRetryRecovery());
@@ -1462,7 +1463,7 @@ fn retryCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
     try dir.writeFile(std.testing.io, .{ .sub_path = "retry-gate", .data = "" });
     probes.retryRecovered();
     try std.testing.expect(!probes.releaseRetryRecovery());
-    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "exhausted_retry_recovery_held"));
     try dir.deleteFile(std.testing.io, "retry-gate");
 }
 
@@ -1471,7 +1472,7 @@ fn unconfiguredRetryCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyer
     defer dir.deleteFile(std.testing.io, "retry-gate") catch {};
     probes.retryRecovered();
     try std.testing.expect(!probes.releaseRetryRecovery());
-    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "exhausted_retry_recovery_held"));
 }
 
 fn unconfiguredBashCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
@@ -1480,7 +1481,7 @@ fn unconfiguredBashCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerr
     defer dir.deleteFile(std.testing.io, "bash-gate") catch {};
     try std.testing.expect(!probes.bashReclaimHeld(binding, true));
     try std.testing.expect(!probes.bashReclaimHeld(binding, false));
-    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "cleanup_release_observed"));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "cleanup_release_observed"));
 }
 
 fn bashCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
@@ -1488,12 +1489,12 @@ fn bashCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
     try dir.writeFile(std.testing.io, .{ .sub_path = "bash-gate", .data = "" });
     try std.testing.expect(probes.bashReclaimHeld(binding, false));
     try std.testing.expect(probes.bashReclaimHeld(binding, true));
-    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "cleanup_release_observed"));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "cleanup_release_observed"));
     try dir.deleteFile(std.testing.io, "bash-gate");
     try std.testing.expect(!probes.bashReclaimHeld(binding, true));
-    try std.testing.expectEqual(@as(usize, 0), countTraces(read_fd, "cleanup_release_observed"));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "cleanup_release_observed"));
     try std.testing.expect(!probes.bashReclaimHeld(binding, false));
-    try std.testing.expectEqual(@as(usize, 1), countTraces(read_fd, "cleanup_release_observed"));
+    try std.testing.expectEqual(@as(usize, 1), try countTraces(read_fd, "cleanup_release_observed"));
 }
 
 test "SH-128 each configured test hold traces once then asks for its delay, unconfigured holds and gates do nothing, and the retry and Bash reclaim gates hold while present" {
