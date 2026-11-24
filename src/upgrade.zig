@@ -5,6 +5,7 @@ const Installation = @import("Installation.zig");
 const HostLifecycle = @import("HostLifecycle.zig");
 const host_activation = @import("host_activation.zig");
 const restart_all = @import("host_restart_all.zig");
+const host_restart_report = @import("host_restart_report.zig");
 const platform = @import("platform.zig");
 const TerminalText = @import("TerminalText.zig");
 const process = @import("upgrade_process.zig");
@@ -72,7 +73,7 @@ pub const Download = process.Download;
 pub const Check = struct {
     candidate: release.ReleaseCandidate,
     selected: Installation.Selection,
-    hosts: restart_all.Batch = .{},
+    hosts: host_restart_report.Batch = .{},
     home: []const u8,
     store: []const u8,
     running_executable: [:0]const u8,
@@ -101,11 +102,11 @@ pub const Check = struct {
 
 pub const Result = struct {
     installation: Installation.InstallationOutcome,
-    hosts: restart_all.Batch = .{},
+    hosts: host_restart_report.Batch = .{},
     store: []const u8,
 
-    pub fn selectedActivation(self: *const Result) HostLifecycle.ActivationOutcome {
-        return self.hosts.selectedOutcome(self.store);
+    pub fn selectedAnswer(self: *const Result) host_activation.Selected {
+        return self.hosts.selected(self.store);
     }
 
     /// What the finished install of `checked` read, as `upgrade_run` reads it.
@@ -190,7 +191,7 @@ pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []cons
     errdefer if (selected) |*value| value.deinit(allocator);
     var candidate: ?release.ReleaseCandidate = null;
     errdefer if (candidate) |*value| value.deinit(allocator);
-    var hosts: ?restart_all.Batch = null;
+    var hosts: ?host_restart_report.Batch = null;
     errdefer if (hosts) |*value| value.deinit(allocator);
     // Each effect polls the cancellation token where it did before this loop;
     // an error ends the check, so it is returned rather than recorded.
@@ -258,7 +259,7 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
     var target: ?restart_all.Target = null;
     defer if (target) |value| value.deinit(allocator);
     var activation_progress: ActivationProgress = .{ .progress = progress };
-    var hosts: restart_all.Batch = .{};
+    var hosts: host_restart_report.Batch = .{};
     // Errors before publication end the run and are returned; errors after
     // it are recorded beside the kept receipt as a failed restart batch.
     while (true) switch (upgrade_run.next(facts)) {
@@ -300,7 +301,7 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
                 .target = &target.?,
                 .cancellation = cancellation,
                 .progress = .{ .context = &activation_progress, .report = ActivationProgress.report },
-            }) catch |err| {
+            }, .inherit) catch |err| {
                 hosts = .{ .failure = err };
                 facts = upgrade_run.failing(facts, causeOf(err));
                 continue;
@@ -321,7 +322,7 @@ fn pinTarget(init: std.process.Init, allocator: std.mem.Allocator, home: []const
     try waitAfterPublication(init, cancellation);
     const pinned = try restart_all.Target.init(init, allocator, home, receipt.selected_after, cancellation);
     target.* = pinned;
-    if (pinned.version.order(receipt.selected_version.?) != .eq) return error.ReleaseExecutableVersionMismatch;
+    if (!pinned.isRelease(receipt.selected_version.?)) return error.ReleaseExecutableVersionMismatch;
 }
 
 fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Cancellation) !void {
@@ -329,7 +330,7 @@ fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Can
 }
 
 pub fn compatible(result: *const Result) bool {
-    return host_activation.clientSafe(result.selectedActivation());
+    return host_activation.selectedClientSafe(result.selectedAnswer());
 }
 
 fn field(writer: *std.Io.Writer, value: []const u8) !void {
@@ -439,13 +440,13 @@ test "upgrade result report embeds the Host lines and its rollback note follows 
         const activation = @unionInit(HostLifecycle.ActivationOutcome, name, std.mem.zeroes(Payload));
         for ([_]bool{ false, true }) |selected| {
             for ([_]bool{ false, true }) |installed| {
-                var entries = [_]restart_all.Entry{.{ .socket = "/socket", .store = if (selected) "/selected-store" else "/other-store", .state = .{ .outcome = activation } }};
+                var entries = [_]host_restart_report.Entry{.{ .socket = "/socket", .store = if (selected) "/selected-store" else "/other-store", .state = .{ .outcome = activation } }};
                 const result: Result = .{
                     .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt },
                     .hosts = .{ .entries = &entries, .version = .{ .schema = 99, .patch = 0 } },
                     .store = "/selected-store",
                 };
-                try std.testing.expectEqualDeep(if (selected) activation else HostLifecycle.ActivationOutcome.not_needed, result.selectedActivation());
+                try std.testing.expectEqualDeep(host_activation.Selected{ .outcome = if (selected) activation else .not_needed }, result.selectedAnswer());
                 var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
                 defer output.deinit();
                 try writeResult(&output.writer, &result);
@@ -488,13 +489,13 @@ test "#1854 a non-interactive install says it is installing, then opens its resu
 test "upgrade selected activation routes by Host directory not SQLite data or MySQL identity" {
     const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
     for ([_][]const u8{ "/data", "0123456789abcdef0123456789abcdef" }) |identity| {
-        var entries = [_]restart_all.Entry{
+        var entries = [_]host_restart_report.Entry{
             .{ .socket = "/first.sock", .directory = "/first-host", .store = "/selected-host", .state = .{ .outcome = .not_needed } },
             .{ .socket = "/selected.sock", .directory = "/selected-host", .store = identity, .state = .{ .outcome = .{ .unsupported = .configuration_unavailable } } },
         };
         const result: Result = .{ .installation = .{ .installed = receipt }, .store = "/selected-host", .hosts = .{ .entries = &entries } };
-        try std.testing.expectEqual(HostLifecycle.Limitation.configuration_unavailable, result.selectedActivation().unsupported);
-        try std.testing.expect(result.hosts.selectedOutcome(identity) == .not_needed);
+        try std.testing.expectEqual(HostLifecycle.Limitation.configuration_unavailable, result.selectedAnswer().outcome.unsupported);
+        try std.testing.expect(result.hosts.selected(identity).outcome == .not_needed);
     }
 }
 

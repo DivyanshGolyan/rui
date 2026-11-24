@@ -248,7 +248,7 @@ fn failureWords(err: anyerror) []const u8 {
 
 const test_result: upgrade.Result = .{
     .installation = .{ .installed = .{ .operation_build = "/synthetic/installed", .selected_after = "/synthetic/installed", .selected_version = .{ .schema = 60, .patch = 1 } } },
-    .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/synthetic/store", .state = .{ .outcome = .cancelled } }}) },
+    .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "/synthetic/store", .state = .{ .outcome = .cancelled } }}) },
     .store = "/synthetic/store",
 };
 
@@ -467,7 +467,7 @@ test "the run's status: checking, the release found, each restart step, then how
     job.phase.store(.preparing, .release);
     const found: upgrade_status.Found = .{ .host = .none };
     try std.testing.expectEqualDeep(upgrade_status.Run{ .installing = .{ .found = found } }, job.status());
-    job.checked.?.hosts = .{ .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .{ .unsupported = .incompatible } } }}) };
+    job.checked.?.hosts = .{ .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .{ .unsupported = .incompatible } } }}) };
     try std.testing.expectEqual(upgrade_status.Host{ .running = 1 }, job.status().installing.found.host);
     job.checked.?.hosts = .{};
     for ([_]struct { upgrade.Phase, upgrade_status.Step }{
@@ -476,7 +476,7 @@ test "the run's status: checking, the release found, each restart step, then how
         job.phase.store(case[0], .release);
         try std.testing.expectEqualDeep(upgrade_status.Run{ .installing = .{ .found = found, .step = case[1] } }, job.status());
     }
-    job.result = .{ .installation = .{ .installed = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 1 } } }, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .{ .ready = .{ .instance = @splat(0), .pid = 1 } } } }}) }, .store = "/s" };
+    job.result = .{ .installation = .{ .installed = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 1 } } }, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .{ .ready = .{ .instance = @splat(0), .pid = 1 } } } }}) }, .store = "/s" };
     job.finish();
     try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 1 }, .restarted = true } }, .outcome = .compatible } }, job.status());
     job.result = null;
@@ -503,7 +503,7 @@ test "a stop asked for shows until the run ends, before the worker starts and wh
 test "a selected release still shows the census while its Hosts are checked for restart" {
     var job: Self = .{ .started = true, .operation = .install, .checked = news_check };
     job.checked.?.selected = .{ .released = .{ .build = "/synthetic/build", .version = .{ .schema = 60, .patch = 1 } } };
-    job.checked.?.hosts = .{ .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .not_needed } }}) };
+    job.checked.?.hosts = .{ .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "/s", .state = .{ .outcome = .not_needed } }}) };
     job.phase.store(.stopping, .release);
     try std.testing.expectEqualDeep(upgrade_status.Run{ .installing = .{ .found = .{ .host = .{ .running = 1 } }, .step = .restarting } }, job.status());
     job.checked = null;
@@ -514,7 +514,7 @@ test "a newer build already selected installs quietly: no older release found, t
     job.checked.?.selected.released.version = .{ .schema = 60, .patch = 2 };
     job.phase.store(.publishing, .release);
     try std.testing.expectEqual(upgrade_status.Run.checking, job.status());
-    job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 2 } } }, .hosts = .{ .version = .{ .schema = 60, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .superseded } }}) }, .store = "" };
+    job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 2 } } }, .hosts = .{ .version = .{ .schema = 60, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .superseded } }}) }, .store = "" };
     job.finish();
     try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .{ .superseded = .{ .schema = 60, .patch = 2 } }, .outcome = .compatible } }, job.status());
     job.result = null;
@@ -526,7 +526,7 @@ test "the selected build already current installs quietly: no found release, the
     job.checked.?.selected.released.version = .{ .schema = 60, .patch = 1 };
     job.phase.store(.publishing, .release);
     try std.testing.expectEqual(upgrade_status.Run.checking, job.status());
-    job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 1 } } }, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .not_needed } }}) }, .store = "" };
+    job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 1 } } }, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .not_needed } }}) }, .store = "" };
     job.finish();
     try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 1 } }, .outcome = .compatible } }, job.status());
     job.result = null;
@@ -537,7 +537,7 @@ test "relaunch uses only an installed receipt selection and keeps every guidance
     const Installation = @import("Installation.zig");
     const receipt: Installation.Receipt = .{ .operation_build = "/downloaded/target", .selected_after = "/published/selection", .selected_version = .{ .schema = 60, .patch = 1 } };
     for ([_]bool{ false, true }) |installed| {
-        var job: Self = .{ .finished = true, .result = .{ .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt }, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/store", .state = .{ .outcome = .not_needed } }}) }, .store = "/store" } };
+        var job: Self = .{ .finished = true, .result = .{ .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt }, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "/store", .state = .{ .outcome = .not_needed } }}) }, .store = "/store" } };
         if (installed) try std.testing.expectEqualStrings("/published/selection", job.relaunchBuild().?) else try std.testing.expect(job.relaunchBuild() == null);
         try std.testing.expect(!job.hasGuidance());
         job.failure = error.ConnectionRefused;
@@ -569,7 +569,7 @@ test "relaunch job retains the result owner's guidance for every activation and 
         for ([_]bool{ false, true }) |installed| {
             const result: upgrade.Result = .{
                 .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt },
-                .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "/store", .state = .{ .outcome = activation } }}) },
+                .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_report.zig").Entry{.{ .socket = "", .store = "/store", .state = .{ .outcome = activation } }}) },
                 .store = "/store",
             };
             const job: Self = .{ .finished = true, .result = result };
@@ -603,7 +603,7 @@ test "#1792 Esc while preparing ends cancelled without failure guidance" {
 }
 
 test "the Upgrade ending uses every Host result not the selected Store supersession" {
-    var entries = [_]@import("host_restart_all.zig").Entry{
+    var entries = [_]@import("host_restart_report.zig").Entry{
         .{ .socket = "", .store = "/selected", .state = .{ .outcome = .superseded } },
         .{ .socket = "", .store = "/other", .state = .{ .outcome = .{ .ready = .{ .instance = @splat(1), .pid = 42 } } } },
     };

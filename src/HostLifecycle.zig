@@ -110,11 +110,11 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, direc
             .observe => seen.observed = if (client.observeHostForUpgrade(allocator, io, directory, null)) |value| observed: {
                 observed = value;
                 break :observed true;
-            } else |_| false,
+            } else |err| if (err == error.OutOfMemory) return err else false,
             .snapshot => seen.snapshot = if (identity.snapshot(allocator, observed.pid)) |value| taken: {
                 snapshot = value;
                 break :taken true;
-            } else |_| false,
+            } else |err| if (err == error.OutOfMemory) return err else false,
             .version => seen.managed = if (try installedVersion(allocator, io, home, snapshot.?.executable, cancellation)) |value| managed: {
                 version = value;
                 break :managed true;
@@ -143,8 +143,7 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, direc
             },
             .confirm => seen.confirmed = if (client.observeHostForUpgrade(allocator, io, directory, null)) |confirmed|
                 sameHost(observed, confirmed) and (identity.generation(observed.pid) catch 0) == snapshot.?.started
-            else |_|
-                false,
+            else |err| if (err == error.OutOfMemory) return err else false,
         },
         .absent => return .absent,
         .unsupported => |reason| return .{ .unsupported = reason },
@@ -359,11 +358,133 @@ fn verifyPass(init: std.process.Init, allocator: std.mem.Allocator, plan: *const
     };
 }
 
+/// Executes the activation policy with a single effect owner. An effect failure
+/// becomes `.faulted` at the exact effect that failed, so the outcome carries its
+/// certainty to every caller.
+pub fn runActivation(initial: activation.Facts, driver: anytype) activation.Outcome {
+    var facts = initial;
+    while (true) {
+        const effect = activation.next(facts, driver.cancelled());
+        if (effect == .done) return effect.done;
+        driver.perform(effect, &facts) catch |err| return .{ .faulted = .{
+            .effect = std.meta.activeTag(effect),
+            .cause = protocol.Bounded(64).from(@errorName(err)) catch unreachable,
+        } };
+    }
+}
+
+const ActivationDriver = struct {
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    plan: ?*const Plan,
+    private: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+    environment: *std.process.Environ.Map,
+    context: process.Context,
+    target: []const u8,
+    version: candidate.Version,
+    cancellation: ?*const client.Cancellation,
+    progress: ?Progress,
+    executable: []const u8 = undefined,
+    request: host_start.Spawn = undefined,
+    checked: ?process.Result = null,
+    current: client.HostControlObservation = undefined,
+
+    fn cancelled(self: *ActivationDriver) bool {
+        process.check(self.cancellation) catch return true;
+        return false;
+    }
+
+    fn perform(self: *ActivationDriver, effect: activation.Effect, facts: *activation.Facts) !void {
+        const plan = self.plan.?;
+        switch (effect) {
+            .resolve_target => {
+                for (plan.snapshot.environment) |entry| {
+                    const equal = std.mem.indexOfScalar(u8, entry, '=').?;
+                    try self.environment.put(entry[0..equal], entry[equal + 1 ..]);
+                }
+                const path = try std.fmt.allocPrint(self.arena.allocator(), "{s}/bin/rui", .{self.target});
+                self.executable = std.Io.Dir.cwd().realPathFileAlloc(self.init.io, path, self.arena.allocator()) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                    facts.target_failed = .resolving;
+                    return;
+                };
+                facts.same_executable = std.mem.eql(u8, self.executable, plan.snapshot.executable);
+            },
+            .confirm_current => facts.current = if (client.observeHostForUpgrade(self.private, self.init.io, plan.sources.request.dir, null)) |value|
+                (if (!sameHost(value, plan.observed) or (identity.generation(value.pid) catch 0) != plan.snapshot.started)
+                    .changed
+                else
+                    .{ .same = .{ .running = .{ .instance = value.facts.instance, .pid = value.pid }, .settings = value.facts.settings_digest } })
+            else |err| if (err == error.OutOfMemory) return err else .unreadable,
+            .reconstruct_sources => facts.sources = if (host_start.restartSources(self.arena.allocator(), plan.sources.request, plan.observed.facts.active_capacity)) |value| sources: {
+                self.request = value;
+                break :sources true;
+            } else |err| if (err == error.OutOfMemory) return err else false,
+            .check_target => {
+                const check_argv = try arguments(self.arena.allocator(), self.executable, self.request, .check);
+                const result = process.runIn(self.private, self.init.io, check_argv, self.cancellation, settings_handoff.max_bytes, .fromSeconds(300), self.context) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                    facts.check = if (err == error.Cancelled) .cancelled else .unavailable;
+                    return;
+                };
+                self.checked = result;
+                facts.check = if (!result.term.success())
+                    (if (try refusal(self.private, result)) |failure| .{ .refused = failure } else .untyped)
+                else if (settings_handoff.accept(result.stdout)) |_|
+                    // The frame owner validates version/framing/bounds. Lifecycle neither
+                    // decodes settings nor reconstructs the target's admitted input; it only
+                    // digests the frame a new Host would be started with.
+                    .{ .ok = settings_handoff.digest(result.stdout) }
+                else |_|
+                    .bad_frame;
+            },
+            .reobserve => facts.before_stop = if (client.observeHostForUpgrade(self.private, self.init.io, self.request.dir, null)) |value| reobserved: {
+                self.current = value;
+                break :reobserved if (sameHost(self.current, plan.observed)) .same else .changed;
+            } else |err| if (err == error.OutOfMemory) return err else .unreadable,
+            .snapshot => facts.snapshot = if (identity.snapshot(self.private, self.current.pid)) |value| fresh: {
+                var taken = value;
+                defer taken.deinit(self.private);
+                break :fresh if (sameSnapshot(&plan.snapshot, &taken)) .same else .changed;
+            } else |err| if (err == error.OutOfMemory) return err else .unreadable,
+            .stop => {
+                // EOF already transferred batch custody. After stop, caller cancellation
+                // cannot abandon this or later entries; start and verification are bounded.
+                Progress.send(self.progress, .stopping);
+                const stopped = try stopObserved(self.init.io, self.private, plan, self.context);
+                facts.stop = if (stopped == .instance_changed) .instance_changed else .done;
+            },
+            .await_retirement => {
+                Progress.send(self.progress, .awaiting_retirement);
+                facts.retired = try retired(self.init.io, self.private, plan);
+            },
+            .start => {
+                Progress.send(self.progress, .starting);
+                try process.waitForTestGate(self.allocator, self.init.io, self.init.environ_map.get("RUI_TEST_UPGRADE_BEFORE_START_GATE"), null, .fromSeconds(300));
+                const start_argv = try arguments(self.arena.allocator(), self.executable, self.request, .start);
+                var start_context = self.context;
+                start_context.input = self.checked.?.stdout;
+                const started = try process.runIn(self.private, self.init.io, start_argv, null, 8192, .fromSeconds(300), start_context);
+                defer process.dispose(self.private, started);
+                facts.start = if (started.term.success())
+                    .started
+                else if (try refusal(self.private, started)) |failure| .{ .refused = failure } else .untyped;
+            },
+            .verify => {
+                Progress.send(self.progress, .verifying);
+                facts.proof = try verify(self.init, self.private, plan, self.executable, self.version, self.context);
+            },
+            .done => unreachable,
+        }
+    }
+};
+
 /// Reads and does what `host_activation.next` asks for, in its order. The
 /// captured environment and every secret it reaches stay in this wiping
 /// allocator; handles and child results stay here.
-pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observation: *const Observation, census: @FieldType(activation.Facts, "census"), target: []const u8, version: candidate.Version, cancellation: ?*const client.Cancellation, progress: ?Progress) !ActivationOutcome {
-    var facts: activation.Facts = .{
+pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observation: *const Observation, census: @FieldType(activation.Facts, "census"), target: []const u8, version: candidate.Version, cancellation: ?*const client.Cancellation, progress: ?Progress) ActivationOutcome {
+    const facts: activation.Facts = .{
         .eligibility = switch (observation.*) {
             .absent => .absent,
             .unsupported => |reason| .{ .unsupported = reason },
@@ -376,111 +497,87 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
         },
         .census = census,
     };
-    const plan: *const Plan = if (observation.* == .managed) &observation.managed else undefined;
+    const plan: ?*const Plan = if (observation.* == .managed) &observation.managed else null;
     var wiping: secret_value.WipingAllocator = .{ .backing = allocator };
     const private = wiping.allocator();
     var arena: std.heap.ArenaAllocator = .init(private);
     defer arena.deinit();
     var environment: std.process.Environ.Map = .init(private);
     defer environment.deinit();
-    const context: process.Context = .{ .environ_map = &environment, .cwd = .{ .path = "/" } };
-    var executable: []const u8 = undefined;
-    var request: host_start.Spawn = undefined;
-    var checked: ?process.Result = null;
-    defer if (checked) |result| process.dispose(private, result);
-    var current: client.HostControlObservation = undefined;
-    while (true) {
-        const cancelled = if (process.check(cancellation)) false else |_| true;
-        switch (activation.next(facts, cancelled)) {
-            .resolve_target => {
-                for (plan.snapshot.environment) |entry| {
-                    const equal = std.mem.indexOfScalar(u8, entry, '=').?;
-                    try environment.put(entry[0..equal], entry[equal + 1 ..]);
-                }
-                const path = try std.fmt.allocPrint(arena.allocator(), "{s}/bin/rui", .{target});
-                executable = std.Io.Dir.cwd().realPathFileAlloc(init.io, path, arena.allocator()) catch |err| {
-                    if (err == error.OutOfMemory) return err;
-                    facts.target_failed = .resolving;
-                    continue;
-                };
-                facts.same_executable = std.mem.eql(u8, executable, plan.snapshot.executable);
-            },
-            .confirm_current => facts.current = if (client.observeHostForUpgrade(private, init.io, plan.sources.request.dir, null)) |value|
-                (if (!sameHost(value, plan.observed) or (identity.generation(value.pid) catch 0) != plan.snapshot.started)
-                    .changed
-                else
-                    .{ .same = .{ .running = .{ .instance = value.facts.instance, .pid = value.pid }, .settings = value.facts.settings_digest } })
-            else |_|
-                .unreadable,
-            .reconstruct_sources => facts.sources = if (host_start.restartSources(arena.allocator(), plan.sources.request, plan.observed.facts.active_capacity)) |value| sources: {
-                request = value;
-                break :sources true;
-            } else |err| if (err == error.OutOfMemory) return err else false,
-            .check_target => {
-                const check_argv = try arguments(arena.allocator(), executable, request, .check);
-                const result = process.runIn(private, init.io, check_argv, cancellation, settings_handoff.max_bytes, .fromSeconds(300), context) catch |err| {
-                    facts.check = if (err == error.Cancelled) .cancelled else .unavailable;
-                    continue;
-                };
-                checked = result;
-                facts.check = if (!result.term.success())
-                    (if (try refusal(private, result)) |failure| .{ .refused = failure } else .untyped)
-                else if (settings_handoff.accept(result.stdout)) |_|
-                    // The frame owner validates version/framing/bounds. Lifecycle neither
-                    // decodes settings nor reconstructs the target's admitted input; it only
-                    // digests the frame a new Host would be started with.
-                    .{ .ok = settings_handoff.digest(result.stdout) }
-                else |_|
-                    .bad_frame;
-            },
-            .reobserve => facts.before_stop = if (client.observeHostForUpgrade(private, init.io, request.dir, null)) |value| reobserved: {
-                current = value;
-                break :reobserved if (sameHost(current, plan.observed)) .same else .changed;
-            } else |_| .unreadable,
-            .snapshot => facts.snapshot = if (identity.snapshot(private, current.pid)) |value| fresh: {
-                var taken = value;
-                defer taken.deinit(private);
-                break :fresh if (sameSnapshot(&plan.snapshot, &taken)) .same else .changed;
-            } else |_| .unreadable,
-            .stop => {
-                // EOF already transferred batch custody. After stop, caller cancellation
-                // cannot abandon this or later entries; start and verification are bounded.
-                Progress.send(progress, .stopping);
-                const stopped = stopObserved(init.io, private, plan, context) catch {
-                    facts.stop = .failed;
-                    continue;
-                };
-                facts.stop = if (stopped == .instance_changed) .instance_changed else .done;
-            },
-            .await_retirement => {
-                Progress.send(progress, .awaiting_retirement);
-                facts.retired = try retired(init.io, private, plan);
-            },
-            .start => {
-                Progress.send(progress, .starting);
-                process.waitForTestGate(allocator, init.io, init.environ_map.get("RUI_TEST_UPGRADE_BEFORE_START_GATE"), null, .fromSeconds(300)) catch {
-                    facts.start = .unavailable;
-                    continue;
-                };
-                const start_argv = try arguments(arena.allocator(), executable, request, .start);
-                var start_context = context;
-                start_context.input = checked.?.stdout;
-                const started = process.runIn(private, init.io, start_argv, null, 8192, .fromSeconds(300), start_context) catch {
-                    facts.start = .unavailable;
-                    continue;
-                };
-                defer process.dispose(private, started);
-                facts.start = if (started.term.success())
-                    .started
-                else if (try refusal(private, started)) |failure| .{ .refused = failure } else .untyped;
-            },
-            .verify => {
-                Progress.send(progress, .verifying);
-                facts.proof = try verify(init, private, plan, executable, version, context);
-            },
-            .done => |outcome| return outcome,
+    var driver: ActivationDriver = .{
+        .init = init,
+        .allocator = allocator,
+        .plan = plan,
+        .private = private,
+        .arena = &arena,
+        .environment = &environment,
+        .context = .{ .environ_map = &environment, .cwd = .{ .path = "/" } },
+        .target = target,
+        .version = version,
+        .cancellation = cancellation,
+        .progress = progress,
+    };
+    defer if (driver.checked) |result| process.dispose(private, result);
+    return runActivation(facts, &driver);
+}
+
+test "SH-136 lifecycle preserves the effect and cause of every unexpected failure" {
+    const effects = [_]std.meta.Tag(activation.Effect){
+        .resolve_target, .confirm_current, .reconstruct_sources, .check_target,
+        .reobserve,      .snapshot,        .stop,                .await_retirement,
+        .start,          .verify,
+    };
+    const stages = [_]?activation.Stage{
+        null, null, null, null, null, null, .stopping, .awaiting_retirement, .starting, .verifying,
+    };
+    const Driver = struct {
+        fail: ?std.meta.Tag(activation.Effect),
+        seen: [effects.len]std.meta.Tag(activation.Effect) = undefined,
+        count: usize = 0,
+
+        fn cancelled(_: *@This()) bool {
+            return false;
         }
+        fn perform(self: *@This(), effect: activation.Effect, facts: *activation.Facts) !void {
+            const tag = std.meta.activeTag(effect);
+            self.seen[self.count] = tag;
+            self.count += 1;
+            if (self.fail == tag) return error.InjectedFailure;
+            switch (effect) {
+                .resolve_target => facts.same_executable = true,
+                .confirm_current => facts.current = .{ .same = .{
+                    .running = .{ .instance = @splat(1), .pid = 1 },
+                    .settings = @splat(1),
+                } },
+                .reconstruct_sources => facts.sources = true,
+                .check_target => facts.check = .{ .ok = @splat(2) },
+                .reobserve => facts.before_stop = .same,
+                .snapshot => facts.snapshot = .same,
+                .stop => facts.stop = .done,
+                .await_retirement => facts.retired = true,
+                .start => facts.start = .started,
+                .verify => facts.proof = .{ .unconfirmed = .verifying },
+                .done => unreachable,
+            }
+        }
+    };
+    const initial: activation.Facts = .{ .eligibility = .{ .managed = .{
+        .order = .lt,
+        .environment_parses = true,
+    } } };
+    for (effects, stages, 0..) |effect, stage, index| {
+        var driver: Driver = .{ .fail = effect };
+        const result = runActivation(initial, &driver);
+        try std.testing.expect(result == .faulted);
+        try std.testing.expectEqual(effect, result.faulted.effect);
+        try std.testing.expectEqualStrings("InjectedFailure", result.faulted.cause.slice());
+        try std.testing.expectEqual(stage, result.faulted.effect.stage());
+        try std.testing.expectEqualSlices(std.meta.Tag(activation.Effect), effects[0 .. index + 1], driver.seen[0..driver.count]);
     }
+    var driver: Driver = .{ .fail = null };
+    const result = runActivation(initial, &driver);
+    try std.testing.expectEqual(activation.Stage.verifying, result.unconfirmed);
+    try std.testing.expectEqualSlices(std.meta.Tag(activation.Effect), &effects, driver.seen[0..driver.count]);
 }
 
 test "upgrade lifecycle control equates a Host by process, instance and store, not by wire" {

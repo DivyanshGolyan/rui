@@ -4018,7 +4018,17 @@ test "Host recovery derives launch progress from job custody without copying rea
     try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
 }
 
-test "Host recovery renders the launch result cause without confusing failure and reachability" {
+test "SUI-133 Host recovery renders the launch result cause without confusing failure and reachability" {
+    const Handover = struct {
+        fn summary(outcome: @import("host_activation.zig").Outcome) HostLaunch {
+            return selectedSummary(.{ .outcome = outcome });
+        }
+        fn selectedSummary(selected: @import("host_activation.zig").Selected) HostLaunch {
+            var result: @import("host_launch.zig").Result = .failed(.setup, error.HostRestartFailed);
+            result.outcome.failed.detail = .{ .handover = selected };
+            return result.summary();
+        }
+    };
     const Case = struct { launch: HostLaunch, words: []const u8, retry: bool = false };
     const cases = [_]Case{
         .{ .launch = .{ .ready = {} }, .words = "" },
@@ -4029,6 +4039,13 @@ test "Host recovery renders the launch result cause without confusing failure an
         .{ .launch = .{ .failed = .{ .kind = .incompatible, .err = error.IncompatibleHost } }, .words = "different Rui version" },
         .{ .launch = .{ .failed = .{ .kind = .provider_unserved, .err = error.HostModelUnavailable } }, .words = "does not serve this provider" },
         .{ .launch = .{ .failed = .{ .kind = .store_format, .err = error.HostStartupFailed } }, .words = "needs a compatible Rui" },
+        .{ .launch = Handover.summary(.{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "invalid") } }), .words = "settings refused", .retry = true },
+        .{ .launch = Handover.summary(.{ .failed = .stopping }), .words = "stop failed", .retry = true },
+        .{ .launch = Handover.summary(.{ .unconfirmed = .awaiting_retirement }), .words = "retire unconfirmed", .retry = true },
+        .{ .launch = Handover.summary(.{ .unconfirmed = .starting }), .words = "start unconfirmed", .retry = true },
+        .{ .launch = Handover.summary(.{ .unconfirmed = .verifying }), .words = "verify unconfirmed", .retry = true },
+        .{ .launch = Handover.selectedSummary(.{ .failed = .of(.observation, error.OutOfMemory) }), .words = "observation failed", .retry = true },
+        .{ .launch = Handover.selectedSummary(.{ .failed = .of(.selection, error.NoVerifiedRelease) }), .words = "build unverified", .retry = true },
     };
     for (cases) |case| for ([_]HostRecovery.Availability{ .ready, .stopping, .stopped }) |after| {
         errdefer std.debug.print("after={s} words={s}\n", .{ @tagName(after), case.words });
@@ -6325,7 +6342,7 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                         },
                         .result = .{
                             .installation = if (outcome == .unchanged) .{ .unchanged = receipt } else .{ .installed = receipt },
-                            .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = try a.dupe(@import("host_restart_all.zig").Entry, &.{.{ .socket = try a.dupe(u8, ""), .store = try a.dupe(u8, "/store"), .state = .{ .outcome = switch (outcome) {
+                            .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = try a.dupe(@import("host_restart_report.zig").Entry, &.{.{ .socket = try a.dupe(u8, ""), .store = try a.dupe(u8, "/store"), .state = .{ .outcome = switch (outcome) {
                                 .unchanged => .not_needed,
                                 .compatible => .{ .ready = .{ .instance = @splat(1), .pid = 42 } },
                                 .incompatible => .{ .client_incompatible = 42 },
