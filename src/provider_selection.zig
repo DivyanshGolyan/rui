@@ -1,6 +1,7 @@
 const std = @import("std");
 const connection = @import("connection.zig");
 const provider_route = @import("provider_route.zig");
+const connection_names = @import("connection_names.zig");
 
 pub const Readiness = enum {
     configured,
@@ -14,26 +15,34 @@ pub const Readiness = enum {
     }
 };
 
-/// One readiness per built-in provider, keyed by connection name. A name
-/// that is not built in has no readiness here, and reads as missing.
+/// The readiness of each served name: the built-in providers first, in their fixed
+/// order, then key connections in document order. A name that is not served reads as missing.
 pub const Readinesses = struct {
-    states: [provider_route.built_in_names.len]Readiness,
+    map: connection_names.NameArray(Readiness) = .{},
 
     pub fn initFill(state: Readiness) Readinesses {
-        return .{ .states = @splat(state) };
+        var result: Readinesses = .{};
+        for (provider_route.built_in_names) |name| result.map.set(name, state) catch unreachable;
+        return result;
     }
 
     pub fn get(self: *const Readinesses, name: connection.Name) Readiness {
-        return self.states[slot(name) orelse return .missing];
+        return self.map.get(name) orelse .missing;
     }
 
+    /// Sets a name's readiness, adding the name if it is not yet served.
     pub fn set(self: *Readinesses, name: connection.Name, state: Readiness) void {
-        self.states[slot(name).?] = state;
+        self.map.set(name, state) catch unreachable;
     }
 
-    fn slot(name: connection.Name) ?usize {
-        for (provider_route.built_in_names, 0..) |built_in, at| if (built_in.eql(name)) return at;
-        return null;
+    /// The served names, in order.
+    pub fn names(self: *const Readinesses) []const connection.Name {
+        return self.map.names[0..self.map.len];
+    }
+
+    /// The readiness of each served name, in the same order as `names`.
+    pub fn states(self: *const Readinesses) []const Readiness {
+        return self.map.values[0..self.map.len];
     }
 };
 
@@ -106,7 +115,8 @@ test "prospective selection does not fall back from a stale or unavailable prefe
 }
 
 test "Codex selection accepts identifiers without claiming model qualification" {
-    const capability = @import("model_capability.zig").capabilities(&Readinesses.initFill(.configured))[0];
+    var readiness: Readinesses = .initFill(.configured);
+    const capability = @import("model_capability.zig").capabilities(&readiness).slice()[0];
     try std.testing.expectEqualStrings("family=variant", (try resolve(&.{capability}, null, "family=variant", null, null)).selected.model);
     const maximum = @as([256]u8, @splat('x'));
     try std.testing.expectEqualStrings(&maximum, (try resolve(&.{capability}, null, &maximum, null, null)).selected.model);
@@ -115,7 +125,8 @@ test "Codex selection accepts identifiers without claiming model qualification" 
 }
 
 test "renewal due selects a sole provider and resolves only absent model pins" {
-    var capability = @import("model_capability.zig").capabilities(&Readinesses.initFill(.renewal_due))[0];
+    var readiness: Readinesses = .initFill(.renewal_due);
+    var capability = @import("model_capability.zig").capabilities(&readiness).slice()[0];
     capability.recommended_model = "future-recommendation";
     const inherited = try resolve(&.{capability}, null, null, null, null);
     try std.testing.expect(inherited == .selected);

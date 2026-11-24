@@ -1,6 +1,7 @@
 const std = @import("std");
 const model_capability = @import("model_capability.zig");
 const protocol = @import("protocol.zig");
+const connection = @import("connection.zig");
 const provider_selection = @import("provider_selection.zig");
 pub const Readinesses = provider_selection.Readinesses;
 pub const max_file_bytes = 1024;
@@ -111,13 +112,14 @@ const provider_names = blk: {
     break :blk text;
 };
 
-pub fn otherWayIn(saved: []const u8, provider: protocol.Provider) bool {
+pub fn otherWayIn(saved: []const u8, chosen: []const u8) bool {
+    const provider = std.meta.stringToEnum(protocol.Provider, chosen) orelse return false;
     const other = provider.sameAccount() orelse return false;
     return std.mem.eql(u8, saved, @tagName(other));
 }
 
 pub fn validateEdit(edit: Edit) !void {
-    if (edit.provider == .set and std.meta.stringToEnum(protocol.Provider, edit.provider.set) == null) return error.UnsupportedPreferenceProvider;
+    if (edit.provider == .set and connection.Name.parse(edit.provider.set) == null) return error.UnsupportedPreferenceProvider;
     if (edit.model == .set and !model_capability.validModelSyntax(edit.model.set)) return error.InvalidPreferenceModel;
     if (edit.store == .set) {
         const value = edit.store.set;
@@ -126,15 +128,22 @@ pub fn validateEdit(edit: Edit) !void {
     }
 }
 
+/// Whether the Host serves this name: a built-in or a key connection in the readiness list.
+fn served(readiness: *const Readinesses, text: []const u8) bool {
+    const name = connection.Name.parse(text) orelse return false;
+    for (readiness.names()) |*one| if (one.eql(name)) return true;
+    return false;
+}
+
 pub fn apply(saved: Values, edit: Edit, store: ?[]const u8, readiness: *const Readinesses) !Values {
     try validateEdit(edit);
+    if (edit.provider == .set and !served(readiness, edit.provider.set)) return error.UnsupportedPreferenceProvider;
     var values = saved;
     if (edit.store == .set) {
         values.store.set(store.?) catch return error.InvalidPreferenceStore;
     }
     if (edit.provider == .set) {
-        const chosen = std.meta.stringToEnum(protocol.Provider, edit.provider.set).?;
-        if (!saved.provider.eql(edit.provider.set) and !otherWayIn(saved.provider.slice(), chosen)) values.model = .{};
+        if (!saved.provider.eql(edit.provider.set) and !otherWayIn(saved.provider.slice(), edit.provider.set)) values.model = .{};
         values.provider.set(edit.provider.set) catch unreachable;
     }
     if (edit.notifications) |on| values.notifications = on;
@@ -152,7 +161,7 @@ pub fn apply(saved: Values, edit: Edit, store: ?[]const u8, readiness: *const Re
         .keep => {},
         .clear => values.model = .{},
         .set => |model| {
-            const choice = provider_selection.resolve(&model_capability.capabilities(readiness), null, model, if (values.provider.len != 0) values.provider.slice() else null, null) catch |err| switch (err) {
+            const choice = provider_selection.resolve(model_capability.capabilities(readiness).slice(), null, model, if (values.provider.len != 0) values.provider.slice() else null, null) catch |err| switch (err) {
                 error.UnsupportedSelectionProvider => return error.UnsupportedPreferenceProvider,
                 error.UnsupportedSelectionModel => return error.UnsupportedPreferenceModel,
             };

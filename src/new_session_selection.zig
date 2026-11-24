@@ -55,7 +55,7 @@ pub const Snapshot = struct {
 
     fn resolveWith(self: *const Snapshot, explicit_provider: ?[]const u8, readiness: *const provider_selection.Readinesses) !?Binding {
         const selection = try provider_selection.resolve(
-            &model_capability.capabilities(readiness),
+            model_capability.capabilities(readiness).slice(),
             explicit_provider,
             self.intent.model,
             if (self.defaults.provider.len == 0) null else self.defaults.provider.slice(),

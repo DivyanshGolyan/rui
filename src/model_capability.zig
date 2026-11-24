@@ -4,6 +4,7 @@ const catalog = @import("model_catalog.zig");
 const product_defaults = @import("product_defaults.zig");
 const provider_name = @import("provider_name.zig");
 const provider_selection = @import("provider_selection.zig");
+const connection = @import("connection.zig");
 
 pub const max_model_bytes = catalog.max_model_bytes;
 pub const ReasoningEffort = catalog.ReasoningEffort;
@@ -97,10 +98,23 @@ pub fn compactionPolicy(model: []const u8, compacts: bool, trigger_override: ?u6
 
 const provider_count = @typeInfo(provider_name.Provider).@"enum".field_names.len;
 
-pub fn capabilities(readiness: *const provider_selection.Readinesses) [provider_count]provider_selection.Capability {
-    var out: [provider_count]provider_selection.Capability = undefined;
-    for (&out, std.enums.values(provider_name.Provider)) |*entry, provider|
-        entry.* = .{ .name = @tagName(provider), .recommended_model = product_defaults.recommended_model, .admits_model = validModelSyntax, .readiness = readiness.get(provider_route.nameOf(provider)) };
+/// The capabilities of the served names, in the Readinesses order. Names point into the readiness they came from,
+/// so the list must not outlive it.
+pub const Capabilities = struct {
+    items: [connection.max_list]provider_selection.Capability = undefined,
+    len: usize = 0,
+
+    pub fn slice(self: *const Capabilities) []const provider_selection.Capability {
+        return self.items[0..self.len];
+    }
+};
+
+pub fn capabilities(readiness: *const provider_selection.Readinesses) Capabilities {
+    var out: Capabilities = .{};
+    for (readiness.names(), readiness.states()) |*name, state| {
+        out.items[out.len] = .{ .name = name.slice(), .recommended_model = product_defaults.recommended_model, .admits_model = validModelSyntax, .readiness = state };
+        out.len += 1;
+    }
     return out;
 }
 
@@ -195,22 +209,22 @@ test "a new Session keeps saved effort unless its listed model excludes it" {
 test "selection admits any ID with valid syntax, listed or not" {
     var readiness: provider_selection.Readinesses = .initFill(.missing);
     readiness.set(provider_route.nameOf(.codex), .configured);
-    const selectable = capabilities(&readiness);
-    try std.testing.expectEqualStrings("family=variant", (try provider_selection.resolve(&selectable, null, "family=variant", null, null)).selected.model);
-    try std.testing.expectEqualStrings("stale-pin", (try provider_selection.resolve(&selectable, null, null, "codex", "stale-pin")).selected.model);
-    try std.testing.expectEqualStrings(product_defaults.recommended_model, (try provider_selection.resolve(&selectable, null, null, null, null)).selected.model);
-    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&selectable, null, "bad model", null, null));
+    const selectable = capabilities(&readiness).slice();
+    try std.testing.expectEqualStrings("family=variant", (try provider_selection.resolve(selectable, null, "family=variant", null, null)).selected.model);
+    try std.testing.expectEqualStrings("stale-pin", (try provider_selection.resolve(selectable, null, null, "codex", "stale-pin")).selected.model);
+    try std.testing.expectEqualStrings(product_defaults.recommended_model, (try provider_selection.resolve(selectable, null, null, null, null)).selected.model);
+    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(selectable, null, "bad model", null, null));
 }
 
 test "every built-in provider is selectable by its label, and two ready ones ask for a choice" {
     var readiness: provider_selection.Readinesses = .initFill(.configured);
-    const both = capabilities(&readiness);
-    try std.testing.expectEqual(provider_selection.Selection.chooser, try provider_selection.resolve(&both, null, null, null, null));
-    try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(&both, "openai", null, null, null)).selected.provider);
+    const both = capabilities(&readiness).slice();
+    try std.testing.expectEqual(provider_selection.Selection.chooser, try provider_selection.resolve(both, null, null, null, null));
+    try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(both, "openai", null, null, null)).selected.provider);
     readiness.set(provider_route.nameOf(.codex), .missing);
     readiness.set(provider_route.nameOf(.chatgpt), .missing);
-    const one = capabilities(&readiness);
-    try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(&one, null, null, null, null)).selected.provider);
+    const one = capabilities(&readiness).slice();
+    try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(one, null, null, null, null)).selected.provider);
 }
 
 test "selected facts alone own capability effort context and help" {

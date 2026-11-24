@@ -86,7 +86,7 @@ fn loginOutcome(before: *const Values, published: bool, provider: protocol.Provi
 }
 
 fn loginMayReplace(saved: []const u8, provider: protocol.Provider) bool {
-    return saved.len == 0 or otherWayIn(saved, provider);
+    return saved.len == 0 or otherWayIn(saved, @tagName(provider));
 }
 
 const otherWayIn = document.otherWayIn;

@@ -1,3 +1,4 @@
+const provider_selection = @import("provider_selection.zig");
 const credential_location = @import("credential_location.zig");
 const std = @import("std");
 const hs = @import("host_settings.zig");
@@ -480,6 +481,41 @@ fn defaultKeySource(init: std.process.Init, key: *hs.Secret(.provider_saved)) !v
     const path = credential_location.default(init.environ_map, .openai, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
     key.source = .{ .file = .{} };
     try key.source.file.text.set(path);
+}
+
+/// Sets each key connection the document names to its readiness: configured when its key loads and is
+/// valid, missing when no key is there, credential_error otherwise. Built-in readiness is left as it is.
+pub fn inspectConnections(init: std.process.Init, dir: []const u8, readiness: *provider_selection.Readinesses) !void {
+    const settings = try init.gpa.create(hs.Settings);
+    defer init.gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var problem: cli_args.Refusal = undefined;
+    const parsed = try cli_args.Command.host_serve.definition().parse(&.{}, init.arena.allocator(), &problem);
+    var failure: start_report.Failure = undefined;
+    try fillAt(init, &parsed, dir, settings, &failure);
+    for (settings.connections.entries) |*entry| {
+        const served = &entry.value;
+        readiness.set(served.name, connectionReadiness(init, served));
+    }
+}
+
+fn connectionReadiness(init: std.process.Init, served: *const served_connection.Connection) provider_selection.Readiness {
+    const key = switch (served.credential) {
+        .key => |*key| key,
+        else => return .credential_error,
+    };
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const source: KeySource = switch (key.source) {
+        .saved => .{ .file = credential_location.connectionKeyFile(init.environ_map, served.name.slice(), &path_buffer) catch return .credential_error },
+        .file => |path| .{ .file = path },
+        .env => |variable| .{ .env = variable },
+        .command => return .credential_error,
+    };
+    var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
+    defer std.crypto.secureZero(u8, &key_buffer);
+    const bytes = keyBytes(init, source, &key_buffer) catch |err| return if (err == error.ApiKeyMissing) .missing else .credential_error;
+    return if (api_key.valid(bytes)) .configured else .credential_error;
 }
 
 pub fn inspectConnection(init: std.process.Init, dir: []const u8) !ConnectionInfo {

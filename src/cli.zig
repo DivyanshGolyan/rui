@@ -2060,8 +2060,15 @@ fn activateOverviewConnectionUsing(init: std.process.Init, intent: new_session_s
 /// The Store's readiness as its Host reads the OpenAI key, over the local readiness of every other provider.
 /// A failed inspect, or a Store whose Host names no key source, leaves the local readiness standing.
 fn storeReadiness(init: std.process.Init, store: []const u8, local: provider_selection.Readinesses) defaults_report.Overlay {
-    const info = host_start.inspectConnection(init, store) catch return defaults_report.overlayStore(local, null);
-    return defaults_report.overlayStore(local, .{ .readiness = info.readiness, .key_source = copiedKeySource(init, info.servedKey()) });
+    const info = host_start.inspectConnection(init, store) catch return overlayConnections(init, store, defaults_report.overlayStore(local, null));
+    return overlayConnections(init, store, defaults_report.overlayStore(local, .{ .readiness = info.readiness, .key_source = copiedKeySource(init, info.servedKey()) }));
+}
+
+/// Adds the readiness of each key connection the Store names to the overlay's readiness, by name.
+fn overlayConnections(init: std.process.Init, store: []const u8, overlay: defaults_report.Overlay) defaults_report.Overlay {
+    var result = overlay;
+    host_start.inspectConnections(init, store, &result.readiness) catch {};
+    return result;
 }
 
 /// The key source copied into the arena, so it outlives the inspect result; null when none or when the copy fails.
@@ -2082,8 +2089,7 @@ fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_sel
 fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding: new_session_selection.Binding, readiness: *const provider_selection.Readinesses, assignments: []const []const u8, ops: host_start.Ops, result: *HostLaunchResult) void {
     startHost(init, store, assignments, readiness, ops, null, result);
     if (result.outcome == .failed) return;
-    const provider = std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?;
-    if (result.outcome.ready.facts.capabilities.connections.route(@tagName(provider)) == .unserved) {
+    if (result.outcome.ready.facts.capabilities.connections.route(binding.provider.slice()) == .unserved) {
         const selector = result.outcome.ready.selector;
         launchFailure(result, .provider_unserved, error.HostModelUnavailable, selector.slice());
     }
@@ -2107,7 +2113,7 @@ fn joinedProviders(comptime separator: []const u8) []const u8 {
 }
 
 fn localReadiness(init: std.process.Init) provider_selection.Readinesses {
-    var readiness: provider_selection.Readinesses = undefined;
+    var readiness: provider_selection.Readinesses = .{};
     for (std.enums.values(protocol.Provider)) |provider|
         readiness.set(provider_route.nameOf(provider), providerReadiness(init, provider) catch .credential_error);
     return readiness;
