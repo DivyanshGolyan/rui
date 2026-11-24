@@ -1181,8 +1181,8 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
     }
     // A declaration this request applied is the lane's set now, so the selections record it as their app set.
     if (reads.apps.declaration != null) {
-        if (reads.tools) |*tools| tools.app_set = reads.apps.set_id;
-        if (reads.loaded_tools) |*loaded| loaded.app_set = reads.apps.set_id;
+        if (reads.tools) |*tools| tools.app_set = reads.apps.set_id orelse 0;
+        if (reads.loaded_tools) |*loaded| loaded.app_set = reads.apps.set_id orelse 0;
     }
     if (creating or configuration.tools.state == .value) {
         const tools = &(reads.tools orelse return error.CorruptStore);
