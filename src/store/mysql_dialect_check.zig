@@ -561,13 +561,9 @@ const migrated_database_sql = "{[migrated]s}";
 const fresh_database_sql = "{[fresh]s}";
 
 fn load(comptime name: []const u8, text: []const u8, unchecked: bool) !void {
-    try setupNamed("USE " ++ name);
-    if (unchecked) try setup("SET FOREIGN_KEY_CHECKS=0");
-    defer if (unchecked) restore("SET FOREIGN_KEY_CHECKS=1");
-    if (try run(text)) |refused| {
-        std.log.err("MySQL migration check: {s} refused: {f}", .{ name, refused });
-        return error.MysqlRefusedMigration;
-    }
+    const database = try std.fmt.allocPrint(std.testing.allocator, name, sqlNames(name, names));
+    defer std.testing.allocator.free(database);
+    try loadIn(database, text, unchecked);
 }
 
 fn writeResult(text: []const u8, out: *std.Io.Writer) !void {
@@ -701,15 +697,15 @@ fn templateBuilt(shape: Shape) bool {
     return false;
 }
 
-/// Runs `text` in `database`, a run-time name. `unchecked` turns foreign key checks off, as `load` does.
-/// Caller holds the mutex.
+/// Runs `text` in `database`, a run-time name; the one SQL loader every history and migration check uses. `unchecked`
+/// turns foreign key checks off for the statement and restores them. Caller holds the mutex.
 fn loadIn(database: []const u8, text: []const u8, unchecked: bool) !void {
     var use_buffer: [128]u8 = undefined;
     try setup(try std.fmt.bufPrint(&use_buffer, "USE {s}", .{database}));
     if (unchecked) try setup("SET FOREIGN_KEY_CHECKS=0");
     defer if (unchecked) restore("SET FOREIGN_KEY_CHECKS=1");
     if (try run(text)) |refused| {
-        std.log.err("MySQL history: {s} refused: {f}", .{ database, refused });
+        std.log.err("MySQL migration check: {s} refused: {f}", .{ database, refused });
         return error.MysqlRefusedMigration;
     }
 }
