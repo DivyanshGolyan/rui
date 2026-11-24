@@ -10,7 +10,7 @@ const product_defaults = @import("product_defaults.zig");
 pub const Setting = enum(u2) {
     model = 0,
     workspace = 1,
-    provider = 2,
+    connection = 2,
 };
 
 /// A non-empty set of missing settings, listed in `Setting` order.
@@ -65,7 +65,7 @@ pub const Missing = struct {
         try out.writeByte(']');
     }
 
-    pub const max_json_bytes = "[\"model\",\"workspace\",\"provider\"]".len;
+    pub const max_json_bytes = "[\"model\",\"workspace\",\"connection\"]".len;
 
     /// Reads the wire list back: one to three distinct setting names.
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Missing {
@@ -113,7 +113,7 @@ pub fn check(creation: Creation) Outcome {
     if (!creation.model) bits |= bit(.model);
     if (!creation.workspace and !creation.parent) bits |= bit(.workspace);
     const provider = resolveProvider(creation.provider, creation.served);
-    if (provider == null) bits |= bit(.provider);
+    if (provider == null) bits |= bit(.connection);
     if (bits != 0) return .{ .missing = .{ .bits = bits } };
     return .{ .complete = .{ .provider = provider.? } };
 }
@@ -142,7 +142,7 @@ test "check names every missing setting over model, workspace, parent, provider 
     const cases = [_]Case{
         .{ .model = true, .workspace = true, .parent = false, .provider = null, .served = .none, .expected = "ok:codex" },
         .{ .model = true, .workspace = true, .parent = false, .provider = null, .served = .one, .expected = "ok:openai" },
-        .{ .model = true, .workspace = true, .parent = false, .provider = null, .served = .two, .expected = "[\"provider\"]" },
+        .{ .model = true, .workspace = true, .parent = false, .provider = null, .served = .two, .expected = "[\"connection\"]" },
         .{ .model = true, .workspace = true, .parent = false, .provider = connection.Name.parse("chatgpt").?, .served = .two, .expected = "ok:chatgpt" },
         .{ .model = true, .workspace = true, .parent = false, .provider = connection.Name.parse("chatgpt").?, .served = .none, .expected = "ok:chatgpt" },
         .{ .model = true, .workspace = false, .parent = false, .provider = null, .served = .one, .expected = "[\"workspace\"]" },
@@ -151,9 +151,9 @@ test "check names every missing setting over model, workspace, parent, provider 
         .{ .model = false, .workspace = true, .parent = false, .provider = null, .served = .one, .expected = "[\"model\"]" },
         .{ .model = false, .workspace = false, .parent = true, .provider = connection.Name.parse("codex").?, .served = .two, .expected = "[\"model\"]" },
         .{ .model = false, .workspace = false, .parent = false, .provider = null, .served = .none, .expected = "[\"model\",\"workspace\"]" },
-        .{ .model = false, .workspace = true, .parent = false, .provider = null, .served = .two, .expected = "[\"model\",\"provider\"]" },
-        .{ .model = true, .workspace = false, .parent = false, .provider = null, .served = .two, .expected = "[\"workspace\",\"provider\"]" },
-        .{ .model = false, .workspace = false, .parent = false, .provider = null, .served = .two, .expected = "[\"model\",\"workspace\",\"provider\"]" },
+        .{ .model = false, .workspace = true, .parent = false, .provider = null, .served = .two, .expected = "[\"model\",\"connection\"]" },
+        .{ .model = true, .workspace = false, .parent = false, .provider = null, .served = .two, .expected = "[\"workspace\",\"connection\"]" },
+        .{ .model = false, .workspace = false, .parent = false, .provider = null, .served = .two, .expected = "[\"model\",\"workspace\",\"connection\"]" },
         .{ .model = false, .workspace = false, .parent = false, .provider = connection.Name.parse("openai").?, .served = .two, .expected = "[\"model\",\"workspace\"]" },
     };
     for (cases) |case| {
@@ -191,11 +191,11 @@ test "the stored missing set is 1 through 7 and lists settings in setting order"
         try std.testing.expectEqual(missing.count(), seen);
     }
     try std.testing.expectEqual(@as(u8, 1), (Missing{ .bits = 0b001 }).stored());
-    try std.testing.expect((Missing{ .bits = 0b100 }).contains(.provider));
+    try std.testing.expect((Missing{ .bits = 0b100 }).contains(.connection));
     var buffer: [Missing.max_json_bytes]u8 = undefined;
     var out: std.Io.Writer = .fixed(&buffer);
     try Missing.all.writeJson(&out);
-    try std.testing.expectEqualStrings("[\"model\",\"workspace\",\"provider\"]", out.buffered());
+    try std.testing.expectEqualStrings("[\"model\",\"workspace\",\"connection\"]", out.buffered());
     for (1..8) |value| {
         const missing = try Missing.fromStored(value);
         var json: [Missing.max_json_bytes]u8 = undefined;

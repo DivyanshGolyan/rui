@@ -160,7 +160,7 @@ def configure(state, store, key, session=None):
         key,
         "--workspace",
         ROOT,
-        "--provider",
+        "--connection",
         "codex",
         "--model",
         "gpt-6-sol",

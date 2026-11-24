@@ -1,6 +1,7 @@
 const std = @import("std");
 const failure_class = @import("failure_class.zig");
-const Provider = @import("provider_name.zig").Provider;
+const connection = @import("connection.zig");
+const provider_route = @import("provider_route.zig");
 
 pub const Mark = enum { needs_you, active, queued, waiting, finished, failed, stopped, newer, none };
 pub const Tone = enum { ink, normal, quiet, attention, failure };
@@ -23,13 +24,13 @@ pub const Cause = struct {
     key: ?[]const u8 = null,
 };
 
-pub fn cause(code: []const u8, provider: ?Provider) Cause {
+pub fn cause(code: []const u8, provider: ?connection.Name) Cause {
     if (std.mem.eql(u8, code, failure_class.ordered_input_not_supported)) return .{ .words = "This Host cannot send this input yet; no provider request was sent" };
     if (std.mem.eql(u8, code, failure_class.ordered_input_limit)) return .{ .words = "Input exceeds this Host's request limit; no provider request was sent" };
     if (std.mem.eql(u8, code, "malformed_provider_output")) return .{ .words = "The model's reply didn't come through", .key = "ctrl+r retries" };
     return switch (failure_class.of(code)) {
         .policy => .{ .words = "Refused by the provider" },
-        .quota => .{ .words = "Out of quota", .place = (if (provider) |known| known.usage() else null) orelse "Settings" },
+        .quota => .{ .words = "Out of quota", .place = (if (provider) |known| if (provider_route.builtInOf(known)) |built_in| built_in.usage() else null else null) orelse "Settings" },
         .plan => .{ .words = "Model not in plan", .place = "Settings" },
         .model => .{ .words = "Model not served", .key = "ctrl+r retries" },
         .sign_in => .{ .words = "Sign-in expired", .place = "Settings" },
@@ -81,19 +82,19 @@ test "MRK-1 status marks and spinner represent their states" {
 }
 
 test "MRK-2 failure causes provide the appropriate explanation and advice" {
-    const Case = struct { code: []const u8, provider: ?Provider = null, words: []const u8, key: ?[]const u8, place: ?[]const u8 = null };
+    const Case = struct { code: []const u8, provider: ?connection.Name = null, words: []const u8, key: ?[]const u8, place: ?[]const u8 = null };
     const cases = [_]Case{
         .{ .code = "malformed_provider_output", .words = "The model's reply didn't come through", .key = "ctrl+r retries" },
         .{ .code = "provider_policy", .words = "Refused by the provider", .key = null },
         .{ .code = "provider_quota", .words = "Out of quota", .key = null, .place = "Settings" },
-        .{ .code = "provider_quota", .words = "Out of quota", .provider = .codex, .key = null, .place = "Settings" },
-        .{ .code = "provider_quota", .words = "Out of quota", .provider = .openai, .key = null, .place = "Settings" },
-        .{ .code = "provider_quota", .words = "Out of quota", .provider = .chatgpt, .key = null, .place = "Manage usage: https://chatgpt.com/settings/usage" },
+        .{ .code = "provider_quota", .words = "Out of quota", .provider = connection.Name.parse("codex"), .key = null, .place = "Settings" },
+        .{ .code = "provider_quota", .words = "Out of quota", .provider = connection.Name.parse("openai"), .key = null, .place = "Settings" },
+        .{ .code = "provider_quota", .words = "Out of quota", .provider = connection.Name.parse("chatgpt"), .key = null, .place = "Manage usage: https://chatgpt.com/settings/usage" },
         .{ .code = "provider_plan", .words = "Model not in plan", .key = null, .place = "Settings" },
-        .{ .code = "provider_plan", .words = "Model not in plan", .provider = .chatgpt, .key = null, .place = "Settings" },
+        .{ .code = "provider_plan", .words = "Model not in plan", .provider = connection.Name.parse("chatgpt"), .key = null, .place = "Settings" },
         .{ .code = "provider_model_unavailable", .words = "Model not served", .key = "ctrl+r retries" },
         .{ .code = "provider_http_401", .words = "Sign-in expired", .key = null, .place = "Settings" },
-        .{ .code = "provider_http_401", .words = "Sign-in expired", .provider = .chatgpt, .key = null, .place = "Settings" },
+        .{ .code = "provider_http_401", .words = "Sign-in expired", .provider = connection.Name.parse("chatgpt"), .key = null, .place = "Settings" },
         .{ .code = "provider_api_key_rejected", .words = "API key rejected", .key = null, .place = "Settings" },
         .{ .code = "ResourceExceeded", .words = "Context full", .key = null },
         .{ .code = "provider_tls_verification_failed", .words = "Provider unreachable", .key = "ctrl+r retries" },
@@ -122,11 +123,12 @@ test "MRK-2 failure causes provide the appropriate explanation and advice" {
         for (codes) |code| {
             provider_seen.insert(failure_class.of(code));
             const unknown = cause(code, null);
-            for (std.enums.values(Provider)) |provider| {
+            for (std.enums.values(@import("provider_name.zig").Provider)) |built_in| {
+                const provider = connection.Name.parse(@tagName(built_in)).?;
                 const shown = cause(code, provider);
                 try std.testing.expectEqualStrings(unknown.words, shown.words);
                 try std.testing.expectEqual(unknown.key, shown.key);
-                const usage = if (failure_class.of(code) == .quota) provider.usage() else null;
+                const usage = if (failure_class.of(code) == .quota) built_in.usage() else null;
                 try std.testing.expectEqualStrings(usage orelse unknown.place orelse "", shown.place orelse "");
             }
         }

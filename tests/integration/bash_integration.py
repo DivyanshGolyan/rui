@@ -705,7 +705,7 @@ def walkthrough():
             "walkthrough-config",
             "--workspace",
             workspace,
-            "--provider",
+            "--connection",
             "codex",
             "--model",
             "gpt-6-sol",

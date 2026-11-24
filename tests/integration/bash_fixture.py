@@ -67,7 +67,7 @@ def configure(state, store, key, permission="ask", workspace=fixture.ROOT):
         key,
         "--workspace",
         workspace,
-        "--provider",
+        "--connection",
         "codex",
         "--model",
         "gpt-6-sol",

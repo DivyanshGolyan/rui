@@ -370,7 +370,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
         .reference = session_ref,
         .parent = if (current.parent_ref) |*parent| parent.slice() else null,
         .workspace = current.workspace.slice(),
-        .provider = provider_route.builtInOf(current.provider) orelse unreachable,
+        .provider = current.provider,
         .model = current.model.slice(),
         .compaction_trigger = policy.compaction_trigger,
         .context_estimate = if (turn_policy.comparedPressure(facts.compaction.facts)) |value| @min(value, std.math.maxInt(i64)) else null,
