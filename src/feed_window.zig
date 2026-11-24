@@ -1162,7 +1162,8 @@ test "quote body extraction consumes user renderer provenance and denies lookali
     try std.testing.expectEqualStrings(source ++ "\n", result.text.bytes);
     const normal = try @import("transcript_selection.zig").copy(gpa, &window.document, .{ .from = 0, .to = window.document.length });
     defer gpa.free(normal.text.bytes);
-    try std.testing.expect(std.mem.startsWith(u8, normal.text.bytes, "Finished\n› "));
+    const first_line = "Finished\n  雪e\u{301}\n";
+    try std.testing.expectEqualStrings(first_line, normal.text.bytes[0..first_line.len]);
     try std.testing.expect(std.mem.indexOf(u8, normal.text.bytes, "unknown lookalike body") != null);
 }
 
