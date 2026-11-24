@@ -5,6 +5,7 @@ const skill_suggestions = @import("skill_suggestions.zig");
 const model_capability = @import("model_capability.zig");
 const TerminalText = @import("TerminalText.zig");
 const ReasoningEffort = model_capability.ReasoningEffort;
+const ArchiveState = @import("session_archive.zig").State;
 
 pub const Argument = union(enum) {
     none,
@@ -43,6 +44,7 @@ pub const Options = struct {
 pub const Context = struct {
     model: ?[]const u8 = null,
     effort: ?ReasoningEffort = null,
+    archive_state: ?ArchiveState = null,
 };
 
 pub const Copy = enum { answer, code, file };
@@ -103,6 +105,14 @@ pub const conversation = Commands(ConversationName, .{
     .unarchive = .{ .description = "restore this chat" },
     .unpin = .{ .description = "" },
 });
+
+pub fn conversationArchiveEligible(name: conversation.Name, state: ?ArchiveState) bool {
+    return switch (name) {
+        .archive => state != null and state.? == .active,
+        .unarchive => state != null and state.? == .archived,
+        else => true,
+    };
+}
 
 fn slashed(text: []const u8) bool {
     return text.len != 0 and text[0] == '/' and !std.mem.startsWith(u8, text, "//");
@@ -224,11 +234,22 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             return if (std.mem.indexOfAny(u8, text, " \t\n") == null) .word else .message;
         }
 
-        pub fn listed() List {
+        pub fn listedFor(context: Context) List {
+            return listedWith(context, true);
+        }
+
+        pub fn listedForTests() List {
+            return listedWith(.{}, false);
+        }
+
+        fn listedWith(context: Context, filter_archive: bool) List {
             var list: List = .{ .typed = "", .column = description_column };
             for (names) |name| {
                 const command = table.get(name);
                 if (!command.listed) continue;
+                if (comptime N == ConversationName) {
+                    if (filter_archive and !conversationArchiveEligible(name, context.archive_state)) continue;
+                }
                 list.add(.{ .word = spaced.get(name)[1 .. spaced.get(name).len - @intFromBool(command.argument == .none)], .shown = spaced.get(name)[0 .. spaced.get(name).len - 1], .description = if (command.description.len != 0) command.description else choices_text.get(name), .runs = !requires(command.argument) });
             }
             return list;
@@ -688,19 +709,6 @@ test "a command's list names the choices its word starts, and Tab puts the highl
     }
 }
 
-test "listed commands are every listed name in order, and reload runs immediately" {
-    const listed = conversation.listed();
-    const expected = [_][]const u8{ "archive", "clear", "copy ", "effort ", "model", "new", "pin", "reload-skills", "reload-tools", "rename ", "requests", "result ", "setup ", "unarchive", "unpin" };
-    try std.testing.expectEqual(expected.len, listed.count);
-    for (expected, listed.shown()) |word, entry| try std.testing.expectEqualStrings(word, entry.word);
-    const reload = listed.shown()[7];
-    try std.testing.expectEqualStrings("reload-skills", reload.word);
-    try std.testing.expect(reload.runs);
-    const tools = listed.shown()[8];
-    try std.testing.expectEqualStrings("reload-tools", tools.word);
-    try std.testing.expect(tools.runs);
-}
-
 test "/effort offers every grammar value for an unlisted model" {
     const list = conversation.suggest("/effort ", .{ .model = "unlisted-model", .effort = .max }).?;
     const expected = [_][]const u8{ "none", "low", "medium", "high", "xhigh", "max", "default" };
@@ -820,7 +828,7 @@ test "archive commands retain separate local command identities" {
             try std.testing.expectEqualStrings(name, @tagName(parsed.command.name));
             try std.testing.expectEqualStrings("", parsed.command.argument);
             try std.testing.expect(screen.parse("/" ++ name ++ " other") == .misused);
-            const list = screen.listed();
+            const list = screen.listedForTests();
             const row = for (list.shown()) |entry| {
                 if (std.mem.eql(u8, entry.word, name)) break entry;
             } else return error.TestUnexpectedResult;
@@ -869,4 +877,33 @@ test "overflow labels are count only" {
     var buffer: [32]u8 = undefined;
     try std.testing.expectEqualStrings("5 more", try std.fmt.bufPrint(&buffer, more, .{5}));
     try std.testing.expectEqualStrings("1 more", try std.fmt.bufPrint(&buffer, more, .{1}));
+}
+
+test "SUI-131 the first-word catalogue and exact archive eligibility agree" {
+    const Case = struct { state: ?ArchiveState, archive: bool = false, unarchive: bool = false };
+    const cases = [_]Case{
+        .{ .state = null },
+        .{ .state = .active, .archive = true },
+        .{ .state = .archiving },
+        .{ .state = .archived, .unarchive = true },
+    };
+    const inventory = [_][]const u8{ "archive", "clear", "copy ", "effort ", "model", "new", "pin", "reload-skills", "reload-tools", "rename ", "requests", "result ", "setup ", "unarchive", "unpin" };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.archive, conversationArchiveEligible(.archive, case.state));
+        try std.testing.expectEqual(case.unarchive, conversationArchiveEligible(.unarchive, case.state));
+        const list = conversation.listedFor(.{ .archive_state = case.state });
+        var index: usize = 0;
+        for (inventory) |word| {
+            if (!case.archive and std.mem.eql(u8, word, "archive")) continue;
+            if (!case.unarchive and std.mem.eql(u8, word, "unarchive")) continue;
+            try std.testing.expect(index < list.count);
+            const entry = list.shown()[index];
+            try std.testing.expectEqualStrings(word, entry.word);
+            if (std.mem.eql(u8, word, "reload-skills") or std.mem.eql(u8, word, "reload-tools")) try std.testing.expect(entry.runs);
+            index += 1;
+        }
+        try std.testing.expectEqual(index, list.count);
+    }
+    try std.testing.expectEqual(ConversationName.archive, conversation.parse("/archive").command.name);
+    try std.testing.expectEqual(ConversationName.unarchive, conversation.parse("/unarchive").command.name);
 }

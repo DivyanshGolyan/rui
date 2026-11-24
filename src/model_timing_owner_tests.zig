@@ -96,6 +96,8 @@ test "model resolution owner captures timings for success failure interruption s
                 transfer.timing = try custody.modelTiming(token);
                 transfer.headers = .{};
                 transfer.credential = null;
+                transfer.allowance_source = null;
+                transfer.allowance = null;
                 var sink: [1]u8 = undefined;
                 try reactor.client.prepare(&transfer.stream, .{
                     .endpoint = reactor.endpoints.get(.codex).?,

@@ -477,7 +477,7 @@ pub const Pointer = struct { over: ?Click, phase: enum { held, released, free } 
 /// does; the drag starts once a held pointer leaves that row. Any other release, any press or move with no button
 /// held anywhere on screen (Root reports those as `free`), a key or another click ends it.
 pub const Carry = struct {
-    /// The row the last press opened, until that press ends.
+    /// The row receiving the primary press, until that press ends.
     pressed: ?Reference = null,
     /// The pressed row's drag has left it.
     carrying: bool = false,
@@ -1014,6 +1014,11 @@ pub const State = struct {
         return .wait;
     }
 
+    fn parentPressHeld(self: *const State) bool {
+        const pending = self.parent_click orelse return false;
+        return !pending.released;
+    }
+
     fn cancelParentClick(self: *State) void {
         self.parent_click = null;
     }
@@ -1033,7 +1038,7 @@ pub const State = struct {
         }
         const pending = self.parent_click orelse return null;
         const now = at_ms orelse return null;
-        if (now < pending.deadline_ms) return null;
+        if (!pending.released or now < pending.deadline_ms) return null;
         self.cancelParentClick();
         return pending.reference;
     }
@@ -1516,7 +1521,8 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .input => |input| {
-            endCarry(state);
+            // Ignored keys must not discard the held parent press before its matching release arrives.
+            if (!state.parentPressHeld() or (!input.pasted and input.key != .ignored)) endCarry(state);
             if (input.list_origin and !input.pasted and !input.under and input.key != .ignored) {
                 const was_held = holding(state);
                 state.now_ms = @max(state.now_ms, input.at_ms orelse state.now_ms);
@@ -2958,7 +2964,7 @@ fn carryPointer(state: *State, pointer: Pointer, effects: *Effects) error{OutOfM
     if (pointer.phase == .released) {
         const over = if (pointer.over != null and pointer.over.? == .open) pointer.over.?.open else null;
         state.releaseParentClick(over);
-    }
+    } else state.cancelParentClick();
     const dropped = pointer.phase == .released and state.carry.carrying and blk: {
         state.carry.over = pointer.over;
         break :blk state.carry.dropping(state);
@@ -3721,25 +3727,36 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
         .spin => "",
         .held => |word| word,
     };
-    const age_cells = @min(built.measure(age), width -| 3);
+    const title_floor: usize = 24;
+    // Leave room for a two-cell title grapheme and an ellipsis.
+    const useful_title_cells: usize = 3;
+    const mark_and_gap: usize = 2;
+    const inset: usize = 1;
+    const row_width: usize = width;
     const folded = isFolded(state, row.reference) and node.descendants != 0;
     const normal_hidden = if (folded) try std.fmt.allocPrint(arena, " {s} {d}", .{ if (caps.unicode) "▸" else ">", node.descendants }) else "";
     const normal_attention = if (folded and node.attention != 0) try std.fmt.allocPrint(arena, " {s} {d} ?", .{ if (caps.unicode) "·" else ".", node.attention }) else "";
-    const compact = folded and @as(usize, width) < 2 + 24 + built.measure(normal_hidden) + built.measure(normal_attention) + @intFromBool(age_cells != 0) + age_cells;
-    const hidden = if (compact) try std.fmt.allocPrint(arena, "{s}{d}", .{ if (caps.unicode) "▸" else ">", node.descendants }) else normal_hidden;
-    const attention_badge = if (compact and node.attention != 0) try std.fmt.allocPrint(arena, "{s}{d}?", .{ if (caps.unicode) "·" else ".", node.attention }) else normal_attention;
     const archived = if (row.archive_state == .archived and state.archive != .archived)
         if (caps.unicode) " · archived" else " . archived"
     else
         "";
-    const suffix_cells = built.measure(hidden) + built.measure(attention_badge) + built.measure(archived);
-    const age_gap: usize = @intFromBool(age_cells != 0);
-    const tight = folded and @as(usize, width) < 1 + 2 + 24 + suffix_cells + age_gap + age_cells + 1;
-    const end: usize = @as(usize, width) -| @as(usize, @intFromBool(!tight));
-    const name_end = end -| age_cells -| age_gap;
-    const origin: usize = if (tight and name_end -| 2 -| suffix_cells < 25) 0 else 1;
-    const depth_budget = (name_end -| origin -| 2 -| suffix_cells -| 24) / 2;
+    const normal_badge_cells = built.measure(normal_hidden) + built.measure(normal_attention);
+    const archived_cells = built.measure(archived);
+    const normal_suffix_cells = normal_badge_cells + archived_cells;
+    // Budget guides against the spaced badges, so gaining room can never cost a guide.
+    const depth_budget = (row_width -| (2 * inset + mark_and_gap + title_floor + normal_suffix_cells)) / 2;
     const depth: usize = @min(node.depth, depth_budget);
+
+    // Folded rows keep room for an ordinary age where possible. The fixed budgets
+    // retain spaced badges at 40 cells and allow compact badges and 999d at 36.
+    const compact = folded and row_width < mark_and_gap + title_floor + normal_badge_cells + 4;
+    const hidden = if (compact) try std.fmt.allocPrint(arena, "{s}{d}", .{ if (caps.unicode) "▸" else ">", node.descendants }) else normal_hidden;
+    const attention_badge = if (compact and node.attention != 0) try std.fmt.allocPrint(arena, "{s}{d}?", .{ if (caps.unicode) "·" else ".", node.attention }) else normal_attention;
+    const hidden_cells = built.measure(hidden);
+    const attention_cells = built.measure(attention_badge);
+    const tight = folded and row_width < 2 * inset + mark_and_gap + title_floor + archived_cells + hidden_cells + attention_cells + 5;
+    const end = row_width -| (if (tight) @as(usize, 0) else inset);
+    const origin = if (tight and end < inset + mark_and_gap + title_floor + normal_suffix_cells) 0 else inset;
     if (depth != 0) {
         const path = try arena.alloc(u32, depth);
         var current: u32 = index;
@@ -3775,17 +3792,35 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
         .attention => Colour.attention,
     } else rule.colour;
     _ = try built.put(mark_at, glyph, 1, .{ .colour = colour, .background = background, .dim = quiet });
-    const start_name = mark_at + 2;
-    const room = name_end -| start_name;
-    const name_room = room -| @min(room, suffix_cells);
-    const selected = rowSelected(state, row);
+    const start_name = mark_at + mark_and_gap;
+    const room = end -| start_name;
     const named = title(state, row).text;
     const name = if (row.archive_state == .archiving) try std.fmt.allocPrint(arena, "[Archiving] {s}", .{named}) else named;
+    const Suffix = struct { text: []const u8, cells: usize, colour: Colour = .quiet };
+    var suffixes = [_]Suffix{
+        .{ .text = archived, .cells = archived_cells },
+        .{ .text = hidden, .cells = hidden_cells },
+        .{ .text = attention_badge, .cells = attention_cells, .colour = .attention },
+    };
+    // On very narrow rows leave space for the title and omit badges whole.
+    var suffix_cells: usize = 0;
+    for (&suffixes) |*suffix| {
+        if (suffix.cells > room -| useful_title_cells -| suffix_cells) suffix.cells = 0;
+        suffix_cells += suffix.cells;
+    }
+    const age_cells = built.measure(age);
+    const age_room = room -| (suffix_cells + age_cells + 1);
+    const show_age = age_cells != 0 and room > suffix_cells + age_cells and
+        (age_room >= useful_title_cells or age_room >= built.measure(name));
+    const name_room = if (show_age) age_room else room -| suffix_cells;
+    const selected = rowSelected(state, row);
     const used = try built.put(start_name, name, name_room, .{ .colour = if (selected) .strong else .normal, .background = background, .bold = selected, .dim = quiet });
-    const archived_cells = try built.put(start_name + used, archived, room -| used, .{ .colour = .quiet, .background = background, .dim = quiet });
-    const hidden_cells = try built.put(start_name + used + archived_cells, hidden, room -| used -| archived_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
-    _ = try built.put(start_name + used + archived_cells + hidden_cells, attention_badge, room -| used -| archived_cells -| hidden_cells, .{ .colour = .attention, .background = background });
-    _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
+    var suffix_at = start_name + used;
+    for (suffixes) |suffix| {
+        if (suffix.cells == 0) continue;
+        suffix_at += try built.put(suffix_at, suffix.text, suffix.cells, .{ .colour = suffix.colour, .background = background, .dim = quiet and suffix.colour != .attention });
+    }
+    if (show_age) _ = try built.put(end - age_cells, age, age_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
     return segmentsOf(arena, try built.finish(), width, .{ .background = background, .dim = quiet });
 }
 
@@ -4425,6 +4460,7 @@ test "SUI-103 creator tree attention representatives" {
 
 test "SUI-104 creator tree width and badges" {
     try creatorWidthCase();
+    try creatorActivityWidthCase();
     try creatorSidebarCase();
 }
 
@@ -4501,7 +4537,7 @@ fn creatorClickCase() !void {
     const release_parent = Event{ .pointer = .{ .phase = .released, .over = target } };
     const last_before_deadline = 100 + ParentClick.interval_ms - 1;
     const deadline = last_before_deadline + 1;
-    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { single, double, childless, focus_left, drag, ignored, paste, navigation })) |gesture| {
+    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { single, double, childless, focus_left, drag, ignored, paste, navigation, held_single, held_paste, late_drag, release_elsewhere })) |gesture| {
         var state = try opened(&.{
             session(&parent, .{ .working = ago(10) }, .{ .label = "Parent", .descendant_count = 1 }),
             session(&child, .{ .finished = ago(1) }, .{ .label = "Child", .creator = parent }),
@@ -4513,6 +4549,29 @@ fn creatorClickCase() !void {
         }
         try expectEffects(&.{}, try step(&state, press_parent));
         try expectOrder(&state, &.{ "Parent", "Child" });
+        const after_deadline: Event = .{ .list_settled = .{ .wide = wide, .focused = true, .click_clock_ms = deadline + 1 } };
+        switch (gesture) {
+            .held_single, .held_paste, .late_drag, .release_elsewhere => {
+                try expectEffects(&.{}, try step(&state, after_deadline));
+                switch (gesture) {
+                    .held_single, .held_paste => {
+                        const ignored = if (gesture == .held_paste) InputDelivery{ .key = .enter, .pasted = true } else InputDelivery{ .key = .ignored };
+                        try expectEffects(&.{}, try step(&state, .{ .input = ignored }));
+                        try expectEffects(&.{}, try step(&state, release_parent));
+                        try expectEffects(&.{ .{ .open = parent }, .list_models }, try step(&state, after_deadline));
+                    },
+                    .late_drag => {
+                        try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .phase = .held, .over = .archived } }));
+                        try expectEffects(&.{.{ .archive = .{ .reference = parent, .archived = true } }}, try step(&state, .{ .pointer = .{ .phase = .released, .over = .archived } }));
+                    },
+                    .release_elsewhere => try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .phase = .free, .over = null } })),
+                    else => unreachable,
+                }
+                try expectEffects(&.{}, try step(&state, after_deadline));
+                continue;
+            },
+            else => {},
+        }
         if (gesture == .drag) {
             _ = try step(&state, .{ .pointer = .{ .phase = .held, .over = .archived } });
         } else {
@@ -9591,29 +9650,124 @@ test "launch admission belongs to bare app startup" {
 
 fn creatorWidthCase() !void {
     const name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    for ([_]u64{ 60, 18 * 3600, 24 * 3600 }) |age| for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 40, 46, 140 }) |width| {
+    for ([_]struct { seconds: u64, text: []const u8 }{
+        .{ .seconds = 60, .text = "1m" },
+        .{ .seconds = 18 * 3600, .text = "18h" },
+        .{ .seconds = 24 * 3600, .text = "1d" },
+    }) |age| for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 5, 8, 30, 32, 36, 40, 46, 140 }) |width| {
         var state = try opened(&.{
-            session("a1b2c3", .{ .working = ago(age) }, .{ .label = "Ancestor" }),
-            session("b4n8wd", .{ .finished = ago(age) }, .{ .label = name, .creator = "a1b2c3".*, .descendant_count = 2, .descendant_needs_you_count = 1 }),
+            session("a1b2c3", .{ .working = ago(age.seconds) }, .{ .label = "Ancestor" }),
+            session("b4n8wd", .{ .finished = ago(age.seconds) }, .{ .label = name, .creator = "a1b2c3".*, .descendant_count = 2, .descendant_needs_you_count = 1 }),
             session("c3d4e5", .{ .approval = ago(1) }, .{ .label = "Question", .creator = "b4n8wd".* }),
             session("d4e5f6", .{ .working = ago(2) }, .{ .label = "Other", .creator = "b4n8wd".* }),
         });
         defer state.deinit();
         state.selected = .{ .session = "b4n8wd".* };
-        _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
+        _ = try press(&state, .collapse_tree);
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const text = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 1, width, .{ .unicode = use_unicode }, 0));
-        try std.testing.expect(std.mem.indexOf(u8, text, name[0..23]) != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "▸ 2" else "> 2") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "· 1 ?" else ". 1 ?") != null);
+        const row = (try Lines.at(arena.allocator(), &state, 1, width, .{ .unicode = use_unicode }, 0)).?;
+        try std.testing.expectEqualStrings("b4n8wd", &row.target.?.open);
+        const text = try segmentText(arena.allocator(), row.segments);
+        const expected_badges = switch (width) {
+            5 => "",
+            8 => if (use_unicode) "▸2" else ">2",
+            30, 32, 36 => if (use_unicode) "▸2·1?" else ">2.1?",
+            else => if (use_unicode) "▸ 2 · 1 ?" else "> 2 . 1 ?",
+        };
+        const badge_at = std.mem.indexOf(u8, text, if (use_unicode) "▸" else ">");
+        if (expected_badges.len == 0) {
+            try std.testing.expectEqual(@as(?usize, null), badge_at);
+        } else {
+            try std.testing.expect(std.mem.startsWith(u8, text[badge_at.?..], expected_badges));
+        }
+        if (width <= 8) try std.testing.expect(std.mem.indexOfScalar(u8, text, '?') == null);
+        if (width >= 30) try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, text, " "), age.text));
+        const minimum_title: usize = switch (width) {
+            5, 8 => 2,
+            30 => 18,
+            32, 40 => 20,
+            else => 23,
+        };
+        try std.testing.expect(std.mem.indexOf(u8, text, name[0..minimum_title]) != null);
+    };
+}
+
+fn creatorActivityWidthCase() !void {
+    const root = session("a1b2c3", .{ .finished = ago(8) }, .{ .label = "Root" });
+    const first = session("b4n8wd", .{ .finished = ago(7) }, .{ .label = "First", .creator = root.reference });
+    const second = session("c3d4e5", .{ .finished = ago(6) }, .{ .label = "Second", .creator = first.reference });
+    const changes = [_]struct { work: WorkState, age: []const u8, ascii_age: ?[]const u8 = null }{
+        .{ .work = .{ .pending = ago(5) }, .age = "now" },
+        .{ .work = .{ .working = ago(4) }, .age = "", .ascii_age = "working" },
+        .{ .work = .{ .finished = ago(60) }, .age = "1m" },
+        .{ .work = .{ .finished = ago(999 * 86400) }, .age = "999d" },
+        .{ .work = .{ .stopping = ago(1) }, .age = "stopping" },
+    };
+    const widths = [_]struct { width: u16, direct_col: u16, deep_col: u16 }{
+        .{ .width = 20, .direct_col = 3, .deep_col = 3 },
+        .{ .width = 29, .direct_col = 3, .deep_col = 3 },
+        .{ .width = 30, .direct_col = 5, .deep_col = 5 },
+        .{ .width = 32, .direct_col = 5, .deep_col = 7 },
+        .{ .width = 36, .direct_col = 5, .deep_col = 9 },
+        .{ .width = 140, .direct_col = 5, .deep_col = 9 },
+    };
+    const Placement = enum { alone, direct, deep };
+    for ([_]bool{ false, true }) |use_unicode| for (std.enums.values(Placement)) |placement| for ([_][]const u8{
+        "Leaf café",
+        "Leaf ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    }) |name| {
+        const options: TestSession = .{ .label = name, .creator = switch (placement) {
+            .alone => null,
+            .direct => root.reference,
+            .deep => second.reference,
+        } };
+        const leaf = session("d4e5f6", changes[0].work, options);
+        const rows = [_]Listed{ leaf, root, first, second };
+        const leaf_at: usize = switch (placement) {
+            .alone => 0,
+            .direct => 1,
+            .deep => 3,
+        };
+        var state = try opened(rows[0 .. leaf_at + 1]);
+        defer state.deinit();
+        for (changes, 0..) |change, generation| {
+            if (generation != 0) _ = try refresh(&state, .changed, testToken(1 + generation), &.{session("d4e5f6", change.work, options)});
+            for (widths) |size| {
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const row = (try Lines.at(arena.allocator(), &state, leaf_at, size.width, .{ .unicode = use_unicode }, 0)).?;
+                try std.testing.expectEqualStrings("d4e5f6", &row.target.?.open);
+                const text = try segmentText(arena.allocator(), row.segments);
+                const name_start = std.mem.indexOf(u8, text, "Leaf").?;
+                const expected_col: u16 = switch (placement) {
+                    .alone => 3,
+                    .direct => size.direct_col,
+                    .deep => size.deep_col,
+                };
+                const prefix = text[0..name_start];
+                try std.testing.expectEqual(expected_col, gwidth.gwidth(prefix, .unicode));
+                try std.testing.expectEqual(use_unicode and expected_col > 3, std.mem.indexOf(u8, prefix, "╰") != null);
+                const trimmed_row = std.mem.trimEnd(u8, text, " ");
+                const age_text = if (use_unicode) change.age else change.ascii_age orelse change.age;
+                if (age_text.len == 0) {
+                    try std.testing.expect(row.spins);
+                    try std.testing.expect(!std.mem.endsWith(u8, trimmed_row, " working"));
+                } else {
+                    try std.testing.expect(std.mem.endsWith(u8, trimmed_row, age_text));
+                }
+                if (size.width >= 29 and std.mem.eql(u8, name, "Leaf café")) {
+                    const shown = if (use_unicode) name else "Leaf caf?";
+                    try std.testing.expect(std.mem.startsWith(u8, text[name_start..], shown));
+                }
+            }
+        }
     };
 }
 
 fn creatorSidebarCase() !void {
     const name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    const width: u16 = 36;
-    for ([_]bool{ false, true }) |use_unicode| {
+    for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 36, 37, 38 }) |width| {
         var state = try opened(&.{session("a1b2c3", .{ .finished = ago(999 * 86400) }, .{ .label = name, .descendant_count = 2, .descendant_needs_you_count = 1 })});
         defer state.deinit();
         state.selected = .{ .session = "a1b2c3".* };
@@ -9626,7 +9780,7 @@ fn creatorSidebarCase() !void {
         try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "W…" else "W.") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "▸2·1?" else ">2.1?") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "999d") != null);
-    }
+    };
 }
 
 fn creatorPresentationCase() !void {

@@ -1,5 +1,5 @@
 const std = @import("std");
-const tool_settle = @import("tool_settle.zig");
+const tool_delivery = @import("tool_delivery.zig");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 const core = @import("core_tools.zig");
@@ -30,12 +30,12 @@ pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storag
         error.InvalidOffset => return fail(store, arena, input, "offset must be within the entry and on a UTF-8 character boundary", faults),
         else => return err,
     };
-    _ = try tool_settle.deliver(store, .{ .core = input.binding }, .succeeded, .{ .text = result }, faults);
+    _ = try tool_delivery.deliver(store, .{ .core = input.binding }, .succeeded, .{ .text = result }, faults);
 }
 
 fn fail(store: *storage.Store, arena: std.mem.Allocator, input: *const storage.CoreActionInput, reason: []const u8, faults: storage.Faults) !void {
     const text = try std.fmt.allocPrint(arena, "Rui could not read the transcript: {s}.", .{reason});
-    _ = try tool_settle.deliver(store, .{ .core = input.binding }, .failed, .{ .text = text }, faults);
+    _ = try tool_delivery.deliver(store, .{ .core = input.binding }, .failed, .{ .text = text }, faults);
 }
 
 fn render(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, arguments: *const core.ReadTranscript) ![]const u8 {
