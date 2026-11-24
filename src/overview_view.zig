@@ -1075,13 +1075,11 @@ pub const State = struct {
         }
     }
 
-    fn settleBrowse(self: *State, wide: bool, focused: bool, effects: *Effects) error{OutOfMemory}!void {
+    fn takeReadyBrowse(self: *State, wide: bool, focused: bool) ?Reference {
         const target = self.browse_target;
         self.browse_target = null;
-        if (target) |reference| if (wide and focused and self.selected == .session and self.selectedRow() != null and std.mem.eql(u8, &self.selected.session, &reference)) {
-            self.presentation_revision +%= 1;
-            try activateList(self, .browse, effects);
-        };
+        if (target) |reference| if (wide and focused and self.selected == .session and self.selectedRow() != null and std.mem.eql(u8, &self.selected.session, &reference)) return reference;
+        return null;
     }
 
     fn selectedRow(self: *const State) ?*const Row {
@@ -1547,7 +1545,10 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                 state.presentation_revision +%= 1;
                 try clickOpen(state, reference, &effects);
             }
-            try state.settleBrowse(frame.wide, frame.focused, &effects);
+            if (state.takeReadyBrowse(frame.wide, frame.focused) != null) {
+                state.presentation_revision +%= 1;
+                try activateList(state, .browse, &effects);
+            }
         },
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| {
@@ -1595,7 +1596,7 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .pin => |request| pinIntent(state, request, &effects),
                 .new_session => {
                     state.selected = .new_session;
-                    try enter(state, &effects);
+                    try enterSelected(state, &effects);
                 },
                 .sessions => try selectView(state, .active, &effects),
                 .archived => try selectView(state, .archived, &effects),
@@ -1741,7 +1742,7 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                     },
                     .create => {
                         state.selected = .new_session;
-                        try enter(state, &effects);
+                        try enterSelected(state, &effects);
                         state.launch = if (state.pendingAt(.create, null) != null) .creating else .done;
                         effects.redraw = true;
                     },
@@ -2779,7 +2780,7 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
 fn clickOpen(state: *State, reference: Reference, effects: *Effects) error{OutOfMemory}!void {
     _ = position(state, reference) orelse return;
     state.selected = .{ .session = reference };
-    try enter(state, effects);
+    try enterSelected(state, effects);
 }
 
 fn select(state: *State, action: Action) void {
@@ -2869,7 +2870,7 @@ fn nextQuestion(state: *State, effects: *Effects) error{OutOfMemory}!void {
         if (!row.listed or row.group != .needs_you) continue;
         state.selected = .{ .session = row.reference };
         state.last_question = row.reference;
-        try enter(state, effects);
+        try enterSelected(state, effects);
         return;
     }
 }
@@ -2889,10 +2890,10 @@ fn adjacentSession(state: *State, direction: Action, effects: *Effects) error{Ou
         else => unreachable,
     } else if (direction == .previous) order.len - 1 else 0;
     state.selected = .{ .session = state.rows.items[order[target]].reference };
-    try enter(state, effects);
+    try enterSelected(state, effects);
 }
 
-fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
+fn enterSelected(state: *State, effects: *Effects) error{OutOfMemory}!void {
     try activateList(state, .enter, effects);
 }
 
