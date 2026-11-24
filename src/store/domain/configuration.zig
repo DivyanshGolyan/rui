@@ -885,6 +885,7 @@ fn creationCheck(configuration: *const ConfigurationView, reads: *const Configur
 /// Session whose lane is another Session) may not declare a list, empty or not; a lane root's declaration is kept for
 /// the apply rounds.
 fn declareAppTools(request: *const Request, reads: *ConfigurationReads) !?configuration_admission.Rejection {
+    if (isChild(request, reads)) return .app_tools_on_child;
     const field = &request.configuration.app_tools;
     if (field.length > app_tools.max_document_bytes) return .app_tools_too_large;
     const bytes = declarationBytes(request.io, field, request.declarations) catch return .invalid_app_tools;
