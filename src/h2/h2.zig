@@ -5,6 +5,7 @@ const policy = @import("policy.zig");
 const liveness = @import("liveness.zig");
 const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
+const Origin = @import("Origin.zig");
 const tls_client = @import("tls_client");
 const url_value = @import("url");
 
@@ -64,7 +65,7 @@ pub fn proxyFromEnvironment() ?Proxy {
 }
 
 pub fn checkProxy(allocator: std.mem.Allocator, proxy: Proxy) InitError!void {
-    var route = try Engine.ProxyRoute.init(allocator, proxy);
+    var route = try Origin.Route.init(allocator, proxy);
     route.deinit(allocator);
 }
 

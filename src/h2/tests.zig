@@ -982,8 +982,8 @@ fn launchRacing(harness: *Harness, stream: *h2.Stream, sink: []u8, before_peer: 
     @memcpy(addresses[0..before_peer.len], before_peer);
     addresses[before_peer.len] = Resolver.Address.literal("127.0.0.1", harness.peer.port).?;
     const origin = &engine.origins[0];
-    origin.lookup.?.release();
-    origin.lookup = Resolver.answered(&engine.waker, addresses[0 .. before_peer.len + 1]) orelse return error.OutOfMemory;
+    origin.lookup.job.?.release();
+    origin.lookup.job = Resolver.answered(&engine.waker, addresses[0 .. before_peer.len + 1]) orelse return error.OutOfMemory;
 }
 
 test "https by name: an address that never answers does not keep the next from connecting" {

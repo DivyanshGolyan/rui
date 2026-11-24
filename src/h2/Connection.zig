@@ -7,6 +7,7 @@ const policy = @import("policy.zig");
 const dial_policy = @import("dial_policy.zig");
 const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
+const Origin = @import("Origin.zig");
 const Resolver = @import("Resolver.zig");
 const tls = @import("tls.zig");
 const proxy = @import("proxy.zig");
@@ -149,49 +150,33 @@ pub fn pollEvents(self: *const Connection) ?i16 {
     };
 }
 
+fn originRef(self: *const Connection) *Origin {
+    return &self.engine.origins[self.origin];
+}
+
 pub fn open(self: *Connection, origin_index: u8, serial: u64) void {
     std.debug.assert(self.state == .free);
     const engine = self.engine;
-    const origin = &engine.origins[origin_index];
     self.origin = origin_index;
     self.serial = serial;
     self.setup_deadline_ns = engine.now() +| engine.options.connect_timeout_ns;
-    const dial = engine.dial(origin);
-    if (dial.literal != null) return self.advanceAttempts(false, engine.now());
+    const origin = self.originRef();
+    if (origin.target.literal != null) return self.advanceAttempts(false, engine.now());
     self.state = .resolving;
-    if (origin.lookup) |lookup| if (origin.lookup_users == 0 and lookup.result() != null) {
-        lookup.release();
-        origin.lookup = null;
-    };
-    if (origin.lookup == null) origin.lookup = Resolver.start(&engine.waker, dial.host, dial.port) orelse
-        return engine.setupFailed(self, .local_failure);
-    origin.lookup_users += 1;
+    if (!origin.lookup.acquire(&engine.waker, origin.target)) return engine.setupFailed(self, .local_failure);
     self.uses_lookup = true;
 }
 
 pub fn finishLookup(self: *Connection) void {
-    const lookup = self.engine.origins[self.origin].lookup.?.result() orelse return;
+    const lookup = self.originRef().lookup.result() orelse return;
     if (lookup.found().len == 0) return self.engine.setupFailed(self, .resolve_failed);
     self.advanceAttempts(false, self.engine.now());
-}
-
-fn addressAt(self: *Connection, index: u8) ?Resolver.Address {
-    const origin = &self.engine.origins[self.origin];
-    if (self.engine.dial(origin).literal) |literal| return if (index == 0) literal else null;
-    const addresses = origin.lookup.?.result().?.found();
-    return if (index < addresses.len) addresses[index] else null;
 }
 
 fn stopUsingLookup(self: *Connection) void {
     if (!self.uses_lookup) return;
     self.uses_lookup = false;
-    const origin = &self.engine.origins[self.origin];
-    origin.lookup_users -= 1;
-    const lookup = origin.lookup.?;
-    if (origin.lookup_users == 0 and lookup.result() != null) {
-        lookup.release();
-        origin.lookup = null;
-    }
+    self.originRef().lookup.release();
 }
 
 pub fn advanceConnect(self: *Connection, time: u64) void {
@@ -227,7 +212,7 @@ fn advanceAttempts(self: *Connection, failed: bool, time: u64) void {
     while (true) {
         switch (dial_policy.nextAttempt(.{
             .in_flight = @as(u8, @intFromBool(self.socket >= 0)) + @intFromBool(self.earlier >= 0),
-            .more_addresses = self.addressAt(self.address_index) != null,
+            .more_addresses = self.originRef().address(self.address_index) != null,
             .failed = failure,
             .delay_passed = self.next_attempt_ns != 0 and time >= self.next_attempt_ns,
         })) {
@@ -247,9 +232,9 @@ fn advanceAttempts(self: *Connection, failed: bool, time: u64) void {
 
 fn attempt(self: *Connection, time: u64) enum { connected, in_flight, refused, local_failure } {
     std.debug.assert(self.earlier < 0);
-    const address = self.addressAt(self.address_index).?;
+    const address = self.originRef().address(self.address_index).?;
     self.address_index += 1;
-    self.next_attempt_ns = if (self.addressAt(self.address_index) != null) time +| dial_policy.attempt_delay_ns else 0;
+    self.next_attempt_ns = if (self.originRef().address(self.address_index) != null) time +| dial_policy.attempt_delay_ns else 0;
     const fd = std.c.socket(address.family, std.c.SOCK.STREAM, 0);
     if (fd < 0) return .local_failure;
     self.earlier = self.socket;
@@ -293,9 +278,9 @@ fn connected(self: *Connection) void {
     self.dropEarlier();
     self.next_attempt_ns = 0;
     self.stopUsingLookup();
-    const origin = &self.engine.origins[self.origin];
+    const origin = self.originRef();
     if (origin.scheme == .http) return self.startSession();
-    if (origin.tunneled) return self.startTunnel();
+    if (origin.via != null) return self.startTunnel();
     self.startTls();
 }
 
@@ -310,8 +295,8 @@ fn startTunnel(self: *Connection) void {
 }
 
 fn tunnelRequest(self: *const Connection, buffer: *[proxy.max_request_bytes]u8) []const u8 {
-    const origin = &self.engine.origins[self.origin];
-    return proxy.connectRequest(buffer, origin.host, origin.port, self.engine.proxy_route.?.credentials);
+    const origin = self.originRef();
+    return proxy.connectRequest(buffer, origin.host, origin.port, origin.via.?.credentials);
 }
 
 pub fn continueTunnel(self: *Connection) void {
@@ -345,7 +330,7 @@ pub fn continueTunnel(self: *Connection) void {
 }
 
 fn startTls(self: *Connection) void {
-    const origin = &self.engine.origins[self.origin];
+    const origin = self.originRef();
     const context = &self.engine.tls_context.?;
     self.ssl = context.newSession(self.socket, origin.server_name, if (origin.literal != null) .ip_literal else .dns_name) orelse
         return self.engine.setupFailed(self, .local_failure);
@@ -368,7 +353,7 @@ pub fn continueHandshake(self: *Connection) void {
 
 fn startVerification(self: *Connection) void {
     std.debug.assert(self.verification == null);
-    const server_name = self.engine.origins[self.origin].server_name;
+    const server_name = self.originRef().server_name;
     self.verification = sec_trust.Verification.start(&self.engine.waker, self.ssl.?, server_name) orelse
         return self.engine.setupFailed(self, .local_failure);
     self.state = .verifying;
@@ -427,7 +412,7 @@ fn sizeWindow(self: *Connection) void {
     self.check(c.nghttp2_session_set_local_window_size(self.session, c.NGHTTP2_FLAG_NONE, 0, window));
 }
 
-pub fn submit(self: *Connection, record: *Record, origin: *const Engine.Origin, path: []const u8) ?i32 {
+pub fn submit(self: *Connection, record: *Record, origin: *const Origin, path: []const u8) ?i32 {
     std.debug.assert(self.hasRoom());
     var nva: [h2.max_fields + 6]c.nghttp2_nv = undefined;
     const borrowed: u8 = c.NGHTTP2_NV_FLAG_NO_COPY_NAME | c.NGHTTP2_NV_FLAG_NO_COPY_VALUE;
@@ -833,7 +818,7 @@ fn onFrameRecv(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
         c.NGHTTP2_SETTINGS => {
             if (frame.*.hd.flags & c.NGHTTP2_FLAG_ACK != 0) return 0;
             self.peer_max_streams = c.nghttp2_session_get_remote_settings(self.session, c.NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS);
-            self.engine.origins[self.origin].learned_max_streams = self.peer_max_streams;
+            self.originRef().learned_max_streams = self.peer_max_streams;
             if (self.state == .awaiting_settings) self.becomeReady();
             self.sizeWindow();
         },

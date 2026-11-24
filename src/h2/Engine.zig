@@ -7,10 +7,9 @@ const dial_policy = @import("dial_policy.zig");
 const liveness = @import("liveness.zig");
 const Record = @import("Stream.zig");
 const Connection = @import("Connection.zig");
+const Origin = @import("Origin.zig");
 const Waker = @import("os").Waker;
-const Resolver = @import("Resolver.zig");
 const tls = @import("tls.zig");
-const proxy = @import("proxy.zig");
 const Engine = @This();
 
 allocator: std.mem.Allocator,
@@ -19,6 +18,7 @@ options: h2.Options,
 callbacks: *c.nghttp2_session_callbacks,
 session_options: *c.nghttp2_option,
 origins: [h2.max_endpoints]Origin = undefined,
+pending: [h2.max_endpoints]Record.Queue = undefined,
 origin_count: u8,
 endpoints: [h2.max_endpoints]Endpoint = undefined,
 endpoint_count: u8,
@@ -35,7 +35,7 @@ stall_ns: u64,
 connection_serial: u64,
 waker: Waker,
 tls_context: ?tls.Context,
-proxy_route: ?ProxyRoute,
+proxy_route: ?Origin.Route,
 faults: if (builtin.is_test) ?*Faults else void = if (builtin.is_test) null else {},
 
 pub const Faults = @import("testing/Faults.zig");
@@ -47,68 +47,6 @@ pub const Receiver = struct {
     context: *anyopaque,
     observe: *const fn (*anyopaque, *Record, h2.Event) h2.Verdict,
 };
-
-pub const Origin = struct {
-    scheme: h2.Scheme,
-    host: []const u8,
-    server_name: []const u8,
-    authority: []const u8,
-    port: u16,
-    learned_max_streams: ?u32,
-    pending: Record.Queue,
-    literal: ?Resolver.Address,
-    tunneled: bool,
-    lookup: ?*Resolver.Job,
-    lookup_users: u32,
-};
-
-pub const ProxyRoute = struct {
-    settings_copy: []u8,
-    host: []const u8,
-    port: u16,
-    literal: ?Resolver.Address,
-    no_proxy: []const u8,
-    credentials: ?[]u8,
-
-    pub fn init(allocator: std.mem.Allocator, settings: h2.Proxy) h2.InitError!ProxyRoute {
-        const text = try allocator.alloc(u8, settings.url.len + settings.no_proxy.len);
-        errdefer {
-            std.crypto.secureZero(u8, text);
-            allocator.free(text);
-        }
-        @memcpy(text[0..settings.url.len], settings.url);
-        @memcpy(text[settings.url.len..], settings.no_proxy);
-        const url = try proxy.splitUrl(text[0..settings.url.len]);
-        const host, const port = h2.parseHostPort(url.authority, 80) catch return error.HttpsProxyInvalid;
-        return .{
-            .settings_copy = text,
-            .host = host,
-            .port = port,
-            .literal = Resolver.Address.literal(host, port),
-            .no_proxy = text[settings.url.len..],
-            .credentials = if (url.user_info) |user_info| try proxy.basicCredentials(allocator, user_info) else null,
-        };
-    }
-
-    pub fn deinit(self: *ProxyRoute, allocator: std.mem.Allocator) void {
-        if (self.credentials) |credentials| {
-            std.crypto.secureZero(u8, credentials);
-            allocator.free(credentials);
-        }
-        std.crypto.secureZero(u8, self.settings_copy);
-        allocator.free(self.settings_copy);
-    }
-};
-
-pub const Dial = struct { host: []const u8, port: u16, literal: ?Resolver.Address };
-
-pub fn dial(self: *const Engine, origin: *const Origin) Dial {
-    if (origin.tunneled) {
-        const via = &self.proxy_route.?;
-        return .{ .host = via.host, .port = via.port, .literal = via.literal };
-    }
-    return .{ .host = origin.host, .port = origin.port, .literal = origin.literal };
-}
 
 pub const Endpoint = struct {
     url: []u8,
@@ -128,7 +66,7 @@ pub const Scratch = struct {
 
 pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2.Options) h2.InitError!void {
     std.debug.assert(options.stream_capacity > 0 and options.inactivity_ns > 0 and options.connect_timeout_ns > 0);
-    var proxy_route: ?ProxyRoute = if (options.proxy) |settings| try ProxyRoute.init(allocator, settings) else null;
+    var proxy_route: ?Origin.Route = if (options.proxy) |settings| try Origin.Route.init(allocator, settings) else null;
     errdefer if (proxy_route) |*value| value.deinit(allocator);
     var callbacks: ?*c.nghttp2_session_callbacks = null;
     if (c.nghttp2_session_callbacks_new(&callbacks) != 0) return error.OutOfMemory;
@@ -214,9 +152,7 @@ pub fn deinit(self: *Engine) void {
         if (connection.state != .free) connection.close(.goaway);
         connection.releaseVerification();
     }
-    for (self.origins[0..self.origin_count]) |origin| {
-        if (origin.lookup) |lookup| lookup.release();
-    }
+    for (self.origins[0..self.origin_count]) |*origin| origin.lookup.deinit();
     for (self.endpoints[0..self.endpoint_count]) |endpoint| self.allocator.free(endpoint.url);
     if (self.tls_context) |*context| context.deinit();
     if (self.proxy_route) |*via| via.deinit(self.allocator);
@@ -242,20 +178,8 @@ pub fn addEndpoint(self: *Engine, url: []const u8) h2.EndpointError!h2.Endpoint 
         if (origin.scheme == parsed.scheme and origin.port == parsed.port and std.mem.eql(u8, origin.host, parsed.host))
             break @intCast(index);
     } else blk: {
-        self.origins[self.origin_count] = .{
-            .scheme = parsed.scheme,
-            .host = parsed.host,
-            .server_name = parsed.server_name,
-            .authority = parsed.authority,
-            .port = parsed.port,
-            .learned_max_streams = null,
-            .pending = .{},
-            .literal = Resolver.Address.literal(parsed.host, parsed.port),
-            .tunneled = if (self.proxy_route) |via| parsed.scheme == .https and
-                !proxy.isLoopback(parsed.server_name) and !proxy.bypasses(via.no_proxy, parsed.server_name) else false,
-            .lookup = null,
-            .lookup_users = 0,
-        };
+        self.origins[self.origin_count] = Origin.init(parsed, if (self.proxy_route) |*via| via else null);
+        self.pending[self.origin_count] = .{};
         self.origin_count += 1;
         break :blk self.origin_count - 1;
     };
@@ -339,7 +263,7 @@ pub fn launch(self: *Engine, record: *Record) void {
     record.state = .pending;
     record.last_activity_ns = self.now();
     self.timers.pushTail(record);
-    self.origins[self.endpoints[record.endpoint].origin].pending.pushTail(record);
+    self.pendingOf(record).pushTail(record);
 }
 
 pub fn cancel(self: *Engine, record: *Record) void {
@@ -348,7 +272,7 @@ pub fn cancel(self: *Engine, record: *Record) void {
         .idle => unreachable,
         .prepared => {},
         .pending => {
-            self.originOf(record).pending.remove(record);
+            self.pendingOf(record).remove(record);
             self.timers.remove(record);
         },
         .open => {
@@ -375,7 +299,7 @@ pub fn nextFinished(self: *Engine) ?*Record {
 
 pub fn endStream(self: *Engine, record: *Record, cause: policy.Cause) void {
     std.debug.assert(record.state == .pending or record.state == .open);
-    if (record.state == .pending) self.originOf(record).pending.remove(record);
+    if (record.state == .pending) self.pendingOf(record).remove(record);
     self.timers.remove(record);
     self.retireBody(record);
     record.releaseFields(self.allocator);
@@ -391,7 +315,7 @@ pub fn requeue(self: *Engine, record: *Record, replay: bool) void {
     record.state = .pending;
     record.body_offset = 0;
     record.flags.body_done = false;
-    self.originOf(record).pending.putBack(record);
+    self.pendingOf(record).putBack(record);
 }
 
 pub fn retireBody(self: *Engine, record: *Record) void {
@@ -405,8 +329,8 @@ pub fn observe(self: *Engine, record: *Record, event: h2.Event) h2.Verdict {
     return receiver.observe(receiver.context, record, event);
 }
 
-pub fn originOf(self: *Engine, record: *const Record) *Origin {
-    return &self.origins[self.endpoints[record.endpoint].origin];
+fn pendingOf(self: *Engine, record: *const Record) *Record.Queue {
+    return &self.pending[self.endpoints[record.endpoint].origin];
 }
 
 fn connectionOf(self: *Engine, record: *const Record) *Connection {
@@ -505,8 +429,8 @@ pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) 
         ready_with_room += @intFromBool(other.hasRoom());
     }
     if (policy.pendingAfterSetupFailure(setting_up, ready_with_room) == .wait) return;
-    const origin = &self.origins[origin_index];
-    while (origin.pending.head) |record| self.endStream(record, cause);
+    const pending = &self.pending[origin_index];
+    while (pending.head) |record| self.endStream(record, cause);
 }
 
 fn readAll(self: *Engine) void {
@@ -518,22 +442,23 @@ fn readAll(self: *Engine) void {
 }
 
 fn submitPending(self: *Engine) void {
-    for (self.origins[0..self.origin_count], 0..) |*origin, origin_index| {
-        while (origin.pending.head) |record| {
+    for (self.pending[0..self.origin_count], 0..) |*pending, origin_index| {
+        const origin = &self.origins[origin_index];
+        while (pending.head) |record| {
             const connection = &self.connections[self.route(@intCast(origin_index)) orelse break];
             const stream_id = connection.submit(record, origin, self.endpoints[record.endpoint].path) orelse {
                 self.endStream(record, .local_failure);
                 continue;
             };
-            _ = origin.pending.popHead();
+            _ = pending.popHead();
             connection.adopt(record, stream_id);
         }
         var setting_up: u32 = 0;
         for (self.active()) |*connection| {
             if (connection.origin == origin_index and connection.settingUp()) setting_up += 1;
         }
-        var opening = policy.connectionsToOpen(origin.pending.len, setting_up, origin.learned_max_streams);
-        while (opening > 0 and origin.pending.len > 0) : (opening -= 1) {
+        var opening = policy.connectionsToOpen(pending.len, setting_up, origin.learned_max_streams);
+        while (opening > 0 and pending.len > 0) : (opening -= 1) {
             const connection = self.freeConnection() orelse break;
             self.connection_serial += 1;
             connection.open(@intCast(origin_index), self.connection_serial);
@@ -579,7 +504,7 @@ pub fn retireConnections(self: *Engine, endpoint: h2.Endpoint) void {
             },
             .free => {},
             else => {
-                if (self.origins[origin].pending.len == 0) connection.close(.abrupt);
+                if (self.pending[origin].len == 0) connection.close(.abrupt);
             },
         }
     }
