@@ -2031,7 +2031,7 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
         var wiping: @import("secret_value.zig").WipingAllocator = .{ .backing = init.gpa };
         var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
         defer memory.deinit();
-        const assignments: []const []const u8 = if (connection) |value| &.{try host_start.connectionAssignment(init, memory.allocator(), value)} else &.{};
+        const assignments: []const []const u8 = if (connection) |value| &.{try host_start.connectionAssignment(memory.allocator(), value)} else &.{};
         startSelectedOverviewHost(init, destination.path, binding, &readiness, assignments, ops, &entry.launch.?);
         // Keep the Host directory selector: Store identity alone loses saved placement.
         if (entry.launch.?.outcome == .ready) {
@@ -5614,7 +5614,7 @@ test "Host launch guided activation requires frozen pair and exact fresh identit
         const store = try std.fs.path.join(arena.allocator(), &.{ home, "store" });
         const saved = try host_start.saveConnection(init, store, .{ .base = "https://first.example/v1" }, .{ .provided = "fixture-first-key" }, "custom-model", Gate.yes);
         _ = try host_start.saveConnection(init, store, .{ .base = "https://second.example/v2" }, .{ .provided = "fixture-second-key" }, "another-model", Gate.yes);
-        const frozen_assignment = try host_start.connectionAssignment(init, arena.allocator(), &saved.saved);
+        const frozen_assignment = try host_start.connectionAssignment(arena.allocator(), &saved.saved);
         var fixture: LaunchFixture = .{ .scenario = case.scenario, .exact_identity = case.exact, .delay_refusal = case.delayed, .openai = case.openai, .expected_assignment = frozen_assignment };
         const activation = try activateOverviewConnectionUsing(init, .{ .store = store, .provider = "openai", .model = "custom-model" }, &saved.saved, fixture.ops());
         try std.testing.expectEqual(case.pending, activation.pending);

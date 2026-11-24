@@ -2956,14 +2956,15 @@ test "Sign-in stale blank key cannot activate endpoint-only or source-only super
         try page.target.set(store);
         const first = try host_start.saveConnection(page.init.?, store, .{ .base = "https://first.example/v1" }, .{ .provided = "first-key" }, "custom-model", Hooks.yes);
         try std.testing.expect(first == .saved);
-        const assignment = try host_start.connectionAssignment(page.init.?, rig.arena.allocator(), &first.saved);
+        const assignment = try host_start.connectionAssignment(rig.arena.allocator(), &first.saved);
         try std.testing.expect(std.mem.indexOf(u8, assignment, "first-key") == null);
         try rig.send("\t\r");
         try std.testing.expect(page.state.page == .api and page.form.?.value.original.reusable());
         const endpoint = if (change == .endpoint) "https://second.example/v2/responses" else first.saved.endpoint.slice();
         if (change == .endpoint) {
             var failure: @import("start_report.zig").Failure = undefined;
-            try host_start.savedEdit(page.init.?, store, "providers.openai.endpoint", endpoint, &failure);
+            const moved = try std.fmt.allocPrint(rig.arena.allocator(), "[{{\"name\":\"openai\",\"label\":\"OpenAI\",\"base_url\":\"https://second.example/v2\",\"credential\":{{\"kind\":\"key\",\"source\":{{\"kind\":\"file\",\"path\":\"{s}\"}},\"placement\":\"bearer\"}},\"headers\":[],\"refusals\":[],\"formats\":[{{\"family\":\"responses\",\"dialect\":\"openai-responses/2\",\"web_search\":true}}],\"assign\":[],\"models\":{{\"list\":\"openai\"}}}}]", .{first.saved.key_file.slice()});
+            try host_start.savedEdit(page.init.?, store, "connections", moved, &failure);
             try std.Io.Dir.cwd().deleteFile(page.init.?.io, first.saved.key_file.slice());
         } else {
             const other = try host_start.saveConnection(page.init.?, store, .{ .unchanged = endpoint }, .{ .provided = "second-key" }, "custom-model", Hooks.yes);
