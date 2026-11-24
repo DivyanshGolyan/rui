@@ -58,6 +58,7 @@ pub const HistoricalInput = historical_domain.HistoricalInput;
 pub const HistoricalInputPart = historical_domain.HistoricalInputPart;
 pub const HistoricalReader = historical_domain.HistoricalReader;
 pub const HistoricalSettings = historical_domain.HistoricalSettings;
+pub const historicalRequestBinding = historical_domain.requestBinding;
 pub const HistoricalStart = historical_domain.Start;
 pub const HistoricalResume = historical_domain.Resume;
 pub const ModelOperationKind = historical_domain.ModelOperationKind;
@@ -209,6 +210,7 @@ test {
     _ = @import("store/sqlite_tests/skills_migration.zig");
     _ = @import("store/sqlite_tests/tool_set.zig");
     _ = @import("store/sqlite_tests/tool_set_migration.zig");
+    _ = @import("store/history.zig");
     _ = @import("store/mysql_dialect_check.zig");
     _ = @import("store/mysql_literal.zig");
     _ = @import("store/mysql_row.zig");

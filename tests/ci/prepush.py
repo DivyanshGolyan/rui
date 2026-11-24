@@ -41,7 +41,7 @@ import build_files
 from caller_errors import inventory_path
 import fixture_user
 from platform_boundary import SCANNED as PLATFORM_SCANNED
-from select_tests import ACCEPTANCE_INPUTS, CLIENT_LOCALITY_INPUTS, LIVE_MYSQL_DIALECT_TARGETS, changed_paths, matches, select, tree_graph
+from select_tests import ACCEPTANCE_INPUTS, CLIENT_LOCALITY_INPUTS, DEEP_MODULES_ALLOWANCE_INPUTS, LIVE_MYSQL_DIALECT_TARGETS, changed_paths, matches, select, tree_graph
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
 import live_engines
@@ -52,6 +52,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE_POLICY = (
     (ACCEPTANCE_INPUTS, (("native_acceptance_test.py", "*"),)),
     (CLIENT_LOCALITY_INPUTS, (("test_client_locality.py", "*"),)),
+    (DEEP_MODULES_ALLOWANCE_INPUTS, (("test_deep_modules_allowance.py", "*"),)),
     ((".claude/skills/verify-rui/scripts/frames.json", ".claude/skills/verify-rui/features/*.md"),
      (("test_verify_rui_map.py", "*"),)),
     (("tests/integration/settings_fixture.py",), (("test_settings_fixture.py", "*"),)),
@@ -433,6 +434,8 @@ def checks(paths, available, base, mode="default", mysql=False):
         yield "flake sources", [sys.executable, "-B", "tests/ci/flake_sources.py"]
     if any(matches(path, CLIENT_LOCALITY_INPUTS) for path in paths):
         yield "client locality", [sys.executable, "-B", "tests/ci/client_locality.py"]
+    if any(matches(path, DEEP_MODULES_ALLOWANCE_INPUTS) for path in paths):
+        yield "deep-modules allowance", [sys.executable, "-B", "tests/ci/deep_modules_allowance.py"]
     if "src/store/schema.zig" in paths:
         yield "schema number", [sys.executable, "-B", "tests/ci/schema_number.py", "--check"]
     generation = {"openapi.json", *GENERATED[1:], "clients/ts/scripts/generate-settings.mjs"}

@@ -146,8 +146,8 @@ FIXTURES = {
 }
 FIXTURE_COVERS = {"human-cli-integration": {"canonical-failure-integration", "terminal-restoration-integration"}}
 TEST_CODE = ("src/*tests.zig", "src/*tests/*", "src/*_test.zig", "src/*testing.zig", "src/*testing/*", "src/mcp/test_server.zig", "src/store/engine_contract.zig",
-             "src/socket_fixture.zig", "src/store/mysql_dialect_check.zig")
-LINUX_ONLY = {"login-signal-integration", "mysql-wire-integration"}
+             "src/socket_fixture.zig", "src/store/mysql_dialect_check.zig", "src/store/history.zig")
+LINUX_ONLY = {"login-signal-integration", "mysql-wire-integration", "deep-modules", "deep-modules-test"}
 
 EMBED = re.compile(r'@embedFile\(\s*"([^"]+)"\s*\)')
 PYTHON_IMPORT = re.compile(r"^\s*(?:from\s+([A-Za-z_]\w*)\S*\s+import\b|import\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*))", re.M)
@@ -590,6 +590,7 @@ BUILD_MODULES = {
     "build/cross.zig": (),
     "build/link_table.zig": BUILD_HUB,
     "build/darwin.zig": ("test", "host-launch-integration"),
+    "build/deep_modules.zig": ("deep-modules", "deep-modules-test"),
     ".github/actions/setup/caches/action.yml": ("test-logic",),
     ".github/actions/setup/caches/save-keys.cjs": ("test-logic",),
     ".github/actions/setup/fixtures/action.yml":
@@ -601,6 +602,14 @@ RULES += tuple(((module,), targets, tuple(target for target in targets if target
 
 
 STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py", "tests/ci/stack_frames.json")
+# The module lint reads every production src/ file (from src/cli.zig) and its allow file; build/deep_modules.zig
+# wires both of its steps, so an edit to it runs the tool's own tests as well.
+DEEP_MODULES = ("src/*", "build.zig", "build.zig.zon", "build/deep_modules.zig", "tests/ci/deep_modules/*",
+                "tests/ci/deep_modules.allow")
+DEEP_MODULES_TEST = ("build/deep_modules.zig", "tests/ci/deep_modules/*")
+# The growth ratchet (tests/ci/deep_modules_allowance.py) reads the allow file against trusted main; its own tests run with it.
+DEEP_MODULES_ALLOWANCE_INPUTS = ("tests/ci/deep_modules.allow", "tests/ci/deep_modules_allowance.py",
+                                 "tests/ci/test_deep_modules_allowance.py")
 
 CHECK_COVERS = {
     "test", "test-native", "test-store", "test-h2", "test-pg", "admission-integration", "dispatch-integration",
@@ -712,7 +721,7 @@ def covers(target, targets) -> bool:
     check-full deliberately excludes stack-frames and rsql-table; promotion adds them separately.
     """
     broader = {"test": {"test-native", "test-store"},
-               "check": CHECK_COVERS | {"stack-frames", "rsql-table"},
+               "check": CHECK_COVERS | {"stack-frames", "rsql-table", "deep-modules"},
                "check-full": CHECK_COVERS | {"check"}, **FIXTURE_COVERS}
     return target in targets or any(target in broader.get(selected, ()) for selected in targets)
 
@@ -750,11 +759,13 @@ PR_OWN_FILE_TARGETS = frozenset({"mysql-wire-integration", "measurement-check"})
 # Targets the PR tier runs whenever the selector picks them. The Host frame gate is picked by Host
 # source, build inputs and its own files (STACK_FRAMES); its LLVM ReleaseSafe build costs minutes,
 # but frame growth found only in Promote holds a release (owner's call, 23 Nov 2026, #1982).
-PR_SELECTED_TARGETS = frozenset({"stack-frames"})
+# deep-modules (DEEP_MODULES) and its tool's tests (DEEP_MODULES_TEST) are cheap Debug builds of the host tool
+# and run beside the policy checks, so they are selected the same way.
+PR_SELECTED_TARGETS = frozenset({"stack-frames", "deep-modules", "deep-modules-test"})
 # Promotion's own targets: the PR tier never runs these whatever the diff touches. ci_plan.py adds
 # them to every promotion, and the issue filer names a red's target as promotion-only with them.
 PROMOTION_CORE_TARGETS = frozenset({"check-full", "test-logic", "admission-debug-integration"})
-PROMOTION_EXTRA_TARGETS = frozenset({"stack-frames", "rsql-table", "mysql-wire-integration"})
+PROMOTION_EXTRA_TARGETS = frozenset({"stack-frames", "deep-modules", "rsql-table", "mysql-wire-integration"})
 # The targets the PR tier never runs, whatever the diff touches: the escape classifier's promotion-only set.
 # Own-file and selected targets are checked first in the classifier, so this is what remains of the extras.
 PR_NEVER_TARGETS = PROMOTION_EXTRA_TARGETS - PR_OWN_FILE_TARGETS - PR_SELECTED_TARGETS
@@ -951,6 +962,12 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
               else any(fnmatch.fnmatchcase(path, pattern) for pattern in STACK_FRAMES)):
             targets.add("stack-frames")
             reasons.add("Host stack frames: the ReleaseSafe frame gate (tests/ci/stack_frames.py)")
+        if not documentation(path) and any(fnmatch.fnmatchcase(path, pattern) for pattern in DEEP_MODULES):
+            targets.add("deep-modules")
+            reasons.add("Module architecture: the deep-modules lint reads the production sources (tests/ci/deep_modules)")
+        if any(fnmatch.fnmatchcase(path, pattern) for pattern in DEEP_MODULES_TEST):
+            targets.add("deep-modules-test")
+            reasons.add("deep-modules tool: its own tests (tests/ci/deep_modules)")
         if ci_policy(path):
             reasons.add("CI policy: the policy job runs selector and workflow checks")
             shortcut = True
@@ -1134,6 +1151,8 @@ def revision_contents(paths, base, head):
 # script; an import, link or path rule the selector follows; or a fallback or coverage expansion only.
 DIRECT, GRAPH, BROAD = 0, 1, 2
 EXTRA_OWN_FILES = {"stack-frames": (STACK_FRAMES_GATE, "tests/ci/stack_frames.py"),
+                   "deep-modules": ("tests/ci/deep_modules.allow", "tests/ci/deep_modules/*", "build/deep_modules.zig"),
+                   "deep-modules-test": ("tests/ci/deep_modules/*", "build/deep_modules.zig"),
                    "rsql-table": ("tests/ci/rsql_table.py", "src/store/rsql_table.zig"),
                    # The Go packages select() maps to measurement-check by its path rule (QUALIFICATION_GO).
                    "measurement-check": tuple(f"{QUALIFICATION_ROOT}*{suffix}" for suffix in QUALIFICATION_GO)}
@@ -1186,7 +1205,8 @@ def attribute(path, graph, available, read, contents=None, fixture_literals=None
             record(target, GRAPH)
     for source in selected:
         if source in reached or source in rule_named or (path == DEPENDENCY_MANIFEST and source in graph.links) \
-                or (source == "stack-frames" and path in graph.host):
+                or (source == "stack-frames" and path in graph.host) \
+                or (source == "deep-modules" and path.startswith("src/")):
             tier = GRAPH
         else:
             tier = BROAD

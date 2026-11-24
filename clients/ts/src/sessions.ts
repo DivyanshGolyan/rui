@@ -584,7 +584,8 @@ export async function reloadTools(link: Link, server?: string): Promise<ToolRelo
 	}
 }
 
-async function readToolsStatus(link: Link): Promise<Schemas["ToolsStatusReply"] | undefined> {
+/** Reads `tools_status`; undefined while the Host is busy. Exported for the tests that read each row. */
+export async function readToolsStatus(link: Link): Promise<Schemas["ToolsStatusReply"] | undefined> {
 	try {
 		return parse<Schemas["ToolsStatusReply"]>(
 			await link.exchange("/v1/tools-status", (store) => JSON.stringify({

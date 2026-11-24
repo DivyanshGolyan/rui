@@ -60,6 +60,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../domain/model_attempt.zig"),
         @embedFile("../domain/model_settlement.zig"),
         @embedFile("../domain/operation_effort.zig"),
+        @embedFile("../domain/replay_wire.zig"),
         @embedFile("../domain/reads.zig"),
         @embedFile("../domain/report.zig"),
         @embedFile("../domain/session_list_read.zig"),
@@ -87,6 +88,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../transition.zig"),
     };
     const test_sources = .{
+        @embedFile("../history.zig"),
         @embedFile("../mysql_dialect_check.zig"),
         @embedFile("../mysql_session_tests.zig"),
         @embedFile("../mysql_testing.zig"),

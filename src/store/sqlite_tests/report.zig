@@ -369,8 +369,9 @@ test "a Current report's read faults keep the owning error and fence" {
     inline for (.{
         .{ TestingWorkShape.awaiting, "model_tool_call", error.CallReadFailed },
         .{ TestingWorkShape.awaiting, "action_operation", error.CallReadFailed },
-        .{ TestingWorkShape.awaiting, "session_revision", error.CorruptStore },
-        .{ TestingWorkShape.idle, "session_revision", null },
+        // The Session's codec lives on its current revision, so the current-state read owns this fault for every shape.
+        .{ TestingWorkShape.awaiting, "session_revision", error.StatementFailed },
+        .{ TestingWorkShape.idle, "session_revision", error.StatementFailed },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();

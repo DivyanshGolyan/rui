@@ -1,0 +1,13 @@
+{
+  "name": "openai",
+  "label": "OpenAI",
+  "base_url": "https://api.openai.com/v1",
+  "credential": {"kind": "key", "source": {"kind": "saved"}, "placement": "bearer"},
+  "headers": [],
+  "refusals": [],
+  "formats": [
+    {"family": "responses", "dialect": "openai-responses/2", "web_search": true}
+  ],
+  "assign": [],
+  "models": {"list": "openai"}
+}

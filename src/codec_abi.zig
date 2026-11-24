@@ -57,6 +57,10 @@ pub const Phase = enum(u8) { unphased = 0, commentary = 1, final_answer = 2 };
 pub const PartKind = enum(u8) { opaque_block = 0, output_text = 1, refusal = 2, summary_text = 3, reasoning_text = 4 };
 pub const PartArray = enum(u8) { none = 0, content = 1, summary = 2 };
 
+/// Which wire grammar wrote a stored bag. Each codec module names its own (`pub const dialect`),
+/// and codecs.zig derives the one value per codec. Two codec versions of one grammar share one dialect.
+pub const Dialect = enum(u8) { openai_responses, anthropic_messages };
+
 pub const Item = union(ItemKind) {
     settings: Settings,
     message: Author,

@@ -76,6 +76,7 @@ workflows() (
 check "Check caller error coverage and shrink-only pending causes" python3 -B tests/ci/caller_errors.py
 check "Check flake sources and shrink-only allowances" python3 -B tests/ci/flake_sources.py
 check "Check client locality and shrink-only exceptions" python3 -B tests/ci/client_locality.py
+check "Check the deep-modules allowance does not grow past trusted main" python3 -B tests/ci/deep_modules_allowance.py
 check "Check the Store statement table was generated from the current inputs" python3 -B tests/ci/rsql_table.py fingerprint
 check "Check the build's link table was generated from the current build inputs" python3 -B tests/ci/link_table.py fingerprint
 check "Run tests/ci, less self-checks whose inputs are unchanged" python3 -B tests/ci/policy_suite.py --skips "$SKIPS"

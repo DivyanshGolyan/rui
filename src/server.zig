@@ -2196,7 +2196,7 @@ noinline fn replyToolsStatus(host: *Host, fd: *Reply) !void {
     var count: usize = 0;
     if (host.mcp_relist) |owner| {
         for (owner.servers, 0..) |*server, index| {
-            rows[count] = .{ .server = server.name.slice(), .status = owner.status(index) };
+            rows[count] = .{ .server = server.name.slice(), .status = owner.status(index), .listen = owner.streamState(index) };
             count += 1;
         }
     }
@@ -5733,7 +5733,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
         var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
         defer reply.deinit();
         try replyToolsStatus(&host, &reply);
-        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance_hex ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\",\"left_out\":\"0\"},{\"server\":\"notes\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\",\"left_out\":\"0\"}]}", reply.body.json);
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance_hex ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\",\"left_out\":\"0\",\"listen\":\"off\"},{\"server\":\"notes\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\",\"left_out\":\"0\",\"listen\":\"off\"}]}", reply.body.json);
     }
 
     // A Host with no MCP servers answers empty lists, and an unnamed ask asks nothing.

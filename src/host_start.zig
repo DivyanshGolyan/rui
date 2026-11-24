@@ -232,7 +232,7 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
     const gpa = memory.allocator();
     const endpoint = switch (endpoint_edit) {
         .unchanged => |endpoint| endpoint,
-        .base => |base| try @import("endpoint_value.zig").endpointUnder(gpa, base),
+        .base => |base| try @import("endpoint_value.zig").endpointUnder(gpa, base, "/responses"),
     };
     try @import("endpoint_value.zig").validateEndpoint(endpoint);
     try @import("endpoint_value.zig").validateKeyEndpoint(endpoint, null, false);

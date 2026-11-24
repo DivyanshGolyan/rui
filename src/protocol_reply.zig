@@ -4343,7 +4343,7 @@ pub fn decodeSkillSuggestions(gpa: std.mem.Allocator, bytes: []const u8, query: 
     return .{ .entries = entries, .revision = revision, .total = total };
 }
 
-test "CM-46 inline skills suggestion replies preserve Host relevance order" {
+test "CM-48 inline skills suggestion replies preserve Host relevance order" {
     const header = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"skill_suggestions\",\"revision\":\"7\",\"total\":";
     const exact = "{\"name\":\"research\",\"description\":\"Investigate a question\"}";
     const prefix = "{\"name\":\"research-notes\",\"description\":\"Write notes\"}";

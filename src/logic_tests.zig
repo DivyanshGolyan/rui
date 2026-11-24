@@ -48,6 +48,7 @@ const cores = .{
     .{ "configuration_admission.zig", @import("configuration_admission.zig") },
     .{ "configuration_defaults.zig", @import("configuration_defaults.zig") },
     .{ "configure_input.zig", @import("configure_input.zig") },
+    .{ "connection.zig", @import("connection.zig") },
     .{ "content_string.zig", @import("content_string.zig") },
     .{ "content_value.zig", @import("content_value.zig") },
     .{ "conversation_read.zig", @import("conversation_read.zig") },
@@ -133,6 +134,7 @@ const cores = .{
     .{ "provider_selection.zig", @import("provider_selection.zig") },
     .{ "queued_line.zig", @import("queued_line.zig") },
     .{ "read_image_arguments.zig", @import("read_image_arguments.zig") },
+    .{ "replay_binding.zig", @import("replay_binding.zig") },
     .{ "replay_recipe.zig", @import("replay_recipe.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
     .{ "required_settings.zig", @import("required_settings.zig") },
@@ -296,6 +298,20 @@ test "the HTTP/2 client's policy stays within the core boundary" {
     // may import no Rui core.
     if (core_boundary.check(@embedFile("h2/policy.zig"), &.{})) |violation| {
         std.debug.print("h2/policy.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
+        return error.CoreBoundaryViolation;
+    }
+}
+
+test "the HTTP/2 client's liveness stays within the core boundary" {
+    if (core_boundary.check(@embedFile("h2/liveness.zig"), &.{})) |violation| {
+        std.debug.print("h2/liveness.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
+        return error.CoreBoundaryViolation;
+    }
+}
+
+test "the HTTP/2 client's dial policy stays within the core boundary" {
+    if (core_boundary.check(@embedFile("h2/dial_policy.zig"), &.{"policy.zig"})) |violation| {
+        std.debug.print("h2/dial_policy.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
         return error.CoreBoundaryViolation;
     }
 }
