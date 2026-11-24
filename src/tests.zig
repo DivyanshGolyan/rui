@@ -47,6 +47,7 @@ test {
     _ = @import("FeedView.zig");
     _ = @import("Root.zig");
     _ = @import("root_focus_owner_tests.zig");
+    _ = @import("root_clipboard_tests.zig");
     _ = @import("Chip.zig");
     _ = @import("StatusRow.zig");
     _ = @import("FactsRow.zig");
@@ -125,15 +126,19 @@ test {
     _ = @import("activity_golden_tests.zig");
     _ = @import("activity_reply.zig");
     _ = @import("server.zig");
+    _ = @import("server_reply.zig");
+    _ = @import("server_replies.zig");
     _ = @import("line_intake.zig");
     _ = @import("line.zig");
     _ = @import("server_execution.zig");
     _ = @import("model_timing_owner_tests.zig");
     _ = @import("server_host.zig");
+    _ = @import("ModelLists.zig");
     _ = @import("server_mcp_tests.zig");
     _ = @import("SessionEnvironments.zig");
     _ = @import("client.zig");
     _ = @import("execution.zig");
+    _ = @import("execution_owner.zig");
     _ = @import("bash.zig");
     _ = @import("named_scratch.zig");
     _ = @import("output_retention.zig");

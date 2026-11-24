@@ -67,6 +67,7 @@ pub const names = [_][]const u8{
     "test-observation-fd",
     "test-observation-plan",
     "test-observation-state-fd",
+    "observe-allowance",
     "test-phase-trace",
     "test-provider-inactivity-seconds",
     "test-request-preparation-byte-allowance",

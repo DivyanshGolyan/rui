@@ -1,5 +1,5 @@
 {
-  "inputs": "3c26c14e49102118559e826eac9fd48e",
+  "inputs": "2777ad04870039898580fa6fa227e837",
   "targets": {
     "activity-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "admission-debug-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
@@ -73,7 +73,7 @@
     "test-native": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "test-pg": ["nghttp2", "openssl", "translate_c"],
     "test-store": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
-    "test-vaxis-overlay": ["vaxis"],
+    "test-vaxis-clipboard": ["vaxis"],
     "transport-h2-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "ts-client": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "typecheck-macos": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],

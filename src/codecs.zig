@@ -100,6 +100,7 @@ pub fn manifest(codec: protocol.Codec) *const codec_abi.Manifest {
 }
 
 comptime {
+    @setEvalBranchQuota(4000);
     for (@typeInfo(protocol.Codec).@"enum".field_names) |name| {
         const codec = module(@field(protocol.Codec, name));
         if (!codec.manifest.valid()) @compileError("codec " ++ name ++ " observes a header that is not a lowercase token");

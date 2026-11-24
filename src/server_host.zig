@@ -1,4 +1,5 @@
 const std = @import("std");
+const ModelLists = @import("ModelLists.zig");
 const test_pause = @import("testing/pause.zig");
 const cli_grammar = @import("cli_grammar.zig");
 const serve_grammar = @import("serve_grammar.zig");
@@ -9,27 +10,22 @@ const trace_native = @import("posix");
 const bash = @import("bash.zig");
 const environment = @import("environment.zig");
 const SessionEnvironments = @import("SessionEnvironments.zig");
-const execution = @import("execution.zig");
 const model_adapter = @import("model_adapter.zig");
-const model_list = @import("model_list.zig");
 const signal_stack = @import("signal_stack.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const product_defaults = @import("product_defaults.zig");
 const provider = @import("provider.zig");
 const providers_module = @import("providers.zig");
-const turn_states_module = @import("turn_states.zig");
 const protocol = @import("protocol.zig");
 const settings_handoff = @import("host_settings_handoff.zig");
 const wire_request = @import("wire_request.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
-const session_report = @import("session_report.zig");
 const stderr = @import("stderr.zig");
 const host_drain = @import("host_drain.zig");
 const host_settings = @import("host_settings.zig");
 const child_exit_wake = @import("child_exit_wake.zig");
-const server_mcp_relist = @import("server_mcp_relist.zig");
 
 pub const default_bash_timeout_ms = @import("host_settings.zig").default_bash_timeout_ms;
 pub const default_bash_path = @import("host_settings.zig").default_bash_path;
@@ -58,6 +54,7 @@ pub const Hooks = struct {
     inspection_reply: Hold = .{},
     control_gate: ?ControlGate = null,
     suppress_first_control_hint: bool = false,
+    observe_allowance: bool = false,
     phase_trace: bool = false,
     pause_fd: if (test_pause.enabled) ?c_int else void = if (test_pause.enabled) null else {},
     observation_fd: ?c_int = null,
@@ -157,7 +154,7 @@ pub const Tuning = struct {
     hooks: Hooks = .{},
 
     pub fn fromOptions(parsed: *const cli_grammar.Parsed) !Tuning {
-        var tuning: Tuning = .{};
+        var tuning: Tuning = .{ .hooks = .{ .observe_allowance = parsed.has("observe-allowance") } };
         const limits = &tuning.limits;
         const hooks = &tuning.hooks;
         if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| limits.bash_scratch_limit_bytes = limit;
@@ -465,6 +462,7 @@ pub const Lifecycle = struct {
 /// in tests) sets before any Host method that reads it runs. Code outside Probes reads its plain fields only;
 /// everything else goes through a method here.
 pub const Probes = struct {
+    io: std.Io = undefined,
     hooks: Hooks = .{},
     pause_owner: if (test_pause.enabled) ?*test_pause.PauseController else void = if (test_pause.enabled) null else {},
     hook_progress: HookProgress = .{},
@@ -476,11 +474,18 @@ pub const Probes = struct {
     last_unprocessed_completions: ?u64 = null,
 
     pub fn init(io: std.Io, hooks: Hooks) Probes {
-        return .{ .hooks = hooks, .trace_run_ns = nowNs(io) };
+        return .{ .io = io, .hooks = hooks, .trace_run_ns = nowNs(io) };
     }
 
-    pub fn attachPauseOwner(self: *Probes, owner: *test_pause.PauseController) void {
+    pub fn attachPauseOwner(self: *Probes, owner: ?*test_pause.PauseController) void {
         if (comptime test_pause.enabled) self.pause_owner = owner;
+    }
+
+    /// Reaches the armed test pause `point` with `context`; an unarmed point proceeds at once.
+    pub fn reach(self: *Probes, point: test_pause.Point, context: test_pause.Context) void {
+        if (comptime test_pause.enabled) if (self.pause_owner) |owner| {
+            _ = owner.reach(point, context) catch {};
+        };
     }
 
     /// Opens the observation writer that the harness's fds name, if it names one.
@@ -626,7 +631,7 @@ pub const Probes = struct {
     }
 
     /// Holds retry recovery at its gate, returning the gate path when this call took the hold.
-    pub fn holdRetryRecovery(self: *Probes) ?[]const u8 {
+    fn holdRetryRecovery(self: *Probes) ?[]const u8 {
         if (self.hook_progress.retry_recovery != .initial) return null;
         const path = self.hooks.retry_recovery_gate_path orelse return null;
         if (!testGateActive(path)) return null;
@@ -643,14 +648,457 @@ pub const Probes = struct {
     }
 
     /// Whether the bash cleanup gate is present; null when no cleanup gate is configured.
-    pub fn bashReclaimGatePresent(self: *const Probes) ?bool {
+    fn bashReclaimGatePresent(self: *const Probes) ?bool {
         const path = self.hooks.bash_reclaim_gate_path orelse return null;
         return testGateActive(path);
     }
 
     /// The delay a test hold adds at `point`, 0 when none is configured.
-    pub fn pauseDelayMs(self: *const Probes, point: Hooks.Pause) i64 {
+    fn pauseDelayMs(self: *const Probes, point: Hooks.Pause) i64 {
         return self.hooks.pauses.get(point).delay_ms;
+    }
+
+    /// Holds `point` for its configured delay, tracing the point once before the wait; no delay returns at once.
+    pub fn holdAt(self: *Probes, point: Hooks.Pause) void {
+        const delay_ms = self.pauseDelayMs(point);
+        if (delay_ms == 0) return;
+        switch (point) {
+            .action_launch => |binding| self.traceAction("prepared_before_handoff", binding),
+            .model_launch => |binding| self.traceOperation("prepared_before_handoff", binding),
+            .action_result => |binding| self.traceAction("sealed_before_settlement", binding),
+            .model_result => |binding| self.traceOperation("sealed_before_settlement", binding),
+        }
+        self.io.sleep(.fromMilliseconds(delay_ms), .awake) catch {};
+    }
+
+    /// Retry recovery that the test gate holds back: the recovery waits, traced once, while its gate is present.
+    pub fn retryRecovered(self: *Probes) void {
+        const path = self.holdRetryRecovery() orelse return;
+        self.traceSubject("exhausted_retry_recovery_held", "path", path);
+    }
+
+    /// Whether a Bash reclaim waits at its test gate; once the gate is gone, a reclaim nothing attempted traces its release.
+    pub fn bashReclaimHeld(self: *Probes, binding: store_module.ActionAttemptBinding, attempted: bool) bool {
+        const present = self.bashReclaimGatePresent() orelse return false;
+        if (present) return true;
+        if (!attempted) self.traceAction("cleanup_release_observed", binding);
+        return false;
+    }
+
+    pub inline fn traceSubject(self: *Probes, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
+        if (self.hooks.phase_trace) self.writeSubjectTrace(phase, subject_kind, subject);
+    }
+
+    noinline fn writeSubjectTrace(self: *Probes, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
+        var publication = self.beginObservation(phase, subject);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.append("{\"rui_test_phase\":") catch return;
+        trace.appendJsonString(phase) catch return;
+        trace.appendFmt(",\"at_ns\":\"{d}\",\"subject_kind\":", .{nowNs(self.io)}) catch return;
+        trace.appendJsonString(subject_kind) catch return;
+        trace.append(",\"subject\":") catch return;
+        trace.appendJsonString(subject) catch return;
+        trace.append("}") catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceCommandObservation(self: *Probes, key: []const u8, phase: []const u8) void {
+        if (self.hooks.phase_trace) self.writeCommandObservationTrace(key, phase);
+    }
+
+    noinline fn writeCommandObservationTrace(self: *Probes, key: []const u8, phase: []const u8) void {
+        var publication = self.beginObservation(phase, null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.append("{\"rui_test_phase\":") catch return;
+        trace.appendJsonString(phase) catch return;
+        trace.append(",\"command_key\":") catch return;
+        trace.appendJsonString(key) catch return;
+        trace.append("}") catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceRequest(self: *Probes, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
+        if (self.hooks.phase_trace) self.writeRequestTrace(phase, request_number, scratch_used_bytes);
+    }
+
+    noinline fn writeRequestTrace(self: *Probes, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
+        var publication = self.beginObservation(phase, null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.append("{\"rui_test_phase\":") catch return;
+        trace.appendJsonString(phase) catch return;
+        trace.appendFmt(
+            ",\"at_ns\":\"{d}\",\"subject_kind\":\"request_number\",\"subject\":\"{d}\"",
+            .{ nowNs(self.io), request_number },
+        ) catch return;
+        if (scratch_used_bytes) |used|
+            trace.appendFmt(",\"scratch_used_bytes\":\"{d}\"", .{used}) catch return;
+        trace.append("}") catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceServiceBoundary(self: *Probes, start_ns: u64, end_ns: u64, wait_ns: u64) void {
+        if (self.hooks.phase_trace) self.writeServiceBoundaryTrace(start_ns, end_ns, wait_ns);
+    }
+
+    noinline fn writeServiceBoundaryTrace(self: *Probes, start_ns: u64, end_ns: u64, wait_ns: u64) void {
+        var publication = self.beginObservation("lifecycle_boundary", null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.appendFmt(
+            "{{\"rui_test_phase\":\"lifecycle_boundary\",\"at_ns\":\"{d}\",\"start_ns\":\"{d}\",\"wait_ns\":\"{d}\"}}",
+            .{ end_ns, start_ns, wait_ns },
+        ) catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceLifecycleService(self: *Probes, maximum_gap_ns: u64) void {
+        if (self.hooks.phase_trace) self.writeLifecycleServiceTrace(maximum_gap_ns);
+    }
+
+    noinline fn writeLifecycleServiceTrace(self: *Probes, maximum_gap_ns: u64) void {
+        var publication = self.beginObservation("lifecycle_service_observation", null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.appendFmt(
+            "{{\"rui_test_phase\":\"lifecycle_service_observation\",\"at_ns\":\"{d}\",\"maximum_gap_ns\":\"{d}\",\"owner\":\"execution\"}}",
+            .{ nowNs(self.io), maximum_gap_ns },
+        ) catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceOperation(self: *Probes, phase: []const u8, binding: store_module.AttemptBinding) void {
+        if (self.hooks.phase_trace) self.writeOperationTrace(phase, binding);
+    }
+
+    noinline fn writeOperationTrace(self: *Probes, phase: []const u8, binding: store_module.AttemptBinding) void {
+        var publication = self.beginObservation(phase, null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.append("{\"rui_test_phase\":") catch return;
+        trace.appendJsonString(phase) catch return;
+        trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+            nowNs(self.io),
+            binding.turn_id,
+            binding.operation_id,
+            binding.attempt_ordinal,
+        }) catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn tracePreparationAdvance(
+        self: *Probes,
+        phase: []const u8,
+        stats: model_adapter.PreparationAdvanceStats,
+        binding: store_module.AttemptBinding,
+    ) void {
+        if (self.hooks.phase_trace) self.writePreparationAdvanceTrace(phase, stats, binding);
+    }
+
+    noinline fn writePreparationAdvanceTrace(
+        self: *Probes,
+        phase: []const u8,
+        stats: model_adapter.PreparationAdvanceStats,
+        binding: store_module.AttemptBinding,
+    ) void {
+        var publication = self.beginObservation(phase, null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.append("{\"rui_test_phase\":") catch return;
+        trace.appendJsonString(phase) catch return;
+        trace.appendFmt(
+            ",\"at_ns\":\"{d}\",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
+            .{ nowNs(self.io), stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
+        ) catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn tracePreparationAdvanceError(
+        self: *Probes,
+        phase: []const u8,
+        err: anyerror,
+        stats: model_adapter.PreparationAdvanceStats,
+        binding: store_module.AttemptBinding,
+    ) void {
+        if (self.hooks.phase_trace) self.writePreparationAdvanceErrorTrace(phase, err, stats, binding);
+    }
+
+    noinline fn writePreparationAdvanceErrorTrace(
+        self: *Probes,
+        phase: []const u8,
+        err: anyerror,
+        stats: model_adapter.PreparationAdvanceStats,
+        binding: store_module.AttemptBinding,
+    ) void {
+        var publication = self.beginObservation(phase, null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.append("{\"rui_test_phase\":") catch return;
+        trace.appendJsonString(phase) catch return;
+        trace.appendFmt(",\"at_ns\":\"{d}\",\"error\":", .{nowNs(self.io)}) catch return;
+        trace.appendJsonString(@errorName(err)) catch return;
+        trace.appendFmt(
+            ",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
+            .{ stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
+        ) catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceCompletionQueue(self: *Probes, queued_after: usize, binding: store_module.AttemptBinding) void {
+        if (self.hooks.phase_trace) self.writeCompletionQueueTrace(queued_after, binding);
+    }
+
+    noinline fn writeCompletionQueueTrace(self: *Probes, queued_after: usize, binding: store_module.AttemptBinding) void {
+        var publication = self.beginObservation("provider_completion_removed", null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.appendFmt(
+            "{{\"rui_test_phase\":\"provider_completion_removed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
+            .{ nowNs(self.io), queued_after, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
+        ) catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceAction(self: *Probes, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
+        if (self.hooks.phase_trace) self.writeActionTrace(phase, binding);
+    }
+
+    noinline fn writeActionTrace(self: *Probes, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
+        var publication = self.beginObservation(phase, null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.append("{\"rui_test_phase\":") catch return;
+        trace.appendJsonString(phase) catch return;
+        trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
+            nowNs(self.io),
+            binding.turn_id,
+            binding.parent_operation_id,
+            binding.action_id,
+        }) catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceOperationControl(
+        self: *Probes,
+        phase: []const u8,
+        command_key: []const u8,
+        binding: store_module.AttemptBinding,
+    ) void {
+        if (self.hooks.phase_trace) self.writeOperationControlTrace(phase, command_key, binding);
+    }
+
+    noinline fn writeOperationControlTrace(
+        self: *Probes,
+        phase: []const u8,
+        command_key: []const u8,
+        binding: store_module.AttemptBinding,
+    ) void {
+        var publication = self.beginObservation(phase, null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.append("{\"rui_test_phase\":") catch return;
+        trace.appendJsonString(phase) catch return;
+        trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(self.io)}) catch return;
+        trace.appendJsonString(command_key) catch return;
+        trace.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+            binding.turn_id,
+            binding.operation_id,
+            binding.attempt_ordinal,
+        }) catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceActionControl(
+        self: *Probes,
+        phase: []const u8,
+        command_key: []const u8,
+        binding: store_module.ActionAttemptBinding,
+    ) void {
+        if (self.hooks.phase_trace) self.writeActionControlTrace(phase, command_key, binding);
+    }
+
+    noinline fn writeActionControlTrace(
+        self: *Probes,
+        phase: []const u8,
+        command_key: []const u8,
+        binding: store_module.ActionAttemptBinding,
+    ) void {
+        var publication = self.beginObservation(phase, null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.append("{\"rui_test_phase\":") catch return;
+        trace.appendJsonString(phase) catch return;
+        trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(self.io)}) catch return;
+        trace.appendJsonString(command_key) catch return;
+        trace.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
+            binding.turn_id,
+            binding.parent_operation_id,
+            binding.action_id,
+        }) catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceActionControlOutcome(
+        self: *Probes,
+        phase: []const u8,
+        command_key: []const u8,
+        attempted: bool,
+        failed: bool,
+        binding: store_module.ActionAttemptBinding,
+    ) void {
+        if (self.hooks.phase_trace) self.writeActionControlOutcomeTrace(phase, command_key, attempted, failed, binding);
+    }
+
+    noinline fn writeActionControlOutcomeTrace(
+        self: *Probes,
+        phase: []const u8,
+        command_key: []const u8,
+        attempted: bool,
+        failed: bool,
+        binding: store_module.ActionAttemptBinding,
+    ) void {
+        var publication = self.beginObservation(phase, null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.append("{\"rui_test_phase\":") catch return;
+        trace.appendJsonString(phase) catch return;
+        trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(self.io)}) catch return;
+        trace.appendJsonString(command_key) catch return;
+        trace.appendFmt(",\"attempted\":{s},\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
+            if (attempted) "true" else "false",
+            if (failed) "true" else "false",
+            binding.turn_id,
+            binding.parent_operation_id,
+            binding.action_id,
+        }) catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceActionDeadline(
+        self: *Probes,
+        phase: []const u8,
+        deadline_ns: u64,
+        failed: bool,
+        binding: store_module.ActionAttemptBinding,
+    ) void {
+        if (self.hooks.phase_trace) self.writeActionDeadlineTrace(phase, deadline_ns, failed, binding);
+    }
+
+    noinline fn writeActionDeadlineTrace(
+        self: *Probes,
+        phase: []const u8,
+        deadline_ns: u64,
+        failed: bool,
+        binding: store_module.ActionAttemptBinding,
+    ) void {
+        var publication = self.beginObservation(phase, null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.append("{\"rui_test_phase\":") catch return;
+        trace.appendJsonString(phase) catch return;
+        trace.appendFmt(",\"at_ns\":\"{d}\",\"deadline_ns\":\"{d}\",\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
+            nowNs(self.io),
+            deadline_ns,
+            if (failed) "true" else "false",
+            binding.turn_id,
+            binding.parent_operation_id,
+            binding.action_id,
+        }) catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn observeUnprocessedCompletions(self: *Probes, reactor: *provider.Reactor) void {
+        const count: u64 = reactor.finishedCount();
+        if (!self.noteUnprocessedCompletions(count)) return;
+        if (self.hooks.phase_trace) self.writeUnprocessedCompletionsTrace(count);
+    }
+
+    noinline fn writeUnprocessedCompletionsTrace(self: *Probes, count: u64) void {
+        var publication = self.beginObservation("native_completions_unprocessed", null);
+        defer if (publication) |*value| value.finish();
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.appendFmt(
+            "{{\"rui_test_phase\":\"native_completions_unprocessed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\"}}",
+            .{ nowNs(self.io), count },
+        ) catch return;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceTransfer(self: *Probes, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
+        if (self.hooks.phase_trace) self.writeTransferTrace(transfer, binding);
+    }
+
+    noinline fn writeTransferTrace(self: *Probes, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
+        var publication = self.beginObservation("codex_transfer", null);
+        defer if (publication) |*value| value.finish();
+        const observation = transfer.protocolObservation();
+        const correlation = transfer.requestId();
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(correlation, &digest, .{});
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.appendFmt("{{\"rui_test_phase\":\"codex_transfer\",\"operation\":\"{d}\",\"new_connections\":{d},\"replays\":{d},\"correlation_present\":{s},\"correlation_sha256\":\"{x}\"}}", .{
+            binding.operation_id,
+            observation.new_connections,
+            observation.replays,
+            if (correlation.len != 0) "true" else "false",
+            digest,
+        }) catch unreachable;
+        self.writeTrace(&trace, &publication);
+    }
+
+    pub inline fn traceSqliteDiagnostic(self: *Probes, store: *store_module.Store, subject: []const u8) void {
+        if (self.hooks.phase_trace and self.hooks.sqlite_diagnostics) self.writeSqliteDiagnosticTrace(store, subject);
+    }
+
+    // Reads the Store before the trace buffer exists: the read can run queued Store
+    // writes on this thread, so the buffer must not share a frame with it.
+    noinline fn writeSqliteDiagnosticTrace(self: *Probes, store: *store_module.Store, subject: []const u8) void {
+        var publication = self.beginObservation("sqlite_diagnostic", subject);
+        defer if (publication) |*value| value.finish();
+        switch (store.diagnostic()) {
+            .sqlite => |*value| self.renderSqliteDiagnosticTrace(subject, value, &publication),
+            .mysql => {},
+        }
+    }
+
+    noinline fn renderSqliteDiagnosticTrace(self: *Probes, subject: []const u8, value: *const @FieldType(store_module.Diagnostic, "sqlite"), publication: *?TestObservation.Publication) void {
+        var trace: protocol.DiagnosticBuffer = .{};
+        trace.append("{\"rui_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
+        trace.appendFmt("{d}", .{nowNs(self.io)}) catch return;
+        trace.append("\",\"subject\":") catch return;
+        trace.appendJsonString(subject) catch return;
+        trace.append(",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",") catch return;
+        appendOptionalUnsigned(&trace, "process_memory_current_bytes", value.process_memory_current_bytes) catch return;
+        trace.append(",") catch return;
+        appendOptionalUnsigned(&trace, "process_memory_highwater_bytes", value.process_memory_highwater_bytes) catch return;
+        trace.append(",") catch return;
+        appendOptionalUnsigned(&trace, "cache_used_bytes", value.cache_used_bytes) catch return;
+        trace.append(",\"cache_used_scope\":\"connection-current approximate pager bytes\",") catch return;
+        appendOptionalUnsigned(&trace, "cache_spills", value.cache_spills) catch return;
+        trace.append(",\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",") catch return;
+        appendOptionalUnsigned(&trace, "hard_heap_limit_bytes", value.hard_heap_limit_bytes) catch return;
+        trace.append(",") catch return;
+        appendOptionalUnsigned(&trace, "page_size_bytes", value.page_size_bytes) catch return;
+        trace.append(",") catch return;
+        appendOptionalSigned(&trace, "cache_size_setting", value.cache_size_setting) catch return;
+        trace.append(",\"cache_size_setting_scope\":\"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages\",") catch return;
+        appendOptionalSigned(&trace, "cache_spill_threshold", value.cache_spill_threshold) catch return;
+        trace.append(",") catch return;
+        appendOptionalUnsigned(&trace, "mmap_size_bytes", value.mmap_size_bytes) catch return;
+        trace.append(",") catch return;
+        appendOptionalSigned(&trace, "synchronous", value.synchronous) catch return;
+        trace.append(",") catch return;
+        appendOptionalSigned(&trace, "temp_store", value.temp_store) catch return;
+        trace.append(",") catch return;
+        appendOptionalUnsigned(&trace, "busy_timeout_ms", value.busy_timeout_ms) catch return;
+        trace.append(",\"journal_mode\":") catch return;
+        if (value.journal_mode) |mode| {
+            trace.appendJsonString(mode.slice()) catch return;
+        } else trace.append("null") catch return;
+        trace.append("}") catch return;
+        self.writeTrace(&trace, publication);
     }
 };
 
@@ -665,562 +1113,115 @@ pub const Host = struct {
     instance: protocol.InstanceId = undefined,
     limits: Limits = .{},
     providers: *const providers_module.Providers = &providers_module.none,
-    catalog_url: ?[]const u8 = null,
     presets: []const core_tools.Preset = &.{},
     model_lists: ModelLists = .{},
-    listings_requested: std.atomic.Value(bool) = .init(false),
-    auth_worker: ?*AuthWorker = null,
-    scratch_budget: ?provider.ScratchBudget = null,
-    turn_states: turn_states_module.PerProvider = .{},
-    history_memos: model_adapter.HistoryMemos = .{},
-    bash_work: []BashWork = &.{},
-    slot_changes: u64 = 0,
-    bash_path: []const u8 = default_bash_path,
     bash_facts: environment.HostFacts = bash.default_facts,
     environments: ?*SessionEnvironments = null,
-    bash_timeout_ms: u64 = default_bash_timeout_ms,
-    background_after_ms: u64 = @import("host_settings.zig").default_background_after_ms,
     mcp_servers: @import("mcp/servers.zig").Servers = .{},
-    /// The owner of MCP re-lists; null when no MCP server is configured.
-    mcp_relist: ?*@import("server_mcp_relist.zig").Relist = null,
     retention: *output_retention.Queue = undefined,
-    failed_response_store: ?std.Io.Dir = null,
-    custody: execution.CustodyPool = .{ .records = &.{} },
-    request_counter: std.atomic.Value(u64) = .init(0),
     intake_capacity: usize = product_defaults.intake_capacity,
     descriptor_soft_limit: ?usize = null,
     scratch_used: std.atomic.Value(u64) = .init(0),
     started_at: u64 = 0,
     /// The frozen settings frame a detached Host was started with; null for a foreground Host.
     settings_digest: ?settings_handoff.Digest = null,
+    allowance_diagnostic: AllowanceDiagnostic = .{},
 };
-
-pub const ModelLists = struct {
-    io: std.Io = undefined,
-    allocator: std.mem.Allocator = undefined,
-    providers: *const providers_module.Providers = &providers_module.none,
-    mutex: std.Io.Mutex = .init,
-    live: std.EnumArray(protocol.Provider, model_list.List) = .initFill(.catalog),
-
-    pub fn init(io: std.Io, allocator: std.mem.Allocator, providers: *const providers_module.Providers) ModelLists {
-        var lists: ModelLists = .{ .io = io, .allocator = allocator, .providers = providers };
-        for (std.enums.values(protocol.Provider)) |name| {
-            if (providers.liveList(name) != null) lists.live.set(name, .pending);
-        }
-        return lists;
-    }
-
-    pub fn deinit(self: *ModelLists) void {
-        for (self.live.values) |list| switch (list) {
-            .live => |ids| self.allocator.free(ids.bytes),
-            .catalog, .pending, .catalog_fallback => {},
-        };
-        self.* = .{};
-    }
-
-    pub fn set(self: *ModelLists, name: protocol.Provider, list: model_list.List) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        switch (self.live.get(name)) {
-            .live => |ids| self.allocator.free(ids.bytes),
-            else => {},
-        }
-        self.live.set(name, list);
-    }
-
-    pub fn publish(self: *ModelLists, name: protocol.Provider, body: anyerror![]const u8) void {
-        const listing = self.providers.liveList(name).?.credential.listing().?;
-        const list: model_list.List = if (keep(self.allocator, listing, body)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
-            stderr.print("rui: {s} model list unavailable ({s}); the picker shows Rui's models\n", .{ name.shown(), @errorName(err) });
-            break :failed .catalog_fallback;
-        };
-        self.set(name, list);
-    }
-
-    noinline fn keep(allocator: std.mem.Allocator, listing: providers_module.Listing, body: anyerror![]const u8) ![]const u8 {
-        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-        defer arena.deinit();
-        const ids = try arena.allocator().create(model_list.IdBuffer);
-        const parsed = try listing.parse(arena.allocator(), try body, ids);
-        return allocator.dupe(u8, parsed.bytes);
-    }
-
-    pub fn render(self: *ModelLists, out: *std.Io.Writer, facts: []const @import("model_catalog.zig").Entry) !void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        var entries: [std.enums.values(protocol.Provider).len]model_list.Entry = undefined;
-        var count: usize = 0;
-        for (std.enums.values(protocol.Provider)) |name| {
-            if (!self.providers.serves(name)) continue;
-            entries[count] = .{ .provider = name, .list = self.live.get(name) };
-            count += 1;
-        }
-        try model_list.writeProviders(out, facts, entries[0..count]);
-    }
-};
-
-pub const AuthWorker = struct {
-    io: std.Io,
-    mutex: std.Io.Mutex = .init,
-    condition: std.Io.Condition = .init,
-    state: State = .idle,
-    credential: providers_module.Lease = undefined,
-    work: providers_module.Work = undefined,
-    stopping: bool = false,
-
-    const Job = union(enum) { acquire: providers_module.Authentication, refresh: providers_module.Credential.Refresh };
-    const State = union(enum) { idle, requested: Job, ready, in_use, refreshed: bool, failed: anyerror };
-    const Result = union(enum) { ready: *const providers_module.Lease, refreshed: bool, failed: anyerror };
-
-    pub fn idle(self: *AuthWorker) bool {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        return self.state == .idle;
-    }
-
-    pub fn request(self: *AuthWorker, source: providers_module.Authentication) void {
-        self.requestJob(.{ .acquire = source });
-    }
-
-    pub fn requestRefresh(self: *AuthWorker, refresh: providers_module.Credential.Refresh) void {
-        self.requestJob(.{ .refresh = refresh });
-    }
-
-    fn requestJob(self: *AuthWorker, job: Job) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        std.debug.assert(self.state == .idle);
-        self.state = .{ .requested = job };
-        self.condition.broadcast(self.io);
-    }
-
-    pub fn take(self: *AuthWorker) ?Result {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        const result: Result = switch (self.state) {
-            .idle, .requested, .in_use => return null,
-            .ready => .{ .ready = &self.credential },
-            .refreshed => |refreshed| .{ .refreshed = refreshed },
-            .failed => |err| .{ .failed = err },
-        };
-        self.state = if (result == .ready) .in_use else .idle;
-        return result;
-    }
-
-    pub fn finish(self: *AuthWorker) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        std.debug.assert(self.state == .in_use);
-        self.credential.release();
-        self.state = .idle;
-    }
-
-    pub fn stop(self: *AuthWorker, thread: std.Thread) void {
-        self.mutex.lockUncancelable(self.io);
-        self.stopping = true;
-        self.condition.broadcast(self.io);
-        self.mutex.unlock(self.io);
-        thread.join();
-        std.debug.assert(self.state != .in_use);
-        if (self.state == .ready) self.credential.release();
-    }
-
-    pub fn run(self: *AuthWorker) void {
-        while (true) {
-            self.mutex.lockUncancelable(self.io);
-            while (!self.stopping and self.state != .requested)
-                self.condition.waitUncancelable(self.io, &self.mutex);
-            if (self.stopping) {
-                self.mutex.unlock(self.io);
-                return;
-            }
-            const job = self.state.requested;
-            self.mutex.unlock(self.io);
-            const answer: State = switch (job) {
-                .acquire => |source| if (providers_module.acquire(source, self.io, &self.work, &self.credential)) |_| .ready else |err| .{ .failed = err },
-                .refresh => |refresh| if (providers_module.refresh(refresh.source, self.io, refresh.generation)) |refreshed| .{ .refreshed = refreshed } else |err| .{ .failed = err },
-            };
-            self.mutex.lockUncancelable(self.io);
-            self.state = answer;
-            self.condition.broadcast(self.io);
-            self.mutex.unlock(self.io);
-        }
-    }
-};
-
-pub const BashWork = union {
-    execution: bash.Execution,
-    prepared_cleanup: bash.PreparedCleanup,
-};
-
-/// The one ask for MCP lists from the Host: asks the re-list owner for `only` or every configured server, wakes the
-/// dispatch loop when anything was asked, and returns how many were asked. `tools_reload` and `find_tools` reload both
-/// call it, so neither path asks or wakes on its own.
-pub fn askMcpLists(host: *Host, only: ?[]const u8, out: *[host_settings.max_mcp_servers]server_mcp_relist.Relist.Asked) usize {
-    const count: usize = if (host.mcp_relist) |owner| owner.askAll(only, out) else 0;
-    if (count != 0) host.lifecycle.wakeDispatch();
-    return count;
-}
 
 pub fn nowNs(io: std.Io) u64 {
     return @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
 }
 
-pub inline fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
-    if (host.probes.hooks.phase_trace) writeSubjectTrace(host, phase, subject_kind, subject);
+const StderrSink = struct {
+    fn write(_: StderrSink, bytes: []const u8) bool {
+        return stderr.write(bytes);
+    }
+};
+
+pub fn writeAllowance(diagnostic: *AllowanceDiagnostic, observation: provider.AllowanceObservation) void {
+    diagnostic.write(observation, StderrSink{});
 }
 
-noinline fn writeSubjectTrace(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
-    var publication = host.probes.beginObservation(phase, subject);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.append("{\"rui_test_phase\":") catch return;
-    trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"subject_kind\":", .{nowNs(host.io)}) catch return;
-    trace.appendJsonString(subject_kind) catch return;
-    trace.append(",\"subject\":") catch return;
-    trace.appendJsonString(subject) catch return;
-    trace.append("}") catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
+/// Owns loss across optional allowance diagnostic deliveries.
+pub const AllowanceDiagnostic = struct {
+    lost: std.atomic.Value(bool) = .init(false),
 
-pub inline fn traceCommandObservation(host: *Host, key: []const u8, phase: []const u8) void {
-    if (host.probes.hooks.phase_trace) writeCommandObservationTrace(host, key, phase);
-}
+    pub fn write(self: *AllowanceDiagnostic, observation: provider.AllowanceObservation, sink: anytype) void {
+        var buffer: [1024]u8 = undefined;
+        const line = formatAllowance(observation, self.lost.load(.acquire), &buffer) catch {
+            self.lost.store(true, .release);
+            return;
+        };
+        if (!sink.write(line)) self.lost.store(true, .release);
+    }
+};
 
-noinline fn writeCommandObservationTrace(host: *Host, key: []const u8, phase: []const u8) void {
-    var publication = host.probes.beginObservation(phase, null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.append("{\"rui_test_phase\":") catch return;
-    trace.appendJsonString(phase) catch return;
-    trace.append(",\"command_key\":") catch return;
-    trace.appendJsonString(key) catch return;
-    trace.append("}") catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub inline fn traceRequest(host: *Host, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
-    if (host.probes.hooks.phase_trace) writeRequestTrace(host, phase, request_number, scratch_used_bytes);
-}
-
-noinline fn writeRequestTrace(host: *Host, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
-    var publication = host.probes.beginObservation(phase, null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.append("{\"rui_test_phase\":") catch return;
-    trace.appendJsonString(phase) catch return;
-    trace.appendFmt(
-        ",\"at_ns\":\"{d}\",\"subject_kind\":\"request_number\",\"subject\":\"{d}\"",
-        .{ nowNs(host.io), request_number },
-    ) catch return;
-    if (scratch_used_bytes) |used|
-        trace.appendFmt(",\"scratch_used_bytes\":\"{d}\"", .{used}) catch return;
-    trace.append("}") catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub fn executionFacts(host: *Host) session_report.Execution {
-    return .{
-        .dispatch_fenced = !host.lifecycle.launchAllowed(),
-        .custody_occupied = host.custody.held(),
-        .scratch_used_bytes = host.scratch_used.load(.acquire),
+fn allowanceField(comptime T: type, field: provider.AllowanceField(T), buffer: []u8) []const u8 {
+    return switch (field) {
+        .missing => "missing",
+        .invalid => "invalid",
+        .value => |value| if (T == f64)
+            std.fmt.bufPrint(buffer, "{e}", .{value}) catch "format_unavailable"
+        else
+            std.fmt.bufPrint(buffer, "{d}", .{value}) catch "format_unavailable",
     };
 }
 
-pub inline fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
-    if (host.probes.hooks.phase_trace) writeServiceBoundaryTrace(host, start_ns, end_ns, wait_ns);
+fn formatAllowance(observation: provider.AllowanceObservation, lost: bool, buffer: []u8) ![]const u8 {
+    var values: [6][64]u8 = undefined;
+    return std.fmt.bufPrint(buffer, "rui: allowance source_account=unconfirmed provider={s} turn={d} operation={d} attempt={d} status={d} observed_at={d} delivery=completion prior_loss={s} primary_used={s} primary_minutes={s} primary_reset_at={s} secondary_used={s} secondary_minutes={s} secondary_reset_at={s}\n", .{ @tagName(observation.provider), observation.binding.turn_id, observation.binding.operation_id, observation.binding.attempt_ordinal, observation.status, observation.observed_at, if (lost) "true" else "false", allowanceField(f64, observation.primary.used, &values[0]), allowanceField(u64, observation.primary.minutes, &values[1]), allowanceField(u64, observation.primary.reset_at, &values[2]), allowanceField(f64, observation.secondary.used, &values[3]), allowanceField(u64, observation.secondary.minutes, &values[4]), allowanceField(u64, observation.secondary.reset_at, &values[5]) });
 }
 
-noinline fn writeServiceBoundaryTrace(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
-    var publication = host.probes.beginObservation("lifecycle_boundary", null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.appendFmt(
-        "{{\"rui_test_phase\":\"lifecycle_boundary\",\"at_ns\":\"{d}\",\"start_ns\":\"{d}\",\"wait_ns\":\"{d}\"}}",
-        .{ end_ns, start_ns, wait_ns },
-    ) catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
+test "CM-54 allowance diagnostic delivers bounded typed records and reports loss" {
+    const Sink = struct {
+        fd: c_int,
+        fn write(self: @This(), bytes: []const u8) bool {
+            const count = std.c.write(self.fd, bytes.ptr, bytes.len);
+            return count >= 0 and @as(usize, @intCast(count)) == bytes.len;
+        }
+    };
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    const flags = std.c.fcntl(fds[0], std.c.F.GETFL);
+    try std.testing.expect(flags >= 0);
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(fds[0], std.c.F.SETFL, flags | nonblock));
+    const output: Sink = .{ .fd = fds[1] };
+    var diagnostic: AllowanceDiagnostic = .{};
+    const sparse: provider.AllowanceObservation = .{
+        .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 3 },
+        .provider = .codex,
+        .status = 200,
+        .observed_at = 123,
+        .primary = .{ .used = .{ .value = 9.5 }, .reset_at = .invalid },
+    };
+    var buffer: [1024]u8 = undefined;
+    diagnostic.write(sparse, output);
+    var count = std.c.read(fds[0], &buffer, buffer.len);
+    try std.testing.expect(count > 0);
+    try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=codex turn=1 operation=2 attempt=3 status=200 observed_at=123 delivery=completion prior_loss=false primary_used=9.5e0 primary_minutes=missing primary_reset_at=invalid secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
+    const extreme: provider.AllowanceObservation = .{
+        .binding = .{ .turn_id = std.math.maxInt(u64), .operation_id = std.math.maxInt(u64), .attempt_ordinal = std.math.maxInt(u64) },
+        .provider = .chatgpt,
+        .status = 599,
+        .observed_at = std.math.maxInt(i64),
+        .primary = .{ .used = .{ .value = std.math.floatMax(f64) }, .minutes = .{ .value = std.math.maxInt(u64) } },
+    };
+    diagnostic.write(extreme, output);
+    count = std.c.read(fds[0], &buffer, buffer.len);
+    try std.testing.expect(count > 0);
+    try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=chatgpt turn=18446744073709551615 operation=18446744073709551615 attempt=18446744073709551615 status=599 observed_at=9223372036854775807 delivery=completion prior_loss=false primary_used=1.7976931348623157e308 primary_minutes=18446744073709551615 primary_reset_at=missing secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
 
-pub inline fn traceLifecycleService(host: *Host, maximum_gap_ns: u64) void {
-    if (host.probes.hooks.phase_trace) writeLifecycleServiceTrace(host, maximum_gap_ns);
-}
-
-noinline fn writeLifecycleServiceTrace(host: *Host, maximum_gap_ns: u64) void {
-    var publication = host.probes.beginObservation("lifecycle_service_observation", null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.appendFmt(
-        "{{\"rui_test_phase\":\"lifecycle_service_observation\",\"at_ns\":\"{d}\",\"maximum_gap_ns\":\"{d}\",\"owner\":\"execution\"}}",
-        .{ nowNs(host.io), maximum_gap_ns },
-    ) catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub inline fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptBinding) void {
-    if (host.probes.hooks.phase_trace) writeOperationTrace(host, phase, binding);
-}
-
-noinline fn writeOperationTrace(host: *Host, phase: []const u8, binding: store_module.AttemptBinding) void {
-    var publication = host.probes.beginObservation(phase, null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.append("{\"rui_test_phase\":") catch return;
-    trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
-        nowNs(host.io),
-        binding.turn_id,
-        binding.operation_id,
-        binding.attempt_ordinal,
-    }) catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub inline fn tracePreparationAdvance(
-    host: *Host,
-    phase: []const u8,
-    stats: model_adapter.PreparationAdvanceStats,
-    binding: store_module.AttemptBinding,
-) void {
-    if (host.probes.hooks.phase_trace) writePreparationAdvanceTrace(host, phase, stats, binding);
-}
-
-noinline fn writePreparationAdvanceTrace(
-    host: *Host,
-    phase: []const u8,
-    stats: model_adapter.PreparationAdvanceStats,
-    binding: store_module.AttemptBinding,
-) void {
-    var publication = host.probes.beginObservation(phase, null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.append("{\"rui_test_phase\":") catch return;
-    trace.appendJsonString(phase) catch return;
-    trace.appendFmt(
-        ",\"at_ns\":\"{d}\",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
-        .{ nowNs(host.io), stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
-    ) catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub inline fn tracePreparationAdvanceError(
-    host: *Host,
-    phase: []const u8,
-    err: anyerror,
-    stats: model_adapter.PreparationAdvanceStats,
-    binding: store_module.AttemptBinding,
-) void {
-    if (host.probes.hooks.phase_trace) writePreparationAdvanceErrorTrace(host, phase, err, stats, binding);
-}
-
-noinline fn writePreparationAdvanceErrorTrace(
-    host: *Host,
-    phase: []const u8,
-    err: anyerror,
-    stats: model_adapter.PreparationAdvanceStats,
-    binding: store_module.AttemptBinding,
-) void {
-    var publication = host.probes.beginObservation(phase, null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.append("{\"rui_test_phase\":") catch return;
-    trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"error\":", .{nowNs(host.io)}) catch return;
-    trace.appendJsonString(@errorName(err)) catch return;
-    trace.appendFmt(
-        ",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
-        .{ stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
-    ) catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub inline fn traceCompletionQueue(host: *Host, queued_after: usize, binding: store_module.AttemptBinding) void {
-    if (host.probes.hooks.phase_trace) writeCompletionQueueTrace(host, queued_after, binding);
-}
-
-noinline fn writeCompletionQueueTrace(host: *Host, queued_after: usize, binding: store_module.AttemptBinding) void {
-    var publication = host.probes.beginObservation("provider_completion_removed", null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.appendFmt(
-        "{{\"rui_test_phase\":\"provider_completion_removed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
-        .{ nowNs(host.io), queued_after, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
-    ) catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub inline fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
-    if (host.probes.hooks.phase_trace) writeActionTrace(host, phase, binding);
-}
-
-noinline fn writeActionTrace(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
-    var publication = host.probes.beginObservation(phase, null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.append("{\"rui_test_phase\":") catch return;
-    trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
-        nowNs(host.io),
-        binding.turn_id,
-        binding.parent_operation_id,
-        binding.action_id,
-    }) catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub inline fn traceOperationControl(
-    host: *Host,
-    phase: []const u8,
-    command_key: []const u8,
-    binding: store_module.AttemptBinding,
-) void {
-    if (host.probes.hooks.phase_trace) writeOperationControlTrace(host, phase, command_key, binding);
-}
-
-noinline fn writeOperationControlTrace(
-    host: *Host,
-    phase: []const u8,
-    command_key: []const u8,
-    binding: store_module.AttemptBinding,
-) void {
-    var publication = host.probes.beginObservation(phase, null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.append("{\"rui_test_phase\":") catch return;
-    trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host.io)}) catch return;
-    trace.appendJsonString(command_key) catch return;
-    trace.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
-        binding.turn_id,
-        binding.operation_id,
-        binding.attempt_ordinal,
-    }) catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub inline fn traceActionControl(
-    host: *Host,
-    phase: []const u8,
-    command_key: []const u8,
-    binding: store_module.ActionAttemptBinding,
-) void {
-    if (host.probes.hooks.phase_trace) writeActionControlTrace(host, phase, command_key, binding);
-}
-
-noinline fn writeActionControlTrace(
-    host: *Host,
-    phase: []const u8,
-    command_key: []const u8,
-    binding: store_module.ActionAttemptBinding,
-) void {
-    var publication = host.probes.beginObservation(phase, null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.append("{\"rui_test_phase\":") catch return;
-    trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host.io)}) catch return;
-    trace.appendJsonString(command_key) catch return;
-    trace.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
-        binding.turn_id,
-        binding.parent_operation_id,
-        binding.action_id,
-    }) catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub inline fn traceActionControlOutcome(
-    host: *Host,
-    phase: []const u8,
-    command_key: []const u8,
-    attempted: bool,
-    failed: bool,
-    binding: store_module.ActionAttemptBinding,
-) void {
-    if (host.probes.hooks.phase_trace) writeActionControlOutcomeTrace(host, phase, command_key, attempted, failed, binding);
-}
-
-noinline fn writeActionControlOutcomeTrace(
-    host: *Host,
-    phase: []const u8,
-    command_key: []const u8,
-    attempted: bool,
-    failed: bool,
-    binding: store_module.ActionAttemptBinding,
-) void {
-    var publication = host.probes.beginObservation(phase, null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.append("{\"rui_test_phase\":") catch return;
-    trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host.io)}) catch return;
-    trace.appendJsonString(command_key) catch return;
-    trace.appendFmt(",\"attempted\":{s},\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
-        if (attempted) "true" else "false",
-        if (failed) "true" else "false",
-        binding.turn_id,
-        binding.parent_operation_id,
-        binding.action_id,
-    }) catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub inline fn traceActionDeadline(
-    host: *Host,
-    phase: []const u8,
-    deadline_ns: u64,
-    failed: bool,
-    binding: store_module.ActionAttemptBinding,
-) void {
-    if (host.probes.hooks.phase_trace) writeActionDeadlineTrace(host, phase, deadline_ns, failed, binding);
-}
-
-noinline fn writeActionDeadlineTrace(
-    host: *Host,
-    phase: []const u8,
-    deadline_ns: u64,
-    failed: bool,
-    binding: store_module.ActionAttemptBinding,
-) void {
-    var publication = host.probes.beginObservation(phase, null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.append("{\"rui_test_phase\":") catch return;
-    trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"deadline_ns\":\"{d}\",\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
-        nowNs(host.io),
-        deadline_ns,
-        if (failed) "true" else "false",
-        binding.turn_id,
-        binding.parent_operation_id,
-        binding.action_id,
-    }) catch return;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub fn pause(host: *Host, point: Hooks.Pause) void {
-    const delay_ms = host.probes.pauseDelayMs(point);
-    if (delay_ms == 0) return;
-    switch (point) {
-        .action_launch => |binding| traceAction(host, "prepared_before_handoff", binding),
-        .model_launch => |binding| traceOperation(host, "prepared_before_handoff", binding),
-        .action_result => |binding| traceAction(host, "sealed_before_settlement", binding),
-        .model_result => |binding| traceOperation(host, "sealed_before_settlement", binding),
-    }
-    host.io.sleep(.fromMilliseconds(delay_ms), .awake) catch {};
-}
-
-/// Retry recovery that the test gate holds back: the recovery waits, traced once, while its gate is present.
-pub fn retryRecovered(host: *Host) void {
-    const path = host.probes.holdRetryRecovery() orelse return;
-    traceSubject(host, "exhausted_retry_recovery_held", "path", path);
-}
-
-pub fn bashReclaimHeld(host: *Host, binding: store_module.ActionAttemptBinding, attempted: bool) bool {
-    const present = host.probes.bashReclaimGatePresent() orelse return false;
-    if (present) return true;
-    if (!attempted) traceAction(host, "cleanup_release_observed", binding);
-    return false;
+    // A pipe's read end cannot be written: this is an actual failed write, with no output.
+    diagnostic.write(sparse, Sink{ .fd = fds[0] });
+    var pollfds = [_]std.posix.pollfd{.{ .fd = fds[0], .events = std.posix.POLL.IN, .revents = 0 }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&pollfds, 0));
+    diagnostic.write(sparse, output);
+    count = std.c.read(fds[0], &buffer, buffer.len);
+    try std.testing.expect(count > 0);
+    try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=codex turn=1 operation=2 attempt=3 status=200 observed_at=123 delivery=completion prior_loss=true primary_used=9.5e0 primary_minutes=missing primary_reset_at=invalid secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
 }
 
 pub fn testGateActive(path: []const u8) bool {
@@ -1229,23 +1230,6 @@ pub fn testGateActive(path: []const u8) bool {
     const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0) catch return false;
     _ = std.c.close(fd);
     return true;
-}
-
-pub inline fn observeUnprocessedCompletions(host: *Host, reactor: *provider.Reactor) void {
-    const count: u64 = reactor.finishedCount();
-    if (!host.probes.noteUnprocessedCompletions(count)) return;
-    if (host.probes.hooks.phase_trace) writeUnprocessedCompletionsTrace(host, count);
-}
-
-noinline fn writeUnprocessedCompletionsTrace(host: *Host, count: u64) void {
-    var publication = host.probes.beginObservation("native_completions_unprocessed", null);
-    defer if (publication) |*value| value.finish();
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.appendFmt(
-        "{{\"rui_test_phase\":\"native_completions_unprocessed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\"}}",
-        .{ nowNs(host.io), count },
-    ) catch return;
-    host.probes.writeTrace(&trace, &publication);
 }
 
 fn appendOptionalUnsigned(
@@ -1272,97 +1256,22 @@ fn appendOptionalSigned(
     } else try trace.append("null");
 }
 
-pub inline fn traceTransfer(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
-    if (host.providers.anySignIn() and host.probes.hooks.phase_trace) writeTransferTrace(host, transfer, binding);
-}
-
-noinline fn writeTransferTrace(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
-    var publication = host.probes.beginObservation("codex_transfer", null);
-    defer if (publication) |*value| value.finish();
-    const observation = transfer.protocolObservation();
-    const correlation = transfer.requestId();
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(correlation, &digest, .{});
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.appendFmt("{{\"rui_test_phase\":\"codex_transfer\",\"operation\":\"{d}\",\"new_connections\":{d},\"replays\":{d},\"correlation_present\":{s},\"correlation_sha256\":\"{x}\"}}", .{
-        binding.operation_id,
-        observation.new_connections,
-        observation.replays,
-        if (correlation.len != 0) "true" else "false",
-        digest,
-    }) catch unreachable;
-    host.probes.writeTrace(&trace, &publication);
-}
-
-pub inline fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
-    if (host.probes.hooks.phase_trace and host.probes.hooks.sqlite_diagnostics) writeSqliteDiagnosticTrace(host, subject);
-}
-
-// Reads the Store before the trace buffer exists: the read can run queued Store
-// writes on this thread, so the buffer must not share a frame with it.
-noinline fn writeSqliteDiagnosticTrace(host: *Host, subject: []const u8) void {
-    var publication = host.probes.beginObservation("sqlite_diagnostic", subject);
-    defer if (publication) |*value| value.finish();
-    switch (host.store.diagnostic()) {
-        .sqlite => |*value| renderSqliteDiagnosticTrace(host, subject, value, &publication),
-        .mysql => {},
-    }
-}
-
-noinline fn renderSqliteDiagnosticTrace(host: *Host, subject: []const u8, value: *const @FieldType(store_module.Diagnostic, "sqlite"), publication: *?TestObservation.Publication) void {
-    var trace: protocol.DiagnosticBuffer = .{};
-    trace.append("{\"rui_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
-    trace.appendFmt("{d}", .{nowNs(host.io)}) catch return;
-    trace.append("\",\"subject\":") catch return;
-    trace.appendJsonString(subject) catch return;
-    trace.append(",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",") catch return;
-    appendOptionalUnsigned(&trace, "process_memory_current_bytes", value.process_memory_current_bytes) catch return;
-    trace.append(",") catch return;
-    appendOptionalUnsigned(&trace, "process_memory_highwater_bytes", value.process_memory_highwater_bytes) catch return;
-    trace.append(",") catch return;
-    appendOptionalUnsigned(&trace, "cache_used_bytes", value.cache_used_bytes) catch return;
-    trace.append(",\"cache_used_scope\":\"connection-current approximate pager bytes\",") catch return;
-    appendOptionalUnsigned(&trace, "cache_spills", value.cache_spills) catch return;
-    trace.append(",\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",") catch return;
-    appendOptionalUnsigned(&trace, "hard_heap_limit_bytes", value.hard_heap_limit_bytes) catch return;
-    trace.append(",") catch return;
-    appendOptionalUnsigned(&trace, "page_size_bytes", value.page_size_bytes) catch return;
-    trace.append(",") catch return;
-    appendOptionalSigned(&trace, "cache_size_setting", value.cache_size_setting) catch return;
-    trace.append(",\"cache_size_setting_scope\":\"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages\",") catch return;
-    appendOptionalSigned(&trace, "cache_spill_threshold", value.cache_spill_threshold) catch return;
-    trace.append(",") catch return;
-    appendOptionalUnsigned(&trace, "mmap_size_bytes", value.mmap_size_bytes) catch return;
-    trace.append(",") catch return;
-    appendOptionalSigned(&trace, "synchronous", value.synchronous) catch return;
-    trace.append(",") catch return;
-    appendOptionalSigned(&trace, "temp_store", value.temp_store) catch return;
-    trace.append(",") catch return;
-    appendOptionalUnsigned(&trace, "busy_timeout_ms", value.busy_timeout_ms) catch return;
-    trace.append(",\"journal_mode\":") catch return;
-    if (value.journal_mode) |mode| {
-        trace.appendJsonString(mode.slice()) catch return;
-    } else trace.append("null") catch return;
-    trace.append("}") catch return;
-    host.probes.writeTrace(&trace, publication);
-}
-
 pub const SettlementTrace = struct {
-    host: *Host,
+    probes: *Probes,
     binding: store_module.AttemptBinding,
 
-    pub fn init(host: *Host, binding: store_module.AttemptBinding) SettlementTrace {
-        return .{ .host = host, .binding = binding };
+    pub fn init(probes: *Probes, binding: store_module.AttemptBinding) SettlementTrace {
+        return .{ .probes = probes, .binding = binding };
     }
 
     pub fn storeTrace(self: *SettlementTrace) ?store_module.SettlementTrace {
-        if (!self.host.probes.hooks.phase_trace) return null;
+        if (!self.probes.hooks.phase_trace) return null;
         return .{ .context = self, .mark_fn = markStore };
     }
 
     fn markStore(context: *anyopaque, phase: store_module.SettlementTracePhase) void {
         const self: *SettlementTrace = @ptrCast(@alignCast(context));
-        traceOperation(self.host, switch (phase) {
+        self.probes.traceOperation(switch (phase) {
             .lock_requested => "settlement_lock_requested",
             .lock_acquired => "settlement_lock_acquired",
             .transaction_active => "settlement_transaction_active",
@@ -1401,31 +1310,6 @@ test "every --fault name reaches its own hook and nothing else" {
         try std.testing.expectError(error.UnknownFault, hooks.inject(name));
 }
 
-test "inspection counts held custody, not an in-flight admission reservation" {
-    var records: [2]execution.CustodyRecord = @splat(.{});
-    var host = Host{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .lease = undefined,
-        .store = undefined,
-        .custody = execution.CustodyPool.initialize(&records),
-    };
-    var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-    host.lifecycle = &host_lifecycle;
-    const cleanup = host.custody.reserve().?;
-    var permit = store_module.DispatchPermit{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 } };
-    _ = try host.custody.attach(cleanup, &permit);
-    try host.custody.detach(cleanup);
-    const probe = host.custody.reserve().?;
-    try std.testing.expectEqual(@as(usize, 1), executionFacts(&host).custody_occupied);
-    try std.testing.expectEqual(@as(usize, 2), host.custody.occupied());
-    try std.testing.expect(host.custody.reserve() == null);
-    try host.custody.releaseUnused(probe);
-    try std.testing.expectEqual(@as(usize, 1), executionFacts(&host).custody_occupied);
-    try host.custody.cleanupComplete(cleanup);
-    try std.testing.expectEqual(@as(usize, 0), executionFacts(&host).custody_occupied);
-}
-
 test "required Bash observations publish while optional stderr custody is held" {
     const native = @import("posix");
     inline for (.{ TestObservation.Plan.bash_cleanup, TestObservation.Plan.bash_pipes }) |plan| {
@@ -1440,24 +1324,15 @@ test "required Bash observations publish while optional stderr custody is held" 
         try std.testing.expectEqual(@as(c_int, 0), native.ftruncate(native.fileno(backing), TestObservation.state_bytes));
         var observation = try TestObservation.init(descriptors[1], native.dup(native.fileno(backing)), plan, 37);
         defer observation.close();
-        var host = Host{
-            .io = std.testing.io,
-            .allocator = std.testing.allocator,
-            .lease = undefined,
-            .store = undefined,
-        };
-        var probes: Probes = .{ .hooks = .{ .phase_trace = true }, .observation = observation };
-        host.probes = &probes;
-        var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-        host.lifecycle = &host_lifecycle;
+        var probes: Probes = .{ .io = std.testing.io, .hooks = .{ .phase_trace = true }, .observation = observation };
         try std.testing.expect(stderr.tryAcquire());
         defer stderr.release();
         var count: u64 = 0;
         inline for (.{ "cleanup_started", "cleanup_release_observed", "cleanup_completed", "inspection_captured", "bash_leader_observed_with_open_pipes", "control_store_complete" }) |phase| {
             if (std.mem.eql(u8, phase, "inspection_captured") or std.mem.eql(u8, phase, "control_store_complete")) {
-                traceSubject(&host, phase, "command_key", "required");
+                probes.traceSubject(phase, "command_key", "required");
             } else {
-                traceAction(&host, phase, .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 });
+                probes.traceAction(phase, .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 });
             }
             const selected = if (plan == .bash_cleanup)
                 std.mem.startsWith(u8, phase, "cleanup_") or std.mem.eql(u8, phase, "inspection_captured")
@@ -1482,190 +1357,318 @@ test "required Bash observations publish while optional stderr custody is held" 
     }
 }
 
-test "effect launch gate rechecks every Host phase" {
+fn tempStorePath(tmp: *std.testing.TmpDir, out: []u8) ![]const u8 {
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    return std.fmt.bufPrint(out, "{s}/store", .{root});
+}
+
+/// Runs `body` with Probes on `io` built from `hooks` and a test observation pipe for `plan`; `body` gets the pipe's read end.
+fn withTraceSink(io: std.Io, plan: TestObservation.Plan, hooks: Hooks, dir: std.Io.Dir, body: *const fn (*Probes, c_int, std.Io.Dir) anyerror!void) !void {
+    const native = @import("posix");
+    var descriptors: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
+    defer _ = native.close(descriptors[0]);
+    for (descriptors) |fd| {
+        try std.testing.expectEqual(@as(c_int, 0), native.fcntl(fd, native.F_SETFL, @as(c_int, native.O_NONBLOCK)));
+    }
+    const backing = native.tmpfile() orelse return error.TestUnexpectedResult;
+    defer _ = native.fclose(backing);
+    try std.testing.expectEqual(@as(c_int, 0), native.ftruncate(native.fileno(backing), TestObservation.state_bytes));
+    var observation = try TestObservation.init(descriptors[1], native.dup(native.fileno(backing)), plan, 37);
+    defer observation.close();
+    // Holding the stderr lock keeps traces off stderr; the observation pipe still records each one.
+    try std.testing.expect(stderr.tryAcquire());
+    defer stderr.release();
+    var traced = hooks;
+    traced.phase_trace = true;
+    var probes: Probes = .{ .io = io, .hooks = traced, .observation = observation };
+    try body(&probes, descriptors[0], dir);
+}
+
+/// Counts the trace frames written since the last count, draining the pipe; every frame must name `phase`.
+/// Each frame carries its own length prefix, so frames that one read returns together are counted apart,
+/// and a frame naming any other phase fails the count instead of being drained unseen.
+fn countTraces(read_fd: c_int, phase: []const u8) error{TestUnexpectedResult}!usize {
+    const native = @import("posix");
+    var count: usize = 0;
+    var bytes: [4 * TestObservation.record_bytes]u8 = undefined;
+    var held: usize = 0;
+    while (true) {
+        const length = native.read(read_fd, bytes[held..].ptr, bytes.len - held);
+        if (length > 0) held += @intCast(length);
+        var start: usize = 0;
+        while (held - start >= 2) {
+            const frame = std.mem.readInt(u16, bytes[start..][0..2], .little);
+            if (frame < 2 or held - start < frame) break;
+            if (std.mem.indexOf(u8, bytes[start..][0..frame], phase) == null) return error.TestUnexpectedResult;
+            count += 1;
+            start += frame;
+        }
+        std.mem.copyForwards(u8, bytes[0 .. held - start], bytes[start..held]);
+        held -= start;
+        if (length <= 0) {
+            std.debug.assert(held == 0);
+            return count;
+        }
+    }
+}
+
+/// Controlled sleep for the hold rows: records the requested wait and the traces of the row's phase written before it, without waiting.
+const HoldSleep = struct {
+    var read_fd: c_int = -1;
+    var phase: []const u8 = "";
+    var requested: ?std.Io.Timeout = null;
+    var traced_before: usize = 0;
+
+    fn sleep(_: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+        requested = timeout;
+        traced_before = countTraces(read_fd, phase) catch std.math.maxInt(usize);
+    }
+};
+
+const HoldRow = struct { point: Hooks.Pause, delay_ms: i64, phase: []const u8 };
+var hold_row: HoldRow = undefined;
+
+fn holdCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    _ = dir;
+    HoldSleep.read_fd = read_fd;
+    HoldSleep.phase = hold_row.phase;
+    HoldSleep.requested = null;
+    HoldSleep.traced_before = 0;
+    probes.holdAt(hold_row.point);
+    if (hold_row.delay_ms == 0) {
+        // An unconfigured hold neither traces nor waits.
+        try std.testing.expect(HoldSleep.requested == null);
+    } else {
+        // A configured hold traces once, then asks for exactly its delay.
+        try std.testing.expectEqual(@as(usize, 1), HoldSleep.traced_before);
+        const requested = HoldSleep.requested orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(i96, hold_row.delay_ms) * std.time.ns_per_ms, requested.duration.raw.nanoseconds);
+        try std.testing.expectEqual(std.Io.Clock.awake, requested.duration.clock);
+    }
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, hold_row.phase));
+}
+
+fn retryCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try dir.writeFile(std.testing.io, .{ .sub_path = "retry-gate", .data = "" });
+    probes.retryRecovered();
+    probes.retryRecovered();
+    try std.testing.expectEqual(@as(usize, 1), try countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try std.testing.expect(probes.releaseRetryRecovery());
+    try dir.deleteFile(std.testing.io, "retry-gate");
+    try std.testing.expect(!probes.releaseRetryRecovery());
+    // A released recovery is not held again, even when the gate returns.
+    try dir.writeFile(std.testing.io, .{ .sub_path = "retry-gate", .data = "" });
+    probes.retryRecovered();
+    try std.testing.expect(!probes.releaseRetryRecovery());
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try dir.deleteFile(std.testing.io, "retry-gate");
+}
+
+fn unconfiguredRetryCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    try dir.writeFile(std.testing.io, .{ .sub_path = "retry-gate", .data = "" });
+    defer dir.deleteFile(std.testing.io, "retry-gate") catch {};
+    probes.retryRecovered();
+    try std.testing.expect(!probes.releaseRetryRecovery());
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "exhausted_retry_recovery_held"));
+}
+
+fn unconfiguredBashCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    const binding: store_module.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
+    try dir.writeFile(std.testing.io, .{ .sub_path = "bash-gate", .data = "" });
+    defer dir.deleteFile(std.testing.io, "bash-gate") catch {};
+    try std.testing.expect(!probes.bashReclaimHeld(binding, true));
+    try std.testing.expect(!probes.bashReclaimHeld(binding, false));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "cleanup_release_observed"));
+}
+
+fn bashCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    const binding: store_module.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
+    try dir.writeFile(std.testing.io, .{ .sub_path = "bash-gate", .data = "" });
+    try std.testing.expect(probes.bashReclaimHeld(binding, false));
+    try std.testing.expect(probes.bashReclaimHeld(binding, true));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "cleanup_release_observed"));
+    try dir.deleteFile(std.testing.io, "bash-gate");
+    try std.testing.expect(!probes.bashReclaimHeld(binding, true));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "cleanup_release_observed"));
+    try std.testing.expect(!probes.bashReclaimHeld(binding, false));
+    try std.testing.expectEqual(@as(usize, 1), try countTraces(read_fd, "cleanup_release_observed"));
+}
+
+test "SH-128 each configured test hold traces once then asks for its delay, unconfigured holds and gates do nothing, and the retry and Bash reclaim gates hold while present" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var retry_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var bash_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var hold_vtable = std.testing.io.vtable.*;
+    hold_vtable.sleep = HoldSleep.sleep;
+    var hold_io = std.testing.io;
+    hold_io.vtable = &hold_vtable;
+    const action: store_module.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
+    const model: store_module.AttemptBinding = .{ .turn_id = 4, .operation_id = 5, .attempt_ordinal = 6 };
+    for ([_]i64{ 0, 7 }) |delay_ms| {
+        for ([_]HoldRow{
+            .{ .point = .{ .action_launch = action }, .delay_ms = delay_ms, .phase = "prepared_before_handoff" },
+            .{ .point = .{ .model_launch = model }, .delay_ms = delay_ms, .phase = "prepared_before_handoff" },
+            .{ .point = .{ .action_result = action }, .delay_ms = delay_ms, .phase = "sealed_before_settlement" },
+            .{ .point = .{ .model_result = model }, .delay_ms = delay_ms, .phase = "sealed_before_settlement" },
+        }) |row| {
+            hold_row = row;
+            var hooks: Hooks = .{};
+            hooks.pauses.getPtr(std.meta.activeTag(row.point)).delay_ms = row.delay_ms;
+            try withTraceSink(hold_io, .control, hooks, tmp.dir, holdCase);
+        }
+    }
+    try withTraceSink(std.testing.io, .dispatch, .{}, tmp.dir, unconfiguredRetryCase);
+    try withTraceSink(std.testing.io, .bash_cleanup, .{}, tmp.dir, unconfiguredBashCase);
+    try withTraceSink(std.testing.io, .dispatch, .{ .retry_recovery_gate_path = try std.fmt.bufPrint(&retry_buffer, "{s}/retry-gate", .{root}) }, tmp.dir, retryCase);
+    try withTraceSink(std.testing.io, .bash_cleanup, .{ .bash_reclaim_gate_path = try std.fmt.bufPrint(&bash_buffer, "{s}/bash-gate", .{root}) }, tmp.dir, bashCase);
+}
+
+test "SH-124 Host phases only move forward and the phase readers follow them" {
+    for (std.enums.values(Phase)) |start| {
+        for (std.enums.values(Phase)) |target| {
+            errdefer std.debug.print("phases: {t} then {t}\n", .{ start, target });
+            var lifecycle = Lifecycle.init(std.testing.io, undefined, false, null);
+            try std.testing.expectEqual(Phase.open, lifecycle.advance(start));
+            try std.testing.expectEqual(start, lifecycle.advance(target));
+            const later = if (@backingInt(target) > @backingInt(start)) target else start;
+            // Together the three readers name the phase: open alone launches, stopping alone stops,
+            // and ending or stopping ends execution.
+            try std.testing.expectEqual(later == .open, lifecycle.launchAllowed());
+            try std.testing.expectEqual(later == .stopping, lifecycle.stopping());
+            try std.testing.expectEqual(later == .ending or later == .stopping, lifecycle.executionEnding());
+        }
+    }
+}
+
+test "SH-125 an effect launch runs only while open, is refused in every other phase, and releases its lock after a failed launch" {
     const Launch = struct {
         fn run(calls: *usize) !void {
             calls.* += 1;
         }
-    };
-    for (std.enums.values(Phase)) |phase| {
-        var host = Host{
-            .io = std.testing.io,
-            .allocator = std.testing.allocator,
-            .lease = undefined,
-            .store = undefined,
-        };
-        var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-        host.lifecycle = &host_lifecycle;
-        try std.testing.expect(host.lifecycle.launchAllowed());
-        _ = host.lifecycle.advance(phase);
-        var calls: usize = 0;
-        if (phase == .open) {
-            try host.lifecycle.withEffectLaunch(&calls, Launch.run);
-            try std.testing.expectEqual(@as(usize, 1), calls);
-        } else {
-            try std.testing.expectError(error.HostDispatchSuppressed, host.lifecycle.withEffectLaunch(&calls, Launch.run));
-            try std.testing.expectEqual(@as(usize, 0), calls);
-        }
-    }
-}
 
-test "Host phases only move forward" {
-    for (std.enums.values(Phase)) |start| {
-        for (std.enums.values(Phase)) |target| {
-            var host = Host{
-                .io = std.testing.io,
-                .allocator = std.testing.allocator,
-                .lease = undefined,
-                .store = undefined,
-            };
-            var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-            host.lifecycle = &host_lifecycle;
-            try std.testing.expectEqual(Phase.open, host.lifecycle.advance(start));
-            try std.testing.expectEqual(start, host.lifecycle.advance(target));
-            const later = if (@backingInt(target) > @backingInt(start)) target else start;
-            try std.testing.expectEqual(later, host.lifecycle.phase.load(.acquire));
-            try std.testing.expectEqual(later == .open, host.lifecycle.launchAllowed());
-            try std.testing.expectEqual(later == .stopping, host.lifecycle.stopping());
-            try std.testing.expectEqual(later == .ending or later == .stopping, host.lifecycle.executionEnding());
-        }
-    }
-}
-
-test "effect launch gate releases its mutex after native failure" {
-    var host = Host{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .lease = undefined,
-        .store = undefined,
-    };
-    var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-    host.lifecycle = &host_lifecycle;
-    const Launch = struct {
         fn fail(calls: *usize) !void {
             calls.* += 1;
             return error.TestLaunchFailure;
         }
-
-        fn succeed(calls: *usize) !void {
-            calls.* += 1;
-        }
     };
+    const rows = [_]struct { phase: Phase, runs: bool }{
+        .{ .phase = .open, .runs = true },
+        .{ .phase = .fenced, .runs = false },
+        .{ .phase = .ending, .runs = false },
+        .{ .phase = .stopping, .runs = false },
+    };
+    for (rows) |row| {
+        errdefer std.debug.print("phase: {t}\n", .{row.phase});
+        var lifecycle = Lifecycle.init(std.testing.io, undefined, false, null);
+        _ = lifecycle.advance(row.phase);
+        try std.testing.expectEqual(row.runs, lifecycle.launchAllowed());
+        var calls: usize = 0;
+        if (row.runs) {
+            try lifecycle.withEffectLaunch(&calls, Launch.run);
+        } else {
+            try std.testing.expectError(error.HostDispatchSuppressed, lifecycle.withEffectLaunch(&calls, Launch.run));
+        }
+        try std.testing.expectEqual(@as(usize, if (row.runs) 1 else 0), calls);
+    }
+    // A launch that fails still releases the launch lock for the next one.
+    var lifecycle = Lifecycle.init(std.testing.io, undefined, false, null);
     var calls: usize = 0;
-    try std.testing.expectError(error.TestLaunchFailure, host.lifecycle.withEffectLaunch(&calls, Launch.fail));
-    try host.lifecycle.withEffectLaunch(&calls, Launch.succeed);
+    try std.testing.expectError(error.TestLaunchFailure, lifecycle.withEffectLaunch(&calls, Launch.fail));
+    try lifecycle.withEffectLaunch(&calls, Launch.run);
     try std.testing.expectEqual(@as(usize, 2), calls);
 }
 
-test "an asked stop leaves the stop record only when it is what stops the Host, and the next start removes it" {
+test "SH-126 an asked stop leaves the stop record only when it is what stops the Host, and the next start removes it" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
+    const path = try tempStorePath(&tmp, &path_buffer);
     for (std.enums.values(Phase)) |before| {
         errdefer std.debug.print("phase before the ask: {t}\n", .{before});
         var lease = try platform.StoreLease.acquire(io, path);
         defer lease.release();
         try lease.prepareForServing(false);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
-        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
-        var host_lifecycle = Lifecycle.init(host.io, &lease, false, null);
-        host.lifecycle = &host_lifecycle;
-        _ = host.lifecycle.advance(before);
+        var lifecycle = Lifecycle.init(io, &lease, false, null);
+        _ = lifecycle.advance(before);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
+        // A stop asked while already stopping changes nothing.
         const stopped = before != .stopping;
-        try std.testing.expectEqual(stopped, host.lifecycle.stopAsked());
-        try std.testing.expect(host.lifecycle.stopping());
+        try std.testing.expectEqual(stopped, lifecycle.stopAsked());
+        try std.testing.expect(lifecycle.stopping());
         try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
-        try std.testing.expect(!host.lifecycle.stopAsked());
+        try std.testing.expect(!lifecycle.stopAsked());
         try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
         try lease.prepareForServing(false);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
     }
 }
 
-test "a draining stop holds new Turns, only tightens, and records how it ended" {
+test "SH-127 a draining stop holds new Turns, only tightens, outlives an operator release, and records how it ended" {
     const io = std.testing.io;
+    // The Lifecycle reads a fixed awake clock, so every deadline is exact.
+    const Clock = struct {
+        const at_ns: i96 = 5 * std.time.ns_per_s;
+        fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            if (clock != .awake) return std.testing.io.vtable.now(userdata, clock);
+            return .fromNanoseconds(at_ns);
+        }
+    };
+    var clock_vtable = std.testing.io.vtable.*;
+    clock_vtable.now = Clock.now;
+    var clock_io = std.testing.io;
+    clock_io.vtable = &clock_vtable;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
-    const host_drain_test = @import("host_drain.zig");
+    const path = try tempStorePath(&tmp, &path_buffer);
     // How the drain ends: the execution owner's judgement, or a plain stop first.
-    for ([_]?host_drain_test.Outcome{ .finished, .deadline, null }) |ending| {
+    for ([_]?host_drain.Outcome{ .finished, .deadline, null }) |ending| {
         errdefer std.debug.print("ending: {?t}\n", .{ending});
         var lease = try platform.StoreLease.acquire(io, path);
         defer lease.release();
         try lease.prepareForServing(false);
-        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
-        var host_lifecycle = Lifecycle.init(host.io, &lease, false, null);
-        host.lifecycle = &host_lifecycle;
-        try std.testing.expect(!host.lifecycle.turnsHeld());
-        const first = host.lifecycle.askStop(try .seconds(60));
-        try std.testing.expect(first == .drain and first.drain.changed);
-        try std.testing.expect(host.lifecycle.turnsHeld() and !host.lifecycle.stopping());
-        try std.testing.expectEqual(host_drain_test.Record.draining, platform.StoreLease.stopRecord(io, path));
+        var lifecycle = Lifecycle.init(clock_io, &lease, false, null);
+        try std.testing.expect(!lifecycle.turnsHeld());
+        const first = lifecycle.askStop(try .seconds(60));
+        try std.testing.expectEqual(host_drain.Ask{ .drain = .{ .until_ns = Clock.at_ns + 60 * std.time.ns_per_s, .changed = true } }, first);
+        try std.testing.expect(lifecycle.turnsHeld() and !lifecycle.stopping());
+        try std.testing.expectEqual(host_drain.Record.draining, platform.StoreLease.stopRecord(io, path));
         // A longer repeat leaves the deadline; a shorter one brings it in.
-        const longer = host.lifecycle.askStop(try .seconds(600));
-        try std.testing.expectEqual(host_drain_test.Ask{ .drain = .{ .until_ns = first.drain.until_ns, .changed = false } }, longer);
-        const shorter = host.lifecycle.askStop(try .seconds(1));
-        try std.testing.expect(shorter == .drain and shorter.drain.changed and shorter.drain.until_ns < first.drain.until_ns);
-        try std.testing.expectEqual(shorter.drain.until_ns, host.lifecycle.drainUntil().?);
+        const longer = lifecycle.askStop(try .seconds(600));
+        try std.testing.expectEqual(host_drain.Ask{ .drain = .{ .until_ns = first.drain.until_ns, .changed = false } }, longer);
+        const shorter = lifecycle.askStop(try .seconds(1));
+        try std.testing.expectEqual(host_drain.Ask{ .drain = .{ .until_ns = Clock.at_ns + std.time.ns_per_s, .changed = true } }, shorter);
+        try std.testing.expectEqual(shorter.drain.until_ns, lifecycle.drainUntil().?);
         // The operator's release does not end a drain's hold.
-        host.lifecycle.setTurnsPaused(false);
-        try std.testing.expect(host.lifecycle.turnsHeld());
+        lifecycle.setTurnsPaused(false);
+        try std.testing.expect(lifecycle.turnsHeld());
         if (ending) |outcome| {
-            try std.testing.expect(host.lifecycle.finishDrain(outcome));
-            try std.testing.expectEqual(host_drain_test.Record.of(outcome), platform.StoreLease.stopRecord(io, path));
-            try std.testing.expect(!host.lifecycle.stopAsked());
+            try std.testing.expect(lifecycle.finishDrain(outcome));
+            try std.testing.expectEqual(host_drain.Record.of(outcome), platform.StoreLease.stopRecord(io, path));
+            try std.testing.expect(!lifecycle.stopAsked());
         } else {
-            try std.testing.expect(host.lifecycle.stopAsked());
-            try std.testing.expectEqual(host_drain_test.Record.superseded, platform.StoreLease.stopRecord(io, path));
-            try std.testing.expect(!host.lifecycle.finishDrain(.finished));
+            try std.testing.expect(lifecycle.stopAsked());
+            try std.testing.expectEqual(host_drain.Record.superseded, platform.StoreLease.stopRecord(io, path));
+            try std.testing.expect(!lifecycle.finishDrain(.finished));
         }
-        try std.testing.expect(host.lifecycle.stopping());
-        try std.testing.expectEqual(host_drain_test.Ask.already_stopping, host.lifecycle.askStop(try .seconds(60)));
+        try std.testing.expect(lifecycle.stopping());
+        try std.testing.expectEqual(host_drain.Ask.already_stopping, lifecycle.askStop(try .seconds(60)));
         try std.testing.expectEqual(platform.StoreLease.LastStop.asked, platform.StoreLease.lastStop(io, path));
     }
 }
 
-test "each provider's model list is published and rendered on its own" {
-    const catalog = @import("model_catalog.zig");
-    var served: providers_module.Providers = .{};
-    served.table.set(.codex, .{ .endpoint = providers_module.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } });
-    served.table.set(.openai, .{ .endpoint = providers_module.endpoint(.openai), .credential = .{ .key_file = .{ .key = "sk-test" } } });
-    served.table.set(.chatgpt, .{ .endpoint = providers_module.endpoint(.chatgpt), .credential = .{ .chatgpt_plan = .{ .path = "/p" } } });
-    var lists: ModelLists = .init(std.testing.io, std.testing.allocator, &served);
-    defer lists.deinit();
-    const facts: []const catalog.Entry = &.{.{ .id = "gpt-6-sol", .context_window = null, .efforts = .{}, .openai_listed = true }};
-    var bytes: [4096]u8 = undefined;
-    var out = std.Io.Writer.fixed(&bytes);
-    try lists.render(&out, facts);
-    try std.testing.expectEqualStrings(
-        "[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[{\"id\":\"gpt-6-sol\",\"known\":true}]}," ++
-            "{\"provider\":\"openai\",\"source\":\"pending\",\"models\":[{\"id\":\"gpt-6-sol\",\"known\":true}]}," ++
-            "{\"provider\":\"chatgpt\",\"source\":\"pending\",\"models\":[{\"id\":\"gpt-6-sol\",\"known\":true}]}]",
-        out.buffered(),
-    );
-    lists.publish(.chatgpt, "{\"models\":[{\"slug\":\"gpt-6-terra\",\"visibility\":\"list\"},{\"slug\":\"secret\",\"visibility\":\"hide\"},{\"slug\":\"gpt-6-sol\",\"visibility\":\"list\"}]}");
-    lists.publish(.openai, error.ListingRefused);
-    out = std.Io.Writer.fixed(&bytes);
-    try lists.render(&out, facts);
-    try std.testing.expectEqualStrings(
-        "[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[{\"id\":\"gpt-6-sol\",\"known\":true}]}," ++
-            "{\"provider\":\"openai\",\"source\":\"catalog_fallback\",\"models\":[{\"id\":\"gpt-6-sol\",\"known\":true}]}," ++
-            "{\"provider\":\"chatgpt\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6-terra\",\"known\":false},{\"id\":\"gpt-6-sol\",\"known\":true}]}]",
-        out.buffered(),
-    );
-    lists.publish(.chatgpt, "{\"data\":[{\"id\":\"gpt-6-luna\"}]}");
-    try std.testing.expect(lists.live.get(.chatgpt) == .catalog_fallback);
-    lists.publish(.openai, "{\"data\":[{\"id\":\"gpt-6-luna\"}]}");
-    lists.publish(.openai, "{\"data\":[{\"id\":\"gpt-6-mare\"}]}");
-    try std.testing.expectEqualStrings("gpt-6-mare\n", lists.live.get(.openai).live.bytes);
-    try std.testing.expect(lists.live.get(.codex) == .catalog);
+test "CM-55 allowance observer Host tuning is default off and explicitly enabled" {
+    var refusal: cli_grammar.Refusal = undefined;
+    const absent = try serve_grammar.definition.parseSyntax(&.{}, std.testing.allocator, &refusal);
+    const enabled = try serve_grammar.definition.parseSyntax(&.{"--observe-allowance"}, std.testing.allocator, &refusal);
+    try std.testing.expect(!(try Tuning.fromOptions(&absent)).hooks.observe_allowance);
+    try std.testing.expect((try Tuning.fromOptions(&enabled)).hooks.observe_allowance);
 }

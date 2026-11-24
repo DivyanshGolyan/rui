@@ -603,13 +603,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 
 fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const selected = keypress.selectEvent(view.keys, input, delivery.pasted);
-    const semantic: view.Input = switch (selected) {
-        .action => |action| .{ .action = action },
-        .enter => .enter,
-        .left => .left,
-        else => .ignored,
-    };
+    const semantic = listKey(input, delivery);
     const before = self.state.selected;
     try self.appNext(ctx, try self.event(.{ .input = .{
         .key = semantic,
@@ -624,6 +618,27 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
         self.app_sessions.followSelection();
     }
     ctx.consumeAndRedraw();
+}
+
+fn listKey(input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) view.Input {
+    if (delivery.list_origin and delivery.under == .main and !delivery.pasted and input == .key_press) {
+        // Ghostty can send Option-arrows as the same word-motion keys used by the composer.
+        const alias: ?keymap.Key = switch (keypress.classify(input.key_press)) {
+            .edit => |edit| switch (edit) {
+                .word_left => .alt_left,
+                .word_right => .alt_right,
+                else => null,
+            },
+            else => null,
+        };
+        if (alias) |key| if (view.keys.get(key)) |action| return .{ .action = action };
+    }
+    return switch (keypress.selectEvent(view.keys, input, delivery.pasted)) {
+        .action => |action| .{ .action = action },
+        .enter => .enter,
+        .left => .left,
+        else => .ignored,
+    };
 }
 
 fn appPresence(raw: *anyopaque, ctx: *vxfw.EventContext, over: bool) anyerror!void {
@@ -792,7 +807,7 @@ fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
     const job = &self.upgrade_job;
     if (job.discovering()) {
         const cancelled = self.state.upgrade.run.? == .cancelling;
-        if (!try job.retireDiscovery(cancelled)) return;
+        if (!try job.retireDiscovery()) return;
         if (cancelled) job.cancel();
         _ = try self.event(.{ .available_upgrade = null });
     }

@@ -11,8 +11,8 @@ import shlex
 import unittest
 
 import build_files
-from dependency_replay import sqlite_bump
-from select_tests import BROAD_HELPER_IMPORTERS, FIXTURES, PR_OWN_FILE_TARGETS, select, shared_helper_importers
+from dependency_replay import sqlite_bump, with_entry
+from select_tests import BROAD_HELPER_IMPORTERS, FIXTURES, PR_OWN_FILE_TARGETS, dependency_entries, select, shared_helper_importers
 import steps
 from strict_paths import STRICT, strict
 
@@ -139,7 +139,7 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('- name: Require PR Shape\n        id: shape', plan)
         self.assertIn('python3 tests/ci/pr_shape.py "$BASE"', plan)
         self.assertEqual(admission.count("if: ${{ needs.plan.outputs.screens_required == 'true' }}"), 1)
-        self.assertIn('sparse-checkout: tests/ci', admission)
+        self.assertIn('sparse-checkout: |\n            tests/ci\n', admission)
         self.assertIn('ref: ${{ needs.plan.outputs.candidate_ref }}', admission)
         self.assertIn('run: python3 tests/ci/pr_shape.py --screens', admission)
         self.assertLess(admission.index('- name: Require screen evidence'),
@@ -635,6 +635,9 @@ class CandidatePlanTest(unittest.TestCase):
         'CI artifact producer': (['tests/ci/build_artifact.py'], {'test-logic'}),
         # The replayed SQLite pin: the PR roots that link sqlite, and the logic root the bootstrap always runs.
         'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'deep-modules', 'test-logic', 'test-native', 'test-store'}),
+        'vaxis repin': (['build.zig.zon'], {'deep-modules', 'test-logic', 'test-native', 'test-store', 'test-vaxis-clipboard'}),
+        'vaxis owner manifest': (['tests/ci/vaxis_test_owners.json'], {'test-native', 'test-vaxis-clipboard'}),
+        'vaxis owner verifier': (['tests/ci/verify_vaxis_test_owners.py'], {'test-native', 'test-vaxis-clipboard'}),
         'dependency fetch': (['src/fetch_dependencies.sh'], {'deep-modules', 'test-logic'}),
         'workflow and policy only': (['.github/workflows/check.yml', '.github/actions/policy/action.yml',
                                       'tests/ci/ci_plan.py'], set()),
@@ -676,7 +679,15 @@ class CandidatePlanTest(unittest.TestCase):
             'session-list-integration', 'test-logic', 'test-native'}),
     }
 
-    PR_TIER_CONTENTS = {'dependency pins': {'build.zig.zon': sqlite_bump()}}
+    _vaxis_before = (ROOT / 'build.zig.zon').read_text()
+    _vaxis_entry = dependency_entries(_vaxis_before)['vaxis']
+    _vaxis_after = with_entry(_vaxis_before, 'vaxis', '        .vaxis = .{\n'
+                              f"            .url = {_vaxis_entry['url']},\n"
+                              '            .hash = "vaxis-repinned",\n        },\n')
+    PR_TIER_CONTENTS = {
+        'dependency pins': {'build.zig.zon': sqlite_bump()},
+        'vaxis repin': {'build.zig.zon': (_vaxis_before, _vaxis_after)},
+    }
 
     def test_ready_candidate_runs_its_pr_tier_and_promotion_the_full_selection(self):
         """CI-1, CI-88 and CI-89: a ready candidate runs its PR tier, own-file and helper importers included; promotion runs all."""
