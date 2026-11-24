@@ -126,3 +126,9 @@ Existing owner names in CI-30–CI-65 identify current tests, not a claim that e
 - `test_mac_runner.py`: CI-26–CI-27; retain checks that enforce documented admission, installation and isolation guarantees; review purely syntactic assertions individually.
 - `test_harness_contracts.py`, `test_fixture_literals.py`, `test_store_schema_fixtures.py`, `test_policy_suite.py`, `test_unit_test_names.py`, `test_unit_roots.py` and `test_selection.py`: CI-34–CI-38, CI-41–CI-43 and CI-47–CI-60 preserve fixture, inventory, partition and enforcement policy; `tests/integration/host_process_test.py` also owns CI-46 for failed startup and bounded diagnostics. Review remaining checks against their owning contracts before removal; fix harness defects at their root.
 - `test_verify_rui_map.py` and its selector/classifier checks own CI-2, CI-54, CI-61 and CI-65. Other `test_verify_rui*.py`, `test_report_issue.py`, `test_conflict_alert.py`, `test_screens_workflow.py`, `test_screens_comment.py` and `test_fixture_user.py` cover separate operator/tool contracts; do not delete wholesale on this catalog's authority. `src/*test*` and `tests/integration` product assertions similarly remain owned by their product catalogs.
+
+## Timing observations
+
+| Id | Level | Invariant | Seam | Owner test | Source |
+| --- | --- | --- | --- | --- | --- |
+| CI-97 | Module | A successful unit shard reports its five slowest completed tests by observed duration, while a failed shard retains its existing failure attribution. | `store_shards.report` over completed result records | `StoreTimingReportTest.test_ci_97_only_successful_shards_report_slowest_completed_tests` in `tests/ci/test_store_shards_timing.py` | tests/ci/store_shards.py (`TerminalTimes`, `report`) |
