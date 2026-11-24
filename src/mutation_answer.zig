@@ -237,7 +237,7 @@ fn DecodePolicy(comptime kind: CommandKind) type {
             return depth == 1 or (depth == 2 and std.mem.startsWith(u8, path, ".answer.")) or std.mem.eql(u8, path, ".execution.reason");
         }
         pub fn Override(comptime path: []const u8) ?type {
-            if (std.mem.eql(u8, path, ".answer.configuration.provider")) return wire_field.JsonEnum(@import("provider_name.zig").Provider);
+            if (std.mem.eql(u8, path, ".answer.configuration.connection")) return wire_field.JsonEnum(@import("provider_name.zig").Provider);
             if (std.mem.eql(u8, path, ".answer.configuration.reasoning_effort")) return ?wire_field.JsonEnum(@import("model_catalog.zig").ReasoningEffort);
             if (std.mem.eql(u8, path, ".answer.configuration.permission_mode")) return wire_field.JsonEnum(@import("cli_value.zig").PermissionMode);
             if (std.mem.eql(u8, path, ".answer.skills")) return wire_field.JsonEnum(SkillsReloadStatus);

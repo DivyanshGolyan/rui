@@ -7,7 +7,7 @@ const TerminalText = @import("TerminalText.zig");
 
 pub const Host = union(enum) {
     store_unavailable,
-    ready: @FieldType(protocol.HostInfo, "capabilities"),
+    ready: protocol.HostCapabilities,
     unavailable,
     owned_unavailable,
     incompatible,
@@ -236,7 +236,7 @@ pub fn writeText(writer: *std.Io.Writer, facts: *const Facts) !void {
         .access_failure => try writer.writeAll("Host: access failure; inspect Store permissions.\n"),
         .ready => |capabilities| {
             var buffer: [512]u8 = undefined;
-            try writer.writeAll(hostProvidersLine(capabilities.providers, names, &buffer));
+            try writer.writeAll(hostProvidersLine(capabilities.connections, names, &buffer));
         },
     }
 }
@@ -264,17 +264,17 @@ fn chatgptLines(writer: *std.Io.Writer, plan: provider_selection.Readiness, devi
     }
 }
 
-fn hostProvidersLine(routes: protocol.Routes, names: *const Names, buffer: []u8) []const u8 {
-    if (!protocol.servesModel(routes)) return "Host: ready without a model provider; use `rui host settings --paths` to configure new model work.\n";
+fn hostProvidersLine(connections: protocol.Connections, names: *const Names, buffer: []u8) []const u8 {
+    if (!connections.servesModel()) return "Host: ready without a model provider; use `rui host settings --paths` to configure new model work.\n";
     var line = std.Io.Writer.fixed(buffer);
     line.writeAll("Host: serves") catch unreachable;
     var first = true;
-    for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) != .unserved) {
+    for (std.enums.values(protocol.Provider)) |provider| if (connections.route(@tagName(provider)) != .unserved) {
         line.print("{s} {s}", .{ if (first) "" else ",", names.shownFor(provider) }) catch unreachable;
         first = false;
     };
     line.writeAll(" (credentials checked locally, not by status)") catch unreachable;
-    for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) == .unserved) {
+    for (std.enums.values(protocol.Provider)) |provider| if (connections.route(@tagName(provider)) == .unserved) {
         const login = names.loginFor(provider);
         if (login.len != 0)
             line.print("; to add {s}, stop and restart it after `{s}`", .{ names.shownFor(provider), login }) catch unreachable
@@ -503,17 +503,17 @@ test "CLI-30 the defaults report is a function of its facts" {
     // Host line: every provider served, then each provider unserved in turn, with and without a sign-in command.
     {
         var buffer: [512]u8 = undefined;
-        try std.testing.expectEqualStrings("Host: serves ChatGPT (device code), OpenAI, ChatGPT (credentials checked locally, not by status).\n", hostProvidersLine(protocol.routesAll(.endpoint), &names, &buffer));
-        const served_one: protocol.Routes = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved };
+        try std.testing.expectEqualStrings("Host: serves ChatGPT (device code), OpenAI, ChatGPT (credentials checked locally, not by status).\n", hostProvidersLine(protocol.connectionsOfRoutes(.{ .codex = .endpoint, .openai = .endpoint, .chatgpt = .endpoint }), &names, &buffer));
+        const served_one = protocol.connectionsOfRoutes(.{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved });
         try std.testing.expectEqualStrings("Host: serves ChatGPT (device code) (credentials checked locally, not by status); to add OpenAI, stop and restart it after `rui auth login openai`; to add ChatGPT, stop and restart it after `rui auth login chatgpt`.\n", hostProvidersLine(served_one, &names, &buffer));
         for ([_]bool{ false, true }) |silent| {
             var table = names;
             if (silent) table.login[@backingInt(protocol.Provider.openai)] = "";
             inline for (@typeInfo(protocol.Provider).@"enum".field_names) |name| {
-                var routes = protocol.routesAll(.endpoint);
+                var routes: std.enums.EnumFieldStruct(protocol.Provider, protocol.Route, .endpoint) = .{};
                 @field(routes, name) = .unserved;
                 const provider = std.meta.stringToEnum(protocol.Provider, name).?;
-                const said = hostProvidersLine(routes, &table, &buffer);
+                const said = hostProvidersLine(protocol.connectionsOfRoutes(routes), &table, &buffer);
                 var expected_buffer: [256]u8 = undefined;
                 const login = table.loginFor(provider);
                 const expected = if (login.len != 0)

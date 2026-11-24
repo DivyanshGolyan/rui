@@ -305,7 +305,7 @@ fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configu
         return .{ .rejected = reason };
     if (protocol.missingCreatingSetting(configuration)) |name|
         return .{ .rejected = try std.fmt.allocPrint(arena, "spec.{s} is required", .{name}) };
-    if (configuration.provider.state == .value and std.meta.stringToEnum(protocol.Provider, configuration.provider.value.slice()) == null)
+    if (configuration.connection.state == .value and std.meta.stringToEnum(protocol.Provider, configuration.connection.value.slice()) == null)
         return refused("spec.provider must be a provider name");
     if (configuration.workspace.state == .value and configuration.workspace.value.len == 0)
         return refused("spec.workspace must be a Workspace path");
@@ -466,7 +466,7 @@ test "a start_agent call's arguments carry a task and a whole spec without a pro
             try std.testing.expectEqualStrings("gpt-6.1-sol", start.configuration.model.value.slice());
             try std.testing.expectEqualStrings("100000", start.configuration.compaction_trigger.value.slice());
             try std.testing.expectEqualStrings("bash start_agent", start.configuration.tools.names.slice());
-            try std.testing.expect(start.configuration.workspace.state != .value and start.configuration.provider.state != .value and start.configuration.label.state != .value);
+            try std.testing.expect(start.configuration.workspace.state != .value and start.configuration.connection.state != .value and start.configuration.label.state != .value);
         }
     }
 }

@@ -124,7 +124,7 @@ test "configuration pre-Workspace decisions allow model revisions" {
             .model_requested = null,
             .expected = null,
         },
-        .{ .name = "a different connection name is immutable on an existing Session", .has_current = true, .workspace_requested = false, .provider_requested = "other", .model_requested = null, .expected = .provider_is_immutable },
+        .{ .name = "a different connection name is immutable on an existing Session", .has_current = true, .workspace_requested = false, .provider_requested = "other", .model_requested = null, .expected = .connection_is_immutable },
     };
 
     var existing: CurrentConfiguration = .{};
@@ -152,8 +152,8 @@ test "configuration pre-Workspace decisions allow model revisions" {
             try requested.model.value.set(model);
         }
         if (case.provider_requested) |provider| {
-            requested.provider.state = .value;
-            try requested.provider.value.set(provider);
+            requested.connection.state = .value;
+            try requested.connection.value.set(provider);
         }
         const current: ?*const CurrentConfiguration = if (case.has_current) &existing else null;
         std.testing.expectEqual(
@@ -210,7 +210,7 @@ test "Store configuration requires Workspace and model and, on a Host serving se
                     "model-a",
                 );
                 if (mask & 1 == 0) command.configuration.workspace.state = .omitted;
-                if (mask & 2 == 0) command.configuration.provider.state = .omitted;
+                if (mask & 2 == 0) command.configuration.connection.state = .omitted;
                 if (mask & 4 == 0) command.configuration.model.state = .omitted;
                 const reply = try storage.configure(&command, .{});
                 if (mask == 7) {
@@ -240,8 +240,8 @@ test "Store configuration requires Workspace and model and, on a Host serving se
             var equal: wire_request.ConfigureCommand = .{};
             try equal.key.set("binding-equal");
             equal.session = session;
-            equal.configuration.provider.state = .value;
-            try equal.configuration.provider.value.set("codex");
+            equal.configuration.connection.state = .value;
+            try equal.configuration.connection.value.set("codex");
             equal.configuration.model.state = .value;
             try equal.configuration.model.value.set("model-a");
             try std.testing.expect(try storage.configure(&equal, .{}) == .accepted);
@@ -282,8 +282,8 @@ test "a different connection name rejects mixed configuration atomically and rep
             var update: wire_request.ConfigureCommand = .{};
             try update.key.set("atomic-unsupported");
             try update.session.set(created_session_0.slice());
-            update.configuration.provider.state = .value;
-            try update.configuration.provider.value.set("anthropic");
+            update.configuration.connection.state = .value;
+            try update.configuration.connection.value.set("anthropic");
             update.configuration.instructions = try testingBytesContent(&tmp, "atomic-instructions", "new instructions");
             update.configuration.output_schema = try testingBytesContent(&tmp, "atomic-schema", "{}");
             update.configuration.tools.state = .value;
@@ -295,7 +295,7 @@ test "a different connection name rejects mixed configuration atomically and rep
             const revision_count = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{});
             const rejected = try storage.configure(&update, .{});
             try std.testing.expect(rejected == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.provider_is_immutable, rejected.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.connection_is_immutable, rejected.rejected.code);
             try std.testing.expectEqual(content_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
             try std.testing.expectEqual(revision_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
             const current = try storage.inspectSessionForTesting(created_session_0.slice());
@@ -312,8 +312,8 @@ test "a different connection name rejects mixed configuration atomically and rep
             omitted.configuration.tools.count = 0;
             try std.testing.expect(try storage.configure(&omitted, .{}) == .accepted);
             var explicit = omitted;
-            explicit.configuration.provider.state = .value;
-            try explicit.configuration.provider.value.set("codex");
+            explicit.configuration.connection.state = .value;
+            try explicit.configuration.connection.value.set("codex");
             try std.testing.expect(try storage.configure(&explicit, .{}) == .conflict);
             try std.testing.expect((try storage.configure(&omitted, .{})).accepted.replayed);
         }
@@ -383,7 +383,7 @@ test "an omitted provider selects the Host's sole served provider" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var command = try completeConfiguration("host-provider", "", workspace, "model-a");
-            command.configuration.provider.state = .omitted;
+            command.configuration.connection.state = .omitted;
             command.configuration.tools = try .of(&.{});
             command.require_model = true;
             const reply = try storage.configure(&command, .{});
@@ -409,15 +409,15 @@ test "an omitted provider is refused on a Host serving several" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var command = try completeConfiguration("several-providers", "", workspace, "model-a");
-            command.configuration.provider.state = .omitted;
+            command.configuration.connection.state = .omitted;
             command.configuration.tools = try .of(&.{});
             const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.missing_settings, reply.rejected.code);
             try std.testing.expectEqual(@as(u3, 0b100), reply.rejected.missing.?.bits);
             try command.key.set("several-providers-named");
-            command.configuration.provider.state = .value;
-            try command.configuration.provider.value.set("openai");
+            command.configuration.connection.state = .value;
+            try command.configuration.connection.value.set("openai");
             try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
         }
     }.run);
@@ -672,8 +672,8 @@ test "configuration planning preserves sparse defaults and rejection precedence"
         existing.revision = case.current_revision;
 
         var requested: wire_request.Configuration = .{};
-        requested.provider.state = .value;
-        try requested.provider.value.set("codex");
+        requested.connection.state = .value;
+        try requested.connection.value.set("codex");
         if (case.workspace != .omitted) requested.workspace.state = .value;
         if (case.model) |model| {
             requested.model.state = .value;
@@ -859,8 +859,8 @@ test "explicit native and preset restrictions survive reopen and resumed model r
                 var create: wire_request.ConfigureCommand = .{};
                 try create.key.set("restricted-create");
                 create.configuration = try shared_fixtures.testingAgentSpec(selection.allowed, "ask");
-                create.configuration.provider.state = .value;
-                try create.configuration.provider.value.set("codex");
+                create.configuration.connection.state = .value;
+                try create.configuration.connection.value.set("codex");
                 create.configuration.workspace.state = .value;
                 try create.configuration.workspace.value.set(workspace);
                 create.configuration.loaded_tools = try .of(selection.loaded);

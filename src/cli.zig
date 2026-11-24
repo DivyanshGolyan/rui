@@ -2037,7 +2037,7 @@ fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding:
     startHost(init, store, assignments, readiness, ops, null, result);
     if (result.outcome == .failed) return;
     const provider = std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?;
-    if (protocol.routeOf(result.outcome.ready.facts.capabilities.providers, provider) == .unserved) {
+    if (result.outcome.ready.facts.capabilities.connections.route(@tagName(provider)) == .unserved) {
         const selector = result.outcome.ready.selector;
         launchFailure(result, .provider_unserved, error.HostModelUnavailable, selector.slice());
     }
@@ -4652,7 +4652,7 @@ const LaunchFixture = struct {
         if (!ready) return if (self.scenario == .competitor_died and self.launches != 0 and self.reads == 1) .owned_unavailable else .unavailable;
         var store = paths.store_identity;
         if (self.store_identity) |value| store.set(value) catch unreachable;
-        return .{ .ready = .{ .store = store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = if (self.openai and (self.launches != 0 or self.scenario == .already_ready)) .key_file else .unserved, .chatgpt = if (self.chatgpt) .chatgpt_plan else .unserved } } } };
+        return .{ .ready = .{ .store = store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .connections = protocol.connectionsOfRoutes(.{ .codex = .chatgpt_device, .openai = if (self.openai and (self.launches != 0 or self.scenario == .already_ready)) .key_file else .unserved, .chatgpt = if (self.chatgpt) .chatgpt_plan else .unserved }) } } };
     }
     fn verify(raw: ?*anyopaque, _: std.Io, _: *const platform.Paths, pid: c_int, started: u64, _: []const u8, _: ?i128, _: *protocol_reply.HostInfoFacts) bool {
         return cast(raw).exact_identity and cast(raw).scenario != .competitor and pid == 42 and started == 12;

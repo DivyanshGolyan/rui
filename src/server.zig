@@ -1947,7 +1947,7 @@ noinline fn replyHostInfo(host: *Host, fd: *Reply) !void {
         .started_at = host.started_at,
         .custody_occupied = host.custody.held(),
         .paused = host.turnsHeld(),
-        .routes = protocol.routesOf(&served_set),
+        .connections = served_set.items(),
         .doublewrite = host.store.admissionDiagnostic().doublewrite,
         .settings_digest = host.settings_digest,
     }});
@@ -4339,8 +4339,8 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try configure.key.set("config");
         configure.configuration.workspace.state = .value;
         try configure.configuration.workspace.value.set(root);
-        configure.configuration.provider.state = .value;
-        try configure.configuration.provider.value.set("codex");
+        configure.configuration.connection.state = .value;
+        try configure.configuration.connection.value.set("codex");
         configure.configuration.model.state = .value;
         try configure.configuration.model.value.set("model-a");
         configure.configuration.tools = try .of(&.{ "bash", "web_search" });
@@ -4640,8 +4640,8 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
     try configure.key.set("config");
     configure.configuration.workspace.state = .value;
     try configure.configuration.workspace.value.set(root);
-    configure.configuration.provider.state = .value;
-    try configure.configuration.provider.value.set("codex");
+    configure.configuration.connection.state = .value;
+    try configure.configuration.connection.value.set("codex");
     configure.configuration.model.state = .value;
     try configure.configuration.model.value.set("model-a");
     configure.configuration.tools = try .of(&.{ "bash", "web_search" });
@@ -4790,7 +4790,7 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     const protocol_reply = @import("protocol_reply.zig");
     var response: protocol.ResponseBuffer = .{};
     const id = "0123456789abcdef0123456789abcdef";
-    var info: host_reply.HostInfo = .{ .store = id, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1792918800, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = "OFF", .settings_digest = null };
+    var info: host_reply.HostInfo = .{ .store = id, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1792918800, .custody_occupied = 0, .paused = false, .connections = &.{}, .doublewrite = "OFF", .settings_digest = null };
     try response.render(host_reply.renderHostInfo, .{info});
     const status = try protocol_reply.parseHostInfo(response.slice(), id);
     try std.testing.expectEqualStrings("OFF", status.ready.innodb_doublewrite.?.slice());
@@ -4941,8 +4941,8 @@ test "presets seed configure before Store validation and idempotency" {
     try override.key.set("preset-overrides");
     override.configuration.model.state = .value;
     try override.configuration.model.value.set("preset-override-model");
-    override.configuration.provider.state = .value;
-    try override.configuration.provider.value.set("codex");
+    override.configuration.connection.state = .value;
+    try override.configuration.connection.value.set("codex");
     override.configuration.workspace.state = .value;
     try override.configuration.workspace.value.set(root);
     override.configuration.reasoning_effort.state = .explicit_null;
@@ -5784,7 +5784,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     try child.key.set("env-child");
     child.configuration = (try store_module.testingCompleteConfiguration("unused", "", root, "model-a")).configuration;
     child.configuration.workspace.state = .omitted;
-    child.configuration.provider.state = .omitted;
+    child.configuration.connection.state = .omitted;
     child.configuration.tools = try .of(&.{"bash"});
     try child.configuration.permission_mode.value.set("ask");
     child.configuration.parent.state = .value;
@@ -5806,8 +5806,8 @@ test "configure parent inherits the Host environment only after a fresh creation
     defer allocator.free(retained);
     try std.testing.expectEqualStrings("A=1\x00", retained);
     try child.key.set("env-child-refused");
-    child.configuration.provider.state = .value;
-    try child.configuration.provider.value.set("codex");
+    child.configuration.connection.state = .value;
+    try child.configuration.connection.value.set("codex");
     const refusal = try submitConfigure(&host, &child, null);
     try std.testing.expect(refusal == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.parent_provider_forbidden, refusal.rejected.code);

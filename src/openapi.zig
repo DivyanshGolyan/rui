@@ -2052,7 +2052,7 @@ test "Host information has one schema with an omittable bounded diagnostic" {
                 .started_at = 1792918800,
                 .custody_occupied = 0,
                 .paused = false,
-                .routes = protocol.routesAll(.unserved),
+                .connections = &.{},
                 .doublewrite = doublewrite,
                 .settings_digest = null,
             }});
@@ -2076,7 +2076,7 @@ test "Host information has one schema with an omittable bounded diagnostic" {
         .started_at = 1792918800,
         .custody_occupied = 0,
         .paused = false,
-        .routes = protocol.routesAll(.unserved),
+        .connections = &.{},
         .doublewrite = null,
         .settings_digest = @splat(0xaa),
     }});

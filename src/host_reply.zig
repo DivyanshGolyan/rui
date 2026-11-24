@@ -276,7 +276,7 @@ pub const HostInfo = struct {
     started_at: u64,
     custody_occupied: u64,
     paused: bool,
-    routes: protocol.Routes,
+    connections: []const @import("provider_route.zig").Entry,
     doublewrite: ?[]const u8,
     /// SHA-256 of the frozen settings frame a detached Host started with; null for a foreground Host.
     settings_digest: ?@import("host_settings_handoff.zig").Digest,
@@ -285,12 +285,16 @@ pub const HostInfo = struct {
 pub fn renderHostInfo(response: protocol.JsonOut, info: HostInfo) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (info.descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
-    const routes = info.routes;
     const shape = protocol.host_info_reply;
     try response.appendShape(shape.head, .{ info.store, info.instance, info.active_capacity, info.intake_capacity, limit_text, info.started_at, info.custody_occupied, info.paused });
     if (info.doublewrite) |value| try response.appendShape(shape.doublewrite, .{value});
     if (info.settings_digest) |digest| try response.appendShape(shape.settings_digest, .{digest});
-    try response.appendShape(shape.tail, .{ routes.codex, routes.openai, routes.chatgpt });
+    try response.append(shape.connections_head);
+    for (info.connections, 0..) |*entry, index| {
+        if (index != 0) try response.append(",");
+        try response.appendShape(shape.connection_entry, .{ entry.name.slice(), entry.label.slice(), entry.route });
+    }
+    try response.append(shape.connections_tail);
 }
 
 pub fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
@@ -495,7 +499,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
     var host_info: protocol.ResponseBuffer = .{};
-    const worst_info: HostInfo = .{ .store = &escaped_store, .instance = @splat(0xff), .active_capacity = max, .intake_capacity = max, .descriptor_soft_limit = max, .started_at = max, .custody_occupied = max, .paused = false, .routes = protocol.routesAll(.chatgpt_device), .doublewrite = null, .settings_digest = null };
+    const worst_info: HostInfo = .{ .store = &escaped_store, .instance = @splat(0xff), .active_capacity = max, .intake_capacity = max, .descriptor_soft_limit = max, .started_at = max, .custody_occupied = max, .paused = false, .connections = &.{}, .doublewrite = null, .settings_digest = null };
     try host_info.render(renderHostInfo, .{worst_info});
     const shape = protocol.host_info_reply;
     try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.tail), host_info.len);

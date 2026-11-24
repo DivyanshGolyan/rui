@@ -2014,7 +2014,7 @@ test "creation image defaults and parent authority match receipts on replay" {
                     const result = try storage.configure(&parent, .{});
                     try std.testing.expect(result == .accepted);
                     create.configuration.workspace.state = .omitted;
-                    create.configuration.provider.state = .omitted;
+                    create.configuration.connection.state = .omitted;
                     create.configuration.parent.state = .value;
                     try create.configuration.parent.value.set(result.accepted.session.slice());
                 }

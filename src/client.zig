@@ -6483,7 +6483,7 @@ test "Session settings client writes every setting and the Host parser preserves
     }
     try std.testing.expectEqualStrings("", missing.buffered());
     try std.testing.expectEqualStrings(root, configuration.workspace.value.slice());
-    try std.testing.expectEqualStrings("openai", configuration.provider.value.slice());
+    try std.testing.expectEqualStrings("openai", configuration.connection.value.slice());
     try std.testing.expectEqualStrings("gpt-5", configuration.model.value.slice());
     try std.testing.expectEqualStrings("bash find_tools", configuration.tools.names.slice());
     try std.testing.expectEqualStrings("bash", configuration.loaded_tools.names.slice());
@@ -6831,7 +6831,7 @@ test "capture routing round trips six placements without conflating selector and
                 }
                 try std.testing.expectEqualStrings(expected, request[0..body_used]);
                 var body: protocol.ResponseBuffer = .{};
-                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null, .settings_digest = null };
+                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .connections = &.{}, .doublewrite = null, .settings_digest = null };
                 try body.render(@import("host_reply.zig").renderHostInfo, .{info});
                 var head_buffer: [512]u8 = undefined;
                 const head = try std.fmt.bufPrint(&head_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nConnection: close\r\n\r\n", .{body.len});
@@ -7239,10 +7239,10 @@ fn checkParentCapture() !void {
             try std.testing.expectEqualStrings("1000", configuration.compaction_trigger.value.slice());
             try std.testing.expectEqualStrings("low", configuration.reasoning_effort.value.slice());
             if (explicit_overrides) {
-                try std.testing.expectEqualStrings("codex", configuration.provider.value.slice());
+                try std.testing.expectEqualStrings("codex", configuration.connection.value.slice());
                 try std.testing.expectEqualStrings(root, configuration.workspace.value.slice());
             } else {
-                try std.testing.expect(configuration.provider.state == .omitted);
+                try std.testing.expect(configuration.connection.state == .omitted);
                 try std.testing.expect(configuration.workspace.state == .omitted);
             }
         }

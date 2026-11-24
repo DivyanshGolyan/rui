@@ -53,7 +53,7 @@ pub const Ingress = struct {
     request: Request = undefined,
 
     const metadata_limit = 2 * (6 * (protocol.max_store_bytes + protocol.max_key_bytes + protocol.max_session_bytes +
-        protocol.max_workspace_bytes + protocol.max_provider_bytes + protocol.max_model_bytes + 16 + 2 * protocol.max_tool_list_name_bytes + 128 * 32) + (128 + 2 * protocol.max_tools) * 8);
+        protocol.max_workspace_bytes + protocol.max_connection_bytes + protocol.max_model_bytes + 16 + 2 * protocol.max_tool_list_name_bytes + 128 * 32) + (128 + 2 * protocol.max_tools) * 8);
 
     pub fn init(self: *Ingress, allocator: std.mem.Allocator, options: ParseOptions) void {
         self.* = .{ .allocator = allocator, .options = options };

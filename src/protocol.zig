@@ -7,6 +7,7 @@ const built_in_tool = @import("built_in_tool.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
+const connection = @import("connection.zig");
 const command_input = @import("command_input.zig");
 const mutation_answer = @import("mutation_answer.zig");
 const turn_ending = @import("turn_ending.zig");
@@ -66,37 +67,71 @@ pub const Served = provider_route.Served;
 pub const servedBuiltIns = provider_route.builtIns;
 pub const servedEntry = provider_route.builtIn;
 
-/// host_info's route holes, one per built-in provider: a projection of the
-/// served set until the wire carries connections.
-pub const Routes = std.enums.EnumFieldStruct(Provider, Route, null);
+/// One served connection as host_info reports it: its name, label and route.
+pub const ConnectionFact = struct {
+    name: connection.Name,
+    label: provider_route.Label,
+    route: Route,
+};
 
-pub fn routesOf(served: *const Served) Routes {
-    var out: Routes = undefined;
-    inline for (@typeInfo(Provider).@"enum".field_names) |name| @field(out, name) = served.route(name);
-    return out;
-}
+/// The served connections a Host reports, in served order, at most one per
+/// served name.
+/// host_info's capabilities as a Host reports them.
+pub const HostCapabilities = struct {
+    bash: bool,
+    connections: Connections = .{},
+};
 
-pub fn routesAll(route: Route) Routes {
-    var out: Routes = undefined;
-    inline for (@typeInfo(Provider).@"enum".field_names) |name| @field(out, name) = route;
-    return out;
-}
-
-pub fn routeOf(routes: Routes, provider: Provider) Route {
-    inline for (@typeInfo(Provider).@"enum".field_names, std.enums.values(Provider)) |name, value| {
-        if (provider == value) return @field(routes, name);
+/// Fixture helper: the built-in connections served at each route, in provider order, and no others.
+pub fn connectionsOfRoutes(routes: std.enums.EnumFieldStruct(Provider, Route, .unserved)) Connections {
+    var out: Connections = .{};
+    inline for (std.enums.values(Provider)) |provider| {
+        const route = @field(routes, @tagName(provider));
+        if (route != .unserved) {
+            out.items[out.len] = .{ .name = connection.Name.parse(@tagName(provider)).?, .label = provider_route.Label.parse(provider.shown()).?, .route = route };
+            out.len += 1;
+        }
     }
-    unreachable;
+    return out;
 }
 
-pub fn servesModel(routes: Routes) bool {
-    inline for (@typeInfo(Provider).@"enum".field_names) |name| if (@field(routes, name) != .unserved) return true;
-    return false;
-}
+pub const Connections = struct {
+    items: [provider_route.max_served]ConnectionFact = undefined,
+    len: usize = 0,
+
+    pub fn slice(self: *const Connections) []const ConnectionFact {
+        return self.items[0..self.len];
+    }
+
+    /// The route a name is served at, `unserved` when the name is absent.
+    pub fn route(self: *const Connections, name: []const u8) Route {
+        for (self.slice()) |fact| if (std.mem.eql(u8, fact.name.slice(), name)) return fact.route;
+        return .unserved;
+    }
+
+    pub fn servesModel(self: *const Connections) bool {
+        return self.len != 0;
+    }
+
+    pub fn jsonStringify(self: *const Connections, jws: anytype) !void {
+        try jws.beginArray();
+        for (self.slice()) |fact| {
+            try jws.beginObject();
+            try jws.objectField("name");
+            try jws.write(fact.name.slice());
+            try jws.objectField("label");
+            try jws.write(fact.label.slice());
+            try jws.objectField("route");
+            try jws.write(@tagName(fact.route));
+            try jws.endObject();
+        }
+        try jws.endArray();
+    }
+};
 
 pub const Codec = provider_name.Codec;
 pub const ReasoningEffort = model_capability.ReasoningEffort;
-pub const max_provider_bytes = command_input.max_provider_bytes;
+pub const max_connection_bytes = command_input.max_connection_bytes;
 pub const max_header_bytes = 16 * 1024;
 pub const content_window_bytes = conversation_read.content_window_bytes;
 pub const public_conversation_page_items = conversation_read.public_conversation_page_items;
@@ -296,7 +331,11 @@ pub const HostInfo = struct {
     settings_digest: ?[]const u8 = null,
     capabilities: struct {
         bash: bool,
-        providers: Routes,
+        connections: []const struct {
+            name: []const u8,
+            label: []const u8,
+            route: Route,
+        },
     },
 };
 
@@ -553,7 +592,7 @@ pub const SessionRow = struct {
     reference: Bounded(max_session_bytes) = .{},
     archive_seq: ?u64 = null,
     workspace: Bounded(max_workspace_bytes) = .{},
-    provider: Provider = .codex,
+    provider: connection.Name = connection.Name.parse("codex").?,
     model: Bounded(max_model_bytes) = .{},
     tools: ToolsField = .{ .state = .value },
     permission_mode: PermissionMode = .ask,
@@ -574,7 +613,7 @@ pub const SessionRow = struct {
 
     pub const json_shape = .{
         "{\"read_version\":\"", Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState }, "\",\"pin_order\":",         Hole.optional_id,                          ",\"reference\":",                   Hole{ .string = max_session_bytes },      ",\"archive_seq\":",          Hole.optional_id,                            ",\"workspace\":",                      Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",     Hole{ .tag = Provider },                     "\",\"model\":",           Hole{ .string = max_model_bytes },  ",\"tools\":",               Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"",           Hole{ .tag = PermissionMode },            "\",\"parent\":",             Hole{ .optional_string = session_id_bytes }, ",\"creator\":",                        Hole{ .optional_string = session_id_bytes },
+        ",\"connection\":",     Hole{ .string = connection.max_name_bytes }, ",\"model\":",           Hole{ .string = max_model_bytes },  ",\"tools\":",               Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"",           Hole{ .tag = PermissionMode },            "\",\"parent\":",             Hole{ .optional_string = session_id_bytes }, ",\"creator\":",                        Hole{ .optional_string = session_id_bytes },
         ",\"label\":",          Hole{ .optional_string = max_label_bytes },  ",\"created_at\":\"",      Hole.decimal,                       "\",\"state_change_at\":\"", Hole.decimal,                              "\",\"subtree_state_change_at\":\"", Hole.decimal,                             "\",\"descendant_count\":\"", Hole.decimal,                                "\",\"descendant_needs_you_count\":\"", Hole.decimal,
         "\",\"revision\":\"",   Hole.decimal,                                "\",\"end\":\"",           Hole.decimal,                       "\",\"first_message\":",     Hole{ .optional_json = FirstMessage },     ",\"last_line\":",                   Hole{ .optional_json = LastLine.Fields }, ",\"work\":",                 Hole{ .json = SessionWork },                 ",\"peers\":",                          Hole{ .json = PeerFacts },
         "}",
@@ -592,7 +631,7 @@ pub const SessionRow = struct {
         reference: []const u8,
         archive_seq: ?u64 = null,
         workspace: []const u8,
-        provider: Provider,
+        provider: connection.Name,
         model: []const u8,
         tools: []const u8,
         permission_mode: PermissionMode,
@@ -616,7 +655,7 @@ pub const SessionRow = struct {
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
             var token_buffer: [change_ring.Token.max_bytes]u8 = undefined;
             try writeShape(out, json_shape, .{
-                f.read_version.format(&token_buffer), f.archive_state,              f.pin_order, f.reference, f.archive_seq,   f.workspace,  f.provider,        f.model,
+                f.read_version.format(&token_buffer), f.archive_state,              f.pin_order, f.reference, f.archive_seq,   f.workspace,  f.provider.slice(), f.model,
                 f.tools,                              f.permission_mode,            f.parent,    f.creator,   f.label,         f.created_at, f.state_change_at, f.subtree_state_change_at,
                 f.descendant_count,                   f.descendant_needs_you_count, f.revision,  f.end,       f.first_message, f.last_line,  f.work,            f.peers,
             });
@@ -2502,7 +2541,7 @@ pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
 pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
 pub const parts_reference_shape = .{ "{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
 
-pub const creation_configuration_shape = .{ ",\"configuration\":{\"provider\":\"", Hole{ .tag = Provider }, "\",\"model\":", Hole{ .string = max_model_bytes }, ",\"reasoning_effort\":", Hole{ .optional_tag = ReasoningEffort }, ",\"workspace\":", Hole{ .string = max_workspace_bytes }, ",\"tools\":", Hole{ .json = @import("creation_receipt_wire.zig").NamesJson }, ",\"loaded_tools\":", Hole{ .json = @import("creation_receipt_wire.zig").NamesJson }, ",\"permission_mode\":\"", Hole{ .tag = cli_value.PermissionMode }, "\",\"compaction_trigger\":", Hole.optional_id, "}" };
+pub const creation_configuration_shape = .{ ",\"configuration\":{\"connection\":", Hole{ .string = connection.max_name_bytes }, ",\"model\":", Hole{ .string = max_model_bytes }, ",\"reasoning_effort\":", Hole{ .optional_tag = ReasoningEffort }, ",\"workspace\":", Hole{ .string = max_workspace_bytes }, ",\"tools\":", Hole{ .json = @import("creation_receipt_wire.zig").NamesJson }, ",\"loaded_tools\":", Hole{ .json = @import("creation_receipt_wire.zig").NamesJson }, ",\"permission_mode\":\"", Hole{ .tag = cli_value.PermissionMode }, "\",\"compaction_trigger\":", Hole.optional_id, "}" };
 
 pub const configuration_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.configure).reply_type ++ "\",\"answer\":{\"status\":";
@@ -2710,18 +2749,17 @@ pub const host_info_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean };
     pub const doublewrite = .{ ",\"innodb_doublewrite\":", Hole{ .string = 32 } };
     pub const settings_digest = .{ ",\"settings_digest\":\"", Hole{ .hex = 32 }, "\"" };
-    pub const tail = .{ ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\",\"chatgpt\":\"", Hole{ .tag = Route }, "\"}}}" };
-    pub const max_bytes = shapeBytes(head) + shapeBytes(doublewrite) + shapeBytes(settings_digest) + shapeBytes(tail);
+    /// The served connections: `connections_head`, one `connection` per served name separated by commas, then `connections_tail`.
+    pub const connections_head = ",\"capabilities\":{\"bash\":true,\"connections\":[";
+    pub const connection_entry = .{ "{\"name\":", Hole{ .string = @import("connection.zig").max_name_bytes }, ",\"label\":", Hole{ .string = @import("connection.zig").max_label_bytes }, ",\"route\":\"", Hole{ .tag = Route }, "\"}" };
+    pub const connections_tail = "]}}";
+    pub const max_bytes = shapeBytes(head) + shapeBytes(doublewrite) + shapeBytes(settings_digest) + shapeBytes(connections_head) +
+        provider_route.max_served * (shapeBytes(connection_entry) + 1) + shapeBytes(connections_tail);
 };
-comptime {
-    const names = @typeInfo(Provider).@"enum".field_names;
-    if (names.len != 3 or !std.mem.eql(u8, names[0], "codex") or !std.mem.eql(u8, names[1], "openai") or !std.mem.eql(u8, names[2], "chatgpt"))
-        @compileError("host_info_reply names one Route hole per provider, in Provider order");
-}
 pub const max_host_info_response_bytes: usize = host_info_reply.max_bytes;
 
 pub const model_list_reply = struct {
-    pub const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"model_list\",\"providers\":";
+    pub const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"model_list\",\"connections\":";
     pub const tail = "}";
     pub const max_bytes = maxBytes(@import("model_catalog.zig").shipped);
 
@@ -3085,7 +3123,7 @@ test "configuration provider value preserves exact spelling and omission" {
         }
         const request = try parseForTest(&parser);
         try std.testing.expectEqual(index == 3, request.configure.require_model);
-        const field = request.configure.configuration.provider;
+        const field = request.configure.configuration.connection;
         if (case.expected) |value| {
             try std.testing.expectEqual(FieldState.value, field.state);
             try std.testing.expectEqualStrings(value, field.value.slice());
@@ -3754,7 +3792,7 @@ test "Session settings configure digest golden" {
 test "Session settings preserve omitted and nullable wire states for every field" {
     inline for (.{
         .{ "workspace", "workspace", false },
-        .{ "provider", "provider", false },
+        .{ "connection", "connection", false },
         .{ "model", "model", false },
         .{ "instructions", "instructions", false },
         .{ "tools", "tools", false },
@@ -3814,7 +3852,7 @@ test "parent spec relation parses creation without a workspace and rejects null 
         const request = try parseForTest(&parser);
         try std.testing.expectEqualStrings("k7m2qx", request.configure.configuration.parent.value.slice());
         try std.testing.expectEqual(FieldState.omitted, request.configure.configuration.workspace.state);
-        try std.testing.expectEqual(FieldState.omitted, request.configure.configuration.provider.state);
+        try std.testing.expectEqual(FieldState.omitted, request.configure.configuration.connection.state);
     }
     inline for (.{
         .{ required ++ ",\"parent\":null", error.InvalidFieldState },

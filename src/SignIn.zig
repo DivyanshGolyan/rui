@@ -2202,7 +2202,7 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
             .os_launch => .failed(.os_launch, error.HostLaunchFailed),
             .timeout => .failed(.readiness_timeout, error.HostReadinessUnconfirmed),
             .activation_error => null,
-            .success, .pending => .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved } } }, .adopted = case == .pending } } },
+            .success, .pending => .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .connections = protocol.connectionsOfRoutes(.{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved }) } }, .adopted = case == .pending } } },
         };
         answer.pending = case == .pending;
         if (answer.launch) |*launch| {
@@ -2482,7 +2482,7 @@ test "Sign-in native departure fully acknowledged successful launch remains succ
         const page = &rig.page;
         defer page.deinit();
         var answer = try testingActivation(page.init.?);
-        answer.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved } } } } } };
+        answer.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .connections = protocol.connectionsOfRoutes(.{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved }) } } } } };
         @memcpy(answer.launch.?.startup_bytes[0..marker.len], marker);
         answer.launch.?.startup_len = marker.len;
         const outcome: Outcome = .{ .published = .{ .defaults = {}, .activation = answer } };
