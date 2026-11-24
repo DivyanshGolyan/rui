@@ -611,13 +611,20 @@ def configure_refresh_case():
 
 def configure_receipt_case():
     # SUI-135/136/137: A may be admitted only after later B and a chat switch.
+    def draft_visible(frame):
+        return any(composer_line(frame, index).rstrip() == " › next draft" for index in range(len(rows(frame))))
     for b_unknown in (False, True):
-        with Chrome("rui-chrome-configure-receipt.", []) as chrome:
+        responses = [fixture.sse_answer("seed-a", "r1", "m1", "SEED A")[0],
+                     fixture.sse_answer("seed-b", "r2", "m2", "SEED B")[0]]
+        with Chrome("rui-chrome-configure-receipt.", responses) as chrome:
             verify_private_chrome(chrome)
             original = chrome.session(model="gpt-6.1-terra")
             other = chrome.session(model="gpt-6.1-terra")
             private_chrome_command(chrome, "session", "configure", "--store", chrome.store, "--session", original, "--label", "original-config")
             private_chrome_command(chrome, "session", "configure", "--store", chrome.store, "--session", other, "--label", "other-config")
+            for session in (original, other):
+                private_chrome_command(chrome, "session", "send", "--store", chrome.store, "--session", session, input="seed")
+                fixture.wait_for(lambda: json.loads(private_chrome_command(chrome, "session", "inspect", "--store", chrome.store, "--session", session))["work"]["state"]["kind"] == "finished", "seeded Session finished")
             master, caller, opened = chrome.open(original, lambda frame:
                 "original-config" in frame and "other-config" in frame and "gpt-6.1-terra" in frame,
                 columns=120, height=36)
@@ -633,17 +640,22 @@ def configure_receipt_case():
                 failed = chrome.frame(master, b"\x1b[A\r", lambda frame: "not confirmed" in frame.lower(), timeout=20)
                 fixture.wait_for(lambda: len(attempts) == 1, "first original Configure")
                 a = json.loads(attempts[0])["key"]
-                assert composing(failed, "next draft"), failed
+                assert draft_visible(failed), failed
                 settled = chrome.frame(master, b"", lambda frame: "gpt-6.1-terra · high" in frame and "not confirmed" in frame.lower())
                 closed = chrome.frame(master, b"\x1b", lambda frame: "Effort" not in conversation_text(frame))
                 chrome.frame(master, footer_click(closed, marker="gpt-6.1-terra"), lambda frame: "✓" in frame)
                 second = chrome.frame(master, b"gpt-5.5\r", lambda frame:
-                    ("not confirmed" in frame.lower() if b_unknown else "gpt-5.5 · high" in frame), timeout=20)
+                    (("Model" in conversation_text(frame) and
+                      (footer(frame).endswith("enter retry · esc close") or footer(frame).endswith("enter edit · esc close")))
+                     if b_unknown else "gpt-5.5 · high" in frame), timeout=20)
                 fixture.wait_for(lambda: len(attempts) == 2, "second independent Configure")
                 b = json.loads(attempts[1])["key"]
-                assert a != b and composing(second, "next draft"), (a, b, second)
+                assert a != b and draft_visible(second), (a, b, second)
+                assert "Config unconfirmed" in second, ("original Configure custody lost", second)
                 if b_unknown:
-                    second = chrome.frame(master, b"\x1b", lambda frame: "not confirmed" not in conversation_text(frame).lower())
+                    assert footer(second).endswith("enter edit · esc close"), second
+                    second = chrome.frame(master, b"\x1b", lambda frame: draft_visible(frame) and
+                                          not footer(frame).endswith(("enter retry · esc close", "enter edit · esc close")))
             finally:
                 proxy.close()
 

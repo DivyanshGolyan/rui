@@ -1247,7 +1247,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_screen.content_gutter = if (list_visible) 2 else 1;
     chrome.place(&self.app_screen, &self.app_input, .{
         .list_visible = list_visible,
-        .choice = if (!self.app_info.standaloneOpen()) .closed else if (self.app_info.hasChoice()) .pick else .retry,
+        .choice = if (!self.app_info.standaloneOpen()) .closed else if (self.app_info.hasChoice()) .pick else if (self.app_info.standaloneUnconfirmed()) .edit else .retry,
         .browsing = browsing,
         .new_entries = self.new_below,
         .needs = send.needs,

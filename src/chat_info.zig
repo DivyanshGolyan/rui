@@ -43,7 +43,7 @@ pub const Backend = struct {
 
 pub const Row = enum { model, effort };
 
-const Phase = enum { open, pending, failed };
+const Phase = enum { open, pending, failed, unconfirmed };
 const Standalone = struct { row: Row, phase: Phase = .open };
 
 standalone: ?Standalone = null,
@@ -115,6 +115,10 @@ pub fn standaloneOpen(self: *const Self) bool {
 
 pub fn standaloneField(self: *const Self) ?Row {
     return if (self.standalone) |shown| shown.row else null;
+}
+
+pub fn standaloneUnconfirmed(self: *const Self) bool {
+    return if (self.standalone) |shown| shown.phase == .unconfirmed else false;
 }
 
 pub fn closeStandaloneChoice(self: *Self) void {
@@ -343,7 +347,7 @@ fn poll(self: *Self) void {
     if (state == .idle or state == .pending) return;
     self.readSession();
     if (state == .failed or state == .unconfirmed or self.read_failed) {
-        if (self.standalone) |*shown| shown.phase = .failed;
+        if (self.standalone) |*shown| shown.phase = if (state == .unconfirmed) .unconfirmed else .failed;
     } else {
         self.closeStandaloneChoice();
     }
@@ -1755,6 +1759,24 @@ test "Chat info standalone effort checks the actual Session effort without chang
             for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (actual == row) "✓" else " ", drawn.readCell(3, @intCast(row + 1)).char.grapheme);
         }
     };
+}
+
+test "SUI-136 an unconfirmed choice opens a new edit instead of retrying" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try page.openStandaloneChoice(&ctx, .effort);
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(@as(usize, 1), fixture.save_calls);
+    fixture.state_value = .unconfirmed;
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(page.standaloneUnconfirmed() and !page.hasChoice());
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expect(page.hasChoice());
+    try std.testing.expectEqual(@as(usize, 1), fixture.save_calls);
 }
 
 test "SUI-136 field notices clear only for the observed Configure key" {
