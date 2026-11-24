@@ -610,6 +610,9 @@ BUILD_MODULES = {
 RULES += tuple(((module,), targets, tuple(target for target in targets if target not in LINUX_ONLY),
                 "Build module: the targets it defines or builds for")
                for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
+RULES += ((("tests/ci/vaxis_test_owners.json", "tests/ci/verify_vaxis_test_owners.py"),
+           VAXIS_CLIPBOARD_TARGETS, VAXIS_CLIPBOARD_TARGETS,
+           "Pinned Vaxis invariant owners: verify the external source and reader tests"),)
 
 
 # The module lint reads every production src/ file (from src/cli.zig) and its allow file; build/deep_modules.zig

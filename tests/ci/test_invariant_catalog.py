@@ -1,8 +1,13 @@
 """CI-86: Invariant identifiers uniquely name their rows across catalogs."""
+import hashlib
+import json
 import re
+import tempfile
 import unittest
 from collections import Counter, defaultdict
 from pathlib import Path
+
+import verify_vaxis_test_owners
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +43,32 @@ class InvariantCatalogTest(unittest.TestCase):
         duplicates = duplicate_ids('\n'.join(path.read_text() for path in catalogs))
         self.assertEqual(duplicates, [], f'duplicate invariant IDs: {", ".join(duplicates)}')
 
+    def test_external_owners_require_the_pin_and_exact_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            revision = "a" * 40
+            source = b'test "SUI-127 example" {}\n'
+            (root / "owner.zig").write_bytes(source)
+            data = {"revision": revision, "sources": {"owner.zig": {
+                "sha256": hashlib.sha256(source).hexdigest(), "tests": ["SUI-127 example"]}}}
+            manifest = root / "owners.json"
+            manifest.write_text(json.dumps(data))
+            build = root / "build.zig.zon"
+            build.write_text(f'git+https://github.com/DivyanshGolyan/libvaxis#{revision}')
+            loaded, owners = verify_vaxis_test_owners.load(manifest, build)
+            self.assertEqual(owners, [("owner.zig", "SUI-127 example")])
+            verify_vaxis_test_owners.verify(loaded, root)
+            build.write_text('git+https://github.com/DivyanshGolyan/libvaxis#' + "b" * 40)
+            with self.assertRaisesRegex(ValueError, "pinned revision"):
+                verify_vaxis_test_owners.load(manifest, build)
+            (root / "owner.zig").write_bytes(source + b"// changed\n")
+            with self.assertRaisesRegex(ValueError, "source changed"):
+                verify_vaxis_test_owners.verify(loaded, root)
+            (root / "owner.zig").write_bytes(source)
+            (root / "other.zig").write_bytes(source)
+            with self.assertRaisesRegex(ValueError, "not unique"):
+                verify_vaxis_test_owners.verify(loaded, root)
+
     def test_named_migrated_owners_exist_once(self):
         """CI-87: Migrated owner names identify one source test."""
         # Unmigrated catalog rows name future owners without an ID prefix.
@@ -51,6 +82,10 @@ class InvariantCatalogTest(unittest.TestCase):
             added = '\n'.join(line[1:] for line in path.read_text().splitlines() if line.startswith('+'))
             for name in TEST.findall(added):
                 tests[name].append(path.relative_to(ROOT))
+        _, external = verify_vaxis_test_owners.load(
+            ROOT / 'tests/ci/vaxis_test_owners.json', ROOT / 'build.zig.zon')
+        for source, name in external:
+            tests[name].append(Path('libvaxis') / source)
         for path, number, cells in catalog_rows():
             identity = cells[1]
             owner = re.search(r"`(" + re.escape(identity) + r" [^`]+)`", cells[5])

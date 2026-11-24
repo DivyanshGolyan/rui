@@ -36,11 +36,31 @@ pub const CiCollection = struct {
     }
 };
 
+fn sourceStem(path: std.Build.LazyPath) []const u8 {
+    const name = switch (path) {
+        .src_path => |source| source.sub_path,
+        .dependency => |source| source.sub_path,
+        .cwd_relative => |source| source,
+        .generated => |source| source.sub_path,
+        .relative => |source| source.sub_path,
+    };
+    return if (name.len == 0) path.getDisplayName() else std.fs.path.stem(name);
+}
+
 fn ciName(b: *std.Build, compile: *std.Build.Step.Compile) []const u8 {
     return if (compile.kind == .@"test")
-        b.fmt("{s}-{s}", .{ compile.name, std.fs.path.stem(compile.root_module.root_source_file.?.src_path.sub_path) })
+        b.fmt("{s}-{s}", .{ compile.name, sourceStem(compile.root_module.root_source_file.?) })
     else
         compile.name;
+}
+
+test "CI artifact names accept source and dependency roots" {
+    const source: std.Build.LazyPath = .{ .src_path = .{ .owner = undefined, .sub_path = "src/tests.zig" } };
+    const local_c: std.Build.LazyPath = .{ .src_path = .{ .owner = undefined, .sub_path = "src/c_api.zig" } };
+    const dependency: std.Build.LazyPath = .{ .dependency = .{ .dependency = undefined, .sub_path = "src/c_api.zig" } };
+    try std.testing.expectEqualStrings("tests", sourceStem(source));
+    try std.testing.expectEqualStrings("c_api", sourceStem(dependency));
+    try std.testing.expectEqualStrings(sourceStem(local_c), sourceStem(dependency));
 }
 
 pub const CiArtifacts = struct {
