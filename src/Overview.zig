@@ -640,7 +640,7 @@ fn listKey(input: vxfw.Event, delivery: @import("app_input.zig").Effects.Deliver
     };
 }
 
-test "SUI-140 overview tree key encodings respect list focus" {
+test "SUI-141 overview tree key encodings respect list focus" {
     const Events = @import("testing/app_events.zig").Events;
     for ([_]struct { bytes: []const u8, action: view.Action, alias: bool }{
         .{ .bytes = "\x1bb", .action = .collapse_tree, .alias = true },
