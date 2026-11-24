@@ -229,8 +229,7 @@ class ScreenEvidenceTest(unittest.TestCase):
         sources = {"src/Overview.zig": b'const view = @import("removed_screen.zig");\n',
                    "src/removed_screen.zig": b'const image = @embedFile("image.bin");\n',
                    "src/image.bin": b"\xff\x80",
-                   "src/logic_tests.zig": b"const cores = .{\n};\n",
-                   "tests/ci/stack_frames.json": b'{"host_modules": []}'}
+                   "src/logic_tests.zig": b"const cores = .{\n};\n"}
         with tarfile.open(fileobj=archive, mode="w") as tree:
             for name, data in sources.items():
                 entry = tarfile.TarInfo(name)
@@ -417,9 +416,6 @@ class PrShapeMainTest(unittest.TestCase):
             integration = Path(directory) / "tests/integration"
             integration.mkdir(parents=True)
             (integration / "placeholder.txt").write_text("fixture\n")
-            gate = Path(directory) / "tests/ci/stack_frames.json"
-            gate.parent.mkdir()
-            gate.write_text('{"host_modules": []}')
             base = commit()
             source.unlink()
             commit()

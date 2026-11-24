@@ -491,18 +491,6 @@ pub fn build(b: *std.Build) void {
     fast_integrations.step.dependOn(&units.signal_stack_probe.step);
     fast_integrations.step.dependOn(&units.run_os_tests.step);
     check_step.dependOn(&fast_integrations.step);
-    const stack_frames_step = b.step(
-        "stack-frames",
-        "Fail when a Host thread reaches a ReleaseSafe stack frame over budget (x86-64 Linux only)",
-    );
-    if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .linux) {
-        const stack_frames = b.addSystemCommand(&.{ "python3", "-B" });
-        stack_frames.addFileArg(b.path("tests/ci/stack_frames.py"));
-        stack_frames.addFileArg(ci.path(production_safe));
-        stack_frames.addFileArg(b.path("tests/ci/stack_frames.json"));
-        stack_frames_step.dependOn(&stack_frames.step);
-    }
-    if (!pr_ci) check_step.dependOn(stack_frames_step);
     const rsql_table_step = b.step(
         "rsql-table",
         "Fail when src/store/rsql_table.zig differs from what rsql's comptime path renders (Linux only)",

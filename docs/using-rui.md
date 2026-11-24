@@ -45,8 +45,8 @@ Both `/new` and `/clear` use **+ New Session**’s creation owner. They send no 
 While the model works on a reply, the work line says `Thinking` with elapsed time.
 Rate-limited retries keep their countdown, and running tools show their descriptions.
 
-Tool outcomes start folded, showing their description and outcome, with a numeric failed exit when available.
-Click a tool heading to open or close its saved output in place.
+Tool outcomes start folded, showing their description and outcome.
+Click a tool heading to open or close its saved output in place, including any exit code.
 Ctrl-O toggles the lowest tool heading or opens the lowest collapsed Message or Session name in view, whichever is lower.
 Several tools can stay open; new live output does not close them and the view keeps following it.
 Output is safely escaped and indented, with at most 20 rows followed by `… N more lines` when needed.

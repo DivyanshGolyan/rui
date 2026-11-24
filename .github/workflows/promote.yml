@@ -27,7 +27,7 @@ on:
         required: false
         default: ''
       bisect-step:
-        description: Manual bisect, promotes nothing; the failed step's name, its space-separated targets (such as stack-frames)
+        description: Manual bisect, promotes nothing; the failed step's name, its space-separated targets (such as rsql-table)
         type: string
         required: false
         default: ''

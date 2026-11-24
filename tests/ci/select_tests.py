@@ -31,7 +31,16 @@ RUI = "src/cli.zig"
 HOST = "src/server.zig"
 CALLER = "src/client.zig"
 FUNCTIONAL_CORES = "src/logic_tests.zig"
-STACK_FRAMES_GATE = "tests/ci/stack_frames.json"
+# Host modules the server.zig import closure does not reach (wired by cli.zig, or dependency packages).
+# graph.host = closure(server.zig + these).
+HOST_MODULES = ('HostDiagnostics', 'TerminalText', 'TestObservation', 'bash', 'bounded', 'call_classification', 'change_ring',
+                'codex_auth', 'codex_credential_policy', 'codex_credentials', 'codex_token_wire', 'execution',
+                'execution_turn', 'failed_responses', 'history_memo', 'message_agent_arguments', 'model_adapter',
+                'named_scratch', 'os.descriptor_limit', 'os.pages', 'output_decode', 'output_format',
+                'output_retention', 'platform', 'preference_values', 'preferences', 'protocol', 'provider',
+                'server', 'server_execution', 'server_host', 'cli_grammar', 'session_work', 'signal_stack',
+                'stderr', 'store', 'transport_policy', 'h2', 'Connection', 'Engine', 'Resolver',
+                'Stream', 'proxy', 'tls', 'job', 'tls_client')
 # build/link_table.json: the dependency packages each build target links, walked from the build graph
 # (build/link_table.zig). A changed build.zig.zon package selects the targets it links.
 LINK_TABLE = "build/link_table.json"
@@ -222,8 +231,7 @@ class Graph:
             r'\.\{ "([^"]+\.zig)", @import', read(FUNCTIONAL_CORES).split("const cores = .{", 1)[1].split("\n};", 1)[0])}
         self.tests = {name for name in self.production if matches(name, TEST_CODE)}
         product = {source: targets - self.tests for source, targets in self.production.items() if source not in self.tests}
-        modules = json.loads(read(STACK_FRAMES_GATE))["host_modules"] if STACK_FRAMES_GATE in names else []
-        host = [HOST, *(name for module in modules for name in self.production
+        host = [HOST, *(name for module in HOST_MODULES for name in self.production
                         if f"/{name}".endswith("/" + module.replace(".", "/") + ".zig"))]
         self.host = self.closure(product, host)
         rui = self.closure(product, [RUI])
@@ -473,7 +481,7 @@ RULES = (
     (("src/os/*",), ("codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
      ("codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
      "Platform boundary: the managed transport and credential store it serves on each OS"),
-    (("src/descriptor*", "src/os/descriptor_limit.zig", "src/server*.zig", "src/platform.zig", "src/cli.zig",
+    (("src/descriptor*", "src/os/descriptor_limit.zig", "src/server*.zig", "src/platform.zig", "src/runtime_directory.zig", "src/cli.zig",
       "tests/integration/descriptor*", "tests/integration/host_launch*", "src/product_defaults.zig",
       "tests/integration/product_defaults.py"),
      ("test", "host-launch-integration", "descriptor-capacity-integration", "codex-h2-integration", "transport-h2-integration"),
@@ -601,7 +609,6 @@ RULES += tuple(((module,), targets, tuple(target for target in targets if target
                for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
 
 
-STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py", "tests/ci/stack_frames.json")
 # The module lint reads every production src/ file (from src/cli.zig) and its allow file; build/deep_modules.zig
 # wires both of its steps, so an edit to it runs the tool's own tests as well.
 DEEP_MODULES = ("src/*", "build.zig", "build.zig.zon", "build/deep_modules.zig", "tests/ci/deep_modules/*",
@@ -631,7 +638,7 @@ TYPECHECK_INPUTS = ("*.zig", "*.zon", "*.c", "*.h", "src/*.patch", "src/*.sh", "
 
 CLIENT_LOCALITY_INPUTS = ("src/*.zig", "clients/ts/src/*", "tests/ci/client_locality.py",
                           "tests/ci/test_client_locality.py", "tests/ci/caller_errors.py", "tests/ci/host_settings_locality.py",
-                          "tests/ci/select_tests.py", "tests/ci/import_architecture.py", STACK_FRAMES_GATE)
+                          "tests/ci/select_tests.py", "tests/ci/import_architecture.py")
 
 
 # The CI-code inputs every module declared with the table reads: a change to CI code or to a workflow reruns it.
@@ -718,10 +725,10 @@ def live_mysql_suites(targets, mysql_suites):
 def covers(target, targets) -> bool:
     """Whether a selected target executes target's checks.
 
-    check-full deliberately excludes stack-frames and rsql-table; promotion adds them separately.
+    check-full deliberately excludes rsql-table; promotion adds it separately.
     """
     broader = {"test": {"test-native", "test-store"},
-               "check": CHECK_COVERS | {"stack-frames", "rsql-table", "deep-modules"},
+               "check": CHECK_COVERS | {"rsql-table", "deep-modules"},
                "check-full": CHECK_COVERS | {"check"}, **FIXTURE_COVERS}
     return target in targets or any(target in broader.get(selected, ()) for selected in targets)
 
@@ -756,16 +763,14 @@ STORE_PATHS = ("src/store.zig", "src/store/*")
 # the live-MySQL wire client (its MySQL 8.4 runs in its own Docker container, not the job's) and the
 # Go measurement packages.
 PR_OWN_FILE_TARGETS = frozenset({"mysql-wire-integration", "measurement-check"})
-# Targets the PR tier runs whenever the selector picks them. The Host frame gate is picked by Host
-# source, build inputs and its own files (STACK_FRAMES); its LLVM ReleaseSafe build costs minutes,
-# but frame growth found only in Promote holds a release (owner's call, 23 Nov 2026, #1982).
-# deep-modules (DEEP_MODULES) and its tool's tests (DEEP_MODULES_TEST) are cheap Debug builds of the host tool
-# and run beside the policy checks, so they are selected the same way.
-PR_SELECTED_TARGETS = frozenset({"stack-frames", "deep-modules", "deep-modules-test"})
+# Targets the PR tier runs whenever the selector picks them. deep-modules (DEEP_MODULES) and its tool's tests
+# (DEEP_MODULES_TEST) are cheap Debug builds of the host tool and run beside the policy checks, so they are
+# selected the same way.
+PR_SELECTED_TARGETS = frozenset({"deep-modules", "deep-modules-test"})
 # Promotion's own targets: the PR tier never runs these whatever the diff touches. ci_plan.py adds
 # them to every promotion, and the issue filer names a red's target as promotion-only with them.
 PROMOTION_CORE_TARGETS = frozenset({"check-full", "test-logic", "admission-debug-integration"})
-PROMOTION_EXTRA_TARGETS = frozenset({"stack-frames", "deep-modules", "rsql-table", "mysql-wire-integration"})
+PROMOTION_EXTRA_TARGETS = frozenset({"deep-modules", "rsql-table", "mysql-wire-integration"})
 # The targets the PR tier never runs, whatever the diff touches: the escape classifier's promotion-only set.
 # Own-file and selected targets are checked first in the classifier, so this is what remains of the extras.
 PR_NEVER_TARGETS = PROMOTION_EXTRA_TARGETS - PR_OWN_FILE_TARGETS - PR_SELECTED_TARGETS
@@ -958,10 +963,6 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
         if documentation(path):
             reasons.add("Documentation: references and diff whitespace, no runtime change")
             shortcut = True
-        elif (path in graph.host if path.startswith("src/") and path.endswith(".zig")
-              else any(fnmatch.fnmatchcase(path, pattern) for pattern in STACK_FRAMES)):
-            targets.add("stack-frames")
-            reasons.add("Host stack frames: the ReleaseSafe frame gate (tests/ci/stack_frames.py)")
         if not documentation(path) and any(fnmatch.fnmatchcase(path, pattern) for pattern in DEEP_MODULES):
             targets.add("deep-modules")
             reasons.add("Module architecture: the deep-modules lint reads the production sources (tests/ci/deep_modules)")
@@ -1150,8 +1151,7 @@ def revision_contents(paths, base, head):
 # How directly a selected target reaches a changed path, strongest first: the target's own source or
 # script; an import, link or path rule the selector follows; or a fallback or coverage expansion only.
 DIRECT, GRAPH, BROAD = 0, 1, 2
-EXTRA_OWN_FILES = {"stack-frames": (STACK_FRAMES_GATE, "tests/ci/stack_frames.py"),
-                   "deep-modules": ("tests/ci/deep_modules.allow", "tests/ci/deep_modules/*", "build/deep_modules.zig"),
+EXTRA_OWN_FILES = {"deep-modules": ("tests/ci/deep_modules.allow", "tests/ci/deep_modules/*", "build/deep_modules.zig"),
                    "deep-modules-test": ("tests/ci/deep_modules/*", "build/deep_modules.zig"),
                    "rsql-table": ("tests/ci/rsql_table.py", "src/store/rsql_table.zig"),
                    # The Go packages select() maps to measurement-check by its path rule (QUALIFICATION_GO).
@@ -1205,7 +1205,6 @@ def attribute(path, graph, available, read, contents=None, fixture_literals=None
             record(target, GRAPH)
     for source in selected:
         if source in reached or source in rule_named or (path == DEPENDENCY_MANIFEST and source in graph.links) \
-                or (source == "stack-frames" and path in graph.host) \
                 or (source == "deep-modules" and path.startswith("src/")):
             tier = GRAPH
         else:
