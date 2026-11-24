@@ -89,6 +89,7 @@ const user_message_bit: RetainedStyle = 1 << 10;
 const user_start_bit: RetainedStyle = 1 << 11;
 const user_end_bit: RetainedStyle = 1 << 12;
 const full_width_bit: RetainedStyle = 1 << 13;
+const decoration_bit: RetainedStyle = 1 << 14;
 const AllText = struct {
     pub fn includes(_: *@This(), _: usize) bool {
         return true;
@@ -101,7 +102,7 @@ const linked_index: u8 = 6;
 const address_index: u8 = 7;
 
 pub fn seamStyle(value: RetainedStyle) RetainedStyle {
-    return (value & (body_bit | user_message_bit | user_start_bit | user_end_bit | full_width_bit)) | (if (foregroundIndex(value) == code_index) @as(RetainedStyle, code_index) << 3 else 0);
+    return (value & (body_bit | user_message_bit | user_start_bit | user_end_bit | full_width_bit | decoration_bit)) | (if (foregroundIndex(value) == code_index) @as(RetainedStyle, code_index) << 3 else 0);
 }
 
 fn foregroundIndex(value: RetainedStyle) u8 {
@@ -186,6 +187,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                             if (self.length != 0 and !self.user_start_pending and self.styles[self.length - 1] & user_message_bit != 0) self.styles[self.length - 1] |= user_end_bit;
                             self.style &= ~user_message_bit;
                             self.user_start_pending = false;
+                        } else if (std.mem.eql(u8, code, TerminalText.decoration_on)) {
+                            self.style |= decoration_bit;
+                        } else if (std.mem.eql(u8, code, TerminalText.decoration_off)) {
+                            self.style &= ~decoration_bit;
                         } else if (std.mem.eql(u8, code, TerminalText.full_width_on)) self.style |= full_width_bit else if (std.mem.eql(u8, code, TerminalText.full_width_off)) self.style &= ~full_width_bit else if (std.mem.eql(u8, code, TerminalText.body_on)) self.style |= body_bit else if (std.mem.eql(u8, code, TerminalText.body_off)) self.style &= ~(body_bit | full_width_bit) else if (std.mem.eql(u8, code, "\x1b[0m")) self.style &= body_bit | user_message_bit | full_width_bit else if (std.mem.eql(u8, code, "\x1b[1m")) self.style |= 1 else if (std.mem.eql(u8, code, "\x1b[3m")) self.style |= 2 else if (std.mem.eql(u8, code, "\x1b[4m")) self.style |= 4 else if (std.mem.eql(u8, code, "\x1b[2m")) self.style |= user_bit else if (std.mem.eql(u8, code, "\x1b[2;8m")) self.style |= user_bit | summary_bit else if (std.mem.eql(u8, code, "\x1b[8m")) self.style = (self.style & ~user_bit) | summary_bit else if (std.mem.eql(u8, code, "\x1b[39m")) self.style &= ~foreground_mask else {
                             const colour_index: u8 = if (std.mem.eql(u8, code, "\x1b[33m")) 1 else if (std.mem.eql(u8, code, "\x1b[90m")) 2 else if (std.mem.eql(u8, code, "\x1b[91m")) 3 else if (std.mem.eql(u8, code, "\x1b[94m")) 4 else if (std.mem.eql(u8, code, "\x1b[40m")) code_index else unreachable;
                             self.style = (self.style & ~foreground_mask) | (@as(RetainedStyle, colour_index) << 3);
@@ -294,14 +299,14 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             var length: usize = 0;
             var filter = eligibility;
             for (start..end) |index| {
-                if (filter.includes(index) and !isSidenote(self.styles[index]) and !self.hidden(index)) length += 1;
+                if (filter.includes(index) and self.selectable(index)) length += 1;
             }
             if (length > most) return null;
             const out = try gpa.alloc(u8, length);
             length = 0;
             filter = eligibility;
             for (start..end) |index| {
-                if (!filter.includes(index) or isSidenote(self.styles[index]) or self.hidden(index)) continue;
+                if (!filter.includes(index) or !self.selectable(index)) continue;
                 out[length] = if (self.bytes[index] == '\t') ' ' else self.bytes[index];
                 length += 1;
             }
@@ -313,7 +318,14 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         pub fn selectable(self: *const Self, position: usize) bool {
-            return position < self.text().len and !(styled and isSidenote(self.styles[position]));
+            if (position >= self.length) return false;
+            if (!styled) return true;
+            const value = self.styles[position];
+            return !self.inlineDecoration(position) and !isSidenote(value) and !self.hidden(position);
+        }
+
+        pub fn inlineDecoration(self: *const Self, position: usize) bool {
+            return styled and self.styles[position] & decoration_bit != 0;
         }
 
         pub fn clear(self: *Self) void {
@@ -622,7 +634,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 var stop = end;
                 if (styled) {
                     stop = start + 1;
-                    while (stop < end and (self.styles[stop] & ~(body_bit | user_start_bit | user_end_bit)) == (self.styles[start] & ~(body_bit | user_start_bit | user_end_bit))) stop += 1;
+                    const presentation = ~(body_bit | user_start_bit | user_end_bit | decoration_bit);
+                    while (stop < end and (self.styles[stop] & presentation) == (self.styles[start] & presentation)) stop += 1;
                 }
                 const shown = !styled or (isSidenote(self.styles[start]) == notes and foregroundIndex(self.styles[start]) != address_index);
                 if (shown) {
