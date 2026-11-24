@@ -2136,13 +2136,17 @@ fn placeArchived(state: *State, read: ArchivedRead, page: ArchivedPage) error{Ou
     const selected_ref = if (state.selected == .session) state.selected.session else null;
     const selected_key = if (selected_ref) |reference| if (state.find(reference)) |row| row.archive_seq else null else null;
     const range: [2]u64 = switch (read.from) {
-        .head => if (page.more_below) .{ page.last orelse std.math.maxInt(u64), std.math.maxInt(u64) } else .{ 0, std.math.maxInt(u64) },
+        .head => .{ 0, std.math.maxInt(u64) },
         .below => |key| .{ page.last orelse 0, key - 1 },
         .above => |key| .{ key + 1, page.first orelse std.math.maxInt(u64) },
         .tail => unreachable,
     };
+    const authority_range: [2]u64 = if (read.from == .head and page.more_below)
+        .{ page.last orelse std.math.maxInt(u64), std.math.maxInt(u64) }
+    else
+        range;
     const selected_omitted = if (selected_ref) |reference| if (selected_key) |key|
-        key >= range[0] and key <= range[1] and !namesArchived(page.rows, reference)
+        key >= authority_range[0] and key <= authority_range[1] and !namesArchived(page.rows, reference)
     else
         false else false;
     for (state.rows.items) |*row| {
@@ -2303,6 +2307,7 @@ fn restartArchivedAtHead(state: *State) void {
 
 fn reconcileSelection(state: *State, selected_at: ?usize, opening: bool) void {
     if (state.selected == .session and state.selectedRow() == null) {
+        if (state.archive == .archived and if (state.find(state.selected.session)) |row| row.archive_state == .archived else false) return;
         state.selected = if (selected_at) |at| if (at < state.order.items.len) .{ .session = state.rows.items[state.order.items[at]].reference } else .new_session else .new_session;
     } else if (opening and state.selected == .new_session and state.order.items.len != 0) {
         state.selected = .{ .session = state.rows.items[state.order.items[0]].reference };
@@ -6199,7 +6204,7 @@ fn segmentText(arena: Allocator, segments: []const Segment) ![]const u8 {
     return std.mem.concat(arena, u8, texts);
 }
 
-test "SUI-131 overview removal clears activation and arrows re-enter current rows" {
+test "SUI-132 overview removal clears activation and arrows re-enter current rows" {
     const rows = [_]Listed{
         session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" }),
         session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" }),
@@ -6295,10 +6300,7 @@ test "SUI-131 overview removal clears activation and arrows re-enter current row
     // Window trim retains the selected record's archive sequence. A capped head is not evidence about older rows.
     _ = try step(&views, .{ .conversation = rows[0].reference });
     views.selected = .{ .session = archived.reference };
-    views.find(archived.reference).?.listed = false;
-    try retainRows(&views);
-    try arrange(&views);
-    try std.testing.expect(views.find(archived.reference) != null);
+    try std.testing.expect(views.find(archived.reference).?.listed);
     _ = try refresh(&views, .changed, testToken(3), &.{ rows[0], rows[2] });
     try std.testing.expectEqualStrings(&archived.reference, &views.selected.session);
     try std.testing.expect(views.find(archived.reference) != null);
@@ -6312,11 +6314,18 @@ test "SUI-131 overview removal clears activation and arrows re-enter current row
     try std.testing.expectEqualStrings(&archived.reference, &views.selected.session);
     try std.testing.expect(views.find(archived.reference) != null);
 
-    // A complete head omission is authoritative restore/movement.
+    // The next page starts from the replacement head boundary and its covered range resolves the trimmed ref.
+    try std.testing.expectEqual(@as(?u64, 20), archivedBounds(&views).last);
+    var middle = session("dddddd", .{ .finished = ago(4) }, .{ .label = "middle archived" });
+    middle.archive_state = .archived;
+    middle.archive_seq = 14;
+    var tail = session("eeeeee", .{ .finished = ago(5) }, .{ .label = "tail archived" });
+    tail.archive_state = .archived;
+    tail.archive_seq = 11;
     refresh_effects = .{};
-    readArchived(&views, &refresh_effects, .head);
+    readArchived(&views, &refresh_effects, .{ .below = 20 });
     head_read = refresh_effects.slice()[0].read_archived;
-    _ = try step(&views, .{ .archived = .{ .read = head_read, .page = .{ .rows = &.{}, .first = null, .last = null, .more_above = false, .more_below = false } } });
+    _ = try step(&views, .{ .archived = .{ .read = head_read, .page = .{ .rows = &.{ middle, tail }, .first = 14, .last = 11, .more_above = false, .more_below = false } } });
     try std.testing.expect(views.selected == .none);
     try std.testing.expectEqualStrings("aaaaaa", &views.conversing.?);
     try expectEffects(&.{}, try submit(&views));
@@ -7377,6 +7386,59 @@ test "archived window: a trim that drops the selected row, then Down, selects fr
     try serveWindowWith(session_list.archived_window_size, &state, &host, try press(&state, .next));
     // Down starts from the top shown row: it selects the row the list shows at its top.
     try std.testing.expectEqual(shown_top, selectedAt(&state));
+}
+
+test "SUI-132 a trim preserves the selected Archived identity through conversation and roster changes until a covered omission" {
+    var refs: [1200][6]u8 = undefined;
+    var host: [1200]Listed = undefined;
+    var state = try archivedWheelFixture(&refs, &host);
+    defer state.deinit();
+    for (0..4) |_| try serveWindowWith(session_list.archived_window_size, &state, &host, try press(&state, .next));
+    const selected = state.selected.session;
+    const selected_row = state.find(selected) orelse return error.TestExpectedEqual;
+    const selected_key = selected_row.archive_seq orelse return error.TestExpectedEqual;
+    var top_ref = state.rows.items[state.order.items[0]].reference;
+    for (0..100) |_| _ = try wheelRows(&state, &host, &top_ref, true);
+    const span = state.viewport orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(?usize, null), position(&state, selected));
+    try std.testing.expect(state.find(selected) != null);
+
+    _ = try step(&state, .{ .conversation = span.first });
+    try std.testing.expectEqualSlices(u8, &selected, &state.selected.session);
+    try std.testing.expectEqualSlices(u8, &selected, &state.conversing.?);
+    _ = try refresh(&state, .changed, testToken(2), &.{});
+    try std.testing.expectEqualSlices(u8, &selected, &state.selected.session);
+    try std.testing.expectEqual(state.find(selected).?.archive_seq, selected_key);
+
+    var changed = false;
+    for (&host) |*row| if (std.mem.eql(u8, &row.reference, &selected)) {
+        row.archive_state = .active;
+        row.archive_seq = null;
+        changed = true;
+        break;
+    };
+    try std.testing.expect(changed);
+    var head_rows: [session_list.archived_window_size]Listed = undefined;
+    var head_count: usize = 0;
+    for (host) |row| if (row.archive_state == .archived and head_count < head_rows.len) {
+        head_rows[head_count] = row;
+        head_count += 1;
+    };
+    try std.testing.expect(head_count != 0);
+    var effects: Effects = .{};
+    readArchived(&state, &effects, .head);
+    const read = effects.slice()[0].read_archived;
+    const head = ArchivedPage{
+        .rows = head_rows[0..head_count],
+        .first = head_rows[0].archive_seq,
+        .last = head_rows[head_count - 1].archive_seq,
+        .more_above = false,
+        .more_below = true,
+    };
+    _ = try step(&state, .{ .archived = .{ .read = read, .page = head } });
+    try std.testing.expect(state.selected == .none);
+    try std.testing.expectEqualSlices(u8, &selected, &state.conversing.?);
+    try std.testing.expect(selected_key >= head.last.?);
 }
 
 test "archived window: a viewport's lines map to rows past a pinned gap" {
