@@ -135,7 +135,7 @@ const LockResult = union(enum) {
 
 /// Test seam: `lockVerified` and `claim` call it between their steps, so a
 /// test can change the world exactly there. Production passes `noPause`.
-const Stage = enum { created, opened, locked };
+const Stage = enum { created, opened };
 const Pause = *const fn (Stage) void;
 fn noPause(_: Stage) void {}
 const no_pause: Pause = noPause;
@@ -159,7 +159,6 @@ fn lockVerifiedPaused(io: std.Io, directory: []const u8, pause: Pause) LockResul
         .AGAIN => return .busy,
         else => return .{ .unusable = error.EndpointLockFailed },
     }
-    pause(.locked);
     // flock belongs to an inode: a D replaced since our open proves nothing.
     if (!namesDirectory(io, directory, dir.handle)) return .busy;
     switch (legacyState(dir.handle)) {
@@ -294,11 +293,12 @@ pub const Endpoint = struct {
 const claim_wait_ns = 100 * std.time.ns_per_ms;
 
 /// Host start: creates D (0700), holds its lock and sets D's times to now, once,
-/// through the held descriptor. Nothing ages D again while the Host lives: the
-/// bind and the unbind each refresh its mtime. An empty D exists only from
-/// this claim until `listen`, where a cleaner would need D to stall for its
-/// whole age, and `listen` refuses a D that was removed. Does not touch
-/// `rui.sock`; that waits for `listen`, after the caller owns its Store.
+/// through the held descriptor. Between this claim and `listen` D is empty, so
+/// only a cleaner that ignores locks, after D stalls for its whole age, can
+/// remove it; `listen` then refuses a removed D. After the bind, D is protected
+/// because it is non-empty and locked, and the bind and unbind refresh its
+/// mtime. Does not touch `rui.sock`; that waits for `listen`, after the caller
+/// owns its Store.
 pub fn claim(io: std.Io, interface: Interface) error{ RuntimeDirectoryInUse, RuntimeDirectoryUnusable }!Endpoint {
     return claimPaused(io, interface, no_pause);
 }
@@ -391,6 +391,8 @@ pub fn occupancy(io: std.Io, directory: []const u8) Occupancy {
         .AGAIN => return .held,
         else => return .unusable,
     }
+    // As in lockVerified: a lock on a D replaced since the open says nothing about D's path.
+    if (!namesDirectory(io, directory, dir.handle)) return .unusable;
     return switch (legacyState(dir.handle)) {
         .absent, .free => .free,
         .held => .held,

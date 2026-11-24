@@ -30,7 +30,7 @@ The canonical selector is at most **492 bytes**, so its 504-byte `/rui.sqlite3` 
 A longer raw CLI alias remains supported when the OS resolves it to a selector within that canonical bound; canonical overflow rejects before the Store lock, SQLite database or socket has an owner.
 Do not use Linux abstract sockets.
 Close-on-exec prevents descendants inheriting ownership.
-PID metadata, socket existence, timeout and absent results prove neither ownership nor effect termination; a free exclusive lock held and verified on the inode its interface directory names proves no Host serves that directory.
+PID metadata, socket existence, timeout and absent results prove neither ownership nor effect termination; a free exclusive lock on the inode its interface directory names, *and*, for this release, a free legacy `rui.lock`, prove that no Host serves that directory.
 
 Protect socket/parent directory; validate Store identity/wire version before mutation.
 Remove a Host socket only while holding its interface directory's lock (`host_endpoint`); discovery and startup both reclaim proven-dead endpoints.
