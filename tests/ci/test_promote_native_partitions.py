@@ -6,7 +6,6 @@ import sys
 import tempfile
 import unittest
 
-from select_tests import execution_batches
 
 
 class NativePartitionTest(unittest.TestCase):
@@ -14,7 +13,6 @@ class NativePartitionTest(unittest.TestCase):
         targets = ["admission-debug-integration", "check-full", "test-full"]
         batches = [["check-full", "-Dcheck-part=execution"], ["admission-debug-integration"],
                    ["test-full"], ["check-full", "-Dcheck-part=callers"]]
-        self.assertEqual(execution_batches(targets, "both"), batches)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             zig = root / "zig"
@@ -45,8 +43,10 @@ sys.exit(1 if str(len(rows) - 1) == os.environ["FAIL_BATCH"] else 0)
                     expected = batches if failed is None else batches[:failed + 1]
                     self.assertEqual(actual, [["build", *batch, "-Dci-artifacts=compiled", "--summary", "all",
                                                "--test-timeout", "5m"] for batch in expected])
-        with self.assertRaises(ValueError):
-            execution_batches(["test-logic"], "both")
+            result = subprocess.run([sys.executable, "-B", "tests/ci/run_selected.py",
+                                     json.dumps(["test-logic"]), "--check-part", "both"],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":
