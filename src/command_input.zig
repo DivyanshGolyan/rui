@@ -10,7 +10,7 @@ const max_key_bytes = @import("idempotency_key.zig").max_bytes;
 const max_session_bytes = session_id.max_reference_bytes;
 const validSessionId = session_id.valid;
 const max_workspace_bytes = @import("workspace_path.zig").max_bytes;
-pub const max_provider_bytes = 16;
+pub const max_connection_bytes = @import("connection.zig").max_name_bytes;
 const max_model_bytes = @import("model_capability.zig").max_model_bytes;
 const max_label_bytes = @import("tool_presentation.zig").max_label_bytes;
 const max_tool_names_bytes = tool_name.max_names_bytes;
@@ -166,7 +166,7 @@ fn ConfigurationOf(comptime Custody: type) type {
         const Configuration = @This();
 
         workspace: OptionalBounded(max_workspace_bytes) = .{},
-        provider: OptionalBounded(max_provider_bytes) = .{},
+        provider: OptionalBounded(max_connection_bytes) = .{},
         model: OptionalBounded(max_model_bytes) = .{},
         instructions: ContentField = .{},
         tools: ToolsField = .{},

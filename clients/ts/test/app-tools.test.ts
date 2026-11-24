@@ -63,7 +63,7 @@ test("TS-16 app_tools_round_trip declares, replaces, clears and refuses a child 
 			providers: { codex: { endpoint: `http://127.0.0.1:${address.port}/responses`, unauthenticated: true } },
 		}, { binary: binary ?? "rui" });
 		const session = await rui.sessions.create({
-			workspace: root, provider: "codex", model: "gpt-6-sol", effort: "low", compactAt: 100000, tools: ["bash"], permissionMode: "ask", appTools: [alpha, beta],
+			workspace: root, connection: "codex", model: "gpt-6-sol", effort: "low", compactAt: 100000, tools: ["bash"], permissionMode: "ask", appTools: [alpha, beta],
 		}, { idempotencyKey: "app-tools:root" });
 		assert.deepEqual((await session.status()).appTools, ["alpha", "beta"]);
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Panel = @import("widgets/Panel.zig");
+const provider_route = @import("provider_route.zig");
 const Footer = @import("widgets/Footer.zig");
 const status = @import("status_page.zig");
 const catalog = @import("model_catalog.zig");
@@ -267,7 +268,9 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
 }
 
 fn openModel(self: *Self) void {
-    self.model_choice.openSource(.{ .context = self.backend.context, .read = self.backend.models }, self.session.provider, self.session.model.slice());
+    // The model picker still lists built-in providers only; a connection with no built-in name has no picker rows.
+    const provider = provider_route.builtInOf(self.session.provider) orelse return;
+    self.model_choice.openSource(.{ .context = self.backend.context, .read = self.backend.models }, provider, self.session.model.slice());
     self.model_choice.userdata = self;
     self.model_choice.on_pick = pickModel;
     if (!self.model_choice.active) self.failures[4] = " · models unavailable";
@@ -1811,7 +1814,7 @@ test "Chat info standalone Model and Effort retry read and save failures by draw
         try std.testing.expect(page.failures[index] == null);
         if (field == .model) {
             try std.testing.expect(page.model_choice.active);
-            try std.testing.expectEqual(fixture.session.provider, page.model_choice.provider);
+            try std.testing.expectEqual(provider_route.builtInOf(fixture.session.provider).?, page.model_choice.provider);
             try std.testing.expectEqualStrings(fixture.session.model.slice(), page.model_choice.current);
         } else {
             const choice = page.panel.choice.?;

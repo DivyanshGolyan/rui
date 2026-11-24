@@ -300,6 +300,7 @@ fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configu
     if (inherits_parent) {
         if (spec.contains("workspace")) return refused("spec.workspace: an agent always works in your Workspace");
         if (spec.contains("provider")) return refused("spec.provider: an agent always uses your provider");
+        if (spec.contains("connection")) return refused("spec.connection: an agent always uses your connection");
     }
     if (try protocol.parseAgentSpec(wire_request.Custody, arena, spec, configuration)) |reason|
         return .{ .rejected = reason };
@@ -584,7 +585,7 @@ test "core_tools sparse specs leave Workspace completeness to Host and preserve 
         .{ .spec = "{\"tools\":[\"bash\"]}", .direct = "spec.model", .agent = "spec.model" },
         .{ .spec = "{\"model\":\"custom\",\"tools\":[\"bash\"],\"workspace\":\"/\"}", .agent = "spec.workspace" },
         .{ .spec = "{\"model\":\"custom\",\"workspace\":\"\"}", .direct = "spec.workspace", .agent = "spec.workspace" },
-        .{ .spec = "{\"model\":\"custom\",\"provider\":\"openai\"}", .agent = "spec.provider" },
+        .{ .spec = "{\"model\":\"custom\",\"connection\":\"openai\"}", .agent = "spec.connection" },
         .{ .spec = "{\"model\":\"custom\",\"parent\":\"k7m2qx\"}", .direct = "spec.parent", .agent = "spec.parent" },
         .{ .spec = "{\"model\":\"custom\",\"tools\":null}", .direct = "spec.tools", .agent = "spec.tools" },
         .{ .spec = "{\"model\":\"custom\",\"loadedTools\":null}", .direct = "spec.loadedTools", .agent = "spec.loadedTools" },
@@ -864,12 +865,12 @@ test "start_agent presets cannot supply provider or workspace even with override
     const arena = memory.allocator();
     const start = try arena.create(StartAgent);
     const configuration = try arena.create(wire_request.Configuration);
-    for ([_][]const u8{ "provider", "workspace" }) |field| {
+    for ([_][]const u8{ "connection", "workspace" }) |field| {
         const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
             \\{"model":"model-a","effort":"low","compactAt":1000,"tools":[],"permissionMode":"ask"}
         , .{})).object;
         var seeded = spec;
-        try seeded.put(arena, field, .{ .string = if (std.mem.eql(u8, field, "provider")) "openai" else "/" });
+        try seeded.put(arena, field, .{ .string = if (std.mem.eql(u8, field, "connection")) "openai" else "/" });
         try std.testing.expect(try parseAgentSpec(arena, seeded, configuration) == .accepted);
         const presets = [_]Preset{.{ .name = "review", .spec = seeded }};
         const null_override = try std.fmt.allocPrint(arena, ",\"spec\":{{\"{s}\":null}}", .{field});

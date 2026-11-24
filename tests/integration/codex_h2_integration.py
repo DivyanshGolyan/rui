@@ -42,7 +42,7 @@ def catalog_unusable_proxy_run():
                 diagnostic = b"rui: models.dev catalog unavailable (HttpsProxySchemeUnsupported); the saved catalog stands\n"
                 for _ in range(3):
                     listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")
-                    assert listed["providers"] == [], listed
+                    assert listed["connections"] == [], listed
                     info = h2_fixture.closed_host_request(ready["socket"], store, "host_info")
                     assert info["active_capacity"] == str(capacity), info
                 assert host.poll() is None, host.returncode
@@ -86,8 +86,8 @@ def catalog_unusable_trust_run():
             # This case proves the default catalog URL's trust failure, so it keeps the default URL.
             isolate_settings=False)
         for _ in range(3):
-            listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
-            assert listed and listed[0]["provider"] == "codex", listed
+            listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["connections"]
+            assert listed and listed[0]["connection"] == "codex", listed
         fixture.stop_host(host)
         host = None
         # The default catalog refresh is asynchronous and may fail before shutdown.
@@ -102,11 +102,11 @@ def catalog_unusable_trust_run():
         ], env={**os.environ, **os_semantics.system_trust(root / "missing-ca.pem")},
             required_fields=READY_TRANSPORT)
         for _ in range(3):
-            listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
-            assert listed and listed[0]["provider"] == "codex", listed
+            listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["connections"]
+            assert listed and listed[0]["connection"] == "codex", listed
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
-            "--workspace", fixture.ROOT, "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none",
+            "--workspace", fixture.ROOT, "--connection", "codex", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]

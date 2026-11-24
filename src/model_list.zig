@@ -95,7 +95,7 @@ pub fn objectKey(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !?[]con
 }
 
 const model_overhead = "{\"id\":\"\",\"known\":false},".len;
-const provider_overhead = ",{\"provider\":\"\",\"source\":\"catalog_fallback\",\"models\":[]}".len + max_provider_name_bytes;
+const provider_overhead = ",{\"connection\":\"\",\"source\":\"catalog_fallback\",\"models\":[]}".len + max_provider_name_bytes;
 const max_provider_name_bytes = blk: {
     var bytes = 0;
     for (std.meta.fieldNames(provider_name.Provider)) |name| bytes = @max(bytes, name.len);
@@ -130,7 +130,7 @@ pub fn writeProviders(out: *std.Io.Writer, facts: []const catalog.Entry, entries
     try out.writeByte('[');
     for (entries, 0..) |entry, index| {
         if (index != 0) try out.writeByte(',');
-        try out.print("{{\"provider\":\"{s}\",\"source\":\"{s}\",\"models\":[", .{ @tagName(entry.provider), @tagName(entry.list) });
+        try out.print("{{\"connection\":\"{s}\",\"source\":\"{s}\",\"models\":[", .{ @tagName(entry.provider), @tagName(entry.list) });
         var first = true;
         switch (entry.list) {
             .live => |live| {
@@ -206,8 +206,8 @@ test "a reply lists each provider's models and whether the catalog knows them" {
         break :blk text;
     };
     try std.testing.expectEqualStrings(
-        "[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[" ++ listed_models ++ "]}," ++
-            "{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6-luna\",\"known\":true},{\"id\":\"my\\\"model\",\"known\":false}]}]",
+        "[{\"connection\":\"codex\",\"source\":\"catalog\",\"models\":[" ++ listed_models ++ "]}," ++
+            "{\"connection\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6-luna\",\"known\":true},{\"id\":\"my\\\"model\",\"known\":false}]}]",
         out.buffered(),
     );
 }
@@ -250,16 +250,16 @@ test "provider lists use selected facts without merging shipped rows or sorting 
         };
         try writeProviders(&out, facts, &.{.{ .provider = .codex, .list = list }});
         var expected: [256]u8 = undefined;
-        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "[{{\"provider\":\"codex\",\"source\":\"{s}\",\"models\":[{{\"id\":\"a-saved\",\"known\":true}},{{\"id\":\"z-saved\",\"known\":true}}]}}]", .{@tagName(source)}), out.buffered());
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "[{{\"connection\":\"codex\",\"source\":\"{s}\",\"models\":[{{\"id\":\"a-saved\",\"known\":true}},{{\"id\":\"z-saved\",\"known\":true}}]}}]", .{@tagName(source)}), out.buffered());
         out = std.Io.Writer.fixed(&bytes);
         try writeProviders(&out, &.{}, &.{.{ .provider = .codex, .list = list }});
-        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "[{{\"provider\":\"codex\",\"source\":\"{s}\",\"models\":[]}}]", .{@tagName(source)}), out.buffered());
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "[{{\"connection\":\"codex\",\"source\":\"{s}\",\"models\":[]}}]", .{@tagName(source)}), out.buffered());
     }
     const entries: []const Entry = &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "z-saved\nb-hidden\ngpt-6-luna\na-saved\n" } } }};
     out = std.Io.Writer.fixed(&bytes);
     try writeProviders(&out, facts, entries);
     try std.testing.expectEqualStrings(
-        "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"z-saved\",\"known\":true},{\"id\":\"b-hidden\",\"known\":true},{\"id\":\"gpt-6-luna\",\"known\":false},{\"id\":\"a-saved\",\"known\":true}]}]",
+        "[{\"connection\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"z-saved\",\"known\":true},{\"id\":\"b-hidden\",\"known\":true},{\"id\":\"gpt-6-luna\",\"known\":false},{\"id\":\"a-saved\",\"known\":true}]}]",
         out.buffered(),
     );
 }

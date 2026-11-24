@@ -1018,7 +1018,7 @@ def consent_boundary_cases(state):
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
             session = human.admit(home, "session", "configure", "--store", store,
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
+                "--workspace", root, "--connection", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
             caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", session], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                 env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
@@ -1105,12 +1105,15 @@ def fatal_reporting_cases(state):
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         session = human.admit(home, "session", "configure", "--store", store,
-            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
+            "--workspace", root, "--connection", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
         missing_session = "000000" if session != "000000" else "000001"
+        # Each diagnostic keeps its own exit whether stderr is open, stopped or disconnected.
+        exits = {b"[preference_provider_invalid]": 2, b"[selection_provider_unsupported]": 6}
         diagnostics = [
             (["session", "resume", "--store", str(store), missing_session], b"[internal_unexpected]"),
-            (["defaults", "configure", "--provider", "unsupported"], b"[choice_unsupported]"),
-            (["--store", str(store), "--provider", "unsupported", "--model", "gpt-6-sol"], b"[choice_unsupported]"),
+            # A connection is a name, not a closed choice: an unknown one is refused as an invalid saved default.
+            (["defaults", "configure", "--connection", "unsupported"], b"[preference_provider_invalid]"),
+            (["--store", str(store), "--connection", "unsupported", "--model", "gpt-6-sol"], b"[selection_provider_unsupported]"),
         ]
         for args, error, stopped in ((args, error, stopped) for args, error in diagnostics for stopped in (False, True)):
             master, slave = open_pty()
@@ -1122,7 +1125,7 @@ def fatal_reporting_cases(state):
                     termios.tcflow(error_slave, termios.TCOOFF)
                 caller = spawn([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=error_slave)
-                assert caller.wait(timeout=3) == (2 if error == b"[choice_unsupported]" else 1), "fatal diagnostic did not exit"
+                assert caller.wait(timeout=3) == exits.get(error, 1), "fatal diagnostic did not exit"
                 assert termios.tcgetattr(slave) == original
                 assert_file_flags(fcntl.fcntl(error_slave, fcntl.F_GETFL), error_flags)
                 if not stopped:
@@ -1143,7 +1146,7 @@ def fatal_reporting_cases(state):
             try:
                 caller = spawn([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
-                assert caller.wait(timeout=3) == (2 if error == b"[choice_unsupported]" else 1), "disconnected stderr replaced the real exit"
+                assert caller.wait(timeout=3) == exits.get(error, 1), "disconnected stderr replaced the real exit"
                 assert termios.tcgetattr(slave) == original
                 assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
                 print(f"fatal reporting: {error.decode()} disconnected stderr passed", flush=True)
@@ -1182,7 +1185,7 @@ def decision_reporting_cases(state):
         for decision, ending in cases:
             name = f"{decision}-{ending}"
             session = human.admit(home, "session", "configure", "--store", store,
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
+                "--workspace", root, "--connection", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             master, slave = open_pty()
             read_ready, write_ready = os.pipe()

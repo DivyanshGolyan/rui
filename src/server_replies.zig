@@ -81,7 +81,7 @@ pub const Facts = struct {
     descriptor_soft_limit: ?usize,
     started_at: u64,
     settings_digest: ?@import("host_settings_handoff.zig").Digest,
-    routes: protocol.Routes,
+    served: protocol.Served,
     presets: []const core_tools.Preset,
     bash_home: ?[]const u8,
 };
@@ -105,7 +105,7 @@ pub const Replies = struct {
     descriptor_soft_limit: ?usize,
     started_at: u64,
     settings_digest: ?@import("host_settings_handoff.zig").Digest,
-    routes: protocol.Routes,
+    served: protocol.Served,
     presets: []const core_tools.Preset,
     environments: ?*SessionEnvironments,
     bash_home: ?[]const u8,
@@ -132,7 +132,7 @@ pub const Replies = struct {
             .descriptor_soft_limit = facts.descriptor_soft_limit,
             .started_at = facts.started_at,
             .settings_digest = facts.settings_digest,
-            .routes = facts.routes,
+            .served = facts.served,
             .presets = facts.presets,
             .environments = shared.environments,
             .bash_home = facts.bash_home,
@@ -350,7 +350,7 @@ pub const Replies = struct {
             .started_at = self.started_at,
             .custody_occupied = self.execution.facts().custody_occupied,
             .paused = self.lifecycle.turnsHeld(),
-            .routes = self.routes,
+            .connections = self.served.items(),
             .doublewrite = self.store.admissionDiagnostic().doublewrite,
             .settings_digest = self.settings_digest,
         }});
@@ -800,10 +800,7 @@ pub const testing_parts = if (builtin.is_test) struct {
             .descriptor_soft_limit = host.descriptor_soft_limit,
             .started_at = host.started_at,
             .settings_digest = host.settings_digest,
-            .routes = routes: {
-                const served_set = host.providers.served();
-                break :routes protocol.routesOf(&served_set);
-            },
+            .served = host.providers.served(),
             .presets = host.presets,
             .bash_home = host.bash_facts.home,
         };
@@ -966,7 +963,7 @@ test "presets seed configure before Store validation and idempotency" {
     defer memory.deinit();
     const arena = memory.allocator();
     const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
-        \\{"model":"gpt-6.1-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
+        \\{"model":"gpt-6.1-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","connection":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
     , .{})).object;
     const presets = [_]core_tools.Preset{.{ .name = "review", .spec = spec }};
     var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .presets = &presets };
@@ -1049,7 +1046,7 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expect(observed.output_schema == null);
 
     const edited_spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
-        \\{"model":"gpt-6-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
+        \\{"model":"gpt-6-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","connection":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
     , .{})).object;
     const edited_presets = [_]core_tools.Preset{.{ .name = "review", .spec = edited_spec }};
     host.presets = &edited_presets;
@@ -1553,9 +1550,9 @@ pub const MutationWitness = struct {
                         else => null,
                     };
                     if (configuration) |item| {
-                        comptime requireFields(@TypeOf(item), &.{ "provider", "model", "reasoning_effort", "workspace", "tools", "loaded_tools", "permission_mode", "compaction_trigger" });
+                        comptime requireFields(@TypeOf(item), &.{ "connection", "model", "reasoning_effort", "workspace", "tools", "loaded_tools", "permission_mode", "compaction_trigger" });
                         const receipt = try std.json.Stringify.valueAlloc(std.testing.allocator, .{
-                            .provider = item.provider,
+                            .connection = item.connection.slice(),
                             .model = item.model.slice(),
                             .reasoning_effort = item.reasoning_effort,
                             .workspace = item.workspace.slice(),

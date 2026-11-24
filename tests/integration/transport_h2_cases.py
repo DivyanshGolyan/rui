@@ -165,7 +165,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                     configured = requests.call(
                         "configure", key=f"config-{capacity}-{index}",
                         session="", configuration={
-                            "workspace": str(dispatch.ROOT), "provider": "codex", "model": "gpt-6-sol",
+                            "workspace": str(dispatch.ROOT), "connection": "codex", "model": "gpt-6-sol",
                             "tools": ["bash"], "permissionMode": "ask",
                             "compactAt": compaction_trigger("codex", "gpt-6-sol"), "effort": "medium",
                         },
@@ -313,7 +313,7 @@ def held_population(root):
                     configured = requests.call(
                         "configure", key=f"held-config-{index}",
                         session="", configuration={
-                            "workspace": str(dispatch.ROOT), "provider": "codex", "model": "gpt-6-sol",
+                            "workspace": str(dispatch.ROOT), "connection": "codex", "model": "gpt-6-sol",
                             "tools": ["bash"], "permissionMode": "ask",
                             "compactAt": compaction_trigger("codex", "gpt-6-sol"), "effort": "medium",
                         },

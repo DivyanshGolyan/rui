@@ -183,7 +183,7 @@ def configure(state, store, ordinal):
         f"configure-{ordinal}",
         "--workspace",
         ROOT,
-        "--provider",
+        "--connection",
         "codex",
         "--model",
         "gpt-6-sol",

@@ -47,7 +47,7 @@ const rui = await Rui.connect({
 	providers: { chatgpt: {} }, // Or { credentialFile: "/private/chatgpt.json" }.
 	tools: { mcp: { drift: { url: "http://127.0.0.1:3000/mcp" } } },
 	presets: { drift: {
-		provider: "chatgpt", model: "gpt-6.1-sol", effort: "low", compactAt: 100000,
+		connection: "chatgpt", model: "gpt-6.1-sol", effort: "low", compactAt: 100000,
 		workspace: "/workspace", tools: ["drift_tool"], permissionMode: "bypass",
 	} },
 });

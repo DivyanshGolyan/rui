@@ -13,7 +13,7 @@ fn checkPreset(allocator: std.mem.Allocator, object: std.json.ObjectMap) error{O
     };
 }
 
-const creation_fields = "\"workspace\":\"/tmp/workspace\",\"provider\":\"" ++ @tagName(std.enums.values(@import("../provider_name.zig").Provider)[0]) ++ "\",";
+const creation_fields = "\"workspace\":\"/tmp/workspace\",\"connection\":\"" ++ @tagName(std.enums.values(@import("../provider_name.zig").Provider)[0]) ++ "\",";
 const spec = "{" ++ creation_fields ++
     \\"model":"model-a","effort":"low","compactAt":1000,"tools":["bash"],"permissionMode":"ask","instructions":"Retained instructions","outputSchema":{"type":"object","properties":{"answer":{"type":"string"}}}}
 ;

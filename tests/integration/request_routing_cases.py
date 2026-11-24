@@ -16,7 +16,7 @@ def capture_routing(binary, directory, root, env, *, message=None):
                               input=input, text=True, capture_output=True, timeout=40)
 
     command = ["session", "start" if message is not None else "configure", "--store", directory,
-               "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol",
+               "--workspace", root, "--connection", "codex", "--model", "gpt-6-sol",
                "--test-drop-reply", "after-commit"]
     dropped = invoke(*command, input=message)
     assert dropped.returncode == 4 and "[reply_unconfirmed]" in dropped.stderr, dropped
