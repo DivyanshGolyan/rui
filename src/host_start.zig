@@ -362,7 +362,7 @@ fn splitEndpoint(endpoint: []const u8) SplitEndpoint {
 }
 
 test "a saved sign-in endpoint resolves back to exactly the admitted URL" {
-    const cases = [_][]const u8{ "https://api.openai.com/v1/responses", "https://gateway.example/custom", "https://gateway.example/v2/chat/run", "http://127.0.0.1:8080/responses" };
+    const cases = [_][]const u8{ "https://api.openai.com/v1/responses", "https://gateway.example/custom", "https://gateway.example/v2/chat/run", "https://gateway.example:8443/responses" };
     for (cases) |endpoint| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
