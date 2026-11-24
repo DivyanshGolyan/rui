@@ -4437,7 +4437,14 @@
                       "model_is_immutable",
                       "revision_exhausted",
                       "skills_unavailable",
-                      "preferences_on_update"
+                      "preferences_on_update",
+                      "invalid_app_tools",
+                      "app_tools_too_large",
+                      "invalid_app_tool_name",
+                      "duplicate_app_tool_name",
+                      "app_tool_built_in_clash",
+                      "invalid_app_tool_policy",
+                      "app_tools_on_child"
                     ]
                   },
                   "message": {
@@ -7667,6 +7674,13 @@
                       "revision_exhausted",
                       "skills_unavailable",
                       "preferences_on_update",
+                      "invalid_app_tools",
+                      "app_tools_too_large",
+                      "invalid_app_tool_name",
+                      "duplicate_app_tool_name",
+                      "app_tool_built_in_clash",
+                      "invalid_app_tool_policy",
+                      "app_tools_on_child",
                       "skill_file_unavailable",
                       "skill_file_too_large",
                       "skill_text_invalid"
@@ -7819,6 +7833,13 @@
                       "revision_exhausted",
                       "skills_unavailable",
                       "preferences_on_update",
+                      "invalid_app_tools",
+                      "app_tools_too_large",
+                      "invalid_app_tool_name",
+                      "duplicate_app_tool_name",
+                      "app_tool_built_in_clash",
+                      "invalid_app_tool_policy",
+                      "app_tools_on_child",
                       "skill_file_unavailable",
                       "skill_file_too_large",
                       "skill_text_invalid"
@@ -15245,6 +15266,17 @@
             "x-rui-max-bytes": 4096,
             "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
           },
+          "app_tools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 128,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4096,
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+          },
           "permission_mode": {
             "type": "string",
             "enum": [
@@ -15297,6 +15329,7 @@
           "revision",
           "tools",
           "loaded_tools",
+          "app_tools",
           "permission_mode",
           "instructions",
           "output_schema",

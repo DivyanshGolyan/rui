@@ -589,9 +589,14 @@ test "creating Message content sealing peaks at five descriptors with its socket
     var text = ContentField{};
     errdefer text.removeTemporaryContent(io) catch unreachable;
     try captureForTest(&text, options, 3, "\"text\"");
-    try std.testing.expectEqual(@as(usize, 5), 1 + Probe.maximum_live_files);
+    // The app tools document is the fourth content slot a request can hold, so a request holds it beside the others.
+    var app_tools = ContentField{};
+    errdefer app_tools.removeTemporaryContent(io) catch unreachable;
+    try captureForTest(&app_tools, options, 4, "\"app_tools\"");
+    try std.testing.expectEqual(@as(usize, 6), 1 + Probe.maximum_live_files);
     try std.testing.expectEqual(@import("descriptor_capacity.zig").ordinary_exchange_descriptors, 1 + Probe.maximum_live_files);
     try std.testing.expectEqual(@as(usize, 0), Probe.directory_opens);
+    try app_tools.removeTemporaryContent(io);
     try text.removeTemporaryContent(io);
     try output_schema.removeTemporaryContent(io);
     try instructions.removeTemporaryContent(io);

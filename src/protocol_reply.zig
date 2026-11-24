@@ -969,6 +969,7 @@ pub const Current = struct {
         revision: Id,
         tools: ReportTools,
         loaded_tools: ReportTools,
+        app_tools: ReportTools,
         permission_mode: JsonEnum(enum { ask, bypass }),
         instructions: Reference,
         output_schema: ?Reference,
