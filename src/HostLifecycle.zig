@@ -358,16 +358,17 @@ fn verifyPass(init: std.process.Init, allocator: std.mem.Allocator, plan: *const
     };
 }
 
-/// Executes the activation policy with a single effect owner. Effect failures retain
-/// the exact point at which the lifecycle could no longer continue.
-pub fn runActivation(initial: activation.Facts, driver: anytype) activation.Execution {
+/// Executes the activation policy with a single effect owner. An effect failure
+/// becomes `.faulted` at the exact effect that failed, so the outcome carries its
+/// certainty to every caller.
+pub fn runActivation(initial: activation.Facts, driver: anytype) activation.Outcome {
     var facts = initial;
     while (true) {
         const effect = activation.next(facts, driver.cancelled());
-        if (effect == .done) return .{ .outcome = effect.done };
-        driver.perform(effect, &facts) catch |err| return .{ .fault = .{
+        if (effect == .done) return effect.done;
+        driver.perform(effect, &facts) catch |err| return .{ .faulted = .{
             .effect = std.meta.activeTag(effect),
-            .cause = err,
+            .cause = protocol.Bounded(64).from(@errorName(err)) catch unreachable,
         } };
     }
 }
@@ -482,7 +483,7 @@ const ActivationDriver = struct {
 /// Reads and does what `host_activation.next` asks for, in its order. The
 /// captured environment and every secret it reaches stay in this wiping
 /// allocator; handles and child results stay here.
-pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observation: *const Observation, census: @FieldType(activation.Facts, "census"), target: []const u8, version: candidate.Version, cancellation: ?*const client.Cancellation, progress: ?Progress) activation.Execution {
+pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observation: *const Observation, census: @FieldType(activation.Facts, "census"), target: []const u8, version: candidate.Version, cancellation: ?*const client.Cancellation, progress: ?Progress) ActivationOutcome {
     const facts: activation.Facts = .{
         .eligibility = switch (observation.*) {
             .absent => .absent,
@@ -567,16 +568,15 @@ test "SH-126 lifecycle preserves the effect and cause of every unexpected failur
     for (effects, stages, 0..) |effect, stage, index| {
         var driver: Driver = .{ .fail = effect };
         const result = runActivation(initial, &driver);
-        try std.testing.expect(result == .fault);
-        try std.testing.expectEqual(effect, result.fault.effect);
-        try std.testing.expectEqual(error.InjectedFailure, result.fault.cause);
-        try std.testing.expectEqual(stage, result.fault.effect.stage());
+        try std.testing.expect(result == .faulted);
+        try std.testing.expectEqual(effect, result.faulted.effect);
+        try std.testing.expectEqualStrings("InjectedFailure", result.faulted.cause.slice());
+        try std.testing.expectEqual(stage, result.faulted.effect.stage());
         try std.testing.expectEqualSlices(std.meta.Tag(activation.Effect), effects[0 .. index + 1], driver.seen[0..driver.count]);
     }
     var driver: Driver = .{ .fail = null };
     const result = runActivation(initial, &driver);
-    try std.testing.expect(result == .outcome);
-    try std.testing.expectEqual(activation.Stage.verifying, result.outcome.unconfirmed);
+    try std.testing.expectEqual(activation.Stage.verifying, result.unconfirmed);
     try std.testing.expectEqualSlices(std.meta.Tag(activation.Effect), &effects, driver.seen[0..driver.count]);
 }
 

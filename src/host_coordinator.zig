@@ -152,16 +152,8 @@ fn receiveEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(restart_al
     const store = if (entry.store) |path| try allocator.dupe(u8, path) else null;
     errdefer if (store) |path| allocator.free(path);
     var state = entry.state;
-    if (state == .failed) {
-        state.failed.cause = try allocator.dupe(u8, state.failed.cause);
-        state.failed.cause_owned = true;
-    }
+    if (state == .failed) state.failed.cause = try allocator.dupe(u8, state.failed.cause);
     errdefer if (state == .failed) allocator.free(state.failed.cause);
-    if (state == .fault) {
-        state.fault.cause = try allocator.dupe(u8, state.fault.cause);
-        state.fault.cause_owned = true;
-    }
-    errdefer if (state == .fault) allocator.free(state.fault.cause);
     try entries.append(allocator, .{ .socket = socket, .directory = directory, .pid = entry.pid, .store = store, .state = state });
 }
 
@@ -367,10 +359,10 @@ test "coordinator task routing preserves OS bytes through the existing JSON slic
     try expectRoundTrip(Task{ .home = "/home/\xff", .target = .{ .build = "/target/\xfe", .version = .{ .schema = 75, .patch = 1 } }, .report = .events });
 }
 
-test "SH-128 coordinator retains lifecycle faults and later Host outcomes" {
+test "SH-128 coordinator round-trips every faulted effect and keeps later Host outcomes" {
     for (std.meta.tags(@import("host_activation.zig").EffectTag)) |effect| {
         if (effect == .done) continue;
-        try expectRoundTrip(Event{ .entry = .{ .directory = "/host", .state = .{ .fault = .{ .effect = effect, .cause = "OutOfMemory" } } } });
+        try expectRoundTrip(outcomeEvent(.{ .faulted = .{ .effect = effect, .cause = try .from("OutOfMemory") } }));
     }
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -378,9 +370,9 @@ test "SH-128 coordinator retains lifecycle faults and later Host outcomes" {
     var lines: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer lines.deinit();
     for ([_]Event{
-        .{ .entry = .{ .directory = "/first", .state = .{ .fault = .{ .effect = .resolve_target, .cause = "OutOfMemory" } } } },
-        .{ .entry = .{ .directory = "/second", .state = .{ .fault = .{ .effect = .await_retirement, .cause = "ConnectionResetByPeer" } } } },
-        .{ .entry = .{ .directory = "/third", .state = .{ .outcome = .not_needed } } },
+        outcomeEvent(.{ .faulted = .{ .effect = .resolve_target, .cause = try .from("OutOfMemory") } }),
+        outcomeEvent(.{ .faulted = .{ .effect = .await_retirement, .cause = try .from("ConnectionResetByPeer") } }),
+        outcomeEvent(.not_needed),
         .done,
     }) |value| {
         try writeEvent(value, &lines.writer);
@@ -392,12 +384,11 @@ test "SH-128 coordinator retains lifecycle faults and later Host outcomes" {
     var batch = try readEvents(io, std.testing.allocator, file, null);
     defer batch.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 3), batch.entries.len);
-    try std.testing.expectEqual(.resolve_target, batch.entries[0].state.fault.effect);
-    try std.testing.expectEqualStrings("OutOfMemory", batch.entries[0].state.fault.cause);
-    try std.testing.expectEqual(.resolve_target, batch.selectedOutcome("/first").pre_stop_failed);
-    try std.testing.expectEqual(.await_retirement, batch.entries[1].state.fault.effect);
-    try std.testing.expectEqualStrings("ConnectionResetByPeer", batch.entries[1].state.fault.cause);
-    try std.testing.expectEqual(.awaiting_retirement, batch.selectedOutcome("/second").unconfirmed);
+    try std.testing.expectEqual(.resolve_target, batch.entries[0].state.outcome.faulted.effect);
+    try std.testing.expectEqualStrings("OutOfMemory", batch.entries[0].state.outcome.faulted.cause.slice());
+    try std.testing.expectEqual(.resolve_target, batch.selectedOutcome("/host/\xff").faulted.effect);
+    try std.testing.expectEqual(.await_retirement, batch.entries[1].state.outcome.faulted.effect);
+    try std.testing.expectEqualStrings("ConnectionResetByPeer", batch.entries[1].state.outcome.faulted.cause.slice());
     try std.testing.expectEqual(.not_needed, batch.entries[2].state.outcome);
     try std.testing.expectError(error.HostRestartUnconfirmed, batch.result());
 }

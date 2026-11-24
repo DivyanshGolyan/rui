@@ -61,8 +61,9 @@ pub const Outcome = union(enum) {
     unsupported: Limitation,
     replacement_observed,
     cancelled,
-    /// An unexpected failure before any stop, with the effect that failed.
-    pre_stop_failed: EffectTag,
+    /// An unexpected effect failure. Certainty is derived from the effect, never stored:
+    /// `effect.stage() == null` means nothing was stopped; otherwise the result is unconfirmed at that stage.
+    faulted: struct { effect: EffectTag, cause: protocol.Bounded(64) },
     /// The target build could not be resolved or checked; nothing was stopped (#1791, #1793).
     target_unusable: TargetStep,
     refused: struct { stage: enum { checking, starting }, failure: start_report.Failure },
@@ -216,14 +217,6 @@ pub const Effect = union(EffectTag) {
     verify,
     done: Outcome,
 };
-
-/// An unexpected effect failure retains its original cause and lifecycle position.
-pub const Fault = struct {
-    effect: EffectTag,
-    cause: anyerror,
-};
-
-pub const Execution = union(enum) { outcome: Outcome, fault: Fault };
 
 /// The running Host a same-build activation leaves current when the target gives no
 /// settings frame to compare: one on the target executable that reports a digest.
@@ -400,14 +393,14 @@ pub fn category(outcome: Outcome) Category {
         .ready, .client_incompatible => .restarted,
         .already_ready => .current,
         .superseded, .not_needed, .unsupported => .skipped,
-        .replacement_observed, .cancelled, .pre_stop_failed, .target_unusable, .failed, .unconfirmed, .refused => .failed,
+        .replacement_observed, .cancelled, .faulted, .target_unusable, .failed, .unconfirmed, .refused => .failed,
     };
 }
 
 /// Whether the outcome leaves recovery instructions for the person.
 pub fn guides(outcome: Outcome) bool {
     return switch (outcome) {
-        .unsupported, .replacement_observed, .cancelled, .pre_stop_failed, .target_unusable, .failed, .unconfirmed, .refused => true,
+        .unsupported, .replacement_observed, .cancelled, .faulted, .target_unusable, .failed, .unconfirmed, .refused => true,
         .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
     };
 }
@@ -416,7 +409,8 @@ pub fn guides(outcome: Outcome) bool {
 pub fn clientSafe(outcome: Outcome) bool {
     return switch (outcome) {
         .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
-        .not_needed, .superseded, .already_ready, .ready, .unsupported, .cancelled, .pre_stop_failed, .target_unusable => true,
+        .faulted => |fault| fault.effect.stage() == null,
+        .not_needed, .superseded, .already_ready, .ready, .unsupported, .cancelled, .target_unusable => true,
     };
 }
 
@@ -483,6 +477,7 @@ pub const Tally = struct {
 /// `host_restart_all.Batch.hasGuidance` and `upgrade.compatible`, typed by hand.
 const sh60 = struct {
     const Row = struct { outcome: Outcome, category: Category, guides: bool, safe: bool };
+    const fault_cause = protocol.Bounded(64).from("TypedFault") catch unreachable;
     const failure = start_report.Failure.init(.settings_invalid, "typed refusal");
     const rows = [_]Row{
         .{ .outcome = .not_needed, .category = .skipped, .guides = false, .safe = true },
@@ -502,12 +497,17 @@ const sh60 = struct {
         .{ .outcome = .{ .unsupported = .target_capability }, .category = .skipped, .guides = true, .safe = true },
         .{ .outcome = .replacement_observed, .category = .failed, .guides = true, .safe = false },
         .{ .outcome = .cancelled, .category = .failed, .guides = true, .safe = true },
-        .{ .outcome = .{ .pre_stop_failed = .resolve_target }, .category = .failed, .guides = true, .safe = true },
-        .{ .outcome = .{ .pre_stop_failed = .confirm_current }, .category = .failed, .guides = true, .safe = true },
-        .{ .outcome = .{ .pre_stop_failed = .reconstruct_sources }, .category = .failed, .guides = true, .safe = true },
-        .{ .outcome = .{ .pre_stop_failed = .check_target }, .category = .failed, .guides = true, .safe = true },
-        .{ .outcome = .{ .pre_stop_failed = .reobserve }, .category = .failed, .guides = true, .safe = true },
-        .{ .outcome = .{ .pre_stop_failed = .snapshot }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .resolve_target, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .confirm_current, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .reconstruct_sources, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .check_target, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .reobserve, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .snapshot, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .faulted = .{ .effect = .stop, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = false },
+        .{ .outcome = .{ .faulted = .{ .effect = .await_retirement, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = false },
+        .{ .outcome = .{ .faulted = .{ .effect = .start, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = false },
+        .{ .outcome = .{ .faulted = .{ .effect = .verify, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = false },
+        .{ .outcome = .{ .faulted = .{ .effect = .done, .cause = fault_cause } }, .category = .failed, .guides = true, .safe = true },
         .{ .outcome = .{ .target_unusable = .resolving }, .category = .failed, .guides = true, .safe = true },
         .{ .outcome = .{ .target_unusable = .checking }, .category = .failed, .guides = true, .safe = true },
         .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = failure } }, .category = .failed, .guides = true, .safe = false },
@@ -851,7 +851,8 @@ test "SH-81 after the stop every ending names a stage" {
             const actual = next(facts, cancelled);
             try fixture.expectEffect(expected, actual);
             if (actual == .done) switch (actual.done) {
-                .cancelled, .unsupported, .not_needed, .superseded, .already_ready, .pre_stop_failed, .target_unusable => return error.TestUnexpectedResult,
+                .cancelled, .unsupported, .not_needed, .superseded, .already_ready, .target_unusable => return error.TestUnexpectedResult,
+                .faulted => return error.TestUnexpectedResult,
                 .unconfirmed, .failed => {},
                 .refused => |refused| try std.testing.expectEqual(.starting, refused.stage),
                 .ready, .client_incompatible, .replacement_observed => {},

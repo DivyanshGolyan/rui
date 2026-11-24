@@ -1222,7 +1222,7 @@ const HostLaunchOps = struct {
     handover: host_start_handover.Handover = .{ .activate = activateStartHandover },
 };
 
-fn activateStartHandover(_: ?*anyopaque, init: std.process.Init, directory: []const u8) !?@import("host_activation.zig").Execution {
+fn activateStartHandover(_: ?*anyopaque, init: std.process.Init, directory: []const u8) !?@import("host_activation.zig").Outcome {
     return @import("host_restart_all.zig").activateOlderHostForStart(init, directory);
 }
 
@@ -1275,11 +1275,6 @@ pub fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool
                 recordExit(status);
                 return error.Reported;
             };
-            if (failure.detail == .handover_fault) {
-                const fault = failure.detail.handover_fault;
-                recordExit(if (fault.effect.stage() != null) .unconfirmed else caller_exit.knownError(fault.cause));
-                return error.Reported;
-            }
             return failure.cause.err;
         },
     }
@@ -2302,35 +2297,6 @@ test "CLI-31 Host launch reports typed refusals and their attempt" {
         };
         try std.testing.expectEqual(expected_status, exit_status);
     };
-}
-
-test "CLI-33 lifecycle faults retain cause, phase and exit certainty" {
-    const activation = @import("host_activation.zig");
-    const cases = [_]struct { effect: activation.EffectTag, status: caller_exit.Status, diagnostic: []const u8 }{
-        .{ .effect = .resolve_target, .status = .environment, .diagnostic = "Host handover: failed while resolving the target before stopping the Host. Cause: Memory was exhausted during Host handover. [OutOfMemory]\n" },
-        .{ .effect = .check_target, .status = .environment, .diagnostic = "Host handover: failed while checking the target before stopping the Host. Cause: Memory was exhausted during Host handover. [OutOfMemory]\n" },
-        .{ .effect = .stop, .status = .unconfirmed, .diagnostic = "Host handover: stopping is unconfirmed while stopping the Host; inspect Host status before retrying. Cause: Memory was exhausted during Host handover. [OutOfMemory]\n" },
-        .{ .effect = .await_retirement, .status = .unconfirmed, .diagnostic = "Host handover: awaiting_retirement is unconfirmed while awaiting retirement; inspect Host status before retrying. Cause: Memory was exhausted during Host handover. [OutOfMemory]\n" },
-        .{ .effect = .start, .status = .unconfirmed, .diagnostic = "Host handover: starting is unconfirmed while starting the replacement; inspect Host status before retrying. Cause: Memory was exhausted during Host handover. [OutOfMemory]\n" },
-        .{ .effect = .verify, .status = .unconfirmed, .diagnostic = "Host handover: verifying is unconfirmed while verifying the replacement; inspect Host status before retrying. Cause: Memory was exhausted during Host handover. [OutOfMemory]\n" },
-    };
-    const saved_status = exit_status;
-    defer exit_status = saved_status;
-    try std.testing.expect(stderr.tryAcquire());
-    defer stderr.release();
-    for (cases) |case| {
-        const fault: activation.Fault = .{ .effect = case.effect, .cause = error.OutOfMemory };
-        var result: HostLaunchResult = .failed(.setup, fault.cause);
-        result.outcome.failed.detail = .{ .handover_fault = fault };
-        var bytes: [host_launch.max_report_bytes]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&bytes);
-        try host_launch.writeDiagnostics(&result, &writer, 0);
-        try std.testing.expectEqualStrings(case.diagnostic, writer.buffered());
-        exit_status = .done;
-        try std.testing.expectError(error.Reported, reportHostLaunch(std.testing.io, &result, false, false, 0));
-        try std.testing.expectEqual(case.status, exit_status);
-        try std.testing.expectEqual(error.OutOfMemory, result.outcome.failed.cause.err);
-    }
 }
 
 noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {

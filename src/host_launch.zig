@@ -84,12 +84,12 @@ pub const Result = struct {
         os_error: ?c_int = null,
         detail: Detail = .none,
 
-        pub const Detail = union(enum) { none, refusal: start_report.Failure, handover: activation.Outcome, handover_fault: activation.Fault };
+        pub const Detail = union(enum) { none, refusal: start_report.Failure, handover: activation.Outcome };
         pub const RefusalView = struct { failure: *const start_report.Failure, attempt: start_report.Attempt };
 
         pub fn refusalView(self: *const Failure) ?RefusalView {
             return switch (self.detail) {
-                .none, .handover_fault => null,
+                .none => null,
                 .refusal => |*refusal| .{ .failure = refusal, .attempt = .start },
                 .handover => |*outcome| switch (outcome.*) {
                     .refused => |*refusal| .{ .failure = &refusal.failure, .attempt = if (refusal.stage == .checking) .check else .start },
@@ -110,7 +110,6 @@ pub const Result = struct {
                 var cause = failure.cause;
                 switch (failure.detail) {
                     .handover => |outcome| cause.handover_words = @import("host_activation_report.zig").summary(outcome),
-                    .handover_fault => |fault| cause.handover_words = @import("host_activation_report.zig").faultSummary(fault),
                     else => {},
                 }
                 break :failed .{ .failed = cause };
@@ -140,10 +139,6 @@ pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: us
             if (result.startup_len != 0) try writer.writeAll(result.startup()[shown..]);
         },
         .failed => |*failure| {
-            if (failure.detail == .handover_fault) {
-                try @import("host_activation_report.zig").writeFault(writer, failure.detail.handover_fault);
-                return;
-            }
             if (failure.detail == .handover) {
                 if (failure.refusalView()) |refusal| {
                     try writeSentence(writer, refusal.attempt, refusal.failure);
