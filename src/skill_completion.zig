@@ -656,15 +656,16 @@ test "Enter runs a row only where its word ends the draft" {
     var reads: Reads = .{};
     var rows: Rows = .{};
     _ = reads.answer(reads.ask("").?.read, testPage(&entries), "");
-    var lone = reads.shown(&rows, "/arch", 5, 1, .{}, null).?;
-    try expectReplacement(.{ .start = 1, .end = 5, .text = "archive" }, enter("/arch", 5, &lone).run);
-    lone.highlight = 1;
-    try expectReplacement(.{ .start = 1, .end = 5, .text = "archx " }, enter("/arch", 5, &lone).edit);
-    lone.highlight = 2;
-    try expectReplacement(.{ .start = 1, .end = 5, .text = "unarchive" }, enter("/arch", 5, &lone).run);
+    var active = reads.shown(&rows, "/arch", 5, 1, .{ .archive_state = .active }, null).?;
+    try expectReplacement(.{ .start = 1, .end = 5, .text = "archive" }, enter("/arch", 5, &active).run);
+    active.highlight = 1;
+    try expectReplacement(.{ .start = 1, .end = 5, .text = "archx " }, enter("/arch", 5, &active).edit);
+    var archived = reads.shown(&rows, "/arch", 5, 1, .{ .archive_state = .archived }, null).?;
+    archived.highlight = 1;
+    try expectReplacement(.{ .start = 1, .end = 5, .text = "unarchive" }, enter("/arch", 5, &archived).run);
     for ([_][]const u8{ "/arch this change", "/arch.foo" }) |draft| {
-        var shown = reads.shown(&rows, draft, 5, 1, .{}, null).?;
-        try std.testing.expectEqual(@as(usize, 3), shown.list.count);
+        var shown = reads.shown(&rows, draft, 5, 1, .{ .archive_state = .active }, null).?;
+        try std.testing.expectEqual(@as(usize, 2), shown.list.count);
         try expectReplacement(.{ .start = 1, .end = 5, .text = "archive" }, enter(draft, 5, &shown).edit);
         shown.highlight = 1;
         try expectReplacement(.{ .start = 1, .end = 5, .text = "archx" }, enter(draft, 5, &shown).edit);

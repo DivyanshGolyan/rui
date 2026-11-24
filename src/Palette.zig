@@ -300,7 +300,7 @@ test "Palette renders every chat command and description in the same normal styl
     };
     const descriptions = [_][]const u8{ "", "start a new chat", "copy the last answer", "", "", "start a new chat", "", "", "", "", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "" };
     inline for (cases) |case| {
-        var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 1, case[0].listed()) };
+        var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 1, case[0].listedForTests()) };
         const shown = &menu.shown.?;
         var palette: Self = .{ .menu = &menu };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

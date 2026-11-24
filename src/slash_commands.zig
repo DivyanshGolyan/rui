@@ -841,7 +841,7 @@ test "archive commands retain separate local command identities" {
             try std.testing.expectEqualStrings(name, @tagName(parsed.command.name));
             try std.testing.expectEqualStrings("", parsed.command.argument);
             try std.testing.expect(screen.parse("/" ++ name ++ " other") == .misused);
-            const list = screen.listed();
+            const list = screen.listedForTests();
             const row = for (list.shown()) |entry| {
                 if (std.mem.eql(u8, entry.word, name)) break entry;
             } else return error.TestUnexpectedResult;
