@@ -283,7 +283,7 @@ pub const routes = [_]Route{
         .path = "/v1/activity-page",
         .kind = .activity_page,
         .summary = "One page of a Session's activity feed, with its work and queue at the page's boundary.",
-        .variants = &.{variant(protocol.activity_page_request.head ++ .{Optional(protocol.activity_page_request.since)} ++ protocol.activity_page_request.tail, .{})},
+        .variants = &.{variant(protocol.activity_page_request.head ++ .{ Optional(protocol.activity_page_request.since), Optional(protocol.activity_page_request.hide_redundant_peer_sends) } ++ protocol.activity_page_request.tail, .{})},
         .reply = jsonReply(.{ activity_reply.page_reply.head ++ .{ListOf(activity_reply.ItemJson)} ++ activity_reply.page_reply.tail, activity_reply.page_reply.unchanged }),
     },
     .{
@@ -776,7 +776,10 @@ pub const Document = struct {
             const kinds = comptime std.meta.tags(protocol.ActivityItem.Kind);
             var values: [kinds.len]Value = undefined;
             inline for (kinds, 0..) |kind, index| {
-                values[index] = try d.shapeSchema(tuple(T.head(kind)) ++ @field(T.value_shapes, @tagName(kind)) ++ T.tail);
+                values[index] = if (kind == .tool_result) try d.anyOf(&.{
+                    try d.shapeSchema(tuple(T.head(kind)) ++ T.value_shapes.tool_result ++ T.tail),
+                    try d.shapeSchema(tuple(T.head(kind)) ++ T.value_shapes.tool_result_peer_send ++ T.tail),
+                }) else try d.shapeSchema(tuple(T.head(kind)) ++ @field(T.value_shapes, @tagName(kind)) ++ T.tail);
                 if (kind == .model_call) try values[index].object.put(d.arena, "description", .{ .string = "One resolved model Operation at its admission position. Timings describe the FINAL attempt only: latency_ms is request sent to resolution; first_event_ms is request sent to the first HTTP response event (including an interim head), not the first token. Missing evidence, usage or timings is null. A resolution may become visible within a previously captured end (D219)." });
             }
             return d.anyOf(&values);

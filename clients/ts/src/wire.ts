@@ -739,7 +739,7 @@ export interface components {
                     server: string | null;
                 };
             };
-        } | {
+        } | ({
             position: components["schemas"]["Decimal"];
             ordinal: components["schemas"]["Decimal"];
             at: components["schemas"]["Decimal"];
@@ -750,6 +750,18 @@ export interface components {
                 };
             };
         } | {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+            at: components["schemas"]["Decimal"];
+            value: {
+                tool_result: {
+                    content: components["schemas"]["ContentValue"];
+                    presentation: components["schemas"]["ToolPresentation"];
+                    /** @constant */
+                    redundant_peer_send: true;
+                };
+            };
+        }) | {
             position: components["schemas"]["Decimal"];
             ordinal: components["schemas"]["Decimal"];
             at: components["schemas"]["Decimal"];
@@ -922,6 +934,7 @@ export interface components {
             kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted" | "model_call")[];
             limit: components["schemas"]["Decimal"];
             since?: string | null;
+            hide_redundant_peer_sends?: boolean;
         };
         ActivitySearchFactsCursor: {
             position: components["schemas"]["Decimal"];

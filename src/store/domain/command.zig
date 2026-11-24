@@ -781,7 +781,7 @@ pub const AgentDelivery = enum {
 };
 
 fn agentMessageKey(buffer: *[idempotency_key.max_bytes]u8, action_id: u64) []const u8 {
-    return std.fmt.bufPrint(buffer, "rui.core/message_agent/{d}", .{action_id}) catch unreachable;
+    return std.fmt.bufPrint(buffer, "{s}{d}", .{ idempotency_key.agent_message_prefix, action_id }) catch unreachable;
 }
 
 pub const DeliverAgentMessage = struct {
