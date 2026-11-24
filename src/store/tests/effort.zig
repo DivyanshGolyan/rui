@@ -1,5 +1,6 @@
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const provider_name = @import("../../provider_name.zig");
 const wire_request = @import("../../wire_request.zig");
 const tool_defs = @import("../../tools.zig");
 const store_core = @import("../Store.zig");
@@ -205,7 +206,7 @@ test "effort refusal requires an emitted Operation update across configure cycle
                 const session = (try storage.configure(&create, .{})).accepted.session;
                 // Retain the historical null case after fresh null requests became default resets.
                 if (initial == null) try store_testing.setLegacyNullEffortForTesting(&storage, session.slice());
-                if (legacy_codec) try store_testing.exec(&storage, "UPDATE session SET codec='openai-responses/1' WHERE session_ref=?1", .{session.slice()});
+                if (legacy_codec) try store_testing.exec(&storage, "UPDATE session_revision SET codec='openai-responses/1' WHERE session_ref=?1", .{session.slice()});
                 if (scenario != .first) try answerTestTurn(&storage, &tmp, session.slice(), "wire-effort-first", &.{.{ .encoded = "ok", .decoded = "ok" }});
                 var change: wire_request.ConfigureCommand = .{};
                 change.session = session;
@@ -363,8 +364,8 @@ test "effective effort carries legacy history without inferring a fresh default"
 
 const EffortCarryRead = struct {
     const query = rsql.Read(.{
-        .sql = "SELECT " ++ historical_domain.effortBeforeSql("?1", "?2", "?3", "?4", "?5") ++ " AS effort",
-        .Args = struct { session: []const u8, boundary: u64, model: []const u8, floor: ?u64, first: ?protocol.ReasoningEffort },
+        .sql = "SELECT " ++ historical_domain.effortBeforeSql("?1", "?2", .{ .provider = "?3", .codec = "?4", .model = "?5" }, "?6", "?7") ++ " AS effort",
+        .Args = struct { session: []const u8, boundary: u64, provider: provider_name.Provider, codec: provider_name.Codec, model: []const u8, floor: ?u64, first: ?protocol.ReasoningEffort },
         .Row = struct { effort: ?protocol.ReasoningEffort },
         .cardinality = .one,
     });
@@ -403,6 +404,8 @@ test "admitted effort carry agrees with replay recipe across the owner domain" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const Recipe = @import("../../replay_recipe.zig").Recipe;
+            const replay_binding = @import("../../replay_binding.zig");
+            const wire: replay_binding.Wire = .{ .connection = "codex", .dialect = .openai_responses };
             const Entry = struct { position: u64, model: []const u8, effort: ?protocol.ReasoningEffort };
             for ([_]?protocol.ReasoningEffort{ null, .low }) |top| {
                 var tmp = std.testing.tmpDir(.{});
@@ -438,8 +441,8 @@ test "admitted effort carry agrees with replay recipe across the owner domain" {
                 for (0..3) |profile| {
                     try store_testing.exec(&storage, "UPDATE model_operation SET resolution_code=CASE WHEN (?1>=1 AND operation_id=90) OR (?1=2 AND operation_id=91) THEN 'compacted' ELSE 'failed' END WHERE operation_id IN (90,91)", .{profile});
                     for ([_][]const u8{ "unlisted-A", "unlisted-B" }) |model| for ([_]u64{ 2, 9, 10, 11, 20, 21, 22, 23, 25, 26, 30 }) |boundary| for ([_]?u64{ null, 0, 10, 11, 20, 22, 25, 40 }) |own_floor| {
-                        const candidate: ?@import("../../replay_recipe.zig").Base = if (profile == 2 and boundary > 20) .{ .position = 20, .floor = 20, .model = "unlisted-B" } else if (profile >= 1 and boundary > 10) .{ .position = 10, .floor = 10, .model = "unlisted-A" } else null;
-                        const recipe = Recipe.select(model, candidate, own_floor orelse 0);
+                        const candidate: ?@import("../../replay_recipe.zig").Base = if (profile == 2 and boundary > 20) .{ .position = 20, .floor = 20, .binding = .{ .wire = wire, .model = "unlisted-B" } } else if (profile >= 1 and boundary > 10) .{ .position = 10, .floor = 10, .binding = .{ .wire = wire, .model = "unlisted-A" } } else null;
+                        const recipe = Recipe.select(.{ .wire = wire, .model = model }, candidate, own_floor orelse 0);
                         const anchor: u64 = if (recipe.frontier == 0) 0 else recipe.frontier + 1;
                         var expected: ?protocol.ReasoningEffort = .medium;
                         for (entries) |item| {
@@ -457,7 +460,7 @@ test "admitted effort carry agrees with replay recipe across the owner domain" {
                             expected = item.effort;
                         };
                         if (declined) continue;
-                        try std.testing.expectEqual(expected, try EffortCarryRead.read(&storage, .{ .session = session.slice(), .boundary = boundary, .model = model, .floor = own_floor, .first = .medium }));
+                        try std.testing.expectEqual(expected, try EffortCarryRead.read(&storage, .{ .session = session.slice(), .boundary = boundary, .provider = .codex, .codec = provider_name.Provider.codex.codec(), .model = model, .floor = own_floor, .first = .medium }));
                     };
                 }
             }

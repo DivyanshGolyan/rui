@@ -67,6 +67,6 @@ Replace the matching blocks only after the new owners exist; these files also co
 - `src/store/sqlite_tests/message.zig:28`, `src/store/sqlite_tests/model_admission.zig:51`, `src/store/tests/model_admission.zig:79`: CM-1–3, CM-5, CM-9, CM-20 and SES-1, SES-4–SES-7, SES-17.
 - `src/store/tests/configuration.zig:182`, `src/store/sqlite_tests/configuration.zig:188`, `src/store/sqlite_tests/effort.zig:44`: ADM-3–4, ADM-21, CM-7–9, CM-11 and EXR-5, EXR-42.
 - `src/skills.zig:488`, `src/session_skills.zig:286`, `src/store/tests/skills.zig:258`, `src/skill_reference.zig:68`, `tests/integration/skills_integration.py:123`: CM-13–18.
-- `src/output_decode.zig:979`, `src/output_item.zig:21`, `tests/integration/codex_integration.py:239`: CM-19, CM-21–23, CM-31, CM-34–35 and EXR-1.
+- `src/output_decode.zig:979`, `src/replay_binding.zig:80`, `tests/integration/codex_integration.py:239`: CM-19, CM-21–23, CM-31, CM-34–35 and EXR-1.
 - `src/store/tests/compaction.zig:123` and `src/output_decode.zig:1243`: CM-24–25, CM-32–33.
 - Timing-only no-resend sleep checks in `tests/integration/codex_integration.py:239`: no invariant for the delay itself; delete the delay and retain the assertion under CM-35.

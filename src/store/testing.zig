@@ -20,6 +20,7 @@ const required_engines = @import("wire/required_engines.zig");
 const Store = store_core.Store;
 const command_domain = @import("domain/command.zig");
 const historical_domain = @import("domain/historical.zig");
+const replay_binding = @import("../replay_binding.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
 const AttemptBinding = store_core.AttemptBinding;
 const OutputItemKind = historical_domain.OutputItemKind;
@@ -135,8 +136,8 @@ pub const TestingPage = struct {
         };
     }
 
-    pub fn replayOutput(self: *TestingPage, entry: *const historical_domain.HistoricalEntry, model: []const u8) !?historical_domain.HistoricalOutput {
-        while (true) return self.page.replayOutput(entry, model) catch |err| {
+    pub fn replayOutput(self: *TestingPage, entry: *const historical_domain.HistoricalEntry, request: replay_binding.Binding) !?historical_domain.HistoricalOutput {
+        while (true) return self.page.replayOutput(entry, request) catch |err| {
             try self.answer(err);
             continue;
         };
@@ -502,6 +503,12 @@ pub fn setLegacyNullEffortForTesting(storage: *Store, session: []const u8) !void
     try exec(storage, "UPDATE model_operation SET previous_effort_override=NULL WHERE session_ref=?1", .{session});
 }
 
+/// Names the connection of a settled revision, so a test can replay an Operation whose
+/// connection differs from the Session's current one (a provider is immutable in a Session).
+pub fn setRevisionProviderForTesting(storage: *Store, session: []const u8, revision: u64, provider: []const u8) !void {
+    try exec(storage, "UPDATE session_revision SET provider=?3 WHERE session_ref=?1 AND revision=?2", .{ session, revision, provider });
+}
+
 pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {
     _ = fixtureText(sql);
     if (storage.engine == .mysql) return mysql_testing.queryU64(storage, sql, args);
@@ -551,6 +558,19 @@ pub fn expectSqliteObligationProjection(comptime sql: [:0]const u8, comptime ddl
         try std.testing.expectEqual(@as(i64, 80), sqlite.c.sqlite3_column_int64(check, 0));
         try std.testing.expectEqual(sqlite.c.SQLITE_DONE, sqlite.c.sqlite3_step(check));
     }
+}
+
+/// Gives every Session that has no revision row its first revision, carrying the Session's
+/// provider and the codec the Session pins (the test fixtures use codex on openai-responses/1).
+/// The command key is a fixture text, so foreign keys are off for this insert only.
+pub fn fixtureRevisions(database: *sqlite.c.sqlite3) !void {
+    const foreign_keys = try sqlite.pragmaInt(database, "PRAGMA foreign_keys");
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF");
+    defer sqlite.exec(database, if (foreign_keys == 0) "PRAGMA foreign_keys=OFF" else "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
+    try sqlite.exec(database, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,codec,model,instructions_content_id," ++
+        "instructions_updated,tool_set_id,permission_mode,effort_source_revision) " ++
+        "SELECT s.session_ref,s.revision,'fixture-'||s.session_ref||'-'||s.revision,s.workspace,s.provider,'openai-responses/1',s.model,s.instructions_content_id," ++
+        "0,s.tool_set_id,s.permission_mode,s.revision FROM session s WHERE NOT EXISTS(SELECT 1 FROM session_revision r WHERE r.session_ref=s.session_ref AND r.revision=s.revision)");
 }
 
 pub fn sqliteExec(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype) !void {
@@ -1623,7 +1643,8 @@ pub const operation_offer_migration_seed: [:0]const u8 =
     "VALUES(99,1,'d8mv7p',2,1,99,0,1,'failed',1)";
 
 pub const operation_effort_migration_seed: [:0]const u8 =
-    "UPDATE session SET codec='openai-responses/2',revision=3,reasoning_effort='high',next_position=16,label='unrelated' WHERE session_ref='d8mv7p';" ++
+    "UPDATE session SET codec='openai-responses/2' WHERE session_ref='d8mv7p';" ++
+    "UPDATE session SET revision=3,reasoning_effort='high',next_position=16,label='unrelated' WHERE session_ref='d8mv7p';" ++
     "UPDATE model_operation SET reasoning_effort='low' WHERE operation_id=1;" ++
     "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) SELECT 'effort-migration-high',1,'d8mv7p',input_digest,1,'',2,0,100 FROM core_command WHERE command_key='fixture-answer-config';" ++
     "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) SELECT 'effort-migration-last',1,'d8mv7p',input_digest,1,'',3,0,101 FROM core_command WHERE command_key='fixture-answer-config';" ++

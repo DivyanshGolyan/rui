@@ -1011,12 +1011,13 @@ pub const Preparation = struct {
                     .tool_results => self.state.stage = if (covered) .covered_tool_results else .tool_results,
                     .operation => if (!covered) {
                         if (entry.declares and codecs.declaresTools(self.settings.codec)) self.declare(.{ .tool_set_id = entry.tool_set_id, .position = entry.position }, .history);
-                        if (entry.requested_model.?.eql(self.settings.model.slice()))
+                        const producer = entry.producerBinding() orelse return error.CorruptStore;
+                        if (producer.eql(store.historicalRequestBinding(&self.settings)))
                             return self.loadItemHeader(.{ .operation = effortOf(entry.effort) }, 0);
                     },
                     .provider_output => {
                         if (covered) return .pending;
-                        const output = try self.page.replayOutput(entry, self.settings.model.slice()) orelse return .pending;
+                        const output = try self.page.replayOutput(entry, store.historicalRequestBinding(&self.settings)) orelse return .pending;
                         self.output_bag = output.bag;
                         var handles: u8 = 0;
                         if (output.call) |call| {
@@ -1242,11 +1243,10 @@ pub const Preparation = struct {
     }
 
     fn memoKey(self: *Preparation) !history_memo.Key {
-        return .{
-            .session = self.settings.session,
-            .model = self.settings.model,
-            .anchor = (try self.page.coverage()).anchor,
-        };
+        const binding = store.historicalRequestBinding(&self.settings);
+        var key: history_memo.Key = .{ .session = self.settings.session, .wire = binding.wire, .model = .{}, .anchor = (try self.page.coverage()).anchor };
+        try key.model.set(binding.model);
+        return key;
     }
 
     fn readMemo(self: *Preparation, copy: *const MemoCopy, destination: []u8) !usize {
@@ -3132,6 +3132,41 @@ test "request preparation fences a saved provider bag whose bytes changed" {
     }
 }
 
+test "a Responses Session replays an Operation from another connection as neutral items without reasoning" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("cross-connection-config");
+    try setup.submit("cross-connection-input", "cross-connection-input-key", session.slice(), "hi");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const first = try admitted.permit.consume();
+    try setup.submit("cross-connection-next", "cross-connection-next-key", session.slice(), "next");
+    try settleComposedForTesting(&setup, first, "cross-connection-first", .message, "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"visible answer\"}]}", &.{});
+    // A model change applies from the next Turn and opens revision 2; the settled Operation
+    // keeps revision 1, which names another connection.
+    var change: wire_request.ConfigureCommand = .{};
+    change.session = session;
+    try change.key.set("cross-connection-change");
+    change.configuration.model.state = .value;
+    try change.configuration.model.value.set("unlisted-B");
+    try std.testing.expect(try setup.storage.configure(&change, .{}) == .accepted);
+    try store.testing.setRevisionProviderForTesting(&setup.storage, session.slice(), 1, "openai");
+    var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try successor.permit.consume();
+    const request = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(request.bytes);
+    try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"encrypted_content\":\"opaque\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"type\":\"reasoning\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"text\":\"visible answer\"") != null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, request.bytes, "visible answer") != null);
+    for (requestHistory(parsed.value)) |item| {
+        const kind = item.object.get("type") orelse continue;
+        try std.testing.expect(!std.mem.eql(u8, kind.string, "reasoning"));
+    }
+}
+
 test "request preparation replays a large private reasoning item within each advance's allowance" {
     {
         var setup: PreparationTestSetup = undefined;
@@ -3336,6 +3371,43 @@ test "model switch rebuilds effort only from the requested model binding" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("low", parsed.value.object.get("reasoning").?.object.get("effort").?.string);
+    try expectInputTexts(request.bytes, &.{ "visible original", "additional_tools", "visible answer", "visible second" });
+    try std.testing.expect(try expectMemoRebuildEqual(&setup, binding, &memos, .{}) > 0);
+}
+
+test "an Operation effort from another connection is no boundary for the same model" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("connection-effort-config");
+    var low: wire_request.ConfigureCommand = .{};
+    low.session = session;
+    try low.key.set("connection-effort-low");
+    low.configuration.reasoning_effort.state = .value;
+    try low.configuration.reasoning_effort.value.set("low");
+    try std.testing.expect(try setup.storage.configure(&low, .{}) == .accepted);
+    try setup.submit("connection-effort-one", "connection-effort-one", session.slice(), "visible original");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, first, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"visible answer\"}]}"}, "visible answer");
+    // The first Operation's revision names another connection with the same model and dialect.
+    try store.testing.setRevisionProviderForTesting(&setup.storage, session.slice(), 2, "openai");
+    var high: wire_request.ConfigureCommand = .{};
+    high.session = session;
+    try high.key.set("connection-effort-high");
+    high.configuration.reasoning_effort.state = .value;
+    try high.configuration.reasoning_effort.value.set("high");
+    try std.testing.expect(try setup.storage.configure(&high, .{}) == .accepted);
+    try setup.submit("connection-effort-two", "connection-effort-two", session.slice(), "visible second");
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var entries: [1]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    const request = try prepareMemoForTesting(&setup, binding, &memos, .{});
+    defer std.testing.allocator.free(request.bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("high", parsed.value.object.get("reasoning").?.object.get("effort").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"effort\":\"low\"") == null);
     try expectInputTexts(request.bytes, &.{ "visible original", "additional_tools", "visible answer", "visible second" });
     try std.testing.expect(try expectMemoRebuildEqual(&setup, binding, &memos, .{}) > 0);
 }
@@ -6214,7 +6286,7 @@ test "canonical ordered Message lowers original PNG JPEG and Text parts on every
             try setup.init();
             defer setup.close();
             const session = try setup.configure("ordered-config");
-            try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+            try store.testing.exec(&setup.storage, "UPDATE session_revision SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
             try submitOrderedForTesting(&setup, session.slice(), "ordered-message", parts, null, null);
             const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
             // A later Message is outside this Operation's frozen view.
@@ -6577,7 +6649,7 @@ test "canonical ordered Action Resolution lowers Text PNG JPEG and one Text on e
             try setup.init();
             defer setup.close();
             const session = try setup.configure("ordered-actions");
-            try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+            try store.testing.exec(&setup.storage, "UPDATE session_revision SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
             try setup.submit("ordered-action-seed", "ordered-action-seed", session.slice(), "observe");
             const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
             try proposeOrderedActionsForTesting(&setup, model, &.{ .{ .item_id = "shot-item", .call_id = "shot\\\"" }, .{ .item_id = "text-item", .call_id = "text-call" } });
@@ -6766,7 +6838,7 @@ test "canonical ordered Action Resolution background final prefixes the same par
         try setup.init();
         defer setup.close();
         const session = try setup.configure("ordered-action-background");
-        try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+        try store.testing.exec(&setup.storage, "UPDATE session_revision SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
         try setup.submit("ordered-background-seed", "ordered-background-seed", session.slice(), "observe");
         const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         try proposeOrderedActionsForTesting(&setup, model, &.{.{ .item_id = "background-shot", .call_id = "background-shot" }});
@@ -6897,7 +6969,7 @@ test "old text request retries unchanged across later image message and final ac
         try setup.init();
         defer setup.close();
         const session = try setup.configure("replay-wire-config");
-        try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+        try store.testing.exec(&setup.storage, "UPDATE session_revision SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
         try setup.submit("replay-wire-seed", "replay-wire-seed", session.slice(), "old text input");
         const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         try proposeOrderedActionsForTesting(&setup, first, &.{ .{ .item_id = "legacy-item", .call_id = "legacy-call" }, .{ .item_id = "background-item", .call_id = "background-call" } });

@@ -2,6 +2,7 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
 const codecs = @import("codecs.zig");
+const replay_binding = @import("replay_binding.zig");
 
 pub const default_byte_limit: u64 = 1024 * 1024 * 1024;
 
@@ -13,14 +14,22 @@ pub fn newHasher() Hasher {
     return .init(0);
 }
 
+/// A memo's Key: the Session, the Binding its prefix was built for and the anchor. The Wire's
+/// connection is a static provider name, so only the model is owned here; a memo serves only
+/// the same Binding, compared by `replay_binding.Binding.eql`.
 pub const Key = struct {
     session: protocol.Bounded(protocol.max_session_bytes),
+    wire: replay_binding.Wire,
     model: protocol.Bounded(protocol.max_model_bytes),
     anchor: ?u64,
 
+    pub fn binding(self: *const Key) replay_binding.Binding {
+        return .{ .wire = self.wire, .model = self.model.slice() };
+    }
+
     pub fn eql(self: *const Key, other: *const Key) bool {
         return self.session.eql(other.session.slice()) and
-            self.model.eql(other.model.slice()) and
+            self.binding().eql(other.binding()) and
             self.anchor == other.anchor;
     }
 };
@@ -275,7 +284,7 @@ pub const Table = struct {
 };
 
 fn testMemo(session: []const u8, model: []const u8, anchor: ?u64, admission_position: u64, length: u64) !Memo {
-    var key: Key = .{ .session = .{}, .model = .{}, .anchor = anchor };
+    var key: Key = .{ .session = .{}, .wire = .{ .connection = "openai", .dialect = .openai_responses }, .model = .{}, .anchor = anchor };
     try key.session.set(session);
     try key.model.set(model);
     return .{
@@ -302,6 +311,12 @@ test "a memo serves only the same Session, model and anchor with a containing vi
     try std.testing.expect(!memo.serves(&key, 30));
     key = memo.key;
     try key.model.set("model-b");
+    try std.testing.expect(!memo.serves(&key, 30));
+    key = memo.key;
+    key.wire.dialect = .anthropic_messages;
+    try std.testing.expect(!memo.serves(&key, 30));
+    key = memo.key;
+    key.wire.connection = "codex";
     try std.testing.expect(!memo.serves(&key, 30));
     key = memo.key;
     try key.session.set("abc124");

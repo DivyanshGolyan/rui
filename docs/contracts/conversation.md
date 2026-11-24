@@ -126,7 +126,7 @@ On an existing Session, omission preserves the saved effort; explicit null reque
 Current inspection reports the effective `reasoning_effort` and saved nullable `reasoning_effort_override`; an explicit saved value wins.
 For an admitted pre-D111 Session with null settings, the configuration owner carries forward its latest Operation's frozen effort, so continuation never clears that historical value; it does not infer a catalog or product default.
 Fresh defaults and reset requests are resolved before admission.
-Each model Operation, including compaction and continuation, freezes the resolved effort, its immutable configured-choice source, its previous same-model admitted effective effort and nullable override, and whether its own pinned request actually emits an effort update at admission.
+Each model Operation, including compaction and continuation, freezes the resolved effort, its immutable configured-choice source, its previous same-Binding admitted effective effort and nullable override, and whether its own pinned request actually emits an effort update at admission.
 Replacement Attempts and reopened historical views emit that stored value without consulting later Session settings or catalog policy.
 Persisted values outside the closed grammar are corruption.
 There is no per-Message override, automatic effort downgrade or model substitution.

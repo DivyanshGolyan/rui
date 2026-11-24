@@ -1,5 +1,6 @@
 const std = @import("std");
-const output_item = @import("../../output_item.zig");
+const replay_binding = @import("../../replay_binding.zig");
+const provider_name = @import("../../provider_name.zig");
 const model_capability = @import("../../model_capability.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
@@ -9,6 +10,7 @@ const content_domain = @import("content.zig");
 const store_core = @import("../Store.zig");
 const store_access = @import("../access.zig");
 const store_schema = @import("../schema.zig");
+const replay_wire = @import("replay_wire.zig");
 
 pub const levels = 3;
 const bytes_per_token = 4;
@@ -73,7 +75,7 @@ const floor_facts = rsql.Read(.{
     .sql = "SELECT current.session_ref,current.admission_position,current.history_floor,current.history_level,base.history_floor AS base_floor,coalesce(base.admission_position,0) AS frontier," ++
         "coalesce((SELECT min(first.session_position) FROM conversation_entry first @index(conversation_entry_history) " ++
         "WHERE first.session_ref=current.session_ref AND first.entry_kind=1),0) AS first_message," ++
-        "current.output_reservation,current.context_window,r.model,base_revision.model AS base_model FROM model_operation current " ++
+        "current.output_reservation,current.context_window," ++ replay_wire.operationBindingSql("r") ++ "," ++ replay_wire.operationBindingAsSql("base_revision", "base") ++ " FROM model_operation current " ++
         "JOIN session_revision r ON r.session_ref=current.session_ref AND r.revision=current.settings_revision " ++
         "LEFT JOIN model_operation base ON base.operation_id=(SELECT selected.operation_id " ++
         "FROM model_operation selected @index(model_operation_compaction_bases) WHERE selected.session_ref=current.session_ref AND selected.purpose=1 " ++
@@ -92,7 +94,11 @@ const floor_facts = rsql.Read(.{
         first_message: u64,
         output_reservation: u64,
         context_window: u64,
+        provider: provider_name.Provider,
+        codec: provider_name.Codec,
         model: Bounded(model_capability.max_model_bytes),
+        base_provider: ?provider_name.Provider,
+        base_codec: ?provider_name.Codec,
         base_model: ?Bounded(model_capability.max_model_bytes),
     },
     .cardinality = .one,
@@ -148,12 +154,12 @@ const result_parts = rsql.Read(.{
 });
 
 const base_floor_read = rsql.Read(.{
-    .sql = "SELECT base.history_floor,r.model FROM model_operation base @index(model_operation_compaction_bases) " ++
+    .sql = "SELECT base.history_floor," ++ replay_wire.operationBindingSql("r") ++ " FROM model_operation base @index(model_operation_compaction_bases) " ++
         "JOIN session_revision r ON r.session_ref=base.session_ref AND r.revision=base.settings_revision " ++
         "WHERE base.session_ref=?1 AND base.purpose=1 AND " ++
         store_schema.resolutionIs("base.resolution_code", .compacted) ++ " AND base.admission_position<?2 ORDER BY base.admission_position DESC LIMIT 1",
     .Args = struct { session: []const u8, boundary: u64 },
-    .Row = struct { history_floor: ?rsql.Positive, model: Bounded(model_capability.max_model_bytes) },
+    .Row = struct { history_floor: ?rsql.Positive, provider: provider_name.Provider, codec: provider_name.Codec, model: Bounded(model_capability.max_model_bytes) },
     .cardinality = .optional,
 });
 
@@ -164,9 +170,10 @@ pub const InheritedFloor = struct {
         a.read(base_floor_read, .{ .session = session, .boundary = boundary }, &read.found);
     }
 
-    pub fn floor(read: *const InheritedFloor, model: []const u8) ?u64 {
+    pub fn floor(read: *const InheritedFloor, request: replay_binding.Binding) ?u64 {
         const row = read.found orelse return null;
-        if (!output_item.Kind.compaction.replayableTo(row.model.slice(), model, .selected_base)) return null;
+        const producer = replay_wire.bindingOf(replay_wire.wireOf(row.provider, row.codec), row.model.slice());
+        if (replay_binding.decide(.compaction, producer, request, .selected_base) == .omit) return null;
         return if (row.history_floor) |found| found.get() else null;
     }
 };
@@ -210,7 +217,8 @@ pub const FloorSearch = struct {
             }
             const from: u8 = facts.history_level orelse 0;
             if (from >= levels) return false;
-            const compatible = if (facts.base_model) |*model| output_item.Kind.compaction.replayableTo(model.slice(), facts.model.slice(), .selected_base) else true;
+            const request = replay_wire.bindingOf(replay_wire.wireOf(facts.provider, facts.codec), facts.model.slice());
+            const compatible = if (facts.base_model) |*model| replay_binding.decide(.compaction, try replay_wire.optionalBinding(facts.base_provider, facts.base_codec, model.slice()), request, .selected_base) != .omit else true;
             search.from = from;
             search.base_floor = if (compatible) (if (facts.base_floor) |floor| floor.get() else 0) else 0;
             search.previous = if (facts.history_floor) |floor| floor.get() else search.base_floor;
@@ -259,7 +267,8 @@ pub const Prepared = struct {
             self.facts.history_floor == facts.history_floor and self.facts.history_level == facts.history_level and
             self.facts.base_floor == facts.base_floor and self.facts.frontier == facts.frontier and
             self.facts.first_message == facts.first_message and self.facts.output_reservation == facts.output_reservation and
-            self.facts.context_window == facts.context_window and self.facts.model.eql(facts.model.slice()) and
+            self.facts.context_window == facts.context_window and self.facts.provider == facts.provider and
+            self.facts.codec == facts.codec and self.facts.model.eql(facts.model.slice()) and
             optionalModelEqual(self.facts.base_model, facts.base_model);
     }
 
