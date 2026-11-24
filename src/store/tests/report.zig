@@ -908,3 +908,61 @@ test "SH-126 Current reports name the lane root's app tools on the root, a child
         }
     }.run);
 }
+
+// SH-127: a Full report names the app tools each revision of a lane root declared, across a declaration,
+// a re-declaration and a clear, and agrees with the Current report at the newest revision.
+fn expectFullRevisionAppTools(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, expected: []const []const []const u8) !void {
+    const body = try testingSessionReportWithProfile(storage, tmp, session, 1024 * 1024, .full);
+    defer std.testing.allocator.free(body);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const revisions = parsed.value.object.get("full").?.object.get("session_revisions").?.array.items;
+    try std.testing.expectEqual(expected.len, revisions.len);
+    for (revisions, expected, 1..) |row, names, revision| {
+        var buffer: [20]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "{d}", .{revision}), row.object.get("revision").?.string);
+        const declared = row.object.get("app_tools").?.array.items;
+        try std.testing.expectEqual(names.len, declared.len);
+        for (declared, names) |actual, name| try std.testing.expectEqualStrings(name, actual.string);
+    }
+}
+
+test "SH-127 Full reports name each revision's app tools across a declaration, a re-declaration and a clear" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace_path = try store_testing.canonicalCwd(std.testing.io, &workspace);
+            const first = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}},{\"name\":\"look\",\"description\":\"Look.\",\"input_schema\":{\"type\":\"object\"}}]";
+            const second = "[{\"name\":\"other\",\"description\":\"Other.\",\"input_schema\":{\"type\":\"object\"}}]";
+
+            var root_command = try store_testing.completeConfiguration("app-full-root", "", workspace_path, "model-a");
+            declareReportAppTools(&root_command.configuration, first);
+            const root_reply = try storage.configure(&root_command, .{});
+            try std.testing.expect(root_reply == .accepted);
+            const root = root_reply.accepted.session.slice();
+            try expectFullRevisionAppTools(&storage, &tmp, root, &.{&.{ "ask", "look" }});
+
+            var replace: wire_request.ConfigureCommand = .{};
+            try replace.key.set("app-full-replace");
+            try replace.session.set(root);
+            declareReportAppTools(&replace.configuration, second);
+            try std.testing.expect((try storage.configure(&replace, .{})) == .accepted);
+            try expectFullRevisionAppTools(&storage, &tmp, root, &.{ &.{ "ask", "look" }, &.{"other"} });
+            try expectReportedAppTools(&storage, &tmp, root, &.{"other"});
+
+            var clear: wire_request.ConfigureCommand = .{};
+            try clear.key.set("app-full-clear");
+            try clear.session.set(root);
+            declareReportAppTools(&clear.configuration, "[]");
+            try std.testing.expect((try storage.configure(&clear, .{})) == .accepted);
+            try expectFullRevisionAppTools(&storage, &tmp, root, &.{ &.{ "ask", "look" }, &.{"other"}, &.{} });
+            try expectReportedAppTools(&storage, &tmp, root, &.{});
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}

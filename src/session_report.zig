@@ -155,6 +155,8 @@ pub const Revision = struct {
     label: ?[]const u8,
     tools: []const []const u8,
     loaded_tools: []const []const u8,
+    /// The app tool names this revision's configure declared; empty when none.
+    app_tools: []const []const u8 = &.{},
     permission_mode: cli_value.PermissionMode,
 };
 

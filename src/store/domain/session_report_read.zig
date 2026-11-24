@@ -286,13 +286,11 @@ const ToolNames = struct {
     app: [app_tools.max_records][]const u8 = undefined,
 };
 
-/// An app set holds at most `app_tools.max_records` names of `tool_name.max_bytes` each, joined by commas.
-const app_names_bytes = app_tools.max_records * tool_name.max_bytes + app_tools.max_records - 1;
 /// The lane root's declared set, read through the lane Session that holds it: a child's own app_tool_set_id is NULL.
 const app_names = rsql.Read(.{
     .sql = "SELECT lane.app_tool_set_id AS set_id," ++ tool_set.namesSql("lane.app_tool_set_id") ++ " AS names FROM session lane WHERE lane.session_ref=?1",
     .Args = struct { lane: []const u8 },
-    .Row = struct { set_id: ?u64, names: ?Bounded(app_names_bytes) },
+    .Row = struct { set_id: ?u64, names: ?Bounded(app_tools.max_names_bytes) },
     .cardinality = .optional,
 });
 

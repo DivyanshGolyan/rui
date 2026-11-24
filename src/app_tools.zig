@@ -12,6 +12,8 @@ pub const max_records = 16;
 pub const max_document_bytes = 64 * 1024;
 /// Bytes the parse may use for the document copy, the JSON tree and the saved text of one declaration.
 pub const arena_bytes = 512 * 1024;
+/// A declared set's names joined by commas: the widest text a reader of one declaration takes.
+pub const max_names_bytes = max_records * tool_name.max_bytes + max_records - 1;
 
 pub const Refusal = enum {
     invalid_app_tools,

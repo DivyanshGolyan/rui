@@ -16393,6 +16393,17 @@
             "x-rui-max-bytes": 4096,
             "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
           },
+          "app_tools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 16,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4096,
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. The app tools this Session's lane declared."
+          },
           "permission_mode": {
             "type": "string",
             "enum": [
@@ -16426,6 +16437,7 @@
           "label",
           "tools",
           "loaded_tools",
+          "app_tools",
           "permission_mode",
           "instructions",
           "output_schema"
