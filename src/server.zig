@@ -1242,6 +1242,13 @@ fn serveOpened(
     };
     var lifecycle: server_host.Lifecycle = .init(io, lease, settings.execution.paused.value, intake_wake[1]);
     var probes: server_host.Probes = .init(io, hooks);
+    const execution_settings: server_execution.Settings = .{
+        .bash_path = bash_path,
+        .bash_timeout_ms = bash_timeout_ms,
+        .background_after_ms = settings.execution.background_after_ms.value,
+        .catalog_url = if (settings.models.catalog_url) |*url| url.slice() else null,
+        .failed_response_store = lease.store_dir,
+    };
     var host = Host{
         .io = io,
         .allocator = allocator,
@@ -1250,15 +1257,11 @@ fn serveOpened(
         .settings_digest = settings_digest,
         .lease = lease,
         .store = storage,
-        .catalog_url = if (settings.models.catalog_url) |*url| url.slice() else null,
         .limits = limits,
         .providers = served,
         .presets = settings.presets.specs,
-        .bash_path = bash_path,
         .bash_facts = bash_facts,
         .environments = environments,
-        .bash_timeout_ms = bash_timeout_ms,
-        .background_after_ms = settings.execution.background_after_ms.value,
         .retention = undefined,
         .custody = execution.CustodyPool.initialize(custody_records),
         .lifecycle = &lifecycle,
@@ -1293,7 +1296,6 @@ fn serveOpened(
     );
     host.retention = &retention;
     defer retention.cleanupAll();
-    host.failed_response_store = lease.store_dir;
     if (served.any()) {
         for (served.table.values) |entry| if (entry) |value| {
             try provider.validateEndpoint(value.endpoint);
@@ -1321,7 +1323,7 @@ fn serveOpened(
     StopSignals.attach(intake.wake[1]);
     defer StopSignals.detach();
     if (comptime test_pause.enabled) if (pause_adapter) |adapter| try adapter.waitStart();
-    const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
+    const execution_thread = try signal_stack.spawn(.{}, executionMain, .{ &host, execution_settings });
     defer {
         if (listener_open) {
             listener.deinit(io);

@@ -18,7 +18,6 @@ const platform = @import("platform.zig");
 const product_defaults = @import("product_defaults.zig");
 const provider = @import("provider.zig");
 const providers_module = @import("providers.zig");
-const turn_states_module = @import("turn_states.zig");
 const protocol = @import("protocol.zig");
 const settings_handoff = @import("host_settings_handoff.zig");
 const wire_request = @import("wire_request.zig");
@@ -1083,25 +1082,14 @@ pub const Host = struct {
     instance: protocol.InstanceId = undefined,
     limits: Limits = .{},
     providers: *const providers_module.Providers = &providers_module.none,
-    catalog_url: ?[]const u8 = null,
     presets: []const core_tools.Preset = &.{},
     model_lists: ModelLists = .{},
-    auth_worker: ?*AuthWorker = null,
-    scratch_budget: ?provider.ScratchBudget = null,
-    turn_states: turn_states_module.PerProvider = .{},
-    history_memos: model_adapter.HistoryMemos = .{},
-    bash_work: []BashWork = &.{},
-    slot_changes: u64 = 0,
-    bash_path: []const u8 = default_bash_path,
     bash_facts: environment.HostFacts = bash.default_facts,
     environments: ?*SessionEnvironments = null,
-    bash_timeout_ms: u64 = default_bash_timeout_ms,
-    background_after_ms: u64 = @import("host_settings.zig").default_background_after_ms,
     mcp_servers: @import("mcp/servers.zig").Servers = .{},
     /// The owner of MCP re-lists; null when no MCP server is configured.
     mcp_relist: ?*@import("server_mcp_relist.zig").Relist = null,
     retention: *output_retention.Queue = undefined,
-    failed_response_store: ?std.Io.Dir = null,
     custody: execution.CustodyPool = .{ .records = &.{} },
     intake_capacity: usize = product_defaults.intake_capacity,
     descriptor_soft_limit: ?usize = null,
@@ -1110,100 +1098,6 @@ pub const Host = struct {
     /// The frozen settings frame a detached Host was started with; null for a foreground Host.
     settings_digest: ?settings_handoff.Digest = null,
     allowance_diagnostic: AllowanceDiagnostic = .{},
-};
-
-pub const AuthWorker = struct {
-    io: std.Io,
-    mutex: std.Io.Mutex = .init,
-    condition: std.Io.Condition = .init,
-    state: State = .idle,
-    credential: providers_module.Lease = undefined,
-    work: providers_module.Work = undefined,
-    stopping: bool = false,
-
-    const Job = union(enum) { acquire: providers_module.Authentication, refresh: providers_module.Credential.Refresh };
-    const State = union(enum) { idle, requested: Job, ready, in_use, refreshed: bool, failed: anyerror };
-    const Result = union(enum) { ready: *const providers_module.Lease, refreshed: bool, failed: anyerror };
-
-    pub fn idle(self: *AuthWorker) bool {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        return self.state == .idle;
-    }
-
-    pub fn request(self: *AuthWorker, source: providers_module.Authentication) void {
-        self.requestJob(.{ .acquire = source });
-    }
-
-    pub fn requestRefresh(self: *AuthWorker, refresh: providers_module.Credential.Refresh) void {
-        self.requestJob(.{ .refresh = refresh });
-    }
-
-    fn requestJob(self: *AuthWorker, job: Job) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        std.debug.assert(self.state == .idle);
-        self.state = .{ .requested = job };
-        self.condition.broadcast(self.io);
-    }
-
-    pub fn take(self: *AuthWorker) ?Result {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        const result: Result = switch (self.state) {
-            .idle, .requested, .in_use => return null,
-            .ready => .{ .ready = &self.credential },
-            .refreshed => |refreshed| .{ .refreshed = refreshed },
-            .failed => |err| .{ .failed = err },
-        };
-        self.state = if (result == .ready) .in_use else .idle;
-        return result;
-    }
-
-    pub fn finish(self: *AuthWorker) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        std.debug.assert(self.state == .in_use);
-        self.credential.release();
-        self.state = .idle;
-    }
-
-    pub fn stop(self: *AuthWorker, thread: std.Thread) void {
-        self.mutex.lockUncancelable(self.io);
-        self.stopping = true;
-        self.condition.broadcast(self.io);
-        self.mutex.unlock(self.io);
-        thread.join();
-        std.debug.assert(self.state != .in_use);
-        if (self.state == .ready) self.credential.release();
-    }
-
-    pub fn run(self: *AuthWorker) void {
-        while (true) {
-            self.mutex.lockUncancelable(self.io);
-            while (!self.stopping and self.state != .requested)
-                self.condition.waitUncancelable(self.io, &self.mutex);
-            if (self.stopping) {
-                self.mutex.unlock(self.io);
-                return;
-            }
-            const job = self.state.requested;
-            self.mutex.unlock(self.io);
-            const answer: State = switch (job) {
-                .acquire => |source| if (providers_module.acquire(source, self.io, &self.work, &self.credential)) |_| .ready else |err| .{ .failed = err },
-                .refresh => |refresh| if (providers_module.refresh(refresh.source, self.io, refresh.generation)) |refreshed| .{ .refreshed = refreshed } else |err| .{ .failed = err },
-            };
-            self.mutex.lockUncancelable(self.io);
-            self.state = answer;
-            self.condition.broadcast(self.io);
-            self.mutex.unlock(self.io);
-        }
-    }
-};
-
-pub const BashWork = union {
-    execution: bash.Execution,
-    prepared_cleanup: bash.PreparedCleanup,
 };
 
 /// The one ask for MCP lists from the Host: asks the re-list owner for `only` or every configured server, wakes the
