@@ -70,6 +70,12 @@ pub const Connected = struct {
     }
 };
 
+/// Whether a connected entry serves this built-in provider's name.
+fn connectedFind(connected: *const Connected, provider: Provider) bool {
+    for (connected.entries[0..connected.len]) |*entry| if (entry.name.eql(provider_route.nameOf(provider))) return true;
+    return false;
+}
+
 /// No key connections, for tests of the built-in providers alone.
 const no_connected: Connected = .{};
 
@@ -85,7 +91,8 @@ pub fn fromSettings(settings: *const @import("host_settings.zig").Settings, conn
         }) catch unreachable;
     }
     inline for (std.enums.values(Provider)) |named| {
-        if (@field(settings.providers.entries, @tagName(named))) |*entry| {
+        // A connection served under a built-in name replaces that built-in entry.
+        if (connectedFind(connected, named)) {} else if (@field(settings.providers.entries, @tagName(named))) |*entry| {
             const target = if (entry.endpoint) |*url| url.slice() else endpoint(named);
             const fixture = @import("host_settings.zig").fixtureEndpoint(settings, target);
             result.table.set(provider_route.nameOf(named), .{
