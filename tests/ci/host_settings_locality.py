@@ -74,7 +74,9 @@ def facts(root=ROOT):
         wire_paths.update(wp)
     for file, declaration in (("store_target.zig", "Kind"),
                               ("tool_record.zig", "Owner"),
-                              ("call_classification.zig", "BashArguments")):
+                              ("call_classification.zig", "BashArguments"),
+                              ("provider_name.zig", "Provider"),
+                              ("model_picker.zig", "Entry")):
         source = root / "src" / file
         if source.exists():
             shared.update(declaration_members(source.read_text(), declaration))
