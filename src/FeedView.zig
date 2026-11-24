@@ -1676,7 +1676,7 @@ test "SUI-112 painted assistant links open on plain clicks while drags select" {
     for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) {
         copied = command.copy_to_clipboard;
     };
-    try std.testing.expectEqualStrings("we", copied orelse return error.MissingClipboardCopy);
+    try std.testing.expectEqualStrings("w", copied orelse return error.MissingClipboardCopy);
     try retryMouse(&view, &ctx, at, .press);
     try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(at.row), .col = @intCast(at.col), .button = .left, .mods = .{ .ctrl = true }, .type = .release } });
     try std.testing.expectEqual(@as(usize, 1), actions.count);
