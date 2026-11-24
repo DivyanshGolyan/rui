@@ -1258,7 +1258,8 @@ fn launchHost(init: std.process.Init, request: host_start.Spawn, ops: host_start
     host_start.spawn(init, request, ops, progress, result);
     const incompatible = result.outcome == .failed and result.outcome.failed.cause.kind == .incompatible;
     if (!activation.startHandoverWanted(incompatible, request.frozen != null)) return;
-    const home = init.environ_map.get("HOME") orelse return host_start.launchFailure(result, .setup, error.HomeUnavailable, null);
+    // Without HOME no coordinator can run, so the incompatible report stands as the answer.
+    const home = init.environ_map.get("HOME") orelse return;
     var batch = @import("host_coordinator.zig").restart(init, init.gpa, .{
         .home = home,
         .scope = .{ .store = request.dir },
