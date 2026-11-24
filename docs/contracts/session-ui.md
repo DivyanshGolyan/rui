@@ -126,6 +126,7 @@ At 100 columns and wider, keys go to the list or to the chat beside it, one at a
 Left on an empty chat draft gives keys to the list and leaves the chat open and drawn; a draft with text, even with the caret at its start, takes Left as an edit.
 Below 100 columns no list sits beside the chat, so Left on an empty draft leaves the chat as Esc does; Esc and Ctrl-G leave the chat at every width.
 While the list has keys, its selected row takes the focused background and the chat's prompt shows a quiet `›` with no caret; while the chat has keys, the open chat's row keeps a dimmed, inactive selection.
+In the split, the inactive pane’s text dims on the focus change while both panes stay readable and clickable. The dimming preserves selection backgrounds and leaves the divider, single-pane screens, and dialog backdrop alone.
 A click on the list gives it keys, and a click in the chat gives keys back to the chat's input, by the same transition as Enter on the open chat's row.
 Divyansh chose this list focus, Left on an empty draft and Esc leaving at every width in November 2026 (PR #1400).
 The Host serves whether Ctrl-X may stop this work; the client also suppresses another stop while its own stop request remains open.
