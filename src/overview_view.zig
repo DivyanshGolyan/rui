@@ -7439,7 +7439,7 @@ fn sUI132ArchivedTrimCase() !void {
     _ = try step(&state, .{ .conversation = span.first });
     try std.testing.expectEqualSlices(u8, &selected, &state.selected.session);
     try std.testing.expectEqualSlices(u8, &span.first, &state.conversing.?);
-    _ = try refresh(&state, .changed, testToken(2), &.{});
+    try commit(&state, .{ .delta = .changed, .since = testToken(2) });
     try std.testing.expectEqualSlices(u8, &selected, &state.selected.session);
     try std.testing.expectEqual(state.find(selected).?.archive_seq, selected_key);
 
