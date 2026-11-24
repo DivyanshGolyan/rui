@@ -10,7 +10,6 @@ const trace_native = @import("posix");
 const bash = @import("bash.zig");
 const environment = @import("environment.zig");
 const SessionEnvironments = @import("SessionEnvironments.zig");
-const execution = @import("execution.zig");
 const model_adapter = @import("model_adapter.zig");
 const signal_stack = @import("signal_stack.zig");
 const output_retention = @import("output_retention.zig");
@@ -23,12 +22,10 @@ const settings_handoff = @import("host_settings_handoff.zig");
 const wire_request = @import("wire_request.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
-const session_report = @import("session_report.zig");
 const stderr = @import("stderr.zig");
 const host_drain = @import("host_drain.zig");
 const host_settings = @import("host_settings.zig");
 const child_exit_wake = @import("child_exit_wake.zig");
-const server_mcp_relist = @import("server_mcp_relist.zig");
 
 pub const default_bash_timeout_ms = @import("host_settings.zig").default_bash_timeout_ms;
 pub const default_bash_path = @import("host_settings.zig").default_bash_path;
@@ -1087,10 +1084,7 @@ pub const Host = struct {
     bash_facts: environment.HostFacts = bash.default_facts,
     environments: ?*SessionEnvironments = null,
     mcp_servers: @import("mcp/servers.zig").Servers = .{},
-    /// The owner of MCP re-lists; null when no MCP server is configured.
-    mcp_relist: ?*@import("server_mcp_relist.zig").Relist = null,
     retention: *output_retention.Queue = undefined,
-    custody: execution.CustodyPool = .{ .records = &.{} },
     intake_capacity: usize = product_defaults.intake_capacity,
     descriptor_soft_limit: ?usize = null,
     scratch_used: std.atomic.Value(u64) = .init(0),
@@ -1099,15 +1093,6 @@ pub const Host = struct {
     settings_digest: ?settings_handoff.Digest = null,
     allowance_diagnostic: AllowanceDiagnostic = .{},
 };
-
-/// The one ask for MCP lists from the Host: asks the re-list owner for `only` or every configured server, wakes the
-/// dispatch loop when anything was asked, and returns how many were asked. `tools_reload` and `find_tools` reload both
-/// call it, so neither path asks or wakes on its own.
-pub fn askMcpLists(host: *Host, only: ?[]const u8, out: *[host_settings.max_mcp_servers]server_mcp_relist.Relist.Asked) usize {
-    const count: usize = if (host.mcp_relist) |owner| owner.askAll(only, out) else 0;
-    if (count != 0) host.lifecycle.wakeDispatch();
-    return count;
-}
 
 pub fn nowNs(io: std.Io) u64 {
     return @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
@@ -1203,14 +1188,6 @@ test "CM-54 allowance diagnostic delivers bounded typed records and reports loss
     count = std.c.read(fds[0], &buffer, buffer.len);
     try std.testing.expect(count > 0);
     try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=codex turn=1 operation=2 attempt=3 status=200 observed_at=123 delivery=completion prior_loss=true primary_used=9.5e0 primary_minutes=missing primary_reset_at=invalid secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
-}
-
-pub fn executionFacts(host: *Host) session_report.Execution {
-    return .{
-        .dispatch_fenced = !host.lifecycle.launchAllowed(),
-        .custody_occupied = host.custody.held(),
-        .scratch_used_bytes = host.scratch_used.load(.acquire),
-    };
 }
 
 pub fn pause(host: *Host, point: Hooks.Pause) void {
@@ -1322,31 +1299,6 @@ test "every --fault name reaches its own hook and nothing else" {
     var hooks: Hooks = .{};
     for ([_][]const u8{ "bash-none", "none", "retention-removal", "content_acquire", "content-acquire-", "" }) |name|
         try std.testing.expectError(error.UnknownFault, hooks.inject(name));
-}
-
-test "inspection counts held custody, not an in-flight admission reservation" {
-    var records: [2]execution.CustodyRecord = @splat(.{});
-    var host = Host{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .lease = undefined,
-        .store = undefined,
-        .custody = execution.CustodyPool.initialize(&records),
-    };
-    var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-    host.lifecycle = &host_lifecycle;
-    const cleanup = host.custody.reserve().?;
-    var permit = store_module.DispatchPermit{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 } };
-    _ = try host.custody.attach(cleanup, &permit);
-    try host.custody.detach(cleanup);
-    const probe = host.custody.reserve().?;
-    try std.testing.expectEqual(@as(usize, 1), executionFacts(&host).custody_occupied);
-    try std.testing.expectEqual(@as(usize, 2), host.custody.occupied());
-    try std.testing.expect(host.custody.reserve() == null);
-    try host.custody.releaseUnused(probe);
-    try std.testing.expectEqual(@as(usize, 1), executionFacts(&host).custody_occupied);
-    try host.custody.cleanupComplete(cleanup);
-    try std.testing.expectEqual(@as(usize, 0), executionFacts(&host).custody_occupied);
 }
 
 test "required Bash observations publish while optional stderr custody is held" {

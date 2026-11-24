@@ -137,6 +137,7 @@ test {
     _ = @import("SessionEnvironments.zig");
     _ = @import("client.zig");
     _ = @import("execution.zig");
+    _ = @import("execution_owner.zig");
     _ = @import("bash.zig");
     _ = @import("named_scratch.zig");
     _ = @import("output_retention.zig");
