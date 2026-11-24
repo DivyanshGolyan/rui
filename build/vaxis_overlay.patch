@@ -1,11 +1,12 @@
 --- a/event.zig
 +++ b/event.zig
-@@ -14,6 +14,8 @@
+@@ -14,6 +14,9 @@
      paste_start, // bracketed paste start
      paste_end, // bracketed paste end
      paste: []const u8, // osc 52 paste, caller must free
 +    clipboard_protocol: bool, // DEC private mode 5522 report
 +    osc_5522: []const u8, // borrows the parser's frame buffer until the next parse
++    osc_5522_invalid,
      color_report: Color.Report, // osc 4, 10, 11, 12 response
      color_scheme: Color.Scheme,
      winsize: Winsize,
@@ -16,19 +17,17 @@
  // text-as-codepoints
  buf: [128]u8 = undefined,
 +osc_5522: ?*Osc5522 = null,
-
+ 
  /// Share Vaxis.cursor_position_requests when using a custom event loop. It is
  /// needed both for cursor position reports and for the explicit width and
-@@ -189,6 +190,20 @@
- /// greater than 0
+@@ -190,6 +191,19 @@
  pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocator) !Result {
      std.debug.assert(input.len > 0);
-+
+ 
 +    if (self.osc_5522) |osc| {
 +        if (osc.inProgress()) {
 +            const result = osc.read(input);
-+            if (result.n != 0 or osc.inProgress()) return result;
-+            // A new escape sequence starts where the aborted OSC ended.
++            return result;
 +        }
 +        if (std.mem.startsWith(u8, input, Osc5522.prefix)) {
 +            osc.len = 0;
@@ -37,13 +36,14 @@
 +            return result;
 +        }
 +    }
-
++
      // We gate this for len > 1 so we can detect singular escape key presses
      if (input[0] == 0x1b and input.len > 1) {
-@@ -466,6 +481,40 @@
+         switch (input[1]) {
+@@ -466,6 +480,40 @@
      return null;
  }
-
+ 
 +pub const Osc5522 = struct {
 +    const prefix = "\x1b]5522;";
 +    const max_bytes = 8192;
@@ -71,7 +71,7 @@
 +            const event: ?Event = if (frame.terminated and len <= max_bytes)
 +                .{ .osc_5522 = self.bytes[0..len] }
 +            else
-+                null;
++                .osc_5522_invalid;
 +            return .{ .event = event, .n = frame.consumed };
 +        }
 +        return .{ .event = null, .n = end };
@@ -81,7 +81,7 @@
  /// Parse a DCS (Device Control String). Terminals send the replies we actually
  /// want here: XTVERSION is `ESC P > | <identity> ST`. Anything else is consumed
  /// without an event so the reader stays in sync with the byte stream.
-@@ -897,10 +946,17 @@
+@@ -897,10 +945,17 @@
          },
          'y' => {
              // DECRPM (CSI ? Ps ; Pm $ y)
@@ -102,10 +102,11 @@
                  // Mouse Pixel reporting
                  1016 => switch (pm) {
                      0, 4 => return null_event,
-@@ -2288,3 +2344,49 @@
+@@ -2287,4 +2342,53 @@
+     try testing.expectEqual(@as(?Event, null), result.event);
      const next = try parser.parse(input[8..], null);
      try testing.expectEqual(@as(?Event, .cap_kitty_keyboard), next.event);
- }
++}
 +
 +test "SUI-127 OSC 5522 transport accepts bounded frames and resumes ordinary input" {
 +    var osc: Osc5522 = .{};
@@ -131,13 +132,16 @@
 +        if (length <= 8192) {
 +            try testing.expectEqualStrings(data, frame.event.?.osc_5522);
 +        } else {
-+            try testing.expectEqual(null, frame.event);
++            try testing.expectEqual(@as(?Event, .osc_5522_invalid), frame.event);
 +        }
 +        try testing.expectEqual('q', (try parser.parse("q", null)).event.?.key_press.codepoint);
 +    }
 +
 +    try testing.expectEqualStrings("literal;payload", (try parser.parse("\x1b]5522;literal;payload\x07", null)).event.?.osc_5522);
 +    _ = try parser.parse("\x1b]5522;incomplete", null);
++    const aborted = try parser.parse("\x1b[A", null);
++    try testing.expectEqual(@as(?Event, .osc_5522_invalid), aborted.event);
++    try testing.expectEqual(0, aborted.n);
 +    try testing.expectEqual(Key.up, (try parser.parse("\x1b[A", null)).event.?.key_press.codepoint);
 +    try testing.expectEqual(0, (try parser.parse("\x1b]552", null)).n);
 +    try testing.expectEqual(0, (try parser.parse("\x1b]52;c;SGVs", null)).n);
@@ -151,7 +155,7 @@
 +    for ([_][]const u8{ "\x1b[?5522;5$y", "\x1b[>5522;2$y", "\x1b[?5522;2 y", "\x1b[?5522;y;text" }) |input| {
 +        try testing.expectEqual(null, (try parser.parse(input, null)).event);
 +    }
-+}
+ }
 --- a/Loop.zig
 +++ b/Loop.zig
 @@ -172,6 +172,9 @@
@@ -173,12 +177,28 @@
                                  // Preserve ESC only when continuation bytes are already queued.
                                  var poll_fds = [1]std.posix.pollfd{.{
                                      .fd = self.tty.fd.handle,
-@@ -301,6 +304,19 @@
+@@ -216,6 +219,11 @@
+                                 read_start = 0;
+                                 continue :read_loop;
+                             };
++                            if (result.n == 0 and result.event == .osc_5522_invalid) {
++                                // The next escape unframed the OSC and still belongs to the decoder.
++                                try handleEventGeneric(self, self.vaxis, &self.cache, Event, .osc_5522_invalid, paste_allocator);
++                                continue;
++                            }
+                             if (result.n == 0) {
+                                 // copy the read to the beginning. We don't use memcpy because
+                                 // this could be overlapping, and it's also rare
+@@ -301,6 +309,23 @@
              if (paste_allocator) |allocator| allocator.free(text);
              return;
          },
 +        .clipboard_protocol => |supported| {
 +            if (@hasField(Event, "clipboard_protocol")) return self.postEvent(.{ .clipboard_protocol = supported });
++            return;
++        },
++        .osc_5522_invalid => {
++            if (@hasField(Event, "osc_5522_invalid")) return self.postEvent(.osc_5522_invalid);
 +            return;
 +        },
 +        .osc_5522 => |payload| {
@@ -193,30 +213,31 @@
          .terminal_version => |identity| {
              // Stored on Vaxis.caps rather than forwarded: capability bookkeeping
              // is internal, and handling it here keeps it off the per-platform
-@@ -410,7 +426,7 @@
+@@ -410,7 +435,7 @@
                          return self.postEvent(.{ .color_report = report });
                      }
                  },
 -                .cursor_position, .paste_start, .paste_end, .paste, .terminal_version => unreachable, // handled above on all platforms
-+                .cursor_position, .paste_start, .paste_end, .paste, .clipboard_protocol, .osc_5522, .terminal_version => unreachable, // handled above on all platforms
++                .cursor_position, .paste_start, .paste_end, .paste, .clipboard_protocol, .osc_5522, .osc_5522_invalid, .terminal_version => unreachable, // handled above on all platforms
                  .color_scheme => |scheme| {
                      if (@hasField(Event, "color_scheme")) {
                          return self.postEvent(.{ .color_scheme = scheme });
 --- a/vxfw/vxfw.zig
 +++ b/vxfw/vxfw.zig
-@@ -44,6 +44,8 @@
+@@ -44,6 +44,9 @@
      paste_start, // bracketed paste start
      paste_end, // bracketed paste end
      paste: []const u8, // osc 52 paste, caller must free
 +    clipboard_protocol: bool, // DEC private mode 5522 support
 +    osc_5522: []const u8, // raw payload after "5522;", borrowed through event dispatch
++    osc_5522_invalid,
      color_report: vaxis.Color.Report, // osc 4, 10, 11, 12 response
      color_scheme: vaxis.Color.Scheme, // light / dark OS theme changes
      winsize: vaxis.Winsize, // the window size has changed. This event is always sent when the loop is started
-@@ -74,6 +76,24 @@
+@@ -74,6 +77,24 @@
      }
  };
-
+ 
 +pub const ClipboardOutput = struct {
 +    pub const max_bytes = 512;
 +
@@ -238,7 +259,7 @@
  pub const Command = union(enum) {
      /// Callback the event with a tick event at the specified deadlline
      tick: Tick,
-@@ -85,6 +105,11 @@
+@@ -85,6 +106,11 @@
      /// Try to copy the provided text to the host clipboard. Uses OSC 52. Silently fails if terminal
      /// doesn't support OSC 52
      copy_to_clipboard: []const u8,
@@ -247,7 +268,7 @@
 +    clipboard_mode: bool,
 +    /// Write and flush framed clipboard protocol bytes.
 +    clipboard_output: ClipboardOutput,
-
+ 
      /// Set the title of the terminal
      set_title: []const u8,
 --- a/vxfw/App.zig
@@ -257,11 +278,11 @@
  timers: std.ArrayList(vxfw.Tick),
  wants_focus: ?vxfw.Widget,
 +clipboard_mode: bool = false,
-
+ 
  /// Runtime options
  pub const Options = struct {
 @@ -57,7 +58,14 @@
-
+ 
      var loop: EventLoop = .init(self.io, tty, vx);
      try loop.start();
 -    defer loop.stop();
@@ -273,22 +294,22 @@
 +            else => {},
 +        };
 +    }
-
+ 
      // Send the init event
      try loop.postEvent(.init);
 @@ -66,6 +74,7 @@
-
+ 
      try vx.enterAltScreen(tty.writer());
      try vx.queryTerminal(tty.writer(), .fromSeconds(1));
 +    if (@import("builtin").os.tag != .windows) try self.clipboardOutput("\x1b[?5522$p");
      try vx.setBracketedPaste(tty.writer(), true);
      try vx.subscribeToColorSchemeUpdates(tty.writer());
-
+ 
 @@ -207,6 +216,12 @@
                  try self.handleCommand(&ctx.cmds);
              },
              .mouse => |mouse| try mouse_handler.handleMouse(self, ctx, mouse),
-+            .clipboard_protocol, .osc_5522 => {
++            .clipboard_protocol, .osc_5522, .osc_5522_invalid => {
 +                defer if (event == .osc_5522) self.allocator.free(event.osc_5522);
 +                ctx.phase = .at_target;
 +                try focus_handler.root.handleEvent(ctx, event);
@@ -300,7 +321,7 @@
 @@ -275,15 +290,38 @@
      std.sort.insertion(vxfw.Tick, self.timers.items, {}, vxfw.Tick.lessThan);
  }
-
+ 
 -fn handleCommand(self: *App, cmds: *vxfw.CommandList) Allocator.Error!void {
 -    defer cmds.clearRetainingCapacity();
 +fn setClipboardMode(self: *App, enabled: bool) std.Io.Writer.Error!void {
@@ -362,10 +383,11 @@
              },
              .query_color => |kind| {
                  self.vx.queryColor(self.tty.writer(), kind) catch |err| {
-@@ -1261,3 +1295,58 @@
+@@ -1260,4 +1294,59 @@
+ 
  test {
      std.testing.refAllDecls(@This());
- }
++}
 +
 +test "SUI-128 OSC 5522 transport dispatches copied frames and reports only to the App root" {
 +    const testing = std.testing;
@@ -420,4 +442,4 @@
 +    try app.dispatchEvents(&loop, &ctx, &mouse, &focus);
 +    try testing.expectEqual(@as(?bool, true), observed.capability);
 +    try testing.expectEqual(2, observed.frames);
-+}
+ }

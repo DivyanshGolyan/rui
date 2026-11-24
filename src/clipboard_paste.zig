@@ -42,7 +42,7 @@ pub const Request = struct {
     }
 };
 
-pub const Failure = enum { invalid, unavailable, text_too_long, image_too_large };
+pub const Failure = enum { invalid, unavailable, timed_out, text_too_long, image_too_large };
 
 pub const Effect = union(enum) {
     read: Request,
@@ -60,6 +60,7 @@ pub const Transaction = struct {
         read: Read,
     } = .idle,
     next_id: u64 = 0,
+    require_reply_ids: bool = false,
 
     const Offer = struct {
         epoch: u64,
@@ -174,6 +175,30 @@ pub const Transaction = struct {
         self.phase = .idle;
     }
 
+    pub fn invalidFrame(self: *Transaction, allocator: std.mem.Allocator) void {
+        switch (self.phase) {
+            .idle => {},
+            .offer => |*offer| offer.discarded = true,
+            .read => |*read| read.fail(allocator, .invalid),
+        }
+    }
+
+    pub fn expire(self: *Transaction, allocator: std.mem.Allocator, epoch: u64) ?Effect {
+        defer self.deinit(allocator);
+        return switch (self.phase) {
+            .idle => null,
+            .offer => |offer| if (offer.epoch == epoch and !offer.discarded)
+                .{ .failure = .{ .epoch = epoch, .reason = .timed_out } }
+            else
+                null,
+            .read => |*read| blk: {
+                // A late untagged reply cannot be distinguished from the next read.
+                self.require_reply_ids = true;
+                break :blk if (read.epoch == epoch and read.outcome != .cancelled) read.refusal(.timed_out) else null;
+            },
+        };
+    }
+
     /// Consume one OSC payload after `5522;`, with the terminator stripped.
     /// The epoch belongs to the target at the offer's opening OK.
     pub fn receive(self: *Transaction, allocator: std.mem.Allocator, payload: []const u8, epoch: u64) ?Effect {
@@ -209,7 +234,11 @@ pub const Transaction = struct {
             (frame.password != null and !eql(frame.password.?, offer.token()))) offer.discarded = true;
 
         switch (frame.status orelse return null) {
-            .OK => offer.discarded = true,
+            .OK => {
+                if (self.require_reply_ids and offer.password_len == 0 and frame.valid and frame.password != null) {
+                    self.beginOffer(frame, epoch);
+                } else offer.discarded = true;
+            },
             .DATA => {
                 if (offer.discarded) return null;
                 if (offer.listed or !eql(frame.mime orelse "", "Lg==")) {
@@ -250,7 +279,7 @@ pub const Transaction = struct {
         if (frame.id) |id| {
             var expected: [20]u8 = undefined;
             if (!eql(id, std.fmt.bufPrint(&expected, "{d}", .{read.id}) catch unreachable)) return null;
-        } else if (read.ignoreOffer(frame)) return null;
+        } else if (read.ignoreOffer(frame) or self.require_reply_ids) return null;
 
         if (!frame.valid or frame.password != null) read.fail(allocator, .invalid);
         switch (frame.status orelse return null) {
@@ -565,27 +594,35 @@ test "SUI-117 clipboard reads settle only the live transaction" {
         try testing.expectEqual(Failure.unavailable, transaction.receive(testing.allocator, "type=read:status=EPERM:id=1", 1).?.failure.reason);
         try testing.expect((try testOffer(&transaction, 1, "text/plain")) != null);
     }
-    {
+    for ([_]bool{ false, true }) |cancelled| {
         var transaction: Transaction = .{};
         defer transaction.deinit(testing.allocator);
-        try testing.expect(!transaction.pending());
-        try testInput(&transaction, 1, "type=read:status=OK");
-        try testing.expect(transaction.pending());
-        try testChunk(&transaction, 1, "type=read:status=DATA:mime=Lg==;", "text/plain");
-        _ = transaction.receive(testing.allocator, "type=read:status=DONE", 1).?.read;
-        try testing.expect(transaction.pending());
+        _ = (try testOffer(&transaction, 1, "text/plain")).?.read;
         try testInput(&transaction, 1, "type=read:status=OK:id=1");
         try testChunk(&transaction, 1, "type=read:status=DATA:id=1:mime=dGV4dC9wbGFpbg==;", "timed out");
-        transaction.abort(testing.allocator);
-        try testing.expect(transaction.pending());
-        transaction.deinit(testing.allocator);
+        if (cancelled) transaction.abort(testing.allocator);
+        const expired = transaction.expire(testing.allocator, 1);
+        if (cancelled) {
+            try testing.expectEqual(null, expired);
+        } else {
+            try testing.expectEqual(Failure.timed_out, expired.?.failure.reason);
+            try testing.expectEqual(@as(u64, 1), expired.?.failure.epoch);
+        }
         try testing.expect(!transaction.pending());
-        const read = (try testOffer(&transaction, 2, "text/plain")).?.read;
-        try testing.expectEqualStrings("\x1b]5522;type=read:id=2;dGV4dC9wbGFpbg==\x1b\\", read.bytes());
+        try testInput(&transaction, 2, "type=read:status=OK");
+        try testInput(&transaction, 2, "type=read:status=OK:pw=dG9rZW4=");
+        try testChunk(&transaction, 2, "type=read:status=DATA:mime=Lg==;", "text/plain");
+        const next = transaction.receive(testing.allocator, "type=read:status=DONE", 2).?.read;
+        try testing.expect(std.mem.indexOf(u8, next.bytes(), "id=2:") != null);
+        try testInput(&transaction, 2, "type=read:status=OK:id=2");
         try testInput(&transaction, 2, "type=read:status=DONE:id=1");
-        try testing.expect(transaction.pending());
-        try testInput(&transaction, 2, "type=read:status=DONE:id=2");
-        try testing.expect(!transaction.pending());
+        try testChunk(&transaction, 2, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;", "stale");
+        try testInput(&transaction, 2, "type=read:status=DONE");
+        try testChunk(&transaction, 2, "type=read:status=DATA:id=2:mime=dGV4dC9wbGFpbg==;", "next");
+        const pasted = transaction.receive(testing.allocator, "type=read:status=DONE:id=2", 2).?.text;
+        defer testing.allocator.free(pasted.bytes);
+        try testing.expectEqualStrings("next", pasted.bytes);
+        try testing.expectEqual(@as(u64, 2), pasted.epoch);
     }
 }
 
@@ -631,6 +668,18 @@ test "SUI-118 clipboard reads keep data within their byte bounds" {
         try testChunk(&transaction, 4, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;", &chunk);
         try testing.expectEqual(Failure.invalid, transaction.receive(testing.allocator, "type=read:status=DONE", 4).?.failure.reason);
     }
+    for (0..3) |invalid_at| {
+        var transaction: Transaction = .{};
+        defer transaction.deinit(testing.allocator);
+        _ = (try testOffer(&transaction, 4, "text/plain")).?.read;
+        try testInput(&transaction, 4, "type=read:status=OK");
+        for (0..3) |index| {
+            if (index == invalid_at) transaction.invalidFrame(testing.allocator);
+            if (index < 2) try testChunk(&transaction, 4, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;", "partial");
+        }
+        try testing.expectEqual(Failure.invalid, transaction.receive(testing.allocator, "type=read:status=DONE", 4).?.failure.reason);
+    }
+
     {
         var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
         const allocator = failing.allocator();

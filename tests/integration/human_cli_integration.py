@@ -605,16 +605,17 @@ def clipboard_paste_case():
         body = b";" + base64.b64encode(payload) if payload is not None else b""
         return b"\x1b]5522;type=read:status=" + metadata + body + b"\x1b\\"
 
-    def paste(master, mime, payload):
+    def paste(master, mime, payload, malformed=None, at=0):
         os.write(master, frame(b"OK:pw=dG9rZW4=") + frame(b"DATA:mime=Lg==", mime) + frame(b"DONE"))
         request = raw_output(master, b";" + base64.b64encode(mime) + b"\x1b\\")
         handle = re.search(rb"type=read:id=([0-9]+)", request).group(1)
         prefix = b":id=" + handle
-        response = frame(b"OK" + prefix)
-        for offset in range(0, len(payload), 4096):
-            response += frame(b"DATA:mime=" + base64.b64encode(mime) + prefix, payload[offset:offset + 4096])
-        response += frame(b"DONE" + prefix)
-        os.write(master, response)
+        data = b"DATA:mime=" + base64.b64encode(mime) + prefix
+        frames = [frame(data, payload[offset:offset + 4096]) for offset in range(0, len(payload), 4096)]
+        if malformed:
+            corrupt = frame(data, b"x" * (7000 if malformed == "oversized" else 1))
+            frames.insert(at, corrupt if malformed == "oversized" else corrupt[:-2])
+        os.write(master, frame(b"OK" + prefix) + b"".join(frames) + frame(b"DONE" + prefix))
 
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")

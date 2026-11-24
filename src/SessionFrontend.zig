@@ -952,6 +952,7 @@ fn pasteClipboard(raw: *anyopaque, ctx: *vxfw.EventContext, data: Root.Clipboard
             .image_too_large => "! Clipboard image exceeds 16 MiB",
             .invalid => "! Clipboard paste is invalid",
             .unavailable => "! Could not read the clipboard",
+            .timed_out => "! Clipboard read timed out",
         },
         .text => |bytes| {
             _ = self.input.appEvent(conversation_keys, .paste_start, true, false);

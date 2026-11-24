@@ -107,7 +107,11 @@ fn clipboardFrame(self: *Self, ctx: *vxfw.EventContext, payload: []const u8) !vo
     const allocator = std.heap.page_allocator;
     const received = self.clipboard.receive(allocator, payload, self.clipboard_epoch);
     self.clipboard_deadline = if (self.clipboard.pending()) std.Io.Clock.awake.now(ctx.io).nanoseconds + 5 * std.time.ns_per_s else null;
-    const effect = received orelse return;
+    if (received) |effect| try self.clipboardEffect(ctx, effect);
+}
+
+fn clipboardEffect(self: *Self, ctx: *vxfw.EventContext, effect: clipboard_paste.Effect) !void {
+    const allocator = std.heap.page_allocator;
     switch (effect) {
         .read => |request| {
             if (!self.clipboard_enabled) {
@@ -344,6 +348,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             try self.syncClipboard(ctx);
         },
         .osc_5522 => |payload| try self.clipboardFrame(ctx, payload),
+        .osc_5522_invalid => self.clipboard.invalidFrame(std.heap.page_allocator),
         .mouse => |mouse| if (mouse.type == .release) if (self.pointer_free) |hook| try hook.free(hook.context, ctx),
         .init => {
             try ctx.requestFocus(self.overview);
@@ -379,12 +384,11 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             if (ctx.quit) return;
             if (self.sign_in) |page| try page.handleEvent(ctx, .tick);
             if (!ctx.quit) {
-                if (self.clipboard_deadline) |deadline| if (std.Io.Clock.awake.now(ctx.io).nanoseconds >= deadline) {
-                    self.clipboard.deinit(std.heap.page_allocator);
-                    self.clipboard_deadline = null;
-                    self.clipboard_supported = false;
-                };
                 try self.syncClipboard(ctx);
+                if (self.clipboard_deadline) |deadline| if (std.Io.Clock.awake.now(ctx.io).nanoseconds >= deadline) {
+                    self.clipboard_deadline = null;
+                    if (self.clipboard.expire(std.heap.page_allocator, self.clipboard_epoch)) |effect| try self.clipboardEffect(ctx, effect);
+                };
                 try ctx.tick(16, self.widget());
             }
         },
