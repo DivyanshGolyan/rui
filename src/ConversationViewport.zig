@@ -84,7 +84,6 @@ pub const RetainedStyle = u16;
 const body_bit: RetainedStyle = 1 << 8;
 const feed_inset: u16 = 2;
 
-const exit_bit: RetainedStyle = 1 << 9;
 const user_message_bit: RetainedStyle = 1 << 10;
 const user_start_bit: RetainedStyle = 1 << 11;
 const user_end_bit: RetainedStyle = 1 << 12;
@@ -158,7 +157,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         user_start_pending: bool = false,
         control: [8]u8 = undefined,
         control_length: usize = 0,
-        link: enum { none, address, text, exit_text } = .none,
+        link: enum { none, address, text } = .none,
         address_length: usize = 0,
         length: usize = 0,
         origin: u64 = 0,
@@ -202,7 +201,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                         self.control_length = 0;
                     } else if (std.mem.eql(u8, self.control[0..self.control_length], TerminalText.link_end)) {
                         std.debug.assert(self.link == .address);
-                        self.link = if (self.address_length == 0) .none else if (self.address_length == tool_fold.exit_uri.len and std.mem.endsWith(u8, self.text(), tool_fold.exit_uri)) .exit_text else .text;
+                        self.link = if (self.address_length == 0) .none else .text;
                         self.control_length = 0;
                     }
                     start = index + 1;
@@ -247,7 +246,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         fn cellValue(self: *const Self) RetainedStyle {
             const index: u8 = switch (self.link) {
                 .none => return self.style,
-                .exit_text => return (self.style & ~foreground_mask) | (@as(RetainedStyle, 2) << 3) | exit_bit,
                 .address => address_index,
                 .text => if (self.style & 4 != 0 and foregroundIndex(self.style) >= 1 and foregroundIndex(self.style) <= 4) return self.style else linked_index,
             };
@@ -315,6 +313,12 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         pub fn bodyAt(self: *const Self, position: usize) bool {
             return styled and position < self.text().len and self.styles[position] & body_bit != 0;
+        }
+
+        pub fn assistantWebLinkAt(self: *const Self, position: usize) ?[]const u8 {
+            if (!self.bodyAt(position) or self.styles[position] & user_message_bit != 0 or !self.selectable(position)) return null;
+            const uri = self.address(position);
+            return if (TerminalText.linkTarget(uri)) uri else null;
         }
 
         pub fn selectable(self: *const Self, position: usize) bool {
@@ -544,22 +548,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 if (commit) _ = self.printRange(line.child(.{ .width = indent, .height = 1 }), offset, leading, .word, false, true, colour, plain, colours);
                 return rowsUsed(self.printRange(line.child(.{ .x_off = indent }), leading, end, .word, false, commit, colour, plain, colours));
             }
-            // The retained exit field is semantic heading data, never inferred from label text.
-            if (styled) for (self.styles[content_start..end], content_start..) |value, index| {
-                if (value & exit_bit == 0) continue;
-                if (commit) {
-                    const line = window.child(.{ .y_off = row, .height = 1, .width = window.width -| feed_inset });
-                    const exit_width = display_text.width(self.bytes[index..end], .{ .viewport = self.width_method });
-                    if (line.width < exit_width) {
-                        self.printTruncated(line, index, end, colour, plain, colours);
-                    } else {
-                        const label_width = line.width - exit_width -| 1;
-                        self.printTruncated(line.child(.{ .width = label_width }), content_start, index, colour, plain, colours);
-                        _ = self.printRange(line.child(.{ .x_off = line.width - exit_width, .width = exit_width }), index, end, .none, false, true, colour, plain, colours);
-                    }
-                }
-                return 1;
-            };
             var user = false;
             var single = styled and end != offset;
             var note: ?struct { start: usize, end: usize } = null;
@@ -1756,84 +1744,6 @@ test "quote body extraction metadata leaves grapheme layout and visual styles un
     };
 }
 
-fn toolExitInsets() !void {
-    const View = @import("session_view.zig");
-    const Sink = struct {
-        writer: *std.Io.Writer,
-        pub fn feed(self: @This(), bytes: []const u8) !void {
-            try self.writer.writeAll(bytes);
-        }
-    };
-    const plain: vaxis.Style = .{ .fg = .{ .index = 255 } };
-    const colours: Colours = .{ .quiet = .{ .index = 63 }, .failure = .{ .index = 64 } };
-    for (std.enums.values(Method)) |method| for ([_]bool{ false, true }) |colour| {
-        for ([_][]const u8{ "Check exit 127", "漢字 é 🧑‍🌾" }) |label| {
-            var description: @import("protocol.zig").Bounded(@import("protocol.zig").max_tool_description_bytes) = .{};
-            try description.set(label);
-            var storage: [512]u8 = undefined;
-            var writer = std.Io.Writer.fixed(&storage);
-            try writer.writeAll(tool_fold.heading_marker);
-            try View.toolResult(.{ .description = description, .code = .failed, .publication_position = null }, .{ .exit = 127 }, Sink{ .writer = &writer }, colour);
-            const input = writer.buffered();
-            for (0..input.len + 1) |split| {
-                var document: Sized(512, true) = .{ .width_method = method, .sidenotes = true };
-                try document.append(input[0..split]);
-                try document.append(input[split..]);
-                try document.prepare();
-                for (0..81) |width_value| {
-                    const width: u16 = @intCast(width_value);
-                    var screen: TestScreen = undefined;
-                    const window = screen.window(width, 2);
-                    window.screen.width_method = method;
-                    window.fill(.{ .style = plain });
-                    try std.testing.expectEqual(@as(u16, 1), document.printLine(window, 0, 0, true, colour, plain, colours));
-                    try std.testing.expectEqual(@as(u16, 1), document.lineRows(.{ .width = width, .method = method }, 0));
-                    if (width >= 2) for (width - 2..width) |at| try std.testing.expectEqualStrings(" ", screen.screen.readCell(@intCast(at), 0).?.char.grapheme);
-                    if (width >= 10) {
-                        for ("exit 127", 0..) |byte, at| {
-                            const cell = screen.screen.readCell(width - 10 + @as(u16, @intCast(at)), 0).?;
-                            try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
-                            try std.testing.expectEqual(if (colour) colours.quiet else plain.fg, cell.style.fg);
-                            try std.testing.expectEqualStrings("", cell.link.uri);
-                        }
-                        if (width > 10) try std.testing.expectEqualStrings(" ", screen.screen.readCell(width - 11, 0).?.char.grapheme);
-                        if (width == 14) try std.testing.expectEqualStrings("…", screen.screen.readCell(2, 0).?.char.grapheme);
-                        if (width == 80) {
-                            var row: [256]u8 = undefined;
-                            try std.testing.expect(std.mem.startsWith(u8, screen.row(0, &row), "× "));
-                        }
-                    } else if (width > 2) {
-                        for (0..width - 3) |at| try std.testing.expectEqualStrings("exit 127"[at..][0..1], screen.screen.readCell(@intCast(at), 0).?.char.grapheme);
-                        try std.testing.expectEqualStrings("…", screen.screen.readCell(width - 3, 0).?.char.grapheme);
-                    }
-                }
-            }
-        }
-    };
-}
-
-fn toolExitAscii() !void {
-    var document: Sized(256, true) = .{};
-    try document.append(tool_fold.heading_marker ++ "x Run tests" ++ tool_fold.exit_open ++ "exit 127" ++ TerminalText.link_close ++ "\n" ++ tool_fold.output_marker ++ "    saved output\n");
-    try document.prepare();
-    try std.testing.expect(document.toolIsOpen(0));
-    var screen: TestScreen = undefined;
-    var row: [128]u8 = undefined;
-    const plain: vaxis.Style = .{ .fg = .{ .index = 255 }, .bg = .{ .index = 19 } };
-    const colours: Colours = .{ .quiet = .{ .index = 63 }, .selection = .{ .index = 64 }, .band = .{ .index = 65 } };
-    for ([_]bool{ false, true }) |colour| {
-        const window = screen.window(32, 3);
-        window.fill(.{ .style = plain });
-        _ = document.draw(window, .{}, true, colour, plain, colours);
-        try std.testing.expectEqualStrings("x Run tests           exit 127", screen.row(0, &row));
-        try std.testing.expectEqualStrings("    saved output", screen.row(1, &row));
-        for (0..32) |column| {
-            try std.testing.expectEqual(if (colour) colours.selection else plain.bg, screen.screen.readCell(@intCast(column), 0).?.style.bg);
-            try std.testing.expectEqual(if (colour) colours.band else plain.bg, screen.screen.readCell(@intCast(column), 1).?.style.bg);
-        }
-    }
-}
-
 fn timestampChanges() !void {
     const cases = [_]struct { previous: ?[]const u8, tool: bool, current: []const u8, shown: bool }{
         .{ .previous = null, .tool = false, .current = "08:00", .shown = true },
@@ -2032,8 +1942,6 @@ fn legacyBandShape() !void {
 }
 
 pub fn testMessageLayout() !void {
-    try toolExitInsets();
-    try toolExitAscii();
     try timestampChanges();
     try wrappedBand();
     try bandProvenance();

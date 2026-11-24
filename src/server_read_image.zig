@@ -79,7 +79,7 @@ pub const Calls = struct {
             return .retry_later;
         };
         active.* = .{ .token = token, .binding = undefined };
-        var admission = (host.store.admitActionAttempt(call, 300_000, host.hooks.storeFaults(.attempt_admission)) catch |err| {
+        var admission = (host.store.admitActionAttempt(call, 300_000, host.probes.storeFaults(.attempt_admission)) catch |err| {
             host.allocator.destroy(active);
             host.custody.releaseUnused(token) catch unreachable;
             host.lifecycle.fenceDispatch("image read admission", err);
@@ -393,7 +393,7 @@ fn testReadImage(cases: []const TestCase) !void {
                 try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
             }
             if (case == .background) try std.testing.expect(storage.backgroundAction(.{ .live_action = selected.action_id }, .{}) == .accepted);
-            if (case == .publication) host.hooks.failures.insert(.result_before_commit);
+            if (case == .publication) host.probes.arm(.result_before_commit);
             if (case == .source_io) {
                 var source_io = std.testing.io;
                 var source_vtable = source_io.vtable.*;

@@ -948,7 +948,7 @@ jobs:
                 false) test "$POLICY_RESULT" = success ;;
                 *) echo 'Missing or invalid PR job selection' >&2; exit 1 ;;
               esac
-              # The PR tier runs no macOS; promotion runs it with the upgrade and frame gate.
+              # The PR tier runs no macOS; promotion runs it with the upgrade.
               case "$NATIVE" in
                 true) test "$MACOS_RESULT" = success ;;
                 false) test "$MACOS_RESULT" = skipped ;;
