@@ -4,6 +4,7 @@ const c = @import("h2_c");
 const openssl = @import("tls_client").c;
 const h2 = @import("h2.zig");
 const policy = @import("policy.zig");
+const dial_policy = @import("dial_policy.zig");
 const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
 const Resolver = @import("Resolver.zig");
@@ -224,7 +225,7 @@ fn advanceAttempts(self: *Connection, failed: bool, time: u64) void {
     self.state = .connecting;
     var failure = failed;
     while (true) {
-        switch (policy.nextAttempt(.{
+        switch (dial_policy.nextAttempt(.{
             .in_flight = @as(u8, @intFromBool(self.socket >= 0)) + @intFromBool(self.earlier >= 0),
             .more_addresses = self.addressAt(self.address_index) != null,
             .failed = failure,
@@ -248,7 +249,7 @@ fn attempt(self: *Connection, time: u64) enum { connected, in_flight, refused, l
     std.debug.assert(self.earlier < 0);
     const address = self.addressAt(self.address_index).?;
     self.address_index += 1;
-    self.next_attempt_ns = if (self.addressAt(self.address_index) != null) time +| policy.attempt_delay_ns else 0;
+    self.next_attempt_ns = if (self.addressAt(self.address_index) != null) time +| dial_policy.attempt_delay_ns else 0;
     const fd = std.c.socket(address.family, std.c.SOCK.STREAM, 0);
     if (fd < 0) return .local_failure;
     self.earlier = self.socket;
@@ -335,7 +336,7 @@ pub fn continueTunnel(self: *Connection) void {
             .more => {},
             .malformed => return self.engine.setupFailed(self, .proxy_failed),
             .done => |answer| {
-                if (policy.tunnelRefusal(answer.status)) |cause| return self.engine.setupFailed(self, cause);
+                if (dial_policy.tunnelRefusal(answer.status)) |cause| return self.engine.setupFailed(self, cause);
                 if (answer.used != count) return self.engine.setupFailed(self, .proxy_failed);
                 return self.startTls();
             },

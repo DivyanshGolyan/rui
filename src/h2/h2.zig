@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @import("h2_c");
 
 const policy = @import("policy.zig");
+const liveness = @import("liveness.zig");
 const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
 const tls_client = @import("tls_client");
@@ -40,7 +41,7 @@ pub const parseHostPort = url_value.parseHostPort;
 
 pub const Endpoint = enum(u8) { _ };
 
-pub const Liveness = policy.Liveness;
+pub const Liveness = liveness.Liveness;
 
 pub const Trust = tls_client.Trust;
 
@@ -365,6 +366,8 @@ test "the linked libraries are the pinned versions" {
 
 test {
     _ = policy;
+    _ = @import("dial_policy.zig");
+    _ = @import("liveness.zig");
     _ = Record;
     _ = Engine;
     _ = @import("Resolver.zig");

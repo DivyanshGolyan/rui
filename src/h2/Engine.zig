@@ -3,6 +3,8 @@ const builtin = @import("builtin");
 const c = @import("h2_c");
 const h2 = @import("h2.zig");
 const policy = @import("policy.zig");
+const dial_policy = @import("dial_policy.zig");
+const liveness = @import("liveness.zig");
 const Record = @import("Stream.zig");
 const Connection = @import("Connection.zig");
 const Waker = @import("os").Waker;
@@ -142,7 +144,7 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
     errdefer freeUnwritten(allocator, Connection, connections);
     const views = try allocUnwritten(allocator, policy.ConnectionView, capacity);
     errdefer freeUnwritten(allocator, policy.ConnectionView, views);
-    const pollfds = try allocUnwritten(allocator, std.c.pollfd, policy.max_attempts * capacity + 1);
+    const pollfds = try allocUnwritten(allocator, std.c.pollfd, dial_policy.max_attempts * capacity + 1);
     errdefer freeUnwritten(allocator, std.c.pollfd, pollfds);
     const scratch = &(try allocUnwritten(allocator, Scratch, 1))[0];
     errdefer freeUnwritten(allocator, Scratch, scratch[0..1]);
@@ -598,7 +600,7 @@ fn checkLiveness(self: *Engine) void {
             connection.close(.abrupt);
             continue;
         }
-        switch (policy.liveness(self.livenessFacts(connection, time), self.options.liveness)) {
+        switch (self.options.liveness.action(self.livenessFacts(connection, time))) {
             .none => {},
             .ping => connection.ping(time),
             .dead => connection.lose(.peer_silent),
@@ -607,7 +609,7 @@ fn checkLiveness(self: *Engine) void {
     }
 }
 
-fn livenessFacts(self: *Engine, connection: *const Connection, time: u64) policy.LivenessFacts {
+fn livenessFacts(self: *Engine, connection: *const Connection, time: u64) liveness.Facts {
     var only_idle = true;
     for (self.connections[0..connection.index]) |*other| {
         if (other.origin == connection.origin and other.state == .ready and other.streams == 0) only_idle = false;
@@ -759,7 +761,7 @@ fn nextDeadline(self: *Engine) ?u64 {
     for (self.active()) |*connection| {
         const deadline: ?u64 = switch (connection.state) {
             .free => null,
-            .ready, .draining => policy.livenessDeadline(self.livenessFacts(connection, time), self.options.liveness),
+            .ready, .draining => self.options.liveness.deadline(self.livenessFacts(connection, time)),
             else => connection.setupDeadline(),
         };
         if (deadline) |value| earliest = if (earliest) |current| @min(current, value) else value;
