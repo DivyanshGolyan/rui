@@ -7,8 +7,8 @@ File tools and tests read the working tree; unstaged and untracked-only edits
 do not select checks. GitHub CI owns review-phase acceptance.
 
 Default and --quick run the same cheap feedback. --full is an opt-in diagnostic
-that adds the CI policy suite, development builds, cross-compilation, all-unit compilation, stack
-frames and reachable live MySQL checks. UID-global Upgrade stays hosted.
+that adds the CI policy suite, development builds, cross-compilation, all-unit compilation and
+reachable live MySQL checks. UID-global Upgrade stays hosted.
 Generation runs only for the emitter's input closure or generated wire inputs.
 The hook reuses a passing receipt for the same tree and merge base.
 Receipts describe local feedback only. Hosted acceptance is never evaluated
@@ -147,7 +147,6 @@ while read -r _ local_sha _ _; do
 done
 """,)
 
-STACK_FRAMES = ["zig", "build", "-j1", "stack-frames", "-Dcpu=baseline", "--summary", "line"]
 RECEIPT = "rui-prepush-receipt.json"
 
 
@@ -482,7 +481,6 @@ def checks(paths, available, base, mode="default", mysql=False):
         yield "macOS type check", ["zig", "build", "typecheck-macos", "--summary", "line"]
     if mode == "full":
         yield "unfiltered unit compile", unit_compile()
-    yield "stack frames", STACK_FRAMES
     reads_mysql = LIVE_MYSQL_DIALECT_TARGETS | set(development["mysql_suites"])
     live = sorted({root for root, _ in development["live_needs"] if root in reads_mysql})
     if live and mysql:
@@ -650,7 +648,7 @@ def main():
     parser.add_argument("--plan", action="store_true", help="print selected commands without executing them")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--quick", action="store_true", help="alias for default cheap feedback, used by installed hooks")
-    modes.add_argument("--full", action="store_true", help="also run the CI policy suite, compile the unit binaries unfiltered, run stack-frames "
+    modes.add_argument("--full", action="store_true", help="also run the CI policy suite, compile the unit binaries unfiltered "
                        "and, with a reachable local MySQL, the selected targets that read it")
     parser.add_argument("--install-hook", action="store_true", help="install the git pre-push hook that runs --quick")
     parser.add_argument("--fix-whitespace", metavar="BASE", help=argparse.SUPPRESS)

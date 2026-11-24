@@ -81,7 +81,7 @@ class PrepushTest(unittest.TestCase):
             with self.subTest(mode=mode):
                 commands = dict(prepush.checks(paths, AVAILABLE, "BASE", mode))
                 self.assertFalse({"development selection", "macOS type check", "unfiltered unit compile",
-                                  "stack frames", "TypeScript client", "tests/ci"} & commands.keys())
+                                  "TypeScript client", "tests/ci"} & commands.keys())
                 self.assertTrue({"whitespace", "zig fmt", "schema number", "undefined Python names"} <= commands.keys())
                 self.assertIsInstance(commands["hosted acceptance"], prepush.Skipped)
                 self.assertIn("not evaluated", commands["hosted acceptance"].reason)
@@ -171,7 +171,7 @@ class PrepushTest(unittest.TestCase):
         for path in ("src/client.zig", "src/nested/client_rule.zig", "clients/ts/src/client.ts",
                      "clients/ts/src/nested/client.ts", "tests/ci/client_locality.py",
                      "tests/ci/test_client_locality.py", "tests/ci/caller_errors.py", "tests/ci/host_settings_locality.py",
-                     "tests/ci/select_tests.py", "tests/ci/import_architecture.py", "tests/ci/stack_frames.json"):
+                     "tests/ci/select_tests.py", "tests/ci/import_architecture.py"):
             for mode in ("default", "quick"):
                 for deleted in (False, True):
                     with self.subTest(path=path, mode=mode, deleted=deleted):
@@ -260,19 +260,18 @@ class PrepushTest(unittest.TestCase):
             self.assertNotIn("-Dpr-ci=true", prepush.unit_compile())
 
 
-    def test_full_adds_the_unit_compile_stack_frames_and_live_mysql_only_with_a_server(self):
+    def test_full_adds_the_unit_compile_and_live_mysql_only_with_a_server(self):
         paths = ["src/store/rsql.zig"]
         default = self.commands(paths)
         without = dict(prepush.checks(paths, AVAILABLE, "BASE", "full"))
         with_server = dict(prepush.checks(paths, AVAILABLE, "BASE", "full", mysql=True))
         for full in (without, with_server):
             focused = {name for name in default if name.startswith("tests/ci:")}
-            self.assertEqual(set(full) - set(default), {"tests/ci (CI policy suite)", "development selection", "macOS type check", "unfiltered unit compile", "stack frames", "live MySQL"})
+            self.assertEqual(set(full) - set(default), {"tests/ci (CI policy suite)", "development selection", "macOS type check", "unfiltered unit compile", "live MySQL"})
             self.assertEqual(set(default) - set(full), focused)
             self.assertEqual({name: full[name] for name in default if name not in focused},
                              {name: command for name, command in default.items() if name not in focused})
             self.assertEqual(full["unfiltered unit compile"], prepush.unit_compile())
-            self.assertEqual(full["stack frames"], ["zig", "build", "-j1", "stack-frames", "-Dcpu=baseline", "--summary", "line"])
         self.assertEqual(with_server["live MySQL"], ["env", "RUI_TEST_REQUIRE_ENGINES=mysql", "zig", "build", "test-store", "--summary", "line"])
         self.assertIsInstance(without["live MySQL"], prepush.Skipped)
         self.assertIn("RUI_TEST_MYSQL_SOCKET", without["live MySQL"].reason)

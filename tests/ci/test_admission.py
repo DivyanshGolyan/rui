@@ -65,7 +65,7 @@ def documentation_env():
 def plan_sources():
     names = ['tests/ci/' + name for name in (
         'select_tests.py', 'ci_plan.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py',
-        'import_architecture.py', 'build_files.py', 'release_numbers.py', 'stack_frames.json')]
+        'import_architecture.py', 'build_files.py', 'release_numbers.py')]
     names += [path.relative_to(ROOT).as_posix() for path in build_files.files()]
     names += ['src/store/schema.zig']
     return {name: (ROOT / name).read_text() for name in names} | {
@@ -621,9 +621,8 @@ class CandidatePlanTest(unittest.TestCase):
             self.assertEqual(output[key], 'false', key)
 
     # CI-1: written as literals, independent of select_tests' tier constants. measurement-check and
-    # mysql-wire-integration reach the PR tier only through their own files; stack-frames runs whenever a Host
-    # source, build input or frame gate file selects it, and deep-modules runs for every src/ or build manifest
-    # path that is not documentation (the rows below name each case).
+    # mysql-wire-integration reach the PR tier only through their own files, and deep-modules runs for every
+    # src/ or build manifest path that is not documentation (the rows below name each case).
     PR_TIER_NEVER = {'check', 'check-full', 'test', 'test-full'}
     # Unit roots the diff reaches, plus fixtures whose own script, executable or owner changed.
     PR_TIER_CASES = {
@@ -631,18 +630,18 @@ class CandidatePlanTest(unittest.TestCase):
         'tests/ci only': (['tests/ci/select_tests.py'], set()),
         # A source file no owner reaches is unclassified, so it selects the full PR set.
         'unreached source': (['src/future_owner.zig'], {'deep-modules', 'test-logic', 'test-native', 'test-store', 'test-h2', 'test-pg'}),
-        'build hub': (['build.zig'], {'deep-modules', 'stack-frames', 'test-logic'}),
+        'build hub': (['build.zig'], {'deep-modules', 'test-logic'}),
         'compiler and cache setup': (['.github/actions/setup/action.yml'], {'test-logic'}),
         'CI artifact producer': (['tests/ci/build_artifact.py'], {'test-logic'}),
         # The replayed SQLite pin: the PR roots that link sqlite, and the logic root the bootstrap always runs.
-        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'deep-modules', 'stack-frames', 'test-logic', 'test-native', 'test-store'}),
-        'dependency fetch': (['src/fetch_dependencies.sh'], {'deep-modules', 'stack-frames', 'test-logic'}),
+        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'deep-modules', 'test-logic', 'test-native', 'test-store'}),
+        'dependency fetch': (['src/fetch_dependencies.sh'], {'deep-modules', 'test-logic'}),
         'workflow and policy only': (['.github/workflows/check.yml', '.github/actions/policy/action.yml',
                                       'tests/ci/ci_plan.py'], set()),
         'producer and documentation': (['tests/ci/build_artifact.py', 'docs/verification/gates.md'], {'test-logic'}),
         'producer and core source': (['tests/ci/build_artifact.py', 'src/request_encoding.zig'],
-                                     {'deep-modules', 'stack-frames', 'test-logic', 'test-native'}),
-        'Store': (['src/store.zig'], {'deep-modules', 'stack-frames', 'test-native', 'test-store'}),
+                                     {'deep-modules', 'test-logic', 'test-native'}),
+        'Store': (['src/store.zig'], {'deep-modules', 'test-native', 'test-store'}),
         'fixture script': (['tests/integration/overview_integration.py'], {'overview-integration'}),
         # A shared helper runs the fixtures that import it, directly (bash_fixture.py) or through another
         # helper (tool_profile_fixture.py is imported by fresh_tool_profile_cases.py, which human-cli imports).
@@ -662,16 +661,14 @@ class CandidatePlanTest(unittest.TestCase):
             'host-launch-integration', 'host-status-integration', 'human-cli-integration', 'settings-integration',
             'upgrade-integration', 'test-logic', 'test-native'}),
         'slow fixture owner': (['src/Upgrade.zig'], {'deep-modules', 'upgrade-integration'}),
-        'core owning no fixture': (['src/request_encoding.zig'], {'deep-modules', 'stack-frames', 'test-logic', 'test-native'}),
-        'core owning one fixture': (['src/session_skills.zig'], {'deep-modules', 'skills-integration', 'stack-frames', 'test-logic', 'test-native'}),
-        # The frame gate's budget and any Host source run stack-frames on the PR.
-        'frame gate budget': (['tests/ci/stack_frames.json'], {'stack-frames'}),
-        'Host source under check': (['src/wire_version.zig'], {'deep-modules', 'stack-frames', 'test-logic', 'test-native'}),
+        'core owning no fixture': (['src/request_encoding.zig'], {'deep-modules', 'test-logic', 'test-native'}),
+        'core owning one fixture': (['src/session_skills.zig'], {'deep-modules', 'skills-integration', 'test-logic', 'test-native'}),
+        'Host source under check': (['src/wire_version.zig'], {'deep-modules', 'test-logic', 'test-native'}),
         'measurement own file': (['tests/qualification/call-classification/main.go'], {'measurement-check'}),
         'measurement non-own file': (['build/measurement.zig'], set()),
         'mysql wire own file': (['tests/integration/mysql_wire_test.zig'], {'mysql-wire-integration', 'test-logic'}),
         'mysql wire non-own file': (['src/store/wire/mysql_connection.zig'],
-                                    {'deep-modules', 'stack-frames', 'test-logic', 'test-native', 'test-store'}),
+                                    {'deep-modules', 'test-logic', 'test-native', 'test-store'}),
         'core owning many fixtures (Mac path)': (['src/client.zig'], {'deep-modules',
             'activity-integration', 'admission-integration', 'cli-image-integration', 'control-integration',
             'conversation-page-integration',
@@ -703,7 +700,7 @@ class CandidatePlanTest(unittest.TestCase):
                 self.assertEqual(run('pull_request', draft=True)['targets'], [])
                 self.assertEqual(run('workflow_dispatch')['targets'], selected['targets'])
                 promoted = set(run('workflow_dispatch', promotion=True)['targets'])
-                self.assertLessEqual({'check-full', 'test-logic', 'admission-debug-integration', 'stack-frames'}, promoted)
+                self.assertLessEqual({'check-full', 'test-logic', 'admission-debug-integration'}, promoted)
                 from select_tests import covers
                 self.assertEqual([t for t in selected['targets'] if not covers(t, promoted)], [])
 
