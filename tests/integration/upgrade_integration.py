@@ -1830,10 +1830,118 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
                 dispose_all(release_version)
 
 
+def first_click_watch_cases(root, binary, releases):
+    """SH-153: an explicit Settings check reads the release after the version-only offer."""
+    from codex_fixture import credentials
+
+    global TERMINAL_COLUMNS
+    original_columns = TERMINAL_COLUMNS
+    selected = f"0.{int(releases.version.split('.')[1]) + 1}.0"
+    newer = f"0.{int(releases.version.split('.')[1]) + 2}.0"
+
+    def click(screen, label, *, left_only=False):
+        frame = screen.contains(label)
+        for row, line in enumerate(frame.splitlines()):
+            if label in (line[:40] if left_only else line):
+                column = line.index(label)
+                screen.send(f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m")
+                return
+        raise AssertionError(frame)
+
+    try:
+        for columns in (140, 46):
+            TERMINAL_COLUMNS = columns
+            for outcome in ("newer", "unchanged", "error", "cancel"):
+                fixture = Releases(binary, newer)
+                try:
+                    future_name, future_sums = fixture.name, fixture.sums_path
+                    fixture.version = selected
+                    fixture.name = future_name.replace(newer, selected)
+                    fixture.sums_path = future_sums.replace(newer, selected)
+                    fixture.latest_location = fixture.origin + "/releases/tag/v" + selected
+                    with case(root, binary, fixture, f"first-click-watch-{columns}-{outcome}") as c:
+                        c.select(c.build("selected", selected))
+                        host, previous = c.start_host()
+                        directory = c.home / ".config/rui"
+                        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        credential = directory / "codex.json"
+                        credentials(credential)
+                        c.run("defaults", "configure", "--provider", "codex", "--model", "gpt-6-terra")
+                        session = c.json("session", "configure", "--store", c.store, "--workspace", c.root,
+                                         "--provider", "codex", "--model", "gpt-6-terra")["answer"]["session"]
+                        before_session = c.json("session", "inspect", "--store", c.store, "--session", session)["session"]
+                        credential_before = credential.read_bytes()
+                        saved_settings = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+                        args = [str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-terra"]
+                        with terminal_process(args, env=c.env, cwd=c.root, columns=columns) as (process, master):
+                            screen = TerminalScreen(master, process)
+                            if columns == 140:
+                                screen.launch_overview()
+                            else:
+                                screen.overview()
+                            screen.contains("Update to " + selected)
+                            assert fixture.sums_path not in fixture.requests, ("watch read checksums", fixture.requests)
+                            click(screen, "Settings", left_only=True)
+                            screen.contains("Notifications")
+                            if columns == 140:
+                                screen.contains("update to " + selected)
+
+                            if outcome in ("newer", "cancel"):
+                                fixture.version = newer
+                                fixture.name, fixture.sums_path = future_name, future_sums
+                                fixture.latest_location = fixture.origin + "/releases/tag/v" + newer
+                            if outcome == "error":
+                                fixture.status["/releases/latest"] = 503
+                            archive = fixture.gate_archive()
+                            lookup = Gate() if outcome == "cancel" else None
+                            if lookup is not None:
+                                fixture.gates["/releases/latest"] = lookup
+                            before_requests = len(fixture.requests)
+                            click(screen, "Version")
+                            if outcome == "newer":
+                                screen.until(lambda: archive.entered.is_set() or "up to date" in screen.capture.completed,
+                                             "first Settings click reaches newer archive or reports current")
+                                assert archive.entered.is_set(), ("first click reported up to date", fixture.requests[before_requests:])
+                                if columns == 140:
+                                    screen.contains("preparing Upgrade")
+                                assert fixture.sums_path in fixture.requests[before_requests:], fixture.requests
+                            elif outcome == "unchanged":
+                                screen.contains("up to date")
+                                assert not archive.entered.is_set()
+                            elif outcome == "error":
+                                if columns == 140:
+                                    screen.contains("couldn't reach GitHub")
+                                else:
+                                    screen.contains("Update failed")
+                                assert not archive.entered.is_set()
+                            else:
+                                screen.until(lookup.entered.is_set, "explicit check held at latest release")
+                                if columns == 140:
+                                    screen.contains("checking for updates")
+                                screen.send("\x1b")
+                                screen.contains("cancelled")
+                                assert fixture.sums_path not in fixture.requests[before_requests:], fixture.requests
+                                assert not archive.entered.is_set()
+                                lookup.release.set()
+                            assert "/releases/latest" in fixture.requests[before_requests:], fixture.requests
+                            assert c.link.resolve() == c.original
+                            assert host.poll() is None and c.status()["instance"] == previous["instance"]
+                            assert credential.read_bytes() == credential_before
+                            assert {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()} == saved_settings
+                            exit_on_sigint(screen, process, f"first-click-watch-{columns}-{outcome}")
+                        after_session = c.json("session", "inspect", "--store", c.store, "--session", session)["session"]
+                        assert after_session == before_session
+                finally:
+                    fixture.close()
+                print(f"first-click watch: {columns} {outcome} passed", flush=True)
+    finally:
+        TERMINAL_COLUMNS = original_columns
+
+
 def main():
-    modes = ("restart-all", "lifecycle", "custody", "download", "terminal", "startup", "future-target", "unchecked-target", "frozen-settings", "pre-freeze-target")
+    modes = ("restart-all", "lifecycle", "custody", "download", "terminal", "startup", "future-target", "unchecked-target", "frozen-settings", "pre-freeze-target", "first-click-watch")
     if len(sys.argv) not in (2, 3, 4, 5) or (len(sys.argv) >= 3 and sys.argv[2] not in modes):
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|future-target FUTURE_REAL_RUI|unchecked-target BASELINE_RUI|frozen-settings|pre-freeze-target PRE_FREEZE_REAL_RUI]")
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|first-click-watch|future-target FUTURE_REAL_RUI|unchecked-target BASELINE_RUI|frozen-settings|pre-freeze-target PRE_FREEZE_REAL_RUI]")
     selection = sys.argv[2] if len(sys.argv) >= 3 else "all"
     assert len(sys.argv) == (4 if selection in ("future-target", "pre-freeze-target") else 4 if selection == "unchecked-target" else 2 if selection == "all" else 3), "supply the native binaries required by this mode"
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
@@ -1854,6 +1962,9 @@ def main():
     releases = Releases(target_binary, version)
     complete = False
     try:
+        if selection in ("all", "terminal", "first-click-watch"):
+            first_click_watch_cases(root, binary, releases)
+            print("upgrade native: first_click_watch_cases passed", flush=True)
         if selection == "frozen-settings":
             frozen_upgrade_cases(root, binary, releases)
             frozen_credential_refusal_case(root, binary, releases)
