@@ -201,15 +201,17 @@ const ProviderSlot = struct {
     owner: AttemptOwner,
     rejection: providers.Credential.Rejection = .settle,
     transfer: provider.Transfer = undefined,
-
-    fn failureCode(self: *const ProviderSlot, failure: execution.TransferFailure, buffer: *[96]u8) []const u8 {
-        if (execution.rejectsCredential(failure)) switch (self.rejection) {
-            .key_rejected => return failure_class.api_key_rejected,
-            .settle, .refresh_once => {},
-        };
-        return failure.codeText(buffer);
-    }
 };
+
+/// The failure code a transfer settles with: a rejected credential names the key when the credential's rejection
+/// says so; any other failure keeps its own code.
+fn transferFailureCode(rejection: providers.Credential.Rejection, failure: execution.TransferFailure, buffer: *[96]u8) []const u8 {
+    if (execution.rejectsCredential(failure)) switch (rejection) {
+        .key_rejected => return failure_class.api_key_rejected,
+        .settle, .refresh_once => {},
+    };
+    return failure.codeText(buffer);
+}
 
 const NamedScratchSlot = struct {
     token: execution.CustodyToken,
@@ -2637,7 +2639,7 @@ fn completeTransfer(
     if (answered_response) |*response| {
         retainFailedResponse(run, .{ .file = response.file, .length = response.length, .transfer = .complete }, .{
             .binding = owner.binding,
-            .code = active.failureCode(decision.fail, &code_buffer),
+            .code = transferFailureCode(active.rejection, decision.fail, &code_buffer),
             .diagnostic = diagnostic,
             .http_status = http_status,
             .request_id = active.transfer.requestId(),
@@ -2660,7 +2662,7 @@ fn completeTransfer(
         },
         .fence_request_source => run.host.lifecycle.fenceDispatch("request scratch read", error.RequestScratchReadFailed),
         .fail => |failure| {
-            const code = active.failureCode(failure, &code_buffer);
+            const code = transferFailureCode(active.rejection, failure, &code_buffer);
             const disposition = failureClass(run.host, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(run, owner, &active.transfer);

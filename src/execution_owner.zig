@@ -80,7 +80,7 @@ pub const Execution = struct {
     }
 };
 
-test "facts count held custody, not an in-flight admission reservation" {
+test "EXR-98 facts count held custody, not an in-flight admission reservation, beside the fence and scratch in force" {
     var records: [2]execution.CustodyRecord = @splat(.{});
     var lifecycle = Lifecycle.init(std.testing.io, undefined, false, null);
     var scratch_used: std.atomic.Value(u64) = .init(0);
@@ -98,4 +98,36 @@ test "facts count held custody, not an in-flight admission reservation" {
     try std.testing.expectEqual(@as(usize, 1), owner.facts().custody_occupied);
     try owner.custody.cleanupComplete(cleanup);
     try std.testing.expectEqual(@as(usize, 0), owner.facts().custody_occupied);
+    try std.testing.expect(!owner.facts().dispatch_fenced);
+    scratch_used.store(4096, .release);
+    try std.testing.expectEqual(@as(u64, 4096), owner.facts().scratch_used_bytes);
+    try std.testing.expectEqual(@as(usize, 2), owner.capacity());
+}
+
+test "EXR-99 an MCP list ask wakes dispatch only when it asked a server" {
+    const server_mcp_settings = @import("server_mcp_settings.zig");
+    var docs: server_mcp_settings.Server = .{};
+    try docs.name.set("docs");
+    var notes: server_mcp_settings.Server = .{};
+    try notes.name.set("notes");
+    const servers = [_]server_mcp_settings.Server{ docs, notes };
+    var relist = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
+    defer relist.deinit();
+    var scratch_used: std.atomic.Value(u64) = .init(0);
+    var asked: [host_settings.max_mcp_servers]server_mcp_relist.Relist.Asked = undefined;
+    var rows: [host_settings.max_mcp_servers]host_reply.ToolServerStatus = undefined;
+    const Row = struct { relist: bool, only: ?[]const u8, asked: usize };
+    for ([_]Row{
+        .{ .relist = false, .only = null, .asked = 0 },
+        .{ .relist = true, .only = "missing", .asked = 0 },
+        .{ .relist = true, .only = "docs", .asked = 1 },
+        .{ .relist = true, .only = null, .asked = 2 },
+    }) |row| {
+        var lifecycle = Lifecycle.init(std.testing.io, undefined, false, null);
+        var owner: Execution = undefined;
+        owner.init(&.{}, if (row.relist) &relist else null, &lifecycle, &scratch_used, null);
+        try std.testing.expectEqual(row.asked, owner.askMcpLists(row.only, &asked));
+        try std.testing.expectEqual(row.asked != 0, lifecycle.dispatchWakeIsSet());
+        try std.testing.expectEqual(@as(usize, if (row.relist) servers.len else 0), owner.mcpStatuses(&rows));
+    }
 }

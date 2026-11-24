@@ -77,7 +77,7 @@ pub fn takeAsk(self: *Self) bool {
     return self.asked.swap(false, .acq_rel);
 }
 
-test "each provider's model list is published and rendered on its own" {
+test "EXR-100 each provider's model list is published and rendered on its own" {
     const catalog = @import("model_catalog.zig");
     var served: providers_module.Providers = .{};
     served.table.set(.codex, .{ .endpoint = providers_module.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } });
@@ -111,4 +111,14 @@ test "each provider's model list is published and rendered on its own" {
     lists.publish(.openai, "{\"data\":[{\"id\":\"gpt-6-mare\"}]}");
     try std.testing.expectEqualStrings("gpt-6-mare\n", lists.live.get(.openai).live.bytes);
     try std.testing.expect(lists.live.get(.codex) == .catalog);
+}
+
+test "EXR-100 model-list asks before one take fold into one true take" {
+    var lists: Self = .init(std.testing.io, std.testing.allocator, &providers_module.none);
+    defer lists.deinit();
+    try std.testing.expect(!lists.takeAsk());
+    lists.ask();
+    lists.ask();
+    try std.testing.expect(lists.takeAsk());
+    try std.testing.expect(!lists.takeAsk());
 }
