@@ -6301,7 +6301,7 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     try expectSelected(&removals, &rows[0].reference);
 
     // With no conversation open, Enter on the cleared selection cannot create a New Chat.
-    var only = try opened(&rows[0..1]);
+    var only = try opened(rows[0..1]);
     defer only.deinit();
     only.selected = .{ .session = rows[0].reference };
     _ = try refresh(&only, .full, testToken(2), &.{});
