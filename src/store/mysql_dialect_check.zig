@@ -685,20 +685,20 @@ pub const Loader = struct {
 };
 
 /// A history Store's shape: its frozen format and whether it holds the baseline rows.
-pub const Shape = struct { format: u32, baseline_rows: bool };
+pub const Shape = struct { format: u32, seeded: bool };
 
 /// Fills a shape's template through `loader`, with `selector` as its store_selector.
 pub const Fill = *const fn (loader: Loader, shape: Shape, selector: []const u8) anyerror!void;
 
 /// The store_selector a template holds. Every clone rewrites it to its own selector.
 const template_selector = "/rui-history-template";
-const template_slots = (schema.schema_version - schema.migration_baseline + 1) * 2;
-/// Whether each shape's template is built in this process. Set after its fill returns.
-var template_built: [template_slots]bool = @splat(false);
+/// The shapes whose template is built in this process. A shape is added after its fill returns.
+var templates_built: [2 * schema.schema_version]Shape = undefined;
+var templates_built_len: usize = 0;
 
-fn templateSlot(shape: Shape) usize {
-    const offset: usize = shape.format - schema.migration_baseline;
-    return offset * 2 + @intFromBool(shape.baseline_rows);
+fn templateBuilt(shape: Shape) bool {
+    for (templates_built[0..templates_built_len]) |built| if (built.format == shape.format and built.seeded == shape.seeded) return true;
+    return false;
 }
 
 /// Runs `text` in `database`, a run-time name. `unchecked` turns foreign key checks off, as `load` does.
@@ -724,14 +724,14 @@ pub fn historyFrom(shape: Shape, selector: []const u8, fill: Fill) !void {
     defer mutex.unlock(io);
     _ = connection() orelse return error.MysqlUnavailable;
     var template_buffer: [64]u8 = undefined;
-    const template = try std.fmt.bufPrint(&template_buffer, "{s}_{d}{s}", .{ names.history_template, shape.format, if (shape.baseline_rows) "b" else "n" });
-    const slot = templateSlot(shape);
-    if (!template_built[slot]) {
+    const template = try std.fmt.bufPrint(&template_buffer, "{s}_{d}{s}", .{ names.history_template, shape.format, if (shape.seeded) "b" else "n" });
+    if (!templateBuilt(shape)) {
         const create = try std.fmt.allocPrint(std.testing.allocator, "DROP DATABASE IF EXISTS {s};CREATE DATABASE {s}", .{ template, template });
         defer std.testing.allocator.free(create);
         try setup(create);
         try fill(.{ .database = template }, shape, template_selector);
-        template_built[slot] = true;
+        templates_built[templates_built_len] = shape;
+        templates_built_len += 1;
     }
     try cloneInto(template, names.history, selector);
 }

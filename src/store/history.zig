@@ -181,7 +181,7 @@ fn buildSqlite(built: *Built, start: *const Start) !void {
 /// the Start's rows load with checks on. MySQL has no foreign_key_check statement, so the baseline rows and steps
 /// are not verified beyond their own statements.
 fn buildMysql(built: *Built, start: *const Start) !void {
-    try mysql_dialect_check.historyFrom(.{ .format = start.format, .baseline_rows = start.baseline_rows }, built.root(), fillMysql);
+    try mysql_dialect_check.historyFrom(.{ .format = start.format, .seeded = start.baseline_rows }, built.root(), fillMysql);
     const rows = start.sql.text(.mysql);
     if (rows.len > 0) try mysql_dialect_check.historyLoad(rows, false);
 }
@@ -193,7 +193,7 @@ fn fillMysql(loader: mysql_dialect_check.Loader, shape: mysql_dialect_check.Shap
 
     var meta_buffer: [protocol.max_store_bytes + 256]u8 = undefined;
     try loader.load(try std.fmt.bufPrint(&meta_buffer, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','7'),('store_selector','{s}'),('format','{d}')", .{ selector, schema.migration_baseline }), false);
-    if (shape.baseline_rows) try loader.load(store_testing.baseline_rows, true);
+    if (shape.seeded) try loader.load(store_testing.baseline_rows, true);
     for (stepsBelow(shape.format)) |step| for (step.mysql) |statement| try loader.load(statement, true);
 
     var format_buffer: [256]u8 = undefined;
