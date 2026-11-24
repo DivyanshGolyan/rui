@@ -24,6 +24,9 @@ pub const user_message_off = "\x1b[203m";
 pub const full_width_on = "\x1b[204m";
 pub const full_width_off = "\x1b[205m";
 
+pub const decoration_on = "\x1b[206m";
+pub const decoration_off = "\x1b[207m";
+
 pub const body_on = "\x1b[200m";
 pub const body_off = "\x1b[201m";
 pub fn writeBody(sink: anytype, bytes: []const u8) !void {

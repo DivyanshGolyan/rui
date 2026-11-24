@@ -4089,7 +4089,7 @@ test "SH-119 schema 92 migration gives every saved tool record the zero app poli
     try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record WHERE owner='app'"));
 }
 
-test "SH-120 schema 94 migration gives every Session no app declaration and its root lane, on SQLite" {
+test "SH-122 schema 94 migration gives every Session no app declaration and its root lane, on SQLite" {
     const step = migrations[93 - migration_baseline];
     try std.testing.expectEqual(@as(u32, 93), step.from);
     var raw: ?*c.sqlite3 = null;
@@ -4122,7 +4122,7 @@ test "SH-120 schema 94 migration gives every Session no app declaration and its 
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET app_lane='nope' WHERE session_ref='ch0001'"));
 }
 
-test "SH-120 schema 94 MySQL step adds each lane column where the bootstrap has it, with its CHECK and key" {
+test "SH-122 schema 94 MySQL step adds each lane column where the bootstrap has it, with its CHECK and key" {
     const step = migrations[93 - migration_baseline];
     try std.testing.expectEqual(@as(u32, 93), step.from);
     const canonical_session_mysql = comptime blk: {

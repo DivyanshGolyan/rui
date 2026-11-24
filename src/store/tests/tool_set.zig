@@ -1147,14 +1147,14 @@ test "SH-118 a tool record read back from the Store through the offer, the selec
     }.run);
 }
 
-// SH-122: a lane root's configure saves its declared app tools as one tool set that the Session names; replacing the
+// SH-124: a lane root's configure saves its declared app tools as one tool set that the Session names; replacing the
 // declaration changes that set, an empty list clears it, a child refuses a declaration by name, and a replayed
 // create keeps one set. Both engines run the same Store API calls.
 fn declareAppTools(configuration: *wire_request.Configuration, bytes: []const u8) void {
     configuration.app_tools = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
 }
 
-test "SH-122 a lane root saves its app tools as one set; replacing, clearing and a child's refusal hold on both engines" {
+test "SH-124 a lane root saves its app tools as one set; replacing, clearing and a child's refusal hold on both engines" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});

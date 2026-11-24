@@ -45,13 +45,12 @@ pub fn RowFor(comptime Doc: type) type {
 
         pub fn spot(self: Self, col: i32) Spot {
             const end = self.document.origin + self.document.text().len;
-            const line = self.line orelse return Spot.point(end);
+            if (self.line == null) return Spot.point(end);
             var spots: Spots = .init(self);
-            const boundary = spots.boundary orelse return Spot.point(self.document.origin + line);
             var column: i32 = 0;
-            var found: Spot = Spot.point(boundary);
+            var found: Spot = Spot.point(spots.boundary);
             while (spots.next()) |value| : (column += 1) {
-                found = value;
+                found = value.spot;
                 if (column >= col) return found;
             }
             return Spot.point(found.end);
@@ -59,49 +58,52 @@ pub fn RowFor(comptime Doc: type) type {
 
         pub fn covered(self: Self, range: Range, columns: []bool) void {
             var spots: Spots = .init(self);
-            if (spots.boundary == null) spots.boundary = self.document.origin + (self.line orelse self.document.text().len);
-            for (columns) |*column| column.* = range.covers(spots.next().?);
+            for (columns) |*column| {
+                const hit = spots.next().?;
+                column.* = hit.paint and range.covers(hit.spot);
+            }
         }
+
+        const Hit = struct { spot: Spot, paint: bool = true };
 
         const Spots = struct {
             row: Self,
-            boundary: ?u64,
+            boundary: u64,
             covered: usize = 0,
-            cover: Spot = undefined,
+            cover: Hit = undefined,
             column: usize = 0,
 
             fn init(row: Self) Spots {
-                var spots: Spots = .{ .row = row, .boundary = null };
+                const document = row.document;
                 for (row.cells) |cell| {
-                    if (source(row.document, cell)) |at| {
-                        spots.boundary = at;
-                        break;
-                    }
+                    const offset = document.cellOffset(cell) orelse continue;
+                    if (document.selectable(offset)) return .{ .row = row, .boundary = document.origin + offset };
                 }
-                return spots;
+                return .{ .row = row, .boundary = document.origin + (row.line orelse document.text().len) };
             }
 
-            fn next(self: *Spots) ?Spot {
+            fn next(self: *Spots) ?Hit {
                 if (self.column == self.row.cells.len) return null;
                 defer self.column += 1;
                 const cell = self.row.cells[self.column];
-                if (source(self.row.document, cell)) |at| {
-                    self.cover = .{ .start = at, .end = at + cell.char.grapheme.len };
+                const document = self.row.document;
+                if (document.cellOffset(cell)) |offset| {
                     self.covered = self.column + @max(cell.char.width, 1);
-                    self.boundary = self.cover.end;
+                    if (document.selectable(offset)) {
+                        const at = document.origin + offset;
+                        self.cover = .{ .spot = .{ .start = at, .end = at + cell.char.grapheme.len } };
+                        self.boundary = self.cover.spot.end;
+                    } else {
+                        const boundary = if (document.inlineDecoration(offset)) document.origin + offset else self.boundary;
+                        self.cover = .{ .spot = Spot.point(boundary), .paint = false };
+                    }
                     return self.cover;
                 }
                 if (self.column < self.covered) return self.cover;
-                return Spot.point(self.boundary orelse return null);
+                return .{ .spot = Spot.point(self.boundary) };
             }
         };
     };
-}
-
-fn source(document: anytype, cell: vaxis.Cell) ?u64 {
-    const offset = document.cellOffset(cell) orelse return null;
-    if (!document.selectable(offset)) return null;
-    return document.origin + offset;
 }
 
 pub fn relative(document: anytype, at: u64) ?usize {
@@ -338,8 +340,9 @@ fn testBandCopy() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
         const method: vaxis.gwidth.Method = if (unicode_caps) .unicode else .wcwidth;
         var document: viewport.Sized(1024, true) = .{ .sidenotes = true, .width_method = method };
-        try document.append(TerminalText.user_message_on ++ "› \x1b[8m14:20\x1b[0mshort\n" ++ TerminalText.user_message_off ++
-            TerminalText.user_message_on ++ "› ");
+        const marker = TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off;
+        try document.append(TerminalText.user_message_on ++ marker ++ "\x1b[8m14:20\x1b[0mshort\n" ++ TerminalText.user_message_off ++
+            TerminalText.user_message_on ++ marker);
         const count: usize = if (width == 46) 75 else 265;
         for (0..count) |_| try document.append("x");
         try document.append("\n" ++ TerminalText.user_message_off);
@@ -354,10 +357,19 @@ fn testBandCopy() !void {
         _ = document.draw(window, .{}, true, true, ground, .{ .user_band = band, .no_depth = depth == 0 });
         const content_row: RowFor(@TypeOf(document)) = .{ .document = &document, .cells = cells[width..][0..width], .line = 0 };
         const cap_row: RowFor(@TypeOf(document)) = .{ .document = &document, .cells = cells[2 * @as(usize, width) ..][0..width], .line = document.selectionLine(layout, .{ .row = 2 }) };
-        const result = try copy(testing.allocator, &document, .of(content_row.spot(4), cap_row.spot(width)));
+        var covered: [140]bool = undefined;
+        content_row.covered(.{ .from = 0, .to = document.text().len }, covered[0..width]);
+        try testing.expectEqualSlices(bool, &.{ false, false, true }, covered[2..5]);
+        try testing.expectEqualSlices(bool, &@as([5]bool, @splat(false)), covered[width - 7 .. width - 2]);
+        const result = try copy(testing.allocator, &document, .of(content_row.spot(2), cap_row.spot(width)));
         try testing.expect(result == .text);
         defer testing.allocator.free(result.text.bytes);
         try testing.expectEqualStrings("short", result.text.bytes);
+
+        const whole = try copy(testing.allocator, &document, .{ .from = 0, .to = document.text().len });
+        defer testing.allocator.free(whole.text.bytes);
+        const expected = if (width == 46) "short\n" ++ @as([75]u8, @splat('x')) ++ "\n" else "short\n" ++ @as([265]u8, @splat('x')) ++ "\n";
+        try testing.expectEqualStrings(expected, whole.text.bytes);
     };
 }
 

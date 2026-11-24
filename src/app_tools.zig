@@ -121,9 +121,9 @@ fn integerOf(comptime Int: type, value: ?std.json.Value, default: Int) ParseErro
     return std.math.cast(Int, found.integer) orelse error.InvalidAppToolPolicy;
 }
 
-// SH-121: the declaration validator accepts one well-formed list of records and names the refusal of every other
+// SH-123: the declaration validator accepts one well-formed list of records and names the refusal of every other
 // document, over the whole domain of names, policies, sizes and counts.
-test "SH-121 app tools validate one declaration with named refusals over its domain" {
+test "SH-123 app tools validate one declaration with named refusals over its domain" {
     const arena_memory = try std.testing.allocator.alloc(u8, arena_bytes);
     defer std.testing.allocator.free(arena_memory);
     const ok = "{\"name\":\"lookup\",\"description\":\"Look up a thing\",\"input_schema\":{\"type\":\"object\"}}";

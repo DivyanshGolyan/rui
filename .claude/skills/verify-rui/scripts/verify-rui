@@ -3370,7 +3370,7 @@ def frame_capture(run, target, out, state, size, reason):
     if unexpected is not None and reason is None:
         reason = f"unexpected on screen: {unexpected}"
     if reason is None:
-        reason = (frame_row_failure(state, plain) or frame_dim_failure(state, frame)
+        reason = (frame_row_failure(state, frame.text) or frame_dim_failure(state, frame)
                   or frame_background_failure(state, frame) or frame_style_failure(state, frame))
     (out / files["txt"]).write_text(plain)
     (out / files["ansi"]).write_text(ansi)

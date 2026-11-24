@@ -6170,9 +6170,9 @@ test "SUI-33 App Session shell gutter and back control follow list visibility th
             try std.testing.expectEqualStrings(" ", screen.readCell(start + @as(u16, @intCast(col)), sent + 1).?.char.grapheme);
         }
         try std.testing.expectEqualStrings("✓", screen.readCell(start + gutter, sent + 1).?.char.grapheme);
-        try std.testing.expectEqualStrings(if (wide) "g" else "‹", screen.readCell(start + 1, 25).?.char.grapheme);
+        try std.testing.expectEqualStrings(if (wide) "g" else "‹", screen.readCell(start + 1, 24).?.char.grapheme);
         var facts: std.Io.Writer.Allocating = .init(arena);
-        for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 25).?.char.grapheme);
+        for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 24).?.char.grapheme);
         try std.testing.expectEqualStrings(if (wide) " gpt-5.5 · low" else " ‹ demo · gpt-5.5 · low", std.mem.trimEnd(u8, facts.written(), " "));
         try std.testing.expect(fixture.root.session.?.eql(fixture.widget));
         try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
@@ -6908,10 +6908,10 @@ test "App Session footer takes list visibility from Root across desktop and phon
         try surface.render(window, fixture.self.app_input.composer.widget());
         const chat_col: u16 = if (case.list) Root.list_width + 1 else 0;
         var row: std.Io.Writer.Allocating = .init(arena);
-        for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 29).?.char.grapheme);
+        for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 28).?.char.grapheme);
         try std.testing.expectEqual(@as(usize, if (case.list) 0 else 1), std.mem.count(u8, row.written(), "‹"));
         try std.testing.expectEqual(!case.list, std.mem.indexOf(u8, row.written(), "k7m2qx") != null);
-        try std.testing.expectEqualStrings("┄", screen.readCell(chat_col, 28).?.char.grapheme);
+        try std.testing.expectEqualStrings("┄", screen.readCell(chat_col, 27).?.char.grapheme);
         try std.testing.expectEqual(!case.list, std.mem.trim(u8, row.written(), " ").len != 0);
     }
 }
