@@ -1,0 +1,13 @@
+{
+  "name": "anthropic",
+  "label": "Anthropic",
+  "base_url": "https://api.anthropic.com/v1",
+  "credential": {"kind": "key", "source": {"kind": "saved"}, "placement": "x-api-key"},
+  "headers": [],
+  "refusals": [],
+  "formats": [
+    {"family": "messages", "dialect": "anthropic-messages/1", "web_search": false}
+  ],
+  "assign": [],
+  "models": {"list": "anthropic"}
+}
