@@ -1,0 +1,64 @@
+name: Diagnostic SQL collector backend
+on:
+  push:
+    branches: [diagnostic/rsql-backend-fxpdvw]
+permissions:
+  contents: read
+jobs:
+  collector:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          targets: '["rsql-table"]'
+          check-part: compiled
+          publish-caches: 'false'
+      - name: Compile only the Store collector with the self-hosted backend
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/rsql-backend-evidence"
+          git rev-parse HEAD HEAD^ | tee "$RUNNER_TEMP/rsql-backend-evidence/source.txt"
+          uname -a | tee -a "$RUNNER_TEMP/rsql-backend-evidence/source.txt"
+          zig version | tee -a "$RUNNER_TEMP/rsql-backend-evidence/source.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('build/unit.zig')
+          source = p.read_text()
+          old = '.use_llvm = if (target.result.cpu.arch == .x86_64 and !(identity == .store and product.rsqlCollect(b))) false else null,'
+          new = '.use_llvm = if (target.result.cpu.arch == .x86_64) false else null,'
+          if source.count(old) != 1:
+              raise SystemExit('Expected collector backend boundary not found exactly once')
+          p.write_text(source.replace(old, new))
+          PY
+          git diff -- build/unit.zig > "$RUNNER_TEMP/rsql-backend-evidence/backend.patch"
+          /usr/bin/time -v zig build ci-build -Dpr-ci=true -Drsql-collect=true \
+            -Dci-targets=test-store -Dci-part=unit --prefix "$RUNNER_TEMP/rsql-backend-output" \
+            --summary all 2>&1 | tee "$RUNNER_TEMP/rsql-backend-evidence/build.log"
+          python3 - <<'PY' | tee "$RUNNER_TEMP/rsql-backend-evidence/records.txt"
+          import hashlib, os, pathlib, sys
+          sys.path.insert(0, 'tests/ci')
+          from rsql_table import elf_records
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'rsql-backend-output' / 'bin'
+          binaries = sorted(root.iterdir())
+          if len(binaries) != 1:
+              raise SystemExit(f'Expected one Store root, got {len(binaries)}')
+          data = binaries[0].read_bytes()
+          records = set(elf_records(data))
+          if not records:
+              raise SystemExit('Store collector exported no records')
+          print(f'binary={binaries[0].name} sha256={hashlib.sha256(data).hexdigest()} unique_records={len(records)}')
+          for record in sorted(records):
+              print(hashlib.sha256(record).hexdigest())
+          PY
+      - name: Retain diagnostic evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rsql-backend-probe-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rsql-backend-evidence
+          if-no-files-found: warn
+          retention-days: 3
