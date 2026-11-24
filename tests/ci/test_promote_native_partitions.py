@@ -31,7 +31,7 @@ sys.exit(1 if str(len(rows) - 1) == os.environ["FAIL_BATCH"] else 0)
                     log = root / "batches.json"
                     log.unlink(missing_ok=True)
                     env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
-                               BATCH_LOG=str(log), FAIL_BATCH=str(failed))
+                               BATCH_LOG=str(log), FAIL_BATCH=str(failed), RUNNER_TEMP=str(root))
                     env.pop("GITHUB_STEP_SUMMARY", None)
                     env.pop("RUNNER_TEMP", None)
                     result = subprocess.run([sys.executable, "-B", "tests/ci/run_selected.py",
@@ -43,6 +43,7 @@ sys.exit(1 if str(len(rows) - 1) == os.environ["FAIL_BATCH"] else 0)
                     expected = batches if failed is None else batches[:failed + 1]
                     self.assertEqual(actual, [["build", *batch, "-Dci-artifacts=compiled", "--summary", "all",
                                                "--test-timeout", "5m"] for batch in expected])
+                    self.assertFalse((root / "rui-failed-steps.jsonl").exists())
             result = subprocess.run([sys.executable, "-B", "tests/ci/run_selected.py",
                                      json.dumps(["test-logic"]), "--check-part", "both"],
                                     capture_output=True, text=True, timeout=20)
