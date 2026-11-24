@@ -58,9 +58,11 @@ test {
     _ = @import("release_candidate.zig");
     _ = @import("upgrade_process.zig");
     _ = @import("host_coordinator.zig");
+    _ = @import("host_coordinator_custody_test.zig");
     _ = @import("self_executable.zig");
     _ = @import("HostLifecycle.zig");
     _ = @import("host_restart_all.zig");
+    _ = @import("host_restart_report.zig");
     _ = @import("host_identity.zig");
     _ = @import("upgrade.zig");
     _ = @import("installation_path.zig");
@@ -132,10 +134,12 @@ test {
     _ = @import("server_execution.zig");
     _ = @import("model_timing_owner_tests.zig");
     _ = @import("server_host.zig");
+    _ = @import("ModelLists.zig");
     _ = @import("server_mcp_tests.zig");
     _ = @import("SessionEnvironments.zig");
     _ = @import("client.zig");
     _ = @import("execution.zig");
+    _ = @import("execution_owner.zig");
     _ = @import("bash.zig");
     _ = @import("named_scratch.zig");
     _ = @import("output_retention.zig");

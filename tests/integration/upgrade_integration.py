@@ -1589,7 +1589,7 @@ def terminal_handoffs(root, binary, releases, artifacts):
 
 
 def terminal_download_recovery(root, binary, releases, artifacts):
-    """Settings > Version recovers DNS failure through the same download owner."""
+    """Settings > Version reads the release itself and recovers DNS failure through its own download owner."""
     with case(root, binary, releases, "terminal-download-recovery") as c:
         c.old_selection()
         old_host, previous = c.start_host()
@@ -1598,11 +1598,14 @@ def terminal_download_recovery(root, binary, releases, artifacts):
         # of any other application-owned Hosts discovered for the fixture uid.
         shadow = c.build("recovery-shadowing-path", "0.1.0", managed=False) / "bin/rui"
         c.env["PATH"] = f"{shadow.parent}:{c.env['PATH']}"
-        curl = CurlAttempts(c, {"/releases/latest": [6]})
+        # Background discovery's lookup succeeds; the request's own lookup then fails once.
+        curl = CurlAttempts(c, {"/releases/latest": [0, 6]})
         gate = releases.gate_archive()
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.launch_overview()
+            screen.until(lambda: curl.log.exists() and any(row["path"] == releases.sums_path for row in curl.observed()),
+                         "background discovery read the release before the request")
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "Settings download recovered and reached archive")
             screen.contains("preparing Upgrade")
@@ -1615,7 +1618,9 @@ def terminal_download_recovery(root, binary, releases, artifacts):
             screen.sidebar()
             proof_ready(c, previous, old_host)
             screen.save(artifacts, "download-recovered")
-            curl.assert_attempts([("/releases/latest", "normal", 6),
+            curl.assert_attempts([("/releases/latest", "normal", 0),
+                                 (releases.sums_path, "normal", 0),
+                                 ("/releases/latest", "normal", 6),
                                  ("/releases/latest", "ipv4", 0),
                                  (releases.sums_path, "ipv4", 0),
                                  (releases.archive_path, "ipv4", 0)])

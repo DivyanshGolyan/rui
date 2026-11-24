@@ -75,6 +75,7 @@ test "detached launcher reports exec failure before claiming Host readiness" {
 
 pub fn main(init: std.process.Init) !void {
     run(init) catch |err| {
+        if (recordRestartUncertainty(err)) std.process.exit(@backingInt(exit_status));
         const code = caller_error.of(err);
         if (err != error.Reported and err != error.CallerFailure and err != error.InvalidInvocation and !reportedByOwner(err)) {
             reportCallerCode(code);
@@ -83,6 +84,22 @@ pub fn main(init: std.process.Init) !void {
         }
         std.process.exit(@backingInt(exit_status));
     };
+}
+
+fn recordRestartUncertainty(err: anyerror) bool {
+    if (err != error.HostRestartUnconfirmed) return false;
+    recordExit(.unconfirmed);
+    return true;
+}
+
+test "CLI-34 reported restart uncertainty retains its exit status" {
+    const saved_status = exit_status;
+    defer exit_status = saved_status;
+    exit_status = .done;
+    try std.testing.expect(!recordRestartUncertainty(error.HostRestartFailed));
+    try std.testing.expectEqual(caller_exit.Status.done, exit_status);
+    try std.testing.expect(recordRestartUncertainty(error.HostRestartUnconfirmed));
+    try std.testing.expectEqual(caller_exit.Status.unconfirmed, exit_status);
 }
 
 var failure_held: caller_error.Held = .{ .resource = "session", .operation = "start", .not_sent = false };
@@ -1199,13 +1216,11 @@ const TerminalHostProgress = struct {
     }
 };
 
-const HostLaunchOps = host_start.Ops;
-
 fn startOverviewHost(init: std.process.Init, selected: []const u8) Overview.HostLaunch {
     return startOverviewHostUsing(init, selected, null, .{});
 }
 
-fn startOverviewHostUsing(init: std.process.Init, selected: []const u8, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps) Overview.HostLaunch {
+fn startOverviewHostUsing(init: std.process.Init, selected: []const u8, readiness: ?*const provider_selection.Readinesses, ops: host_start.Ops) Overview.HostLaunch {
     var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
     startHost(init, selected, &.{}, readiness, ops, null, &result);
     return result.summary();
@@ -1215,35 +1230,65 @@ fn startHostForTerminal(init: std.process.Init, selected: []const u8, quiet: boo
     return startHostForTerminalUsing(init, selected, quiet, settings_file, assignments, readiness, .{});
 }
 
-fn startHostForTerminalUsing(init: std.process.Init, selected: []const u8, quiet: bool, settings_file: ?[]const u8, assignments: []const []const u8, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps) !void {
+fn startHostForTerminalUsing(init: std.process.Init, selected: []const u8, quiet: bool, settings_file: ?[]const u8, assignments: []const []const u8, readiness: ?*const provider_selection.Readinesses, ops: host_start.Ops) !void {
     _ = readiness; // Credential defaults belong to the child intake owner.
     return startHostRequest(init, .{ .dir = selected, .settings_file = settings_file, .assignments = assignments }, quiet, ops);
 }
 
-fn startHostRequest(init: std.process.Init, request: host_start.Spawn, quiet: bool, ops: HostLaunchOps) !void {
+fn startHostRequest(init: std.process.Init, request: host_start.Spawn, quiet: bool, ops: host_start.Ops) !void {
     var progress: TerminalHostProgress = .{};
     var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
-    host_start.spawn(init, request, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
+    launchHost(init, request, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
     try reportHostLaunch(init.io, &result, quiet, request.assignments.len != 0 or request.settings_file != null, progress.shown);
 }
 
 const launchFailure = host_start.launchFailure;
 
-fn startHost(init: std.process.Init, selected: []const u8, assignments: []const []const u8, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps, progress: ?HostLaunchProgress, result: *HostLaunchResult) void {
+fn startHost(init: std.process.Init, selected: []const u8, assignments: []const []const u8, readiness: ?*const provider_selection.Readinesses, ops: host_start.Ops, progress: ?HostLaunchProgress, result: *HostLaunchResult) void {
     _ = readiness; // Credential defaults belong to the child intake owner.
-    host_start.spawn(init, .{ .dir = selected, .assignments = assignments }, ops, progress, result);
+    launchHost(init, .{ .dir = selected, .assignments = assignments }, ops, progress, result);
 }
 
-fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, overrides: bool, shown: usize) !void {
-    if (result.outcome == .failed) if (result.outcome.failed.refusal) |*refusal| return writeRefusal(io, refusal, if (result.wait == null) .invalid else caller_exit.knownError(result.outcome.failed.cause.err));
+/// The one launch entry for the terminal and the Overview. An ordinary start that finds an
+/// incompatible Host submits the coordinator scoped to its Store: a detached worker that
+/// reports typed events. The start then attaches, keeps the original report, or reports the
+/// Store's outcome. The Overview's stderr is ignored, because it draws the terminal itself.
+fn launchHost(init: std.process.Init, request: host_start.Spawn, ops: host_start.Ops, progress: ?HostLaunchProgress, result: *HostLaunchResult) void {
+    const activation = @import("host_activation.zig");
+    host_start.spawn(init, request, ops, progress, result);
+    const incompatible = result.outcome == .failed and result.outcome.failed.cause.kind == .incompatible;
+    if (!activation.startHandoverWanted(incompatible, request.frozen != null)) return;
+    // Without HOME no coordinator can run, so the incompatible report stands as the answer.
+    const home = init.environ_map.get("HOME") orelse return;
+    var batch = @import("host_coordinator.zig").restart(init, init.gpa, .{
+        .home = home,
+        .scope = .{ .store = request.dir },
+    }, if (progress == null) .ignore else .inherit) catch |err| return host_start.launchFailure(result, .setup, err, null);
+    defer batch.deinit(init.gpa);
+    const own = batch.selected(request.dir);
+    switch (activation.startStep(own)) {
+        .attach => host_start.spawn(init, request, ops, progress, result),
+        .keep_incompatible => {},
+        .report => host_start.handoverFailed(result, own),
+    }
+}
+
+pub fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, overrides: bool, shown: usize) !void {
     var bytes: [host_launch.max_report_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
+    if (result.outcome == .failed) {
+        const failure = &result.outcome.failed;
+        if (failure.refusalView()) |refusal| return writeAttemptRefusal(io, refusal.attempt, refusal.failure, if (refusal.attempt == .check or (result.wait == null and failure.detail != .handover)) .invalid else caller_exit.knownError(failure.cause.err));
+    }
     try host_launch.writeDiagnostics(result, &writer, shown);
     if (writer.buffered().len != 0) _ = stderr.write(writer.buffered());
     switch (result.outcome) {
         .ready => |*ready| try reportStartedHost(io, ready, quiet, overrides and ready.adopted),
         .failed => |*failure| {
-            if (failure.refusal) |*refusal| return writeRefusal(io, refusal, caller_exit.knownError(failure.cause.err));
+            if (failure.detail == .handover) if (caller_exit.selectedHandover(failure.detail.handover)) |status| {
+                recordExit(status);
+                return error.Reported;
+            };
             return failure.cause.err;
         },
     }
@@ -1949,7 +1994,7 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
     return prepareOverviewUsing(init, options, entry, .{}, null);
 }
 
-fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entry: *OverviewEntry, ops: HostLaunchOps, connection: ?*const host_start.Connection) !void {
+fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entry: *OverviewEntry, ops: host_start.Ops, connection: ?*const host_start.Connection) !void {
     if (options.model) |model| try admitModel(model);
     const intent: new_session_selection.Intent = .{ .store = options.store, .provider = options.provider, .model = options.model };
     var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
@@ -2000,11 +2045,11 @@ fn activateOverview(init: std.process.Init, intent: new_session_selection.Intent
     return activateOverviewConnectionUsing(init, intent, connection, .{});
 }
 
-fn activateOverviewUsing(init: std.process.Init, intent: new_session_selection.Intent, ops: HostLaunchOps) !@import("SignIn.zig").Activation {
+fn activateOverviewUsing(init: std.process.Init, intent: new_session_selection.Intent, ops: host_start.Ops) !@import("SignIn.zig").Activation {
     return activateOverviewConnectionUsing(init, intent, null, ops);
 }
 
-fn activateOverviewConnectionUsing(init: std.process.Init, intent: new_session_selection.Intent, connection: ?*const host_start.Connection, ops: HostLaunchOps) !@import("SignIn.zig").Activation {
+fn activateOverviewConnectionUsing(init: std.process.Init, intent: new_session_selection.Intent, connection: ?*const host_start.Connection, ops: host_start.Ops) !@import("SignIn.zig").Activation {
     const entry = try init.gpa.create(OverviewEntry);
     defer init.gpa.destroy(entry);
     try prepareOverviewUsing(init, .{ .store = intent.store, .provider = intent.provider, .model = intent.model }, entry, ops, connection);
@@ -2033,7 +2078,7 @@ fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_sel
     return storeReadiness(init, store, localReadiness(init)).readiness;
 }
 
-fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding: new_session_selection.Binding, readiness: *const provider_selection.Readinesses, assignments: []const []const u8, ops: HostLaunchOps, result: *HostLaunchResult) void {
+fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding: new_session_selection.Binding, readiness: *const provider_selection.Readinesses, assignments: []const []const u8, ops: host_start.Ops, result: *HostLaunchResult) void {
     startHost(init, store, assignments, readiness, ops, null, result);
     if (result.outcome == .failed) return;
     const provider = std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?;
@@ -2206,21 +2251,24 @@ test "start report CLI publishes once before settling every Host outcome" {
     }
 }
 
-test "public Host starter preserves every typed refusal before and after waiting" {
+test "CLI-31 Host launch reports typed refusals and their attempt" {
     const Probe = struct {
-        var output: [4096]u8 = undefined;
-        var used: usize = 0;
+        var output: [2][4096]u8 = undefined;
+        var used: [2]usize = .{ 0, 0 };
         fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-            if (operation == .file_write_streaming and operation.file_write_streaming.file.handle == 1) {
+            if (operation == .file_write_streaming) {
                 const write = operation.file_write_streaming;
-                var out = std.Io.Writer.fixed(output[used..]);
-                out.writeAll(write.header) catch return .{ .file_write_streaming = error.NoSpaceLeft };
-                for (write.data, 0..) |bytes, index| {
-                    const repeats = if (index == write.data.len - 1) write.splat else 1;
-                    for (0..repeats) |_| out.writeAll(bytes) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                if (write.file.handle == 1 or write.file.handle == 2) {
+                    const index: usize = @intCast(write.file.handle - 1);
+                    var out = std.Io.Writer.fixed(output[index][used[index]..]);
+                    out.writeAll(write.header) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                    for (write.data, 0..) |bytes, part| {
+                        const repeats = if (part == write.data.len - 1) write.splat else 1;
+                        for (0..repeats) |_| out.writeAll(bytes) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                    }
+                    used[index] += out.buffered().len;
+                    return .{ .file_write_streaming = out.buffered().len };
                 }
-                used += out.buffered().len;
-                return .{ .file_write_streaming = out.buffered().len };
             }
             return std.testing.io.vtable.operate(userdata, operation);
         }
@@ -2235,16 +2283,33 @@ test "public Host starter preserves every typed refusal before and after waiting
         .{ .err = error.StoreIdentityMismatch, .status = .environment },
         .{ .err = error.StoreAlreadyOwned, .status = .environment },
     };
-    for (causes) |cause| for (std.enums.values(start_report.StartError)) |code| for ([_]bool{ false, true }) |waited| for ([_]bool{ false, true }) |quiet| {
+    const source_cases = [_]struct { source: enum { ordinary, checking, starting }, sentence: []const u8 }{
+        .{ .source = .ordinary, .sentence = "the Host did not start" },
+        .{ .source = .checking, .sentence = "these settings would not start a Host" },
+        .{ .source = .starting, .sentence = "the Host did not start" },
+    };
+    for (causes) |cause| for (std.enums.values(start_report.StartError)) |code| for ([_]bool{ false, true }) |waited| for ([_]bool{ false, true }) |quiet| for (source_cases) |source| {
         var result: HostLaunchResult = .failed(.child_refused, cause.err);
-        result.outcome.failed.refusal = .init(code, "the original typed refusal, including its reason");
+        const refusal: start_report.Failure = .init(code, "original typed refusal");
+        switch (source.source) {
+            .ordinary => result.outcome.failed.detail = .{ .refusal = refusal },
+            .checking => result.outcome.failed.detail = .{ .handover = .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = refusal } } } },
+            .starting => result.outcome.failed.detail = .{ .handover = .{ .outcome = .{ .refused = .{ .stage = .starting, .failure = refusal } } } },
+        }
         if (waited) result.wait = .init(0);
-        Probe.used = 0;
+        Probe.used = .{ 0, 0 };
         exit_status = .done;
         try std.testing.expectError(error.Reported, reportHostLaunch(io, &result, quiet, false, 0));
-        var expected: [start_report.max_line_bytes]u8 = undefined;
-        try std.testing.expectEqualStrings(start_report.line(&result.outcome.failed.refusal.?, &expected), Probe.output[0..Probe.used]);
-        try std.testing.expectEqual(if (waited) cause.status else .invalid, exit_status);
+        var expected_json: [4096]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_json, "{{\"rui_start_error\":{{\"code\":\"{s}\",\"message\":\"original typed refusal\"}}}}\n", .{@tagName(code)}), Probe.output[0][0..Probe.used[0]]);
+        var expected_sentence: [4096]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_sentence, "rui: {s}: original typed refusal [{s}]\n", .{ source.sentence, @tagName(code) }), Probe.output[1][0..Probe.used[1]]);
+        const expected_status: caller_exit.Status = switch (source.source) {
+            .ordinary => if (waited) cause.status else .invalid,
+            .checking => .invalid,
+            .starting => cause.status,
+        };
+        try std.testing.expectEqual(expected_status, exit_status);
     };
 }
 
@@ -4595,7 +4660,7 @@ fn closeDescriptor(fd: std.posix.fd_t) void {
 }
 
 const LaunchFixture = struct {
-    const Scenario = enum { success, os_error, refusal, timeout, missing_key, already_ready, closed, full, identity, competitor, competitor_pending, competitor_absent, competitor_died, incompatible, access, interrupted, migration_success, migration_timeout, migration_both, migration_eof, migration_final };
+    const Scenario = enum { success, os_error, refusal, timeout, missing_key, already_ready, closed, full, identity, competitor, competitor_pending, competitor_absent, competitor_died, access, interrupted, migration_success, migration_timeout, migration_both, migration_eof, migration_final };
     scenario: Scenario,
     launches: usize = 0,
     observations: usize = 0,
@@ -4627,7 +4692,7 @@ const LaunchFixture = struct {
     const competitor = "Another Host owns this Store. [store_locked]\n";
     const note = "startup notice after readiness\n";
 
-    fn ops(self: *LaunchFixture) HostLaunchOps {
+    fn ops(self: *LaunchFixture) host_start.Ops {
         return .{ .context = self, .observe = LaunchFixture.observe, .launch = LaunchFixture.launch, .verify = LaunchFixture.verify, .read = LaunchFixture.read, .now = LaunchFixture.now, .pause = LaunchFixture.pause };
     }
     fn cast(raw: ?*anyopaque) *LaunchFixture {
@@ -4640,7 +4705,6 @@ const LaunchFixture = struct {
             const expected = self.migrated_deadline orelse if (self.migration_announced) self.clock - std.time.ns_per_s + HostStartupWait.readiness_ns else HostStartupWait.readiness_ns;
             self.deadline_valid = self.deadline_valid and deadline == expected;
         }
-        if (self.scenario == .incompatible) return .incompatible;
         if (self.scenario == .access) return .access_failure;
         const ready = self.scenario == .already_ready or (self.launches != 0 and switch (self.scenario) {
             .success, .missing_key, .competitor, .migration_final => true,
@@ -4782,7 +4846,6 @@ test "Host launch owner returns one result for terminal and screen across its wh
         .{ .scenario = .competitor_pending, .success = true },
         .{ .scenario = .competitor_absent, .kind = .child_refused, .err = error.HostStartupFailed, .words = "refused to start", .terminal = "another Host owns this Store", .typed = true },
         .{ .scenario = .competitor_died, .kind = .child_refused, .err = error.HostStartupFailed, .words = "refused to start", .terminal = "another Host owns this Store", .typed = true },
-        .{ .scenario = .incompatible, .kind = .incompatible, .err = error.IncompatibleHost, .words = "different Rui version", .terminal = "does not speak this rui's protocol" },
         .{ .scenario = .access, .kind = .store_access, .err = error.StoreAccessFailed, .words = "can't read Store" },
         .{ .scenario = .interrupted, .kind = .interrupted, .err = error.Cancelled, .words = "start interrupted" },
     };
@@ -4832,9 +4895,9 @@ test "Host launch owner returns one result for terminal and screen across its wh
                     startHost(init, store, &.{"tools.bash.timeoutMs=1000"}, &readiness, fixture.ops(), null, &result);
                     summary = result.summary();
                     if (case.typed) {
-                        try std.testing.expectEqual(.store_locked, result.outcome.failed.refusal.?.code);
+                        try std.testing.expectEqual(.store_locked, result.outcome.failed.detail.refusal.code);
                         try std.testing.expectEqual(.store_locked, result.outcome.failed.cause.refusal_code.?);
-                        try std.testing.expectEqualStrings("another Host owns this Store", result.outcome.failed.refusal.?.message.slice());
+                        try std.testing.expectEqualStrings("another Host owns this Store", result.outcome.failed.detail.refusal.message.slice());
                         try std.testing.expect(fixture.clock >= HostStartupWait.readiness_ns);
                         try std.testing.expectEqual(fixture.reads + 1, fixture.observations);
                     }
@@ -4867,7 +4930,7 @@ test "Host launch owner returns one result for terminal and screen across its wh
         if (case.scenario == .migration_success or case.scenario == .migration_timeout) try std.testing.expect(fixture.clock > HostStartupWait.readiness_ns);
         if (case.scenario == .migration_timeout) try std.testing.expect(fixture.clock >= fixture.migrated_deadline.?);
         const launches: usize = switch (case.scenario) {
-            .already_ready, .incompatible, .access => 0,
+            .already_ready, .access => 0,
             else => 1,
         };
         try std.testing.expectEqual(launches, fixture.launches);
@@ -5058,7 +5121,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
     const cases = [_]Case{
         .{ .err = error.HostNotServing, .code = .host_not_serving, .exit = 6, .phrase = "No Host serves this Store." },
         .{ .err = error.HostStopping, .code = .host_stopping, .exit = 5, .phrase = "The Host for this Store is shutting down and no longer accepts requests." },
-        .{ .err = error.IncompatibleHost, .code = .host_incompatible, .exit = 6, .phrase = "Pause it with the Rui version that started it" },
+        .{ .err = error.IncompatibleHost, .code = .host_incompatible, .exit = 6, .phrase = "Run rui host restart --all" },
         .{ .err = error.InvalidStorePath, .code = .store_path_malformed, .exit = 2, .phrase = "Supply --store PATH" },
         .{ .err = error.InvalidStore, .code = .store_path_malformed, .exit = 2, .phrase = "canonical form is at most 492 bytes" },
         .{ .err = error.StoreUnavailable, .code = .store_unavailable, .exit = 6, .phrase = "permissions to 0700" },
@@ -5445,7 +5508,6 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
         .{ .scenario = .refusal, .kind = .store_format, .terminal = LaunchFixture.refusal, .words = "Host needs a compatible Rui", .retry = false },
         .{ .scenario = .timeout, .kind = .readiness_timeout, .terminal = "do not kill or reclaim an uncertain owner", .words = "Host start timed out" },
         .{ .scenario = .already_ready, .openai = false, .kind = .provider_unserved, .terminal = "does not serve the selected provider", .words = "Host does not serve this provider", .retry = false },
-        .{ .scenario = .incompatible, .kind = .incompatible, .terminal = "does not speak this rui's protocol", .words = "Host different Rui version", .retry = false },
     };
     const io = std.testing.io;
     for (cases) |case| {
@@ -5483,7 +5545,7 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
         try std.testing.expectEqual(case.kind == null, launch.outcome == .ready);
         if (case.kind) |kind| {
             try std.testing.expectEqual(kind, launch.outcome.failed.cause.kind);
-            if (kind != .incompatible) try std.testing.expectEqualStrings(store, launch.outcome.failed.store.slice());
+            try std.testing.expectEqualStrings(store, launch.outcome.failed.store.slice());
         }
         if (case.scenario == .refusal) try std.testing.expectEqualStrings(LaunchFixture.refusal, launch.startup());
         const diagnostic_file = try tmp.dir.createFile(io, "diagnostics", .{ .read = true });
@@ -5512,7 +5574,7 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
         try std.testing.expectEqual(case.retry, std.mem.indexOf(u8, line.written(), "enter tries again") != null);
         try std.testing.expect(std.mem.indexOfAny(u8, line.written(), "\r\n\x1b") == null);
         try std.testing.expect(std.mem.indexOf(u8, line.written(), "[store_format_unsupported]") == null);
-        try std.testing.expectEqual(if (case.scenario == .already_ready or case.scenario == .incompatible) @as(usize, 0) else 1, fixture.launches);
+        try std.testing.expectEqual(if (case.scenario == .already_ready) @as(usize, 0) else 1, fixture.launches);
     }
 }
 
@@ -5659,7 +5721,7 @@ test "Host launch chosen usable bindings attach before startup document admissio
             try std.testing.expect(launch.outcome == .failed);
             try std.testing.expectEqual(HostLaunchResult.Cause.Kind.child_refused, launch.outcome.failed.cause.kind);
             try std.testing.expectEqual(error.HostStartupFailed, launch.outcome.failed.cause.err);
-            try std.testing.expectEqual(start_report.StartError.settings_invalid, launch.outcome.failed.refusal.?.code);
+            try std.testing.expectEqual(start_report.StartError.settings_invalid, launch.outcome.failed.detail.refusal.code);
             try std.testing.expectEqualStrings(store, launch.outcome.failed.store.slice());
             try std.testing.expectEqual(@as(usize, 0), fixture.launches);
         } else {

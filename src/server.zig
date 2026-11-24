@@ -44,6 +44,7 @@ const server_mcp_relist = @import("server_mcp_relist.zig");
 const relist = @import("mcp/relist.zig");
 const stderr = @import("stderr.zig");
 const server_execution = @import("server_execution.zig");
+const execution_owner = @import("execution_owner.zig");
 const server_host = @import("server_host.zig");
 const child_exit_wake = @import("child_exit_wake.zig");
 const line_intake = @import("line_intake.zig");
@@ -61,7 +62,6 @@ pub const Hooks = server_host.Hooks;
 pub const Tuning = server_host.Tuning;
 const Host = server_host.Host;
 const nowNs = server_host.nowNs;
-const executionFacts = server_host.executionFacts;
 const waitAtTestGate = server_host.waitAtTestGate;
 const server_reply = @import("server_reply.zig");
 const ReplyAnswer = server_reply.Answer;
@@ -1242,6 +1242,14 @@ fn serveOpened(
     };
     var lifecycle: server_host.Lifecycle = .init(io, lease, settings.execution.paused.value, intake_wake[1]);
     var probes: server_host.Probes = .init(io, hooks);
+    const execution_settings: server_execution.Settings = .{
+        .bash_path = bash_path,
+        .bash_timeout_ms = bash_timeout_ms,
+        .background_after_ms = settings.execution.background_after_ms.value,
+        .catalog_url = if (settings.models.catalog_url) |*url| url.slice() else null,
+        .failed_response_store = lease.store_dir,
+    };
+    var execution_state: execution_owner.Execution = undefined;
     var host = Host{
         .io = io,
         .allocator = allocator,
@@ -1250,20 +1258,14 @@ fn serveOpened(
         .settings_digest = settings_digest,
         .lease = lease,
         .store = storage,
-        .catalog_url = if (settings.models.catalog_url) |*url| url.slice() else null,
         .limits = limits,
         .providers = served,
         .presets = settings.presets.specs,
-        .bash_path = bash_path,
         .bash_facts = bash_facts,
         .environments = environments,
-        .bash_timeout_ms = bash_timeout_ms,
-        .background_after_ms = settings.execution.background_after_ms.value,
         .retention = undefined,
-        .custody = execution.CustodyPool.initialize(custody_records),
         .lifecycle = &lifecycle,
         .probes = &probes,
-        .mcp_relist = mcp_relist,
     };
     const test_pause = @import("testing/pause.zig");
     var pause_owner = test_pause.PauseController.init(io, std.heap.c_allocator);
@@ -1278,8 +1280,8 @@ fn serveOpened(
     defer if (comptime test_pause.enabled) {
         if (pause_adapter) |adapter| adapter.stop();
     };
-    storage.modelTimingSource().* = host.custody.timingSource();
-    defer storage.modelTimingSource().* = .{};
+    execution_state.init(custody_records, mcp_relist, &lifecycle, &host.scratch_used, storage);
+    defer execution_state.deinit(storage);
     try host.mcp_servers.init(allocator, mcp_servers);
     defer host.mcp_servers.deinit(allocator);
     try probes.openObservation();
@@ -1293,7 +1295,6 @@ fn serveOpened(
     );
     host.retention = &retention;
     defer retention.cleanupAll();
-    host.failed_response_store = lease.store_dir;
     if (served.any()) {
         for (served.table.values) |entry| if (entry) |value| {
             try provider.validateEndpoint(value.endpoint);
@@ -1308,7 +1309,7 @@ fn serveOpened(
     host.started_at = @intCast(started_at);
     host.model_lists = .init(io, allocator, served);
     defer host.model_lists.deinit();
-    var replies = Replies.init(&host);
+    var replies = Replies.init(&host, &execution_state);
     var intake: Intake = undefined;
     try intake.init(&host, &replies, intake_wake);
     intake_wake_owned = false;
@@ -1321,7 +1322,7 @@ fn serveOpened(
     StopSignals.attach(intake.wake[1]);
     defer StopSignals.detach();
     if (comptime test_pause.enabled) if (pause_adapter) |adapter| try adapter.waitStart();
-    const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
+    const execution_thread = try signal_stack.spawn(.{}, executionMain, .{ &host, execution_settings, &execution_state });
     defer {
         if (listener_open) {
             listener.deinit(io);
@@ -1904,11 +1905,13 @@ test "a line upgrades on the Host, takes its leftover watch, hears each commit t
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .instance = @splat(0xab), .intake_capacity = descriptor_capacity.minimum_intake };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     const wake = try linePair();
     defer for (wake) |fd| {
         _ = std.c.close(fd);
     };
-    var replies = Replies.init(&host);
+    var replies = Replies.init(&host, &execution_state);
     var intake = Intake.parts(&host, &replies);
     intake.wake = wake;
     defer intake.polls.deinit(host.allocator);
@@ -2102,6 +2105,8 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     const text = "prompt /demo";
     var command: wire_request.MessageCommand = .{ .session = configured.accepted.session, .text = .{ .state = .value, .borrowed = text.ptr, .length = text.len, .digest = protocol.contentDigest(text) } };
     try command.key.set("pressure-key");
@@ -2111,7 +2116,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
         var oom_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
         failing = .init(std.testing.allocator, .{ .fail_index = fail_index });
         host.allocator = failing.allocator();
-        var replies = Replies.init(&host);
+        var replies = Replies.init(&host, &execution_state);
         const result = Replies.submitMessage(&replies, &command, &oom_offer, null);
         host.allocator = std.testing.allocator;
         try std.testing.expect(!storage.isFenced() and host.lifecycle.launchAllowed());
@@ -2121,7 +2126,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     }
     try std.testing.expect(fail_index > 2);
     try std.testing.expect(try storage.commandExists(command.key.slice()));
-    var replies = Replies.init(&host);
+    var replies = Replies.init(&host, &execution_state);
     var intake = Intake.parts(&host, &replies);
     const accepted_at = nowNs(std.testing.io);
     var exchange = Intake.Exchange{ .owner = &intake, .fd = -1, .accepted_at_ns = accepted_at, .deadline = @as(i128, accepted_at) + 10 * std.time.ns_per_s };
@@ -2134,20 +2139,20 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     defer std.testing.allocator.free(sent);
     try std.testing.expect(std.mem.startsWith(u8, sent, "HTTP/1.1 503 "));
     host.allocator = failing.allocator();
-    replies = Replies.init(&host);
+    replies = Replies.init(&host, &execution_state);
     try std.testing.expectError(error.OutOfMemory, Replies.readSkillSuggestions(&replies, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, ""));
     host.allocator = std.testing.allocator;
     try std.testing.expect(!storage.isFenced() and host.lifecycle.launchAllowed());
-    replies = Replies.init(&host);
+    replies = Replies.init(&host, &execution_state);
     try std.testing.expectError(error.OutOfMemory, Replies.readSkillSuggestions(&replies, failing.allocator(), .{ .session = configured.accepted.session.slice() }, ""));
     try std.testing.expect(!storage.isFenced() and host.lifecycle.launchAllowed());
-    replies = Replies.init(&host);
+    replies = Replies.init(&host, &execution_state);
     var preview = try Replies.readSkillSuggestions(&replies, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, "");
     defer preview.deinit(std.testing.allocator);
     try std.testing.expectEqual(@import("skill_suggestions.zig").capacity, preview.entries.len);
     try std.testing.expectEqual(entries.len, preview.total);
     var retry_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
-    replies = Replies.init(&host);
+    replies = Replies.init(&host, &execution_state);
     const accepted = try Replies.submitMessage(&replies, &command, &retry_offer, null);
     try std.testing.expect(accepted == .accepted and accepted.accepted.replayed);
     try std.testing.expectEqual(@as(u64, text.len), accepted.accepted.content.text.length);
@@ -2158,7 +2163,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     while (true) : (fail_index += 1) {
         failing = .init(std.testing.allocator, .{ .fail_index = fail_index });
         host.allocator = failing.allocator();
-        replies = Replies.init(&host);
+        replies = Replies.init(&host, &execution_state);
         const result = Replies.submitConfigure(&replies, &reload, null);
         host.allocator = std.testing.allocator;
         try std.testing.expect(!storage.isFenced() and host.lifecycle.launchAllowed());
@@ -2171,7 +2176,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     }
     try std.testing.expect(fail_index > 2);
     try store_module.testingFailReadsOf(&storage, "session_skill_catalog");
-    replies = Replies.init(&host);
+    replies = Replies.init(&host, &execution_state);
     try std.testing.expectError(error.CanonicalStoreFailure, Replies.readSkillSuggestions(&replies, std.testing.allocator, .{ .session = configured.accepted.session.slice() }, ""));
     try std.testing.expect(storage.isFenced() and !host.lifecycle.launchAllowed());
 }
@@ -2198,7 +2203,9 @@ test "discovery identity exhaustion cannot start a new error delivery budget" {
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
-    var replies = Replies.init(&host);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
+    var replies = Replies.init(&host, &execution_state);
     var test_owner = Intake.parts(&host, &replies);
     test_owner.requests.store(std.math.maxInt(u64), .release);
     const exchange = try host.allocator.create(Intake.Exchange);
@@ -2605,7 +2612,9 @@ test "retired reserved exchanges cannot block their successors while workers are
             var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .intake_capacity = descriptor_capacity.minimum_intake };
             var host_parts: TestParts = undefined;
             host_parts.attach(&host, undefined);
-            var replies = Replies.init(&host);
+            var execution_state: execution_owner.Execution = undefined;
+            execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
+            var replies = Replies.init(&host, &execution_state);
             var intake = Intake.parts(&host, &replies);
             defer intake.exchanges.deinit(host.allocator);
             defer for (intake.exchanges.items) |exchange| {
@@ -2677,9 +2686,11 @@ test "disconnected reserved peers release classification while half-closed peers
                 var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined, .intake_capacity = descriptor_capacity.minimum_intake };
                 var host_parts: TestParts = undefined;
                 host_parts.attach(&host, &lease);
+                var execution_state: execution_owner.Execution = undefined;
+                execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
                 var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
                 host.retention = &retention;
-                var replies = Replies.init(&host);
+                var replies = Replies.init(&host, &execution_state);
                 var intake = Intake.parts(&host, &replies);
                 defer intake.exchanges.deinit(host.allocator);
                 defer for (intake.exchanges.items) |exchange| std.debug.assert(exchange.destroy());
@@ -2742,7 +2753,9 @@ test "file-free retirement releases intake places before acceptance with occupie
             var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
             var host_parts: TestParts = undefined;
             host_parts.attach(&host, undefined);
-            var replies = Replies.init(&host);
+            var execution_state: execution_owner.Execution = undefined;
+            execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
+            var replies = Replies.init(&host, &execution_state);
             var intake = Intake.parts(&host, &replies);
             defer intake.exchanges.deinit(host.allocator);
             defer for (intake.exchanges.items) |exchange| {
@@ -2780,7 +2793,9 @@ test "retired ordinary capture still consumes its intake classification and reso
         var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined, .intake_capacity = descriptor_capacity.minimum_intake };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, &lease);
-        var replies = Replies.init(&host);
+        var execution_state: execution_owner.Execution = undefined;
+        execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
+        var replies = Replies.init(&host, &execution_state);
         var intake = Intake.parts(&host, &replies);
         defer intake.exchanges.deinit(host.allocator);
         defer {
@@ -2863,7 +2878,9 @@ test "shutdown fences every unhanded route while preserving request and reply cu
     host.lease = &lease;
     host.instance = @splat(17);
     host_parts.attach(&host, undefined);
-    var replies = Replies.init(&host);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
+    var replies = Replies.init(&host, &execution_state);
     var test_owner = Intake.parts(&host, &replies);
     var exchange = Intake.Exchange{ .owner = &test_owner, .fd = -1, .accepted_at_ns = 0, .deadline = 0 };
     const State = @TypeOf(exchange.state);
@@ -2960,8 +2977,10 @@ test "intake accepts and physically retires a hundred incomplete exchanges" {
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     const wake = try Intake.openIntakeWake();
-    var replies = Replies.init(&host);
+    var replies = Replies.init(&host, &execution_state);
     var intake: Intake = undefined;
     intake.init(&host, &replies, wake) catch |err| {
         for (wake) |fd| _ = std.c.close(fd);
@@ -3054,8 +3073,10 @@ test "Host settings fields decide fenced MySQL shutdown once at the return bound
                     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
                     var host_parts: TestParts = undefined;
                     host_parts.attach(&host, &lease);
+                    var execution_state: execution_owner.Execution = undefined;
+                    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
                     _ = host.lifecycle.advance(.stopping);
-                    var replies = Replies.init(&host);
+                    var replies = Replies.init(&host, &execution_state);
                     var intake = Intake.parts(&host, &replies);
                     intake.lifetime = lifetime;
                     intake.deadline_armed = true;
@@ -3211,9 +3232,11 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         const wake = try Intake.openIntakeWake();
         var host_parts: TestParts = undefined;
         host_parts.attachWithWake(&host, &lease, wake[1]);
+        var execution_state: execution_owner.Execution = undefined;
+        execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
         var retention = output_retention.Queue.initialize(io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
         host.retention = &retention;
-        var replies = Replies.init(&host);
+        var replies = Replies.init(&host, &execution_state);
         var intake: Intake = undefined;
         intake.init(&host, &replies, wake) catch |err| {
             for (wake) |fd| _ = std.c.close(fd);
@@ -3328,9 +3351,11 @@ test "readable ingress cannot cross its header or body deadline" {
     var host = Host{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
     host.retention = &retention;
-    var replies = Replies.init(&host);
+    var replies = Replies.init(&host, &execution_state);
     var test_owner = Intake.parts(&host, &replies);
     for ([_]Route{ .host_stop, .host_info }) |route| {
         for ([_]bool{ false, true }) |body_only| {
@@ -3399,9 +3424,11 @@ test "ingress resumes its peer wait after local capture completion" {
     var host = Host{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
     host.retention = &retention;
-    var replies = Replies.init(&host);
+    var replies = Replies.init(&host, &execution_state);
     var test_owner = Intake.parts(&host, &replies);
     var sockets: [2]c_int = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
@@ -3451,9 +3478,11 @@ test "a Message's environment header and entries are checked before admission" {
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
     host.retention = &retention;
-    var replies = Replies.init(&host);
+    var replies = Replies.init(&host, &execution_state);
     var test_owner = Intake.parts(&host, &replies);
     const request = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"x\"}}";
     const Case = struct { route: []const u8 = "message", header: []const u8, entries: []const u8 = "", record: bool = true, result: anyerror!?[]const u8 };
@@ -3531,11 +3560,15 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .environments = &environments };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
     host.retention = &retention;
     const Send = struct {
         fn message(owner: *Host, key: []const u8, to: []const u8, entries: []const u8) !void {
-            var replies = Replies.init(owner);
+            var helper_execution: execution_owner.Execution = undefined;
+            helper_execution.init(&.{}, null, owner.lifecycle, &owner.scratch_used, null);
+            var replies = Replies.init(owner, &helper_execution);
             var test_owner = Intake.parts(owner, &replies);
             var request_buffer: [512]u8 = undefined;
             const request = try std.fmt.bufPrint(&request_buffer, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"{s}\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{ key, to });
@@ -3600,7 +3633,9 @@ test "exchange retirement retains failed ingress cleanup through retry" {
     };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
-    var replies = Replies.init(&host);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
+    var replies = Replies.init(&host, &execution_state);
     var test_owner = Intake.parts(&host, &replies);
     const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
     const payload = @as([8192]u8, @splat('x'));
@@ -3737,6 +3772,8 @@ test "creation receipt survives dropped and failed reply allocation" {
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     const request = try std.testing.allocator.create(wire_request.Request);
     defer std.testing.allocator.destroy(request);
     request.* = .{ .configure = try store_module.testingCompleteConfiguration("receipt-allocation", "", root, "model-a") };
@@ -3744,7 +3781,7 @@ test "creation receipt survives dropped and failed reply allocation" {
     var header = Header{ .route = .configure, .content_length = 0 };
     var receipt_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     host.allocator = receipt_failure.allocator();
-    var replies = Replies.init(&host);
+    var replies = Replies.init(&host, &execution_state);
     var reply: Reply = undefined;
     reply.init(std.testing.io, std.testing.allocator, null);
     defer reply.deinit();
@@ -3755,7 +3792,7 @@ test "creation receipt survives dropped and failed reply allocation" {
     host.allocator = accounting.allocator();
     var output_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     reply.deinit();
-    replies = Replies.init(&host);
+    replies = Replies.init(&host, &execution_state);
     reply.init(std.testing.io, output_failure.allocator(), null);
     try prepareTest(&replies, &reply, header, request, null, null);
     try std.testing.expect(reply.next(0) == .retire);
@@ -3852,9 +3889,11 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
     host.retention = &retention;
-    var replies = Replies.init(&host);
+    var replies = Replies.init(&host, &execution_state);
     var test_owner = Intake.parts(&host, &replies);
     var request_buffer: [512]u8 = undefined;
     const request = try std.fmt.bufPrint(&request_buffer, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"skill_suggestions\",\"store\":\"s\",\"workspace\":\"{s}\",\"prefix\":\"\"}}", .{root});
@@ -3875,11 +3914,11 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
         const reply = try exchange.ensureReply();
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         host.allocator = failing.allocator();
-        replies = Replies.init(&host);
+        replies = Replies.init(&host, &execution_state);
         test_owner = Intake.parts(&host, &replies);
         exchange.prepare() catch |err| exchange.fail(err);
         host.allocator = std.testing.allocator;
-        replies = Replies.init(&host);
+        replies = Replies.init(&host, &execution_state);
         test_owner = Intake.parts(&host, &replies);
         try std.testing.expect(!storage.isFenced() and host.lifecycle.launchAllowed());
         const status = reply.header[0..reply.header_length];
@@ -3935,6 +3974,8 @@ test "SH-51 a route that cannot serve a parts value refuses it as ordinary and l
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
     host.retention = &retention;
     const head = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"";
@@ -3976,7 +4017,9 @@ test "SH-51 a route that cannot serve a parts value refuses it as ordinary and l
     const Answer = struct { status: []const u8, body: []const u8 };
     const exchangeRead = struct {
         fn run(serving: *Host, allocator: std.mem.Allocator, read: Read) !Answer {
-            var replies = Replies.init(serving);
+            var helper_execution: execution_owner.Execution = undefined;
+            helper_execution.init(&.{}, null, serving.lifecycle, &serving.scratch_used, null);
+            var replies = Replies.init(serving, &helper_execution);
             var test_owner = Intake.parts(serving, &replies);
             var sockets: [2]c_int = undefined;
             try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
@@ -4072,13 +4115,17 @@ test "INS-11 public part content windows" {
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
     host.retention = &retention;
 
     const Answer = struct { header: []const u8, body: []const u8 };
     const exchange = struct {
         fn run(serving: *Host, allocator: std.mem.Allocator, path: []const u8, body: []const u8) !Answer {
-            var replies = Replies.init(serving);
+            var helper_execution: execution_owner.Execution = undefined;
+            helper_execution.init(&.{}, null, serving.lifecycle, &serving.scratch_used, null);
+            var replies = Replies.init(serving, &helper_execution);
             var test_owner = Intake.parts(serving, &replies);
             var sockets: [2]c_int = undefined;
             try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
@@ -4168,6 +4215,8 @@ test "SH-53 a dispatch fence records its reason in the Host diagnostics file" {
     var unattached = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
     var unattached_parts: TestParts = undefined;
     unattached_parts.attach(&unattached, undefined);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &unattached_parts.lifecycle, &unattached.scratch_used, null);
     unattached.lifecycle.fenceDispatch("before readiness", error.Unattached);
     try std.testing.expect(unattached.lifecycle.stopping());
 
@@ -4403,6 +4452,8 @@ test "SIGINT, SIGTERM and SIGHUP ask the Host to stop once through intake's loop
         var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, &lease);
+        var execution_state: execution_owner.Execution = undefined;
+        execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
         _ = host.lifecycle.advance(before);
         StopSignals.apply(host.lifecycle);
         try std.testing.expectEqual(before, host.lifecycle.phase.load(.acquire));
@@ -5002,6 +5053,8 @@ test "SH-65 Host wire admits image bytes in order and preserves refusal identity
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
+    var execution_state: execution_owner.Execution = undefined;
+    execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     const Exercise = struct {
         fn run(owner: *Host, body: []const u8, expected: []const u8) !void {
             var retained: ?named_scratch.Owner = null;
@@ -5013,7 +5066,9 @@ test "SH-65 Host wire admits image bytes in order and preserves refusal identity
             defer request.removeTemporaryContent(std.testing.io) catch unreachable;
             var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
             defer offer.deinit(std.testing.allocator);
-            var replies = Replies.init(owner);
+            var helper_execution: execution_owner.Execution = undefined;
+            helper_execution.init(&.{}, null, owner.lifecycle, &owner.scratch_used, null);
+            var replies = Replies.init(owner, &helper_execution);
             var reply: Reply = undefined;
             reply.init(std.testing.io, std.testing.allocator, null);
             defer reply.deinit();
