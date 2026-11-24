@@ -220,15 +220,12 @@ test "keys reference gives Enter both its list and chat meanings" {
 }
 
 test "keys reference aliases are explicit under their listed rows" {
-    try std.testing.expectEqual(@as(usize, 16), list.len);
     for ([_]struct { key: Key, row: []const u8 }{
         .{ .key = .ctrl_g, .row = "esc" },
         .{ .key = .ctrl_d, .row = "ctrl+c" },
         .{ .key = .ctrl_n, .row = "ctrl+p" },
         .{ .key = .shift_up, .row = "↑↓" },
         .{ .key = .shift_down, .row = "↑↓" },
-        .{ .key = .alt_left, .row = "alt+←→" },
-        .{ .key = .alt_right, .row = "alt+←→" },
         .{ .key = .page_up, .row = "↑↓" },
         .{ .key = .page_down, .row = "↑↓" },
         .{ .key = .home, .row = "↑↓" },
@@ -262,11 +259,21 @@ test "every keys reference row names its input including non-table input" {
         empty[index].keys = &.{};
         try std.testing.expectEqual(@as(?ListError, .empty_row), referenceError(&empty, .{bindable}));
     }
-    try std.testing.expectEqual(std.meta.Tag(ReferenceInput).enter, std.meta.activeTag(list[0].keys[0]));
-    try std.testing.expectEqual(std.meta.Tag(ReferenceInput).newline, std.meta.activeTag(list[2].keys[0]));
-    try std.testing.expectEqual(std.meta.Tag(ReferenceInput).slash, std.meta.activeTag(list[11].keys[0]));
-    for ([_]usize{ 0, 2, 11 }) |index| {
+    for ([_]struct { key: []const u8, input: ReferenceInput }{
+        .{ .key = "enter", .input = .enter },
+        .{ .key = "⇧enter", .input = .newline },
+        .{ .key = "/", .input = .slash },
+    }) |expected| {
+        const index = for (list, 0..) |row, at| {
+            if (std.mem.eql(u8, expected.key, row.key)) break at;
+        } else return error.MissingReferenceRow;
+        try std.testing.expectEqual(expected.input, list[index].keys[0]);
         const duplicate = list ++ .{list[index]};
         try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{bindable}));
     }
+    const option = for (list) |row| {
+        if (std.mem.eql(u8, "alt+←→", row.key)) break row;
+    } else return error.MissingReferenceRow;
+    try std.testing.expectEqualStrings("fold / expand tree", option.meaning);
+    try std.testing.expectEqualSlices(ReferenceInput, &.{ .{ .key = .alt_left }, .{ .key = .alt_right } }, option.keys);
 }

@@ -4211,6 +4211,7 @@
         "ctrl+c   leave",
         "next focus",
         "previous focus",
+        "open chat · info actions",
         "fold / expand tree"
       ],
       "absent": [
