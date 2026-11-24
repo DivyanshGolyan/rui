@@ -152,7 +152,7 @@ const Walker = struct {
                 _ = try self.container(ctx, name, owner, node, value, found.members, found.is_struct);
                 return;
             }
-            if (syntax.isAlias(ctx.ast, value)) {
+            if (decl.ast.type_node.unwrap() == null and syntax.isAlias(ctx.ast, value)) {
                 var item = base(ctx, .alias, name, node, owner);
                 item.alias_of = value;
                 _ = try self.add(item);
@@ -211,6 +211,8 @@ const thing_source =
     \\pub const Alias = std.mem;
     \\pub const limit = 10;
     \\pub var state: u32 = 0;
+    \\pub const typed: u32 = undefined;
+    \\pub const undef = undefined;
     \\pub const Holder = struct {
     \\    const Self = @This();
     \\    count: usize,
@@ -254,6 +256,8 @@ const thing_rows = [_]Row{
     .{ .path = "Alias", .kind = .alias },
     .{ .path = "limit", .kind = .constant },
     .{ .path = "state", .kind = .constant },
+    .{ .path = "typed", .kind = .constant },
+    .{ .path = "undef", .kind = .constant },
     .{ .path = "Holder", .kind = .type },
     .{ .path = "Holder.Self", .kind = .alias },
     .{ .path = "Holder.count", .kind = .field, .plain = .scalar },

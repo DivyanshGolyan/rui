@@ -30,12 +30,12 @@ pub fn isBuiltinNamed(ast: *const Ast, node: Ast.Node.Index, name: []const u8) b
     };
 }
 
-/// An identifier, `@import(..)`, or a field chain on one of them.
+/// An identifier other than a literal value, `@import(..)`, or a field chain on one of them.
 fn purePath(ast: *const Ast, node: Ast.Node.Index) bool {
     return switch (ast.nodeTag(node)) {
         .identifier => {
             const name = ast.tokenSlice(ast.nodeMainToken(node));
-            return !std.mem.eql(u8, name, "true") and !std.mem.eql(u8, name, "false") and !std.mem.eql(u8, name, "null");
+            return !std.mem.eql(u8, name, "true") and !std.mem.eql(u8, name, "false") and !std.mem.eql(u8, name, "null") and !std.mem.eql(u8, name, "undefined");
         },
         .field_access => purePath(ast, ast.nodeData(node).node_and_token[0]),
         else => isBuiltinNamed(ast, node, "@import"),

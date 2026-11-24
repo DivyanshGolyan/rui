@@ -11,5 +11,6 @@ test {
     _ = @import("Report.zig");
     _ = @import("Sources.zig");
     _ = @import("Types.zig");
+    _ = @import("InferTest.zig");
     _ = @import("main.zig");
 }

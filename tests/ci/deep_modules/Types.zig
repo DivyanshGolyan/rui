@@ -107,7 +107,8 @@ fn peel(t: TypeRef, layer: Layer) TypeRef {
     return out;
 }
 
-fn wrap(layer: Layer, inner: TypeRef) TypeRef {
+/// `inner` with `layer` added outermost. Unknown when the layers would overflow.
+pub fn wrap(layer: Layer, inner: TypeRef) TypeRef {
     if (inner.layers.len == max_layers) return unknown;
     var out = inner;
     var i: usize = out.layers.len;
