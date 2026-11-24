@@ -45,7 +45,8 @@ CREATOR = "github-actions[bot]"
 WORKFLOWS = (".github/workflows/main-qualifier.yml", ".github/workflows/promote.yml")
 PLATFORMS = ("linux-x86_64", "linux-arm64", "darwin-arm64")
 # What Release publishes from a qualifying run (release-build.yml uploads them).
-RELEASE_ARTIFACTS = frozenset({*(f"rui-{platform}" for platform in PLATFORMS), "rui-npm", "rui-digests"})
+# The memory table is part of what Release publishes: the qualification tier uploads it beside the archives.
+RELEASE_ARTIFACTS = frozenset({*(f"rui-{platform}" for platform in PLATFORMS), "rui-npm", "rui-digests", "rui-host-memory"})
 # Publication and its retries must finish before the archives expire.
 EXPIRY_MARGIN = timedelta(hours=2)
 RUN_URL = re.compile(r"/actions/runs/([1-9][0-9]*)$")

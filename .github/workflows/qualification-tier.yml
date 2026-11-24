@@ -100,6 +100,7 @@ jobs:
       # Installs the fixture Python (h2) that host_memory.py imports, which the release job's venv used to supply.
       - uses: ./.github/actions/setup
         with:
+          # Restore only: the memory gate publishes no caches, so cache cleanup has nothing of its to prune.
           publish-caches: 'false'
           targets: '["host-memory"]'
       - name: Fetch the release executable this promotion publishes

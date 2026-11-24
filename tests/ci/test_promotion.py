@@ -512,6 +512,14 @@ class RecordedExcerptTest(unittest.TestCase):
 
 
 class BisectTargetTest(unittest.TestCase):
+    def test_host_memory_bisects_as_its_own_target(self):
+        """CI-94: a manual bisect of the memory step replays host-memory alone, through the function and the subcommand."""
+        self.assertEqual(promotion.bisect_targets("host-memory"), ["host-memory"])
+        result = subprocess.run([sys.executable, "-B", str(PROMOTION), "bisect-targets", "--step", "host-memory"],
+                                capture_output=True, text=True, cwd=select_tests.ROOT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ["host-memory"])
+
     def test_a_step_that_is_not_a_build_target_is_refused_before_any_replay(self):
         with self.assertRaises(SystemExit) as refused:
             promotion.bisect_targets("pty")
