@@ -709,19 +709,6 @@ test "a command's list names the choices its word starts, and Tab puts the highl
     }
 }
 
-test "listed commands are every listed name in order, and reload runs immediately" {
-    const listed = conversation.listedForTests();
-    const expected = [_][]const u8{ "archive", "clear", "copy ", "effort ", "model", "new", "pin", "reload-skills", "reload-tools", "rename ", "requests", "result ", "setup ", "unarchive", "unpin" };
-    try std.testing.expectEqual(expected.len, listed.count);
-    for (expected, listed.shown()) |word, entry| try std.testing.expectEqualStrings(word, entry.word);
-    const reload = listed.shown()[7];
-    try std.testing.expectEqualStrings("reload-skills", reload.word);
-    try std.testing.expect(reload.runs);
-    const tools = listed.shown()[8];
-    try std.testing.expectEqualStrings("reload-tools", tools.word);
-    try std.testing.expect(tools.runs);
-}
-
 test "/effort offers every grammar value for an unlisted model" {
     const list = conversation.suggest("/effort ", .{ .model = "unlisted-model", .effort = .max }).?;
     const expected = [_][]const u8{ "none", "low", "medium", "high", "xhigh", "max", "default" };
@@ -892,38 +879,31 @@ test "overflow labels are count only" {
     try std.testing.expectEqualStrings("1 more", try std.fmt.bufPrint(&buffer, more, .{1}));
 }
 
-test "archive command eligibility follows the exact archive state" {
-    const cases = .{
-        .{ ArchiveState.active, true, false },
-        .{ ArchiveState.archiving, false, false },
-        .{ ArchiveState.archived, false, true },
-    };
-    inline for (cases) |case| {
-        try std.testing.expectEqual(case[1], conversationArchiveEligible(.archive, case[0]));
-        try std.testing.expectEqual(case[2], conversationArchiveEligible(.unarchive, case[0]));
-        try std.testing.expect(conversationArchiveEligible(.clear, case[0]));
-    }
-    try std.testing.expect(!conversationArchiveEligible(.archive, null));
-    try std.testing.expect(!conversationArchiveEligible(.unarchive, null));
-}
-
-test "conversation first-word catalogue exposes only the state-eligible archive verb" {
-    const Case = struct { state: ?ArchiveState, archive: bool, unarchive: bool };
+test "SUI-131 the first-word catalogue and exact archive eligibility agree" {
+    const Case = struct { state: ?ArchiveState, archive: bool = false, unarchive: bool = false };
     const cases = [_]Case{
-        .{ .state = null, .archive = false, .unarchive = false },
-        .{ .state = .active, .archive = true, .unarchive = false },
-        .{ .state = .archiving, .archive = false, .unarchive = false },
-        .{ .state = .archived, .archive = false, .unarchive = true },
+        .{ .state = null },
+        .{ .state = .active, .archive = true },
+        .{ .state = .archiving },
+        .{ .state = .archived, .unarchive = true },
     };
+    const inventory = [_][]const u8{ "archive", "clear", "copy ", "effort ", "model", "new", "pin", "reload-skills", "reload-tools", "rename ", "requests", "result ", "setup ", "unarchive", "unpin" };
     for (cases) |case| {
+        try std.testing.expectEqual(case.archive, conversationArchiveEligible(.archive, case.state));
+        try std.testing.expectEqual(case.unarchive, conversationArchiveEligible(.unarchive, case.state));
         const list = conversation.listedFor(.{ .archive_state = case.state });
-        var archive = false;
-        var unarchive = false;
-        for (list.shown()) |entry| {
-            archive = archive or std.mem.eql(u8, entry.shown, "/archive");
-            unarchive = unarchive or std.mem.eql(u8, entry.shown, "/unarchive");
+        var index: usize = 0;
+        for (inventory) |word| {
+            if (!case.archive and std.mem.eql(u8, word, "archive")) continue;
+            if (!case.unarchive and std.mem.eql(u8, word, "unarchive")) continue;
+            try std.testing.expect(index < list.count);
+            const entry = list.shown()[index];
+            try std.testing.expectEqualStrings(word, entry.word);
+            if (std.mem.eql(u8, word, "reload-skills") or std.mem.eql(u8, word, "reload-tools")) try std.testing.expect(entry.runs);
+            index += 1;
         }
-        try std.testing.expectEqual(case.archive, archive);
-        try std.testing.expectEqual(case.unarchive, unarchive);
+        try std.testing.expectEqual(index, list.count);
     }
+    try std.testing.expectEqual(ConversationName.archive, conversation.parse("/archive").command.name);
+    try std.testing.expectEqual(ConversationName.unarchive, conversation.parse("/unarchive").command.name);
 }

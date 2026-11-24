@@ -651,18 +651,50 @@ test "a list stays the drawn one only while its rows are the same, across every 
     }
 }
 
-test "Enter runs a row only where its word ends the draft" {
+test "SUI-24 archive completion refreshes before accepting and preserves replacement boundaries" {
+    const ArchiveState = @import("session_archive.zig").State;
     const entries = [_]skill_suggestions.Entry{.{ .name = "archx", .description = "Skill" }};
     var reads: Reads = .{};
     var rows: Rows = .{};
     _ = reads.answer(reads.ask("").?.read, testPage(&entries), "");
-    var active = reads.shown(&rows, "/arch", 5, 1, .{ .archive_state = .active }, null).?;
-    try expectReplacement(.{ .start = 1, .end = 5, .text = "archive" }, enter("/arch", 5, &active).run);
-    active.highlight = 1;
-    try expectReplacement(.{ .start = 1, .end = 5, .text = "archx " }, enter("/arch", 5, &active).edit);
-    var archived = reads.shown(&rows, "/arch", 5, 1, .{ .archive_state = .archived }, null).?;
-    archived.highlight = 1;
-    try expectReplacement(.{ .start = 1, .end = 5, .text = "unarchive" }, enter("/arch", 5, &archived).run);
+
+    const cases = [_]struct { state: ?ArchiveState, words: []const []const u8 }{
+        .{ .state = null, .words = &.{"/archx"} },
+        .{ .state = .active, .words = &.{ "/archive", "/archx" } },
+        .{ .state = .archiving, .words = &.{"/archx"} },
+        .{ .state = .archived, .words = &.{ "/archx", "/unarchive" } },
+        .{ .state = .active, .words = &.{ "/archive", "/archx" } },
+    };
+    var previous: ?slash_commands.Shown = null;
+    for (cases) |case| {
+        var shown = reads.shown(&rows, "/arch", 5, 1, .{ .archive_state = case.state }, previous).?;
+        try std.testing.expectEqual(.hidden, shown.seen);
+        try std.testing.expectEqual(case.words.len, shown.list.count);
+        for (case.words, shown.list.shown(), 0..) |word, entry, index| {
+            try std.testing.expectEqualStrings(word, entry.shown);
+            shown.highlight = index;
+            if (std.mem.eql(u8, word, "/archx")) {
+                try expectReplacement(.{ .start = 1, .end = 5, .text = "archx " }, enter("/arch", 5, &shown).edit);
+            } else {
+                try expectReplacement(.{ .start = 1, .end = 5, .text = word[1..] }, enter("/arch", 5, &shown).run);
+            }
+        }
+        shown.drew(true);
+        previous = shown;
+    }
+
+    const unavailable = [_]struct { state: ?ArchiveState, draft: []const u8 }{
+        .{ .state = null, .draft = "/archive" },
+        .{ .state = null, .draft = "/unarchive" },
+        .{ .state = .archiving, .draft = "/archive" },
+        .{ .state = .archiving, .draft = "/unarchive" },
+        .{ .state = .archived, .draft = "/archive" },
+        .{ .state = .active, .draft = "/unarchive" },
+    };
+    for (unavailable) |case| {
+        try std.testing.expect(reads.shown(&rows, case.draft, case.draft.len, 2, .{ .archive_state = case.state }, null) == null);
+    }
+
     for ([_][]const u8{ "/arch this change", "/arch.foo" }) |draft| {
         var shown = reads.shown(&rows, draft, 5, 1, .{ .archive_state = .active }, null).?;
         try std.testing.expectEqual(@as(usize, 2), shown.list.count);
@@ -867,33 +899,5 @@ test "a transport-interrupted skills read is retryable without discarding the he
         try std.testing.expect(next.read > pending.read);
         reads.fail(next.read);
         try std.testing.expect(reads.ask("re") == null);
-    }
-}
-
-test "first word archive suggestions follow state and exact unavailable names never fuzzy match" {
-    const ArchiveState = @import("session_archive.zig").State;
-    const entries = [_]skill_suggestions.Entry{.{ .name = "archiver", .description = "Archive notes" }};
-    var reads: Reads = .{};
-    var rows: Rows = .{};
-    _ = reads.answer(reads.ask("").?.read, testPage(&entries), "");
-
-    var active = reads.shown(&rows, "/arch", "/arch".len, 1, .{ .archive_state = .active }, null).?;
-    try std.testing.expectEqualStrings("/archive", active.list.entries[0].shown);
-    active.drew(true);
-    const archiving = reads.shown(&rows, "/arch", "/arch".len, 1, .{ .archive_state = .archiving }, active).?;
-    try std.testing.expectEqualStrings("hidden", @tagName(archiving.seen));
-    try std.testing.expectEqualStrings("/archiver", archiving.list.entries[0].shown);
-    try std.testing.expect(reads.shown(&rows, "/archive", "/archive".len, 1, .{ .archive_state = .archiving }, active) == null);
-
-    const restored = reads.shown(&rows, "/unarch", "/unarch".len, 1, .{ .archive_state = .archived }, null).?;
-    try std.testing.expectEqualStrings("/unarchive", restored.list.entries[0].shown);
-    const unavailable = [_]struct { state: ArchiveState, draft: []const u8 }{
-        .{ .state = .archived, .draft = "/archive" },
-        .{ .state = .active, .draft = "/unarchive" },
-        .{ .state = .archiving, .draft = "/archive" },
-        .{ .state = .archiving, .draft = "/unarchive" },
-    };
-    for (unavailable) |case| {
-        try std.testing.expect(reads.shown(&rows, case.draft, case.draft.len, 2, .{ .archive_state = case.state }, null) == null);
     }
 }

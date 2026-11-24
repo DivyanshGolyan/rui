@@ -5446,7 +5446,7 @@ test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives
     }
 }
 
-test "SUI-25 archive slash verbs follow observed chat state and preserve opening refusal" {
+test "SUI-25 archive slash verbs follow observed chat state and preserve command custody" {
     const ArchiveState = protocol.SessionArchiveState;
     const Case = struct { state: ?ArchiveState, command: []const u8, accepted: bool, refusal: ?[]const u8 = null };
     const cases = [_]Case{
@@ -5479,9 +5479,11 @@ test "SUI-25 archive slash verbs follow observed chat state and preserve opening
         if (case.refusal) |expected| try std.testing.expectEqualStrings(expected, held.self.notice.?);
         try std.testing.expect(held.self.submission.view() == null);
     }
+    try staleArchiveSlashPicks();
+    try staleExactArchiveSlash();
 }
 
-test "SUI-24 archive state changes invalidate drawn Tab and pointer picks before repaint" {
+fn staleArchiveSlashPicks() !void {
     const InputPath = enum { tab, click };
     for (std.enums.values(InputPath)) |path| {
         const held = try HeldFrontend.create();
@@ -5512,7 +5514,7 @@ test "SUI-24 archive state changes invalidate drawn Tab and pointer picks before
     }
 }
 
-test "SUI-25 exact archive command refuses after its chat state changes" {
+fn staleExactArchiveSlash() !void {
     const held = try HeldFrontend.create();
     defer held.destroy();
     var overview: ArchiveOverview = .{ .state = undefined };
