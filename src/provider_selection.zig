@@ -85,35 +85,6 @@ pub fn resolve(capabilities: []const Capability, explicit_provider: ?[]const u8,
     return error.UnsupportedSelectionProvider;
 }
 
-test "prospective selection does not fall back from a stale or unavailable preference" {
-    const Policy = struct {
-        fn valid(model: []const u8) bool {
-            return std.mem.eql(u8, model, "luna") or std.mem.eql(u8, model, "other");
-        }
-        fn small(model: []const u8) bool {
-            return std.mem.eql(u8, model, "small");
-        }
-    };
-    const capabilities = [_]Capability{
-        .{ .name = "codex", .recommended_model = "luna", .admits_model = Policy.valid, .readiness = .configured },
-        .{ .name = "synthetic", .recommended_model = "small", .admits_model = Policy.small, .readiness = .configured },
-    };
-    try std.testing.expectEqual(Selection.chooser, try resolve(&.{}, null, null, null, null));
-    try std.testing.expectEqual(Selection.chooser, try resolve(&capabilities, null, null, null, null));
-    try std.testing.expectEqualStrings("synthetic", (try resolve(&capabilities, "synthetic", null, "codex", "other")).selected.provider);
-    try std.testing.expectEqualStrings("small", (try resolve(&capabilities, "synthetic", null, "codex", "other")).selected.model);
-    try std.testing.expectEqualStrings("other", (try resolve(&capabilities, null, null, "codex", "other")).selected.model);
-    try std.testing.expectError(error.UnsupportedSelectionModel, resolve(&capabilities, null, null, "codex", "unknown"));
-    try std.testing.expectError(error.UnsupportedSelectionProvider, resolve(&capabilities, null, null, "removed", null));
-    try std.testing.expectError(error.UnsupportedSelectionModel, resolve(&capabilities, "synthetic", "luna", null, null));
-    const only = capabilities[0..1];
-    try std.testing.expectEqualStrings("luna", (try resolve(only, null, null, null, null)).selected.model);
-    const missing = [_]Capability{.{ .name = "codex", .recommended_model = "luna", .admits_model = Policy.valid, .readiness = .missing }};
-    try std.testing.expectEqual(Selection.chooser, try resolve(&missing, null, null, null, null));
-    try std.testing.expectEqual(Readiness.missing, (try resolve(&missing, null, null, "codex", null)).selected.readiness);
-    try std.testing.expectEqual(Readiness.missing, (try resolve(&missing, "codex", null, null, null)).selected.readiness);
-}
-
 test "Codex selection accepts identifiers without claiming model qualification" {
     var readiness: Readinesses = .initFill(.configured);
     const capability = @import("model_capability.zig").capabilities(&readiness).slice()[0];
@@ -124,33 +95,61 @@ test "Codex selection accepts identifiers without claiming model qualification" 
         try std.testing.expectError(error.UnsupportedSelectionModel, resolve(&.{capability}, null, invalid, null, null));
 }
 
-test "renewal due selects a sole provider and resolves only absent model pins" {
-    var readiness: Readinesses = .initFill(.renewal_due);
-    var capability = @import("model_capability.zig").capabilities(&readiness).slice()[0];
-    capability.recommended_model = "future-recommendation";
-    const inherited = try resolve(&.{capability}, null, null, null, null);
-    try std.testing.expect(inherited == .selected);
-    try std.testing.expectEqualStrings("future-recommendation", inherited.selected.model);
-    try std.testing.expectEqual(Readiness.renewal_due, inherited.selected.readiness);
-    try std.testing.expectEqualStrings("explicit-pin", (try resolve(&.{capability}, null, null, "codex", "explicit-pin")).selected.model);
-    for ([_]Readiness{ .missing, .refresh_required, .credential_error }) |unavailable| {
-        capability.readiness = unavailable;
-        try std.testing.expectEqual(Selection.chooser, try resolve(&.{capability}, null, null, null, null));
-        try std.testing.expectEqual(unavailable, (try resolve(&.{capability}, null, null, "codex", null)).selected.readiness);
+test "CM-57 served-name selection resolves by name across counts, readiness and explicit, saved and default choices" {
+    const model_capability = @import("model_capability.zig");
+    const built_ins = provider_route.built_in_names.len;
+    var name_text: [connection.max_served][16]u8 = undefined;
+    for (0..connection.max_served - built_ins + 1) |count| {
+        var served: [connection.max_served]connection.Name = undefined;
+        for (0..count) |index| served[index] = connection.Name.parse(try std.fmt.bufPrint(&name_text[index], "conn-{d}", .{index})).?;
+        for (std.enums.values(Readiness)) |state| for (0..count) |sole| {
+            var readiness: Readinesses = .initFill(.missing);
+            for (served[0..count]) |name| readiness.set(name, .missing);
+            readiness.set(served[sole], state);
+            try std.testing.expectEqual(built_ins + count, readiness.names().len);
+            for (served[0..count], 0..) |name, index| try std.testing.expectEqualStrings(name.slice(), readiness.names()[built_ins + index].slice());
+            try std.testing.expectEqual(Readiness.missing, readiness.get(connection.Name.parse("absent").?));
+            var caps = model_capability.capabilities(&readiness);
+            const list = caps.slice();
+            try std.testing.expectEqual(built_ins + count, list.len);
+
+            // Explicit by name selects that entry with its own readiness, whatever the readiness.
+            const explicit = try resolve(list, served[sole].slice(), null, null, null);
+            try std.testing.expectEqualStrings(served[sole].slice(), explicit.selected.provider);
+            try std.testing.expectEqual(state, explicit.selected.readiness);
+            // Saved by name takes the saved model; an explicit model overrides it.
+            try std.testing.expectEqualStrings("saved-model", (try resolve(list, null, null, served[sole].slice(), "saved-model")).selected.model);
+            try std.testing.expectEqualStrings("explicit-model", (try resolve(list, null, "explicit-model", served[sole].slice(), "saved-model")).selected.model);
+            // A name that is not served is refused, and a stale saved name never falls back to a ready entry.
+            try std.testing.expectError(error.UnsupportedSelectionProvider, resolve(list, "absent", null, null, null));
+            try std.testing.expectError(error.UnsupportedSelectionProvider, resolve(list, null, null, "absent", null));
+            // With no explicit or saved name, the sole usable entry is chosen, else the caller must choose.
+            const default = try resolve(list, null, null, null, null);
+            if (state.usable()) {
+                try std.testing.expectEqualStrings(served[sole].slice(), default.selected.provider);
+            } else {
+                try std.testing.expectEqual(Selection.chooser, default);
+            }
+            // A second usable entry (a built-in configured) leaves the default to the caller.
+            var pair = readiness;
+            pair.set(built_ins_first(), .configured);
+            var pair_caps = model_capability.capabilities(&pair);
+            const pair_default = try resolve(pair_caps.slice(), null, null, null, null);
+            if (state.usable()) {
+                try std.testing.expectEqual(Selection.chooser, pair_default);
+            } else {
+                try std.testing.expectEqualStrings(built_ins_first().slice(), pair_default.selected.provider);
+            }
+        };
     }
+
+    // The served set holds at most max_served names, and one more is refused.
+    var full: Readinesses = .initFill(.missing);
+    for (0..connection.max_served - built_ins) |index| full.set(connection.Name.parse(try std.fmt.bufPrint(&name_text[index], "conn-{d}", .{index})).?, .missing);
+    try std.testing.expectEqual(connection.max_served, full.names().len);
+    try std.testing.expectError(error.ServedFull, full.map.set(connection.Name.parse("extra").?, .missing));
 }
 
-test "Readinesses lists the built-ins first, then connections in order, and reads absent names as missing" {
-    var readiness: Readinesses = .initFill(.configured);
-    const built_ins = provider_route.built_in_names.len;
-    try std.testing.expectEqual(built_ins, readiness.names().len);
-    try std.testing.expectEqual(Readiness.missing, readiness.get(connection.Name.parse("alpha").?));
-    readiness.set(connection.Name.parse("alpha").?, .missing);
-    readiness.set(connection.Name.parse("beta").?, .configured);
-    try std.testing.expectEqual(built_ins + 2, readiness.names().len);
-    try std.testing.expectEqualStrings("alpha", readiness.names()[built_ins].slice());
-    try std.testing.expectEqualStrings("beta", readiness.names()[built_ins + 1].slice());
-    readiness.set(connection.Name.parse("beta").?, .refresh_required);
-    try std.testing.expectEqual(built_ins + 2, readiness.names().len);
-    try std.testing.expectEqual(Readiness.refresh_required, readiness.get(connection.Name.parse("beta").?));
+fn built_ins_first() connection.Name {
+    return provider_route.built_in_names[0];
 }

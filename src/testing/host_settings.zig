@@ -208,11 +208,11 @@ fn expectRefusal(gpa: std.mem.Allocator, text: []const u8, path: []const u8, rea
     try std.testing.expectEqual(@as(usize, 0), settings.connections.entries.len);
 }
 
-// SH-148 is the connections document's admission: the parser's refusals name
-// the entry and field, and a name is unique and not a sign-in's. SH-149 is
+// SH-153 is the connections document's admission: the parser's refusals name
+// the entry and field, and a name is unique and not a sign-in's. SH-154 is
 // this slice's served shape: each shape another Rui version serves is refused
 // by name at seal, and nothing else is.
-test "HST connections: SH-148 two valid entries parse, seal and round-trip through write" {
+test "HST connections: SH-153 two valid entries parse, seal and round-trip through write" {
     const gpa = std.testing.allocator;
     const text = try connectionDocument(gpa, &.{ alpha_connection, beta_connection });
     defer gpa.free(text);
@@ -244,7 +244,7 @@ test "HST connections: SH-148 two valid entries parse, seal and round-trip throu
     try std.testing.expectEqualStrings(first.written(), second.written());
 }
 
-test "HST connections: SH-148 each entry refusal names its entry and field" {
+test "HST connections: SH-153 each entry refusal names its entry and field" {
     const gpa = std.testing.allocator;
     const doc_1 = try connectionDocument(gpa, &.{ alpha_connection, alpha_connection });
     defer gpa.free(doc_1);
@@ -280,7 +280,7 @@ test "HST connections: SH-148 each entry refusal names its entry and field" {
     try expectRefusal(gpa, doc_5, "connections", "too many connections");
 }
 
-test "HST connections: SH-148 the nesting bound refuses the next container inside connections" {
+test "HST connections: SH-153 the nesting bound refuses the next container inside connections" {
     const gpa = std.testing.allocator;
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -292,7 +292,7 @@ test "HST connections: SH-148 the nesting bound refuses the next container insid
     try expectRefusal(gpa, out.written(), "connections", "nesting");
 }
 
-test "HST connections: SH-149 seal refuses each shape this Rui version does not serve, by name" {
+test "HST connections: SH-154 seal refuses each shape this Rui version does not serve, by name" {
     const gpa = std.testing.allocator;
     const cases = [_]struct { from: []const u8, to: []const u8, field: []const u8 }{
         .{ .from = "{\"kind\":\"saved\"}", .to = "{\"kind\":\"command\",\"command\":\"printf x\"}", .field = "credential.source" },
