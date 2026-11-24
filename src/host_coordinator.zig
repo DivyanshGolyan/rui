@@ -9,6 +9,7 @@ const event_limit = input_limit;
 const Task = struct {
     home: []const u8,
     target: ?restart_all.Target = null,
+    scope: restart_all.Scope = .all,
     report: enum { lines, events },
 };
 const Event = union(enum) {
@@ -31,7 +32,7 @@ const Event = union(enum) {
     done,
 };
 
-fn submit(init: std.process.Init, task: Task, stdout: std.process.SpawnOptions.StdIo) !std.process.Child {
+fn submit(init: std.process.Init, task: Task, stdout: std.process.SpawnOptions.StdIo, stderr_policy: std.process.SpawnOptions.StdIo) !std.process.Child {
     // The coordinator speaks this build's private pipe, so it must be this
     // build even after the upgrade published another one (self_executable).
     const executable = try @import("self_executable.zig").path(init.io);
@@ -40,6 +41,7 @@ fn submit(init: std.process.Init, task: Task, stdout: std.process.SpawnOptions.S
         .environ_map = init.environ_map,
         .stdin = .pipe,
         .stdout = stdout,
+        .stderr = stderr_policy,
     });
     errdefer child.kill(init.io);
     var buffer: [2048]u8 = undefined;
@@ -52,7 +54,7 @@ fn submit(init: std.process.Init, task: Task, stdout: std.process.SpawnOptions.S
 }
 
 pub fn restartAll(init: std.process.Init) !void {
-    var child = try submit(init, .{ .home = init.environ_map.get("HOME") orelse return error.HomeNotFound, .report = .lines }, .inherit);
+    var child = try submit(init, .{ .home = init.environ_map.get("HOME") orelse return error.HomeNotFound, .report = .lines }, .inherit, .inherit);
     const term = try waitResult(child.wait(init.io));
     lineResult(term) catch |err| {
         if (err == error.HostRestartUnconfirmed) switch (term) {
@@ -81,13 +83,15 @@ fn lineResult(term: std.process.Child.Term) !void {
     }
 }
 
-pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: restart_all.Options) !restart_all.Batch {
+/// `stderr` is the coordinator's stderr policy: `.ignore` where the caller owns the terminal.
+pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: restart_all.Options, stderr_policy: std.process.SpawnOptions.StdIo) !restart_all.Batch {
     try @import("upgrade_process.zig").check(options.cancellation);
     var child = try submit(init, .{
         .home = options.home,
         .target = if (options.target) |target| target.* else null,
+        .scope = options.scope,
         .report = .events,
-    }, .pipe);
+    }, .pipe, stderr_policy);
     const received = readEvents(init.io, allocator, child.stdout.?, options.progress);
     child.stdout.?.close(init.io);
     child.stdout = null;
@@ -209,6 +213,7 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
     var batch = restart_all.restart(init, allocator, .{
         .home = task.home,
         .target = if (task.target) |*target| target else null,
+        .scope = task.scope,
         .progress = .{ .context = &process_init, .report = progressEvent },
     }) catch |err| restart_all.Batch{ .failure = err };
     defer batch.deinit(allocator);
@@ -264,6 +269,7 @@ test "coordinator transfers every batch outcome and progress without reduction" 
 test "coordinator task pins only routing target and reporting not an activation plan" {
     inline for (.{ .lines, .events }) |report| {
         try expectRoundTrip(Task{ .home = "/home/雪\n", .report = report });
+        try expectRoundTrip(Task{ .home = "/home/雪\n", .scope = .{ .store = "/store/雪\n" }, .report = report });
         try expectRoundTrip(Task{ .home = "/home/雪\n", .target = .{ .build = "/pinned/build", .version = .{ .schema = 3, .patch = 4 } }, .report = report });
     }
 }

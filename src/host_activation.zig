@@ -15,6 +15,8 @@ pub const Limitation = enum {
     application_owned,
     configuration_unavailable,
     target_capability,
+    /// An ordinary start's handover found this Host ineligible; it is left running and untouched.
+    not_start_eligible,
 };
 
 /// The steps after a Host was asked to stop.

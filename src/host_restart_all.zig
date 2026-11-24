@@ -71,8 +71,12 @@ test "SH-125 absent Store owner is not started by handover observation" {
     defer environment.deinit();
     try environment.put("HOME", root);
     const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
-    const result = (try activateOlderHostForStart(init, root)).?;
-    try std.testing.expectEqual(std.meta.Tag(activation.Outcome).not_needed, std.meta.activeTag(result));
+    var batch = try restart(init, std.testing.allocator, .{ .home = root, .scope = .{ .store = root } });
+    defer batch.deinit(std.testing.allocator);
+    // The Store scope names exactly one Host, and the absent owner needs no lease.
+    try std.testing.expectEqual(@as(usize, 1), batch.entries.len);
+    try std.testing.expectEqualStrings(root, batch.entries[0].directory.?);
+    try std.testing.expectEqual(std.meta.Tag(activation.Outcome).not_needed, std.meta.activeTag(batch.selectedOutcome(root)));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "host.lock", .{}));
 }
 
@@ -244,14 +248,27 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
     return .{ .entries = try entries.toOwnedSlice(allocator) };
 }
 
+/// Which Hosts a restart considers. `.store` is an ordinary start's handover:
+/// one Store's directory, uid-wide discovery skipped, and only a Host that
+/// `startHandoverEligible` admits is activated. Any other Host stays untouched.
+pub const Scope = union(enum) {
+    all,
+    store: []const u8,
+};
+
 pub const Options = struct {
     home: []const u8,
     target: ?*const Target = null,
+    scope: Scope = .all,
     cancellation: ?*const client.Cancellation = null,
     progress: ?HostLifecycle.Progress = null,
 };
 
 pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Options) !Batch {
+    switch (options.scope) {
+        .all => {},
+        .store => |directory| return restartStore(init, allocator, options, directory),
+    }
     var batch = try discover(init, allocator, options.home, options.cancellation);
     errdefer batch.deinit(allocator);
     var selected: ?Target = null;
@@ -287,6 +304,49 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
         };
     }
     return batch;
+}
+
+/// One Store's handover: the batch holds exactly one entry, placed by its directory.
+fn restartStore(init: std.process.Init, allocator: std.mem.Allocator, options: Options, directory: []const u8) !Batch {
+    const entries = try allocator.alloc(Entry, 1);
+    entries[0] = .{ .state = .{ .outcome = .not_needed } };
+    var batch: Batch = .{ .entries = entries };
+    errdefer batch.deinit(allocator);
+    entries[0].directory = try allocator.dupe(u8, directory);
+    entries[0].state = try storeState(init, allocator, options, directory, &batch.version);
+    return batch;
+}
+
+fn storeState(init: std.process.Init, allocator: std.mem.Allocator, options: Options, directory: []const u8, version: *?release.Version) !@FieldType(Entry, "state") {
+    process.check(options.cancellation) catch return .{ .outcome = .cancelled };
+    var observation = HostLifecycle.observe(allocator, init.io, options.home, directory, options.cancellation) catch |err|
+        return .{ .failed = try .of(allocator, .observation, err) };
+    defer observation.deinit(allocator);
+    switch (observation) {
+        .absent => return .{ .outcome = .not_needed },
+        .unsupported => |reason| return .{ .outcome = .{ .unsupported = reason } },
+        .managed => {},
+    }
+    // An unusable installation keeps the Host as it is: the caller keeps its original report.
+    var owned: ?Target = null;
+    defer if (owned) |target| target.deinit(allocator);
+    const target: *const Target = options.target orelse selected: {
+        owned = Target.init(init, allocator, options.home, null, options.cancellation) catch |err| switch (err) {
+            error.IneligibleInstallation => return .{ .outcome = .{ .target_unusable = .resolving } },
+            else => return .{ .failed = try .of(allocator, .selection, err) },
+        };
+        break :selected &owned.?;
+    };
+    version.* = target.version;
+    const binary = try std.fmt.allocPrint(allocator, "{s}/bin/rui", .{target.build});
+    defer allocator.free(binary);
+    const actual = std.Io.Dir.cwd().realPathFileAlloc(init.io, binary, allocator) catch |err| return .{ .failed = try .of(allocator, .selection, err) };
+    defer allocator.free(actual);
+    const selected_is_self = std.mem.eql(u8, actual, try @import("self_executable.zig").path(init.io));
+    if (!activation.startHandoverEligible(observation.managed.observed.foreign, observation.managed.version.order(target.version), selected_is_self)) {
+        return .{ .outcome = .{ .unsupported = .not_start_eligible } };
+    }
+    return .{ .outcome = HostLifecycle.activate(init, allocator, &observation, .same, target.build, target.version, options.cancellation, options.progress) };
 }
 
 pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
@@ -410,6 +470,7 @@ test "SH-50 restart all reports every activation outcome and limitation with exi
         "application-owned Host (including MySQL); restart through its application",
         "launch configuration cannot be safely reconstructed; restart through its owner",
         "target build cannot safely check a detached restart; Host left running",
+        "not eligible for an ordinary start on this build; Host left running",
     };
     inline for (std.meta.tags(HostLifecycle.Limitation), limitations) |limitation, text| {
         var bytes: [1024]u8 = undefined;

@@ -161,6 +161,7 @@ test "SH-122 ordinary start hands over only eligible incompatible Hosts and pres
         .{ "application-owned Host", "application-owned Host" },
         .{ "launch configuration unavailable", "launch configuration cannot be safely reconstructed" },
         .{ "target cannot check restart", "target build cannot safely check a detached restart" },
+        .{ "not eligible to start", "not eligible for an ordinary start on this build" },
     };
     inline for (std.meta.tags(activation.Limitation), limitations) |limitation, expected| {
         try checkOutcome(init, .{ .unsupported = limitation }, expected[0], expected[1]);

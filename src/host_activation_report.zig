@@ -46,6 +46,7 @@ pub fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: activati
                 .application_owned => "application-owned Host (including MySQL); restart through its application",
                 .configuration_unavailable => "launch configuration cannot be safely reconstructed; restart through its owner",
                 .target_capability => "target build cannot safely check a detached restart; Host left running",
+                .not_start_eligible => "not eligible for an ordinary start on this build; Host left running",
             }});
         },
         .replacement_observed => {
@@ -104,6 +105,7 @@ pub fn summary(outcome: activation.Outcome) []const u8 {
             .application_owned => "application-owned Host",
             .configuration_unavailable => "launch configuration unavailable",
             .target_capability => "target cannot check restart",
+            .not_start_eligible => "not eligible to start",
         },
         .replacement_observed => "replacement Host observed",
         .cancelled => "activation cancelled",

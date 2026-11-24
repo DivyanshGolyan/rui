@@ -313,7 +313,7 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
                 .target = &target.?,
                 .cancellation = cancellation,
                 .progress = .{ .context = &activation_progress, .report = ActivationProgress.report },
-            }) catch |err| {
+            }, .inherit) catch |err| {
                 hosts = .{ .failure = err };
                 facts = upgrade_run.failing(facts, causeOf(err));
                 continue;
