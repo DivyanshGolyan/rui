@@ -31,7 +31,7 @@ const activity_reply = @import("activity_reply.zig");
 const builtin = @import("builtin");
 const TestParts = if (builtin.is_test) @import("server_host_testing.zig").TestParts else void;
 const sendReply = server_reply.sendReply;
-const Host = if (builtin.is_test) server_host.Host else void;
+const Fixture = if (builtin.is_test) @import("server_host_testing.zig").Fixture else void;
 const Lifecycle = server_host.Lifecycle;
 const Probes = server_host.Probes;
 const Answer = server_reply.Answer;
@@ -778,7 +778,7 @@ test "preset overlay retains or replaces the whole preferences object" {
 
 /// Test-only derivations of Replies' inputs from a test Host, so every test builds them the same way.
 pub const testing_parts = if (builtin.is_test) struct {
-    pub fn sharedOf(host: *Host) Shared {
+    pub fn sharedOf(host: *Fixture) Shared {
         return .{
             .io = host.io,
             .allocator = host.allocator,
@@ -793,7 +793,7 @@ pub const testing_parts = if (builtin.is_test) struct {
         };
     }
 
-    pub fn factsOf(host: *const Host) Facts {
+    pub fn factsOf(host: *const Fixture) Facts {
         return .{
             .instance = host.instance,
             .intake_capacity = host.intake_capacity,
@@ -870,7 +870,7 @@ test "Conversation stream native delivery reads each byte once and closes on fai
         .{ .encoded = @as([257 * "\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".len]u8, @bitCast(@as([257]["\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".len]u8, @splat("\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".*)))) ++ "tail", .decoded = @as([257 * "é中🙂\n\\\"/".len]u8, @bitCast(@as([257]["é中🙂\n\\\"/".len]u8, @splat("é中🙂\n\\\"/".*)))) ++ "tail" },
     });
     command.stream = true;
-    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -969,7 +969,7 @@ test "presets seed configure before Store validation and idempotency" {
         \\{"model":"gpt-6.1-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
     , .{})).object;
     const presets = [_]core_tools.Preset{.{ .name = "review", .spec = spec }};
-    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .presets = &presets };
+    var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .presets = &presets };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -1110,7 +1110,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     const servers = [_]server_mcp_settings.Server{ docs, notes };
     var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .instance = @splat(0x7e) };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .instance = @splat(0x7e) };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -1197,7 +1197,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     }
 
     // A Host with no MCP servers answers empty lists, and an unnamed ask asks nothing.
-    var bare = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .instance = @splat(0x7e) };
+    var bare = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .instance = @splat(0x7e) };
     var bare_parts: TestParts = undefined;
     bare_parts.attach(&bare, undefined);
     var bare_execution: execution_owner.Execution = undefined;
@@ -1242,7 +1242,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     var environments: SessionEnvironments = undefined;
     try environments.init(io, allocator);
     defer environments.deinit();
-    var host: Host = .{ .io = io, .allocator = allocator, .lease = &lease, .store = &storage, .environments = &environments };
+    var host: Fixture = .{ .io = io, .allocator = allocator, .lease = &lease, .store = &storage, .environments = &environments };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
     var execution_state: execution_owner.Execution = undefined;
@@ -1295,7 +1295,7 @@ test "configure parent inherits the Host environment only after a fresh creation
 test "every accepted control publishes exactly one hint before reply handling" {
     const native = @import("posix");
     const Probe = struct {
-        host: *Host,
+        host: *Fixture,
         observation: *TestObservation,
         accepted: bool,
         allocations: usize = 0,
@@ -1343,7 +1343,7 @@ test "every accepted control publishes exactly one hint before reply handling" {
                     try std.testing.expectEqual(@as(c_int, 0), native.ftruncate(native.fileno(backing), TestObservation.state_bytes));
                     var observation = try TestObservation.init(descriptors[1], native.dup(native.fileno(backing)), .control, 37);
                     defer observation.close();
-                    var host = Host{
+                    var host = Fixture{
                         .io = std.testing.io,
                         .allocator = std.testing.allocator,
                         .lease = undefined,
@@ -1416,7 +1416,7 @@ test "SH-61 Host submits a sealed ordered input through Message admission" {
     lease.paths = .{};
     try lease.paths.store_identity.set(root);
     try lease.paths.scratch.set(root);
-    var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var host: Fixture = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
     var execution_state: execution_owner.Execution = undefined;
@@ -1652,7 +1652,7 @@ test "SH-123 report scratch is sealed whole or discarded whole within the shared
     var storage: store_module.Store = undefined;
     try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
     defer storage.close() catch unreachable;
-    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, &lease);
     var execution_state: execution_owner.Execution = undefined;

@@ -49,7 +49,7 @@ const h2 = @import("h2");
 const read_action_tool = @import("read_action_tool.zig");
 const read_transcript = @import("read_transcript.zig");
 const session_skills = @import("session_skills.zig");
-const Host = if (@import("builtin").is_test) server_host.Host else void;
+const Fixture = if (@import("builtin").is_test) @import("server_host_testing.zig").Fixture else void;
 const AuthWorker = struct {
     io: std.Io,
     mutex: std.Io.Mutex = .init,
@@ -451,7 +451,7 @@ const TestParts = if (@import("builtin").is_test) @import("server_host_testing.z
 
 /// Test-only derivations of the thread's inputs from a test Host, so every test Run is built the same way.
 const testing_parts = if (@import("builtin").is_test) struct {
-    fn sharedOf(host: *Host) Shared {
+    fn sharedOf(host: *Fixture) Shared {
         return .{
             .io = host.io,
             .allocator = host.allocator,
@@ -466,7 +466,7 @@ const testing_parts = if (@import("builtin").is_test) struct {
         };
     }
 
-    fn settingsOf(host: *const Host) Settings {
+    fn settingsOf(host: *const Fixture) Settings {
         return .{
             .limits = host.limits,
             .providers = host.providers,
@@ -3261,7 +3261,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
 
     for ([_]bool{ false, true }) |ready| {
         var records: [1]execution.CustodyRecord = @splat(.{});
-        var host = Host{
+        var host = Fixture{
             .io = io,
             .allocator = std.testing.allocator,
             .lease = undefined,
@@ -3360,7 +3360,7 @@ test "a leased model list waits behind every model slot, and its lease always go
     const plan_source = served.get(.chatgpt).?.credential.signIn().?;
     const device_source = served.get(.codex).?.credential.signIn().?;
     var records: [1]execution.CustodyRecord = @splat(.{});
-    var host = Host{
+    var host = Fixture{
         .io = io,
         .allocator = std.testing.allocator,
         .lease = undefined,
@@ -3562,7 +3562,7 @@ test "HTTP error capture retires before execution custody" {
         var used: std.atomic.Value(u64) = .init(17);
         const budget = ScratchBudget{ .used = &used, .limit = 4096 };
         var records: [1]execution.CustodyRecord = @splat(.{});
-        var host = Host{
+        var host = Fixture{
             .io = io,
             .allocator = std.testing.allocator,
             .lease = undefined,
@@ -3639,12 +3639,12 @@ test "HTTP error capture retires before execution custody" {
 
 test "forced refresh captures retire before custody publication across Store claims" {
     const Case = enum { superseded, unreadable_store, declined, accepted };
-    const Fixture = struct {
+    const Scene = struct {
         tmp: std.testing.TmpDir,
         storage: store_module.Store,
         root: [platform.max_scratch_path_bytes]u8,
         records: [1]execution.CustodyRecord,
-        host: Host,
+        host: Fixture,
         host_parts: TestParts,
         execution: execution_owner.Execution,
         run: Run,
@@ -3692,7 +3692,7 @@ test "forced refresh captures retire before custody publication across Store cla
     vtable.now = Boundary.now;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     for ([_]Case{ .superseded, .unreadable_store, .declined, .accepted }) |kind| {
-        const mapped = try pages.Mapped(Fixture).map();
+        const mapped = try pages.Mapped(Scene).map();
         defer mapped.unmap();
         const fixture = mapped.value;
         fixture.tmp = std.testing.tmpDir(.{});
@@ -3838,7 +3838,7 @@ test "cleanup publication follows complete execution retirement" {
     var vtable = std.testing.io.vtable.*;
     vtable.now = Boundary.now;
     var records: [1]execution.CustodyRecord = @splat(.{});
-    var host = Host{
+    var host = Fixture{
         .io = .{ .userdata = &boundary, .vtable = &vtable },
         .allocator = std.testing.allocator,
         .lease = undefined,
@@ -4040,7 +4040,7 @@ test "Bash releases both spills after lost custody or fenced settlement" {
         var lease: platform.StoreLease = undefined;
         lease.paths = .{};
         try lease.paths.scratch.set(root);
-        var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+        var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, &lease);
         var execution_state: execution_owner.Execution = undefined;
@@ -4187,7 +4187,7 @@ test "named scratch retry releases custody through the shutdown owner path" {
     var scratch_used: std.atomic.Value(u64) = .init(9);
     var removal_gate: std.atomic.Value(bool) = .init(true);
     var records: [1]execution.CustodyRecord = @splat(.{});
-    var host = Host{
+    var host = Fixture{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .lease = &lease,
@@ -4366,7 +4366,7 @@ test "compound admission preflight releases transient custody and cancels its re
             .lock_file = undefined,
         };
         var records: [1]execution.CustodyRecord = @splat(.{});
-        var host = Host{
+        var host = Fixture{
             .io = std.testing.io,
             .allocator = std.testing.allocator,
             .lease = &lease,
@@ -4482,7 +4482,7 @@ test "no-work admission restores only its temporary custody reservation" {
     inline for (std.meta.tags(Kind)) |kind| {
         for ([_]bool{ false, true }) |with_sibling| {
             var records: [3]execution.CustodyRecord = @splat(.{});
-            var host = Host{
+            var host = Fixture{
                 .io = std.testing.io,
                 .allocator = std.testing.allocator,
                 .lease = undefined,
@@ -4597,7 +4597,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             }
 
             var records: [3]execution.CustodyRecord = @splat(.{});
-            var host = Host{
+            var host = Fixture{
                 .io = std.testing.io,
                 .allocator = std.testing.allocator,
                 .lease = undefined,
@@ -4664,7 +4664,7 @@ test "closed Bash delivery retains its payload with detached custody" {
         .store_dir = undefined,
         .lock_file = undefined,
     };
-    var host = Host{
+    var host = Fixture{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .lease = &lease,
@@ -4907,7 +4907,7 @@ test "retained named scratch blocks its slot until the same owner reclaims" {
     var scratch_used: std.atomic.Value(u64) = .init(9);
     var removal_gate: std.atomic.Value(bool) = .init(true);
     var records: [1]execution.CustodyRecord = @splat(.{});
-    var host = Host{
+    var host = Fixture{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .lease = &lease,
@@ -5039,7 +5039,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     for ([_]server_host.Phase{ .fenced, .stopping }) |phase| {
         var records: [1]execution.CustodyRecord = @splat(.{});
-        var host = Host{
+        var host = Fixture{
             .io = std.testing.io,
             .allocator = std.testing.allocator,
             .lease = undefined,
@@ -5269,7 +5269,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         };
         var records: [1]execution.CustodyRecord = @splat(.{});
         var served: providers.Providers = .{};
-        var host = Host{
+        var host = Fixture{
             .io = std.testing.io,
             .allocator = std.testing.allocator,
             .lease = &lease,
@@ -5363,7 +5363,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
     defer tmp.cleanup();
     for ([_]server_host.Phase{ .fenced, .stopping }) |phase| {
         var records: [1]execution.CustodyRecord = @splat(.{});
-        var host = Host{
+        var host = Fixture{
             .io = std.testing.io,
             .allocator = std.testing.allocator,
             .lease = undefined,
@@ -5424,7 +5424,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
     for ([_]server_host.Phase{ .fenced, .stopping }) |phase| {
         for ([_]bool{ false, true }) |fail_cleanup| {
             var records: [1]execution.CustodyRecord = @splat(.{});
-            var host = Host{
+            var host = Fixture{
                 .io = std.testing.io,
                 .allocator = std.testing.allocator,
                 .lease = &lease,
@@ -5618,7 +5618,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
         try std.testing.expect(std.mem.indexOf(u8, pending, "\"tool\":\"fetch_page\"") != null);
     }
     var custody: [1]execution.CustodyRecord = @splat(.{});
-    var host = Host{
+    var host = Fixture{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .lease = undefined,
@@ -5684,7 +5684,7 @@ test "a skill tool reload under heap exhaustion runs again later without fencing
         .decoded_arguments = "{\"operation\":\"reload\"}",
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -5787,7 +5787,7 @@ test "a model reload settles in the pass that asks, and a find_tools search find
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try std.testing.expect(input.tool == .find_tools);
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -5858,7 +5858,7 @@ test "a reload while a list is in flight folds into the next list, one extra lis
         .decoded_arguments = "{\"reload\":true}",
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -5918,7 +5918,7 @@ test "a reload does not hold back a later core Action in another Session" {
         .decoded_arguments = "{\"words\":\"alpha\"}",
     }});
     const reload = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -5956,7 +5956,7 @@ test "a reload with no MCP server configured says so and asks nothing" {
         .decoded_arguments = "{\"reload\":true,\"words\":\"alpha\"}",
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -6000,7 +6000,7 @@ test "a find_tools reload with words reports the asks, then the loaded tools, an
         .decoded_arguments = "{\"reload\":true,\"words\":\"alpha\"}",
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -6045,7 +6045,7 @@ test "a find_tools reload with invalid words is refused and asks no server" {
         .decoded_arguments = "{\"reload\":true,\"words\":7}",
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -6087,7 +6087,7 @@ test "a find_tools reload under heap exhaustion retries later without fencing, a
         .decoded_arguments = "{\"reload\":true}",
     }});
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -6167,7 +6167,7 @@ const PendingOverflowFixture = struct {
     records: [3]execution.CustodyRecord = @splat(.{}),
     slots: [3]ExecutionSlot = @splat(.free),
     sessions: [3]protocol.Bounded(protocol.max_session_bytes) = @splat(.{}),
-    host: Host,
+    host: Fixture,
     run: Run,
     parts: TestParts = undefined,
     execution: execution_owner.Execution = undefined,
@@ -6502,7 +6502,7 @@ test "EXR-92 a Host started before its MCP server serves holds the server's new 
     var storage: store_module.Store = undefined;
     try testing.testingStoreToolSet(&storage, &tmp, io, null);
     defer storage.close() catch unreachable;
-    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var host = Fixture{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;

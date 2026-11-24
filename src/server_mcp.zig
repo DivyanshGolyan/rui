@@ -1,7 +1,7 @@
 const std = @import("std");
 const execution_owner = @import("execution_owner.zig");
 const execution = @import("execution.zig");
-const Host = @import("server_host.zig").Host;
+const Fixture = if (@import("builtin").is_test) @import("server_host_testing.zig").Fixture else void;
 const tool_result = @import("tool_result.zig");
 const store = @import("store.zig");
 const protocol = @import("protocol.zig");
@@ -424,7 +424,7 @@ test "MCP full output hints follow the frozen Bash offer despite later settings"
         var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = Running.max_answer_bytes }, &entries);
         defer retention.cleanupAll();
         var custody_records: [2]execution.CustodyRecord = @splat(.{});
-        var host: Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = &configs }, .retention = &retention };
+        var host: Fixture = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = &configs }, .retention = &retention };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, undefined);
         const results: tool_result.Results = .{ .io = std.testing.io, .allocator = host.allocator, .retention = &retention };
@@ -506,7 +506,7 @@ test "MCP call of a prefixed tool sends the name its server listed" {
     var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = Running.max_answer_bytes }, &entries);
     defer retention.cleanupAll();
     var custody_records: [2]execution.CustodyRecord = @splat(.{});
-    var host: Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = &configs }, .retention = &retention };
+    var host: Fixture = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = &configs }, .retention = &retention };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     const results: tool_result.Results = .{ .io = std.testing.io, .allocator = host.allocator, .retention = &retention };
@@ -568,7 +568,7 @@ test "MCP ordinary custody covers preparation failure init failure stop shutdown
         defer retention.cleanupAll();
         var custody_records: [2]execution.CustodyRecord = @splat(.{});
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = if (case == .allocation) 0 else 1 });
-        var host: Host = .{ .io = std.testing.io, .allocator = if (case == .allocation or case == .preparation) failing.allocator() else std.testing.allocator, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = if (case == .unavailable) &.{} else &configs }, .retention = &retention };
+        var host: Fixture = .{ .io = std.testing.io, .allocator = if (case == .allocation or case == .preparation) failing.allocator() else std.testing.allocator, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = if (case == .unavailable) &.{} else &configs }, .retention = &retention };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, undefined);
         const results: tool_result.Results = .{ .io = std.testing.io, .allocator = host.allocator, .retention = &retention };
@@ -707,7 +707,7 @@ test "MCP Result renders and retains text across outcomes and frozen offers" {
     var entries: [4]adapter_test_retention.Entry = @splat(.{});
     var queue = adapter_test_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = Running.max_answer_bytes }, &entries);
     defer queue.cleanupAll();
-    var host: @import("server_host.zig").Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
+    var host: Fixture = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -828,7 +828,7 @@ test "MCP Result reports retention refusal without changing success" {
         var script: adapter_test_script = .{ .reply = wire };
         try script.start();
         defer script.stop();
-        var host: @import("server_host.zig").Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
+        var host: Fixture = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, undefined);
         var execution_state: execution_owner.Execution = undefined;
@@ -861,7 +861,7 @@ test "Running oversized JSON and SSE answers preserve borrowed evidence until re
     var entries: [1]adapter_test_retention.Entry = @splat(.{});
     var queue = adapter_test_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = Running.max_answer_bytes + 1024 }, &entries);
     defer queue.cleanupAll();
-    var host: @import("server_host.zig").Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
+    var host: Fixture = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
     var execution_state: execution_owner.Execution = undefined;
@@ -949,7 +949,7 @@ test "MCP image part limit accounts for empty text tails" {
         var entries: [2]@import("output_retention.zig").Entry = @splat(.{});
         var queue = @import("output_retention.zig").Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = 2_000_000 }, &entries);
         defer queue.cleanupAll();
-        var host: Host = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = undefined, .retention = &queue };
+        var host: Fixture = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = undefined, .retention = &queue };
         var host_parts: TestParts = undefined;
         host_parts.attach(&host, undefined);
         var execution_state: execution_owner.Execution = undefined;
@@ -1041,7 +1041,7 @@ test "MCP retained response follows the actual delivery outcome" {
         var queue = retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, &entries);
         defer queue.cleanupAll();
         var custody_records: [1]execution.CustodyRecord = @splat(.{});
-        const host = try allocator.create(Host);
+        const host = try allocator.create(Fixture);
         defer allocator.destroy(host);
         host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .retention = &queue };
         var host_parts: TestParts = undefined;
