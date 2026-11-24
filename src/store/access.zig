@@ -7,6 +7,8 @@ const rsql = @import("rsql.zig");
 const engine = @import("engine.zig");
 const sqlite = @import("sqlite.zig");
 const pass_plan = @import("pass_plan.zig");
+const app_tools = @import("../tool_record.zig").app_tools;
+const tool_set = @import("domain/tool_set.zig");
 
 pub const Mode = pass_plan.Mode;
 
@@ -29,6 +31,13 @@ const advance = rsql.Write(.{
     .Args = struct { session: rsql.SessionHead, expected: u64, next: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
+
+/// A declared app tool's description and input schema, one tracked import each (`tool_set.AppSaving`).
+const app_declaration_rows = 2 * app_tools.max_records;
+/// The other tracked imports one transaction can carry beside a declaration: the instructions and the output
+/// schema (configuration), the skill catalog's metadata and instruction text (`skills.Appending.finish`), and a
+/// command's text and outcome (StartAgent's task and result, with its configure). Any other transition imports fewer.
+const carried_rows = 2 + 2 + 2;
 
 pub const InsertedContent = struct { digest: [32]u8, length: u64, private: bool, content_id: u64 };
 
@@ -159,9 +168,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         inserted: [if (reads_only or mode == .single) 0 else max_inserted]InsertedContent = undefined,
         inserted_count: u8 = 0,
 
-        const max_inserted = 6;
+        // Every tracked content import in one write transaction records a row here, so the bound is the
+        // most one transaction can import: an app declaration's text pair per record, plus the configuration
+        // and command content that the same transaction may carry (see the named sources below).
+        const max_inserted = app_declaration_rows + carried_rows;
         comptime {
-            std.debug.assert(2 * @import("domain/tool_set.zig").records_per_transaction <= max_inserted);
+            std.debug.assert(@typeInfo(@FieldType(tool_set.AppSaving, "pairs")).array.len == app_tools.max_records);
         }
         const max_taken = max_inserted;
 

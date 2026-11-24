@@ -17,7 +17,7 @@ pub fn Bounded(comptime capacity: usize) type {
         }
 
         pub fn from(text: []const u8) error{ ValueTooLong, InvalidUtf8 }!@This() {
-            var value: @This() = .{ .len = 0 };
+            var value: @This() = .{ .bytes = @splat(0), .len = 0 };
             try value.set(text);
             return value;
         }

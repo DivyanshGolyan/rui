@@ -95,7 +95,7 @@ function narrowed(entry: FeedEntry): void {
 			break;
 		}
 		case "session_changed": {
-			const field: "provider" | "model" | "instructions" | "tools" | "loaded_tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "reasoning_effort_refused" | "label" = entry.field;
+			const field: "provider" | "model" | "instructions" | "tools" | "loaded_tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "reasoning_effort_refused" | "label" | "app_tools" = entry.field;
 			const providerText: string | null = entry.providerText;
 			void [field, providerText];
 			break;
