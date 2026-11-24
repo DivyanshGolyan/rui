@@ -66,6 +66,29 @@ test "SH-125 absent Store owner is not started by handover observation" {
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "host.lock", .{}));
 }
 
+test "SH-125 a Store scope names only its own directory, however many other Stores exist" {
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var other = try tmp.dir.createDirPathOpen(io, "other-store", .{ .permissions = .fromMode(0o700) });
+    other.close(io);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", root);
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
+    var batch = try restart(init, std.testing.allocator, .{ .home = root, .scope = .{ .store = root } });
+    defer batch.deinit(std.testing.allocator);
+    // The Store scope names exactly one Host, and an absent owner needs no lease.
+    try std.testing.expectEqual(@as(usize, 1), batch.entries.len);
+    try std.testing.expectEqualStrings(root, batch.entries[0].directory.?);
+    try std.testing.expectEqual(std.meta.Tag(activation.Outcome).not_needed, std.meta.activeTag(batch.selectedOutcome(root)));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "host.lock", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "other-store/host.lock", .{}));
+}
+
 pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []const u8, cancellation: ?*const client.Cancellation) !Batch {
     const candidates = try client.discoverUpgradeHosts(allocator, init.io, cancellation);
     defer {
@@ -227,4 +250,3 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
     };
     try batch.result();
 }
-
