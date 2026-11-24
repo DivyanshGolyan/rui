@@ -53,24 +53,10 @@ const unmapZeroed = pages.unmapZeroed;
 const Limits = server_host.Limits;
 const SettlementTrace = server_host.SettlementTrace;
 const default_bash_path = server_host.default_bash_path;
-const traceSubject = server_host.traceSubject;
-const traceServiceBoundary = server_host.traceServiceBoundary;
-const traceLifecycleService = server_host.traceLifecycleService;
-const traceOperation = server_host.traceOperation;
-const tracePreparationAdvance = server_host.tracePreparationAdvance;
-const tracePreparationAdvanceError = server_host.tracePreparationAdvanceError;
-const traceCompletionQueue = server_host.traceCompletionQueue;
-const traceAction = server_host.traceAction;
-const traceOperationControl = server_host.traceOperationControl;
-const traceActionControl = server_host.traceActionControl;
-const traceActionControlOutcome = server_host.traceActionControlOutcome;
-const traceActionDeadline = server_host.traceActionDeadline;
 const test_pause = @import("testing/pause.zig");
-const traceTransfer = server_host.traceTransfer;
 const pause = server_host.pause;
 const bashReclaimHeld = server_host.bashReclaimHeld;
 const retryRecovered = server_host.retryRecovered;
-const observeUnprocessedCompletions = server_host.observeUnprocessedCompletions;
 
 fn reachAction(host: *Host, point: test_pause.Point, binding: store_module.ActionAttemptBinding) void {
     if (comptime test_pause.enabled) if (host.probes.pause_owner) |owner| {
@@ -693,8 +679,7 @@ pub fn executionMain(host: *Host) void {
     }
     const stopped_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     if (measurement.last_service_at) |last| {
-        traceServiceBoundary(
-            host,
+        host.probes.traceServiceBoundary(
             @intCast(last.raw.nanoseconds),
             @intCast(stopped_at.raw.nanoseconds),
             measurement.wait_since_service_ns,
@@ -704,7 +689,7 @@ pub fn executionMain(host: *Host) void {
             @as(u64, @intCast(last.durationTo(stopped_at).raw.nanoseconds)),
         );
     }
-    traceLifecycleService(host, measurement.maximum_gap_ns);
+    host.probes.traceLifecycleService(measurement.maximum_gap_ns);
 }
 
 /// Judges a draining pause after each pass. Returns how long the loop may
@@ -754,8 +739,7 @@ const NativeTurn = struct {
         }
         const observed = self.now();
         if (self.measurement.last_service_at) |last| {
-            traceServiceBoundary(
-                self.host,
+            self.host.probes.traceServiceBoundary(
                 @intCast(last.raw.nanoseconds),
                 @intCast(observed.raw.nanoseconds),
                 self.measurement.wait_since_service_ns,
@@ -769,7 +753,7 @@ const NativeTurn = struct {
         self.measurement.wait_since_service_ns = 0;
         const trace_due = if (self.measurement.next_trace_at) |deadline| deadline.compare(.lte, observed) else true;
         if (trace_due) {
-            traceLifecycleService(self.host, self.measurement.maximum_gap_ns);
+            self.host.probes.traceLifecycleService(self.measurement.maximum_gap_ns);
             self.measurement.next_trace_at = observed.addDuration(.{
                 .raw = .fromMilliseconds(lifecycle_trace_interval_ms),
                 .clock = .awake,
@@ -1076,7 +1060,7 @@ const NativeTurn = struct {
             self.fenced = true;
             return error.Fence;
         }
-        observeUnprocessedCompletions(self.host, self.reactor.?);
+        self.host.probes.observeUnprocessedCompletions(self.reactor.?);
     }
 
     pub noinline fn serviceOneCompletion(self: *NativeTurn) bool {
@@ -1310,7 +1294,7 @@ fn cancelSupersededTransfers(
                 return;
             };
             const control = superseded orelse continue;
-            traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
+            host.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), active.binding);
             workspace.model_preparation.cancel();
             finishCustodyNow(host, slot);
         },
@@ -1321,7 +1305,7 @@ fn cancelSupersededTransfers(
                 return;
             };
             if (superseded) |control| {
-                traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.owner.binding);
+                host.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), active.owner.binding);
                 active.cancelled = true;
             }
         },
@@ -1332,7 +1316,7 @@ fn cancelSupersededTransfers(
                 return;
             };
             if (superseded) |control| {
-                traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.owner.binding);
+                host.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), active.owner.binding);
                 active.cancelled = true;
             }
         },
@@ -1342,7 +1326,7 @@ fn cancelSupersededTransfers(
                 return;
             };
             if (superseded) |control| {
-                traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.owner.binding);
+                host.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), active.owner.binding);
                 active.deinit();
                 finishCustodyNow(host, slot);
             }
@@ -1354,7 +1338,7 @@ fn cancelSupersededTransfers(
             };
             const control = superseded orelse continue;
             const owner = active.owner;
-            traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), owner.binding);
+            host.probes.traceOperationControl("effect_stop_requested", control.command_key.slice(), owner.binding);
             active.transfer.deinit();
             finishCustodyNow(host, slot);
         },
@@ -1456,10 +1440,10 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
             }
             made_progress = made_progress or service.made_progress;
             if (service.timeout_action) |action| {
-                traceActionDeadline(host, "bash_deadline_serviced", action.deadline_ns, action.signal_failed, active.attempt.binding);
+                host.probes.traceActionDeadline("bash_deadline_serviced", action.deadline_ns, action.signal_failed, active.attempt.binding);
             }
             if (service.leader_observed_with_open_pipes) {
-                traceAction(host, "bash_leader_observed_with_open_pipes", active.attempt.binding);
+                host.probes.traceAction("bash_leader_observed_with_open_pipes", active.attempt.binding);
                 if (comptime test_pause.enabled) reachAction(host, .action_bash_exit_observed, active.attempt.binding);
             }
             if (service.fault) |err| {
@@ -1926,9 +1910,9 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         .attempt = attempt,
         .execution = &work.execution,
     });
-    traceAction(host, "bash_handoff_committed", action_binding);
+    host.probes.traceAction("bash_handoff_committed", action_binding);
     const deadline_ns = slot.bash.execution.deadlineNs();
-    traceActionDeadline(host, "bash_deadline_established", deadline_ns, false, action_binding);
+    host.probes.traceActionDeadline("bash_deadline_established", deadline_ns, false, action_binding);
 }
 
 fn startBash(context: anytype) !void {
@@ -1947,7 +1931,7 @@ fn stopSupersededBash(
                 .running => continue,
                 .stopped => |control| control,
             };
-            traceActionControl(host, "effect_stop_requested", control.command_key.slice(), slot.bash_preparing.attempt.binding);
+            host.probes.traceActionControl("effect_stop_requested", control.command_key.slice(), slot.bash_preparing.attempt.binding);
             var cleanup = preparation.cancel();
             settleActionFailure(slot, .cancelled, "Bash was stopped before launch.");
             cleanup.cleanup(bashScratch(host)) catch |cleanup_err| {
@@ -1964,13 +1948,12 @@ fn stopSupersededBash(
             };
             if (!active.stop_accepted) {
                 active.stop_accepted = true;
-                traceActionControl(host, "effect_stop_requested", control.command_key.slice(), active.attempt.binding);
+                host.probes.traceActionControl("effect_stop_requested", control.command_key.slice(), active.attempt.binding);
                 const action = active.execution.requestStop(.now(host.io, .awake));
                 host.store.revokeActionSender(active.attempt.binding) catch |err| {
                     _ = failBash(host, slot, "Bash sender retirement", err);
                 };
-                traceActionControlOutcome(
-                    host,
+                host.probes.traceActionControlOutcome(
                     "lifecycle_action_attempted",
                     control.command_key.slice(),
                     action.attempted,
@@ -2040,7 +2023,7 @@ fn closeBashDelivery(host: *Host, slot: *ExecutionSlot) void {
     std.debug.assert(closed.delivery == .open);
     closed.delivery = .{ .closed = .{ .closing = closed.attempt.close(), .reclaim_at = .now(host.io, .awake) } };
     moveSlot(host, slot, .bash, closed);
-    traceAction(host, "cleanup_started", closed.attempt.binding);
+    host.probes.traceAction("cleanup_started", closed.attempt.binding);
 }
 
 fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) bool {
@@ -2062,7 +2045,7 @@ fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) b
     const closing = closed.closing;
     moveSlot(host, slot, .free, {});
     closing.finish();
-    traceAction(host, "cleanup_completed", binding);
+    host.probes.traceAction("cleanup_completed", binding);
     return true;
 }
 
@@ -2181,7 +2164,7 @@ fn beginAdmittedAttempt(
         finishModelPreparationFailure(host, slot, slot.model_preparing, err, retained_scratch);
         return .admitted;
     };
-    traceOperation(host, "preparation_started", binding);
+    host.probes.traceOperation("preparation_started", binding);
     return .admitted;
 }
 
@@ -2208,7 +2191,7 @@ fn advanceModelPreparation(
         finishCustodyNow(host, slot);
         return true;
     }
-    traceOperation(host, "preparation_advance_started", owner.binding);
+    host.probes.traceOperation("preparation_advance_started", owner.binding);
     var progress = preparation.advance(byte_allowance, item_allowance);
     while (progress == .read) {
         host.store.readRequestPage(&preparation.page) catch |err| {
@@ -2221,19 +2204,19 @@ fn advanceModelPreparation(
     switch (progress) {
         .read => unreachable,
         .pending => {
-            tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
+            host.probes.tracePreparationAdvance("preparation_advance_completed", stats, owner.binding);
             // This blocking pause holds the shared execution loop until release.
             if (comptime test_pause.enabled) reachModel(host, .model_preparation_advanced, owner.binding);
         },
         .failed => |err| {
-            tracePreparationAdvanceError(host, "preparation_advance_failed", err, stats, owner.binding);
+            host.probes.tracePreparationAdvanceError("preparation_advance_failed", err, stats, owner.binding);
             preparation.cancel();
             finishModelPreparationFailure(host, slot, owner, err, null);
         },
         .prepared => |request| {
             owner.purpose = preparation.settings.operation;
-            tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
-            traceOperation(host, "preparation_completed", owner.binding);
+            host.probes.tracePreparationAdvance("preparation_advance_completed", stats, owner.binding);
+            host.probes.traceOperation("preparation_completed", owner.binding);
             const leased = host.providers.get(request.provider).?.credential.leased();
             switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = leased } })) {
                 .authenticate => {
@@ -2483,7 +2466,7 @@ fn launchPreparedRequest(
         else
             .unexpected })) {
             .abandon => if (err == error.SupersededByControl) {
-                traceOperation(host, "canonical_handoff_superseded", binding);
+                host.probes.traceOperation("canonical_handoff_superseded", binding);
             },
             .fence => {
                 stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
@@ -2494,7 +2477,7 @@ fn launchPreparedRequest(
         finishCustodyNow(host, slot);
         return;
     };
-    traceOperation(host, "transport_handoff_committed", binding);
+    host.probes.traceOperation("transport_handoff_committed", binding);
 }
 
 fn completeTransfer(
@@ -2506,9 +2489,9 @@ fn completeTransfer(
     const active = &slot.provider;
     const owner = active.owner;
     if (active.transfer.allowance) |observation| server_host.writeAllowance(&host.allowance_diagnostic, observation);
-    traceCompletionQueue(host, completion.queued_after, owner.binding);
-    defer traceOperation(host, "provider_completion_serviced", owner.binding);
-    traceTransfer(host, &active.transfer, owner.binding);
+    host.probes.traceCompletionQueue(completion.queued_after, owner.binding);
+    defer host.probes.traceOperation("provider_completion_serviced", owner.binding);
+    if (host.providers.anySignIn()) host.probes.traceTransfer(&active.transfer, owner.binding);
     var error_response: execution.ErrorResponse = .ordinary;
     var answered_response: ?provider.SealedResponse = null;
     defer retireAnsweredResponse(&answered_response);
@@ -2637,7 +2620,7 @@ noinline fn completeRejectedTransfer(host: *Host, workspace: *Workspace, slot: *
     var response_owned = true;
     defer if (response_owned) response.deinit();
     const rejection = &workspace.interpretation.rejected;
-    traceOperation(host, "validation_failed", owner.binding);
+    host.probes.traceOperation("validation_failed", owner.binding);
     stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(rejection.reason) });
     var detail: [512]u8 = undefined;
     const diagnostic = rejection.format(&detail);
@@ -2715,7 +2698,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
         return .cleanup;
     };
     defer event_data.deinit();
-    traceOperation(host, "validation_started", owner.binding);
+    host.probes.traceOperation("validation_started", owner.binding);
     const operation = owner.purpose;
     metadata.fail_writes = host.probes.fails(.response_metadata);
     output_decode.interpret(&workspace.interpret, codec, host.io, response.file, response.length, &metadata, event_data, operation, .{
@@ -2730,7 +2713,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
         },
     };
     const validated = &accepted.output;
-    traceOperation(host, "validation_completed", owner.binding);
+    host.probes.traceOperation("validation_completed", owner.binding);
     if (comptime test_pause.enabled) reachModel(host, .model_result_ready, owner.binding);
     pause(host, .{ .model_result = owner.binding });
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
@@ -2750,7 +2733,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
     };
     host.store.settleModelSuccess(owner.binding, &workspace.settlement, host.probes.storeFaults(.{ .model_output = settlement_trace.storeTrace() })) catch |err| {
         if (err == error.SupersededByControl) {
-            traceOperation(host, "model_settlement_superseded", owner.binding);
+            host.probes.traceOperation("model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
             rejectContradictoryOutput(host, rejected, &answered, err, http_status);
         } else {
@@ -2758,7 +2741,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
         }
         return .cleanup;
     };
-    traceOperation(host, "model_settlement_committed", owner.binding);
+    host.probes.traceOperation("model_settlement_committed", owner.binding);
     return .cleanup;
 }
 
@@ -3053,8 +3036,8 @@ fn finishCustodyNow(host: *Host, slot: *ExecutionSlot) void {
         else => moveSlot(host, slot, .free, {}),
     }
     if (traced) |binding| switch (binding) {
-        .model => |model| traceOperation(host, "cleanup_completed", model),
-        .action => |action| traceAction(host, "cleanup_completed", action),
+        .model => |model| host.probes.traceOperation("cleanup_completed", model),
+        .action => |action| host.probes.traceAction("cleanup_completed", action),
     };
 }
 

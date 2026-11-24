@@ -1147,14 +1147,14 @@ test "SH-118 a tool record read back from the Store through the offer, the selec
     }.run);
 }
 
-// SH-124: a lane root's configure saves its declared app tools as one tool set that the Session names; replacing the
+// SH-126: a lane root's configure saves its declared app tools as one tool set that the Session names; replacing the
 // declaration changes that set, an empty list clears it, a child refuses a declaration by name, and a replayed
 // create keeps one set. Both engines run the same Store API calls.
 fn declareAppTools(configuration: *wire_request.Configuration, bytes: []const u8) void {
     configuration.app_tools = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
 }
 
-test "SH-124 a lane root saves its app tools as one set; replacing, clearing and a child's refusal hold on both engines" {
+test "SH-126 a lane root saves its app tools as one set; replacing, clearing and a child's refusal hold on both engines" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1230,7 +1230,7 @@ test "SH-124 a lane root saves its app tools as one set; replacing, clearing and
     }.run);
 }
 
-// SH-125: a lane root's configure or create saves a declared app tool set of any supported size in one transaction,
+// SH-127: a lane root's configure or create saves a declared app tool set of any supported size in one transaction,
 // whether its texts are fresh or already stored, and the set reads back with every declared record.
 const declared_counts = [_]usize{ 1, 8, app_tools.max_records };
 
@@ -1270,7 +1270,7 @@ fn expectAppSetReadsBack(storage: *Store, root: []const u8, document: []const u8
     try std.testing.expectEqualSlices(u8, &expected_set.final(), &(try selection.selection()).digest);
 }
 
-test "SH-125 a lane root saves a declared app tool set of every supported size on create and configure, fresh or with stored texts" {
+test "SH-127 a lane root saves a declared app tool set of every supported size on create and configure, fresh or with stored texts" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});

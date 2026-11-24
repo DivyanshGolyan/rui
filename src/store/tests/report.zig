@@ -829,7 +829,7 @@ test "Current reports preserve equal distinct and empty loaded tool names" {
     }.run);
 }
 
-// SH-126: a Current report names the app tools its lane root declares, on the root, a child and a grandchild alike;
+// SH-128: a Current report names the app tools its lane root declares, on the root, a child and a grandchild alike;
 // a re-declaration and a clear reach all three.
 fn expectReportedAppTools(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, expected: []const []const u8) !void {
     const body = try testingSessionReport(storage, tmp, session, 1024 * 1024);
@@ -846,7 +846,7 @@ fn declareReportAppTools(configuration: *wire_request.Configuration, bytes: []co
     configuration.app_tools = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
 }
 
-test "SH-126 Current reports name the lane root's app tools on the root, a child and a grandchild" {
+test "SH-128 Current reports name the lane root's app tools on the root, a child and a grandchild" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -909,7 +909,7 @@ test "SH-126 Current reports name the lane root's app tools on the root, a child
     }.run);
 }
 
-// SH-127: a Full report names the app tools each revision itself declared, across a declaration, a re-declaration
+// SH-129: a Full report names the app tools each revision itself declared, across a declaration, a re-declaration
 // and a clear, and agrees with the Current report at a lane root's newest revision; a child's revisions declare none.
 fn expectFullRevisionAppTools(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, expected: []const []const []const u8) !void {
     const body = try testingSessionReportWithProfile(storage, tmp, session, 1024 * 1024, .full);
@@ -927,7 +927,7 @@ fn expectFullRevisionAppTools(storage: *Store, tmp: *std.testing.TmpDir, session
     }
 }
 
-test "SH-127 Full reports name each revision's app tools across a declaration, a re-declaration and a clear" {
+test "SH-129 Full reports name each revision's app tools across a declaration, a re-declaration and a clear" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
