@@ -1,5 +1,6 @@
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const provider_name = @import("../../provider_name.zig");
 const wire_request = @import("../../wire_request.zig");
 const tool_defs = @import("../../tools.zig");
 const store_core = @import("../Store.zig");
@@ -363,8 +364,8 @@ test "effective effort carries legacy history without inferring a fresh default"
 
 const EffortCarryRead = struct {
     const query = rsql.Read(.{
-        .sql = "SELECT " ++ historical_domain.effortBeforeSql("?1", "?2", "?3", "?4", "?5") ++ " AS effort",
-        .Args = struct { session: []const u8, boundary: u64, model: []const u8, floor: ?u64, first: ?protocol.ReasoningEffort },
+        .sql = "SELECT " ++ historical_domain.effortBeforeSql("?1", "?2", .{ .provider = "?3", .codec = "?4", .model = "?5" }, "?6", "?7") ++ " AS effort",
+        .Args = struct { session: []const u8, boundary: u64, provider: provider_name.Provider, codec: provider_name.Codec, model: []const u8, floor: ?u64, first: ?protocol.ReasoningEffort },
         .Row = struct { effort: ?protocol.ReasoningEffort },
         .cardinality = .one,
     });
@@ -459,7 +460,7 @@ test "admitted effort carry agrees with replay recipe across the owner domain" {
                             expected = item.effort;
                         };
                         if (declined) continue;
-                        try std.testing.expectEqual(expected, try EffortCarryRead.read(&storage, .{ .session = session.slice(), .boundary = boundary, .model = model, .floor = own_floor, .first = .medium }));
+                        try std.testing.expectEqual(expected, try EffortCarryRead.read(&storage, .{ .session = session.slice(), .boundary = boundary, .provider = .codex, .codec = provider_name.Provider.codex.codec(), .model = model, .floor = own_floor, .first = .medium }));
                     };
                 }
             }

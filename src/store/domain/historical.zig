@@ -116,6 +116,8 @@ pub const HistoricalEntry = struct {
     content: ?HistoricalContent = null,
     input: ?HistoricalInput = null,
     requested_model: ?Bounded(model_capability.max_model_bytes) = null,
+    /// The Wire of an output item's producing revision (its connection and dialect).
+    producer_wire: ?replay_binding.Wire = null,
     source_action: ?SourceAction = null,
     sender: ?Bounded(session_id.max_reference_bytes) = null,
     effort: ?model_capability.ReasoningEffort = null,
@@ -446,7 +448,7 @@ pub const RequestPage = struct {
     pub fn replayOutput(self: *RequestPage, entry: *const HistoricalEntry, request: replay_binding.Binding) !?HistoricalOutput {
         const output = try self.openOutput(entry.position);
         const use: replay_binding.Use = if (self.anchor == entry.position) .selected_base else .history;
-        const producer = replay_wire.producerOf(request, entry.requested_model.?.slice());
+        const producer = replay_wire.bindingOf(entry.producer_wire orelse return error.CorruptStore, entry.requested_model.?.slice());
         if (replay_binding.decide(output.kind, producer, request, use) != .omit) return output;
         self.output_parts = null;
         return null;
@@ -737,7 +739,7 @@ const historical_settings = rsql.Read(.{
         "WHERE member.tool_set_id=o.tool_set_id AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,s.parent_ref,r.workspace,o.compaction_trigger,o.output_reservation,o.output_limit," ++
         operation_effort.effectiveSql("o") ++ " AS reasoning_effort,(" ++ operation_effort.emittedSql("o") ++ ") AS effort_update,r.codec,o.purpose," ++
         "(SELECT first.reasoning_effort FROM model_operation first JOIN session_revision first_revision ON first_revision.session_ref=first.session_ref AND first_revision.revision=first.settings_revision " ++
-        "WHERE first.session_ref=o.session_ref AND first_revision.model=r.model ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
+        "WHERE first.session_ref=o.session_ref AND " ++ replay_wire.sameBindingSql(replay_wire.revisionSide("first_revision"), replay_wire.revisionSide("r")) ++ " ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
         "instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest,instructions.private AS instructions_private," ++
         pageBytesSql("instructions", "instructions_bytes") ++ "," ++
         "output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest,output_schema.private AS output_schema_private " ++
@@ -1049,7 +1051,7 @@ const session_prefix_seal = rsql.Read(.{
 });
 
 const seal_model = rsql.Read(.{
-    .sql = "SELECT sealed_revision.model=current_revision.model AS same_model " ++
+    .sql = "SELECT " ++ replay_wire.sameBindingSql(replay_wire.revisionSide("sealed_revision"), replay_wire.revisionSide("current_revision")) ++ " AS same_model " ++
         "FROM model_operation current JOIN session_revision current_revision ON current_revision.session_ref=current.session_ref AND current_revision.revision=current.settings_revision " ++
         "JOIN model_operation sealed ON sealed.session_ref=current.session_ref AND sealed.admission_position=?2 " ++
         "JOIN session_revision sealed_revision ON sealed_revision.session_ref=sealed.session_ref AND sealed_revision.revision=sealed.settings_revision " ++
@@ -1113,26 +1115,27 @@ pub fn newestBaseSql(comptime session: []const u8, comptime boundary: []const u8
 }
 const selected_base_sql = newestBaseSql("current.session_ref", "current.admission_position");
 
-pub fn effortBeforeSql(comptime session: []const u8, comptime boundary: []const u8, comptime model: []const u8, comptime own_floor: []const u8, comptime first_effort: []const u8) []const u8 {
-    const floor = replay_recipe.Recipe.floorSql(model, "effort_base_model.model", "effort_base.history_floor", own_floor);
-    const anchor = replay_recipe.Recipe.anchorSql(model, "effort_base_model.model", "(SELECT min(anchor.session_position) FROM model_output_item anchor @index(model_output_compaction_anchor) WHERE anchor.operation_id=effort_base.operation_id AND anchor.session_ref=" ++ session ++ " AND anchor.item_kind=4)");
+pub fn effortBeforeSql(comptime session: []const u8, comptime boundary: []const u8, comptime request: replay_wire.Side, comptime own_floor: []const u8, comptime first_effort: []const u8) []const u8 {
+    const same = replay_wire.sameBindingSql(replay_wire.revisionSide("effort_base_model"), request);
+    const floor = replay_recipe.Recipe.floorSql(same, "effort_base.history_floor", own_floor);
+    const anchor = replay_recipe.Recipe.anchorSql(same, "(SELECT min(anchor.session_position) FROM model_output_item anchor @index(model_output_compaction_anchor) WHERE anchor.operation_id=effort_base.operation_id AND anchor.session_ref=" ++ session ++ " AND anchor.item_kind=4)");
     return "(SELECT CASE WHEN retained.operation_id IS NOT NULL THEN " ++ operation_effort.effectiveSql("retained") ++ " WHEN first_effort.operation_id IS NOT NULL THEN first_effort.reasoning_effort ELSE " ++ first_effort ++ " END FROM session effort_seed " ++
         "LEFT JOIN model_operation effort_base ON effort_base.operation_id=" ++ newestBaseSql(session, boundary) ++ " AND effort_base.session_ref=" ++ session ++ " " ++
         "LEFT JOIN session_revision effort_base_model ON effort_base_model.session_ref=effort_base.session_ref AND effort_base_model.revision=effort_base.settings_revision " ++
-        "LEFT JOIN model_operation retained ON retained.operation_id=(SELECT earlier.operation_id FROM model_operation earlier @index(model_operation_admission) JOIN session_revision earlier_model ON earlier_model.session_ref=earlier.session_ref AND earlier_model.revision=earlier.settings_revision WHERE earlier.session_ref=" ++ session ++ " AND earlier.admission_position<" ++ boundary ++ " AND earlier_model.model=" ++ model ++ " AND earlier.admission_position>" ++ floor ++ " AND earlier.admission_position>=" ++ anchor ++ " ORDER BY earlier.admission_position DESC LIMIT 1) AND retained.session_ref=" ++ session ++ " " ++
-        "LEFT JOIN model_operation first_effort ON first_effort.operation_id=(SELECT first.operation_id FROM model_operation first @index(model_operation_admission) JOIN session_revision first_model ON first_model.session_ref=first.session_ref AND first_model.revision=first.settings_revision WHERE first.session_ref=" ++ session ++ " AND first_model.model=" ++ model ++ " AND first.admission_position<" ++ boundary ++ " ORDER BY first.admission_position LIMIT 1) AND first_effort.session_ref=" ++ session ++ " WHERE effort_seed.session_ref=" ++ session ++ ")";
+        "LEFT JOIN model_operation retained ON retained.operation_id=(SELECT earlier.operation_id FROM model_operation earlier @index(model_operation_admission) JOIN session_revision earlier_model ON earlier_model.session_ref=earlier.session_ref AND earlier_model.revision=earlier.settings_revision WHERE earlier.session_ref=" ++ session ++ " AND earlier.admission_position<" ++ boundary ++ " AND " ++ replay_wire.sameBindingSql(replay_wire.revisionSide("earlier_model"), request) ++ " AND earlier.admission_position>" ++ floor ++ " AND earlier.admission_position>=" ++ anchor ++ " ORDER BY earlier.admission_position DESC LIMIT 1) AND retained.session_ref=" ++ session ++ " " ++
+        "LEFT JOIN model_operation first_effort ON first_effort.operation_id=(SELECT first.operation_id FROM model_operation first @index(model_operation_admission) JOIN session_revision first_model ON first_model.session_ref=first.session_ref AND first_model.revision=first.settings_revision WHERE first.session_ref=" ++ session ++ " AND " ++ replay_wire.sameBindingSql(replay_wire.revisionSide("first_model"), request) ++ " AND first.admission_position<" ++ boundary ++ " ORDER BY first.admission_position LIMIT 1) AND first_effort.session_ref=" ++ session ++ " WHERE effort_seed.session_ref=" ++ session ++ ")";
 }
 
 const base_anchors_from = "FROM model_output_item anchor @index(model_output_compaction_anchor) ";
 const base_anchors_where = "WHERE anchor.operation_id=base.operation_id AND anchor.item_kind=4";
 
-const selected_floor_sql = replay_recipe.Recipe.floorSql("current_revision.model", "base_revision.model", "base.history_floor", "current.history_floor");
+const selected_floor_sql = replay_recipe.Recipe.floorSql(replay_wire.sameBindingSql(replay_wire.revisionSide("base_revision"), replay_wire.revisionSide("current_revision")), "base.history_floor", "current.history_floor");
 const first_message_sql = "CASE WHEN coalesce(current.history_floor,base.history_floor) IS NULL THEN 0 ELSE coalesce((SELECT min(first.session_position) " ++
     "FROM conversation_entry first @index(conversation_entry_history) WHERE first.session_ref=current.session_ref AND first.entry_kind=1),0) END";
 
 const output_boundary = rsql.Read(.{
     .sql = "SELECT current.admission_position,base.operation_id,coalesce(base.admission_position,0) AS frontier," ++
-        "current.history_floor AS own_floor,base.history_floor AS base_floor,current_revision.provider AS current_provider,current_revision.codec AS current_codec,current_revision.model AS current_model,base_revision.model AS base_model," ++
+        "current.history_floor AS own_floor,base.history_floor AS base_floor,current_revision.provider AS current_provider,current_revision.codec AS current_codec,current_revision.model AS current_model," ++ replay_wire.operationBindingAsSql("base_revision", "base") ++ "," ++
         "(SELECT count(*) " ++ base_anchors_from ++ base_anchors_where ++ ") AS anchors," ++
         "(SELECT min(anchor.session_position) " ++ base_anchors_from ++ base_anchors_where ++ ") AS anchor_position," ++
         "(SELECT count(*) " ++ base_anchors_from ++ "JOIN content bag ON bag.content_id=anchor.extras_content_id " ++ base_anchors_where ++ ") AS anchor_bags," ++
@@ -1160,6 +1163,8 @@ const output_boundary = rsql.Read(.{
         current_provider: provider_name.Provider,
         current_codec: provider_name.Codec,
         current_model: Bounded(model_capability.max_model_bytes),
+        base_provider: ?provider_name.Provider,
+        base_codec: ?provider_name.Codec,
         base_model: ?Bounded(model_capability.max_model_bytes),
         anchors: u64,
         anchor_position: ?rsql.Positive,
@@ -1241,7 +1246,7 @@ fn keepOutputBoundary(view: *RequestPage, row: *const output_boundary.Row) error
     const recipe = replay_recipe.Recipe.select(request, if (row.operation_id != null) .{
         .position = row.frontier,
         .floor = if (row.base_floor) |floor| floor.get() else 0,
-        .binding = replay_wire.producerOf(request, (row.base_model orelse return error.CorruptStore).slice()),
+        .binding = try replay_wire.optionalBinding(row.base_provider, row.base_codec, if (row.base_model) |*model| model.slice() else null),
     } else null, if (row.own_floor) |floor| floor.get() else 0);
     const compatible = (view.selected_base != 0) == (recipe.frontier != 0);
     if (!compatible) {
@@ -1343,7 +1348,7 @@ fn entryAfter(a: *ReadAccess, view: *RequestPage, after_position: u64) !?*const 
 }
 
 const historical_entries = rsql.Read(.{
-    .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AND (e.entry_kind<>1 OR EXISTS(SELECT 1 FROM message_admission m WHERE m.admission_id=e.source_admission_id AND m.session_ref=e.session_ref AND m.content_id=e.content_id AND " ++ sourced_input.actionConsistentSql("m") ++ ")) AS consistent," ++
+    .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS codec,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AND (e.entry_kind<>1 OR EXISTS(SELECT 1 FROM message_admission m WHERE m.admission_id=e.source_admission_id AND m.session_ref=e.session_ref AND m.content_id=e.content_id AND " ++ sourced_input.actionConsistentSql("m") ++ ")) AS consistent," ++
         "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,(SELECT " ++ sourced_input.actionIdSql("m") ++ " FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS source_action,e.session_ref AS source_session,NULL AS effort," ++
         "(SELECT v.ordinal FROM action_value v WHERE v.admission_id=e.source_admission_id) AS source_ordinal,NULL AS tool_set_id,NULL AS declares," ++ pageBytesSql("content", "bytes") ++ " " ++
         "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
@@ -1351,7 +1356,7 @@ const historical_entries = rsql.Read(.{
         "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
         "AND e.entry_kind IN (1,2,4) AND (e.entry_kind=2 OR e.session_position>?3 OR e.session_position=?4" ++
         " OR " ++ history_floor_domain.firstMessageSkillSql("e", "?4") ++ ") UNION ALL " ++
-        "SELECT item.session_position,3,NULL,NULL,NULL,NULL,NULL,r.model,r.provider,item.item_kind,item.item_id_digest," ++
+        "SELECT item.session_position,3,NULL,NULL,NULL,NULL,NULL,r.model,r.provider,r.codec,item.item_kind,item.item_id_digest," ++
         store_schema.oneOf("owner.resolution_code", &accepted_resolutions) ++ " AND owner.session_ref=item.session_ref " ++
         "AND owner_turn.session_ref=item.session_ref " ++
         "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
@@ -1364,7 +1369,7 @@ const historical_entries = rsql.Read(.{
         "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
         "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position " ++
         "AND " ++ servedItemSql("?3", "?5") ++ " UNION ALL " ++
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",NULL,earlier.tool_set_id," ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",NULL,earlier.tool_set_id," ++
         "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("earlier.tool_set_id", "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
@@ -1382,6 +1387,7 @@ const historical_entries = rsql.Read(.{
         form: ?u8,
         model: ?Bounded(model_capability.max_model_bytes),
         provider: ?provider_name.Provider,
+        codec: ?provider_name.Codec,
         item_kind: ?u8,
         item_id_digest: ?[32]u8,
         consistent: ?bool,
@@ -1967,12 +1973,14 @@ fn historicalEntry(view: *RequestPage, row: *const historical_entries.Row) error
     var content: ?HistoricalContent = null;
     var input: ?HistoricalInput = null;
     var requested_model: ?Bounded(model_capability.max_model_bytes) = null;
+    var producer_wire: ?replay_binding.Wire = null;
     if (kind == .provider_output) {
         if (row.consistent != true) return error.CorruptStore;
         const model = row.model orelse return error.CorruptStore;
-        if (model.len == 0 or row.provider == null or row.item_id_digest == null) return error.CorruptStore;
+        if (model.len == 0 or row.item_id_digest == null) return error.CorruptStore;
         _ = std.enums.fromInt(OutputItemKind, row.item_kind orelse return error.CorruptStore) orelse return error.CorruptStore;
         requested_model = model;
+        producer_wire = replay_wire.wireOf(row.provider orelse return error.CorruptStore, row.codec orelse return error.CorruptStore);
     } else {
         if (row.consistent != true) return error.CorruptStore;
         const content_id = row.content_id orelse return error.CorruptStore;
@@ -1996,6 +2004,7 @@ fn historicalEntry(view: *RequestPage, row: *const historical_entries.Row) error
         .position = row.session_position.get(),
         .kind = kind,
         .requested_model = requested_model,
+        .producer_wire = producer_wire,
         .sender = row.sender,
         .source_action = if (row.source_action) |action| source: {
             const session = row.source_session orelse return error.CorruptStore;

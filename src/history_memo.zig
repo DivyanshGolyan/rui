@@ -2,6 +2,7 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
 const codecs = @import("codecs.zig");
+const codec_abi = @import("codec_abi.zig");
 
 pub const default_byte_limit: u64 = 1024 * 1024 * 1024;
 
@@ -13,14 +14,26 @@ pub fn newHasher() Hasher {
     return .init(0);
 }
 
+/// An owned Binding (see replay_binding.zig): the connection and the wire dialect a memo's
+/// prefix was built for, and the requested model. A memo serves only the same Binding.
+pub const Binding = struct {
+    provider: protocol.Provider,
+    dialect: codec_abi.Dialect,
+    model: protocol.Bounded(protocol.max_model_bytes),
+
+    pub fn eql(self: *const Binding, other: *const Binding) bool {
+        return self.provider == other.provider and self.dialect == other.dialect and self.model.eql(other.model.slice());
+    }
+};
+
 pub const Key = struct {
     session: protocol.Bounded(protocol.max_session_bytes),
-    model: protocol.Bounded(protocol.max_model_bytes),
+    binding: Binding,
     anchor: ?u64,
 
     pub fn eql(self: *const Key, other: *const Key) bool {
         return self.session.eql(other.session.slice()) and
-            self.model.eql(other.model.slice()) and
+            self.binding.eql(&other.binding) and
             self.anchor == other.anchor;
     }
 };
@@ -275,9 +288,9 @@ pub const Table = struct {
 };
 
 fn testMemo(session: []const u8, model: []const u8, anchor: ?u64, admission_position: u64, length: u64) !Memo {
-    var key: Key = .{ .session = .{}, .model = .{}, .anchor = anchor };
+    var key: Key = .{ .session = .{}, .binding = .{ .provider = .openai, .dialect = .openai_responses, .model = .{} }, .anchor = anchor };
     try key.session.set(session);
-    try key.model.set(model);
+    try key.binding.model.set(model);
     return .{
         .key = key,
         .admission_position = admission_position,
@@ -301,7 +314,13 @@ test "a memo serves only the same Session, model and anchor with a containing vi
     key.anchor = null;
     try std.testing.expect(!memo.serves(&key, 30));
     key = memo.key;
-    try key.model.set("model-b");
+    try key.binding.model.set("model-b");
+    try std.testing.expect(!memo.serves(&key, 30));
+    key = memo.key;
+    key.binding.dialect = .anthropic_messages;
+    try std.testing.expect(!memo.serves(&key, 30));
+    key = memo.key;
+    key.binding.provider = .codex;
     try std.testing.expect(!memo.serves(&key, 30));
     key = memo.key;
     try key.session.set("abc124");
@@ -320,7 +339,7 @@ test "a span appends only to the exact memo it copied" {
     changed.digest = 1;
     try std.testing.expectEqual(@as(u64, 0), appendOffset(&changed, &copied));
     changed = copied;
-    try changed.key.model.set("model-b");
+    try changed.key.binding.model.set("model-b");
     try std.testing.expectEqual(@as(u64, 0), appendOffset(&changed, &copied));
     changed = copied;
     changed.key.anchor = 3;

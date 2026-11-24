@@ -20,12 +20,14 @@ pub const Recipe = struct {
         return .{ .frontier = base.position, .floor = @max(own_floor, base.floor) };
     }
 
-    pub fn floorSql(comptime model: []const u8, comptime base_model: []const u8, comptime base_floor: []const u8, comptime own_floor: []const u8) []const u8 {
-        return "max(coalesce(" ++ own_floor ++ ",0),CASE WHEN " ++ base_model ++ "=" ++ model ++ " THEN coalesce(" ++ base_floor ++ ",0) ELSE 0 END)";
+    /// `same_binding` is the SQL truth of "the base's Binding is the request's" (a caller's
+    /// sameBindingSql); the base's floor and anchor count only when it holds.
+    pub fn floorSql(comptime same_binding: []const u8, comptime base_floor: []const u8, comptime own_floor: []const u8) []const u8 {
+        return "max(coalesce(" ++ own_floor ++ ",0),CASE WHEN " ++ same_binding ++ " THEN coalesce(" ++ base_floor ++ ",0) ELSE 0 END)";
     }
 
-    pub fn anchorSql(comptime model: []const u8, comptime base_model: []const u8, comptime anchor: []const u8) []const u8 {
-        return "CASE WHEN " ++ base_model ++ "=" ++ model ++ " THEN coalesce(" ++ anchor ++ ",0) ELSE 0 END";
+    pub fn anchorSql(comptime same_binding: []const u8, comptime anchor: []const u8) []const u8 {
+        return "CASE WHEN " ++ same_binding ++ " THEN coalesce(" ++ anchor ++ ",0) ELSE 0 END";
     }
 
     pub fn measuredBy(recipe: Recipe, measured: Recipe) bool {

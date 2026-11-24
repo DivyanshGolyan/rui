@@ -1244,7 +1244,11 @@ pub const Preparation = struct {
     fn memoKey(self: *Preparation) !history_memo.Key {
         return .{
             .session = self.settings.session,
-            .model = self.settings.model,
+            .binding = .{
+                .provider = self.settings.provider,
+                .dialect = codecs.dialect(self.settings.codec),
+                .model = self.settings.model,
+            },
             .anchor = (try self.page.coverage()).anchor,
         };
     }
@@ -5038,7 +5042,7 @@ test "a history memo that does not match the frozen request is rebuilt in full" 
         const memo = &memo_entries[history_memo.sessionSlot(&memo_entries, session.slice()).?].memo.?;
         switch (mismatch) {
             .anchor => memo.key.anchor = 1,
-            .model => try memo.key.model.set("model-b"),
+            .model => try memo.key.binding.model.set("model-b"),
             .older_view => memo.admission_position = std.math.maxInt(u64),
             .session => try memo.key.session.set("zzzzzz"),
         }
