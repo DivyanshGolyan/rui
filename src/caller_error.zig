@@ -304,6 +304,7 @@ fn mapped(err: anyerror) ?Code {
         error.ConnectionNotActive => .sign_in_connection_pending,
         error.SignInReportingUnavailable => .sign_in_report_unavailable,
         error.ApiKeyMissing => .sign_in_required,
+        error.ConnectionUnserved => .connection_unserved,
         error.HostStopped => .host_stopped,
         error.StoreAlreadyOwned => .store_locked,
         error.UnknownMcpServer => .unknown_mcp_server,
