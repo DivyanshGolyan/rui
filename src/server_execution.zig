@@ -154,7 +154,7 @@ const Run = struct {
     custody: *execution.CustodyPool,
     auth_worker: ?*AuthWorker = null,
     scratch_budget: ?provider.ScratchBudget = null,
-    turn_states: turn_states_module.PerConnection = .{},
+    turn_states: turn_states_module.PerConnection = undefined,
     history_memos: model_adapter.HistoryMemos = .{},
     bash_work: []BashWork = &.{},
     slot_changes: u64 = 0,
@@ -704,10 +704,9 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
         run.shared.lifecycle.fenceDispatch("execution workspace allocation", err);
         return;
     };
-    run.turn_states = .init(served_names, turn_states);
+    run.turn_states.init(served_names, turn_states);
     defer {
         run.turn_states.deinit();
-        run.turn_states = .{};
         unmapZeroed(turn_states);
     }
     const history_memos = mapZeroed(model_adapter.HistoryMemos.Entry, slots.len) catch |err| {

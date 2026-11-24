@@ -8,15 +8,15 @@ const provider = @import("provider.zig");
 pub const PerConnection = struct {
     tables: connection_names.NameArray(TurnStates) = .{},
 
-    pub fn init(names: []const connection.Name, entries: []TurnStates.Entry) PerConnection {
+    /// Initializes in place: the value is over 1 KiB and has one address on a Host thread.
+    pub fn init(self: *PerConnection, names: []const connection.Name, entries: []TurnStates.Entry) void {
         std.debug.assert(names.len <= connection.max_served);
         std.debug.assert(if (names.len == 0) entries.len == 0 else entries.len % names.len == 0);
         const per_table = if (names.len == 0) 0 else entries.len / names.len;
-        var self: PerConnection = .{};
+        self.tables = .{};
         for (names, 0..) |name, index| {
             self.tables.set(name, .{ .entries = entries[index * per_table ..][0..per_table] }) catch unreachable;
         }
-        return self;
     }
 
     /// The table of a served name; a name the served set does not hold has none.
@@ -198,7 +198,8 @@ test "owner changes invalidate paused Turns and stale completions" {
 test "two connections' Turns keep their values while their different owners launch in turn" {
     const names = [_]connection.Name{ connection.Name.parse("codex").?, connection.Name.parse("openai").?, connection.Name.parse("alpha").? };
     var storage: [2 * names.len]TurnStates.Entry = @splat(.{});
-    var states: PerConnection = .init(&names, &storage);
+    var states: PerConnection = undefined;
+    states.init(&names, &storage);
     defer states.deinit();
     const chatgpt: TurnStates.Owner = @splat(1);
     const key: TurnStates.Owner = @splat(0);
