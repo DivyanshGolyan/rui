@@ -366,13 +366,13 @@ test "a saved sign-in endpoint resolves back to exactly the admitted URL" {
     for (cases) |endpoint| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const text = try openAiConnectionText(arena.allocator(), endpoint, "/keys/openai.key");
+        const document = try openAiConnectionText(arena.allocator(), endpoint, "/keys/openai.key");
         const NoHostField = struct {
             fn none(_: []const u8) bool {
                 return false;
             }
         };
-        const parsed = switch (try served_connection.parse(arena.allocator(), text, NoHostField.none)) {
+        const parsed = switch (try served_connection.parse(arena.allocator(), document, NoHostField.none)) {
             .ok => |value| value,
             .refused => return error.TestUnexpectedResult,
         };
