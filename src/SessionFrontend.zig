@@ -3283,7 +3283,7 @@ fn showStaged(self: *Self) !void {
             break;
         }
         if (row.excluded_key) |key| {
-            if (row.excluded_capped) self.shown_notice.show("! Stopped before it ran · send it again to run it", self.nowMs());
+            self.shown_notice.show("! Stopped before it ran · send it again to run it", self.nowMs());
             if (self.local_projection) |*local| if (std.mem.eql(u8, &local.key, &key)) {
                 local.terminal = true;
             };
@@ -7943,6 +7943,7 @@ test "an attached stop row retires only its exact held Message" {
     try std.testing.expect(self.submission.messageHeld());
     try fixture.page(.scan, &.{.{ .key = 3, .text = "◌ not sent\nstopped original\n", .excluded_key = @splat('K') }}, true, true);
     try std.testing.expect(!self.submission.messageHeld());
+    try std.testing.expectEqualStrings("! Stopped before it ran · send it again to run it", self.shown_notice.current(self.nowMs()).?);
     const shown = try fixture.held.shown();
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "stopped original"));
 }

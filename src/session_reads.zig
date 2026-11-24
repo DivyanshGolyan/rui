@@ -41,7 +41,6 @@ pub const RenderedRow = struct {
     collapsed_count: usize = 0,
     message_key: ?[36]u8 = null,
     excluded_key: ?[36]u8 = null,
-    excluded_capped: bool = false,
 };
 
 pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ChatInfo.Edit) anyerror!bool;
@@ -535,7 +534,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         try capture.finish();
         row.length = capture.length;
         row.excluded_key = capture.excluded_key;
-        row.excluded_capped = capture.excluded_capped;
         if (row.length != 0 or pending) switch (item.value) {
             .admission, .received, .user => |message| {
                 const key_bytes = message.key.slice();
@@ -629,7 +627,6 @@ const RowCapture = struct {
     cap_target: ?View.Collapsed = null,
     watch_key: ?[36]u8 = null,
     excluded_key: ?[36]u8 = null,
-    excluded_capped: bool = false,
     omitted_summaries: u64 = 0,
     boundary: u64 = 0,
     scalar_left: u3 = 0,
@@ -705,7 +702,6 @@ const RowCapture = struct {
         const watched = self.watch_key orelse return;
         if (!std.mem.eql(u8, &watched, key)) return;
         self.excluded_key = watched;
-        self.excluded_capped = self.cut;
     }
 
     fn retainSummary(self: *@This(), value: View.Collapsed, bytes: []const u8, limit: u64) !bool {
@@ -1923,7 +1919,6 @@ test "capped stop row reports the exact excluded identity without changing its p
     try std.testing.expectEqualDeep(baseline_row.collapsed_targets[0], row.collapsed_targets[0]);
     try std.testing.expect(std.mem.indexOf(u8, shown, "More content omitted") != null);
     try std.testing.expectEqual(@as(?[36]u8, @as([36]u8, @splat('K'))), capture.excluded_key);
-    try std.testing.expect(capture.excluded_capped);
 }
 
 test "session_reads stopped collapsed Messages retain their exact ordered identities up to the metadata bound" {
