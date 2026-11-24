@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const session_list = @import("session_list.zig");
 const model_catalog = @import("model_catalog.zig");
 const vaxis = @import("vaxis");
@@ -2230,8 +2231,8 @@ const fake_operations: Operations = .{
             errdefer reply.deinit();
             try reply.writer.writeAll(protocol.model_list_reply.head);
             try model_list.writeProviders(&reply.writer, model_catalog.shipped, &.{
-                .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\n" } } },
-                .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
+                .{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\n" } } },
+                .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
             });
             try reply.writer.writeAll(protocol.model_list_reply.tail);
             return reply.toOwnedSlice();
@@ -6462,7 +6463,7 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         const rig = try openOverview();
         defer rig.close();
         const overview = rig.overview;
-        try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "future-chat\ngpt-5.5\n" } } }}) } }) == null);
+        try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "future-chat\ngpt-5.5\n" } } }}) } }) == null);
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try overview.root.openSettings(&ctx);
@@ -6475,7 +6476,7 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         if (release) {
             try std.testing.expect(try overview.event(.leave) == null);
         } else {
-            try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }}) } }) == null);
+            try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }}) } }) == null);
         }
         try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
         try std.testing.expect(!page.hasChoice());
@@ -6545,8 +6546,8 @@ fn sui4ModelFilter() !void {
         try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
         _ = try overview.event(.{ .input = .{ .key = .{ .action = .first } } });
         try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{
-            .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
-            .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
+            .{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
+            .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
         }) } }) == null);
         try std.testing.expect(try rig.press("kept draft") == null);
         var ctx = rig.context();

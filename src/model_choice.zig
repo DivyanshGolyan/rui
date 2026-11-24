@@ -1,4 +1,7 @@
 const std = @import("std");
+const connection_names = @import("connection_names.zig");
+const provider_route = @import("provider_route.zig");
+const connection = @import("connection.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const picker = @import("model_picker.zig");
@@ -26,7 +29,7 @@ pub const Source = struct {
 const fallback_entries = blk: {
     @setEvalBranchQuota(20000);
     var entries: [catalog.openai_ids.len]picker.Entry = undefined;
-    for (catalog.openai_ids, 0..) |id, at| entries[at] = .{ .id = id, .known = true, .catalogued = true, .providers = .full };
+    for (catalog.openai_ids, 0..) |id, at| entries[at] = .{ .id = id, .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&provider_route.built_in_names) };
     break :blk entries;
 };
 const fallback: picker.Menu = .{ .entries = &fallback_entries };
@@ -37,7 +40,7 @@ active: bool = false,
 source: ?Source = null,
 revision: u64 = 0,
 menu: *const picker.Menu = &fallback,
-provider: picker.Provider = .codex,
+provider: connection.Name = provider_route.nameOf(.codex),
 current: []const u8 = "",
 focus: @import("app_input.zig").ChoiceFocus = .{ .filter = null },
 filter_drawn: bool = false,
@@ -56,7 +59,7 @@ quiet: vaxis.Style = .{ .dim = true },
 hits: []const usize = &.{},
 hover: Hover = .{},
 
-pub fn open(self: *Self, menu: ?*const picker.Menu, provider: picker.Provider, current: []const u8) void {
+pub fn open(self: *Self, menu: ?*const picker.Menu, provider: connection.Name, current: []const u8) void {
     self.source = null;
     self.menu = menu orelse &fallback;
     self.provider = provider;
@@ -73,7 +76,7 @@ pub fn open(self: *Self, menu: ?*const picker.Menu, provider: picker.Provider, c
     self.active = self.focus.selected() != null;
 }
 
-pub fn openSource(self: *Self, source: Source, provider: picker.Provider, current: []const u8) void {
+pub fn openSource(self: *Self, source: Source, provider: connection.Name, current: []const u8) void {
     const snapshot = source.read(source.context);
     self.open(snapshot.menu, provider, current);
     self.source = source;
@@ -143,7 +146,7 @@ fn drawInput(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
 fn row(self: *const Self, entry: picker.Entry) ?picker.Row {
     if (!entry.providers.contains(self.provider)) return null;
     var constrained = entry;
-    constrained.providers = .initOne(self.provider);
+    constrained.providers = .of(&.{self.provider});
     return picker.Query.parse(self.editor.text()).row(constrained, .{ .model = self.current, .provider = self.provider });
 }
 
@@ -316,9 +319,9 @@ fn press(choice: *Self, ctx: *vxfw.EventContext, key: u21) !void {
 
 test "Model choice shares picker rows filters never empty and picks only its provider" {
     const entries = [_]picker.Entry{
-        .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = .initOne(.codex) },
-        .{ .id = "gpt-5.5", .known = true, .catalogued = true, .providers = .full },
-        .{ .id = "api-only", .known = false, .catalogued = false, .providers = .initOne(.openai) },
+        .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
+        .{ .id = "gpt-5.5", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&provider_route.built_in_names) },
+        .{ .id = "api-only", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.openai)}) },
     };
     const menu: picker.Menu = .{ .entries = &entries };
     var fixture: Fixture = .{};
@@ -362,18 +365,18 @@ test "Model choice shares picker rows filters never empty and picks only its pro
 
 test "Model choice keeps a chat on its own way into ChatGPT, and either ChatGPT word finds it" {
     const entries = [_]picker.Entry{
-        .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = .full },
-        .{ .id = "browser-only", .known = false, .catalogued = false, .providers = .initOne(.chatgpt) },
-        .{ .id = "device-only", .known = false, .catalogued = false, .providers = .initOne(.codex) },
-        .{ .id = "key-only", .known = false, .catalogued = false, .providers = .initOne(.openai) },
+        .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&provider_route.built_in_names) },
+        .{ .id = "browser-only", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.chatgpt)}) },
+        .{ .id = "device-only", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
+        .{ .id = "key-only", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.openai)}) },
     };
     const menu: picker.Menu = .{ .entries = &entries };
-    const Case = struct { provider: picker.Provider, own: []const u8, found: [3]bool };
+    const Case = struct { provider: connection.Name, own: []const u8, found: [3]bool };
     const words = [3][]const u8{ "chatgpt", "codex", "api" };
     for ([_]Case{
-        .{ .provider = .codex, .own = "device-only", .found = .{ true, true, false } },
-        .{ .provider = .chatgpt, .own = "browser-only", .found = .{ true, true, false } },
-        .{ .provider = .openai, .own = "key-only", .found = .{ false, false, true } },
+        .{ .provider = provider_route.nameOf(.codex), .own = "device-only", .found = .{ true, true, false } },
+        .{ .provider = provider_route.nameOf(.chatgpt), .own = "browser-only", .found = .{ true, true, false } },
+        .{ .provider = provider_route.nameOf(.openai), .own = "key-only", .found = .{ false, false, true } },
     }) |case| {
         var fixture: Fixture = .{};
         var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel };
@@ -420,14 +423,14 @@ test "Model choice bounds scrolling and mouse picking use the visible list" {
 test "Model choice invalidates every replaced or released source before keys mouse or drawing" {
     const Live = struct {
         const old = [_]picker.Entry{
-            .{ .id = "old-a", .known = false, .catalogued = false, .providers = .full },
-            .{ .id = "old-b", .known = false, .catalogued = false, .providers = .full },
+            .{ .id = "old-a", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&provider_route.built_in_names) },
+            .{ .id = "old-b", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&provider_route.built_in_names) },
         };
         const replacements = [_][]const picker.Entry{
             &.{old[0]},
             &.{ old[1], old[0] },
             &.{},
-            &.{ .{ .id = "new-a", .known = false, .catalogued = false, .providers = .full }, old[0] }, // same length
+            &.{ .{ .id = "new-a", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&provider_route.built_in_names) }, old[0] }, // same length
         };
         menu: picker.Menu = .{ .entries = &old },
         revision: u64 = 0,
@@ -440,7 +443,7 @@ test "Model choice invalidates every replaced or released source before keys mou
         var live: Live = .{};
         var fixture: Fixture = .{};
         var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel };
-        choice.openSource(.{ .context = &live, .read = Live.read }, .codex, "old-b");
+        choice.openSource(.{ .context = &live, .read = Live.read }, provider_route.nameOf(.codex), "old-b");
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 8 }, .cell_size = .{} };
@@ -465,8 +468,8 @@ const RejectedInput = enum { typed_overflow, invalid_utf8, invalid_scalar, paste
 
 fn expectFilterRecovery(failure: RejectedInput) !void {
     const entries = [_]picker.Entry{
-        .{ .id = "alpha-one", .known = false, .catalogued = false, .providers = .initOne(.codex) },
-        .{ .id = "alpha-two", .known = false, .catalogued = false, .providers = .initOne(.codex) },
+        .{ .id = "alpha-one", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
+        .{ .id = "alpha-two", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
     };
     const menu: picker.Menu = .{ .entries = &entries };
     var fixture: Fixture = .{};
@@ -538,7 +541,7 @@ test "Model choice preserves paste overflow rollback before editing and picking"
 test "Model choice Panel field keeps its input visible and compacts indented matches with quiet overflow" {
     const entries = blk: {
         var all: [10]picker.Entry = undefined;
-        inline for (0..10) |i| all[i] = .{ .id = std.fmt.comptimePrint("model-{d}", .{i}), .known = false, .catalogued = false, .providers = .initOne(.codex) };
+        inline for (0..10) |i| all[i] = .{ .id = std.fmt.comptimePrint("model-{d}", .{i}), .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) };
         break :blk all;
     };
     const widths = [_]u16{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 46, 99 };
@@ -635,11 +638,11 @@ test "Model choice input scrolls by grapheme and reserves refusal without a labe
 
 test "Model choice size column follows only the longest shown name across widths and filters" {
     const entries = [_]picker.Entry{
-        .{ .id = "a-very-long-hidden-chat-model-before", .known = false, .catalogued = false, .providers = .initOne(.codex) },
-        .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = .initOne(.codex) },
-        .{ .id = "gpt-6.1-terra", .known = true, .catalogued = true, .providers = .initOne(.codex) },
-        .{ .id = "gpt-6-sol", .known = true, .catalogued = true, .providers = .initOne(.codex) },
-        .{ .id = "another-even-longer-hidden-chat-model-after", .known = false, .catalogued = false, .providers = .initOne(.codex) },
+        .{ .id = "a-very-long-hidden-chat-model-before", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
+        .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
+        .{ .id = "gpt-6.1-terra", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
+        .{ .id = "gpt-6-sol", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
+        .{ .id = "another-even-longer-hidden-chat-model-after", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
     };
     const menu: picker.Menu = .{ .entries = &entries };
     for (30..141) |width| for ([_]u16{ 1, 2, 3 }) |height| for ([_]bool{ false, true }) |filtered| {
@@ -663,7 +666,7 @@ test "Model choice size column follows only the longest shown name across widths
 }
 
 test "Model choice shared ASCII inline input and compact matches preserve PR4 geometry" {
-    const entries = [_]picker.Entry{.{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = .initOne(.codex) }};
+    const entries = [_]picker.Entry{.{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) }};
     const menu: picker.Menu = .{ .entries = &entries };
     var choice: Self = .{ .unicode = false };
     choice.open(&menu, .codex, entries[0].id);
@@ -741,7 +744,7 @@ test "Model choice ASCII cursor projection stays bounded across Unicode prefixes
 test "Model choice hover and click follow full-width Panel matches without selecting overflow" {
     const entries = blk: {
         var all: [10]picker.Entry = undefined;
-        inline for (0..10) |i| all[i] = .{ .id = std.fmt.comptimePrint("model-{d}", .{i}), .known = false, .catalogued = false, .providers = .initOne(.codex) };
+        inline for (0..10) |i| all[i] = .{ .id = std.fmt.comptimePrint("model-{d}", .{i}), .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) };
         break :blk all;
     };
     const menu: picker.Menu = .{ .entries = &entries };
@@ -796,9 +799,9 @@ test "Model choice hover and click follow full-width Panel matches without selec
 
 test "Model choice standalone rows use all bounded space without viewport hints" {
     const entries = [_]picker.Entry{
-        .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = .full },
-        .{ .id = "gpt-5.5", .known = true, .catalogued = true, .providers = .full },
-        .{ .id = "gpt-5.4", .known = true, .catalogued = true, .providers = .full },
+        .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&provider_route.built_in_names) },
+        .{ .id = "gpt-5.5", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&provider_route.built_in_names) },
+        .{ .id = "gpt-5.4", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&provider_route.built_in_names) },
     };
     const menu: picker.Menu = .{ .entries = &entries };
     var choice: Self = .{};
@@ -821,8 +824,8 @@ test "Model choice standalone rows use all bounded space without viewport hints"
 
 test "Model Tab includes its drawn filter and excludes clipped results" {
     const entries = [_]picker.Entry{
-        .{ .id = "one", .known = false, .catalogued = false, .providers = .initOne(.codex) },
-        .{ .id = "two", .known = false, .catalogued = false, .providers = .initOne(.codex) },
+        .{ .id = "one", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
+        .{ .id = "two", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
     };
     const menu: picker.Menu = .{ .entries = &entries };
     var choice: Self = .{};

@@ -374,15 +374,15 @@ test "a model list reply reads as what the Host writes" {
     var out = std.Io.Writer.fixed(&bytes);
     try out.writeAll(protocol.model_list_reply.head);
     try model_list.writeProviders(&out, model_catalog.shipped, &.{
-        .{ .provider = .codex, .list = .catalog },
-        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\nunlisted-model\n" } } },
+        .{ .provider = provider_route.nameOf(.codex), .list = .catalog },
+        .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-6-luna\nunlisted-model\n" } } },
     });
     try out.writeAll(protocol.model_list_reply.tail);
     var menu = try model_picker.read(std.testing.allocator, try modelListProviders(out.buffered()));
     defer menu.deinit(std.testing.allocator);
     try std.testing.expectEqual(@import("model_catalog.zig").openai_ids.len + 1, menu.entries.len);
-    try std.testing.expectEqual(@as(?model_list.Source, .catalog), menu.sources.get(.codex));
-    try std.testing.expectEqual(@as(?model_list.Source, .live), menu.sources.get(.openai));
+    try std.testing.expectEqual(@as(?model_list.Source, .catalog), menu.sources.get(provider_route.nameOf(.codex)));
+    try std.testing.expectEqual(@as(?model_list.Source, .live), menu.sources.get(provider_route.nameOf(.openai)));
     try std.testing.expectEqualStrings("unlisted-model", menu.entries[menu.others].id);
     for ([_][]const u8{ "", protocol.model_list_reply.head, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"connections\":[]}" }) |body|
         try std.testing.expectError(error.InvalidModelList, modelListProviders(body));

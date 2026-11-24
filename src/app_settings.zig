@@ -1,4 +1,7 @@
 const std = @import("std");
+const connection_names = @import("connection_names.zig");
+const provider_route = @import("provider_route.zig");
+const connection = @import("connection.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Panel = @import("widgets/Panel.zig");
@@ -118,8 +121,8 @@ fn readValues(self: *Self) !void {
     if (was_failed) self.failures.set(.model, null);
 }
 
-fn provider(self: *const Self) ?protocol.Provider {
-    return std.meta.stringToEnum(protocol.Provider, if (self.values.provider.len == 0) defaults.provider else self.values.provider.slice());
+fn provider(self: *const Self) ?connection.Name {
+    return connection.Name.parse(if (self.values.provider.len == 0) defaults.provider else self.values.provider.slice());
 }
 
 fn model(self: *const Self) []const u8 {
@@ -150,7 +153,7 @@ fn value(self: *const Self, row: Row) []const u8 {
         .effort => if (self.choiceEffort()) |shown| @tagName(shown) else "model default",
         .permissions => permissionText(self.permissionMode()),
         .notifications => if (self.values.notifications) "on" else "off",
-        .sign_in => if (self.provider()) |saved| saved.signIn() else "unavailable",
+        .sign_in => if (self.provider()) |saved| provider_route.signInOf(saved) orelse "unavailable" else "unavailable",
         .version, .memory, .keys => unreachable,
     };
 }
@@ -778,9 +781,9 @@ test "App settings Permissions choices save both modes and display the saved wor
 test "App settings Model shares the provider list at full width and preserves matches on filtering" {
     const List = struct {
         const entries = [_]picker.Entry{
-            .{ .id = "future-chat", .known = false, .catalogued = false, .providers = .initOne(.codex) },
-            .{ .id = "api-only", .known = false, .catalogued = false, .providers = .initOne(.openai) },
-            .{ .id = "text-embedding-3-small", .known = true, .catalogued = true, .providers = .full },
+            .{ .id = "future-chat", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}) },
+            .{ .id = "api-only", .known = false, .catalogued = false, .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.openai)}) },
+            .{ .id = "text-embedding-3-small", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&provider_route.built_in_names) },
         };
         const menu: picker.Menu = .{ .entries = &entries };
         fn models(_: *anyopaque) ModelChoice.Snapshot {

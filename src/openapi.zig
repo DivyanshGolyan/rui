@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const model_catalog = @import("model_catalog.zig");
 const session_settings = @import("session_settings.zig");
 const tool_name = @import("tool_name.zig");
@@ -1971,8 +1972,8 @@ fn publishedReplyExamples() !void {
     const ids = "gpt-6.1-sol\nmy\"model\n";
     try out.writer.writeAll(protocol.model_list_reply.head);
     try model_list.writeProviders(&out.writer, model_catalog.shipped, &.{
-        .{ .provider = .codex, .list = .catalog },
-        .{ .provider = .openai, .list = .{ .live = .{ .bytes = ids } } },
+        .{ .provider = provider_route.nameOf(.codex), .list = .catalog },
+        .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = ids } } },
     });
     try out.writer.writeAll(protocol.model_list_reply.tail);
     try Case.check(schemas, "ModelListReply", out.written(), a);

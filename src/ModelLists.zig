@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const protocol = @import("protocol.zig");
 const model_list = @import("model_list.zig");
 const providers_module = @import("providers.zig");
@@ -63,7 +64,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, facts: []const @import("model_ca
     var count: usize = 0;
     for (std.enums.values(protocol.Provider)) |name| {
         if (!self.providers.serves(name)) continue;
-        entries[count] = .{ .provider = name, .list = self.live.get(name) };
+        entries[count] = .{ .provider = provider_route.nameOf(name), .list = self.live.get(name) };
         count += 1;
     }
     try model_list.writeProviders(out, facts, entries[0..count]);
