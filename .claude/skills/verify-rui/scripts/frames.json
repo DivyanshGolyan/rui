@@ -4206,7 +4206,8 @@
         "ctrl+c   leave",
         "next focus",
         "previous focus",
-        "fold tree · info actions"
+        "open chat · info actions",
+        "fold / expand tree"
       ],
       "absent": [
         "/help",
@@ -5693,7 +5694,7 @@
     },
     {
       "name": "list-to-chat",
-      "note": "Enter on the open row returns to its retained input, without reopening the feed.",
+      "note": "Right on the open row returns to its retained input, without reopening the feed.",
       "open": "Focus navigation audit",
       "steps": [
         {
@@ -5702,16 +5703,19 @@
         {
           "keys": [
             "Left",
-            "Enter"
+            "Right"
           ]
         },
         {
-          "sleep": 0.2
+          "text": "Right Arrow draft"
+        },
+        {
+          "wait": "Right Arrow draft"
         }
       ],
       "expect": [
         "Focus navigation audit",
-        "›"
+        "Right Arrow draft"
       ],
       "absent": [
         "Opening…"
