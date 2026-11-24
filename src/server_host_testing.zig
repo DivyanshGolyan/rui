@@ -16,7 +16,7 @@ pub const TestParts = struct {
     pub fn attachWithWake(self: *TestParts, host: *Host, lease: *platform.StoreLease, intake_wake: ?@import("std").posix.fd_t) void {
         self.lifecycle = .init(host.io, lease, false, intake_wake);
         host.lifecycle = &self.lifecycle;
-        self.probes = .{};
+        self.probes = .{ .io = host.io };
         host.probes = &self.probes;
     }
 };

@@ -61,11 +61,8 @@ pub const Hooks = server_host.Hooks;
 pub const Tuning = server_host.Tuning;
 const Host = server_host.Host;
 const nowNs = server_host.nowNs;
-const traceSubject = server_host.traceSubject;
-const traceRequest = server_host.traceRequest;
 const executionFacts = server_host.executionFacts;
 const waitAtTestGate = server_host.waitAtTestGate;
-const traceSqliteDiagnostic = server_host.traceSqliteDiagnostic;
 
 // Rare work with a 4 KiB capture of its own: noinline keeps the capture off
 // the frame of every session inspection.
@@ -306,9 +303,9 @@ const Intake = struct {
             if (!self.cleanup()) return false;
             self.header_bytes.deinit(host.allocator);
             if (self.number) |number|
-                traceRequest(host, "connection_resources_released", number, host.scratch_used.load(.acquire))
+                host.probes.traceRequest("connection_resources_released", number, host.scratch_used.load(.acquire))
             else
-                traceSubject(host, "connection_place_released", "place", "classification");
+                host.probes.traceSubject("connection_place_released", "place", "classification");
             host.allocator.destroy(self);
             return true;
         }
@@ -413,7 +410,7 @@ const Intake = struct {
                             } else if (ordinary > self.host.intake_capacity) return error.ClientCapacity;
                         }
                         if (!self.route.?.isControl() and self.route != .host_info)
-                            traceSubject(self.host, "ordinary_classification_released", "route", @tagName(self.route.?));
+                            self.host.probes.traceSubject("ordinary_classification_released", "route", @tagName(self.route.?));
                     }
                     if (!std.mem.endsWith(u8, header, "\r\n\r\n")) continue;
                     self.header = try HeaderReader.parseFields(header, self.route.?);
@@ -421,7 +418,7 @@ const Intake = struct {
                     if (self.route == .line) return self.owner.upgradeLine(self, bytes[consumed..]);
                     self.number = try nextRequestNumber(self.host);
                     switch (self.route.?) {
-                        inline else => |route| traceRequest(self.host, "connection_request_" ++ @tagName(route), self.number.?, null),
+                        inline else => |route| self.host.probes.traceRequest("connection_request_" ++ @tagName(route), self.number.?, null),
                     }
                     const limit: u64 = switch (self.route.?) {
                         .host_info => protocol.max_host_info_request_bytes,
@@ -664,7 +661,7 @@ const Intake = struct {
         if (count > 0) return;
         if (count < 0 and std.posix.errno(count) == .INTR) return;
         self.stdin = null;
-        traceSubject(self.host, "launch_stdin_closed", "host", "launch");
+        self.host.probes.traceSubject("launch_stdin_closed", "host", "launch");
         self.armShutdownDeadline();
         _ = self.host.lifecycle.stopAsked();
     }
@@ -1510,11 +1507,11 @@ noinline fn writeReadiness(
 
 fn publishControlHint(host: *Host, command_key: []const u8) void {
     if (host.probes.suppressFirstControlHint()) {
-        traceSubject(host, "control_hint_suppressed", "command_key", command_key);
+        host.probes.traceSubject("control_hint_suppressed", "command_key", command_key);
         return;
     }
     host.lifecycle.noteControlsChanged();
-    traceSubject(host, "control_hint_published", "command_key", command_key);
+    host.probes.traceSubject("control_hint_published", "command_key", command_key);
 }
 
 const ControlTiming = struct {
@@ -1545,19 +1542,19 @@ const ControlTiming = struct {
         switch (phase) {
             .lock_requested => {
                 self.store_queued_ns = nowNs(self.host.io);
-                traceSubject(self.host, "control_store_queued", "command_key", self.command_key.slice());
+                self.host.probes.traceSubject("control_store_queued", "command_key", self.command_key.slice());
             },
             .lock_acquired => {
                 self.lock_acquired_ns = nowNs(self.host.io);
-                traceSubject(self.host, "control_lock_acquired", "command_key", self.command_key.slice());
+                self.host.probes.traceSubject("control_lock_acquired", "command_key", self.command_key.slice());
                 self.waitAtTestGate();
             },
             .durable_acceptance => {
-                traceSubject(self.host, "control_durable_acceptance", "command_key", self.command_key.slice());
+                self.host.probes.traceSubject("control_durable_acceptance", "command_key", self.command_key.slice());
             },
             .store_complete => {
                 self.store_complete_ns = nowNs(self.host.io);
-                traceSubject(self.host, "control_store_complete", "command_key", self.command_key.slice());
+                self.host.probes.traceSubject("control_store_complete", "command_key", self.command_key.slice());
             },
         }
     }
@@ -1571,7 +1568,7 @@ const ControlTiming = struct {
             defer gate.close(self.host.io);
             var release: [1]u8 = undefined;
             const count = gate.readStreaming(self.host.io, &.{&release}) catch return;
-            if (count == 1) traceSubject(self.host, "control_gate_released", "command_key", self.command_key.slice());
+            if (count == 1) self.host.probes.traceSubject("control_gate_released", "command_key", self.command_key.slice());
             return;
         }
     }
@@ -2018,9 +2015,9 @@ noinline fn replyObserveCommand(host: *Host, fd: *Reply, command: *@FieldType(wi
     var observation: store_module.Observed = undefined;
     host.store.observeCommand(command.key.slice(), command.since, &observation) catch |err| return refuseRead(host, fd, "command observation", err);
     switch (observation) {
-        .full => server_host.traceCommandObservation(host, command.key.slice(), "request_observation_full"),
+        .full => host.probes.traceCommandObservation(command.key.slice(), "request_observation_full"),
         .not_modified => |token| if (command.since) |since| {
-            server_host.traceCommandObservation(host, command.key.slice(), if (token.generation > since.generation)
+            host.probes.traceCommandObservation(command.key.slice(), if (token.generation > since.generation)
                 "request_observation_tier2"
             else
                 "request_observation_tier1");
@@ -2076,10 +2073,10 @@ noinline fn replyInspectSession(host: *Host, fd: *Reply, request_value: *@FieldT
         return refuseRead(host, fd, "session inspection", err);
     };
     try fd.setReport(report);
-    traceSubject(host, "inspection_captured", "session", request_value.session.slice());
-    traceSqliteDiagnostic(host, request_value.session.slice());
+    host.probes.traceSubject("inspection_captured", "session", request_value.session.slice());
+    host.probes.traceSqliteDiagnostic(host.store, request_value.session.slice());
     try fd.holdDelivery(host.probes.hooks.inspection_reply);
-    if (fd.gate != null) traceSubject(host, "test_gate_waiting", "path", host.probes.hooks.inspection_reply.gate_path.?);
+    if (fd.gate != null) host.probes.traceSubject("test_gate_waiting", "path", host.probes.hooks.inspection_reply.gate_path.?);
 }
 
 noinline fn replyListSessions(host: *Host, fd: *Reply, request_value: *@FieldType(wire_request.Request, "list_sessions"), request_number: u64) !void {
