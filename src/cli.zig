@@ -5861,7 +5861,7 @@ test "Host selection round trips every Store placement and interface through def
             const result = try gpa.create(HostLaunchResult);
             defer gpa.destroy(result);
             result.* = .{ .outcome = .{ .failed = .{ .cause = .{ .kind = .setup, .err = error.FixtureUninitialized } } } };
-            host_start.spawn(init, .{ .dir = admitted.selector() }, fixture.ops(), null, result);
+            host_start.spawn(init, .{ .dir = admitted.selector() }, fixture.ops().start, null, result);
             try std.testing.expect(result.outcome == .ready);
             try std.testing.expectEqual(if (ready) @as(usize, 0) else 1, fixture.launches);
             try std.testing.expectEqualStrings(dir, result.outcome.ready.selector.slice());
