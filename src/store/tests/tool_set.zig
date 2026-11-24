@@ -1857,7 +1857,16 @@ test "SH-174 a request offers the Host's full tool set beside every app tool a l
                 @setEvalBranchQuota(10_000_000);
                 const count = tool_name.max_offered_tools - app_tools.max_records - tool_defs.built_in_tool_set.records.len;
                 var records: [count]tool_defs.Record = undefined;
-                const bytes = protocol.max_tool_list_name_bytes - "find_tools".len;
+                // The root names every Host tool but stop_action, which the offer adds itself: those names and the stubs fill
+                // the configurable list's bytes (its separators counted once).
+                var builtin_bytes: usize = 0;
+                var builtin_count: usize = 0;
+                for (tool_defs.built_in_tool_set.records) |record| {
+                    if (std.mem.eql(u8, record.name, "stop_action")) continue;
+                    builtin_bytes += record.name.len;
+                    builtin_count += 1;
+                }
+                const bytes = protocol.max_tool_list_name_bytes - builtin_bytes - (builtin_count + count - 1);
                 for (&records, 0..) |*record, index| {
                     const prefix = std.fmt.comptimePrint("stub{d:0>3}", .{index});
                     const length = bytes / records.len + @intFromBool(index < bytes % records.len);
@@ -1874,6 +1883,21 @@ test "SH-174 a request offers the Host's full tool set beside every app tool a l
                 break :blk records;
             };
             const records = comptime testingHostToolRecords(&host_extras);
+            // The names the root configures: the Host's built-ins but stop_action, then every stub.
+            const configured_names = comptime blk: {
+                var names: [tool_defs.built_in_tool_set.records.len - 1 + host_extras.len][]const u8 = undefined;
+                var at: usize = 0;
+                for (tool_defs.built_in_tool_set.records) |record| {
+                    if (std.mem.eql(u8, record.name, "stop_action")) continue;
+                    names[at] = record.name;
+                    at += 1;
+                }
+                for (host_extras) |record| {
+                    names[at] = record.name;
+                    at += 1;
+                }
+                break :blk names;
+            };
             var digests: [records.len][32]u8 = undefined;
             for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
             var tmp = std.testing.tmpDir(.{});
@@ -1895,8 +1919,16 @@ test "SH-174 a request offers the Host's full tool set beside every app tool a l
             }
             try writer.writeByte(']');
 
+            var configured: protocol.ToolsField = .{ .state = .value };
+            for (configured_names) |name| try configured.insert(name);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var root_create = try completeConfiguration("sh174-root", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            declareAppTools(&root_create.configuration, writer.buffered());
+            root_create.configuration.tools = configured;
+            const root_reply = try storage.configure(&root_create, .{});
+            try expectAccepted("root", root_reply);
             var root_buffer: [128]u8 = undefined;
-            const root = try createRoot(&storage, "sh174-root", writer.buffered(), &root_buffer);
+            const root = keepRef(&root_buffer, root_reply.accepted.session.slice());
             var offered: Offered = undefined;
             try offerOf(&storage, try admitMessage(&storage, &tmp, "sh174-first", root), &offered);
             try std.testing.expectEqual(@as(usize, tool_name.max_offered_tools), offered.count);
@@ -1945,11 +1977,7 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
             var storage: Store = undefined;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            // An MCP tool named `lookup` is in the Host set, so an app tool of that name is shadowed by it.
-            const shadow = comptime testingHostToolRecords(&.{.{ .name = "lookup", .owner = .mcp, .server = "notes", .description = "Lookup.", .input_schema = "{\"type\":\"object\"}" }});
-            var shadow_digests: [shadow.len][32]u8 = undefined;
-            for (&shadow, &shadow_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
-            try storage.saveHostToolSet(&.{ .records = &shadow, .digests = &shadow_digests });
+            try storage.saveHostToolSet(&tool_defs.built_in_tool_set);
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var refs: [4][128]u8 = undefined;
@@ -1991,13 +2019,22 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
             omitted.configuration.tools = try .of(&.{ "ask", "find_tools" });
             try expectAccepted("omitted", try storage.configure(&omitted, .{}));
 
-            // Host precedence: a declaration whose `lookup` the Host shadows creates, and the Host name is selected.
+            // A root declares `lookup` while the Host has none, and names it. Then an MCP `lookup` arrives in the Host set:
+            // it shadows the app tool, so a declaration that names it is refused by name (app_tool_host_clash).
             var shadowed = try completeConfiguration("sh175-shadowed", "", workspace, "model-a");
             declareAppTools(&shadowed.configuration, lookup_and_ask_declaration);
             shadowed.configuration.tools = try .of(&.{"lookup"});
             const shadowed_reply = try storage.configure(&shadowed, .{});
             try expectAccepted("shadowed", shadowed_reply);
             const shadow_root = keepRef(&refs[1], shadowed_reply.accepted.session.slice());
+            const shadow = comptime testingHostToolRecords(&.{.{ .name = "lookup", .owner = .mcp, .server = "notes", .description = "Lookup.", .input_schema = "{\"type\":\"object\"}" }});
+            var shadow_digests: [shadow.len][32]u8 = undefined;
+            for (&shadow, &shadow_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            try storage.saveHostToolSet(&.{ .records = &shadow, .digests = &shadow_digests });
+            var clashing = try completeConfiguration("sh175-clash", "", workspace, "model-a");
+            declareAppTools(&clashing.configuration, lookup_and_ask_declaration);
+            clashing.configuration.tools = try .of(&.{"ask"});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.app_tool_host_clash, (try storage.configure(&clashing, .{})).rejected.code);
 
             // A child of that root names `ask`: the shadowed `lookup` narrows nothing, so `ask` is offered to it.
             // A child inherits its parent's workspace, so its spec names none.
