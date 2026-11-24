@@ -475,7 +475,7 @@ pub const Pointer = struct { over: ?Click, phase: enum { held, released, free } 
 /// does; the drag starts once a held pointer leaves that row. Any other release, any press or move with no button
 /// held anywhere on screen (Root reports those as `free`), a key or another click ends it.
 pub const Carry = struct {
-    /// The row the last press opened, until that press ends.
+    /// The row receiving the primary press, until that press ends.
     pressed: ?Reference = null,
     /// The pressed row's drag has left it.
     carrying: bool = false,
@@ -989,6 +989,11 @@ pub const State = struct {
         return .wait;
     }
 
+    fn parentPressHeld(self: *const State) bool {
+        const pending = self.parent_click orelse return false;
+        return !pending.released;
+    }
+
     fn cancelParentClick(self: *State) void {
         self.parent_click = null;
     }
@@ -1008,7 +1013,7 @@ pub const State = struct {
         }
         const pending = self.parent_click orelse return null;
         const now = at_ms orelse return null;
-        if (now < pending.deadline_ms) return null;
+        if (!pending.released or now < pending.deadline_ms) return null;
         self.cancelParentClick();
         return pending.reference;
     }
@@ -1491,7 +1496,8 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .input => |input| {
-            endCarry(state);
+            // Ignored keys must not discard the held parent press before its matching release arrives.
+            if (!state.parentPressHeld() or (!input.pasted and input.key != .ignored)) endCarry(state);
             if (input.list_origin and !input.pasted and !input.under and input.key != .ignored) {
                 const was_held = holding(state);
                 state.now_ms = @max(state.now_ms, input.at_ms orelse state.now_ms);
@@ -2933,7 +2939,7 @@ fn carryPointer(state: *State, pointer: Pointer, effects: *Effects) error{OutOfM
     if (pointer.phase == .released) {
         const over = if (pointer.over != null and pointer.over.? == .open) pointer.over.?.open else null;
         state.releaseParentClick(over);
-    }
+    } else state.cancelParentClick();
     const dropped = pointer.phase == .released and state.carry.carrying and blk: {
         state.carry.over = pointer.over;
         break :blk state.carry.dropping(state);
@@ -4506,7 +4512,7 @@ fn creatorClickCase() !void {
     const release_parent = Event{ .pointer = .{ .phase = .released, .over = target } };
     const last_before_deadline = 100 + ParentClick.interval_ms - 1;
     const deadline = last_before_deadline + 1;
-    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { single, double, childless, focus_left, drag, ignored, paste, navigation })) |gesture| {
+    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { single, double, childless, focus_left, drag, ignored, paste, navigation, held_single, held_paste, late_drag, release_elsewhere })) |gesture| {
         var state = try opened(&.{
             session(&parent, .{ .working = ago(10) }, .{ .label = "Parent", .descendant_count = 1 }),
             session(&child, .{ .finished = ago(1) }, .{ .label = "Child", .creator = parent }),
@@ -4518,6 +4524,29 @@ fn creatorClickCase() !void {
         }
         try expectEffects(&.{}, try step(&state, press_parent));
         try expectOrder(&state, &.{ "Parent", "Child" });
+        const after_deadline: Event = .{ .list_settled = .{ .wide = wide, .focused = true, .click_clock_ms = deadline + 1 } };
+        switch (gesture) {
+            .held_single, .held_paste, .late_drag, .release_elsewhere => {
+                try expectEffects(&.{}, try step(&state, after_deadline));
+                switch (gesture) {
+                    .held_single, .held_paste => {
+                        const ignored = if (gesture == .held_paste) InputDelivery{ .key = .enter, .pasted = true } else InputDelivery{ .key = .ignored };
+                        try expectEffects(&.{}, try step(&state, .{ .input = ignored }));
+                        try expectEffects(&.{}, try step(&state, release_parent));
+                        try expectEffects(&.{ .{ .open = parent }, .list_models }, try step(&state, after_deadline));
+                    },
+                    .late_drag => {
+                        try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .phase = .held, .over = .archived } }));
+                        try expectEffects(&.{.{ .archive = .{ .reference = parent, .archived = true } }}, try step(&state, .{ .pointer = .{ .phase = .released, .over = .archived } }));
+                    },
+                    .release_elsewhere => try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .phase = .free, .over = null } })),
+                    else => unreachable,
+                }
+                try expectEffects(&.{}, try step(&state, after_deadline));
+                continue;
+            },
+            else => {},
+        }
         if (gesture == .drag) {
             _ = try step(&state, .{ .pointer = .{ .phase = .held, .over = .archived } });
         } else {
