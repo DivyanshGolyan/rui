@@ -60,13 +60,39 @@ def latest_run(pr, runs):
     return max(matches, key=lambda run: run["run_number"], default=None)
 
 
-# The jobs that run the policy checks: `policy`, or on a ready PR the single `linux pr` job.
+# A run replays the workflow revision it was created from, so the jobs decide what it checks.
+# An updated run's `admission` job has the wire step: it reads the newest release there, last,
+# and merges the PR when it goes green. Rerunning it alone is cheap. A legacy run has no such
+# step; its wire check happens in the policy job, and rerunning that job reruns its dependents.
+ADMISSION_JOB = "admission"
+WIRE_STEP = "Require the wire contract against the newest release"
 POLICY_JOBS = ("policy", "linux pr")
 
 
-def checked_since(run, policy):
-    if policy is not None and policy["status"] in ("in_progress", "completed"):
-        return timestamp(policy["started_at"])
+@dataclass(frozen=True)
+class WireGate:
+    job: dict | None
+    updated: bool
+
+
+def wire_gate(run, jobs):
+    """The job that reads the release for this run, and whether the run's own workflow has the wire step."""
+    latest = [job for job in jobs if job["run_id"] == run["id"] and job["run_attempt"] == run["run_attempt"]]
+    admission = [job for job in latest if job["name"] == ADMISSION_JOB]
+    if len(admission) > 1:
+        raise ValueError(f"run {run['id']} has multiple latest admission jobs")
+    if admission and any(step["name"] == WIRE_STEP for step in admission[0].get("steps") or []):
+        return WireGate(admission[0], updated=True)
+    policy = [job for job in latest if job["name"] in POLICY_JOBS]
+    policy = [job for job in policy if job["conclusion"] != "skipped"] or policy[:1]
+    if len(policy) > 1:
+        raise ValueError(f"run {run['id']} has multiple latest policy jobs")
+    return WireGate(policy[0] if policy else None, updated=False)
+
+
+def checked_since(run, gate):
+    if gate.job is not None and gate.job["status"] in ("in_progress", "completed"):
+        return timestamp(gate.job["started_at"])
     return timestamp(run["run_started_at"])
 
 
@@ -78,22 +104,20 @@ def select_rerun(pr, files, runs, jobs, published, now):
     run = latest_run(pr, runs)
     if run is None:
         return Selection(None, "no check.yml PR run for the current head yet")
-    latest = [job for job in jobs if job["run_id"] == run["id"]
-              and job["run_attempt"] == run["run_attempt"] and job["name"] in POLICY_JOBS]
-    policy = [job for job in latest if job["conclusion"] != "skipped"] or latest[:1]
-    if len(policy) > 1:
-        raise ValueError(f"run {run['id']} has multiple latest policy jobs")
-    policy = policy[0] if policy else None
-    if checked_since(run, policy) >= published:
+    gate = wire_gate(run, jobs)
+    if checked_since(run, gate) >= published:
         return Selection(None, f"run {run['id']} checks after publication; it reads the new release itself")
     if now - timestamp(run["created_at"]) > RERUN_WINDOW:
         return Selection(None, f"run {run['id']} is older than GitHub's 30-day rerun limit; "
                                "push to the PR to start a fresh run", failed=True)
     if run["status"] != "completed":
         return Selection(None, f"latest run {run['id']} is {run['status']}", waiting=True)
-    if policy is None or policy["status"] != "completed" or policy["conclusion"] == "skipped":
-        return Selection(None, f"run {run['id']} has no completed policy check yet")
-    return Selection(policy["id"], f"{policy['name']} in run {run['id']} and its dependents (including admission)")
+    job = gate.job
+    if job is None or job["status"] != "completed" or job["conclusion"] == "skipped":
+        return Selection(None, f"run {run['id']} has no completed wire check yet")
+    if gate.updated:
+        return Selection(job["id"], f"{ADMISSION_JOB} in run {run['id']}")
+    return Selection(job["id"], f"{job['name']} in legacy run {run['id']} and its dependents")
 
 
 def check_runs(api, repo, pr):
