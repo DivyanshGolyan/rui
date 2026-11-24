@@ -124,6 +124,8 @@ pub const Attempt = struct {
     }
 
     /// Sends under the Store dispatch handoff and the launch lock, after a `.channel` launch.
+    /// A nonblocking send may leave the request unsent, so the caller runs this again on
+    /// each poll until its request is out; every run takes the handoff and the lock anew.
     pub fn dispatch(self: *Attempt, context: anytype, comptime send: anytype) !void {
         std.debug.assert(self.stage == .opened);
         try self.parts.store.withActionDispatchHandoff(self.binding, .{ .lifecycle = self.parts.lifecycle, .context = context }, struct {
@@ -131,7 +133,6 @@ pub const Attempt = struct {
                 try handoff_context.lifecycle.withEffectLaunch(handoff_context.context, send);
             }
         }.handoff);
-        self.stage = .launched;
     }
 
     pub fn settle(self: *Attempt, resolution: Resolution) Delivered {
