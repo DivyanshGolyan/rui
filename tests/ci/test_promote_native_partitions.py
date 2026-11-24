@@ -33,7 +33,7 @@ sys.exit(1 if str(len(rows) - 1) == os.environ["FAIL_BATCH"] else 0)
                     env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
                                BATCH_LOG=str(log), FAIL_BATCH=str(failed))
                     env.pop("GITHUB_STEP_SUMMARY", None)
-                    env.pop("RUI_STEP_FAILURES", None)
+                    env.pop("RUNNER_TEMP", None)
                     result = subprocess.run([sys.executable, "-B", "tests/ci/run_selected.py",
                                              json.dumps(targets), "--check-part", "both",
                                              "--ci-artifacts", "compiled"],
