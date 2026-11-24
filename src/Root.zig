@@ -370,19 +370,24 @@ fn expectDividerUnchanged(split_frame: vxfw.Surface) !void {
 
 test "SUI-4 split pane focus dims only the inactive chat or sidebar" {
     const Pane = struct {
+        glyph: []const u8,
+
         fn widget(self: *@This()) vxfw.Widget {
             return .{ .userdata = self, .drawFn = drawPane };
         }
         fn drawPane(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
             const self: *@This() = @ptrCast(@alignCast(raw));
             const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
-            @memset(surface.buffer, .{ .char = .{ .grapheme = "p", .width = 1 }, .style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } }, .bg = .{ .rgb = .{ 0, 0, 0 } } } });
+            @memset(surface.buffer, .{ .char = .{ .grapheme = self.glyph, .width = 1 }, .style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } }, .bg = .{ .rgb = .{ 0, 0, 0 } } } });
             return surface;
         }
     };
-    var overview: Pane = .{};
-    var list: Pane = .{};
-    var chat: Pane = .{};
+    var overview: Pane = .{ .glyph = "o" };
+    var list: Pane = .{ .glyph = "l" };
+    var chat: Pane = .{ .glyph = "c" };
+    try std.testing.expect(!overview.widget().eql(list.widget()));
+    try std.testing.expect(!list.widget().eql(chat.widget()));
+    try std.testing.expect(!overview.widget().eql(chat.widget()));
     var root: Self = .{ .overview = overview.widget(), .list = list.widget(), .session = chat.widget() };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
