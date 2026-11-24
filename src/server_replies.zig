@@ -546,7 +546,7 @@ pub const Replies = struct {
     }
 
     noinline fn replyModelList(self: *Replies, fd: *Reply) !void {
-        self.host.listings_requested.store(true, .release);
+        self.host.model_lists.ask();
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
         const facts = self.store.readModelCatalog(arena.allocator()) catch |err| {

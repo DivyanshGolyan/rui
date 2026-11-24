@@ -132,6 +132,7 @@ test {
     _ = @import("server_execution.zig");
     _ = @import("model_timing_owner_tests.zig");
     _ = @import("server_host.zig");
+    _ = @import("ModelLists.zig");
     _ = @import("server_mcp_tests.zig");
     _ = @import("SessionEnvironments.zig");
     _ = @import("client.zig");

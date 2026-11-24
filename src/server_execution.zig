@@ -734,7 +734,7 @@ const NativeTurn = struct {
     }
 
     pub fn noteLifecycleOpportunity(self: *NativeTurn) void {
-        if (self.host.listings_requested.swap(false, .acq_rel)) {
+        if (self.host.model_lists.takeAsk()) {
             if (self.reactor) |reactor| startListings(self.host, reactor, &self.workspace.listings);
         }
         const observed = self.now();
