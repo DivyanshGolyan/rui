@@ -1,0 +1,13 @@
+{
+  "name": "custom",
+  "label": "Custom gateway",
+  "base_url": "https://gateway.example/v1",
+  "credential": {"kind": "key", "source": {"kind": "saved"}, "placement": "bearer"},
+  "headers": [],
+  "refusals": [],
+  "formats": [
+    {"family": "responses", "dialect": "openai-responses/3", "web_search": false}
+  ],
+  "assign": [],
+  "models": {"list": "openai"}
+}

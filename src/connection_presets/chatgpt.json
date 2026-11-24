@@ -1,0 +1,25 @@
+{
+  "name": "chatgpt",
+  "label": "ChatGPT",
+  "base_url": "https://api.openai.com/v1",
+  "credential": {
+    "kind": "oauth",
+    "authorize_url": "https://auth.openai.com/api/accounts/authorize",
+    "token_url": "https://auth.openai.com/api/accounts/oauth/token",
+    "client_id": {"issued_at_sign_in": "dynamic_agent_client"},
+    "scopes": "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
+    "required_scope": "chatgpt.tokens.use.direct",
+    "audience": "https://api.openai.com/v1",
+    "link": [
+      {"name": "agent_name_hint", "from": {"kind": "literal", "value": "Rui"}},
+      {"name": "ext_agent_host_id", "from": {"kind": "host_id"}}
+    ]
+  },
+  "headers": [],
+  "refusals": [],
+  "formats": [
+    {"family": "responses", "dialect": "openai-responses/3", "web_search": true}
+  ],
+  "assign": [],
+  "models": {"list": "chatgpt_plan"}
+}

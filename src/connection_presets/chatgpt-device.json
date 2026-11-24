@@ -1,0 +1,20 @@
+{
+  "name": "chatgpt-device",
+  "label": "ChatGPT (device code)",
+  "base_url": "https://chatgpt.com/backend-api/codex",
+  "credential": {
+    "kind": "openai-device",
+    "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+    "audience": "https://chatgpt.com/backend-api/codex"
+  },
+  "headers": [
+    {"name": "chatgpt-account-id", "from": {"kind": "claim", "name": "account_id"}},
+    {"name": "x-openai-fedramp", "from": {"kind": "claim", "name": "fedramp"}}
+  ],
+  "refusals": [],
+  "formats": [
+    {"family": "responses", "dialect": "openai-responses/2", "web_search": true}
+  ],
+  "assign": [],
+  "models": {"list": "catalog"}
+}
