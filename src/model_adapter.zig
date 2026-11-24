@@ -1243,15 +1243,10 @@ pub const Preparation = struct {
     }
 
     fn memoKey(self: *Preparation) !history_memo.Key {
-        return .{
-            .session = self.settings.session,
-            .binding = .{
-                .provider = self.settings.provider,
-                .dialect = codecs.dialect(self.settings.codec),
-                .model = self.settings.model,
-            },
-            .anchor = (try self.page.coverage()).anchor,
-        };
+        const binding = store.historicalRequestBinding(&self.settings);
+        var key: history_memo.Key = .{ .session = self.settings.session, .wire = binding.wire, .model = .{}, .anchor = (try self.page.coverage()).anchor };
+        try key.model.set(binding.model);
+        return key;
     }
 
     fn readMemo(self: *Preparation, copy: *const MemoCopy, destination: []u8) !usize {
@@ -5115,7 +5110,7 @@ test "a history memo that does not match the frozen request is rebuilt in full" 
         const memo = &memo_entries[history_memo.sessionSlot(&memo_entries, session.slice()).?].memo.?;
         switch (mismatch) {
             .anchor => memo.key.anchor = 1,
-            .model => try memo.key.binding.model.set("model-b"),
+            .model => try memo.key.model.set("model-b"),
             .older_view => memo.admission_position = std.math.maxInt(u64),
             .session => try memo.key.session.set("zzzzzz"),
         }
