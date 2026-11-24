@@ -4003,7 +4003,7 @@ test "Host recovery derives launch progress from job custody without copying rea
     try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
 }
 
-test "SUI-130 Host recovery renders the launch result cause without confusing failure and reachability" {
+test "SUI-133 Host recovery renders the launch result cause without confusing failure and reachability" {
     const Handover = struct {
         fn summary(outcome: @import("host_activation.zig").Outcome) HostLaunch {
             var result: @import("host_launch.zig").Result = .failed(.setup, error.HostRestartFailed);
