@@ -355,7 +355,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     };
     var edit: preferences.Edit = .{};
     if (parsed.get("store")) |store| edit.store = .{ .set = store };
-    if (parsed.get("provider")) |name| edit.provider = .{ .set = name };
+    if (parsed.get("connection")) |name| edit.provider = .{ .set = name };
     if (parsed.get("model")) |model| edit.model = .{ .set = model };
     if (parsed.has("clear-model")) edit.model = .clear;
     if (parsed.get("notifications")) |choice| edit.notifications = if (std.mem.eql(u8, choice, "on")) true else if (std.mem.eql(u8, choice, "off")) false else return error.InvalidArguments;
@@ -1379,14 +1379,14 @@ fn loginDefaultReceipt(buffer: []u8, provider: protocol.Provider, outcome: prefe
         .filled => "Rui: New Sessions will use this sign-in.\n",
         .replaced => "Rui: New Sessions will use this sign-in; Sessions already open keep theirs.\n",
         .already => "Rui: Your default provider for new Sessions is unchanged.\n",
-        .kept => try std.fmt.bufPrint(buffer, "Rui: Your default provider for new Sessions is unchanged. To use {s} instead: rui defaults configure --provider {s}\n", .{ provider.shown(), @tagName(provider) }),
+        .kept => try std.fmt.bufPrint(buffer, "Rui: Your default provider for new Sessions is unchanged. To use {s} instead: rui defaults configure --connection {s}\n", .{ provider.shown(), @tagName(provider) }),
     };
 }
 
 fn conversationStart(comptime provider: protocol.Provider, outcome: preferences.LoginDefault) []const u8 {
     return switch (outcome) {
         .filled, .replaced, .already => "Start a conversation with: rui\n",
-        .kept => "Start a conversation with: rui --provider " ++ @tagName(provider) ++ "\n",
+        .kept => "Start a conversation with: rui --connection " ++ @tagName(provider) ++ "\n",
     };
 }
 
@@ -1397,13 +1397,13 @@ test "a login's default receipt says what changed and, when nothing did, how to 
         try std.testing.expectEqualStrings("Rui: New Sessions will use this sign-in; Sessions already open keep theirs.\n", try loginDefaultReceipt(&buffer, provider, .replaced));
         try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged.\n", try loginDefaultReceipt(&buffer, provider, .already));
     }
-    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use ChatGPT instead: rui defaults configure --provider chatgpt\n", try loginDefaultReceipt(&buffer, .chatgpt, .kept));
-    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use ChatGPT (device code) instead: rui defaults configure --provider codex\n", try loginDefaultReceipt(&buffer, .codex, .kept));
-    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use OpenAI instead: rui defaults configure --provider openai\n", try loginDefaultReceipt(&buffer, .openai, .kept));
+    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use ChatGPT instead: rui defaults configure --connection chatgpt\n", try loginDefaultReceipt(&buffer, .chatgpt, .kept));
+    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use ChatGPT (device code) instead: rui defaults configure --connection codex\n", try loginDefaultReceipt(&buffer, .codex, .kept));
+    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use OpenAI instead: rui defaults configure --connection openai\n", try loginDefaultReceipt(&buffer, .openai, .kept));
     for (std.enums.values(preferences.LoginDefault)) |outcome| {
-        const expected = if (outcome == .kept) "Start a conversation with: rui --provider chatgpt\n" else "Start a conversation with: rui\n";
+        const expected = if (outcome == .kept) "Start a conversation with: rui --connection chatgpt\n" else "Start a conversation with: rui\n";
         try std.testing.expectEqualStrings(expected, conversationStart(.chatgpt, outcome));
-        try std.testing.expectEqualStrings(if (outcome == .kept) "Start a conversation with: rui --provider codex\n" else "Start a conversation with: rui\n", conversationStart(.codex, outcome));
+        try std.testing.expectEqualStrings(if (outcome == .kept) "Start a conversation with: rui --connection codex\n" else "Start a conversation with: rui\n", conversationStart(.codex, outcome));
     }
 }
 
@@ -1730,7 +1730,7 @@ const NewSessionOptions = struct {
             return error.InvalidInvocation;
         };
         if (parsed.help) return null;
-        return .{ .store = parsed.get("store"), .provider = parsed.get("provider"), .model = parsed.get("model") };
+        return .{ .store = parsed.get("store"), .provider = parsed.get("connection"), .model = parsed.get("model") };
     }
 };
 
@@ -1819,7 +1819,7 @@ fn relaunchArguments(executable: []const u8, store: []const u8, selectors: new_s
     buffer[1] = "--store";
     buffer[2] = store;
     var count: usize = 3;
-    inline for (.{ "provider", "model" }) |name| {
+    inline for (.{ "connection", "model" }) |name| {
         if (@field(selectors, name)) |value| {
             buffer[count] = "--" ++ name;
             buffer[count + 1] = value;
@@ -1851,7 +1851,7 @@ test "relaunch argv pins the actual Store with every explicit selector subset" {
     for (0..8) |mask| {
         const selectors: new_session_selection.Intent = .{
             .store = if (mask & 1 != 0) "./store as given" else null,
-            .provider = if (mask & 2 != 0) "provider" else null,
+            .provider = if (mask & 2 != 0) "connection" else null,
             .model = if (mask & 4 != 0) "model pin" else null,
         };
         var buffer: [7][]const u8 = undefined;
@@ -1860,7 +1860,7 @@ test "relaunch argv pins the actual Store with every explicit selector subset" {
         try std.testing.expectEqualStrings("--store", args[1]);
         try std.testing.expectEqualStrings("/canonical/original-store", args[2]);
         var at: usize = 3;
-        inline for (.{ "provider", "model" }) |name| if (@field(selectors, name)) |value| {
+        inline for (.{ "connection", "model" }) |name| if (@field(selectors, name)) |value| {
             try std.testing.expectEqualStrings("--" ++ name, args[at]);
             try std.testing.expectEqualStrings(value, args[at + 1]);
             at += 2;
@@ -2313,7 +2313,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (named != null and named.?.len == 0) return usage();
     if (parsed.get("parent")) |reference| input.parent = .{ .present = true, .value = reference };
     if (parsed.get("preset")) |name| input.preset = .{ .present = true, .value = name };
-    if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
+    if (parsed.get("connection")) |name| input.provider = .{ .present = true, .value = name };
     if (parsed.get("model")) |model| {
         try admitModel(model);
         input.model = .{ .present = true, .value = model };
@@ -2792,7 +2792,7 @@ pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destinat
     const live: LiveAddress = .{ .store = destination, .session = reference };
     switch (command.name) {
         .setup => {
-            const setup_usage = "Usage: /setup [--store PATH] [--provider chatgpt] [--model ID | --clear-model] [--notifications on|off] [--reasoning-effort LEVEL|default]; no changes saved. See rui session configure --help for model IDs.\n";
+            const setup_usage = "Usage: /setup [--store PATH] [--connection chatgpt] [--model ID | --clear-model] [--notifications on|off] [--reasoning-effort LEVEL|default]; no changes saved. See rui session configure --help for model IDs.\n";
             var setup_args: [setup_capacity][]const u8 = undefined;
             const count = interactiveTokens(argument, &setup_args) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
@@ -2995,7 +2995,7 @@ const setup_capacity = cli_args.live_setup.tokenCapacity();
 const live_capacity = 1 + cli_args.live_configure.tokenCapacity();
 
 test "/setup takes every option in one line" {
-    var line = "--store /path/to/store --provider codex --model gpt-6-luna --notifications off --reasoning-effort high".*;
+    var line = "--store /path/to/store --connection codex --model gpt-6-luna --notifications off --reasoning-effort high".*;
     var tokens: [setup_capacity][]const u8 = undefined;
     const count = try interactiveTokens(&line, &tokens);
     try std.testing.expectEqual(@as(usize, 10), count);
@@ -3886,8 +3886,8 @@ const StartConfiguration = struct {
 };
 
 fn writeCreationConfiguration(writer: *std.Io.Writer, config: @import("creation_receipt.zig").Configuration) !void {
-    try writer.writeAll(",\"configuration\":{\"provider\":");
-    try std.json.Stringify.value(@tagName(config.provider), .{}, writer);
+    try writer.writeAll(",\"configuration\":{\"connection\":");
+    try std.json.Stringify.value(config.connection.slice(), .{}, writer);
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(config.model.slice(), .{}, writer);
     try writer.writeAll(",\"reasoning_effort\":");
@@ -4504,7 +4504,7 @@ const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /s
 
 const usage_text =
     \\usage:
-    \\  rui [--store PATH] [--provider chatgpt] [--model MODEL]
+    \\  rui [--store PATH] [--connection chatgpt] [--model MODEL]
     \\    Create a fresh live terminal conversation in the current directory. Bash runs
     \\    without asking by default. Enter Message text in the terminal editor.
     \\    Open Settings > Keys for the key list.
@@ -4970,7 +4970,7 @@ test "native promotion saved refusals keep their catalog code and refused exit" 
 test "saved CLI rejection goldens preserve JSON and explain permission and missing settings" {
     const cases = [_]struct { code: []const u8, session: []const u8, missing: []const u8 = "null", json_missing: []const u8 = "", line: []const u8 }{
         .{ .code = "unsupported_permission_mode", .session = "k7m2qx", .line = "rui session configure: --permission-mode: Rui has no such permission mode. Accepted: ask, bypass. Next: Use one of the accepted values. This rejection was saved and replays as saved; a resend needs a new key. [unsupported_permission_mode]\n" },
-        .{ .code = "missing_settings", .session = "", .missing = "[\"workspace\",\"provider\"]", .json_missing = ",\"missing\":[\"workspace\",\"provider\"]", .line = "rui session configure: --workspace, --provider: A new Session is missing a Workspace and a provider. Accepted: a model, a Workspace or parent, and a provider when the Host serves several. Next: Supply each missing setting with its option, a preset or a parent. This rejection was saved and replays as saved; a resend needs a new key. [missing_settings]\n" },
+        .{ .code = "missing_settings", .session = "", .missing = "[\"workspace\",\"provider\"]", .json_missing = ",\"missing\":[\"workspace\",\"provider\"]", .line = "rui session configure: --workspace, --connection: A new Session is missing a Workspace and a provider. Accepted: a model, a Workspace or parent, and a provider when the Host serves several. Next: Supply each missing setting with its option, a preset or a parent. This rejection was saved and replays as saved; a resend needs a new key. [missing_settings]\n" },
     };
     for (cases) |case| {
         var wire: [1024]u8 = undefined;
@@ -5075,7 +5075,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.PreferencesUnavailable, .code = .preferences_unavailable, .exit = 6, .phrase = "preferences file (0600)" },
         .{ .err = error.InsecurePreferenceDirectory, .code = .preferences_unavailable, .exit = 6, .phrase = "HOME/.config/rui (0700)" },
         .{ .err = error.InvalidPreferenceStore, .code = .preference_store_invalid, .exit = 2, .phrase = "rui defaults configure --store PATH" },
-        .{ .err = error.UnsupportedPreferenceProvider, .code = .preference_provider_invalid, .exit = 2, .phrase = "--provider chatgpt or --provider openai." },
+        .{ .err = error.UnsupportedPreferenceProvider, .code = .preference_provider_invalid, .exit = 2, .phrase = "--connection chatgpt or --connection openai." },
         .{ .err = error.InvalidPreferenceModel, .code = .preference_model_invalid, .exit = 2, .phrase = "1-256 printable non-space ASCII bytes" },
         .{ .err = error.PreferenceProviderRequired, .code = .preference_provider_required, .exit = 2, .phrase = "Saving a default model requires a provider." },
         .{ .err = error.HomeUnavailable, .code = .home_unavailable, .exit = 6, .phrase = "Set HOME to your absolute home directory" },

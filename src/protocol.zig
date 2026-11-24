@@ -83,12 +83,13 @@ pub const HostCapabilities = struct {
 };
 
 /// Fixture helper: the built-in connections served at each route, in provider order, and no others.
-pub fn connectionsOfRoutes(routes: std.enums.EnumFieldStruct(Provider, Route, .unserved)) Connections {
+pub fn connectionsOfRoutes(routes: anytype) Connections {
     var out: Connections = .{};
-    inline for (std.enums.values(Provider)) |provider| {
-        const route = @field(routes, @tagName(provider));
+    inline for (@typeInfo(Provider).@"enum".field_names) |field| {
+        const route: Route = @field(routes, field);
         if (route != .unserved) {
-            out.items[out.len] = .{ .name = connection.Name.parse(@tagName(provider)).?, .label = provider_route.Label.parse(provider.shown()).?, .route = route };
+            const built_in = provider_route.builtIn(std.meta.stringToEnum(Provider, field).?, route);
+            out.items[out.len] = .{ .name = built_in.name, .label = built_in.label, .route = route };
             out.len += 1;
         }
     }
@@ -2753,8 +2754,8 @@ pub const host_info_reply = struct {
     pub const connections_head = ",\"capabilities\":{\"bash\":true,\"connections\":[";
     pub const connection_entry = .{ "{\"name\":", Hole{ .string = @import("connection.zig").max_name_bytes }, ",\"label\":", Hole{ .string = @import("connection.zig").max_label_bytes }, ",\"route\":\"", Hole{ .tag = Route }, "\"}" };
     pub const connections_tail = "]}}";
-    pub const max_bytes = shapeBytes(head) + shapeBytes(doublewrite) + shapeBytes(settings_digest) + shapeBytes(connections_head) +
-        provider_route.max_served * (shapeBytes(connection_entry) + 1) + shapeBytes(connections_tail);
+    pub const max_bytes = shapeBytes(head) + shapeBytes(doublewrite) + shapeBytes(settings_digest) + shapeBytes(.{connections_head}) +
+        provider_route.max_served * shapeBytes(connection_entry) + (provider_route.max_served - 1) + shapeBytes(.{connections_tail});
 };
 pub const max_host_info_response_bytes: usize = host_info_reply.max_bytes;
 
@@ -3113,7 +3114,7 @@ test "configuration provider value preserves exact spelling and omission" {
         const json = try std.fmt.bufPrint(
             &buffer,
             "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{{s}{s}}}{s}}}",
-            .{ if (case.field.len == 0) "" else "\"provider\":", case.field, case.suffix },
+            .{ if (case.field.len == 0) "" else "\"connection\":", case.field, case.suffix },
         );
         var source: MetadataSource = .{ .input = json };
         var parser = Tested.Parser{ .source = &source };
@@ -3123,7 +3124,7 @@ test "configuration provider value preserves exact spelling and omission" {
         }
         const request = try parseForTest(&parser);
         try std.testing.expectEqual(index == 3, request.configure.require_model);
-        const field = request.configure.configuration.connection;
+        const field = request.configure.configuration.provider;
         if (case.expected) |value| {
             try std.testing.expectEqual(FieldState.value, field.state);
             try std.testing.expectEqualStrings(value, field.value.slice());
@@ -3425,7 +3426,7 @@ test "SessionRow borrowed fields preserve offered tool names" {
     const fields: SessionRow.Fields = .{
         .reference = "peer",
         .workspace = "/w",
-        .provider = .codex,
+        .provider = connection.Name.parse("codex").?,
         .model = "model",
         .tools = "[\"bash\",\"offered_tool\"]",
         .permission_mode = .ask,
@@ -3792,7 +3793,7 @@ test "Session settings configure digest golden" {
 test "Session settings preserve omitted and nullable wire states for every field" {
     inline for (.{
         .{ "workspace", "workspace", false },
-        .{ "connection", "connection", false },
+        .{ "provider", "connection", false },
         .{ "model", "model", false },
         .{ "instructions", "instructions", false },
         .{ "tools", "tools", false },
@@ -3852,7 +3853,7 @@ test "parent spec relation parses creation without a workspace and rejects null 
         const request = try parseForTest(&parser);
         try std.testing.expectEqualStrings("k7m2qx", request.configure.configuration.parent.value.slice());
         try std.testing.expectEqual(FieldState.omitted, request.configure.configuration.workspace.state);
-        try std.testing.expectEqual(FieldState.omitted, request.configure.configuration.connection.state);
+        try std.testing.expectEqual(FieldState.omitted, request.configure.configuration.provider.state);
     }
     inline for (.{
         .{ required ++ ",\"parent\":null", error.InvalidFieldState },

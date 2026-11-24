@@ -396,7 +396,7 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
     return .{ .ready = try parseHostInfoFacts(body, store) };
 }
 
-fn connectionFacts(list: []const @FieldType(protocol.HostCapabilities, "connections")) !protocol.Connections {
+fn connectionFacts(list: anytype) !protocol.Connections {
     if (list.len > provider_route.max_served) return error.InvalidHostInfo;
     var out: protocol.Connections = .{};
     for (list, 0..) |item, index| {
@@ -628,7 +628,9 @@ test "Host information requires complete current-wire facts" {
     try std.testing.expectError(error.MissingField, parseHostInfo(missing_route, "/one"));
 
     for (std.meta.tags(protocol.Route)) |route| {
-        const body = try std.mem.replaceOwned(u8, std.testing.allocator, current_host_info, "\"route\":\"endpoint\"", try std.fmt.allocPrint(std.testing.allocator, "\"route\":\"{s}\"", .{@tagName(route)}));
+        const route_text = try std.fmt.allocPrint(std.testing.allocator, "\"route\":\"{s}\"", .{@tagName(route)});
+        defer std.testing.allocator.free(route_text);
+        const body = try std.mem.replaceOwned(u8, std.testing.allocator, current_host_info, "\"route\":\"endpoint\"", route_text);
         defer std.testing.allocator.free(body);
         var expected = facts;
         expected.capabilities.connections.items[0].route = route;
@@ -1473,7 +1475,7 @@ pub const SessionListPage = struct {
                 .parent = if (wire.parent) |parent| parent.value else null,
                 .creator = if (wire.creator) |creator| creator.value else null,
                 .workspace = wire.workspace.value,
-                .provider = connection.Name.parse(wire.connection.value) orelse return error.InvalidSessionRow,
+                .provider = connection.Name.parse(wire.connection.value.slice()) orelse return error.InvalidSessionRow,
                 .model = wire.model.value,
                 .tools = wire.tools.names,
                 .permission_mode = wire.permission_mode.value,
@@ -3467,7 +3469,7 @@ fn listValidationCase2() !void {
     const writer = &output.interface;
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     const largest = std.math.maxInt(i64);
-    var maximal: protocol.SessionRow = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .archive_state = .archiving, .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .state_change_at = largest, .subtree_state_change_at = largest, .descendant_count = largest, .descendant_needs_you_count = largest, .revision = largest, .end = largest };
+    var maximal: protocol.SessionRow = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .archive_state = .archiving, .provider = @import("connection.zig").Name.parse("codex").?, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .state_change_at = largest, .subtree_state_change_at = largest, .descendant_count = largest, .descendant_needs_you_count = largest, .revision = largest, .end = largest };
     // An archiving row carries its archive key; the largest one is the longest row.
     maximal.archive_seq = largest;
     maximal.creator = .{};

@@ -6509,7 +6509,7 @@ test "Session settings client writes every setting and the Host parser preserves
     }
     try std.testing.expectEqualStrings("", missing.buffered());
     try std.testing.expectEqualStrings(root, configuration.workspace.value.slice());
-    try std.testing.expectEqualStrings("openai", configuration.connection.value.slice());
+    try std.testing.expectEqualStrings("openai", configuration.provider.value.slice());
     try std.testing.expectEqualStrings("gpt-5", configuration.model.value.slice());
     try std.testing.expectEqualStrings("bash find_tools", configuration.tools.names.slice());
     try std.testing.expectEqualStrings("bash", configuration.loaded_tools.names.slice());
@@ -7264,10 +7264,10 @@ fn checkParentCapture() !void {
             try std.testing.expectEqualStrings("1000", configuration.compaction_trigger.value.slice());
             try std.testing.expectEqualStrings("low", configuration.reasoning_effort.value.slice());
             if (explicit_overrides) {
-                try std.testing.expectEqualStrings("codex", configuration.connection.value.slice());
+                try std.testing.expectEqualStrings("codex", configuration.provider.value.slice());
                 try std.testing.expectEqualStrings(root, configuration.workspace.value.slice());
             } else {
-                try std.testing.expect(configuration.connection.state == .omitted);
+                try std.testing.expect(configuration.provider.state == .omitted);
                 try std.testing.expect(configuration.workspace.state == .omitted);
             }
         }

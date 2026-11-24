@@ -1,5 +1,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const connection = @import("connection.zig");
+const provider_route = @import("provider_route.zig");
 const change_ring = @import("change_ring.zig");
 const command_reply = @import("command_reply.zig");
 const command_spec = @import("command_spec.zig");
@@ -35,7 +37,7 @@ pub fn renderConfigureReply(
 ) !void {
     const shapes = protocol.configuration_reply;
     try switch (result) {
-        .accepted => |value| if (value.configuration) |config| response.appendShape(shapes.accepted_create, .{ value.replayed, value.session.slice(), value.revision, value.created, config.provider, config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }, @import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }, config.permission_mode, config.compaction_trigger }) else if (value.skills) |status| response.appendShape(shapes.accepted_skills, .{ value.replayed, value.session.slice(), value.revision, status }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.revision, value.created }),
+        .accepted => |value| if (value.configuration) |config| response.appendShape(shapes.accepted_create, .{ value.replayed, value.session.slice(), value.revision, value.created, config.connection.slice(), config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }, @import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }, config.permission_mode, config.compaction_trigger }) else if (value.skills) |status| response.appendShape(shapes.accepted_skills, .{ value.replayed, value.session.slice(), value.revision, status }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.revision, value.created }),
         .rejected => |value| renderToolRejection(response, session, value, shapes.rejected),
         .conflict => response.appendShape(shapes.conflict, .{session}),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
@@ -49,7 +51,7 @@ pub fn renderMessageReply(
 ) !void {
     const shapes = protocol.message_reply;
     try switch (result) {
-        .accepted => |value| if (value.configuration) |config| response.appendShape(shapes.accepted_create, .{ value.replayed, value.session.slice(), value.admission_id, config.provider, config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }, @import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }, config.permission_mode, config.compaction_trigger, protocol.MessageInputJson{ .value = value.content }, value.admission_id }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, protocol.MessageInputJson{ .value = value.content }, value.admission_id }),
+        .accepted => |value| if (value.configuration) |config| response.appendShape(shapes.accepted_create, .{ value.replayed, value.session.slice(), value.admission_id, config.connection.slice(), config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }, @import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }, config.permission_mode, config.compaction_trigger, protocol.MessageInputJson{ .value = value.content }, value.admission_id }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, protocol.MessageInputJson{ .value = value.content }, value.admission_id }),
         .rejected => |value| switch (value.form) {
             .bytes => renderToolRejection(response, session, value, shapes.rejected),
             .parts => renderToolRejection(response, session, value, shapes.rejected_parts),
@@ -409,7 +411,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     };
 
     var config: command_reply.CreationConfiguration = .{
-        .provider = Worst.tag(protocol.Provider),
+        .connection = @import("connection.zig").Name.parse("codex").?,
         .model = .{},
         .reasoning_effort = Worst.tag(protocol.ReasoningEffort),
         .workspace = .{},
@@ -498,11 +500,16 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try failure.render(renderStatic, .{ Worst.tag(protocol.ErrorType), &escaped_code });
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
+    // Every served connection at its longest name and label: the worst case the bound covers.
+    var connection_names: [provider_route.max_served][connection.max_name_bytes]u8 = undefined;
+    var full: [provider_route.max_served]provider_route.Entry = undefined;
+    for (&full, 0..) |*entry, index| {
+        const name = std.fmt.bufPrint(&connection_names[index], "c{d:0>15}", .{index}) catch unreachable;
+        entry.* = .{ .name = connection.Name.parse(name).?, .label = provider_route.Label.parse(&@as([connection.max_label_bytes]u8, @splat('L'))).?, .route = .chatgpt_device, .codec = .@"openai-responses/2", .web_search = true };
+    }
     var host_info: protocol.ResponseBuffer = .{};
-    const worst_info: HostInfo = .{ .store = &escaped_store, .instance = @splat(0xff), .active_capacity = max, .intake_capacity = max, .descriptor_soft_limit = max, .started_at = max, .custody_occupied = max, .paused = false, .connections = &.{}, .doublewrite = null, .settings_digest = null };
+    const worst_info: HostInfo = .{ .store = &escaped_store, .instance = @splat(0xff), .active_capacity = max, .intake_capacity = max, .descriptor_soft_limit = max, .started_at = max, .custody_occupied = max, .paused = false, .connections = &full, .doublewrite = null, .settings_digest = null };
     try host_info.render(renderHostInfo, .{worst_info});
-    const shape = protocol.host_info_reply;
-    try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.tail), host_info.len);
     host_info.len = 0;
     var with_diagnostic = worst_info;
     with_diagnostic.doublewrite = &@as([32]u8, @splat(0x01));

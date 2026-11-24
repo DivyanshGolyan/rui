@@ -4352,8 +4352,8 @@ test "failed admission releases its reservation and fences the Store and dispatc
             try command.key.set("failed-admission-config");
             command.configuration.workspace.state = .value;
             try command.configuration.workspace.value.set(workspace);
-            command.configuration.connection.state = .value;
-            try command.configuration.connection.value.set("codex");
+            command.configuration.provider.state = .value;
+            try command.configuration.provider.value.set("codex");
             command.configuration.model.state = .value;
             try command.configuration.model.value.set("model-a");
             command.configuration.tools = try .of(&.{ "bash", "web_search" });
@@ -4578,8 +4578,8 @@ test "preparing slots belong to their live preparations" {
     try command.key.set("prep-belong-config");
     command.configuration.workspace.state = .value;
     try command.configuration.workspace.value.set(workspace);
-    command.configuration.connection.state = .value;
-    try command.configuration.connection.value.set("codex");
+    command.configuration.provider.state = .value;
+    try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
     command.configuration.tools = try .of(&.{ "bash", "web_search" });
@@ -4983,8 +4983,8 @@ test "an encode failure settles unanswered and releases request scratch" {
         try command.key.set("encode-failure-config");
         command.configuration.workspace.state = .value;
         try command.configuration.workspace.value.set(workspace);
-        command.configuration.connection.state = .value;
-        try command.configuration.connection.value.set("codex");
+        command.configuration.provider.state = .value;
+        try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
         command.configuration.tools = try .of(&.{ "bash", "web_search" });

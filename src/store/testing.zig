@@ -1274,8 +1274,8 @@ pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace
     try command.session.set(session_ref);
     command.configuration.workspace.state = .value;
     try command.configuration.workspace.value.set(workspace);
-    command.configuration.connection.state = .value;
-    try command.configuration.connection.value.set("codex");
+    command.configuration.provider.state = .value;
+    try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set(model);
     if (session_ref.len == 0) {

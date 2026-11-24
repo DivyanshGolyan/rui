@@ -237,7 +237,7 @@ fn DecodePolicy(comptime kind: CommandKind) type {
             return depth == 1 or (depth == 2 and std.mem.startsWith(u8, path, ".answer.")) or std.mem.eql(u8, path, ".execution.reason");
         }
         pub fn Override(comptime path: []const u8) ?type {
-            if (std.mem.eql(u8, path, ".answer.configuration.connection")) return wire_field.JsonEnum(@import("provider_name.zig").Provider);
+            if (std.mem.eql(u8, path, ".answer.configuration.connection")) return wire_field.JsonString(@import("connection.zig").max_name_bytes);
             if (std.mem.eql(u8, path, ".answer.configuration.reasoning_effort")) return ?wire_field.JsonEnum(@import("model_catalog.zig").ReasoningEffort);
             if (std.mem.eql(u8, path, ".answer.configuration.permission_mode")) return wire_field.JsonEnum(@import("cli_value.zig").PermissionMode);
             if (std.mem.eql(u8, path, ".answer.skills")) return wire_field.JsonEnum(SkillsReloadStatus);
@@ -319,7 +319,7 @@ fn creationConfiguration(partial: anytype) Error!?@import("creation_receipt.zig"
         const c = answer.configuration;
         if (!@import("model_catalog.zig").validModelSyntax(c.model.slice())) return error.InvalidResponse;
         break :config .{
-            .provider = c.provider.value,
+            .connection = @import("connection.zig").Name.parse(c.connection.value.slice()) orelse return error.InvalidResponse,
             .model = c.model.value,
             .reasoning_effort = if (c.reasoning_effort) |effort| effort.value else null,
             .workspace = c.workspace.value,
@@ -705,7 +705,7 @@ test "mutation rejection preserves an empty original creation target" {
 test "CLI-24 creation reply binding" {
     const protocol = @import("protocol.zig");
     const command_reply = @import("command_reply.zig");
-    const config = ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"reasoning_effort\":\"high\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"100\"}";
+    const config = ",\"configuration\":{\"connection\":\"codex\",\"model\":\"gpt-5.5\",\"reasoning_effort\":\"high\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"100\"}";
     const message_head = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"";
     const message_tail = "},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
     const target: Target = .{ .message = .{ .bytes = 3, .digest = @splat(0), .creates_session = true } };
@@ -721,7 +721,7 @@ test "CLI-24 creation reply binding" {
     try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, message_head ++ parts_tail, "", parts_target).answer);
     try std.testing.expectEqual(@as(?u64, 100), receipt.compaction_trigger);
     try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, message_head ++ message_tail, "", target).answer);
-    const malformed = ",\"configuration\":{\"provider\":\"codex\",\"model\":\"bad model\",\"reasoning_effort\":null,\"workspace\":\"/workspace\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"compaction_trigger\":null}";
+    const malformed = ",\"configuration\":{\"connection\":\"codex\",\"model\":\"bad model\",\"reasoning_effort\":null,\"workspace\":\"/workspace\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"compaction_trigger\":null}";
     try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, message_head ++ malformed ++ message_tail, "", target).answer);
     const send: Target = .{ .message = .{ .bytes = 3, .digest = @splat(0) } };
     try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, message_head ++ config ++ message_tail, "k7m2qx", send).answer);

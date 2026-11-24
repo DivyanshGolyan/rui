@@ -42,7 +42,7 @@ pub const names = [_][]const u8{
     "position",
     "preset",
     "profile",
-    "provider",
+    "connection",
     "reasoning-effort",
     "record",
     "reload-skills",

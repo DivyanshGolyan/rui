@@ -255,8 +255,8 @@ pub fn expectModelRevisions(storage: *Store, session: []const u8, phase: []const
         try update.key.set(try std.fmt.bufPrint(&key_buffer, "binding-{s}-{d}", .{ phase, variant }));
         try update.session.set(session);
         if (variant & 1 != 0 or variant == 4) {
-            update.configuration.connection.state = .value;
-            try update.configuration.connection.value.set(if (variant == 4) "anthropic" else "codex");
+            update.configuration.provider.state = .value;
+            try update.configuration.provider.value.set(if (variant == 4) "anthropic" else "codex");
         }
         if (variant & 2 != 0 or variant == 5) {
             update.configuration.model.state = .value;

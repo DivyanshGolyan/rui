@@ -33,7 +33,7 @@ fn narrowedChild(storage: *store.Store, tmp: *std.testing.TmpDir, parent: protoc
     var cwd: [protocol.max_workspace_bytes]u8 = undefined;
     var spec = try testing.completeConfiguration("unused", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
     spec.configuration.workspace = .{};
-    spec.configuration.connection = .{};
+    spec.configuration.provider = .{};
     spec.configuration.tools = try .of(&.{"fetch_a"});
     const Capture = struct {
         child: protocol.Bounded(protocol.max_session_bytes) = .{},
@@ -299,7 +299,7 @@ test "MCP parent creation narrows configured intent and saves no derived offer a
 
                 var child_spec = try testing.completeConfiguration("parent-intent-child", "", workspace, "model-a");
                 child_spec.configuration.workspace = .{};
-                child_spec.configuration.connection = .{};
+                child_spec.configuration.provider = .{};
                 child_spec.configuration.tools = try .of(&.{ "fetch_b", "find_tools" });
                 if (subset) child_spec.configuration.loaded_tools = try .of(&.{"find_tools"});
                 const child = switch (door) {

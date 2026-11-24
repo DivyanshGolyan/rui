@@ -178,8 +178,8 @@ pub fn configurationBeforeWorkspace(
     else
         null;
     _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
-    const provider = if (requested.connection.state == .value)
-        connection.Name.parse(requested.connection.value.slice()) orelse return .unknown_connection
+    const provider = if (requested.provider.state == .value)
+        connection.Name.parse(requested.provider.value.slice()) orelse return .unknown_connection
     else
         null;
     if (current) |existing| {
@@ -245,7 +245,7 @@ pub fn planConfigurationUpdate(
         }
     }
 
-    if (requested.connection.state == .value) next.provider = connection.Name.parse(requested.connection.value.slice()).?;
+    if (requested.provider.state == .value) next.provider = connection.Name.parse(requested.provider.value.slice()).?;
     if (requested.model.state == .value) next.model = requested.model.value;
     if (requested.permission_mode.state == .value) {
         next.permission_mode = permissionModeCode(requested.permission_mode.value.slice());
@@ -428,7 +428,7 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, served: *const
     if (configuration.model.state != .value) return null;
     const failure: ?ParentFailure = refusal: {
         if (configuration.workspace.state != .omitted) break :refusal .{ .code = .parent_workspace_forbidden };
-        if (configuration.connection.state != .omitted) break :refusal .{ .code = .parent_provider_forbidden };
+        if (configuration.provider.state != .omitted) break :refusal .{ .code = .parent_provider_forbidden };
         // This early start_agent boundary needs only tool and permission
         // authority. The selected catalog is read later for model defaults.
         const resolved = configuration_defaults.resolve(&.{}, .{
@@ -850,8 +850,8 @@ const CreationCheck = union(enum) {
 /// The one creation check: every path that creates a Session (configure, a creating Message,
 /// start_agent) reaches it after the parent is read, so the reply names every missing setting.
 fn creationCheck(configuration: *const ConfigurationView, reads: *const ConfigurationReads, served: *const provider_route.Served) CreationCheck {
-    const explicit: ?connection.Name = if (configuration.connection.state == .value)
-        connection.Name.parse(configuration.connection.value.slice()) orelse return .unknown_connection
+    const explicit: ?connection.Name = if (configuration.provider.state == .value)
+        connection.Name.parse(configuration.provider.value.slice()) orelse return .unknown_connection
     else
         null;
     // Naming a connection the Host does not serve is refused; a default or inherited provider is not.
@@ -923,8 +923,8 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
     if (configuration.compaction_trigger.state == .value) _ = tokenCount(configuration.compaction_trigger.value.slice(), false) catch return .{ .rejected = .invalid_compaction_trigger };
     _ = configurationTokens(configuration.output_reservation, null, true) catch return .{ .rejected = .invalid_output_reservation };
-    const provider = if (configuration.connection.state == .value)
-        connection.Name.parse(configuration.connection.value.slice()) orelse return .{ .rejected = .unknown_connection }
+    const provider = if (configuration.provider.state == .value)
+        connection.Name.parse(configuration.provider.value.slice()) orelse return .{ .rejected = .unknown_connection }
     else if (current_configuration) |existing| existing.provider else v.creation_provider.?;
     const model = if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice();
     reads.defaults = configuration_defaults.resolve(v.model.facts(), .{

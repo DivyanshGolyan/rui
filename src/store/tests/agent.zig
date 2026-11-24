@@ -871,8 +871,8 @@ test "configure parent refuses every widening field, missing or ended parents an
                         break :refusal .permission_mode_wider_than_parent;
                     },
                     .provider => refusal: {
-                        child.configuration.connection.state = .value;
-                        try child.configuration.connection.value.set("codex");
+                        child.configuration.provider.state = .value;
+                        try child.configuration.provider.value.set("codex");
                         break :refusal .parent_provider_forbidden;
                     },
                     .workspace => refusal: {

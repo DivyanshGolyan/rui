@@ -1409,7 +1409,7 @@ test "known image costs affect uncovered context pressure" {
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                 var patch = try completeConfiguration("image-cost-session", "", workspace, choice.model);
-                try patch.configuration.connection.value.set("openai");
+                try patch.configuration.provider.value.set("openai");
                 patch.configuration.compaction_trigger.state = .value;
                 try patch.configuration.compaction_trigger.value.set("1000");
                 patch.configuration.output_reservation.state = .value;

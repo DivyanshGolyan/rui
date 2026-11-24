@@ -158,7 +158,7 @@ pub const reasoning_help =
 
 const parent_help =
     \\--parent ID creates an attached Session that inherits its parent's provider, Workspace and saved Bash environment.
-    \\Omit --provider and --workspace; even equal overrides are refused. Tools must be within the parent's configured set, and an asking parent requires ask.
+    \\Omit --connection and --workspace; even equal overrides are refused. Tools must be within the parent's configured set, and an asking parent requires ask.
     \\Other creation settings use normal CLI defaults. Specify --compaction-trigger TOKENS when the parent's provider needs a different threshold than the CLI default binding.
     \\Start receipts show provider null and parent ID for inherited binding. Existing Sessions cannot change parent.
     \\
@@ -233,7 +233,7 @@ fn settingOption(comptime field: []const u8) Option {
             .content => value(cli.name, if (entry.nullable) "FILE|-" else "-"),
             .tools => value(cli.name, if (std.mem.eql(u8, field, "tools")) tool_choices else "a,b|none"),
             .decimal_policy => value(cli.name, "TOKENS|default"),
-            .choice => if (std.mem.eql(u8, field, "provider")) choice(cli.name, provider_name.Provider) else if (std.mem.eql(u8, field, "permission_mode")) choice(cli.name, cli_value.PermissionMode) else if (std.mem.eql(u8, field, "reasoning_effort")) choice(cli.name, cli_value.ReasoningChoice) else @compileError("choose CLI values for " ++ field),
+            .choice => if (std.mem.eql(u8, field, "provider")) value(cli.name, "NAME") else if (std.mem.eql(u8, field, "permission_mode")) choice(cli.name, cli_value.PermissionMode) else if (std.mem.eql(u8, field, "reasoning_effort")) choice(cli.name, cli_value.ReasoningChoice) else @compileError("choose CLI values for " ++ field),
         };
     }
     @compileError("unknown Session setting: " ++ field);
@@ -596,7 +596,7 @@ test "typed choices share enum names with help and refuse unknown values" {
     const cases = [_]Case{
         .{ .command = .session_start, .name = "permission-mode", .choices = &.{ "ask", "bypass" } },
         .{ .command = .defaults_configure, .name = "permission-mode", .choices = &.{ "ask", "bypass" } },
-        .{ .command = .session_start, .name = "provider", .choices = &.{ "codex", "openai", "chatgpt" } },
+        .{ .command = .session_start, .name = "connection", .choices = &.{ "codex", "openai", "chatgpt" } },
         .{ .command = .session_configure, .name = "reasoning-effort", .choices = &.{ "none", "low", "medium", "high", "xhigh", "max", "default" } },
         .{ .command = .defaults_configure, .name = "notifications", .choices = &.{ "on", "off" } },
         .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background", "action-stop" } },
@@ -790,7 +790,7 @@ test "Session settings CLI membership and order preserve configure and start" {
     inline for (.{
         .{ settings, &[_][]const u8{ "workspace", "instructions", "tools", "loaded-tools", "permission-mode", "output-schema", "text-output", "compaction-trigger", "output-reservation", "reasoning-effort", "label" } },
         .{ start_settings, &[_][]const u8{ "workspace", "tools", "loaded-tools", "permission-mode", "compaction-trigger", "output-reservation", "reasoning-effort", "label" } },
-        .{ binding, &[_][]const u8{ "provider", "model" } },
+        .{ binding, &[_][]const u8{ "connection", "model" } },
     }) |case| {
         try std.testing.expectEqual(case[1].len, case[0].len);
         for (case[0], 0..) |option, index| try std.testing.expectEqualStrings(case[1][index], option.name);
@@ -871,9 +871,9 @@ test "Host settings modes and generic overrides share the start grammar" {
 test "parent relation reaches only creating command grammars without hiding canonical refusals" {
     for ([_]Command{ .session_start, .session_configure }) |command| {
         var storage: [1024]u8 = undefined;
-        const parsed = try testParse(command.definition(), &.{ "--parent", "k7m2qx", "--provider", "codex", "--workspace", "/same" }, &storage);
+        const parsed = try testParse(command.definition(), &.{ "--parent", "k7m2qx", "--connection", "codex", "--workspace", "/same" }, &storage);
         try std.testing.expectEqualStrings("k7m2qx", parsed.getNamed("parent").?);
-        try std.testing.expectEqualStrings("codex", parsed.getNamed("provider").?);
+        try std.testing.expectEqualStrings("codex", parsed.getNamed("connection").?);
         try std.testing.expectEqualStrings("/same", parsed.getNamed("workspace").?);
         try expectValidation(command, &.{ "--parent", "k7m2qx", "--parent", "k7m2qx" }, error.DuplicateArgument);
         try expectValidation(command, &.{"--parent"}, error.MissingArgumentValue);

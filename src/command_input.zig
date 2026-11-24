@@ -166,7 +166,7 @@ fn ConfigurationOf(comptime Custody: type) type {
         const Configuration = @This();
 
         workspace: OptionalBounded(max_workspace_bytes) = .{},
-        connection: OptionalBounded(max_connection_bytes) = .{},
+        provider: OptionalBounded(max_connection_bytes) = .{},
         model: OptionalBounded(max_model_bytes) = .{},
         instructions: ContentField = .{},
         tools: ToolsField = .{},
