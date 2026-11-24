@@ -1154,6 +1154,8 @@ DIRECT, GRAPH, BROAD = 0, 1, 2
 EXTRA_OWN_FILES = {"deep-modules": ("tests/ci/deep_modules.allow", "tests/ci/deep_modules/*", "build/deep_modules.zig"),
                    "deep-modules-test": ("tests/ci/deep_modules/*", "build/deep_modules.zig"),
                    "rsql-table": ("tests/ci/rsql_table.py", "src/store/rsql_table.zig"),
+                   # Attribution only: host-memory is in no selection rule, so only Promote's memory job runs it.
+                   "host-memory": ("tests/ci/host_memory.py",),
                    # The Go packages select() maps to measurement-check by its path rule (QUALIFICATION_GO).
                    "measurement-check": tuple(f"{QUALIFICATION_ROOT}*{suffix}" for suffix in QUALIFICATION_GO)}
 # The targets whose binaries rsql-table's collect build compiles: every statement and fixture text they
@@ -1197,6 +1199,9 @@ def attribute(path, graph, available, read, contents=None, fixture_literals=None
     rule_named = {target for patterns, checks, *_ in RULES if matches(path, patterns) for target in checks}
     if any(path in graph.reached[root] for root in STATEMENT_TABLE_TARGETS):
         record("rsql-table", GRAPH)
+    if path in graph.host:
+        # Host graph paths reach the memory gate through the Host's closure, which no selection rule names.
+        record("host-memory", GRAPH)
     if path == DEPENDENCY_MANIFEST and contents and DEPENDENCY_MANIFEST in contents:
         # The link edges the changed packages reach, before the PR tier's CI_RUNNABLE filter drops some of them.
         packages = changed_dependencies(*contents[DEPENDENCY_MANIFEST])
