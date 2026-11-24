@@ -201,6 +201,12 @@ fn progressEvent(raw: *anyopaque, stage: HostLifecycle.Stage) void {
 }
 
 pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
+    return runWith(init, allocator, restart_all.restart);
+}
+
+/// The detached worker. `restart` is the Store or all-Host restart it runs; production passes
+/// `restart_all.restart`, and the custody test passes an injected barrier.
+pub fn runWith(init: std.process.Init, allocator: std.mem.Allocator, restart_step: *const fn (std.process.Init, std.mem.Allocator, restart_all.Options) anyerror!host_restart_report.Batch) !void {
     if (std.c.setsid() < 0) return error.HostRestartFailed;
     var buffer: [2048]u8 = undefined;
     var input = std.Io.File.stdin().readerStreaming(init.io, &buffer);
@@ -211,7 +217,7 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
     const task = parsed.value;
     if (task.report == .lines) return restart_all.run(init, allocator);
     var process_init = init;
-    var batch = restart_all.restart(init, allocator, .{
+    var batch = restart_step(init, allocator, .{
         .home = task.home,
         .target = if (task.target) |*target| target else null,
         .scope = task.scope,

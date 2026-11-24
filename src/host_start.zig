@@ -1592,7 +1592,9 @@ pub fn handoverFailed(result: *HostLaunchResult, outcome: @import("host_activati
         launchFailure(result, .child_refused, error.HostStartupFailed, null);
         result.outcome.failed.cause.refusal_code = outcome.refused.failure.code;
     } else {
-        launchFailure(result, .setup, error.HostRestartFailed, null);
+        // Certainty crosses every caller: an unconfirmed handover is never an ordinary failure.
+        const err: anyerror = if (@import("caller_exit.zig").handover(outcome) == .unconfirmed) error.HostRestartUnconfirmed else error.HostRestartFailed;
+        launchFailure(result, .setup, err, null);
     }
     result.outcome.failed.detail = .{ .handover = outcome };
 }
