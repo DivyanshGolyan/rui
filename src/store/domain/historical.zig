@@ -210,6 +210,8 @@ pub const RequestPage = struct {
         closed: [2]bool = .{ false, false },
         array: output_format.PartArray = .none,
         text: ?MessageText = null,
+        /// How this item enters the request (decide): `neutral` withholds every bag.
+        replay: replay_binding.Replay = .exact,
     };
 
     const MessageText = struct {
@@ -446,21 +448,34 @@ pub const RequestPage = struct {
     }
 
     pub fn replayOutput(self: *RequestPage, entry: *const HistoricalEntry, request: replay_binding.Binding) !?HistoricalOutput {
-        const output = try self.openOutput(entry.position);
+        var output = try self.openOutput(entry.position);
         const use: replay_binding.Use = if (self.anchor == entry.position) .selected_base else .history;
         const producer = replay_wire.bindingOf(entry.producer_wire orelse return error.CorruptStore, entry.requested_model.?.slice());
-        if (replay_binding.decide(output.kind, producer, request, use) != .omit) return output;
-        self.output_parts = null;
-        return null;
+        const replay = replay_binding.decide(output.kind, producer, request, use);
+        if (replay == .omit) {
+            self.output_parts = null;
+            return null;
+        }
+        self.output_parts.?.replay = replay;
+        if (replay == .neutral) output.bag = null;
+        return output;
     }
 
+    /// The next part the item sends. A `neutral` item sends its visible text only: opaque
+    /// blocks and empty text parts are skipped, since they carry no neutral meaning.
     pub fn nextOutputPart(self: *RequestPage) !?HistoricalPart {
         std.debug.assert(self.active and self.output_parts != null);
-        if (partsExhausted(self)) {
-            self.keepRead(.{ .question = .parts });
-            return error.PageRead;
+        while (true) {
+            if (partsExhausted(self)) {
+                self.keepRead(.{ .question = .parts });
+                return error.PageRead;
+            }
+            const neutral = self.output_parts.?.replay == .neutral;
+            const part = nextPart(self) catch return self.corrupt();
+            const value = part orelse return null;
+            if (neutral and (value.kind == .opaque_block or (if (value.text) |text| text.length == 0 else false))) continue;
+            return value;
         }
-        return nextPart(self) catch self.corrupt();
     }
 
     pub fn openMessage(self: *RequestPage, input: HistoricalInput) !void {
@@ -2372,8 +2387,9 @@ fn nextPart(view: *RequestPage) error{CorruptStore}!?HistoricalPart {
             true,
         ),
     };
-    const bag = try viewBag(view, row.extras_content_id.get(), &try pageMetadata(row.bag_length, row.bag_digest, row.bag_private));
-    if (kind == .opaque_block and bag == null) return error.CorruptStore;
+    const neutral = cursor.replay == .neutral;
+    const bag = if (neutral) null else try viewBag(view, row.extras_content_id.get(), &try pageMetadata(row.bag_length, row.bag_digest, row.bag_private));
+    if (kind == .opaque_block and bag == null and !neutral) return error.CorruptStore;
     if (array != cursor.array) {
         if (cursor.closed[@backingInt(array) - 1]) return error.CorruptStore;
         if (cursor.array != .none) cursor.closed[@backingInt(cursor.array) - 1] = true;

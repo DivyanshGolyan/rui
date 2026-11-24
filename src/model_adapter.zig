@@ -3136,6 +3136,41 @@ test "request preparation fences a saved provider bag whose bytes changed" {
     }
 }
 
+test "a Responses Session replays an Operation from another connection as neutral items without reasoning" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("cross-connection-config");
+    try setup.submit("cross-connection-input", "cross-connection-input-key", session.slice(), "hi");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const first = try admitted.permit.consume();
+    try setup.submit("cross-connection-next", "cross-connection-next-key", session.slice(), "next");
+    try settleComposedForTesting(&setup, first, "cross-connection-first", .message, "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"visible answer\"}]}", &.{});
+    // A model change applies from the next Turn and opens revision 2; the settled Operation
+    // keeps revision 1, which names another connection.
+    var change: wire_request.ConfigureCommand = .{};
+    change.session = session;
+    try change.key.set("cross-connection-change");
+    change.configuration.model.state = .value;
+    try change.configuration.model.value.set("unlisted-B");
+    try std.testing.expect(try setup.storage.configure(&change, .{}) == .accepted);
+    try store.testing.setRevisionProviderForTesting(&setup.storage, session.slice(), 1, "openai");
+    var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try successor.permit.consume();
+    const request = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(request.bytes);
+    try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"encrypted_content\":\"opaque\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"type\":\"reasoning\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"text\":\"visible answer\"") != null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, request.bytes, "visible answer") != null);
+    for (requestHistory(parsed.value)) |item| {
+        const kind = item.object.get("type") orelse continue;
+        try std.testing.expect(!std.mem.eql(u8, kind.string, "reasoning"));
+    }
+}
+
 test "request preparation replays a large private reasoning item within each advance's allowance" {
     {
         var setup: PreparationTestSetup = undefined;

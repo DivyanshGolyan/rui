@@ -239,7 +239,7 @@ Missing or corrupt required canonical state fences the Host instead of failing o
 Configuration changes do not prevalidate or discard saved continuation.
 Request preparation validates the frozen Operation's selected recipe.
 The producing Operation's frozen revision supplies each item's requested model; served-model evidence never substitutes for that identity.
-One output-item replay rule permits visible assistant messages, tool calls and tool results across models, but omits reasoning and compaction items from a different requested model (D192).
+Replay is keyed by Binding: a stored item's Binding is its producing revision's connection, wire dialect and model, and the request's is its own. `replay_binding.decide` maps each item's kind and use (history or selected base) to `exact`, `neutral` or `omit`. A visible message or tool call on the same wire replays exactly, even across models (D192), and one from another connection or dialect replays from its neutral fields with every bag withheld. Reasoning and compaction replay exactly only on the same Binding, so another model or connection omits them, and a web search call replays only on the same wire. A model or connection change applies from the next Turn; a running reply finishes on its model, and Rui never moves a chat to another connection by itself.
 A model switch therefore rebuilds from visible history, costing one unavoidable cache miss; it changes no canonical output and needs no new Store column.
 The ordinary compaction trigger weighs this rebuilt history for the new model; old-model compaction floors and successor exemptions do not apply.
 Actual provider qualification still requires adapter evidence.

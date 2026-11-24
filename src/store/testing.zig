@@ -954,6 +954,12 @@ pub fn setLegacyNullEffortForTesting(storage: *Store, session: []const u8) !void
     try exec(storage, "UPDATE model_operation SET previous_effort_override=NULL WHERE session_ref=?1", .{session});
 }
 
+/// Names the connection of a settled revision, so a test can replay an Operation whose
+/// connection differs from the Session's current one (a provider is immutable in a Session).
+pub fn setRevisionProviderForTesting(storage: *Store, session: []const u8, revision: u64, provider: []const u8) !void {
+    try exec(storage, "UPDATE session_revision SET provider=?3 WHERE session_ref=?1 AND revision=?2", .{ session, revision, provider });
+}
+
 pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {
     _ = fixtureText(sql);
     if (storage.engine == .mysql) return mysql_testing.queryU64(storage, sql, args);
