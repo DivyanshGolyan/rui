@@ -2,15 +2,15 @@
 
 This file lists build-time and runtime-linked dependencies and measurement-only components distributed or used with Rui. Versions and source hashes are pinned in `build.zig.zon`; measurement-only Go modules are pinned in `tests/qualification/go.mod`.
 
-## libvaxis 0.6.0 (commit a024e901cb246c971a2eaea63ea998238cf34778)
+## libvaxis 0.6.0 (commit fe39e0007292667e825980150b4f82e398f9d52a)
 
 The alternate-screen conversation frontend uses libvaxis for cell drawing and
 terminal-sequence parsing. Rui retains terminal entry and restoration custody.
 The pinned fork provides bounded OSC 5522 clipboard frames, the capability probe,
 and paste mode restoration.
 
-- Source: `https://github.com/DivyanshGolyan/libvaxis` at `a024e901cb246c971a2eaea63ea998238cf34778`
-- Zig package content hash: `vaxis-0.6.0-BWNV_BlgEADQfSnnBvdqMFLS08TRxQyxSqHcQ1ScYHkq`
+- Source: `https://github.com/DivyanshGolyan/libvaxis` at `fe39e0007292667e825980150b4f82e398f9d52a`
+- Zig package content hash: `vaxis-0.6.0-BWNV_O9kEAARntl3zAJAFU7m9GaQhdu3FyFEN_ZTRUVq`
 - License: MIT, reproduced in the source distribution's `LICENSE` file
 
 Copyright (c) 2023 Tim Culverhouse
