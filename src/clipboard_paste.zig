@@ -42,12 +42,15 @@ pub const Request = struct {
     }
 };
 
+pub const Failure = enum { invalid, unavailable, text_too_long, image_too_large };
+
 pub const Effect = union(enum) {
     read: Request,
     /// The caller owns text and image bytes through the receive allocator.
     text: struct { epoch: u64, bytes: []u8 },
     image: struct { epoch: u64, bytes: []u8, mime: Mime },
     local_image: u64,
+    failure: struct { epoch: u64, reason: Failure },
 };
 
 pub const Transaction = struct {
@@ -79,12 +82,42 @@ pub const Transaction = struct {
         content: std.ArrayList(u8) = .empty,
         started: bool = false,
         ignoring_offer: bool = false,
-        discarded: bool = false,
+        outcome: union(enum) { receiving, cancelled, failure: Failure } = .receiving,
 
-        fn discard(self: *Read, allocator: std.mem.Allocator) void {
+        fn clearPayload(self: *Read, allocator: std.mem.Allocator) void {
             self.content.deinit(allocator);
             self.content = .empty;
-            self.discarded = true;
+        }
+
+        fn cancel(self: *Read, allocator: std.mem.Allocator) void {
+            self.clearPayload(allocator);
+            self.outcome = .cancelled;
+        }
+
+        fn fail(self: *Read, allocator: std.mem.Allocator, reason: Failure) void {
+            if (self.outcome != .receiving) return;
+            self.clearPayload(allocator);
+            self.outcome = .{ .failure = reason };
+        }
+
+        fn finish(self: *Read, allocator: std.mem.Allocator) ?Effect {
+            defer self.clearPayload(allocator);
+            switch (self.outcome) {
+                .cancelled => return null,
+                .failure => |reason| return self.refusal(reason),
+                .receiving => {},
+            }
+            if (!self.started or self.content.items.len == 0) return null;
+            if (self.mime == .text and !std.unicode.utf8ValidateSlice(self.content.items)) return self.refusal(.invalid);
+            const bytes = self.content.toOwnedSlice(allocator) catch return self.refusal(.unavailable);
+            return if (self.mime == .text)
+                .{ .text = .{ .epoch = self.epoch, .bytes = bytes } }
+            else
+                .{ .image = .{ .epoch = self.epoch, .bytes = bytes, .mime = self.mime } };
+        }
+
+        fn refusal(self: *const Read, reason: Failure) Effect {
+            return .{ .failure = .{ .epoch = self.epoch, .reason = reason } };
         }
 
         /// A password on an untagged OK identifies another unsolicited offer.
@@ -101,22 +134,22 @@ pub const Transaction = struct {
             return false;
         }
 
-        fn append(self: *Read, allocator: std.mem.Allocator, frame: Frame) bool {
+        fn append(self: *Read, allocator: std.mem.Allocator, frame: Frame) ?Failure {
             var mime_encoded: [base64.Encoder.calcSize("text/plain".len)]u8 = undefined;
             const expected = base64.Encoder.encode(&mime_encoded, self.mime.mime());
-            if (!eql(frame.mime orelse return false, expected)) return false;
-            const size = decodedSize(frame.payload, chunk_limit) orelse return false;
+            if (!eql(frame.mime orelse return .invalid, expected)) return .invalid;
+            const size = decodedSize(frame.payload, chunk_limit) orelse return .invalid;
             const old_len = self.content.items.len;
             const needed = old_len + size;
             const limit = self.mime.limit();
-            if (needed > limit) return false;
+            if (needed > limit) return if (self.mime == .text) .text_too_long else .image_too_large;
             if (needed > self.content.capacity) {
                 const capacity = @min(limit, @max(needed, @max(chunk_limit, self.content.capacity * 2)));
-                self.content.ensureTotalCapacityPrecise(allocator, capacity) catch return false;
+                self.content.ensureTotalCapacityPrecise(allocator, capacity) catch return .unavailable;
             }
             const dest = self.content.addManyAsSliceAssumeCapacity(size);
-            base64.Decoder.decode(dest, frame.payload) catch return false;
-            return true;
+            base64.Decoder.decode(dest, frame.payload) catch return .invalid;
+            return null;
         }
     };
 
@@ -130,7 +163,7 @@ pub const Transaction = struct {
         switch (self.phase) {
             .idle => {},
             .offer => |*offer| offer.discarded = true,
-            .read => |*read| read.discard(allocator),
+            .read => |*read| read.cancel(allocator),
         }
     }
 
@@ -213,40 +246,33 @@ pub const Transaction = struct {
 
     fn receiveRead(self: *Transaction, allocator: std.mem.Allocator, frame: Frame, epoch: u64) ?Effect {
         const read = &self.phase.read;
-        if (epoch != read.epoch) read.discard(allocator);
+        if (epoch != read.epoch) read.cancel(allocator);
         if (frame.id) |id| {
             var expected: [20]u8 = undefined;
             if (!eql(id, std.fmt.bufPrint(&expected, "{d}", .{read.id}) catch unreachable)) return null;
         } else if (read.ignoreOffer(frame)) return null;
 
-        if (!frame.valid or frame.password != null) read.discard(allocator);
+        if (!frame.valid or frame.password != null) read.fail(allocator, .invalid);
         switch (frame.status orelse return null) {
             .OK => {
-                if (read.started) read.discard(allocator);
+                if (read.started) read.fail(allocator, .invalid);
                 read.started = true;
             },
             .DATA => {
-                if (read.discarded) return null;
-                if (!read.started or !read.append(allocator, frame)) read.discard(allocator);
+                if (read.outcome != .receiving) return null;
+                const failure = if (!read.started) .invalid else read.append(allocator, frame);
+                if (failure) |reason| read.fail(allocator, reason);
             },
             .DONE => {
                 defer self.phase = .idle;
-                defer read.discard(allocator);
-                if (read.discarded or !read.started or read.content.items.len == 0) return null;
-                if (read.mime == .text and !std.unicode.utf8ValidateSlice(read.content.items)) return null;
-                const bytes = read.content.toOwnedSlice(allocator) catch return null;
-                return if (read.mime == .text)
-                    .{ .text = .{ .epoch = read.epoch, .bytes = bytes } }
-                else
-                    .{ .image = .{ .epoch = read.epoch, .bytes = bytes, .mime = read.mime } };
+                return read.finish(allocator);
             },
             else => {
-                // A failed read sends an error in place of OK, with no DONE.
+                read.fail(allocator, .unavailable);
+                // A valid terminal refusal in place of OK has no DONE.
                 if (frame.valid and !read.started) {
-                    read.discard(allocator);
-                    self.phase = .idle;
-                } else {
-                    read.discard(allocator);
+                    defer self.phase = .idle;
+                    return read.finish(allocator);
                 }
             },
         }
@@ -521,7 +547,13 @@ test "SUI-117 clipboard reads settle only the live transaction" {
             }
             try testChunk(&transaction, if (case == .focus) 2 else 1, "type=read:status=DATA:id=1:mime=dGV4dC9wbGFpbg==;", "tail");
             try testInput(&transaction, 1, "type=read:status=DONE:id=99");
-            try testInput(&transaction, 1, if (case == .bad_done) "type=read:status=DONE:id=1;bad" else "type=read:status=DONE:id=1");
+            const done = transaction.receive(testing.allocator, if (case == .bad_done) "type=read:status=DONE:id=1;bad" else "type=read:status=DONE:id=1", 1);
+            if (case == .focus or case == .abort) {
+                try testing.expectEqual(null, done);
+            } else {
+                try testing.expectEqual(Failure.invalid, done.?.failure.reason);
+                try testing.expectEqual(@as(u64, 1), done.?.failure.epoch);
+            }
             const request = (try testOffer(&transaction, 2, "text/plain")).?.read;
             try testing.expectEqualStrings("\x1b]5522;type=read:id=2;dGV4dC9wbGFpbg==\x1b\\", request.bytes());
         }
@@ -530,7 +562,7 @@ test "SUI-117 clipboard reads settle only the live transaction" {
         var transaction: Transaction = .{};
         defer transaction.deinit(testing.allocator);
         _ = (try testOffer(&transaction, 1, "text/plain")).?.read;
-        try testInput(&transaction, 1, "type=read:status=EPERM:id=1");
+        try testing.expectEqual(Failure.unavailable, transaction.receive(testing.allocator, "type=read:status=EPERM:id=1", 1).?.failure.reason);
         try testing.expect((try testOffer(&transaction, 1, "text/plain")) != null);
     }
     {
@@ -576,7 +608,7 @@ test "SUI-118 clipboard reads keep data within their byte bounds" {
             if (overflow) try testChunk(&transaction, 4, frame, "x");
             const result = transaction.receive(testing.allocator, "type=read:status=DONE", 4);
             if (overflow) {
-                try testing.expectEqual(null, result);
+                try testing.expectEqual(if (eql(case.mime, "text/plain")) Failure.text_too_long else Failure.image_too_large, result.?.failure.reason);
             } else {
                 const bytes = switch (result.?) {
                     .image => |image| image.bytes,
@@ -597,7 +629,7 @@ test "SUI-118 clipboard reads keep data within their byte bounds" {
         try testInput(&transaction, 4, "type=read:status=OK");
         const chunk: [chunk_limit + 1]u8 = @splat('z');
         try testChunk(&transaction, 4, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;", &chunk);
-        try testInput(&transaction, 4, "type=read:status=DONE");
+        try testing.expectEqual(Failure.invalid, transaction.receive(testing.allocator, "type=read:status=DONE", 4).?.failure.reason);
     }
     {
         var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
@@ -608,7 +640,7 @@ test "SUI-118 clipboard reads keep data within their byte bounds" {
         try testing.expectEqual(null, transaction.receive(allocator, "type=read:status=OK", 1));
         try testing.expectEqual(null, transaction.receive(allocator, "type=read:status=DATA:mime=dGV4dC9wbGFpbg==;eA==", 1));
         try testing.expect(transaction.pending());
-        try testing.expectEqual(null, transaction.receive(allocator, "type=read:status=DONE", 1));
+        try testing.expectEqual(Failure.unavailable, transaction.receive(allocator, "type=read:status=DONE", 1).?.failure.reason);
         try testing.expect(!transaction.pending());
     }
 }

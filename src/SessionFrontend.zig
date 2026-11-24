@@ -935,6 +935,12 @@ fn pasteClipboard(raw: *anyopaque, ctx: *vxfw.EventContext, data: Root.Clipboard
     switch (data) {
         .image => |bytes| self.attachImage(bytes),
         .local_image => try self.pasteLocalImage(),
+        .failure => |reason| self.notice = switch (reason) {
+            .text_too_long => refusedNotice(.paste_overflow),
+            .image_too_large => "! Clipboard image exceeds 16 MiB",
+            .invalid => "! Clipboard paste is invalid",
+            .unavailable => "! Could not read the clipboard",
+        },
         .text => |bytes| {
             _ = self.input.appEvent(conversation_keys, .paste_start, true, false);
             _ = self.input.appEvent(conversation_keys, .{ .key_press = .{ .codepoint = 0, .text = bytes } }, true, false);
@@ -1762,6 +1768,13 @@ test "SUI-113 clipboard paste stays in its originating composer until Enter" {
     }
     try std.testing.expectEqualStrings("caption!", held.self.input.composition().bytes);
     try std.testing.expect((try rowWith(held, "[Image 1]")) != null);
+    try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=OK:pw=dG9rZW4=" });
+    try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=DATA:mime=Lg==;aW1hZ2UvcG5n" });
+    try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=DONE" });
+    try root.handleEvent(&ctx, .{ .osc_5522 = "type=read:status=EPERM" });
+    try std.testing.expect((try rowWith(held, "Could not read the clipboard")) != null);
+    try std.testing.expectEqualSlices(u8, png, held.self.input.image().?.bytes);
+    try std.testing.expectEqualStrings("caption!", held.self.input.composition().bytes);
     try held.keys("\x1b[H\x7f");
     try std.testing.expect(held.self.input.image() == null);
     try std.testing.expectEqualStrings("caption!", held.self.input.composition().bytes);

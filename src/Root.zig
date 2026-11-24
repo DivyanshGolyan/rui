@@ -36,7 +36,7 @@ pub const FocusOwner = struct {
     } = null,
 };
 
-pub const ClipboardData = union(enum) { text: []const u8, image: []u8, local_image };
+pub const ClipboardData = union(enum) { text: []const u8, image: []u8, local_image, failure: clipboard_paste.Failure };
 
 /// The composed main screen ends its presentation when Root changes panes.
 pub const MainPresentation = struct {
@@ -123,6 +123,12 @@ fn clipboardFrame(self: *Self, ctx: *vxfw.EventContext, payload: []const u8) !vo
                 const owner = self.session_focus.?;
                 try owner.clipboard.?.paste(owner.context, ctx, .{ .image = image.bytes });
             } else allocator.free(image.bytes);
+        },
+        .failure => |failure| {
+            if (self.clipboard_enabled and failure.epoch == self.clipboard_epoch) {
+                const owner = self.session_focus.?;
+                try owner.clipboard.?.paste(owner.context, ctx, .{ .failure = failure.reason });
+            }
         },
         .local_image => |epoch| {
             if (self.clipboard_enabled and epoch == self.clipboard_epoch) {

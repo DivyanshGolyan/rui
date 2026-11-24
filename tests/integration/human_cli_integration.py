@@ -632,6 +632,8 @@ def clipboard_paste_case():
             raw_output(master, b"\x1b[?5522h")
             paste(master, b"text/plain", b"Clipboard caption")
             raw_output(master, lambda screen: "Clipboard caption" in screen)
+            paste(master, b"text/plain", b"x" * 65_538)
+            raw_output(master, lambda screen: "Paste too long" in screen and "Clipboard caption" in screen)
             paste(master, b"image/png", png)
             raw_output(master, lambda screen: "[Image 1]" in screen)
             assert endpoint.requests == []
