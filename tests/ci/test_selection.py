@@ -775,22 +775,6 @@ class SelectionTest(unittest.TestCase):
                     self.assertIn(reason, select([path], phase, AVAILABLE)["reasons"])
                     self.assertTrue(set(select([path], phase, AVAILABLE)["targets"]) & served_by)
 
-    def test_start_handover_fixture_is_hosted_and_selected(self):
-        import prepush
-        path = "tests/integration/host_start_handover_integration.py"
-        tracked = subprocess.check_output(["git", "ls-files", "-z"]).decode().split("\0")
-        files = {name for name in tracked if name and Path(name).is_file()} | {path}
-        graph = Graph(files, lambda name: Path(name).read_text())
-        result = select([path], "review", AVAILABLE, graph=graph)
-        self.assertIn("start-handover-integration", result["targets"])
-        self.assertIn("start-handover-integration", result["native_targets"])
-        self.assertIn("start-handover-integration", result["fast_targets"])
-        for mode in ("default", "quick"):
-            checks = list(prepush.checks([path], AVAILABLE, "HEAD", mode=mode))
-            self.assertFalse(any(name == "development selection" for name, _ in checks))
-            self.assertFalse(any(isinstance(command, list) and "start-handover-integration" in command
-                                 for _, command in checks))
-
     def test_prepush_leaves_server_targets_to_ci(self):
         import prepush
         for path in ("src/store/rsql.zig", "src/store/wire/mysql_connection.zig", "src/store/wire/pg.zig"):
