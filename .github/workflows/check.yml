@@ -891,7 +891,9 @@ jobs:
     # This is the sole PR admission status. Reduced draft feedback cannot pass it.
     # It checks the Linux parts itself (require_linux_parts.sh); the linux job does so off pull requests.
     needs: [plan, policy, macos, cache_execution, pr_linux, linux_build, linux_build_unit, linux_suites, macos_typecheck]
-    if: ${{ always() && github.event_name == 'pull_request' }}
+    # A superseded run is cancelled; its admission would only post a red check over a head
+    # SHA the newer run is still judging, so it is cancelled with the run instead.
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
