@@ -3067,7 +3067,8 @@
                           "output_reservation",
                           "reasoning_effort",
                           "label",
-                          "reasoning_effort_refused"
+                          "reasoning_effort_refused",
+                          "app_tools"
                         ]
                       },
                       "provider_text": {
