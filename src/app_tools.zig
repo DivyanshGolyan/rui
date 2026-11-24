@@ -56,7 +56,7 @@ pub fn parse(arena: std.mem.Allocator, bytes: []const u8) Parsed {
 const ParseError = error{ OutOfMemory, InvalidAppTools, InvalidAppToolName, DuplicateAppToolName, AppToolBuiltInClash, InvalidAppToolPolicy };
 
 fn parseInArena(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
-    const value = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .allocate = .alloc_if_needed }) catch |err| switch (err) {
+    const value = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .allocate = .alloc_if_needed, .parse_numbers = false }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidAppTools,
     };
@@ -119,8 +119,44 @@ fn replayOf(value: ?std.json.Value) ParseError!tool_record.Replay {
 
 fn integerOf(comptime Int: type, value: ?std.json.Value, default: Int) ParseError!Int {
     const found = value orelse return default;
-    if (found != .integer) return error.InvalidAppToolPolicy;
-    return std.math.cast(Int, found.integer) orelse error.InvalidAppToolPolicy;
+    // Numbers stay as their written text so a schema keeps its exact values; a policy integer is plain digits.
+    if (found != .number_string) return error.InvalidAppToolPolicy;
+    return std.fmt.parseInt(Int, found.number_string, 10) catch error.InvalidAppToolPolicy;
+}
+
+// SH-123: an input schema keeps every number exactly as written (integer, decimal and exponent forms), so its text
+// and record digest never depend on floating-point rounding; policy integers accept only plain digits.
+test "SH-123 app tools keep schema numbers exactly as written" {
+    const arena_memory = try std.testing.allocator.alloc(u8, arena_bytes);
+    defer std.testing.allocator.free(arena_memory);
+    const schemas = [_][]const u8{
+        "{\"maximum\":9007199254740993}",
+        "{\"maximum\":9007199254740993e0}",
+        "{\"multipleOf\":0.1000000000000000055511151231257827}",
+        "{\"minimum\":-1.5E+3}",
+    };
+    var digests: [schemas.len][32]u8 = undefined;
+    for (schemas, &digests) |schema, *digest| {
+        var fixed: std.heap.FixedBufferAllocator = .init(arena_memory);
+        var document: [256]u8 = undefined;
+        const text = try std.fmt.bufPrint(&document, "[{{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{s}}}]", .{schema});
+        const parsed = parse(fixed.allocator(), text);
+        try std.testing.expect(parsed == .declared);
+        try std.testing.expectEqualStrings(schema, parsed.declared.records[0].input_schema);
+        digest.* = parsed.declared.digests[0];
+        // The same text declared again keeps the same digest, so a repeated declaration deduplicates.
+        var again: std.heap.FixedBufferAllocator = .init(arena_memory[arena_bytes / 2 ..]);
+        const reparsed = parse(again.allocator(), text);
+        try std.testing.expectEqualSlices(u8, digest, &reparsed.declared.digests[0]);
+    }
+    try std.testing.expect(!std.mem.eql(u8, &digests[0], &digests[1]));
+    var fixed: std.heap.FixedBufferAllocator = .init(arena_memory);
+    for ([_][]const u8{ "5.0", "5e0", "-1", "\"5\"" }) |limit| {
+        fixed.reset();
+        var document: [256]u8 = undefined;
+        const text = try std.fmt.bufPrint(&document, "[{{\"name\":\"a\",\"description\":\"d\",\"input_schema\":{{}},\"replay\":\"safe\",\"restart_limit\":{s}}}]", .{limit});
+        try std.testing.expectEqual(Parsed{ .refused = .invalid_app_tool_policy }, parse(fixed.allocator(), text));
+    }
 }
 
 // SH-123: the declaration validator accepts one well-formed list of records and names the refusal of every other
