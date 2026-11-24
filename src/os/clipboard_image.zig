@@ -1,9 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const input_media = @import("input_media.zig");
+const input_media = @import("../input_media.zig");
 
 pub const max_bytes = 16 * 1024 * 1024;
 const allocator = std.heap.page_allocator;
+
+pub const command_key = builtin.os.tag == .macos;
 
 /// Reads a local clipboard image. The caller frees returned bytes with the page allocator.
 /// Returns null if no supported image or usable local clipboard is available.
@@ -132,9 +134,9 @@ test "Linux clipboard image finds a supported local representation and preserves
     defer threaded.deinit();
     const io = threaded.io();
 
-    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
-    const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
-    const x11_png = @embedFile("codecs/fixtures/image-input/pixel-multi-window.png");
+    const png = @embedFile("../codecs/fixtures/image-input/pixel.png");
+    const jpeg = @embedFile("../testing/fixtures/input-baseline.jpg");
+    const x11_png = @embedFile("../codecs/fixtures/image-input/pixel-multi-window.png");
     try fixture.dir.writeFile(io, .{ .sub_path = "image.png", .data = png });
     try fixture.dir.writeFile(io, .{ .sub_path = "image.jpg", .data = jpeg });
     try fixture.dir.writeFile(io, .{ .sub_path = "x11.png", .data = x11_png });

@@ -22,7 +22,7 @@ const activity_reply = @import("activity_reply.zig");
 const protocol = @import("protocol.zig");
 const content_value = @import("content_value.zig");
 const Input = @import("SessionInput.zig");
-const clipboard_image = @import("clipboard_image.zig");
+const clipboard_image = @import("os/clipboard_image.zig");
 const image_label = @import("part_text.zig").first_image;
 const Submission = @import("SessionSubmission.zig");
 const original_state = @import("submission_state.zig");
@@ -918,7 +918,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
 
 fn imagePasteKey(key: vaxis.Key) bool {
     return key.matchExact('v', .{ .ctrl = true }) or key.matchExact(0x16, .{}) or
-        (@import("builtin").os.tag == .macos and key.matchExact('v', .{ .super = true }));
+        (clipboard_image.command_key and key.matchExact('v', .{ .super = true }));
 }
 
 fn clipboardTarget(raw: *anyopaque) ?Input.Insertion {

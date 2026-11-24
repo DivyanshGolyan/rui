@@ -71,7 +71,7 @@ pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target
     configureBashPlatform(b, compile);
     configureHostLaunch(b, compile);
     configureTerminalEditor(b, compile);
-    configureClipboard(b, compile.root_module, target, pinned);
+    darwin.configureClipboard(b, compile.root_module, target, if (pinned) |transport| transport.output else null);
     configureTransport(b, compile, target, pinned);
     configureOpenApi(b, compile);
 }
@@ -153,7 +153,7 @@ fn addRuiWithIdentity(
     configureBashPlatform(b, executable);
     configureHostLaunch(b, executable);
     configureTerminalEditor(b, executable);
-    configureClipboard(b, executable.root_module, target, pinned_transport);
+    darwin.configureClipboard(b, executable.root_module, target, if (pinned_transport) |transport| transport.output else null);
     configureTransportWithIdentity(b, executable, target, pinned_transport, identity);
     return executable;
 }
@@ -493,30 +493,6 @@ pub fn configureTerminalEditor(b: *std.Build, compile: *std.Build.Step.Compile) 
     configurePosix(b, compile.root_module);
     configureVaxis(b, compile.root_module);
     compile.root_module.link_libc = true;
-}
-
-fn configureClipboard(
-    b: *std.Build,
-    module: *std.Build.Module,
-    target: std.Build.ResolvedTarget,
-    pinned: ?PinnedTransport,
-) void {
-    if (target.result.os.tag != .macos) return;
-    if (pinned) |transport| {
-        module.addSystemFrameworkPath(transport.output.path(b, "sdk/System/Library/Frameworks"));
-        module.addSystemIncludePath(transport.output.path(b, "sdk/usr/include"));
-        module.addLibraryPath(transport.output.path(b, "sdk/usr/lib"));
-    } else if (b.graph.host.result.os.tag != .macos) {
-        // The unpinned macOS type check must work without an Apple SDK on Linux.
-        return;
-    }
-    module.addCSourceFile(.{
-        .file = b.path("src/clipboard_macos.m"),
-        .flags = &.{"-fobjc-arc"},
-    });
-    module.linkFramework("AppKit", .{});
-    module.linkFramework("CoreGraphics", .{});
-    module.linkFramework("ImageIO", .{});
 }
 
 fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
