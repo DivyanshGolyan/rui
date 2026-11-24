@@ -1238,7 +1238,7 @@ pub fn toolResult(presentation: protocol.ToolPresentation, sink: anytype, colour
     return toolHeadingWith(presentation, sink, colour, false);
 }
 
-test "tool headings show each outcome without exit fields" {
+test "SUI-125 tool headings show each outcome without exit fields" {
     const Sink = struct {
         bytes: [1024]u8 = undefined,
         length: usize = 0,

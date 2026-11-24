@@ -8222,7 +8222,7 @@ test "SessionFrontend capped answer Ctrl-O opens the whole authenticated source"
     try std.testing.expect(std.mem.indexOf(u8, held.screen.staging.text(), source) != null);
 }
 
-test "SessionFrontend tool row Ctrl-O opens saved output in place, closes it, and reloads it open" {
+test "SUI-126 SessionFrontend tool row Ctrl-O opens saved output in place, closes it, and reloads it open" {
     const io = std.testing.io;
     const held = try HeldFrontend.create();
     defer held.destroy();
