@@ -8851,7 +8851,7 @@ fn sUI132AdjacentBrowseCase() !void {
     _ = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } });
     try std.testing.expectEqualSlices(u8, &rows[1].reference, &state.selected.session);
     const activated = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next_session } } });
-    try expectEffects(&.{.{ .open = rows[1].reference }}, activated);
+    try expectEffects(&.{ .{ .open = rows[1].reference }, .list_models }, activated);
     const settled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = true } });
     try expectEffects(&.{}, settled);
     try std.testing.expect(!settled.browse_open);
@@ -8871,7 +8871,7 @@ fn sUI132ExplicitBrowseCase() !void {
         _ = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } });
         try expectSelected(&state, &rows[1].reference);
 
-        try expectEffects(&.{.{ .open = rows[1].reference }}, try step(&state, .{ .input = .{ .wide = true, .key = key } }));
+        try expectEffects(&.{ .{ .open = rows[1].reference }, .list_models }, try step(&state, .{ .input = .{ .wide = true, .key = key } }));
         const settled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = true } });
         try expectEffects(&.{}, settled);
         try std.testing.expect(!settled.browse_open);
@@ -8895,7 +8895,7 @@ fn sUI132IgnoredPasteBrowseCase() !void {
         try expectSelected(&state, &rows[1].reference);
         _ = try step(&state, .{ .input = delivery });
         const settled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = true } });
-        try expectEffects(&.{.{ .open = rows[1].reference }}, settled);
+        try expectEffects(&.{ .{ .open = rows[1].reference }, .list_models }, settled);
         try std.testing.expect(settled.browse_open);
     }
 }
