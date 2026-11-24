@@ -308,10 +308,10 @@ def managed_descriptor_rejection(store, env, limit):
 
 def startup_limits(root, env):
     required = managed_descriptor_rejection(root / "hard-256", env, 256)
-    minimum = required - 5 * (INTAKE - 10)
+    minimum = required - os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS * (INTAKE - 10)
     observed = managed_descriptor_rejection(root / "hard-below-minimum", env, minimum - 1)
     if observed != required:
-        required, minimum = observed, observed - 5 * (INTAKE - 10)
+        required, minimum = observed, observed - os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS * (INTAKE - 10)
         assert managed_descriptor_rejection(root / "hard-below-minimum-again", env, minimum - 1) == required
     print(f"default capacity refused below {minimum} descriptors (default intake needs {required})", flush=True)
     for name, hard in (("soft-256", None), ("linux-1024", 1024), ("hard-minimum", minimum)):
@@ -328,7 +328,7 @@ def startup_limits(root, env):
             assert json.loads(started.stdout) == reported, (started, reported)
             capacity = int(reported["intake_capacity"])
             if hard == 1024:
-                expected_capacity = INTAKE - max(0, (required - 1024 + 4) // 5)
+                expected_capacity = INTAKE - max(0, -(-(required - 1024) // os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS))
                 assert capacity == expected_capacity and reported["descriptor_limit"] == "1024", reported
             elif hard:
                 assert capacity == 10 and reported["descriptor_limit"] == str(hard), reported
