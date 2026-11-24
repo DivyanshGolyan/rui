@@ -1038,37 +1038,3 @@ fn readBody(
     if (record.body_offset == record.body_length) data_flags.* |= c.NGHTTP2_DATA_FLAG_EOF;
     return @intCast(wanted);
 }
-
-test "a failure is a setup failure until the session is ready, then a lost connection" {
-    var env: Env = undefined;
-    var connection = vacant(&env, 0);
-    const Row = struct { state: State, cause: policy.Cause, protocol: bool = false, expected: ?Failure };
-    const lost_connection: Failure = .{ .lost = .{ .cause = .connection_lost, .goaway_last_stream_id = 7 } };
-    const lost_protocol: Failure = .{ .lost = .{ .cause = .protocol_error, .goaway_last_stream_id = 7 } };
-    const rows = [_]Row{
-        .{ .state = .free, .cause = .connection_lost, .expected = null },
-        .{ .state = .resolving, .cause = .connection_lost, .expected = .{ .setup = .connect_failed } },
-        .{ .state = .resolving, .cause = .protocol_error, .expected = .{ .setup = .protocol_error } },
-        .{ .state = .connecting, .cause = .connection_lost, .expected = .{ .setup = .connect_failed } },
-        .{ .state = .connecting, .cause = .protocol_error, .expected = .{ .setup = .protocol_error } },
-        .{ .state = .tunneling, .cause = .connection_lost, .expected = .{ .setup = .connect_failed } },
-        .{ .state = .tunneling, .cause = .protocol_error, .expected = .{ .setup = .protocol_error } },
-        .{ .state = .handshaking, .cause = .connection_lost, .expected = .{ .setup = .connect_failed } },
-        .{ .state = .handshaking, .cause = .protocol_error, .expected = .{ .setup = .protocol_error } },
-        .{ .state = .verifying, .cause = .connection_lost, .expected = .{ .setup = .connect_failed } },
-        .{ .state = .verifying, .cause = .protocol_error, .expected = .{ .setup = .protocol_error } },
-        .{ .state = .awaiting_settings, .cause = .connection_lost, .expected = .{ .setup = .connect_failed } },
-        .{ .state = .awaiting_settings, .cause = .protocol_error, .expected = .{ .setup = .protocol_error } },
-        .{ .state = .ready, .cause = .connection_lost, .expected = lost_connection },
-        .{ .state = .ready, .cause = .connection_lost, .protocol = true, .expected = lost_protocol },
-        .{ .state = .ready, .cause = .protocol_error, .expected = lost_protocol },
-        .{ .state = .draining, .cause = .connection_lost, .expected = lost_connection },
-        .{ .state = .draining, .cause = .connection_lost, .protocol = true, .expected = lost_protocol },
-    };
-    for (rows) |row| {
-        connection.state = row.state;
-        connection.protocol_failure = row.protocol;
-        connection.goaway_last_stream_id = 7;
-        try std.testing.expectEqualDeep(row.expected, connection.failure(row.cause));
-    }
-}

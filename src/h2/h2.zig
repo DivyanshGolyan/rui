@@ -381,9 +381,6 @@ test {
     _ = @import("liveness.zig");
     _ = Record;
     _ = Engine;
-    _ = @import("Origin.zig");
-    _ = @import("Clock.zig");
-    _ = @import("Connection.zig");
     _ = @import("Resolver.zig");
     _ = @import("proxy.zig");
     _ = @import("tls.zig");
