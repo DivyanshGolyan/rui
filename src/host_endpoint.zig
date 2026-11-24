@@ -379,20 +379,37 @@ pub fn inspect(io: std.Io, interface: *const Interface) Sighting {
 /// `rui.lock` counts as held.
 pub const Occupancy = enum { held, free, absent, unusable };
 
+/// Looks again when a stopping Host removed or replaced D between the open
+/// and the name check, a race that is normal and not an access failure.
+const occupancy_attempts = 4;
+
 pub fn occupancy(io: std.Io, directory: []const u8) Occupancy {
+    return occupancyPaused(io, directory, no_pause);
+}
+
+fn occupancyPaused(io: std.Io, directory: []const u8, pause: Pause) Occupancy {
+    for (0..occupancy_attempts) |_| {
+        if (occupancyOnce(io, directory, pause)) |result| return result;
+    }
+    return .unusable;
+}
+
+/// One look; null when D's path stopped naming the locked inode.
+fn occupancyOnce(io: std.Io, directory: []const u8, pause: Pause) ?Occupancy {
     const dir = openDirectory(directory) catch |err| return switch (err) {
         error.FileNotFound => .absent,
         else => .unusable,
     };
     defer dir.close(io);
     privateDirectory(dir.handle) catch return .unusable;
+    pause(.opened);
     switch (std.posix.errno(std.posix.system.flock(dir.handle, std.posix.LOCK.SH | std.posix.LOCK.NB))) {
         .SUCCESS => {},
         .AGAIN => return .held,
         else => return .unusable,
     }
     // As in lockVerified: a lock on a D replaced since the open says nothing about D's path.
-    if (!namesDirectory(io, directory, dir.handle)) return .unusable;
+    if (!namesDirectory(io, directory, dir.handle)) return null;
     return switch (legacyState(dir.handle)) {
         .absent, .free => .free,
         .held => .held,
@@ -857,6 +874,17 @@ fn backdate(fd: std.posix.fd_t) !void {
     if (c.futimens(fd, &epoch) != 0) return error.BackdateFailed;
 }
 
+/// Sets the node at `path` to the epoch without following a symlink, so the
+/// cleaner model's age rule reaches a socket the way a real cleaner does.
+fn backdatePath(path: []const u8) !void {
+    var buffer: [std.Io.net.UnixAddress.max_len + 1]u8 = undefined;
+    if (path.len >= buffer.len) return error.BackdateFailed;
+    @memcpy(buffer[0..path.len], path);
+    buffer[path.len] = 0;
+    const epoch = [2]c.timespec{ .{ .tv_sec = 0, .tv_nsec = 0 }, .{ .tv_sec = 0, .tv_nsec = 0 } };
+    if (c.utimensat(c.AT_FDCWD, buffer[0..path.len :0].ptr, &epoch, c.AT_SYMLINK_NOFOLLOW) != 0) return error.BackdateFailed;
+}
+
 test "SH-11 no OS temp cleaner's rules remove a node of a live endpoint (#2128)" {
     const io = testing.io;
     var runtime = try socket_fixture.Directory.init();
@@ -884,6 +912,11 @@ test "SH-11 no OS temp cleaner's rules remove a node of a live endpoint (#2128)"
         // bound D whose socket keeps it non-empty and locked. A fresh claim, and
         // an unbind, leave D's own refresh in place.
         if (phase == .claimed_stalled or phase == .bound) try backdate(endpoint.held.?.dir.handle);
+        // A bound D's socket is old too: only its live probe spares it.
+        if (phase == .bound) {
+            var socket_path_buffer: [std.Io.net.UnixAddress.max_len]u8 = undefined;
+            try backdatePath(try std.fmt.bufPrint(&socket_path_buffer, "{s}/{s}", .{ directory, socket_name }));
+        }
         const removed = try applyCleaner(io, cleaner, directory);
         if (removed) {
             // Only a stalled claim under a cleaner that ignores locks loses D.
@@ -982,6 +1015,52 @@ test "SH-11 a lock on a directory replaced after the open proves nothing" {
     try testing.expect(lockVerifiedPaused(io, directory, Replace.pause) == .busy);
     // The new D is free and empty; the look that follows reclaims it.
     try testing.expectEqual(Sighting.reclaimed, inspect(io, &derived));
+}
+
+test "SH-11 occupancy looks again when a stopping Host removes D after the open" {
+    const io = testing.io;
+    var runtime = try socket_fixture.Directory.init();
+    defer runtime.cleanup();
+    const root = runtime.root[0..runtime.root_len];
+    var directory_buffer: [Path.max_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
+    (try arrange(io, directory, .free, .absent, .absent, false)).release(io);
+
+    // The stop removes D once, after the open and before the name check.
+    const Remove = struct {
+        var path: []const u8 = "";
+        var armed = false;
+        fn pause(stage: Stage) void {
+            if (stage != .opened or !armed) return;
+            armed = false;
+            std.Io.Dir.cwd().deleteDir(testing.io, path) catch unreachable;
+        }
+    };
+    Remove.path = directory;
+    Remove.armed = true;
+    try testing.expectEqual(Occupancy.absent, occupancyPaused(io, directory, Remove.pause));
+    try testing.expect(!Remove.armed);
+}
+
+test "SH-11 occupancy reports unusable when D keeps being replaced" {
+    const io = testing.io;
+    var runtime = try socket_fixture.Directory.init();
+    defer runtime.cleanup();
+    const root = runtime.root[0..runtime.root_len];
+    var directory_buffer: [Path.max_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/{s}", .{ root, "0123456789abcdef0123456789abcdef" });
+    (try arrange(io, directory, .free, .absent, .absent, false)).release(io);
+
+    const Replace = struct {
+        var path: []const u8 = "";
+        fn pause(stage: Stage) void {
+            if (stage != .opened) return;
+            std.Io.Dir.cwd().deleteDir(testing.io, path) catch unreachable;
+            std.Io.Dir.cwd().createDir(testing.io, path, .fromMode(0o700)) catch unreachable;
+        }
+    };
+    Replace.path = directory;
+    try testing.expectEqual(Occupancy.unusable, occupancyPaused(io, directory, Replace.pause));
 }
 
 test "SH-11 a claim whose directory is removed before its open retries and holds it" {
