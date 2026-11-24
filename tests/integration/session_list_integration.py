@@ -70,7 +70,7 @@ def main():
             baseline = released_resources(process.pid, diagnostics, latest_invocation)
             def configure(key, reference, workspace, model="gpt-6-sol", label=None):
                 config = {
-                    "workspace": workspace, "provider": "codex", "model": model,
+                    "workspace": workspace, "connection": "codex", "model": model,
                     "tools": ["bash", "web_search"], "permissionMode": "bypass", "compactAt": 100000,
                     "effort": "low" if model == "gpt-6-sol" else None,
                 }
@@ -96,8 +96,8 @@ def main():
             continued = listing(str(root), first["next"])
             assert continued[0] == 200 and continued[1]["next"] is None and len(continued[1]["sessions"]) == 1, continued
             row = continued[1]["sessions"][0]
-            assert {name: row[name] for name in ("reference", "workspace", "provider", "model", "tools", "permission_mode")} == {
-                "reference": names[9], "workspace": str(root), "provider": "codex", "model": "gpt-6-sol", "tools": ["bash", "web_search"],
+            assert {name: row[name] for name in ("reference", "workspace", "connection", "model", "tools", "permission_mode")} == {
+                "reference": names[9], "workspace": str(root), "connection": "codex", "model": "gpt-6-sol", "tools": ["bash", "web_search"],
                 "permission_mode": "bypass"}, row
             assert int(row["created_at"]) > 0 and row["label"] is None and row["revision"] == "1" and row["end"] == "0", row
             assert row["first_message"] is None and row["peers"] == {"from_person_at": None}, row

@@ -76,7 +76,7 @@ pub const Code = enum {
     session_archiving,
     invalid_sender_handle,
     unsupported_permission_mode,
-    unsupported_provider,
+    unknown_connection,
     connection_unserved,
     invalid_model,
     model_capability_unavailable,
@@ -112,7 +112,7 @@ pub const Code = enum {
 
     invalid_workspace,
     workspace_is_immutable,
-    provider_is_immutable,
+    connection_is_immutable,
     model_is_immutable,
     revision_exhausted,
     skills_unavailable,
@@ -380,7 +380,7 @@ pub const Input = enum {
             .session => "--session",
             .sender_handle => "RUI_SENDER_HANDLE",
             .preset => "preset",
-            .missing_settings => "--model, --workspace, --provider",
+            .missing_settings => "--model, --workspace, --connection",
             .reload_skills => "--reload-skills",
             .target => "--turn / --operation / --action",
             .operation => "--operation",
@@ -433,14 +433,14 @@ pub fn facts(code: Code) Facts {
         .store_path_malformed => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "a nonempty UTF-8 filesystem path without controls, whose canonical form is at most 492 bytes" }, .says = "The Store path is malformed.", .next = "Supply --store PATH naming a private Store directory." },
         .store_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Store directory is missing, inaccessible or not private.", .next = "Create the directory if missing, give your user access, and restrict its permissions to 0700; then retry unchanged." },
         .peer_context_invalid => .{ .act = .fix, .input = .sender_handle, .accepted = .{ .grammar = "RUI_STORE, RUI_ADDRESS (six lowercase Crockford characters) and nonempty RUI_SENDER_HANDLE together, or none" }, .says = "The inherited peer context is incomplete or malformed.", .next = "Restore all three variables from the Session Bash, or unset RUI_STORE RUI_ADDRESS RUI_SENDER_HANDLE to make an operator call." },
-        .selection_provider_unsupported => .{ .act = .operate, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "The selected provider, possibly from saved preferences, is unsupported.", .next = "Run rui defaults inspect, then rui defaults configure --provider chatgpt --clear-model, or supply --provider explicitly." },
-        .selection_model_unsupported => .{ .act = .operate, .input = .model, .accepted = .{ .grammar = "a model supported by the selected provider" }, .says = "The selected model, possibly from saved preferences, is unsupported.", .next = "Run rui defaults inspect; select a supported --provider and --model, or run rui defaults configure --clear-model." },
+        .selection_provider_unsupported => .{ .act = .operate, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "The selected provider, possibly from saved preferences, is unsupported.", .next = "Run rui defaults inspect, then rui defaults configure --connection chatgpt --clear-model, or supply --connection explicitly." },
+        .selection_model_unsupported => .{ .act = .operate, .input = .model, .accepted = .{ .grammar = "a model supported by the selected provider" }, .says = "The selected model, possibly from saved preferences, is unsupported.", .next = "Run rui defaults inspect; select a supported --connection and --model, or run rui defaults configure --clear-model." },
         .preferences_invalid => .{ .act = .operate, .input = null, .accepted = .none, .says = "The saved preferences are malformed or use an unsupported version.", .next = "Inspect HOME/.config/rui/preferences; repair or remove that file, then run rui defaults configure." },
         .preferences_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "Rui cannot read or save private preferences.", .next = "Check ownership and access to HOME/.config/rui (0700) and its preferences file (0600), then run rui defaults inspect." },
         .preference_store_invalid => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "an existing private absolute Store directory" }, .says = "The default Store path is invalid.", .next = "Run rui defaults configure --store PATH with an existing private absolute directory." },
-        .preference_provider_invalid => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "The default provider is unsupported.", .next = "Run rui defaults configure --provider chatgpt or --provider openai." },
-        .preference_model_invalid => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a supported model ID of 1-256 printable non-space ASCII bytes" }, .says = "The default model is invalid or unsupported.", .next = "Run rui defaults configure --clear-model, or set --provider and a supported --model." },
-        .preference_provider_required => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "Saving a default model requires a provider.", .next = "Run rui defaults configure --provider chatgpt --model MODEL, or --provider openai --model MODEL." },
+        .preference_provider_invalid => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "The default provider is unsupported.", .next = "Run rui defaults configure --connection chatgpt or --connection openai." },
+        .preference_model_invalid => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a supported model ID of 1-256 printable non-space ASCII bytes" }, .says = "The default model is invalid or unsupported.", .next = "Run rui defaults configure --clear-model, or set --connection and a supported --model." },
+        .preference_provider_required => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "Saving a default model requires a provider.", .next = "Run rui defaults configure --connection chatgpt --model MODEL, or --connection openai --model MODEL." },
         .home_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "HOME is missing or is not an absolute directory.", .next = "Set HOME to your absolute home directory, or supply --store PATH when only a Store is needed." },
         .session_id_needs_session => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "--session ID" }, .says = "A positional Session ID is not a Session selector for this command.", .next = "Move the Session ID to --session ID." },
         .host_settings_modes_conflict => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--paths or --check, not both" }, .says = "Listing paths and checking settings are different operations.", .next = "Keep one mode." },
@@ -475,7 +475,7 @@ pub fn facts(code: Code) Facts {
         .session_archiving => .{ .act = .wait, .input = .session, .accepted = .none, .says = "This Session is still settling its archive request and cannot take new Messages.", .next = "Wait for archival to complete, then send a new Message to restore the Session." },
         .invalid_sender_handle => .{ .act = .fix, .input = .sender_handle, .accepted = .{ .grammar = "the live peer context supplied by Rui" }, .says = "The peer sender handle is invalid or no longer live.", .next = "Send from a live Rui Session; do not fabricate or reuse peer environment variables." },
         .unsupported_permission_mode => .{ .act = .fix, .input = .permission_mode, .accepted = .{ .closed = names(cli_value.PermissionMode) }, .says = "Rui has no such permission mode.", .next = "Use one of the accepted values." },
-        .unsupported_provider => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "Rui has no such provider.", .next = "Use one of the accepted providers." },
+        .unknown_connection => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a connection named in the Host settings; see rui host status" }, .says = "Rui has no connection with that name.", .next = "Use a connection this Host serves, or add it to the Host settings." },
         .connection_unserved => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a connection this Host serves; see rui host status" }, .says = "This Host does not serve that connection.", .next = "Use a connection this Host serves, or add it to the Host's settings and restart the Host." },
         .invalid_model => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a nonempty model ID; see rui session configure --help for syntax and suggested IDs" }, .says = "The model ID is empty.", .next = "Supply a nonempty --model; unlisted IDs are allowed and use default limits." },
         .model_capability_unavailable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a provider served by this Host; see rui host status" }, .says = "This Host does not serve the Session's required provider.", .next = "Use a Host serving the required provider, or create a Session with a provider listed by rui host status." },
@@ -499,7 +499,7 @@ pub fn facts(code: Code) Facts {
         .loaded_tools_unreachable => .{ .act = .fix, .input = .loaded_tools, .accepted = .{ .grammar = "every tool in --tools, or a subset when find_tools is loaded" }, .says = "Some tools would never be reachable: the loaded tools leave some out without loading find_tools.", .next = "Add find_tools to --loaded-tools, or load every tool in --tools." },
         .invalid_label => .{ .act = .fix, .input = .label, .accepted = .{ .grammar = "one line of at most 100 UTF-8 bytes, or an empty string to clear it" }, .says = "The Label is too long or contains a line break or control character.", .next = "Shorten --label and remove line breaks and control characters." },
         .settings_on_reload => .{ .act = .fix, .input = .reload_skills, .accepted = .{ .grammar = "--reload-skills alone, with no setting, preset or model requirement" }, .says = "A Skills reload cannot change settings.", .next = "Reload Skills alone, then configure settings in a separate request." },
-        .missing_settings => .{ .act = .fix, .input = .missing_settings, .accepted = .{ .grammar = "a model, a Workspace or parent, and a provider when the Host serves several" }, .says = "A new Session is missing a required setting.", .next = "Supply each missing setting with its option, a preset or a parent." },
+        .missing_settings => .{ .act = .fix, .input = .missing_settings, .accepted = .{ .grammar = "a model, a Workspace or parent, and a connection when the Host serves several" }, .says = "A new Session is missing a required setting.", .next = "Supply each missing setting with its option, a preset or a parent." },
         .unknown_preset => .{ .act = .fix, .input = .preset, .accepted = .{ .grammar = "a preset name supplied when this Host was launched" }, .says = "The Host does not have that preset.", .next = "Use a preset supplied at connect, or supply a complete creation spec." },
         .preset_on_update => .{ .act = .fix, .input = .preset, .accepted = .{ .grammar = "a preset only when creating a Session" }, .says = "An existing Session cannot apply a preset.", .next = "Omit preset from the update, or create a new Session with it." },
         .preferences_on_update => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "preferences only on creation" }, .says = "An existing Session cannot apply creation preferences.", .next = "Omit preferences from the update." },
@@ -510,7 +510,7 @@ pub fn facts(code: Code) Facts {
         .permission_mode_wider_than_parent => .{ .act = .fix, .input = .permission_mode, .accepted = .{ .grammar = "ask when the parent asks" }, .says = "The parent asks before running commands, so its child Session must ask too. Nothing was created.", .next = "Use permissionMode ask." },
         .invalid_workspace => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "an absolute path to an existing directory" }, .says = "The workspace is not a usable absolute directory.", .next = "Set --workspace to an existing absolute directory accessible to the Host." },
         .workspace_is_immutable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "the workspace already saved for this Session" }, .says = "An existing Session cannot change its workspace.", .next = "Omit --workspace, or create a new Session for the other directory." },
-        .provider_is_immutable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "the provider already saved for this Session" }, .says = "An existing Session cannot change its provider.", .next = "Omit --provider, or create a new Session with the other provider." },
+        .connection_is_immutable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "the connection already saved for this Session" }, .says = "An existing Session cannot change its connection.", .next = "Omit --connection, or create a new Session with the other connection." },
         .model_is_immutable => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "model changes within the Session's fixed provider" }, .says = "This saved command was rejected when a Session could not change its model.", .next = "Submit the model change with a new idempotency key." },
         .skill_file_unavailable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "a readable SKILL.md at its advertised absolute path" }, .says = "The selected skill file could not be read.", .next = "Restore the file and access to it, or reload skills before choosing another name." },
         .skill_file_too_large => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "complete SKILL.md files of at most 1 MiB each and in total" }, .says = "The selected skill files exceed the per-file or combined read limit.", .next = "Select fewer skills or reduce their files to fit both limits." },
@@ -624,7 +624,7 @@ fn writeMissing(out: *std.Io.Writer, missing: required_settings.Missing) error{W
         try out.writeAll(switch (setting) {
             .model => comptime Input.model.spelling().?,
             .workspace => comptime Input.workspace.spelling().?,
-            .provider => comptime Input.provider.spelling().?,
+            .connection => comptime Input.provider.spelling().?,
         });
     }
     try out.writeAll(": A new Session is missing ");
@@ -636,7 +636,7 @@ fn writeMissing(out: *std.Io.Writer, missing: required_settings.Missing) error{W
         try out.writeAll(switch (setting) {
             .model => "a model",
             .workspace => "a Workspace",
-            .provider => "a provider",
+            .connection => "a connection",
         });
     }
     try out.writeByte('.');
@@ -807,12 +807,12 @@ test "a missing-settings line names each missing setting by flag and noun" {
     const cases = [_]struct { bits: u3, expected: []const u8 }{
         .{ .bits = 0b001, .expected = "rui session configure: --model: A new Session is missing a model." },
         .{ .bits = 0b010, .expected = "rui session configure: --workspace: A new Session is missing a Workspace." },
-        .{ .bits = 0b100, .expected = "rui session configure: --provider: A new Session is missing a provider." },
+        .{ .bits = 0b100, .expected = "rui session configure: --connection: A new Session is missing a connection." },
         .{ .bits = 0b011, .expected = "rui session configure: --model, --workspace: A new Session is missing a model and a Workspace." },
-        .{ .bits = 0b110, .expected = "rui session configure: --workspace, --provider: A new Session is missing a Workspace and a provider." },
-        .{ .bits = 0b111, .expected = "rui session configure: --model, --workspace, --provider: A new Session is missing a model, a Workspace and a provider." },
+        .{ .bits = 0b110, .expected = "rui session configure: --workspace, --connection: A new Session is missing a Workspace and a connection." },
+        .{ .bits = 0b111, .expected = "rui session configure: --model, --workspace, --connection: A new Session is missing a model, a Workspace and a connection." },
     };
-    const tail = " Accepted: a model, a Workspace or parent, and a provider when the Host serves several. Next: Supply each missing setting with its option, a preset or a parent. This rejection was saved and replays as saved; a resend needs a new key. [missing_settings]\n";
+    const tail = " Accepted: a model, a Workspace or parent, and a connection when the Host serves several. Next: Supply each missing setting with its option, a preset or a parent. This rejection was saved and replays as saved; a resend needs a new key. [missing_settings]\n";
     for (cases) |case| {
         var bytes: [1024]u8 = undefined;
         var out = std.Io.Writer.fixed(&bytes);
@@ -861,7 +861,7 @@ test "inline skills size refusal explains per-file and combined limits" {
 test "Session settings caller spellings retain every existing diagnostic" {
     inline for (.{
         .{ Input.workspace, "--workspace" },
-        .{ Input.provider, "--provider" },
+        .{ Input.provider, "--connection" },
         .{ Input.model, "--model" },
         .{ Input.tools, "--tools" },
         .{ Input.loaded_tools, "--loaded-tools" },

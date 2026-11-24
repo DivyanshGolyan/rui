@@ -26,13 +26,13 @@ def empty_creation(binary, root, store_settings, env):
     clean = dict(env, HOME=str(home))
     for name in ("RUI_STORE", "RUI_ADDRESS", "RUI_SENDER_HANDLE", "RUI_RUNTIME_DIR"):
         clean.pop(name, None)
-    binding = {"provider": "openai", "model": DEFAULTS.recommended_model, "workspace": str(workspace)}
+    binding = {"connection": "openai", "model": DEFAULTS.recommended_model, "workspace": str(workspace)}
     expected = {
         "tools": sorted(DEFAULTS.tools.split(",")),
         "loaded_tools": sorted(DEFAULTS.tools.split(",")),
         "permission_mode": DEFAULTS.permission_mode,
         "reasoning_effort": start_effort(binding["model"]),
-        "compaction_trigger": str(compaction_trigger(binding["provider"], binding["model"])),
+        "compaction_trigger": str(compaction_trigger(binding["connection"], binding["model"])),
     }
 
     def check(report):
@@ -94,7 +94,7 @@ def empty_creation(binary, root, store_settings, env):
 
             record = root / "cli.json"
             cli = invoke("session", "configure", "--store", store, "--record", record, "--key", "empty-creation:cli",
-                         "--provider", binding["provider"], "--model", binding["model"], "--workspace", workspace)
+                         "--connection", binding["connection"], "--model", binding["model"], "--workspace", workspace)
             assert json.loads(record.read_text())["configuration"] == binding
             assert check(inspect(cli["context"]["session"])) == resolved
 
@@ -103,7 +103,7 @@ def empty_creation(binary, root, store_settings, env):
             master, slave = open_pty()
             caller = None
             try:
-                caller = spawn([str(binary), "--store", store, "--provider", binding["provider"],
+                caller = spawn([str(binary), "--store", store, "--connection", binding["connection"],
                                 "--model", binding["model"]], cwd=workspace, env=clean,
                                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 overview_frame(master, overview_title)

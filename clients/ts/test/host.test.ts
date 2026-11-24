@@ -56,7 +56,7 @@ test("connect starts a ready Host and close stops it", { skip }, async () => {
 	const rui = await connect(store);
 	const info = await hostInfo(rui);
 	assert.equal(info.active_capacity, "2");
-	assert.equal(info.capabilities.providers.openai, "key_file");
+	assert.equal(info.capabilities.connections.find((entry: { name: string }) => entry.name === "openai")?.route, "key_file");
 	assert.equal(info.store, realpathSync(store));
 	assert.equal(rui.hostInfo?.innodb_doublewrite, undefined);
 	assert.equal(Object.hasOwn(info, "innodb_doublewrite"), false);
@@ -301,7 +301,7 @@ test("an explicitly named OpenAI environment source reaches the child, not the d
 	let rui: Rui | undefined;
 	try {
 		rui = await connect(newStore(), { providers: { openai: { key: { env: name } } } });
-		assert.equal(rui.hostInfo?.capabilities.providers.openai, "key_file");
+		assert.equal((rui.hostInfo?.capabilities.connections.find((c) => c.name === "openai")?.route ?? "unserved"), "key_file");
 		if (process.platform === "linux") {
 			assert.ok(readFileSync(`/proc/${rui.pid}/environ`, "utf8").split("\0").includes(`${name}=${key}`));
 			assert.ok(!readFileSync(`/proc/${rui.pid}/cmdline`, "utf8").includes(key));

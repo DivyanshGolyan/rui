@@ -185,12 +185,12 @@ pub fn configurationBeforeWorkspace(
         null;
     _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
     const provider = if (requested.provider.state == .value)
-        connection.Name.parse(requested.provider.value.slice()) orelse return .unsupported_provider
+        connection.Name.parse(requested.provider.value.slice()) orelse return .unknown_connection
     else
         null;
     if (current) |existing| {
         if (provider) |value| {
-            if (!value.eql(existing.provider)) return .provider_is_immutable;
+            if (!value.eql(existing.provider)) return .connection_is_immutable;
         }
     }
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
@@ -849,7 +849,7 @@ test "a null or empty model is invalid and an omitted one is left to the missing
 
 const CreationCheck = union(enum) {
     missing: required_settings.Missing,
-    unsupported_provider,
+    unknown_connection,
     unserved_connection,
     complete: struct { provider: connection.Name },
 };
@@ -858,7 +858,7 @@ const CreationCheck = union(enum) {
 /// start_agent) reaches it after the parent is read, so the reply names every missing setting.
 fn creationCheck(configuration: *const ConfigurationView, reads: *const ConfigurationReads, served: *const provider_route.Served) CreationCheck {
     const explicit: ?connection.Name = if (configuration.provider.state == .value)
-        connection.Name.parse(configuration.provider.value.slice()) orelse return .unsupported_provider
+        connection.Name.parse(configuration.provider.value.slice()) orelse return .unknown_connection
     else
         null;
     // Naming a connection the Host does not serve is refused; a default or inherited provider is not.
@@ -960,19 +960,20 @@ fn validateLane(a: anytype, request: *const Request, reads: *ConfigurationReads)
     const creating = request.session.len == 0;
     const next = &reads.next;
     try reads.lane.check();
-    reads.lane_tools = reads.lane.view(request.tools.host_tool_set);
-    parentApps(reads);
     if (creating) if (try inheritParent(request.configuration, reads)) |code| return .{ .rejected = code };
     const creation_provider: ?connection.Name = if (creating) switch (creationCheck(configuration, reads, request.served)) {
         .missing => |missing| {
             reads.missing = missing;
             return .{ .rejected = .missing_settings };
         },
-        .unsupported_provider => return .{ .rejected = .unsupported_provider },
+        .unknown_connection => return .{ .rejected = .unknown_connection },
         .unserved_connection => return .{ .rejected = .connection_unserved },
         .complete => |complete| complete.provider,
     } else null;
     if (request.configuration.app_tools.state == .value) if (try declareAppTools(request, reads)) |code| return .{ .rejected = code };
+    // The one lane resolver for this request: the declaration it carries (create, replace or clear), else the saved lane.
+    reads.lane_tools = if (reads.apps.declaration) |*declaration| declaredLaneTools(request.tools.host_tool_set, declaration) else reads.lane.view(request.tools.host_tool_set);
+    parentApps(reads);
     if (creating or configuration.tools.state == .value) {
         reads.tools = tool_set.Selection.of(&reads.lane_tools, if (creating) configuration_defaults.creationTools(configuration.tools, configuration.model.value.slice(), @import("../../os/read_image_file.zig").available) else configuration.tools, reads.lane.set);
         if (reads.tools) |*tools| tool_set.lookupSelection(a, tools);
@@ -985,11 +986,22 @@ fn validateLane(a: anytype, request: *const Request, reads: *ConfigurationReads)
     return .{ .round = .model };
 }
 
-/// The app names a child's parent offers, as the lane's records narrow them to the parent's names.
+/// The Host set plus a declaration this request carries: its records replace the saved lane's for this request.
+fn declaredLaneTools(host: *const tool_defs.HostToolSet, declaration: *const app_tools.Declaration) tool_defs.HostToolSet {
+    return .{
+        .records = host.records,
+        .digests = host.digests,
+        .configured_servers = host.configured_servers,
+        .apps = declaration.records,
+        .app_digests = declaration.digests,
+    };
+}
+
+/// The app names a child's parent offers, as the lane's resolved tools narrow them to the parent's names.
 fn parentApps(reads: *ConfigurationReads) void {
     reads.parent_apps = .{};
     if (!reads.inherits_parent) return;
-    reads.lane.offeredTo(reads.inherited.tools.slice(), &reads.parent_apps);
+    tool_set.offeredAppNamesTo(&reads.lane_tools, reads.inherited.tools.slice(), &reads.parent_apps);
 }
 
 fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
@@ -1002,7 +1014,7 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     if (configuration.compaction_trigger.state == .value) _ = tokenCount(configuration.compaction_trigger.value.slice(), false) catch return .{ .rejected = .invalid_compaction_trigger };
     _ = configurationTokens(configuration.output_reservation, null, true) catch return .{ .rejected = .invalid_output_reservation };
     const provider = if (configuration.provider.state == .value)
-        connection.Name.parse(configuration.provider.value.slice()) orelse return .{ .rejected = .unsupported_provider }
+        connection.Name.parse(configuration.provider.value.slice()) orelse return .{ .rejected = .unknown_connection }
     else if (current_configuration) |existing| existing.provider else v.creation_provider.?;
     const model = if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice();
     // Named tools resolve through the lane before their parent authority is judged, so an unknown or unavailable name
@@ -1168,6 +1180,11 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
             next.output_schema_id = @intCast(applied.output_schema_id.?);
         },
         .clear => next.output_schema_id = null,
+    }
+    // A declaration this request applied is the lane's set now, so the selections record it as their app set.
+    if (reads.apps.declaration != null) {
+        if (reads.tools) |*tools| tools.app_set = reads.apps.set_id orelse 0;
+        if (reads.loaded_tools) |*loaded| loaded.app_set = reads.apps.set_id orelse 0;
     }
     if (creating or configuration.tools.state == .value) {
         const tools = &(reads.tools orelse return error.CorruptStore);

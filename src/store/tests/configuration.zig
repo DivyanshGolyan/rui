@@ -124,7 +124,7 @@ test "configuration pre-Workspace decisions allow model revisions" {
             .model_requested = null,
             .expected = null,
         },
-        .{ .name = "a different connection name is immutable on an existing Session", .has_current = true, .workspace_requested = false, .provider_requested = "other", .model_requested = null, .expected = .provider_is_immutable },
+        .{ .name = "a different connection name is immutable on an existing Session", .has_current = true, .workspace_requested = false, .provider_requested = "other", .model_requested = null, .expected = .connection_is_immutable },
     };
 
     var existing: CurrentConfiguration = .{};
@@ -169,9 +169,10 @@ test "configuration pre-Workspace decisions allow model revisions" {
 test "configure refuses a tool name the tool set lacks and a provider tool its provider does not run" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const hosted: tool_defs.Record = .{ .name = "code_interpreter", .owner = .provider };
-            const records = [_]tool_defs.Record{ tool_defs.bash_record, hosted, tool_defs.web_search_record };
-            const digests = [_][32]u8{ tool_defs.recordDigest(&records[0]), tool_defs.recordDigest(&records[1]), tool_defs.recordDigest(&records[2]) };
+            // The Host set holds every built-in (a Store refuses a set without them) and one provider tool.
+            const records = comptime testingHostToolRecords(&.{.{ .name = "code_interpreter", .owner = .provider }});
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: store_core.Store = undefined;
@@ -307,7 +308,7 @@ test "a different connection name rejects mixed configuration atomically and rep
             const revision_count = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{});
             const rejected = try storage.configure(&update, .{});
             try std.testing.expect(rejected == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.provider_is_immutable, rejected.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.connection_is_immutable, rejected.rejected.code);
             try std.testing.expectEqual(content_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
             try std.testing.expectEqual(revision_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
             const current = try storage.inspectSessionForTesting(created_session_0.slice());
@@ -952,7 +953,7 @@ test "explicit native and preset restrictions survive reopen and resumed model r
                     try request.preset.?.set("reader");
                     const arena = memory.allocator();
                     const bytes = try std.json.Stringify.valueAlloc(arena, .{
-                        .provider = "codex",
+                        .connection = "codex",
                         .workspace = workspace,
                         .model = create.configuration.model.value.slice(),
                         .effort = create.configuration.reasoning_effort.value.slice(),

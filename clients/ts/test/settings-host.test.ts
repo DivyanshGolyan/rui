@@ -119,7 +119,7 @@ for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysq
 				writeFileSync(credentialFile, `version=3\ngeneration=1\naccount_id=plan-subject\nclient_id=rui-test-plan-client\nfedramp=0\nid_token=${id}\naccess_token=${token}\nrefresh_token=fixture-refresh\nexpires_at=4102444800\nrefreshed_at=1750000000\nstate=ready\n`, { mode: 0o600 });
 			}
 			const spec = {
-				provider: adapter, model: "gpt-6.1-sol", effort: "low" as const, compactAt: 100000,
+				connection: adapter, model: "gpt-6.1-sol", effort: "low" as const, compactAt: 100000,
 				workspace: root, tools: ["bash", "settings_echo"], permissionMode: "bypass" as const,
 			};
 			rui = await Rui.connect({
@@ -129,9 +129,9 @@ for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysq
 				...(adapter === "chatgpt" ? { presets: { drift: spec } } : {}),
 				tools: { bash: { timeoutMs: 37 }, mcp: { fixture: { url: `http://127.0.0.1:${mcpAddress.port}/mcp`, bearerToken: { env: tokenName }, callTimeoutMs: 1000 } } },
 			}, { binary });
-			assert.equal(rui.hostInfo?.capabilities.providers.codex, adapter === "codex" ? "endpoint" : "unserved");
-			assert.equal(rui.hostInfo?.capabilities.providers.openai, "unserved");
-			assert.equal(rui.hostInfo?.capabilities.providers.chatgpt, adapter === "chatgpt" ? "chatgpt_plan" : "unserved");
+			assert.equal((rui.hostInfo?.capabilities.connections.find((c) => c.name === "codex")?.route ?? "unserved"), adapter === "codex" ? "endpoint" : "unserved");
+			assert.equal((rui.hostInfo?.capabilities.connections.find((c) => c.name === "openai")?.route ?? "unserved"), "unserved");
+			assert.equal((rui.hostInfo?.capabilities.connections.find((c) => c.name === "chatgpt")?.route ?? "unserved"), adapter === "chatgpt" ? "chatgpt_plan" : "unserved");
 			assert.ok(methods.includes("tools/list"), "configured MCP Adapter must be listed during start");
 			if (adapter === "chatgpt") {
 				const deadline = AbortSignal.any([t.signal, AbortSignal.timeout(10_000)]);
@@ -141,12 +141,12 @@ for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysq
 						version: WIRE_VERSION, kind: "model_list", store: canonicalStore,
 					}), undefined, { idleMs: 1000 });
 					const reply = JSON.parse(bytes.toString("utf8")) as components["schemas"]["ModelListReply"];
-					const current = reply.providers.find((entry) => entry.provider === "chatgpt");
+					const current = reply.connections.find((entry) => entry.connection === "chatgpt");
 					if (current?.source === "live" && current.models.some((model) => model.id === "gpt-6.1-sol")) break;
 					await delay(100, undefined, { signal: deadline });
 				}
 				const listed = await rui.models();
-				assert.ok(listed.some((model) => model.provider === "chatgpt" && model.id === "gpt-6.1-sol"), "live ChatGPT listing must offer the preset's fixture model");
+				assert.ok(listed.some((model) => model.connection === "chatgpt" && model.id === "gpt-6.1-sol"), "live ChatGPT listing must offer the preset's fixture model");
 				assert.ok(providerRequests.includes("GET /v1/models"), "live listing must reach the sign-in fixture, not unknown-model fallback");
 			}
 			const session = await rui.sessions.create(adapter === "chatgpt" ? { preset: "drift" } : spec, { idempotencyKey: "settings:create" });

@@ -88,7 +88,7 @@ def completion(state):
     try:
         with running(state, "completion", [(answer("completed answer"), release)]) as (home, store, endpoint, host, diagnostics):
             started = canonical.invoke(home, "session", "start", "--store", store,
-                                       "--workspace", home, "--provider", "codex", "--model", "gpt-6-sol",
+                                       "--workspace", home, "--connection", "codex", "--model", "gpt-6-sol",
                                        input="complete")
             assert started.returncode == 0, started
             handle = canonical.announced(started)

@@ -25,7 +25,7 @@ pub const Entry = struct {
 
 pub const entries = [_]Entry{
     .{ .field = "workspace", .spec = "workspace", .kind = .{ .text = 4096 }, .changeable = false, .cli = .{ .name = "workspace" }, .column = "workspace" },
-    .{ .field = "provider", .spec = "provider", .kind = .{ .choice = 16 }, .changeable = false, .cli = .{ .name = "provider", .group = .binding }, .column = "provider" },
+    .{ .field = "provider", .spec = "connection", .kind = .{ .choice = 16 }, .changeable = false, .cli = .{ .name = "connection", .group = .binding }, .column = "provider" },
     .{ .field = "model", .spec = "model", .kind = .{ .text = 256 }, .create = .must_value, .changeable = true, .cli = .{ .name = "model", .group = .binding }, .column = "model" },
     .{ .field = "instructions", .spec = "instructions", .kind = .content, .cli = .{ .name = "instructions", .on_start = false }, .column = "instructions_content_id" },
     .{ .field = "tools", .spec = "tools", .kind = .tools, .cli = .{ .name = "tools" }, .column = "tool_set_id" },
@@ -40,6 +40,15 @@ pub const entries = [_]Entry{
     // and read back as the declared list. Only a lane root may declare them (a child refuses by name).
     .{ .field = "app_tools", .spec = "appTools", .kind = .app_tools, .nullable = true, .cli = null, .digest = .unless_omitted, .column = "app_tool_set_id", .since_refused = true },
 };
+
+/// The CLI spelling of a Session setting: every grammar, requirement and
+/// repair line names the option through this, never a literal.
+pub fn cliName(comptime field: []const u8) []const u8 {
+    for (entries) |entry| if (std.mem.eql(u8, entry.field, field)) {
+        return (entry.cli orelse @compileError("setting has no CLI option: " ++ field)).name;
+    };
+    @compileError("unknown Session setting: " ++ field);
+}
 
 pub const relations = [_]Entry{
     .{ .field = "parent", .spec = "parent", .kind = .{ .text = 6 }, .changeable = false, .cli = null, .digest = .unless_omitted, .column = "parent_ref" },

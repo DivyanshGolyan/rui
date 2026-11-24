@@ -161,7 +161,7 @@ def key_entry_journey(binary):
                                stderr=subprocess.PIPE, env={**env, "HOME": str(home)}, timeout=10)
     assert piped.returncode != 0, piped
     assert (home / ".config" / "rui" / "openai.key").read_text() == "sk-receipt\n"
-    assert "provider=openai" in (home / ".config" / "rui" / "preferences").read_text()
+    assert "connection=openai" in (home / ".config" / "rui" / "preferences").read_text()
     print("openai key entry passed: hidden input, Ctrl+C restores the terminal and saves nothing, Backspace edits, Enter saves, a failed receipt still saves the default")
 
 

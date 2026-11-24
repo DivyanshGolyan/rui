@@ -1462,7 +1462,7 @@
     "/v1/model-list": {
       "post": {
         "operationId": "modelList",
-        "summary": "The models each served provider offers.",
+        "summary": "The models each served connection offers.",
         "parameters": [
           {
             "$ref": "#/components/parameters/WireVersion"
@@ -3782,13 +3782,10 @@
             },
             "additionalProperties": false
           },
-          "provider": {
+          "connection": {
             "type": "string",
-            "enum": [
-              "codex",
-              "openai",
-              "chatgpt"
-            ]
+            "maxLength": 16,
+            "x-maxBytes": 16
           },
           "workspace": {
             "type": "string"
@@ -3922,7 +3919,7 @@
             "maxLength": 4096,
             "x-rui-max-bytes": 4096
           },
-          "provider": {
+          "connection": {
             "type": "string",
             "maxLength": 16,
             "x-rui-max-bytes": 16
@@ -4242,13 +4239,9 @@
                   "configuration": {
                     "type": "object",
                     "properties": {
-                      "provider": {
+                      "connection": {
                         "type": "string",
-                        "enum": [
-                          "codex",
-                          "openai",
-                          "chatgpt"
-                        ]
+                        "x-rui-max-bytes": 16
                       },
                       "model": {
                         "type": "string",
@@ -4312,7 +4305,7 @@
                       }
                     },
                     "required": [
-                      "provider",
+                      "connection",
                       "model",
                       "reasoning_effort",
                       "workspace",
@@ -4460,7 +4453,7 @@
                       "invalid_session_reference",
                       "unknown_session",
                       "unsupported_permission_mode",
-                      "unsupported_provider",
+                      "unknown_connection",
                       "invalid_model",
                       "model_capability_unavailable",
                       "invalid_output_schema",
@@ -4485,7 +4478,7 @@
                       "permission_mode_wider_than_parent",
                       "invalid_workspace",
                       "workspace_is_immutable",
-                      "provider_is_immutable",
+                      "connection_is_immutable",
                       "model_is_immutable",
                       "revision_exhausted",
                       "skills_unavailable",
@@ -4522,7 +4515,7 @@
                           "enum": [
                             "model",
                             "workspace",
-                            "provider"
+                            "connection"
                           ]
                         },
                         "minItems": 1,
@@ -4618,6 +4611,36 @@
           "key",
           "session",
           "configuration"
+        ],
+        "additionalProperties": false
+      },
+      "ConnectionEntry": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "x-rui-max-bytes": 16
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 40,
+            "x-rui-max-bytes": 40
+          },
+          "route": {
+            "type": "string",
+            "enum": [
+              "unserved",
+              "endpoint",
+              "chatgpt_device",
+              "key_file",
+              "chatgpt_plan"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "label",
+          "route"
         ],
         "additionalProperties": false
       },
@@ -5353,51 +5376,16 @@
               "bash": {
                 "const": true
               },
-              "providers": {
-                "type": "object",
-                "properties": {
-                  "codex": {
-                    "type": "string",
-                    "enum": [
-                      "unserved",
-                      "endpoint",
-                      "chatgpt_device",
-                      "key_file",
-                      "chatgpt_plan"
-                    ]
-                  },
-                  "openai": {
-                    "type": "string",
-                    "enum": [
-                      "unserved",
-                      "endpoint",
-                      "chatgpt_device",
-                      "key_file",
-                      "chatgpt_plan"
-                    ]
-                  },
-                  "chatgpt": {
-                    "type": "string",
-                    "enum": [
-                      "unserved",
-                      "endpoint",
-                      "chatgpt_device",
-                      "key_file",
-                      "chatgpt_plan"
-                    ]
-                  }
-                },
-                "required": [
-                  "codex",
-                  "openai",
-                  "chatgpt"
-                ],
-                "additionalProperties": false
+              "connections": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ConnectionEntry"
+                }
               }
             },
             "required": [
               "bash",
-              "providers"
+              "connections"
             ],
             "additionalProperties": false
           }
@@ -7535,13 +7523,9 @@
                   "configuration": {
                     "type": "object",
                     "properties": {
-                      "provider": {
+                      "connection": {
                         "type": "string",
-                        "enum": [
-                          "codex",
-                          "openai",
-                          "chatgpt"
-                        ]
+                        "x-rui-max-bytes": 16
                       },
                       "model": {
                         "type": "string",
@@ -7605,7 +7589,7 @@
                       }
                     },
                     "required": [
-                      "provider",
+                      "connection",
                       "model",
                       "reasoning_effort",
                       "workspace",
@@ -7699,7 +7683,7 @@
                       "unknown_session",
                       "invalid_sender_handle",
                       "unsupported_permission_mode",
-                      "unsupported_provider",
+                      "unknown_connection",
                       "connection_unserved",
                       "invalid_model",
                       "model_capability_unavailable",
@@ -7724,7 +7708,7 @@
                       "permission_mode_wider_than_parent",
                       "invalid_workspace",
                       "workspace_is_immutable",
-                      "provider_is_immutable",
+                      "connection_is_immutable",
                       "model_is_immutable",
                       "revision_exhausted",
                       "skills_unavailable",
@@ -7762,7 +7746,7 @@
                           "enum": [
                             "model",
                             "workspace",
-                            "provider"
+                            "connection"
                           ]
                         },
                         "minItems": 1,
@@ -7859,7 +7843,7 @@
                       "unknown_session",
                       "invalid_sender_handle",
                       "unsupported_permission_mode",
-                      "unsupported_provider",
+                      "unknown_connection",
                       "connection_unserved",
                       "invalid_model",
                       "model_capability_unavailable",
@@ -7884,7 +7868,7 @@
                       "permission_mode_wider_than_parent",
                       "invalid_workspace",
                       "workspace_is_immutable",
-                      "provider_is_immutable",
+                      "connection_is_immutable",
                       "model_is_immutable",
                       "revision_exhausted",
                       "skills_unavailable",
@@ -7922,7 +7906,7 @@
                           "enum": [
                             "model",
                             "workspace",
-                            "provider"
+                            "connection"
                           ]
                         },
                         "minItems": 1,
@@ -8425,13 +8409,9 @@
       "ModelListEntry": {
         "type": "object",
         "properties": {
-          "provider": {
+          "connection": {
             "type": "string",
-            "enum": [
-              "codex",
-              "openai",
-              "chatgpt"
-            ]
+            "x-rui-max-bytes": 16
           },
           "source": {
             "type": "string",
@@ -8465,7 +8445,7 @@
           }
         },
         "required": [
-          "provider",
+          "connection",
           "source",
           "models"
         ],
@@ -8480,7 +8460,7 @@
           "type": {
             "const": "model_list"
           },
-          "providers": {
+          "connections": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ModelListEntry"
@@ -8490,7 +8470,7 @@
         "required": [
           "version",
           "type",
-          "providers"
+          "connections"
         ],
         "additionalProperties": false
       },
@@ -13842,13 +13822,9 @@
             "maxLength": 4096,
             "x-rui-max-bytes": 4096
           },
-          "provider": {
+          "connection": {
             "type": "string",
-            "enum": [
-              "codex",
-              "openai",
-              "chatgpt"
-            ]
+            "x-rui-max-bytes": 16
           },
           "model": {
             "type": "string",
@@ -13964,7 +13940,7 @@
           "reference",
           "archive_seq",
           "workspace",
-          "provider",
+          "connection",
           "model",
           "tools",
           "permission_mode",
@@ -15219,13 +15195,9 @@
             "maxLength": 4096,
             "x-rui-max-bytes": 4096
           },
-          "provider": {
+          "connection": {
             "type": "string",
-            "enum": [
-              "codex",
-              "openai",
-              "chatgpt"
-            ]
+            "x-rui-max-bytes": 16
           },
           "model": {
             "type": "string",
@@ -15373,7 +15345,7 @@
           "reference",
           "parent",
           "workspace",
-          "provider",
+          "connection",
           "model",
           "compaction_trigger",
           "context_estimate",
@@ -16319,13 +16291,9 @@
             "maxLength": 4096,
             "x-rui-max-bytes": 4096
           },
-          "provider": {
+          "connection": {
             "type": "string",
-            "enum": [
-              "codex",
-              "openai",
-              "chatgpt"
-            ]
+            "x-rui-max-bytes": 16
           },
           "model": {
             "type": "string",
@@ -16433,7 +16401,7 @@
           "revision",
           "command_key",
           "workspace",
-          "provider",
+          "connection",
           "model",
           "compaction_trigger",
           "output_reservation",
