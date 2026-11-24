@@ -763,12 +763,17 @@ fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line
     return null;
 }
 
+const StopBaseline = struct {
+    version: Token,
+    work: session_work.Work,
+};
+
 pub const Request = struct {
     kind: enum { create, stop, archive, unarchive, pin, unpin, send },
 
     session: ?Reference = null,
     status: enum { pending, done, failed, unknown } = .pending,
-    stop_read_version: ?Token = null,
+    stop_baseline: ?StopBaseline = null,
     stop_overlay: bool = true,
 
     text: Bounded(@max(max_handle_bytes, session_work.max_code_bytes)) = .{},
@@ -2321,8 +2326,7 @@ fn reconcileSelection(state: *State, selected_at: ?usize, opening: bool) void {
     }
 }
 
-fn workChanged(row: *const Row, work: session_work.Work) bool {
-    const old = row.work();
+fn workChanged(old: session_work.Work, work: session_work.Work) bool {
     if (std.meta.activeTag(old.state) != std.meta.activeTag(work.state) or old.state.since() != work.state.since()) return true;
     if (!std.meta.eql(old.turn, work.turn) or !std.meta.eql(old.operation, work.operation) or
         !std.meta.eql(old.first_action, work.first_action) or !std.meta.eql(old.actions, work.actions) or
@@ -2356,9 +2360,11 @@ fn settleRow(state: *State, row: *Row, read: session_list.Snapshot) void {
     next.state = next.state.asOf(state.now_ms);
     for (state.requests[0..state.request_count]) |*held| {
         if (held.kind != .stop or !held.stop_overlay or !std.mem.eql(u8, &held.session.?, &row.reference)) continue;
-        const before = held.stop_read_version orelse continue;
-        const later = !std.mem.eql(u8, &before.instance, &read.read_version.instance) or read.read_version.generation > before.generation;
-        if (later and workChanged(row, next)) held.stop_overlay = false;
+        const baseline = held.stop_baseline orelse continue;
+        const later = !std.mem.eql(u8, &baseline.version.instance, &read.read_version.instance) or read.read_version.generation > baseline.version.generation;
+        var original = baseline.work;
+        original.state = original.state.asOf(state.now_ms);
+        if (later and workChanged(original, next)) held.stop_overlay = false;
     }
     row.read_version = read.read_version;
     row.state = next.state;
@@ -2778,7 +2784,9 @@ fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
     const kind = kindShown(state, ref, target.work);
     if (!target.can_stop or state.openStop(ref) != null) return refuseStop(state, ref, kind);
     if (state.request(.stop, ref)) {
-        state.requests[state.request_count - 1].stop_read_version = if (state.find(ref)) |row| row.read_version else null;
+        if (state.find(ref)) |row| if (row.read_version) |version| {
+            if (state.accepts(version)) state.requests[state.request_count - 1].stop_baseline = .{ .version = version, .work = row.work() };
+        };
         effects.add(.{ .stop = ref });
     }
 }
