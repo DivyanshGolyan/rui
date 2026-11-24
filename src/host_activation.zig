@@ -168,7 +168,7 @@ test "SH-122 an ordinary start hands over only an incompatible start and attache
     var seen: [std.meta.tags(std.meta.Tag(Outcome)).len]bool = @splat(false);
     for (rows) |row| {
         try std.testing.expectEqual(row.step, startStep(row.outcome));
-        seen[@intFromEnum(std.meta.activeTag(row.outcome))] = true;
+        seen[@backingInt(std.meta.activeTag(row.outcome))] = true;
     }
     for (seen) |covered| try std.testing.expect(covered);
 }

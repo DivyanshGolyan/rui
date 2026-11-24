@@ -88,7 +88,6 @@ pub fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: activati
     return activation.category(outcome);
 }
 
-
 const Result = activation.Category;
 const Totals = activation.Counts;
 
