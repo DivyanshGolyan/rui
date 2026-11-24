@@ -348,7 +348,7 @@ pub fn sentWire(io: std.Io, allocator: std.mem.Allocator, reply: *Reply) ![]u8 {
     defer _ = std.c.close(sockets[1]);
     defer _ = std.c.close(sockets[0]);
     try sendReply(io, sockets[0], reply);
-    _ = std.c.shutdown(sockets[0], std.posix.SHUT.WR);
+    _ = socket_os.shutdown(sockets[0], std.c.SHUT.WR);
     var received: std.ArrayList(u8) = .empty;
     errdefer received.deinit(allocator);
     var chunk: [4096]u8 = undefined;

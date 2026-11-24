@@ -3712,23 +3712,10 @@ fn prepareTest(replies: *Replies, reply: *Reply, header: Header, request: *wire_
 /// The body a prepared reply sends, read back through a socket pair; it sends the whole reply and leaves it
 /// for the caller to deinit.
 fn sentBody(allocator: std.mem.Allocator, reply: *Reply) ![]u8 {
-    var sockets: [2]c_int = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
-    defer _ = std.c.close(sockets[1]);
-    defer _ = std.c.close(sockets[0]);
-    try server_reply.sendReply(std.testing.io, sockets[0], reply);
-    _ = std.c.shutdown(sockets[0], std.posix.SHUT.WR);
-    var received: std.ArrayList(u8) = .empty;
-    defer received.deinit(allocator);
-    var chunk: [4096]u8 = undefined;
-    while (true) {
-        const count = std.c.read(sockets[1], &chunk, chunk.len);
-        if (count < 0) return error.ReadFailed;
-        if (count == 0) break;
-        try received.appendSlice(allocator, chunk[0..@intCast(count)]);
-    }
-    const headers_end = std.mem.indexOf(u8, received.items, "\r\n\r\n") orelse return error.MissingHeaders;
-    return allocator.dupe(u8, received.items[headers_end + 4 ..]);
+    const wire = try server_reply.sentWire(std.testing.io, allocator, reply);
+    defer allocator.free(wire);
+    if (std.mem.indexOf(u8, wire, "\r\n\r\n") == null) return error.MissingHeaders;
+    return allocator.dupe(u8, server_reply.bodyOf(wire));
 }
 
 test "creation receipt survives dropped and failed reply allocation" {
