@@ -41,7 +41,7 @@ The documentation lane skips heavyweight policy, product builds and suites.
 It requires a successful plan with canonical empty product outputs and a successful Linux aggregate that verifies all product producers were skipped.
 The allowlist reads committed Git paths and modes against the selector's resolved base and candidate; any selected runtime, native, cache or resource obligation restores normal verification.
 Reference and consistency checks remain reviewed evidence, not automated link validation.
-The always-run `admission` aggregate requires the exact results for the declared change kind; on a PR the Mac and cache-execution jobs must be skipped.
+The `admission` aggregate, which runs on every PR run that is not cancelled, requires the exact results for the declared change kind; on a PR the Mac and cache-execution jobs must be skipped.
 Failed, cancelled, missing or unexpectedly skipped required jobs do not qualify a candidate, and an unselected Mac job must be skipped.
 A draft PR runs only the plan (candidate, `git diff --check` and selection summary) and cheap aggregates; policy, builds and suites are skipped.
 The plan owns draft routing without changing the diff's documentation/normal classification; readiness computes a fresh full selection.
@@ -140,11 +140,11 @@ The targets are portable: a baseline CPU, glibc 2.34 on Linux and macOS 15 on Ap
 Each build must report the version and exact SHA from `rui --version`.
 The Linux executables are stripped, and their debug info ships as a separate `-debug` archive that crash traces read once it is extracted beside them.
 The release attaches the archives, `SHA256SUMS` and an `install.sh` that pins the archive digests.
-Before publishing, the publish job measures the released linux-x86_64 executable with [host_memory.py](../../tests/ci/host_memory.py) from the release's own source and adds its table to the release notes, so Host memory can be tracked release by release.
+Promote's qualification tier measures the released linux-x86_64 executable with [host_memory.py](../../tests/ci/host_memory.py) (the `host-memory` step, the `memory` job) before publication. Its per-agent verdict gates the promotion, and its table is uploaded as `rui-host-memory`; the publish job adds that table to the release notes without measuring again, so Host memory is tracked release by release from one measurement.
 Each scenario in its `SCENARIOS` list is one row: a fresh Host brought to one state by the `tests/integration` fixtures without network, its `/proc/PID/smaps_rollup` field read once it stops changing, over a fixed number of runs, reported as median and range in KiB with the runner's image, CPU, kernel and glibc.
 The rows are an empty Host and 100 agents waiting on the model (`Private_Dirty`), and a Host holding an OpenAI model listing or an MCP `tools/list` open at start (`Anonymous`); a feature adds a row by adding an entry.
-Numbers compare only release to release on the same runner type, and nothing fails on them: a scenario that cannot be measured says `not measured` with its reason in its row, and a measuring step that fails or passes its five minutes leaves one `not measured` line, never a failed release.
-`test_host_memory.py` checks the table and the `not measured` path; only a real release run measures on the hosted runner.
+Numbers compare only release to release on the same runner type, and nothing fails on them: a scenario that cannot be measured says `not measured` with its reason in its row, and a publish-only row that cannot be measured never fails a release. Only the per-agent verdict gates, and the notes say `not measured` when the qualification tier uploaded no table.
+`test_host_memory.py` checks the verdict, the table and the `not measured` path; only a real promotion run measures on the hosted runner.
 
 `test_release.py` uses fake archives.
 It covers version planning, template filling with the shared publication fragment, every report state (first install, update, reinstall, Store format change, Host and `PATH` states) and the installer's update, digest, version and preservation behavior.

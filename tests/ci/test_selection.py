@@ -1766,6 +1766,12 @@ fi
                     self.assertEqual(pr_job.count("publish-caches: 'false'"), 1)
                     self.assertEqual(pr_job.count('uses: ./.github/actions/setup'), 1)
                     workflow = workflow.replace(pr_job, pr_job.replace("publish-caches: 'false'", ''), 1)
+                if path.name == 'qualification-tier.yml':
+                    # The memory gate only restores: it measures a release archive and publishes no caches.
+                    memory = re.search(r'(?ms)^  memory:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
+                    self.assertEqual(memory.count("publish-caches: 'false'"), 1)
+                    self.assertEqual(memory.count('uses: ./.github/actions/setup'), 1)
+                    workflow = workflow.replace(memory, memory.replace("publish-caches: 'false'", ''), 1)
                 if path.name == 'promote.yml':
                     # The manual bisect replays old commits: its one setup restores and never publishes.
                     bisect = re.search(r'(?ms)^  bisect:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
@@ -2824,6 +2830,23 @@ class SuspectAttributionTest(unittest.TestCase):
 
     def test_a_statement_table_root_reach_makes_rsql_table_a_graph_suspect(self):
         self.assertEqual(self.reach("src/store/tests.zig").get("rsql-table"), GRAPH)
+
+    def test_host_memory_is_attribution_only_over_its_domain(self):
+        """CI-93: host-memory is DIRECT for its own script, GRAPH for Host graph paths, and no selection names it."""
+        from select_tests import PR_SELECTED_TARGETS, PROMOTION_CORE_TARGETS, PROMOTION_EXTRA_TARGETS
+        cases = (
+            ("tests/ci/host_memory.py", "host-memory", DIRECT),
+            ("src/server.zig", "host-memory", GRAPH),
+            ("src/store/tests.zig", "host-memory", None),
+        )
+        for path, target, expected in cases:
+            with self.subTest(path=path):
+                self.assertEqual(self.reach(path).get(target), expected)
+        self.assertNotIn("host-memory", PR_SELECTED_TARGETS | PROMOTION_EXTRA_TARGETS | PROMOTION_CORE_TARGETS | CHECK_COVERS)
+        self.assertNotIn("host-memory", FIXTURES)
+        for paths in (["src/server.zig"], ["tests/ci/host_memory.py"], ["build.zig"]):
+            with self.subTest(selected=paths):
+                self.assertNotIn("host-memory", select(paths, "review", AVAILABLE)["targets"])
 
     def test_a_changed_package_reaches_the_targets_that_link_it_even_outside_the_pr_tier(self):
         before = (ROOT / "build.zig.zon").read_text()

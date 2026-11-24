@@ -3,6 +3,34 @@ const Editor = @import("DraftEditor.zig");
 const keymap = @import("keymap.zig");
 const slash_commands = @import("slash_commands.zig").conversation;
 const Self = @This();
+const media = @import("input_media.zig");
+const parts = @import("input_parts.zig");
+const protocol = @import("protocol.zig");
+
+pub const max_image_bytes = 16 * 1024 * 1024;
+pub const image_budget = 64 * 1024 * 1024;
+pub const Image = struct {
+    bytes: []const u8,
+    identity: parts.Identity,
+
+    pub fn validate(bytes: []const u8) !Image {
+        var scanner = try media.Scanner.init(bytes.len, null, .{ .max_bytes = max_image_bytes });
+        var allowance = bytes.len;
+        _ = try scanner.advance(bytes, &allowance);
+        return .{
+            .bytes = bytes,
+            .identity = .{ .length = bytes.len, .digest = protocol.contentDigest(bytes), .kind = .{ .image = .{ .media = try scanner.finish() } } },
+        };
+    }
+
+    pub fn clone(self: Image) !Image {
+        return .{ .bytes = try std.heap.page_allocator.dupe(u8, self.bytes), .identity = self.identity };
+    }
+
+    pub fn deinit(self: Image) void {
+        std.heap.page_allocator.free(self.bytes);
+    }
+};
 
 pub const capacity = 65_536;
 pub const Ticket = struct { owner: *const Self, serial: u64 };
@@ -33,6 +61,7 @@ pub const Landing = union(enum) {
 
 banks: [2][capacity]u8 = undefined,
 editors: [2]Editor = undefined,
+images: [2]?Image = @splat(null),
 command_buffer: [capacity]u8 = undefined,
 command_length: ?usize = null,
 active: u1 = 0,
@@ -117,8 +146,13 @@ pub fn snapshot(self: *const Self) Snapshot {
 }
 
 pub fn restore(self: *Self, draft: Snapshot) void {
+    self.restoreWithImage(draft, null);
+}
+
+pub fn restoreWithImage(self: *Self, draft: Snapshot, attachment: ?Image) void {
     std.debug.assert(draft.bytes.len <= capacity and draft.cursor <= draft.bytes.len);
     self.clear();
+    self.images[self.active] = attachment;
     const editor = &self.editors[self.active];
     std.debug.assert(editor.set(draft.bytes, draft.cursor) == null);
     editor.rejected = draft.rejected;
@@ -127,6 +161,8 @@ pub fn restore(self: *Self, draft: Snapshot) void {
 
 pub fn appEvent(self: *Self, comptime keys: anytype, event: @import("vaxis").vxfw.Event, pasting: bool, selected: bool) Event(@TypeOf(keys).Action) {
     const outcome = self.tracked(keymap.Outcome(@TypeOf(keys).Action), Editor.appEvent, .{ keys, event, pasting });
+    if (outcome == .action and self.image() != null and event == .key_press and @import("keypress.zig").named(event.key_press) == .ctrl_d)
+        return .{ .editor = .none };
     return self.accept(@TypeOf(keys).Action, outcome, selected);
 }
 
@@ -160,11 +196,11 @@ fn accept(self: *Self, comptime Action: type, outcome: keymap.Outcome(Action), s
     if (outcome == .refused and outcome.refused.endsLine()) self.clear();
     if (outcome != .submit) return .{ .editor = outcome };
     const bytes = self.composition().bytes;
-    if (bytes.len == 0) return .{ .editor = outcome };
-    switch (slash_commands.draftOf(bytes)) {
+    if (self.draftEmpty()) return .{ .editor = outcome };
+    if (self.image() == null) switch (slash_commands.draftOf(bytes)) {
         .command => return if (self.admitsCommand()) .command else .busy,
         .message, .word => {},
-    }
+    };
     if (!selected or self.submitted != null) return .busy;
     return .{ .message = self.seal(false, bytes.len) };
 }
@@ -199,6 +235,7 @@ pub fn submitPreservingDraft(self: *Self, io: std.Io, file: std.Io.File, length:
     std.debug.assert(self.submitted == null);
     if (length > capacity) return error.MessageTooLarge;
     const bank = self.active ^ 1;
+    std.debug.assert(self.images[bank] == null);
     const bytes = self.banks[bank][0..length];
     if (try file.readPositionalAll(io, bytes, 0) != length) return error.TruncatedRetryScratch;
     self.editors[bank] = self.empty(bank);
@@ -218,7 +255,33 @@ fn seal(self: *Self, literal: bool, length: usize) Ticket {
 
 pub fn clear(self: *Self) void {
     self.editors[self.active] = self.empty(self.active);
+    self.setImage(null);
+}
+
+pub fn setImage(self: *Self, attachment: ?Image) void {
+    if (self.images[self.active]) |previous| previous.deinit();
+    self.images[self.active] = attachment;
     self.changed();
+}
+
+pub fn image(self: *const Self) ?Image {
+    return self.images[self.active];
+}
+
+pub fn draftEmpty(self: *const Self) bool {
+    return self.image() == null and self.composition().bytes.len == 0;
+}
+
+pub fn submittedImageBytes(self: *const Self) usize {
+    const bank = self.submitted orelse return 0;
+    return if (self.images[bank.bank]) |attachment| attachment.bytes.len else 0;
+}
+
+pub fn deinit(self: *Self) void {
+    for (&self.images) |*attachment| {
+        if (attachment.*) |owned| owned.deinit();
+        attachment.* = null;
+    }
 }
 
 fn changed(self: *Self) void {
@@ -228,7 +291,7 @@ fn changed(self: *Self) void {
 }
 
 pub fn press(self: *Self, older: bool) enum { queued, typed } {
-    if (self.recall.shown == null and self.composition().bytes.len != 0) return .typed;
+    if (self.recall.shown == null and !self.draftEmpty()) return .typed;
     self.recall.pending += if (older) -1 else 1;
     return .queued;
 }
@@ -278,12 +341,18 @@ pub fn fill(self: *Self, io: std.Io, file: std.Io.File, found: Found) !void {
 pub fn message(self: *const Self, ticket: Ticket) ![]const u8 {
     const submitted = try self.checked(ticket);
     const bytes = self.banks[submitted.bank][0..submitted.length];
-    return if (!submitted.literal and std.mem.startsWith(u8, bytes, "//")) bytes[1..] else bytes;
+    return if (!submitted.literal and self.images[submitted.bank] == null and std.mem.startsWith(u8, bytes, "//")) bytes[1..] else bytes;
+}
+
+pub fn messageImage(self: *const Self, ticket: Ticket) !?Image {
+    return self.images[(try self.checked(ticket)).bank];
 }
 
 pub fn release(self: *Self, ticket: Ticket) !void {
     const submitted = try self.checked(ticket);
     self.editors[submitted.bank] = self.empty(submitted.bank);
+    if (self.images[submitted.bank]) |attachment| attachment.deinit();
+    self.images[submitted.bank] = null;
     self.submitted = null;
 }
 

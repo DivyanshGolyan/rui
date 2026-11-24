@@ -476,9 +476,9 @@ class AdmissionTest(unittest.TestCase):
                 with self.subTest(skips=skips):
                     self.assertNotEqual(run(skips).returncode, 0)
 
-    def test_admission_always_runs_for_every_pr_and_waits_for_required_parts(self):
+    def test_admission_runs_for_every_uncancelled_pr_and_waits_for_required_parts(self):
         text = job(CHECK.read_text(), 'admission')
-        self.assertIn("if: ${{ always() && github.event_name == 'pull_request' }}", text)
+        self.assertIn("if: ${{ !cancelled() && github.event_name == 'pull_request' }}", text)
         # Admission checks every part the linux job checks off pull requests, so it needs their results too.
         required = ('plan', 'policy', 'macos', 'cache_execution', 'pr_linux', 'linux_build',
                     'linux_build_unit', 'linux_suites', 'macos_typecheck')
@@ -1157,7 +1157,7 @@ class JobGraphTest(unittest.TestCase):
         self.assertIn("if: ${{ github.event_name != 'pull_request' }}", job(text, 'mac_runner'))
         linux, admission = job(text, 'linux'), job(text, 'admission')
         self.assertIn("github.event_name != 'pull_request'", linux)
-        self.assertIn("if: ${{ always() && github.event_name == 'pull_request' }}", admission)
+        self.assertIn("if: ${{ !cancelled() && github.event_name == 'pull_request' }}", admission)
         # Admission runs the same script over the same environment the linux job uses off pull requests.
         def linux_step(body):
             step = body.split('- name: Require every selected Linux part', 1)[1].split('\n      - ', 1)[0]
@@ -1249,13 +1249,33 @@ class ReleaseFlowTest(unittest.TestCase):
                     self.assertEqual(ran.returncode, 0, ran.stderr)
                     self.assertEqual(output.read(), f'scheduled={expected}\n')
 
+    def test_memory_gates_the_release_archive_and_never_skips(self):
+        text = TIER.read_text()
+        memory = job(text, 'memory')
+        # No job-level condition: a skipped tier is unfinished to verdict(), so the gate always runs.
+        self.assertNotIn('\n    if:', memory)
+        self.assertIn('needs: release_build', memory)
+        self.assertIn('ref: ${{ inputs.head }}', memory)
+        self.assertIn('targets: \'["host-memory"]\'', memory)
+        self.assertIn('python3 -B tests/ci/release_under_test.py "$VERSION" "$SHA"', memory)
+        self.assertIn('VERSION: ${{ needs.release_build.outputs.version }}', memory)
+        self.assertIn('RUI_HOST_MEMORY_NOTES: ${{ runner.temp }}/host-memory.md', memory)
+        self.assertIn('python3 -B tests/ci/steps.py --output-root "$RUNNER_TEMP/memory"', memory)
+        self.assertIn('\'host-memory=zig build host-memory --summary all ${RUI_UNDER_TEST:+"-Drui-under-test=$RUI_UNDER_TEST"}\'', memory)
+        upload = memory.split('Retain the Host memory table', 1)[1]
+        self.assertIn('if: ${{ always() }}', upload)
+        self.assertIn('name: rui-host-memory', upload)
+        self.assertIn('path: ${{ runner.temp }}/host-memory.md', upload)
+        self.assertEqual(permissions_of(memory), {'contents': 'read', 'actions': 'read'})
+        self.assertIn('needs: [selected, upgrade, renderer, memory]', job(text, 'report'))
+
     def test_one_tier_owns_qualification_and_its_verdict(self):
         text = TIER.read_text()
         on = text.split('\npermissions:', 1)[0]
         self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', on), ['workflow_call'])
         self.assertEqual(re.findall(r'(?m)^      ([a-z-]+):\n        description', on), ['base', 'head', 'red-label', 'version'])
         self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]),
-                         ['release_build', 'selected', 'upgrade', 'renderer', 'qualified', 'report'])
+                         ['release_build', 'selected', 'upgrade', 'renderer', 'memory', 'qualified', 'report'])
         self.assertNotRegex(text, r'/release\.yml|id-token|actions: write')
         build = job(text, 'release_build')
         self.assertIn('uses: ./.github/workflows/release-build.yml', build)
@@ -1273,14 +1293,14 @@ class ReleaseFlowTest(unittest.TestCase):
             self.assertIn('needs: release_build', body)
             self.assertIn('release-version: ${{ needs.release_build.outputs.version }}', body)
         qualified = job(text, 'qualified')
-        self.assertIn('needs: [release_build, selected, upgrade, renderer]', qualified)
+        self.assertIn('needs: [release_build, selected, upgrade, renderer, memory]', qualified)
         self.assertIn('if: ${{ always() }}', qualified)
         self.assertEqual(permissions_of(qualified), {'contents': 'read', 'statuses': 'write'})
         script = step_script(qualified, 'Record the verdict on HEAD')
         self.assertIn('main_qualified.py verdict $RESULTS', script)
         self.assertIn('main_qualified.py record --sha "$HEAD_SHA" --state "$state" --run-id "$GITHUB_RUN_ID" --version "$VERSION"',
                       script)
-        for tier in ('release_build', 'selected', 'upgrade', 'renderer'):
+        for tier in ('release_build', 'selected', 'upgrade', 'renderer', 'memory'):
             self.assertIn(f'${{{{ needs.{tier}.result }}}}', qualified)
         # The requirement is report_issue.py's aggregate step: it files nothing of its own.
         self.assertIn('      - name: Require every selected qualification tier\n', qualified)
@@ -1329,7 +1349,7 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertIn('value: ${{ jobs.release_build.outputs.version }}', TIER.read_text())
         # A green qualification publishes that run's archives without qualifying again.
         self.assertIn('artifact-run: ${{ needs.batch.outputs.run }}', release)
-        self.assertEqual(RELEASE.read_text().count('gh run download "$ARTIFACT_RUN"'), 3)
+        self.assertEqual(RELEASE.read_text().count('gh run download "$ARTIFACT_RUN"'), 2)
         self.assertNotIn('gh run download "$GITHUB_RUN_ID"', RELEASE.read_text())
         # Publication never rebuilds: it checks the archives against the digests recorded at build time.
         publication = RELEASE.read_text()
@@ -1351,7 +1371,8 @@ class ReleaseFlowTest(unittest.TestCase):
         jobs = [('linux_suites', job(check, 'linux_suites'), 'run_selected.py'),
                 ('macos_suites', job(check, 'macos_suites'), 'run_selected.py'),
                 ('upgrade', job(UPGRADE.read_text(), 'upgrade'), 'steps.py'),
-                ('contracts', job(RENDERER.read_text(), 'contracts'), 'steps.py')]
+                ('contracts', job(RENDERER.read_text(), 'contracts'), 'steps.py'),
+                ('memory', job(TIER.read_text(), 'memory'), 'steps.py')]
         for name, body, recorder in jobs:
             with self.subTest(job=name):
                 self.assertNotIn('Bisect the promotion batch', body)

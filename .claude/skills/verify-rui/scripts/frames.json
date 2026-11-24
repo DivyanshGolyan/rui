@@ -1390,7 +1390,7 @@
           ]
         },
         {
-          "wait": "/unarchive"
+          "wait": "/unpin"
         }
       ],
       "expect": [
@@ -1398,9 +1398,10 @@
         "/requests       recover a lost request",
         "/result         show a saved answer",
         "/setup          defaults for new chats",
-        "/unarchive      restore this chat"
+        "/unpin"
       ],
       "absent": [
+        "/unarchive",
         "/configure",
         "/status",
         "/discard",
@@ -1418,7 +1419,7 @@
       ],
       "expect_dim": [
         {
-          "text": "restore this chat",
+          "text": "defaults for new chats",
           "dim": false
         }
       ]
@@ -1526,12 +1527,13 @@
         "/requests       recover a lost request",
         "/result         show a saved answer",
         "/setup          defaults for new chats",
-        "/unarchive      restore this chat",
+        "/unpin",
         "/review",
         "Verify the project and",
         "more \u00b7 type to narrow"
       ],
       "absent": [
+        "/unarchive",
         "/configure",
         "/status",
         "/discard",

@@ -6,6 +6,7 @@ The **Slash commands** screen opens above the input when you type `/` in **Chat*
 
 - Matching parts are bold, an exact listed command or skill name turns blue in the input, and the selected row uses the shared selection wash.
 - Up/Down move through suggestions. Tab completes; Enter takes the selected suggestion. Commands needing an argument continue in the draft.
+- Use `/arch` in an unarchived chat and `/unar` in an archived chat to inspect the matching command. During pending archive, both archive verbs are unavailable. A completed restore returns the chat to the live list with work still stopped.
 - `/copy`, `/copy code` and `/copy file` copy an answer or its named part. A missing code block shows **No code block**.
 - `/rename NAME`, `/effort LEVEL`, `/pin`, `/unpin`, `/reload-skills`, `/reload-tools` and `/setup` act on the named chat or defaults. `/setup` alone shows defaults.
 - `/requests` shows saved requests. Select a row with Up/Down then Enter to recover a request or show its saved answer. `/result KEY` shows a saved answer directly.
