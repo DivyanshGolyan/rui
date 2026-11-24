@@ -317,6 +317,12 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return styled and position < self.text().len and self.styles[position] & body_bit != 0;
         }
 
+        pub fn assistantWebLinkAt(self: *const Self, position: usize) ?[]const u8 {
+            if (!self.bodyAt(position) or self.styles[position] & user_message_bit != 0 or !self.selectable(position)) return null;
+            const uri = self.address(position);
+            return if (TerminalText.linkTarget(uri)) uri else null;
+        }
+
         pub fn selectable(self: *const Self, position: usize) bool {
             if (position >= self.length) return false;
             if (!styled) return true;

@@ -333,7 +333,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
     self.startInput();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
-    self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick, .on_retry = appRetry, .quote = .{ .begin = appQuoteBegin, .insert = appQuoteInsert } } };
+    self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_external = appExternal, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick, .on_retry = appRetry, .quote = .{ .begin = appQuoteBegin, .insert = appQuoteInsert } } };
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
     self.app_document = .{ .document = &screen.browsing, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll } };
     self.app_body = .{ .shown = self.app_content.widget() };
@@ -692,6 +692,18 @@ fn appQuoteInsert(raw: *anyopaque, ctx: *vxfw.EventContext, target: Input.Insert
         try self.app_hooks.root.focusInput(ctx);
     }
     try self.afterInput(ctx);
+}
+
+fn appExternal(raw: *anyopaque, ctx: *vxfw.EventContext, uri: []const u8) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.leaving != null or self.pagePlace() == .elsewhere or !TerminalText.linkTarget(uri)) return;
+    const opener = @import("os").linkOpener(self.init.environ_map) orelse {
+        try appNotice(raw, ctx, "No browser opener is available for this link");
+        return;
+    };
+    opener.open(self.init.io, uri) catch {
+        try appNotice(raw, ctx, "Couldn't open this link in a browser");
+    };
 }
 
 fn appOpen(raw: *anyopaque, ctx: *vxfw.EventContext, id: []const u8) !void {

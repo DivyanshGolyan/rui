@@ -82,7 +82,7 @@ pub const Calls = struct {
         const timeout_ms = for (host.mcp_servers.entries) |*server| {
             if (std.mem.eql(u8, server.name, call.server.slice())) break server.timeout_ms;
         } else @import("mcp/servers.zig").default_timeout_ms;
-        var admission = (host.store.admitActionAttempt(call, timeout_ms, host.hooks.storeFaults(.attempt_admission)) catch |err| {
+        var admission = (host.store.admitActionAttempt(call, timeout_ms, host.probes.storeFaults(.attempt_admission)) catch |err| {
             active.releaseUnused(host);
             host.lifecycle.fenceDispatch("MCP admission", err);
             return .retry_later;
@@ -645,7 +645,7 @@ test "MCP ordinary custody covers preparation failure init failure stop shutdown
                         var stop = try store.testingCompleteSessionStop("stop", session.slice());
                         try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
                     }
-                    if (case == .settlement) host.hooks.failures.insert(.result_before_commit);
+                    if (case == .settlement) host.probes.arm(.result_before_commit);
                     try std.testing.expect(calls.service(&host));
                 }
             }
@@ -1054,7 +1054,7 @@ test "MCP retained response follows the actual delivery outcome" {
                 try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
             },
             .lost => try std.testing.expect(host.custody.claimTerminalDelivery(token)),
-            .fenced => host.hooks.failures.insert(.result_before_commit),
+            .fenced => host.probes.arm(.result_before_commit),
             .normal => {},
         }
         complete(host, &active, ended);
