@@ -2627,7 +2627,7 @@ test "a line upgrades on the Host, takes its leftover watch, hears each commit t
 
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .instance = @splat(0xab), .intake_capacity = descriptor_capacity.minimum_intake };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const wake = try linePair();
     defer for (wake) |fd| {
         _ = std.c.close(fd);
@@ -2707,7 +2707,7 @@ test "a line upgrades on the Host, takes its leftover watch, hears each commit t
     try std.testing.expectEqual(@as(usize, 0), intake.lines.count);
 
     // A fenced Store refuses an upgrade with the canonical store failure, not a busy reply.
-    host.lifecycle.phase.store(.open, .release);
+    host_parts.attach(&host, undefined);
     storage.fenced.store(true, .release);
     try sendRequest(pairs[3][1], &request, line_test_instance, "");
     try intake.accept(pairs[3][0]);
@@ -3043,7 +3043,7 @@ test "Conversation stream native delivery reads each byte once and closes on fai
     command.stream = true;
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     var sockets: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &sockets));
     defer _ = std.c.close(sockets[0]);
@@ -3155,7 +3155,7 @@ test "discovery identity exhaustion cannot start a new error delivery budget" {
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     host.request_counter.store(std.math.maxInt(u64), .release);
     const exchange = try host.allocator.create(Intake.Exchange);
     exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 10 * std.time.ns_per_s };
@@ -3388,7 +3388,7 @@ test "delayed control replies retain command identity after request storage reus
             .test_observation = &observation,
         };
         var host_parts: TestParts = undefined;
-        host_parts.attach(&host, null);
+        host_parts.attach(&host, undefined);
         var original: [protocol.max_key_bytes]u8 = undefined;
         for (&original, 0..) |*byte, index| byte.* = @intCast('a' + index % 26);
         var request_key = protocol.Bounded(protocol.max_key_bytes){ .bytes = original, .len = original.len };
@@ -3806,7 +3806,7 @@ test "retired reserved exchanges cannot block their successors while workers are
         for ([_]Intake.Exchange.State{ .retired, .closed }) |retired_state| {
             var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .intake_capacity = descriptor_capacity.minimum_intake };
             var host_parts: TestParts = undefined;
-            host_parts.attach(&host, null);
+            host_parts.attach(&host, undefined);
             var intake: Intake = .{ .host = &host };
             defer intake.exchanges.deinit(host.allocator);
             defer for (intake.exchanges.items) |exchange| {
@@ -3941,7 +3941,7 @@ test "file-free retirement releases intake places before acceptance with occupie
         for ([_]bool{ false, true }) |service_workers| {
             var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
             var host_parts: TestParts = undefined;
-            host_parts.attach(&host, null);
+            host_parts.attach(&host, undefined);
             var intake: Intake = .{ .host = &host };
             defer intake.exchanges.deinit(host.allocator);
             defer for (intake.exchanges.items) |exchange| {
@@ -4055,7 +4055,7 @@ test "retired ordinary capture still consumes its intake classification and reso
 test "shutdown fences every unhanded route while preserving request and reply custody" {
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     var exchange = Intake.Exchange{ .owner = undefined, .host = &host, .fd = -1, .accepted_at_ns = 0, .deadline = 0 };
     const State = @TypeOf(exchange.state);
     for (std.enums.values(Route)) |route| {
@@ -4156,7 +4156,7 @@ test "shutdown fences every unhanded route while preserving request and reply cu
 test "intake accepts and physically retires a hundred incomplete exchanges" {
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const wake = try Intake.openIntakeWake();
     var intake: Intake = undefined;
     intake.init(&host, wake) catch |err| {
@@ -4969,7 +4969,7 @@ test "presets seed configure before Store validation and idempotency" {
     const presets = [_]core_tools.Preset{.{ .name = "review", .spec = spec }};
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .presets = &presets };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const create = try arena.create(wire_request.ConfigureCommand);
     create.* = .{ .preset = .{} };
     try create.preset.?.set("review");
@@ -5531,13 +5531,13 @@ test "SH-53 a dispatch fence records its reason in the Host diagnostics file" {
 
     var unattached = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
     var unattached_parts: TestParts = undefined;
-    unattached_parts.attach(&unattached, null);
+    unattached_parts.attach(&unattached, undefined);
     unattached.lifecycle.fenceDispatch("before readiness", error.Unattached);
     try std.testing.expect(unattached.lifecycle.stopping());
 
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     writer.record("ready", "serving");
     host.lifecycle.attachDiagnostics(&writer);
     host.lifecycle.retainDispatchFence("retained cleanup", error.Retained);
@@ -5754,7 +5754,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     defer owner.deinit();
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .mcp_relist = &owner, .instance = @splat(0x7e) };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
 
     // An unknown server is refused, and no list is asked.
     var request: @FieldType(wire_request.Request, "tools_reload") = .{};
@@ -5781,7 +5781,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
         try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "dispatch_fenced") != null);
     }
     try std.testing.expectEqual(@as(u64, 0), owner.asks[0].load(.acquire) + owner.asks[1].load(.acquire));
-    host.lifecycle.phase.store(.open, .release);
+    host_parts.attach(&host, undefined);
 
     // A named server asks only its own list, and the reply carries the Host instance.
     request.server = .{};
@@ -5819,7 +5819,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     // A Host with no MCP servers answers empty lists, and an unnamed ask asks nothing.
     var bare = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .instance = @splat(0x7e) };
     var bare_parts: TestParts = undefined;
-    bare_parts.attach(&bare, null);
+    bare_parts.attach(&bare, undefined);
     {
         var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
         defer reply.deinit();
@@ -6382,7 +6382,7 @@ test "every accepted control publishes exactly one hint before reply handling" {
                         .test_observation = &observation,
                     };
                     var host_parts: TestParts = undefined;
-                    host_parts.attach(&host, null);
+                    host_parts.attach(&host, undefined);
                     var result = initial;
                     switch (result) {
                         .accepted => |*value| value.replayed = replayed,

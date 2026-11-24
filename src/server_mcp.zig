@@ -436,7 +436,7 @@ test "MCP full output hints follow the frozen Bash offer despite later settings"
         var custody_records: [2]execution.CustodyRecord = @splat(.{});
         var host: Host = .{ .custody = execution.CustodyPool.initialize(&custody_records), .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = &configs }, .retention = &retention };
         var host_parts: TestParts = undefined;
-        host_parts.attach(&host, null);
+        host_parts.attach(&host, undefined);
         var calls: Calls = .{};
         defer calls.shutdown(&host);
         try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, calls.admit(&host, selected));
@@ -515,7 +515,7 @@ test "MCP call of a prefixed tool sends the name its server listed" {
     var custody_records: [2]execution.CustodyRecord = @splat(.{});
     var host: Host = .{ .custody = execution.CustodyPool.initialize(&custody_records), .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = &configs }, .retention = &retention };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     var calls: Calls = .{};
     defer calls.shutdown(&host);
     try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, calls.admit(&host, selected));
@@ -574,7 +574,7 @@ test "MCP ordinary custody covers preparation failure init failure stop shutdown
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = if (case == .allocation) 0 else 1 });
         var host: Host = .{ .custody = execution.CustodyPool.initialize(&custody_records), .io = std.testing.io, .allocator = if (case == .allocation or case == .preparation) failing.allocator() else std.testing.allocator, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = if (case == .unavailable) &.{} else &configs }, .retention = &retention };
         var host_parts: TestParts = undefined;
-        host_parts.attach(&host, null);
+        host_parts.attach(&host, undefined);
         if (case == .capacity_zero or case == .capacity_occupied or case == .capacity_detached) {
             if (case == .capacity_zero) host.custody = execution.CustodyPool.initialize(&.{});
             const detached = if (case == .capacity_detached) detach: {
@@ -708,7 +708,7 @@ test "MCP Result renders and retains text across outcomes and frozen offers" {
     defer queue.cleanupAll();
     var host: @import("server_host.zig").Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const running = try gpa.create(Running);
     defer gpa.destroy(running);
     const Case = struct { length: usize, kind: enum { text, mixed_error, structured, rpc_error, refused } = .text };
@@ -826,7 +826,7 @@ test "MCP Result reports retention refusal without changing success" {
         defer script.stop();
         var host: @import("server_host.zig").Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
         var host_parts: TestParts = undefined;
-        host_parts.attach(&host, null);
+        host_parts.attach(&host, undefined);
         try running.start(gpa, adapterTestInput(script.port), 0);
         defer running.deinit();
         const ended = try adapterTestDrive(running);
@@ -856,7 +856,7 @@ test "Running oversized JSON and SSE answers preserve borrowed evidence until re
     defer queue.cleanupAll();
     var host: @import("server_host.zig").Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const running = try gpa.create(Running);
     defer gpa.destroy(running);
     const response = try gpa.alloc(u8, Running.max_answer_bytes + 1024);
@@ -941,7 +941,7 @@ test "MCP image part limit accounts for empty text tails" {
         defer queue.cleanupAll();
         var host: Host = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = undefined, .retention = &queue };
         var host_parts: TestParts = undefined;
-        host_parts.attach(&host, null);
+        host_parts.attach(&host, undefined);
         var content: std.Io.Writer.Allocating = .init(allocator);
         defer content.deinit();
         try content.writer.writeByte('[');
@@ -1033,7 +1033,7 @@ test "MCP retained response follows the actual delivery outcome" {
         defer allocator.destroy(host);
         host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .custody = execution.CustodyPool.initialize(&custody_records), .retention = &queue };
         var host_parts: TestParts = undefined;
-        host_parts.attach(host, null);
+        host_parts.attach(host, undefined);
         const token = host.custody.reserve().?;
         const binding = try host.custody.attach(token, &admission.permit);
         defer {

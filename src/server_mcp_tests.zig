@@ -173,7 +173,7 @@ fn run(case: Case) !void {
     defer allocator.destroy(host);
     host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .custody = execution.CustodyPool.initialize(custody[0..(if (case == .concurrent) 2 else 1)]), .mcp_servers = .{ .entries = &servers }, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(host, null);
+    host_parts.attach(host, undefined);
     if (case == .retention_settlement_failure or case == .retention_settlement_unlink_failure) host.hooks.failures.insert(.result_before_commit);
     var active: mcp.Calls = .{};
     defer {

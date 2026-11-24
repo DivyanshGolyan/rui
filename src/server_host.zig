@@ -328,7 +328,7 @@ pub const Phase = enum(u8) { open, fenced, ending, stopping };
 pub const Lifecycle = struct {
     io: std.Io,
     /// Null only in tests that never stop the Host.
-    lease: ?*platform.StoreLease,
+    lease: *platform.StoreLease,
     phase: std.atomic.Value(Phase) = .init(.open),
     controls_changed: std.atomic.Value(bool) = .init(false),
     /// The operator's hold on new Turns (host-pause). Read the hold in force
@@ -343,7 +343,7 @@ pub const Lifecycle = struct {
     /// Attached after readiness, when the Host's stderr may be /dev/null; launch_mutex guards writes.
     diagnostics: ?*HostDiagnostics = null,
 
-    pub fn init(io: std.Io, lease: ?*platform.StoreLease, paused: bool, intake_wake: ?std.posix.fd_t) Lifecycle {
+    pub fn init(io: std.Io, lease: *platform.StoreLease, paused: bool, intake_wake: ?std.posix.fd_t) Lifecycle {
         return .{ .io = io, .lease = lease, .turns_paused = .init(paused), .intake_wake = intake_wake };
     }
 
@@ -443,8 +443,7 @@ pub const Lifecycle = struct {
     }
 
     fn recordStop(self: *Lifecycle, record: host_drain.Record) void {
-        const lease = self.lease orelse return;
-        lease.recordStop(record.text()) catch |err| stderr.print("rui: stop record not written: {s}\n", .{@errorName(err)});
+        self.lease.recordStop(record.text()) catch |err| stderr.print("rui: stop record not written: {s}\n", .{@errorName(err)});
     }
 
     pub fn withEffectLaunch(self: *Lifecycle, context: anytype, comptime launch: anytype) !void {
@@ -1337,7 +1336,7 @@ test "inspection counts held custody, not an in-flight admission reservation" {
         .store = undefined,
         .custody = execution.CustodyPool.initialize(&records),
     };
-    var host_lifecycle = Lifecycle.init(host.io, null, false, null);
+    var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
     host.lifecycle = &host_lifecycle;
     const cleanup = host.custody.reserve().?;
     var permit = store_module.DispatchPermit{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 } };
@@ -1375,7 +1374,7 @@ test "required Bash observations publish while optional stderr custody is held" 
             .hooks = .{ .phase_trace = true },
             .test_observation = &observation,
         };
-        var host_lifecycle = Lifecycle.init(host.io, null, false, null);
+        var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
         host.lifecycle = &host_lifecycle;
         try std.testing.expect(stderr.tryAcquire());
         defer stderr.release();
@@ -1422,7 +1421,7 @@ test "effect launch gate rechecks every Host phase" {
             .lease = undefined,
             .store = undefined,
         };
-        var host_lifecycle = Lifecycle.init(host.io, null, false, null);
+        var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
         host.lifecycle = &host_lifecycle;
         try std.testing.expect(host.lifecycle.launchAllowed());
         _ = host.lifecycle.advance(phase);
@@ -1446,7 +1445,7 @@ test "Host phases only move forward" {
                 .lease = undefined,
                 .store = undefined,
             };
-            var host_lifecycle = Lifecycle.init(host.io, null, false, null);
+            var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
             host.lifecycle = &host_lifecycle;
             try std.testing.expectEqual(Phase.open, host.lifecycle.advance(start));
             try std.testing.expectEqual(start, host.lifecycle.advance(target));
@@ -1466,7 +1465,7 @@ test "effect launch gate releases its mutex after native failure" {
         .lease = undefined,
         .store = undefined,
     };
-    var host_lifecycle = Lifecycle.init(host.io, null, false, null);
+    var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
     host.lifecycle = &host_lifecycle;
     const Launch = struct {
         fn fail(calls: *usize) !void {

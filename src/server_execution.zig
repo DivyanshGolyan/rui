@@ -3082,7 +3082,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
             .auth_worker = &worker,
         };
         var host_parts: TestParts = undefined;
-        host_parts.attach(&host, null);
+        host_parts.attach(&host, undefined);
         const token = host.custody.reserve().?;
         var permit = store_module.DispatchPermit{ .binding = .{
             .turn_id = 7,
@@ -3182,7 +3182,7 @@ test "a leased model list waits behind every model slot, and its lease always go
         .model_lists = .init(io, std.testing.allocator, &served),
     };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     defer host.model_lists.deinit();
     var used: std.atomic.Value(u64) = .init(0);
     var urls: std.EnumArray(provider.ListingKind, ?[]const u8) = .initFill(null);
@@ -3381,7 +3381,7 @@ test "HTTP error capture retires before execution custody" {
             .custody = execution.CustodyPool.initialize(&records),
         };
         var host_parts: TestParts = undefined;
-        host_parts.attach(&host, null);
+        host_parts.attach(&host, undefined);
         const token = host.custody.reserve().?;
         var permit = store_module.DispatchPermit{ .binding = .{
             .turn_id = 3,
@@ -3518,7 +3518,7 @@ test "forced refresh captures retire before custody publication across Store cla
             .custody = execution.CustodyPool.initialize(&fixture.records),
         };
         var fixture_parts: TestParts = undefined;
-        fixture_parts.attach(&fixture.host, null);
+        fixture_parts.attach(&fixture.host, undefined);
         fixture.host.scratch_used.store(17, .release);
         const budget = ScratchBudget{ .used = &fixture.host.scratch_used, .limit = 4 * 1024 * 1024 };
         const token = fixture.host.custody.reserve().?;
@@ -3652,7 +3652,7 @@ test "cleanup publication follows complete execution retirement" {
         .custody = execution.CustodyPool.initialize(&records),
     };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     var slot: ExecutionSlot = .free;
     boundary.slot = &slot;
     boundary.custody = &host.custody;
@@ -4285,7 +4285,7 @@ test "no-work admission restores only its temporary custody reservation" {
                 .custody = execution.CustodyPool.initialize(&records),
             };
             var host_parts: TestParts = undefined;
-            host_parts.attach(&host, null);
+            host_parts.attach(&host, undefined);
             var slots = [_]ExecutionSlot{ .free, .free, .free };
             const sibling = if (with_sibling) host.custody.reserve().? else null;
             if (sibling) |token| {
@@ -4399,7 +4399,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
                 .custody = execution.CustodyPool.initialize(&records),
             };
             var host_parts: TestParts = undefined;
-            host_parts.attach(&host, null);
+            host_parts.attach(&host, undefined);
             var slots = [_]ExecutionSlot{ .free, .free, .free };
             const sibling = if (with_sibling) host.custody.reserve().? else null;
             if (sibling) |token| {
@@ -4837,7 +4837,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             .custody = execution.CustodyPool.initialize(&records),
         };
         var host_parts: TestParts = undefined;
-        host_parts.attach(&host, null);
+        host_parts.attach(&host, undefined);
         const token = host.custody.reserve().?;
         var permit = store_module.DispatchPermit{ .binding = .{
             .turn_id = 1,
@@ -5157,7 +5157,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .custody = execution.CustodyPool.initialize(&records),
         };
         var host_parts: TestParts = undefined;
-        host_parts.attach(&host, null);
+        host_parts.attach(&host, undefined);
         const token = host.custody.reserve().?;
         var permit = store_module.DispatchPermit{ .binding = .{
             .turn_id = 1,
@@ -5409,7 +5409,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
         .custody = execution.CustodyPool.initialize(&custody),
     };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     var mcp_calls: server_mcp.Calls = .{};
     defer mcp_calls.shutdown(&host);
     var native: NativeTurn = .{
@@ -5466,7 +5466,7 @@ test "a skill tool reload under heap exhaustion runs again later without fencing
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
@@ -5566,7 +5566,7 @@ test "a model reload settles in the pass that asks, and a find_tools search find
     try std.testing.expect(input.tool == .find_tools);
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
 
     // One pass settles the reload: the server is asked again, its generation advanced, and nothing waits.
     try std.testing.expectEqual(@as(u64, 1), owner.asks[0].load(.acquire));
@@ -5634,7 +5634,7 @@ test "a reload while a list is in flight folds into the next list, one extra lis
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
 
     // A list is already in flight when the reload asks; the reload's generation waits for the list after it.
     _ = owner.ask(0);
@@ -5691,7 +5691,7 @@ test "a reload does not hold back a later core Action in another Session" {
     const reload = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &reload));
 
     // Once the reload settles, the next core Action is the other Session's search, not the reload again.
@@ -5726,7 +5726,7 @@ test "a reload with no MCP server configured says so and asks nothing" {
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
     var text: [256]u8 = undefined;
     try std.testing.expectEqualStrings("No MCP servers are configured, so nothing was reloaded.\nNo tools matched. 0 tools are still not loaded.", try reloadText(&storage, session, input.binding.action_id, &text));
@@ -5767,7 +5767,7 @@ test "a find_tools reload with words reports the asks, then the loaded tools, an
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const revisions = try testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1", .{session.slice()});
 
     try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
@@ -5809,7 +5809,7 @@ test "a find_tools reload with invalid words is refused and asks no server" {
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
     var text: [256]u8 = undefined;
     try std.testing.expectEqualStrings("Rui could not find tools: words must be a string. Nothing was loaded.", try reloadText(&storage, session, input.binding.action_id, &text));
@@ -5848,7 +5848,7 @@ test "a find_tools reload under heap exhaustion retries later without fencing, a
     const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
@@ -6256,7 +6256,7 @@ test "EXR-92 a Host started before its MCP server serves holds the server's new 
     defer storage.close() catch unreachable;
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
 
     try owner.startup(io, &storage, null, null);
     try std.testing.expect(storage.hostTools().host_tool_set.find("beta") == null);

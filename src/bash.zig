@@ -790,7 +790,7 @@ fn testOutcome(execution: *Execution, scratch: Scratch, queue: *output_retention
     var unavailable = output_retention.Queue.initialize(scratch.io, scratch.path, queue.budget, &no_entries);
     var host: Host = .{ .io = scratch.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &unavailable };
     var host_parts: Parts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = excerpt_bytes, .retain = true });
     defer result.destroy();
     out.code = try execution.writeResult(scratch, &unavailable, result);

@@ -356,7 +356,7 @@ fn testReadImage(cases: []const TestCase) !void {
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 1 });
         var host: Host = .{ .io = std.testing.io, .allocator = if (case == .result_allocation or case == .empty_allocation or case == .oversized_allocation) failing.allocator() else std.testing.allocator, .lease = undefined, .store = &storage, .retention = &queue, .custody = execution.CustodyPool.initialize(&records) };
         var host_parts: TestParts = undefined;
-        host_parts.attach(&host, null);
+        host_parts.attach(&host, undefined);
         var capture_vtable = std.testing.io.vtable.*;
         var calls: Calls = .{};
         defer calls.shutdown(&host);

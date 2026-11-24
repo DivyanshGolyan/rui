@@ -7,11 +7,11 @@ const Lifecycle = server_host.Lifecycle;
 pub const TestParts = struct {
     lifecycle: Lifecycle,
 
-    pub fn attach(self: *TestParts, host: *Host, lease: ?*platform.StoreLease) void {
+    pub fn attach(self: *TestParts, host: *Host, lease: *platform.StoreLease) void {
         self.attachWithWake(host, lease, null);
     }
 
-    pub fn attachWithWake(self: *TestParts, host: *Host, lease: ?*platform.StoreLease, intake_wake: ?@import("std").posix.fd_t) void {
+    pub fn attachWithWake(self: *TestParts, host: *Host, lease: *platform.StoreLease, intake_wake: ?@import("std").posix.fd_t) void {
         self.lifecycle = .init(host.io, lease, false, intake_wake);
         host.lifecycle = &self.lifecycle;
     }

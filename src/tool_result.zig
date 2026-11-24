@@ -466,7 +466,7 @@ test "result budgets image diagnostics and keeps a later image" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 10_000, .retain = false });
     defer result.destroy();
     for (0..6) |_| {
@@ -513,7 +513,7 @@ test "fitting result creates no retained file" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 10_000, .retain = true });
     defer result.destroy();
     try result.text().writeAll("complete text");
@@ -535,7 +535,7 @@ test "result reserves final part for refusal text" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 10_000, .retain = false });
     defer result.destroy();
     const png = @embedFile("codecs/fixtures/image-input/pixel.png");
@@ -561,7 +561,7 @@ test "result text excerpt is independent of chunk boundaries" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 4, .retain = false });
     defer result.destroy();
     try result.text().writeAll("ab\xe2");
@@ -583,7 +583,7 @@ test "required image capture reclaims optional spill" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 8, .retain = true });
     defer result.destroy();
     const long: [20_000]u8 = @splat('x');
@@ -616,7 +616,7 @@ test "result retained path names complete sanitized output" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 3, .retain = true });
     defer result.destroy();
     try result.text().writeAll("abcdef");
@@ -654,7 +654,7 @@ test "plain result preserves unavailable-retention footer" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 3, .retain = true });
     defer result.destroy();
     try result.text().writeAll("abcdef");
@@ -674,7 +674,7 @@ test "final reservation yields spill before choosing footer" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 8, .retain = true });
     defer result.destroy();
     const long: [20_000]u8 = @splat('x');
@@ -708,7 +708,7 @@ test "result accepts exactly the full image part limit" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 10_000, .retain = false });
     defer result.destroy();
     const png = @embedFile("codecs/fixtures/image-input/pixel.png");
@@ -732,7 +732,7 @@ test "destroying an unfinished result releases capture and spill" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 3, .retain = true });
     try result.text().writeAll("abcdef");
     const png = @embedFile("codecs/fixtures/image-input/pixel.png");
@@ -754,7 +754,7 @@ test "final reservation retries with shorter refusal footer" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 3, .retain = true });
     defer result.destroy();
     try result.text().writeAll("abcdef");
@@ -795,7 +795,7 @@ test "final reservation protects the advertised footer from competing allocation
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 8, .retain = true });
     defer result.destroy();
     const long: [20_000]u8 = @splat('x');
@@ -827,7 +827,7 @@ test "fitting mixed result does not retain output" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 100, .retain = true });
     try result.text().writeAll("before");
     const png = @embedFile("codecs/fixtures/image-input/pixel.png");
@@ -857,7 +857,7 @@ test "image capture yields optional spill and finishes under contention" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 8, .retain = true });
     defer result.destroy();
     const long: [20_000]u8 = @splat('x');
@@ -936,7 +936,7 @@ test "file results reject oversized labels before reading or adoption" {
     try file.writeStreamingAll(std.testing.io, "abcdefghijklmnop");
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = undefined };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const result = try Result.create(&host, 1, .{ .excerpt_bytes = 4, .retain = true });
     defer result.destroy();
     var first: Adoption = .{};
@@ -965,7 +965,7 @@ test "file results frame outside allowance and adopt only cut streams" {
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const a = try tmp.dir.createFile(std.testing.io, "a", .{ .read = true });
     try a.writeStreamingAll(std.testing.io, "abcdefghijklmnop");
     const b = try tmp.dir.createFile(std.testing.io, "b", .{ .read = true });
@@ -1014,7 +1014,7 @@ test "file result falls back and releases adopted output when another transfer f
     defer queue.cleanupAll();
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const a = try tmp.dir.createFile(std.testing.io, "a", .{ .read = true });
     try a.writeStreamingAll(std.testing.io, "abcdefghijklmnop");
     const b = try tmp.dir.createFile(std.testing.io, "b", .{ .read = true });
@@ -1052,7 +1052,7 @@ test "file result keeps capture ownership when retention sequence is exhausted" 
     queue.next_sequence = std.math.maxInt(u64);
     var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
     var host_parts: TestParts = undefined;
-    host_parts.attach(&host, null);
+    host_parts.attach(&host, undefined);
     const file = try tmp.dir.createFile(std.testing.io, "capture", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "abcdefghijklmnop");
     try std.testing.expect(queue.budget.charge(16));
@@ -1088,7 +1088,7 @@ test "file results release unkept output and suppress footer when retention is d
         defer queue.cleanupAll();
         var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &queue };
         var host_parts: TestParts = undefined;
-        host_parts.attach(&host, null);
+        host_parts.attach(&host, undefined);
         const file = try tmp.dir.createFile(std.testing.io, "capture", .{ .read = true });
         try file.writeStreamingAll(std.testing.io, "abcdefghijklmnop");
         try std.testing.expect(queue.budget.charge(16));
@@ -1127,7 +1127,7 @@ test "file results match base Bash formatter for generated stream pairs" {
                     defer queue.cleanupAll();
                     var host: Host = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = undefined, .retention = &queue };
                     var host_parts: TestParts = undefined;
-                    host_parts.attach(&host, null);
+                    host_parts.attach(&host, undefined);
                     const stdout = try tmp.dir.createFile(std.testing.io, "stdout", .{ .read = true });
                     const stderr = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
                     const files = [_]std.Io.File{ stdout, stderr };
