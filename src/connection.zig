@@ -1009,9 +1009,15 @@ test "validate holds the sign-in URLs to the base URL's rule: https, no query, n
     };
     for (bad) |text| {
         for ([_]bool{ true, false }) |authorize| {
-            var oauth = connection.credential.oauth;
-            if (authorize) oauth.authorize_url = text else oauth.token_url = text;
-            connection.credential = .{ .oauth = oauth };
+            connection.credential = .{ .oauth = .{
+                .authorize_url = if (authorize) text else "https://auth.example/authorize",
+                .token_url = if (authorize) "https://auth.example/token" else text,
+                .client_id = .{ .fixed = "client" },
+                .scopes = "openid",
+                .required_scope = "openid",
+                .audience = base,
+                .link = &.{},
+            } };
             const found = validate(&connection, noHostFields) orelse return error.TestExpectedRefusal;
             try std.testing.expectEqual(Refusal.Reason.invalid_url, found.reason);
             try std.testing.expectEqualStrings(if (authorize) "authorize_url" else "token_url", found.field);
