@@ -1095,7 +1095,7 @@ test "creation receipts retain maximum configured and loaded tools" {
 
 // SH-118: an app record a lane root declares reads back through the offer and the saved selection with the digest it
 // was saved with, on both engines.
-test "SH-118 a tool record read back from the Store through the offer and the selection has the digest it was saved with" {
+test "SH-118 a tool record read back from the Store through the offer, the selection and readHostToolSet has the digest it was saved with" {
     try store_testing.forEachEngine(struct {
         fn run(engine: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
