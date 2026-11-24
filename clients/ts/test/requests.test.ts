@@ -96,7 +96,7 @@ test("status requests the Current profile and maps reported facts and parent los
 		};
 		assert.deepEqual(await new Session(link, 'session"\n').status(), {
 			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, attention: null, group: "done", canStop: false, decide: null, interruptTarget: null, pendingMessages: "9007199254740993",
-			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], loadedTools: ["bash"], permissionMode: "ask", latestOutcome,
+			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], loadedTools: ["bash"], appTools: [], permissionMode: "ask", latestOutcome,
 		});
 	}
 });
