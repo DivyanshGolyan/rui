@@ -399,7 +399,7 @@ test "SH-128 coordinator round-trips every faulted effect and keeps later Host o
     try std.testing.expectEqual(@as(usize, 3), batch.entries.len);
     try std.testing.expectEqual(.resolve_target, batch.entries[0].state.outcome.faulted.effect);
     try std.testing.expectEqualStrings("OutOfMemory", batch.entries[0].state.outcome.faulted.cause.slice());
-    try std.testing.expectEqual(.resolve_target, batch.selectedOutcome("/host/\xff").faulted.effect);
+    try std.testing.expectEqual(.resolve_target, batch.selected("/host/\xff").outcome.faulted.effect);
     try std.testing.expectEqual(.await_retirement, batch.entries[1].state.outcome.faulted.effect);
     try std.testing.expectEqualStrings("ConnectionResetByPeer", batch.entries[1].state.outcome.faulted.cause.slice());
     try std.testing.expectEqual(.not_needed, batch.entries[2].state.outcome);

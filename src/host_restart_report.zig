@@ -97,16 +97,9 @@ fn writeTotals(totals: Totals, writer: *std.Io.Writer) !void {
     try writer.print("{d} Hosts: {d} restarted, {d} already current, {d} left unchanged, {d} failed.\n", .{ total, totals.restarted, totals.current, totals.skipped, totals.failed });
 }
 
-pub const Stage = enum { discovery, observation, selection };
-pub const Failure = struct {
-    stage: Stage,
-    /// Owned by the Batch's entry; `Entry.deinit` frees it.
-    cause: []const u8,
-
-    pub fn of(allocator: std.mem.Allocator, stage: Stage, err: anyerror) !Failure {
-        return .{ .stage = stage, .cause = try allocator.dupe(u8, @errorName(err)) };
-    }
-};
+/// A failed entry's stage and cause live with the activation answer they become (`activation.Selected`).
+pub const Stage = activation.EntryStage;
+pub const Failure = activation.EntryFailure;
 pub const Entry = struct {
     socket: ?[]const u8 = null,
     /// Persistent local routing selector; never replace it with wire Store identity.
@@ -142,7 +135,8 @@ pub const Batch = struct {
         self.* = .{};
     }
 
-    pub fn selectedOutcome(self: *const Batch, store: []const u8) activation.Outcome {
+    /// The answer for the Store `store`: its entry's outcome, or the failure that ended its entry.
+    pub fn selected(self: *const Batch, store: []const u8) activation.Selected {
         return self.summary(store).own;
     }
 
@@ -168,7 +162,7 @@ pub const Batch = struct {
     }
 
     /// Every entry placed against `store` (none when null) and folded by
-    /// `host_activation`; an entry still only observed counts as failed there.
+    /// `host_activation`; an entry still only observed is unconfirmed there.
     pub fn summary(self: *const Batch, store: ?[]const u8) activation.Summary {
         var tally: activation.Tally = .{};
         for (self.entries) |entry| tally.add(.{
@@ -178,7 +172,8 @@ pub const Batch = struct {
                 .unlocated,
             .state = switch (entry.state) {
                 .outcome => |outcome| .{ .outcome = outcome },
-                .failed, .observed => .failed,
+                .failed => |failure| .{ .failed = failure },
+                .observed => .{ .outcome = .{ .unconfirmed = .verifying } },
             },
         });
         return tally.finish(if (self.failure) |err| if (err == error.Cancelled) .cancelled else .other else null);
@@ -215,15 +210,24 @@ pub const Batch = struct {
     }
 };
 
-fn writeEntryFailure(writer: *std.Io.Writer, entry: *const Entry, failure: Failure) !void {
-    if (entry.directory orelse entry.store) |store| {
+/// One Store's failed entry, as restart all and the Host launch both print it. An empty
+/// `store` is the unscoped handover line, as `writeOutcome` prints it.
+pub fn writeFailure(writer: *std.Io.Writer, store: []const u8, failure: Failure) !void {
+    if (store.len == 0) {
+        try writer.writeAll("Host handover: ");
+    } else {
         try field(writer, store);
-        return writer.print(": failed at {s} ({s}): {s}\n", .{ @tagName(failure.stage), failure.cause, switch (failure.stage) {
-            .discovery => "could not read this Host's sources; inspect with its owning client, then retry.",
-            .observation => "could not confirm this Host; inspect with its owning client, then retry.",
-            .selection => "selected installed build has no verified release version; install a managed release and retry.",
-        } });
+        try writer.writeAll(": ");
     }
+    try writer.print("failed at {s} ({s}): {s}\n", .{ @tagName(failure.stage), failure.cause, switch (failure.stage) {
+        .discovery => "could not read this Host's sources; inspect with its owning client, then retry.",
+        .observation => "could not confirm this Host; inspect with its owning client, then retry.",
+        .selection => "selected installed build has no verified release version; install a managed release and retry.",
+    } });
+}
+
+fn writeEntryFailure(writer: *std.Io.Writer, entry: *const Entry, failure: Failure) !void {
+    if (entry.directory orelse entry.store) |store| return writeFailure(writer, store, failure);
     try writer.writeAll("Store unknown (");
     if (entry.socket) |socket| {
         try writer.writeAll("socket ");
@@ -398,8 +402,8 @@ test "restart batch retains DIR selection independently of wire identity and out
         .state = .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "cannot start") } } },
     }};
     const batch: Batch = .{ .entries = &entries };
-    try std.testing.expect(batch.selectedOutcome("/host-directory") == .refused);
-    try std.testing.expect(batch.selectedOutcome("mysql-opaque-identity") == .not_needed);
+    try std.testing.expect(batch.selected("/host-directory").outcome == .refused);
+    try std.testing.expect(batch.selected("mysql-opaque-identity").outcome == .not_needed);
     try std.testing.expect(batch.hasGuidance());
     try std.testing.expectEqual(@as(usize, 1), batch.totals().failed);
     var buffer: [2048]u8 = undefined;
@@ -441,7 +445,41 @@ test "SH-127 lifecycle faults report the exact effect and cause at every stage" 
         var line_bytes: [512]u8 = undefined;
         try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), try std.fmt.bufPrint(&line_bytes, "/store: {s}\n", .{case.expected})));
         try std.testing.expectEqual(@as(usize, 1), batch.totals().failed);
-        try std.testing.expectEqualDeep(outcome, batch.selectedOutcome("/store"));
+        try std.testing.expectEqualDeep(activation.Selected{ .outcome = outcome }, batch.selected("/store"));
+    }
+}
+
+test "SH-127 a failed Store entry keeps its stage, cause and certainty across every answer" {
+    const Certainty = enum { ok, failed, unconfirmed };
+    const refusal: activation.Outcome = .{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "cannot start") } };
+    const cases = [_]struct { name: []const u8, state: ?@FieldType(Entry, "state"), selected: activation.Selected, text: []const u8, certainty: Certainty }{
+        .{ .name = "observation failure", .state = .{ .failed = .{ .stage = .observation, .cause = "OutOfMemory" } }, .selected = .{ .failed = .{ .stage = .observation, .cause = "OutOfMemory" } }, .text = "/store: failed at observation (OutOfMemory): could not confirm this Host; inspect with its owning client, then retry.\n", .certainty = .failed },
+        .{ .name = "selection failure", .state = .{ .failed = .{ .stage = .selection, .cause = "NoVerifiedRelease" } }, .selected = .{ .failed = .{ .stage = .selection, .cause = "NoVerifiedRelease" } }, .text = "/store: failed at selection (NoVerifiedRelease): selected installed build has no verified release version; install a managed release and retry.\n", .certainty = .failed },
+        .{ .name = "absent", .state = null, .selected = .{ .outcome = .not_needed }, .text = "No running Hosts.\n", .certainty = .ok },
+        .{ .name = "not_needed", .state = .{ .outcome = .not_needed }, .selected = .{ .outcome = .not_needed }, .text = "/store: no longer running; no Host started\n", .certainty = .ok },
+        .{ .name = "refused", .state = .{ .outcome = refusal }, .selected = .{ .outcome = refusal }, .text = "/store: refused at checking\n", .certainty = .failed },
+        .{ .name = "faulted before stop", .state = .{ .outcome = .{ .faulted = .{ .effect = .check_target, .cause = try .from("OutOfMemory") } } }, .selected = .{ .outcome = .{ .faulted = .{ .effect = .check_target, .cause = try .from("OutOfMemory") } } }, .text = "/store: failed during check_target (OutOfMemory); Host left running", .certainty = .failed },
+        .{ .name = "faulted after stop", .state = .{ .outcome = .{ .faulted = .{ .effect = .start, .cause = try .from("OutOfMemory") } } }, .selected = .{ .outcome = .{ .faulted = .{ .effect = .start, .cause = try .from("OutOfMemory") } } }, .text = "/store: failed at starting: restart is unconfirmed during start (OutOfMemory)", .certainty = .unconfirmed },
+        .{ .name = "unconfirmed", .state = .{ .outcome = .{ .unconfirmed = .verifying } }, .selected = .{ .outcome = .{ .unconfirmed = .verifying } }, .text = "/store: failed at verifying: restart is unconfirmed", .certainty = .unconfirmed },
+    };
+    for (cases) |case| {
+        var storage: [1]Entry = undefined;
+        const entries: []Entry = if (case.state) |state| blk: {
+            storage[0] = .{ .directory = "/store", .store = "/store", .state = state };
+            break :blk storage[0..1];
+        } else storage[0..0];
+        const batch: Batch = .{ .entries = entries };
+        errdefer std.debug.print("case={s}\n", .{case.name});
+        try std.testing.expectEqualDeep(case.selected, batch.selected("/store"));
+        var bytes: [1024]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&bytes);
+        try batch.write(&writer);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), case.text) != null);
+        switch (case.certainty) {
+            .ok => try batch.result(),
+            .failed => try std.testing.expectError(error.HostRestartFailed, batch.result()),
+            .unconfirmed => try std.testing.expectError(error.HostRestartUnconfirmed, batch.result()),
+        }
     }
 }
 

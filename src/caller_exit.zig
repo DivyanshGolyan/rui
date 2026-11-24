@@ -48,6 +48,14 @@ pub fn forCode(certainty: Certainty, code: caller_error.Code) Status {
     return status(certainty, caller_error.facts(code).act);
 }
 
+/// The handover's Store answer at the CLI boundary: a failed entry was never stopped, so it exits ordinary.
+pub fn selectedHandover(selected: @import("host_activation.zig").Selected) ?Status {
+    return switch (selected) {
+        .outcome => |outcome| handover(outcome),
+        .failed => null,
+    };
+}
+
 /// A handover that cannot confirm its result retains uncertainty at the CLI boundary.
 /// A fault after the stop is unconfirmed; a fault before it leaves the ordinary exit.
 pub fn handover(outcome: @import("host_activation.zig").Outcome) ?Status {

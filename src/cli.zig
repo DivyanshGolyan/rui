@@ -1264,7 +1264,7 @@ fn launchHost(init: std.process.Init, request: host_start.Spawn, ops: host_start
         .scope = .{ .store = request.dir },
     }, if (progress == null) .ignore else .inherit) catch |err| return host_start.launchFailure(result, .setup, err, null);
     defer batch.deinit(init.gpa);
-    const own = batch.selectedOutcome(request.dir);
+    const own = batch.selected(request.dir);
     switch (activation.startStep(own)) {
         .attach => host_start.spawn(init, request, ops, progress, result),
         .keep_incompatible => {},
@@ -1284,7 +1284,7 @@ pub fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool
     switch (result.outcome) {
         .ready => |*ready| try reportStartedHost(io, ready, quiet, overrides and ready.adopted),
         .failed => |*failure| {
-            if (failure.detail == .handover) if (caller_exit.handover(failure.detail.handover)) |status| {
+            if (failure.detail == .handover) if (caller_exit.selectedHandover(failure.detail.handover)) |status| {
                 recordExit(status);
                 return error.Reported;
             };
@@ -2292,8 +2292,8 @@ test "CLI-31 Host launch reports typed refusals and their attempt" {
         const refusal: start_report.Failure = .init(code, "original typed refusal");
         switch (source.source) {
             .ordinary => result.outcome.failed.detail = .{ .refusal = refusal },
-            .checking => result.outcome.failed.detail = .{ .handover = .{ .refused = .{ .stage = .checking, .failure = refusal } } },
-            .starting => result.outcome.failed.detail = .{ .handover = .{ .refused = .{ .stage = .starting, .failure = refusal } } },
+            .checking => result.outcome.failed.detail = .{ .handover = .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = refusal } } } },
+            .starting => result.outcome.failed.detail = .{ .handover = .{ .outcome = .{ .refused = .{ .stage = .starting, .failure = refusal } } } },
         }
         if (waited) result.wait = .init(0);
         Probe.used = .{ 0, 0 };

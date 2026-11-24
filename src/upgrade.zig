@@ -105,8 +105,8 @@ pub const Result = struct {
     hosts: host_restart_report.Batch = .{},
     store: []const u8,
 
-    pub fn selectedActivation(self: *const Result) HostLifecycle.ActivationOutcome {
-        return self.hosts.selectedOutcome(self.store);
+    pub fn selectedAnswer(self: *const Result) host_activation.Selected {
+        return self.hosts.selected(self.store);
     }
 
     /// What the finished install of `checked` read, as `upgrade_run` reads it.
@@ -343,7 +343,7 @@ fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Can
 }
 
 pub fn compatible(result: *const Result) bool {
-    return host_activation.clientSafe(result.selectedActivation());
+    return host_activation.selectedClientSafe(result.selectedAnswer());
 }
 
 fn field(writer: *std.Io.Writer, value: []const u8) !void {
@@ -459,7 +459,7 @@ test "upgrade result report embeds the Host lines and its rollback note follows 
                     .hosts = .{ .entries = &entries, .version = .{ .schema = 99, .patch = 0 } },
                     .store = "/selected-store",
                 };
-                try std.testing.expectEqualDeep(if (selected) activation else HostLifecycle.ActivationOutcome.not_needed, result.selectedActivation());
+                try std.testing.expectEqualDeep(host_activation.Selected{ .outcome = if (selected) activation else .not_needed }, result.selectedAnswer());
                 var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
                 defer output.deinit();
                 try writeResult(&output.writer, &result);
@@ -544,8 +544,8 @@ test "upgrade selected activation routes by Host directory not SQLite data or My
             .{ .socket = "/selected.sock", .directory = "/selected-host", .store = identity, .state = .{ .outcome = .{ .unsupported = .configuration_unavailable } } },
         };
         const result: Result = .{ .installation = .{ .installed = receipt }, .store = "/selected-host", .hosts = .{ .entries = &entries } };
-        try std.testing.expectEqual(HostLifecycle.Limitation.configuration_unavailable, result.selectedActivation().unsupported);
-        try std.testing.expect(result.hosts.selectedOutcome(identity) == .not_needed);
+        try std.testing.expectEqual(HostLifecycle.Limitation.configuration_unavailable, result.selectedAnswer().outcome.unsupported);
+        try std.testing.expect(result.hosts.selected(identity).outcome == .not_needed);
     }
 }
 

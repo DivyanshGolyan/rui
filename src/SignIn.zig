@@ -1408,16 +1408,18 @@ fn testingCompleted(page: *Self) bool {
 test "SUI-134 Sign-in departure keeps a handover's unconfirmed certainty" {
     const activation = @import("host_activation.zig");
     const cause = try @import("protocol.zig").Bounded(64).from("OutOfMemory");
-    const Case = struct { outcome: activation.Outcome, expected: anyerror };
+    const Case = struct { selected: activation.Selected, expected: anyerror };
     const cases = [_]Case{
-        .{ .outcome = .{ .unconfirmed = .verifying }, .expected = error.HostRestartUnconfirmed },
-        .{ .outcome = .{ .faulted = .{ .effect = .stop, .cause = cause } }, .expected = error.HostRestartUnconfirmed },
-        .{ .outcome = .{ .faulted = .{ .effect = .resolve_target, .cause = cause } }, .expected = error.HostRestartFailed },
-        .{ .outcome = .{ .failed = .stopping }, .expected = error.HostRestartFailed },
+        .{ .selected = .{ .outcome = .{ .unconfirmed = .verifying } }, .expected = error.HostRestartUnconfirmed },
+        .{ .selected = .{ .outcome = .{ .faulted = .{ .effect = .stop, .cause = cause } } }, .expected = error.HostRestartUnconfirmed },
+        .{ .selected = .{ .outcome = .{ .faulted = .{ .effect = .resolve_target, .cause = cause } } }, .expected = error.HostRestartFailed },
+        .{ .selected = .{ .outcome = .{ .failed = .stopping } }, .expected = error.HostRestartFailed },
+        .{ .selected = .{ .failed = .{ .stage = .observation, .cause = "OutOfMemory" } }, .expected = error.HostRestartFailed },
+        .{ .selected = .{ .failed = .{ .stage = .selection, .cause = "NoVerifiedRelease" } }, .expected = error.HostRestartFailed },
     };
     for (cases) |row| {
         var launch: host_launch.Result = .failed(.setup, error.HostRestartFailed);
-        host_start.handoverFailed(&launch, row.outcome);
+        host_start.handoverFailed(&launch, row.selected);
         var page: Self = .{
             .state = .{ .page = .{ .saving = .existing } },
             .outcome = .{ .published = .{ .defaults = {}, .activation = .{ .binding = .{}, .store = .{}, .launch = launch } } },

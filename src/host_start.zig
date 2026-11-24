@@ -1585,18 +1585,35 @@ pub fn launchFailure(result: *HostLaunchResult, kind: HostLaunchResult.Cause.Kin
     if (store) |canonical| result.outcome.failed.store.set(canonical) catch unreachable;
 }
 
-/// Reports a handover outcome as the start's failure: a refusal keeps its typed cause, every
-/// other outcome is the handover's own line, read unchanged by the Overview and the terminal.
-pub fn handoverFailed(result: *HostLaunchResult, outcome: @import("host_activation.zig").Outcome) void {
-    if (outcome == .refused) {
-        launchFailure(result, .child_refused, error.HostStartupFailed, null);
-        result.outcome.failed.cause.refusal_code = outcome.refused.failure.code;
-    } else {
-        // Certainty crosses every caller: an unconfirmed handover is never an ordinary failure.
-        const err: anyerror = if (@import("caller_exit.zig").handover(outcome) == .unconfirmed) error.HostRestartUnconfirmed else error.HostRestartFailed;
-        launchFailure(result, .setup, err, null);
+/// Reports a handover's Store answer as the start's failure: a refusal keeps its typed cause, a
+/// failed entry keeps its stage and cause, and every other outcome is the handover's own line.
+/// Each is read unchanged by the Overview and the terminal.
+pub fn handoverFailed(result: *HostLaunchResult, selected: @import("host_activation.zig").Selected) void {
+    switch (selected) {
+        // Nothing was stopped: the Store's Host was never confirmed, so the failure is ordinary.
+        .failed => launchFailure(result, .setup, error.HostRestartFailed, null),
+        .outcome => |outcome| if (outcome == .refused) {
+            launchFailure(result, .child_refused, error.HostStartupFailed, null);
+            result.outcome.failed.cause.refusal_code = outcome.refused.failure.code;
+        } else {
+            // Certainty crosses every caller: an unconfirmed handover is never an ordinary failure.
+            const err: anyerror = if (@import("caller_exit.zig").selectedHandover(selected) == .unconfirmed) error.HostRestartUnconfirmed else error.HostRestartFailed;
+            launchFailure(result, .setup, err, null);
+        },
     }
-    result.outcome.failed.detail = .{ .handover = outcome };
+    result.outcome.failed.detail = .{ .handover = selected };
+}
+
+test "SH-122 a failed Store entry reports its stage and cause as an ordinary failure" {
+    const host_launch = @import("host_launch.zig");
+    var result: HostLaunchResult = .failed(.setup, error.HostRestartUnconfirmed);
+    handoverFailed(&result, .{ .failed = .{ .stage = .observation, .cause = "OutOfMemory" } });
+    try std.testing.expectEqual(error.HostRestartFailed, result.outcome.failed.cause.err);
+    try std.testing.expectEqualStrings("observation failed", result.summary().failed.words());
+    var bytes: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&bytes);
+    try host_launch.writeDiagnostics(&result, &writer, 0);
+    try std.testing.expectEqualStrings("Host handover: failed at observation (OutOfMemory): could not confirm this Host; inspect with its owning client, then retry.\n", writer.buffered());
 }
 
 fn launchRefusal(result: *HostLaunchResult, failure: start_report.Failure, selector: []const u8) void {

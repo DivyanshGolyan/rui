@@ -4006,8 +4006,11 @@ test "Host recovery derives launch progress from job custody without copying rea
 test "SUI-133 Host recovery renders the launch result cause without confusing failure and reachability" {
     const Handover = struct {
         fn summary(outcome: @import("host_activation.zig").Outcome) HostLaunch {
+            return selectedSummary(.{ .outcome = outcome });
+        }
+        fn selectedSummary(selected: @import("host_activation.zig").Selected) HostLaunch {
             var result: @import("host_launch.zig").Result = .failed(.setup, error.HostRestartFailed);
-            result.outcome.failed.detail = .{ .handover = outcome };
+            result.outcome.failed.detail = .{ .handover = selected };
             return result.summary();
         }
     };
@@ -4026,6 +4029,8 @@ test "SUI-133 Host recovery renders the launch result cause without confusing fa
         .{ .launch = Handover.summary(.{ .unconfirmed = .awaiting_retirement }), .words = "retire unconfirmed", .retry = true },
         .{ .launch = Handover.summary(.{ .unconfirmed = .starting }), .words = "start unconfirmed", .retry = true },
         .{ .launch = Handover.summary(.{ .unconfirmed = .verifying }), .words = "verify unconfirmed", .retry = true },
+        .{ .launch = Handover.selectedSummary(.{ .failed = .{ .stage = .observation, .cause = "OutOfMemory" } }), .words = "observation failed", .retry = true },
+        .{ .launch = Handover.selectedSummary(.{ .failed = .{ .stage = .selection, .cause = "NoVerifiedRelease" } }), .words = "build unverified", .retry = true },
     };
     for (cases) |case| for ([_]HostRecovery.Availability{ .ready, .stopping, .stopped }) |after| {
         errdefer std.debug.print("after={s} words={s}\n", .{ @tagName(after), case.words });

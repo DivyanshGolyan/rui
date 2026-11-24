@@ -62,7 +62,7 @@ test "SH-125 absent Store owner is not started by handover observation" {
     // The Store scope names exactly one Host, and the absent owner needs no lease.
     try std.testing.expectEqual(@as(usize, 1), batch.entries.len);
     try std.testing.expectEqualStrings(root, batch.entries[0].directory.?);
-    try std.testing.expectEqual(std.meta.Tag(activation.Outcome).not_needed, std.meta.activeTag(batch.selectedOutcome(root)));
+    try std.testing.expectEqualDeep(activation.Selected{ .outcome = .not_needed }, batch.selected(root));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "host.lock", .{}));
 }
 
@@ -84,7 +84,7 @@ test "SH-125 a Store scope names only its own directory, however many other Stor
     // The Store scope names exactly one Host, and an absent owner needs no lease.
     try std.testing.expectEqual(@as(usize, 1), batch.entries.len);
     try std.testing.expectEqualStrings(root, batch.entries[0].directory.?);
-    try std.testing.expectEqual(std.meta.Tag(activation.Outcome).not_needed, std.meta.activeTag(batch.selectedOutcome(root)));
+    try std.testing.expectEqualDeep(activation.Selected{ .outcome = .not_needed }, batch.selected(root));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "host.lock", .{}));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "other-store/host.lock", .{}));
 }

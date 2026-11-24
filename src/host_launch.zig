@@ -84,16 +84,19 @@ pub const Result = struct {
         os_error: ?c_int = null,
         detail: Detail = .none,
 
-        pub const Detail = union(enum) { none, refusal: start_report.Failure, handover: activation.Outcome };
+        pub const Detail = union(enum) { none, refusal: start_report.Failure, handover: activation.Selected };
         pub const RefusalView = struct { failure: *const start_report.Failure, attempt: start_report.Attempt };
 
         pub fn refusalView(self: *const Failure) ?RefusalView {
             return switch (self.detail) {
                 .none => null,
                 .refusal => |*refusal| .{ .failure = refusal, .attempt = .start },
-                .handover => |*outcome| switch (outcome.*) {
-                    .refused => |*refusal| .{ .failure = &refusal.failure, .attempt = if (refusal.stage == .checking) .check else .start },
-                    else => null,
+                .handover => |*selected| switch (selected.*) {
+                    .outcome => |*outcome| switch (outcome.*) {
+                        .refused => |*refusal| .{ .failure = &refusal.failure, .attempt = if (refusal.stage == .checking) .check else .start },
+                        else => null,
+                    },
+                    .failed => null,
                 },
             };
         }
@@ -109,7 +112,7 @@ pub const Result = struct {
             .failed => |failure| failed: {
                 var cause = failure.cause;
                 switch (failure.detail) {
-                    .handover => |outcome| cause.handover_words = activation.words(outcome),
+                    .handover => |selected| cause.handover_words = activation.selectedWords(selected),
                     else => {},
                 }
                 break :failed .{ .failed = cause };
@@ -140,10 +143,12 @@ pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: us
         },
         .failed => |*failure| {
             if (failure.detail == .handover) {
+                const report = @import("host_restart_report.zig");
                 if (failure.refusalView()) |refusal| {
                     try writeSentence(writer, refusal.attempt, refusal.failure);
-                } else {
-                    _ = try @import("host_restart_report.zig").writeOutcome(writer, failure.store.slice(), failure.detail.handover, null);
+                } else switch (failure.detail.handover) {
+                    .outcome => |outcome| _ = try report.writeOutcome(writer, failure.store.slice(), outcome, null),
+                    .failed => |entry| try report.writeFailure(writer, failure.store.slice(), entry),
                 }
                 return;
             }
