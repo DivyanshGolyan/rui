@@ -3695,25 +3695,34 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
         .spin => "",
         .held => |word| word,
     };
-    const age_cells = @min(built.measure(age), width -| 3);
+    const title_floor: usize = 24;
+    const mark_and_gap: usize = 2;
+    const inset: usize = 1;
+    const row_width: usize = width;
     const folded = isFolded(state, row.reference) and node.descendants != 0;
     const normal_hidden = if (folded) try std.fmt.allocPrint(arena, " {s} {d}", .{ if (caps.unicode) "▸" else ">", node.descendants }) else "";
     const normal_attention = if (folded and node.attention != 0) try std.fmt.allocPrint(arena, " {s} {d} ?", .{ if (caps.unicode) "·" else ".", node.attention }) else "";
-    const compact = folded and @as(usize, width) < 2 + 24 + built.measure(normal_hidden) + built.measure(normal_attention) + @intFromBool(age_cells != 0) + age_cells;
-    const hidden = if (compact) try std.fmt.allocPrint(arena, "{s}{d}", .{ if (caps.unicode) "▸" else ">", node.descendants }) else normal_hidden;
-    const attention_badge = if (compact and node.attention != 0) try std.fmt.allocPrint(arena, "{s}{d}?", .{ if (caps.unicode) "·" else ".", node.attention }) else normal_attention;
     const archived = if (row.archive_state == .archived and state.archive != .archived)
         if (caps.unicode) " · archived" else " . archived"
     else
         "";
-    const suffix_cells = built.measure(hidden) + built.measure(attention_badge) + built.measure(archived);
-    const age_gap: usize = @intFromBool(age_cells != 0);
-    const tight = folded and @as(usize, width) < 1 + 2 + 24 + suffix_cells + age_gap + age_cells + 1;
-    const end: usize = @as(usize, width) -| @as(usize, @intFromBool(!tight));
-    const name_end = end -| age_cells -| age_gap;
-    const origin: usize = if (tight and name_end -| 2 -| suffix_cells < 25) 0 else 1;
-    const depth_budget = (name_end -| origin -| 2 -| suffix_cells -| 24) / 2;
+    const normal_badge_cells = built.measure(normal_hidden) + built.measure(normal_attention);
+    const archived_cells = built.measure(archived);
+    const normal_suffix_cells = normal_badge_cells + archived_cells;
+    // Budget guides against the spaced badges, so gaining room can never cost a guide.
+    const depth_budget = (row_width -| (2 * inset + mark_and_gap + title_floor + normal_suffix_cells)) / 2;
     const depth: usize = @min(node.depth, depth_budget);
+
+    // Folded rows keep room for an ordinary age where possible. The fixed budgets
+    // retain spaced badges at 40 cells and allow compact badges and 999d at 36.
+    const compact = folded and row_width < mark_and_gap + title_floor + normal_badge_cells + 4;
+    const hidden = if (compact) try std.fmt.allocPrint(arena, "{s}{d}", .{ if (caps.unicode) "▸" else ">", node.descendants }) else normal_hidden;
+    const attention_badge = if (compact and node.attention != 0) try std.fmt.allocPrint(arena, "{s}{d}?", .{ if (caps.unicode) "·" else ".", node.attention }) else normal_attention;
+    const hidden_cells = built.measure(hidden);
+    const attention_cells = built.measure(attention_badge);
+    const tight = folded and row_width < inset + mark_and_gap + title_floor + archived_cells + hidden_cells + attention_cells + 5;
+    const end = row_width -| (if (tight) @as(usize, 0) else inset);
+    const origin = if (tight and end < inset + mark_and_gap + title_floor + normal_suffix_cells) 0 else inset;
     if (depth != 0) {
         const path = try arena.alloc(u32, depth);
         var current: u32 = index;
@@ -3749,17 +3758,35 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
         .attention => Colour.attention,
     } else rule.colour;
     _ = try built.put(mark_at, glyph, 1, .{ .colour = colour, .background = background, .dim = quiet });
-    const start_name = mark_at + 2;
-    const room = name_end -| start_name;
-    const name_room = room -| @min(room, suffix_cells);
-    const selected = rowSelected(state, row);
+    const start_name = mark_at + mark_and_gap;
+    const room = end -| start_name;
     const named = title(state, row).text;
     const name = if (row.archive_state == .archiving) try std.fmt.allocPrint(arena, "[Archiving] {s}", .{named}) else named;
+    const Suffix = struct { text: []const u8, cells: usize, colour: Colour = .quiet };
+    var suffixes = [_]Suffix{
+        .{ .text = archived, .cells = archived_cells },
+        .{ .text = hidden, .cells = hidden_cells },
+        .{ .text = attention_badge, .cells = attention_cells, .colour = .attention },
+    };
+    // On very narrow rows leave space for the title and omit badges whole.
+    var suffix_cells: usize = 0;
+    for (&suffixes) |*suffix| {
+        if (suffix.cells > room -| 3 -| suffix_cells) suffix.cells = 0;
+        suffix_cells += suffix.cells;
+    }
+    const age_cells = built.measure(age);
+    const age_room = room -| (suffix_cells + age_cells + 1);
+    const show_age = age_cells != 0 and room > suffix_cells + age_cells and
+        (age_room >= title_floor or age_room >= built.measure(name));
+    const name_room = if (show_age) age_room else room -| suffix_cells;
+    const selected = rowSelected(state, row);
     const used = try built.put(start_name, name, name_room, .{ .colour = if (selected) .strong else .normal, .background = background, .bold = selected, .dim = quiet });
-    const archived_cells = try built.put(start_name + used, archived, room -| used, .{ .colour = .quiet, .background = background, .dim = quiet });
-    const hidden_cells = try built.put(start_name + used + archived_cells, hidden, room -| used -| archived_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
-    _ = try built.put(start_name + used + archived_cells + hidden_cells, attention_badge, room -| used -| archived_cells -| hidden_cells, .{ .colour = .attention, .background = background });
-    _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
+    var suffix_at = start_name + used;
+    for (suffixes) |suffix| {
+        if (suffix.cells == 0) continue;
+        suffix_at += try built.put(suffix_at, suffix.text, suffix.cells, .{ .colour = suffix.colour, .background = background, .dim = quiet and suffix.colour != .attention });
+    }
+    if (show_age) _ = try built.put(end - age_cells, age, age_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
     return segmentsOf(arena, try built.finish(), width, .{ .background = background, .dim = quiet });
 }
 
@@ -4399,6 +4426,7 @@ test "SUI-103 creator tree attention representatives" {
 
 test "SUI-104 creator tree width and badges" {
     try creatorWidthCase();
+    try creatorActivityWidthCase();
     try creatorSidebarCase();
 }
 
@@ -9548,7 +9576,7 @@ test "launch admission belongs to bare app startup" {
 
 fn creatorWidthCase() !void {
     const name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    for ([_]u64{ 60, 18 * 3600, 24 * 3600 }) |age| for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 40, 46, 140 }) |width| {
+    for ([_]u64{ 60, 18 * 3600, 24 * 3600 }) |age| for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 5, 8, 30, 32, 36, 40, 46, 140 }) |width| {
         var state = try opened(&.{
             session("a1b2c3", .{ .working = ago(age) }, .{ .label = "Ancestor" }),
             session("b4n8wd", .{ .finished = ago(age) }, .{ .label = name, .creator = "a1b2c3".*, .descendant_count = 2, .descendant_needs_you_count = 1 }),
@@ -9557,13 +9585,72 @@ fn creatorWidthCase() !void {
         });
         defer state.deinit();
         state.selected = .{ .session = "b4n8wd".* };
-        _ = try step(&state, .{ .input = .{ .key = .{ .action = .collapse_tree } } });
+        _ = try press(&state, .collapse_tree);
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const text = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 1, width, .{ .unicode = use_unicode }, 0));
-        try std.testing.expect(std.mem.indexOf(u8, text, name[0..23]) != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "▸ 2" else "> 2") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "· 1 ?" else ". 1 ?") != null);
+        const row = (try Lines.at(arena.allocator(), &state, 1, width, .{ .unicode = use_unicode }, 0)).?;
+        try std.testing.expectEqualStrings("b4n8wd", &row.target.?.open);
+        const text = try segmentText(arena.allocator(), row.segments);
+        const expected_badges = switch (width) {
+            5 => "",
+            8 => if (use_unicode) "▸2" else ">2",
+            30, 32, 36 => if (use_unicode) "▸2·1?" else ">2.1?",
+            else => if (use_unicode) "▸ 2 · 1 ?" else "> 2 . 1 ?",
+        };
+        const badge_at = std.mem.indexOf(u8, text, if (use_unicode) "▸" else ">");
+        if (expected_badges.len == 0) {
+            try std.testing.expectEqual(@as(?usize, null), badge_at);
+        } else {
+            try std.testing.expect(std.mem.startsWith(u8, text[badge_at.?..], expected_badges));
+        }
+        if (width <= 8) try std.testing.expect(std.mem.indexOfScalar(u8, text, '?') == null);
+        const minimum_title = if (width < 30) 2 else @min(23, width - 8);
+        try std.testing.expect(std.mem.indexOf(u8, text, name[0..minimum_title]) != null);
+    };
+}
+
+fn creatorActivityWidthCase() !void {
+    const root = session("a1b2c3", .{ .finished = ago(8) }, .{ .label = "Root" });
+    const first = session("b4n8wd", .{ .finished = ago(7) }, .{ .label = "First", .creator = root.reference });
+    const second = session("c3d4e5", .{ .finished = ago(6) }, .{ .label = "Second", .creator = first.reference });
+    const changes = [_]struct { work: WorkState, age: []const u8, ascii_age: ?[]const u8 = null }{
+        .{ .work = .{ .pending = ago(5) }, .age = "now" },
+        .{ .work = .{ .working = ago(4) }, .age = "", .ascii_age = "working" },
+        .{ .work = .{ .finished = ago(60) }, .age = "1m" },
+        .{ .work = .{ .finished = ago(999 * 86400) }, .age = "999d" },
+        .{ .work = .{ .stopping = ago(1) }, .age = "stopping" },
+    };
+    const widths = [_]struct { width: u16, direct_col: u16, deep_col: u16 }{
+        .{ .width = 29, .direct_col = 3, .deep_col = 3 },
+        .{ .width = 30, .direct_col = 5, .deep_col = 5 },
+        .{ .width = 32, .direct_col = 5, .deep_col = 7 },
+        .{ .width = 36, .direct_col = 5, .deep_col = 9 },
+        .{ .width = 140, .direct_col = 5, .deep_col = 9 },
+    };
+    for ([_]bool{ false, true }) |use_unicode| for ([_]bool{ false, true }) |deep| {
+        const options: TestSession = .{ .label = "Leaf café", .creator = if (deep) second.reference else root.reference };
+        const leaf = session("d4e5f6", changes[0].work, options);
+        const rows = [_]Listed{ root, leaf, first, second };
+        var state = try opened(if (deep) &rows else rows[0..2]);
+        defer state.deinit();
+        for (changes, 0..) |change, generation| {
+            if (generation != 0) _ = try refresh(&state, .changed, testToken(1 + generation), &.{session("d4e5f6", change.work, options)});
+            for (widths) |size| {
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const row = (try Lines.at(arena.allocator(), &state, if (deep) 3 else 1, size.width, .{ .unicode = use_unicode }, 0)).?;
+                try std.testing.expectEqualStrings("d4e5f6", &row.target.?.open);
+                const text = try segmentText(arena.allocator(), row.segments);
+                const name = if (use_unicode) "Leaf café" else "Leaf caf?";
+                const name_start = std.mem.indexOf(u8, text, name).?;
+                const expected_col = if (deep) size.deep_col else size.direct_col;
+                const prefix = text[0..name_start];
+                try std.testing.expectEqual(expected_col, gwidth.gwidth(prefix, .unicode));
+                try std.testing.expectEqual(use_unicode and size.width >= 30, std.mem.indexOf(u8, prefix, "╰") != null);
+                const suffix = std.mem.trim(u8, text[name_start + name.len ..], " ");
+                try std.testing.expectEqualStrings(if (use_unicode) change.age else change.ascii_age orelse change.age, suffix);
+            }
+        }
     };
 }
 
