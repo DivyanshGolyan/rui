@@ -11,6 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 3
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
@@ -21,7 +22,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/rsql-backend-evidence"
-          git rev-parse HEAD HEAD^ | tee "$RUNNER_TEMP/rsql-backend-evidence/source.txt"
+          source=744f1e879de2caf376efa129861d0679bc3d7ee7
+          git rev-parse HEAD "$source^{commit}" | tee "$RUNNER_TEMP/rsql-backend-evidence/source.txt"
+          git diff --exit-code "$source" HEAD -- build.zig build.zig.zon build src tests
           uname -a | tee -a "$RUNNER_TEMP/rsql-backend-evidence/source.txt"
           zig version | tee -a "$RUNNER_TEMP/rsql-backend-evidence/source.txt"
           python3 - <<'PY'
