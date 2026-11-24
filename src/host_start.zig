@@ -737,7 +737,6 @@ pub fn prepare(init: std.process.Init, settings: *hs.Settings, failure: *start_r
 /// bytes live in `connected` and never in the settings value.
 pub fn resolveConnections(init: std.process.Init, settings: *const hs.Settings, connected: *providers.Connected, failure: *start_report.Failure) !void {
     connected.wipe();
-    if (settings.connections.entries.len == 0) return presetOpenAi(init, settings, connected, failure);
     for (settings.connections.entries) |*entry| {
         const served = &entry.value;
         const name = served.name.slice();
@@ -771,19 +770,6 @@ pub fn resolveConnections(init: std.process.Init, settings: *const hs.Settings, 
 /// The automatic OpenAI connection a document without a connections list serves: OpenAI's own
 /// endpoint with the key in the saved key file, HOME/.config/rui/openai.key unless RUI_OPENAI_KEY_FILE names
 /// another. This is the one OpenAI served in that case; the built-in entry is not served beside it.
-fn presetOpenAi(init: std.process.Init, settings: *const hs.Settings, connected: *providers.Connected, failure: *start_report.Failure) !void {
-    const name = "openai";
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = credential_location.connectionKeyFile(init.environ_map, name, &path_buffer) catch |err| return connectionFailure(failure, name, err);
-    var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
-    defer std.crypto.secureZero(u8, &key_buffer);
-    const bytes = keyBytes(init, .{ .file = path }, &key_buffer) catch |err| return connectionFailure(failure, name, err);
-    if (!api_key.valid(bytes)) return connectionFailure(failure, name, error.InvalidApiKey);
-    const target = if (settings.providers.entries.openai) |*entry| if (entry.endpoint) |*url| url.slice() else openai_endpoint else openai_endpoint;
-    const presentation: providers.Connected.Presentation = .{ .label = "OpenAI", .codec = .@"openai-responses/2", .web_search = true };
-    _ = connected.add(served_connection.Name.parse(name).?, presentation, target, bytes, hs.fixtureEndpoint(settings, target)) catch |err| return connectionFailure(failure, name, err);
-}
-
 fn connectionFailure(failure: *start_report.Failure, name: []const u8, err: anyerror) anyerror {
     if (err == error.OutOfMemory) return err;
     var message: [start_report.max_refusal_message_bytes]u8 = undefined;
@@ -1600,7 +1586,7 @@ test "Host start saved openai edit carries a usable key into the saved automatic
     try std.testing.expect(providers_object.object.contains("codex") and providers_object.object.contains("openai"));
 }
 
-test "SH-150 a document without connections serves the automatic OpenAI from HOME's key file, as before" {
+test "a document without connections adds none: OpenAI stays with the built-in selection" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
     defer environment.deinit();
@@ -1628,12 +1614,7 @@ test "SH-150 a document without connections serves the automatic OpenAI from HOM
     var connected: providers.Connected = .{};
     defer connected.wipe();
     try resolveConnections(init, settings, &connected, &failure);
-    try std.testing.expectEqual(@as(usize, 1), connected.len);
-    const entry = &connected.entries[0];
-    try std.testing.expectEqualStrings("openai", entry.name.slice());
-    try std.testing.expectEqualStrings("OpenAI", entry.label[0..entry.label_len]);
-    try std.testing.expectEqualStrings(openai_endpoint, entry.url[0..entry.url_len]);
-    try std.testing.expectEqualStrings("sk-synthetic-automatic-key", entry.key.bytes[0..entry.key.len]);
+    try std.testing.expectEqual(@as(usize, 0), connected.len);
 }
 
 test "Host start refused JSON input allocations erase secret bytes before release" {

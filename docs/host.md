@@ -229,9 +229,9 @@ Without a `providers` setting, every start path uses automatic provider selectio
 
 A settings document may name key connections in a `connections` list. Each entry is served under its own `name` (lowercase letters, digits and `-`, at most 16 bytes) at its own `base_url`, with the key its `credential` source names: a private `file`, an `env` variable, or the connection's saved key file (`RUI_<NAME>_KEY_FILE`, else `HOME/.config/rui/<name>.key`). The Host reads each key once at start, as it does for `providers`; the key bytes never enter the settings document. Only one shape is served: a key, one Responses format, and no extra headers, refusal rules or command sources. Other shapes are refused by name at start.
 
-A document with no `connections` list serves one automatic `openai` connection from `HOME/.config/rui/openai.key` (or `RUI_OPENAI_KEY_FILE`) at OpenAI's endpoint, or at the endpoint its `providers.openai` names.
+A document with no `connections` list adds no connection: OpenAI is served, or not, by the `providers` selection above.
 
-`rui auth login openai` saves its key as the connection named `openai` in the document's `connections` list, with the key in a private file beside the document. It leaves the other connections as they are. A connection named `openai` takes the place of the automatic one.
+`rui auth login openai` saves its key as the connection named `openai` in the document's `connections` list, with the key in a private file beside the document. It leaves the other connections as they are. A connection named `openai` takes the place of the built-in `openai` provider, with its own endpoint, format and tools.
 
 Key connections are served by name, but the model picker does not list their models yet; per-name model lists are not in this change.
 The [Host reference](contracts/host.md#platforms-and-server-lifetime) states the startup and shutdown guarantees.

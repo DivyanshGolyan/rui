@@ -105,6 +105,9 @@ pub fn fromSettings(settings: *const @import("host_settings.zig").Settings, conn
                         .openai => unreachable,
                     },
                 },
+                .label = named.shown(),
+                .codec = named.codec(),
+                .web_search = named.runsTool("web_search"),
             }) catch unreachable;
         }
     }
@@ -355,7 +358,7 @@ pub const Headers = struct {
 pub const Served = struct {
     endpoint: []const u8,
     credential: Credential,
-    /// A key connection's own presentation; a built-in provider has its facts instead.
+    /// The entry's presentation: a connection's own, or a built-in provider's facts.
     label: []const u8 = "",
     codec: provider_name.Codec = .@"openai-responses/2",
     web_search: bool = false,
@@ -395,10 +398,6 @@ pub const Providers = struct {
     pub fn served(self: *const Providers) protocol.Served {
         var out: protocol.Served = .{};
         for (self.table.names[0..self.table.len], self.table.values[0..self.table.len]) |name, value| {
-            if (provider_route.builtInOf(name)) |named| {
-                out.put(provider_route.builtIn(named, value.credential.route())) catch unreachable;
-                continue;
-            }
             out.put(.{
                 .name = name,
                 .label = provider_route.Label.parse(value.label).?,
@@ -729,4 +728,42 @@ test "fromSettings serves each key connection at its own URL with its own key, a
     try std.testing.expectEqualStrings("sk-beta-key", served.get(connection.Name.parse("beta").?).?.credential.key_file.key);
     try std.testing.expect(served.get(connection.Name.parse("gamma").?) == null);
     try std.testing.expectEqual(protocol.Route.key_file, served.served().route("alpha"));
+}
+
+test "a connection keeps its own facts under a built-in name, and a built-in entry carries the built-in facts" {
+    var settings: @import("host_settings.zig").Settings = .{};
+    inline for (std.enums.values(Provider)) |named| @field(settings.providers.entries, @tagName(named)) = null;
+    settings.providers.entries.codex = .{ .credential_file = .{} };
+    var connected: Connected = .{};
+    defer connected.wipe();
+    _ = try connected.add(connection.Name.parse("openai").?, .{ .label = "Alpha", .codec = .@"openai-responses/3", .web_search = false }, "https://alpha.example/v1/responses", "sk-alpha-key", false);
+    _ = try connected.add(connection.Name.parse("beta").?, .{ .label = "Beta", .codec = .@"openai-responses/1", .web_search = true }, "https://beta.example/v1/responses", "sk-beta-key", false);
+    const served = fromSettings(&settings, &connected).served();
+    try std.testing.expectEqual(provider_name.Codec.@"openai-responses/3", served.codecOf("openai").?);
+    try std.testing.expect(!served.runsTool("openai", "web_search"));
+    try std.testing.expectEqual(provider_name.Codec.@"openai-responses/1", served.codecOf("beta").?);
+    try std.testing.expect(served.runsTool("beta", "web_search"));
+    try std.testing.expectEqual(Provider.codex.codec(), served.codecOf("codex").?);
+    try std.testing.expectEqual(Provider.codex.runsTool("web_search"), served.runsTool("codex", "web_search"));
+}
+
+test "the served set holds the longest connections list beside every built-in, and an openai connection replaces its built-in" {
+    var settings: @import("host_settings.zig").Settings = .{};
+    settings.providers.entries.codex = .{};
+    settings.providers.entries.chatgpt = .{};
+    settings.providers.entries.openai = .{};
+    inline for (.{ false, true }) |replace_openai| {
+        var connected: Connected = .{};
+        defer connected.wipe();
+        var names: [connection.max_list][4]u8 = undefined;
+        for (0..connection.max_list) |index| {
+            const name = if (replace_openai and index == 0) "openai" else std.fmt.bufPrint(&names[index], "c{d}", .{index}) catch unreachable;
+            _ = try connected.add(connection.Name.parse(name).?, .{ .label = "Alpha", .codec = .@"openai-responses/2", .web_search = false }, "https://alpha.example/v1/responses", "sk-alpha-key", false);
+        }
+        settings.providers.entries.codex.?.credential_file = .{};
+        settings.providers.entries.chatgpt.?.credential_file = .{};
+        const served = fromSettings(&settings, &connected).served();
+        try std.testing.expectEqual(@as(usize, connection.max_list + 3) - @intFromBool(replace_openai), served.items().len);
+        try std.testing.expectEqual(protocol.Route.key_file, served.route("openai"));
+    }
 }

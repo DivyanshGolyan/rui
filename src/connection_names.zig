@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const connection = @import("connection.zig");
-const max_served = connection.max_list;
+const max_served = connection.max_served;
 
 /// A bounded set of connection names: at most `max_served`, each once. The
 /// keyed container for anything a Host serves, in place of an enum set.
