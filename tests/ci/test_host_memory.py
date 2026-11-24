@@ -8,12 +8,24 @@ import sys
 import tempfile
 import unittest
 
-from host_memory import (COMPARABLE, FIXTURE_DESCRIPTORS, PER_AGENT_BUDGET, RAMP_FROM, RAMP_RUNS, RAMP_TO, Ramp,
-                         Readings, SCENARIOS, fixture_shortfall, raise_descriptor_limit, ramp_runs, summary, verdict)
+from host_memory import (COMPARABLE, FIXTURE_DESCRIPTORS, MIN_RAMP_RUNS, PER_AGENT_BUDGET, RAMP_FROM, RAMP_RUNS, RAMP_TO,
+                         Ramp, Readings, SCENARIOS, raise_descriptor_limit, ramp_runs, summary, verdict)
 
 MACHINE = {"image": "ubuntu24 20261101.1", "cpu": "Example CPU @ 2.10GHz", "kernel": "6.8.0", "glibc": "glibc 2.39"}
 BUDGET_KIB = (RAMP_TO - RAMP_FROM) * PER_AGENT_BUDGET // 1024   # 3600 KiB of slope is exactly the budget
 BASE = 100_000
+
+# The Host's own refusal, as start_ready_process reports it when the Host exits before ready (server.zig prints this line).
+HOST_REFUSAL = ("rui: Host cannot start: descriptor soft limit 64 is below the minimum intake requirement 4,311 "
+                "(10 ordinary clients). Rui already tried raising it.")
+
+# What a scripted ramp raises. "before" and "held" fail before the reading (held is held_exactly's own message);
+# "teardown" fails after the reading, while the Host stops.
+FAILURES = {
+    "before": "the model listing never held",
+    "held": "3 model requests held, expected exactly 5",
+    "teardown": "Host did not stop within 10 seconds",
+}
 
 
 def ramp_of(delta, base=BASE):
@@ -24,113 +36,8 @@ def runs(*deltas):
     return [ramp_of(delta) for delta in deltas]
 
 
-class VerdictTest(unittest.TestCase):
-    def test_a_median_within_budget_passes(self):
-        judged = verdict(runs(3000, 3000, 3000, 3000, 3000))
-        self.assertTrue(judged.within)
-        self.assertEqual(judged.per_agent, 3000 * 1024 // 900)
-        self.assertIn("within", judged.line)
-        self.assertIn("median of 5", judged.line)
-
-    def test_a_median_exactly_at_budget_passes(self):
-        judged = verdict(runs(BUDGET_KIB, BUDGET_KIB, BUDGET_KIB, BUDGET_KIB, BUDGET_KIB))
-        self.assertTrue(judged.within)
-        self.assertEqual(judged.per_agent, PER_AGENT_BUDGET)
-
-    def test_a_median_just_past_budget_fails_naming_median_and_budget(self):
-        # smaps reports KiB, so the smallest step past the budget is one KiB of slope (about 1.14 bytes per agent).
-        judged = verdict(runs(BUDGET_KIB + 1, BUDGET_KIB + 1, BUDGET_KIB + 1, BUDGET_KIB + 1, BUDGET_KIB + 1))
-        self.assertFalse(judged.within)
-        self.assertEqual(judged.per_agent, 4097)
-        self.assertTrue(judged.line.startswith("Host memory gate failed: "), judged.line)
-        self.assertIn("4,097 bytes", judged.line)
-        self.assertIn("4,096-byte budget", judged.line)
-
-    def test_a_bimodal_step_at_ramp_from_does_not_move_an_over_budget_median(self):
-        # One run reads 200 KiB high at RAMP_FROM only, so its slope is 200 KiB low; the median stays over budget.
-        judged = verdict(runs(BUDGET_KIB + 1, BUDGET_KIB + 1, BUDGET_KIB + 1, BUDGET_KIB + 1, BUDGET_KIB + 1 - 200))
-        self.assertFalse(judged.within)
-
-    def test_a_bimodal_step_at_ramp_to_does_not_move_a_within_median(self):
-        # One run reads 200 KiB high at RAMP_TO only, so its slope is 200 KiB high; the median stays within.
-        judged = verdict(runs(BUDGET_KIB, BUDGET_KIB, BUDGET_KIB, BUDGET_KIB, BUDGET_KIB + 200))
-        self.assertTrue(judged.within)
-
-    def test_three_of_five_runs_is_measured(self):
-        judged = verdict(runs(3000, 3100, 2900))
-        self.assertTrue(judged.within)
-        self.assertEqual(judged.per_agent, 3000 * 1024 // 900)
-
-    def test_two_of_five_runs_is_not_measured_and_fails(self):
-        judged = verdict(runs(3000, 3000))
-        self.assertFalse(judged.within)
-        self.assertIsNone(judged.per_agent)
-        self.assertIn("not measured", judged.line)
-        self.assertIn("2 of 5 ramp runs completed", judged.line)
-
-    def test_a_reason_string_fails_as_not_measured_and_quotes_the_reason(self):
-        judged = verdict("the model listing never held")
-        self.assertFalse(judged.within)
-        self.assertIsNone(judged.per_agent)
-        self.assertEqual(judged.line, "Host memory gate failed: per-agent cost not measured: "
-                                      "the model listing never held")
-
-    def test_a_negative_slope_is_measured_within_and_reported_as_is(self):
-        judged = verdict(runs(-1000, -1000, -1000, -1000, -1000))
-        self.assertTrue(judged.within)
-        self.assertEqual(judged.per_agent, -1000 * 1024 // 900)
-        self.assertIn(f"{-1000 * 1024 // 900:,} bytes", judged.line)
-
-    def test_an_even_run_count_takes_the_upper_middle_so_it_never_rounds_toward_passing(self):
-        judged = verdict(runs(BUDGET_KIB, BUDGET_KIB, BUDGET_KIB + 1, BUDGET_KIB + 1))
-        self.assertFalse(judged.within)
-
-
-class SummaryTest(unittest.TestCase):
-    def readings(self, ramps, rows=None):
-        return Readings(rows or {"Empty Host": [2188, 2184, 2192], "Model listing held at start": [10, 20],
-                                 "MCP tool listing held at start": [30, 40]}, ramps)
-
-    def test_each_scenario_is_one_row_and_the_ramp_has_its_two_rows_and_a_per_agent_line(self):
-        ramps = runs(3000, 3000, 3000, 3000, 3000)
-        judged = verdict(ramps)
-        text = summary("rui 0.70.0 (abc123)", MACHINE, self.readings(ramps), judged)
-        self.assertIn("Measured on rui 0.70.0 (abc123) on ubuntu24 20261101.1, Example CPU @ 2.10GHz, "
-                      "kernel 6.8.0, glibc 2.39.", text)
-        self.assertIn("| Empty Host | Private_Dirty | 3 | 2188 | 2184-2192 |", text)
-        self.assertIn("| 100 agents waiting on the model | Private_Dirty | 5 |", text)
-        self.assertIn("| 1,000 agents waiting on the model | Private_Dirty | 5 |", text)
-        self.assertIn("| Model listing held at start | Anonymous | 2 | 15 | 10-20 |", text)
-        self.assertIn(f"Per agent (100 -> 1,000 waiting agents, same Host): {judged.per_agent:,} bytes median of 5", text)
-        self.assertIn(COMPARABLE, text)
-        self.assertTrue(text.endswith(judged.line))
-
-    def test_a_ramp_that_did_not_run_is_a_not_measured_row_and_the_gate_fails(self):
-        judged = verdict("no ramp run started")
-        text = summary("rui 0.70.0 (abc123)", MACHINE, self.readings("no ramp run started"), judged)
-        self.assertIn("| 1,000 agents waiting on the model | Private_Dirty | not measured: no ramp run started | | |", text)
-        self.assertIn("Per agent (100 -> 1,000 waiting agents, same Host): not measured.", text)
-        self.assertTrue(text.endswith(judged.line))
-
-    def test_a_publish_only_failure_stays_a_row(self):
-        ramps = runs(3000, 3000, 3000)
-        text = summary("rui 0.70.0 (abc123)", MACHINE,
-                       self.readings(ramps, {"Empty Host": "timed out | twice"}), verdict(ramps))
-        self.assertIn("| Empty Host | Private_Dirty | not measured: timed out / twice | | |", text)
-
-    def test_scenarios_have_distinct_names_and_read_a_smaps_rollup_field(self):
-        self.assertEqual(len({scenario.name for scenario in SCENARIOS}), len(SCENARIOS))
-        self.assertTrue({scenario.metric for scenario in SCENARIOS} <= {"Private_Dirty", "Anonymous"})
-
-
-# The Host's own refusal, as start_ready_process reports it when the Host exits before ready (server.zig prints this line).
-HOST_REFUSAL = ("rui: Host cannot start: descriptor soft limit 64 is below the minimum intake requirement 4,311 "
-                "(10 ordinary clients). Rui already tried raising it.")
-
-
 def scripted_ramp(outcomes):
-    """A stand-in for host_memory.ramp. Each run takes the next outcome: "ok", "before" (fails before the
-    yield, while the Host starts or holds) or "teardown" (fails after the yield, while the Host stops)."""
+    """A stand-in for host_memory.ramp. Each run takes the next outcome: "ok", or one of FAILURES."""
     remaining = iter(outcomes)
     started = []
 
@@ -138,11 +45,11 @@ def scripted_ramp(outcomes):
     def fake(binary, root, store):
         outcome = next(remaining)
         started.append(outcome)
-        if outcome == "before":
-            raise RuntimeError("the model listing never held")
+        if outcome in ("before", "held"):
+            raise RuntimeError(FAILURES[outcome])
         yield Ramp(BASE, BASE + 3000)
         if outcome == "teardown":
-            raise RuntimeError("Host did not stop within 10 seconds")
+            raise RuntimeError(FAILURES[outcome])
 
     return fake, started
 
@@ -152,54 +59,117 @@ def quietly(call):
         return call()
 
 
-class DescriptorLimitTest(unittest.TestCase):
-    def test_a_soft_limit_below_hard_is_raised_to_hard_and_the_new_soft_limit_is_returned(self):
-        limits = {"now": (1024, 4096)}
-        calls = []
+def run_main(binary, environment=None):
+    return subprocess.run([sys.executable, "-B", str(Path(__file__).with_name("host_memory.py")), str(binary)],
+                          capture_output=True, text=True, timeout=60, env=environment)
 
-        def setrlimit(which, value):
-            calls.append((which, value))
-            limits["now"] = value
 
-        soft = raise_descriptor_limit(getrlimit=lambda which: limits["now"], setrlimit=setrlimit)
-        self.assertEqual(calls, [(resource.RLIMIT_NOFILE, (4096, 4096))])
-        self.assertEqual(soft, 4096)
+def raise_once(soft, hard, refuse=False):
+    """Run raise_descriptor_limit over a fake limit; return the soft limit it reports and the setrlimit calls."""
+    limits = {"now": (soft, hard)}
+    calls = []
 
-    def test_a_refused_raise_keeps_the_soft_limit_and_does_not_fail(self):
-        def setrlimit(which, value):
+    def setrlimit(which, value):
+        calls.append((which, value))
+        if refuse:
             raise ValueError("not permitted")
+        limits["now"] = value
 
-        soft = raise_descriptor_limit(getrlimit=lambda which: (1024, 4096), setrlimit=setrlimit)
-        self.assertEqual(soft, 1024)
+    returned = raise_descriptor_limit(getrlimit=lambda which: limits["now"], setrlimit=setrlimit)
+    return returned, calls
 
-    def test_a_sufficient_fixture_limit_has_no_shortfall(self):
-        self.assertIsNone(fixture_shortfall(FIXTURE_DESCRIPTORS))
-        self.assertIsNone(fixture_shortfall(FIXTURE_DESCRIPTORS + 1))
 
-    def test_an_insufficient_fixture_limit_names_the_fixture_headroom(self):
-        reason = fixture_shortfall(FIXTURE_DESCRIPTORS - 1)
-        self.assertIsNotNone(reason)
-        self.assertIn(f"{FIXTURE_DESCRIPTORS - 1:,}", reason)
-        self.assertIn(f"{FIXTURE_DESCRIPTORS:,}", reason)
+class PerAgentVerdictTest(unittest.TestCase):
+    def test_ci_90_per_agent_verdict_over_its_whole_domain(self):
+        over_by_one = BUDGET_KIB + 1
+        cases = (
+            # name, ramps or reason, passes, per_agent, fragment of the gate sentence
+            ("median well within budget", runs(3000, 3000, 3000, 3000, 3000), True, 3000 * 1024 // 900, "median of 5"),
+            ("median exactly at budget", runs(*[BUDGET_KIB] * 5), True, PER_AGENT_BUDGET, "within"),
+            ("median 1 KiB of slope over budget", runs(*[over_by_one] * 5), False, 4097, "4,096-byte budget"),
+            ("bimodal step at ramp_from cannot lower an over-budget median", runs(
+                over_by_one, over_by_one, over_by_one, over_by_one, over_by_one - 200), False, 4097, "4,096-byte budget"),
+            ("bimodal step at ramp_to cannot raise a within median", runs(
+                BUDGET_KIB, BUDGET_KIB, BUDGET_KIB, BUDGET_KIB, BUDGET_KIB + 200), True, PER_AGENT_BUDGET, "within"),
+            (f"{MIN_RAMP_RUNS} of {RAMP_RUNS} runs is measured", runs(3000, 3100, 2900), True, 3000 * 1024 // 900,
+             f"median of {MIN_RAMP_RUNS}"),
+            (f"one run short of {MIN_RAMP_RUNS}", runs(*[3000] * (MIN_RAMP_RUNS - 1)), False, None,
+             f"{MIN_RAMP_RUNS - 1} of {RAMP_RUNS} ramp runs completed"),
+            ("no ramp completed", [], False, None, f"0 of {RAMP_RUNS} ramp runs completed"),
+            ("negative slope is measured and reported as is", runs(-1000, -1000, -1000, -1000, -1000), True,
+             -1000 * 1024 // 900, "bytes"),
+            ("an even run count takes the upper middle", runs(BUDGET_KIB, BUDGET_KIB, over_by_one, over_by_one),
+             False, 4097, "4,097 bytes"),
+            ("a not-measured reason fails and is quoted", "the model listing never held", False, None,
+             "per-agent cost not measured: the model listing never held"),
+        )
+        for name, ramps, passes, per_agent, fragment in cases:
+            with self.subTest(case=name):
+                judged = verdict(ramps)
+                self.assertEqual(judged.within, passes)
+                self.assertEqual(judged.per_agent, per_agent)
+                self.assertIn(fragment, judged.line)
+                self.assertTrue(judged.line.startswith("Host memory gate " + ("passed" if passes else "failed")), judged.line)
 
-    def test_an_unlimited_fixture_limit_has_no_shortfall(self):
-        self.assertIsNone(fixture_shortfall(resource.RLIM_INFINITY))
 
-    def test_a_sufficient_fixture_limit_runs_the_ramps(self):
-        fake, started = scripted_ramp(["ok"] * RAMP_RUNS)
-        result = quietly(lambda: ramp_runs(Path("rui"), Path("root"), raise_limit=lambda: FIXTURE_DESCRIPTORS, open_ramp=fake))
-        self.assertIsInstance(result, list)
-        self.assertEqual(len(result), RAMP_RUNS)
-        self.assertEqual(len(started), RAMP_RUNS)
+class CleanRampTest(unittest.TestCase):
+    def test_ci_91_only_a_clean_ramp_counts_toward_the_verdict(self):
+        # (name, outcome of each run, runs that count)
+        outcome_cases = (
+            ("every run clean", ["ok"] * RAMP_RUNS, RAMP_RUNS),
+            ("failure before the reading, every run", ["before"] * RAMP_RUNS, 0),
+            ("held-count shortfall, every run", ["held"] * RAMP_RUNS, 0),
+            ("failure at teardown, every run", ["teardown"] * RAMP_RUNS, 0),
+            ("teardown failures cannot make up the minimum", ["ok", "ok", "teardown", "teardown", "teardown"], 2),
+            ("failures before the reading cannot make up the minimum", ["ok", "ok", "before", "held", "before"], 2),
+            ("clean runs reach the minimum", ["ok", "ok", "ok", "teardown", "before"], 3),
+        )
+        for name, outcomes, counted in outcome_cases:
+            with self.subTest(case=name):
+                fake, started = scripted_ramp(outcomes)
+                result = quietly(lambda: ramp_runs(Path("rui"), Path("root"), raise_limit=lambda: FIXTURE_DESCRIPTORS,
+                                                   open_ramp=fake))
+                self.assertEqual(started, outcomes)
+                if counted == 0:
+                    self.assertIsInstance(result, str)
+                    self.assertIn(FAILURES[outcomes[-1]], result)
+                    judged = verdict(result)
+                    self.assertFalse(judged.within)
+                    self.assertIsNone(judged.per_agent)
+                    self.assertTrue(judged.line.startswith("Host memory gate failed: per-agent cost not measured: "))
+                    continue
+                self.assertIsInstance(result, list)
+                self.assertEqual(len(result), counted)
+                if counted < MIN_RAMP_RUNS:
+                    judged = verdict(result)
+                    self.assertFalse(judged.within)
+                    self.assertIsNone(judged.per_agent)
+                    self.assertIn(f"{counted} of {RAMP_RUNS} ramp runs completed", judged.line)
+                else:
+                    self.assertTrue(verdict(result, budget=10**9).within)
 
-    def test_an_insufficient_fixture_limit_is_not_measured_and_starts_no_host(self):
-        fake, started = scripted_ramp(["ok"] * RAMP_RUNS)
-        result = quietly(lambda: ramp_runs(Path("rui"), Path("root"), raise_limit=lambda: FIXTURE_DESCRIPTORS - 1, open_ramp=fake))
-        self.assertIsInstance(result, str)
-        self.assertIn("fixture's descriptor limit", result)
-        self.assertEqual(started, [])
+        # The fixture's own descriptor headroom: a shortfall is not measured and starts no Host.
+        shortfall_cases = (
+            (FIXTURE_DESCRIPTORS, None),
+            (FIXTURE_DESCRIPTORS + 1, None),
+            (resource.RLIM_INFINITY, None),
+            (FIXTURE_DESCRIPTORS - 1, f"{FIXTURE_DESCRIPTORS - 1:,}"),
+        )
+        for limit, shown in shortfall_cases:
+            with self.subTest(descriptor_limit=limit):
+                fake, started = scripted_ramp(["ok"] * RAMP_RUNS)
+                result = quietly(lambda: ramp_runs(Path("rui"), Path("root"), raise_limit=lambda: limit, open_ramp=fake))
+                if shown is None:
+                    self.assertIsInstance(result, list)
+                    self.assertEqual(len(started), RAMP_RUNS)
+                else:
+                    self.assertIsInstance(result, str)
+                    self.assertIn("fixture's descriptor limit", result)
+                    self.assertIn(shown, result)
+                    self.assertIn(f"{FIXTURE_DESCRIPTORS:,}", result)
+                    self.assertEqual(started, [])
 
-    def test_the_host_refusing_to_start_becomes_not_measured_with_its_own_reason(self):
+        # The Host's own refusal to start is reported with its own reason and never counted.
         @contextlib.contextmanager
         def refused(binary, root, store):
             raise RuntimeError(f"Host exited before ready; stdout=b''; stderr_tail=b'{HOST_REFUSAL}'")
@@ -211,70 +181,71 @@ class DescriptorLimitTest(unittest.TestCase):
         judged = verdict(result)
         self.assertFalse(judged.within)
         self.assertIsNone(judged.per_agent)
-        self.assertIn("not measured", judged.line)
         self.assertIn("Host cannot start", judged.line)
 
-
-class RampCountingTest(unittest.TestCase):
-    def count(self, outcomes):
-        fake, started = scripted_ramp(outcomes)
-        result = quietly(lambda: ramp_runs(Path("rui"), Path("root"), raise_limit=lambda: FIXTURE_DESCRIPTORS, open_ramp=fake))
-        return result, started
-
-    def test_a_failure_before_the_yield_is_never_counted(self):
-        result, _ = self.count(["before"] * RAMP_RUNS)
-        self.assertIsInstance(result, str)
-        self.assertIn("model listing never held", result)
-        self.assertFalse(verdict(result).within)
-
-    def test_a_failure_at_teardown_after_the_yield_is_never_counted(self):
-        result, started = self.count(["teardown"] * RAMP_RUNS)
-        self.assertEqual(started, ["teardown"] * RAMP_RUNS)
-        self.assertIsInstance(result, str)
-        self.assertIn("did not stop within 10 seconds", result)
-        judged = verdict(result)
-        self.assertFalse(judged.within)
-        self.assertIsNone(judged.per_agent)
-
-    def test_teardown_failures_cannot_make_up_min_ramp_runs(self):
-        # Two clean runs and three that fail at teardown: only the two clean ones count, below MIN_RAMP_RUNS.
-        result, _ = self.count(["ok", "ok", "teardown", "teardown", "teardown"])
-        self.assertIsInstance(result, list)
-        self.assertEqual(len(result), 2)
-        judged = verdict(result)
-        self.assertFalse(judged.within)
-        self.assertIn("2 of 5 ramp runs completed", judged.line)
-
-    def test_failures_before_the_yield_cannot_make_up_min_ramp_runs(self):
-        result, _ = self.count(["ok", "ok", "before", "before", "before"])
-        self.assertEqual(len(result), 2)
-        self.assertIn("2 of 5 ramp runs completed", verdict(result).line)
-
-    def test_clean_runs_count_and_reach_min_ramp_runs(self):
-        result, _ = self.count(["ok", "ok", "ok", "teardown", "before"])
-        self.assertEqual(len(result), 3)
-        self.assertTrue(verdict(result, budget=10**9).within)
+        # Raising the soft descriptor limit to the hard limit, and what is kept when the raise is refused.
+        raise_cases = (
+            ("soft below hard is raised to hard", 1024, 4096, False, 4096, [(resource.RLIMIT_NOFILE, (4096, 4096))]),
+            ("a refused raise keeps the soft limit", 1024, 4096, True, 1024, [(resource.RLIMIT_NOFILE, (4096, 4096))]),
+            ("soft equal to hard is left alone", 4096, 4096, False, 4096, []),
+        )
+        for name, soft, hard, refuse, returned, calls in raise_cases:
+            with self.subTest(case=name):
+                self.assertEqual(raise_once(soft, hard, refuse), (returned, calls))
 
 
-class MainTest(unittest.TestCase):
-    def run_main(self, binary, environment=None):
-        return subprocess.run([sys.executable, "-B", str(Path(__file__).with_name("host_memory.py")), str(binary)],
-                              capture_output=True, text=True, timeout=60, env=environment)
+class MemoryTableTest(unittest.TestCase):
+    def test_ci_92_memory_table_and_exit_status_over_its_rows(self):
+        version = "rui 0.70.0 (abc123)"
+        ramps = runs(3000, 3000, 3000, 3000, 3000)
+        judged = verdict(ramps)
 
-    def test_a_run_that_cannot_start_is_not_measured_and_exits_one(self):
-        with tempfile.TemporaryDirectory() as directory:
-            result = self.run_main(Path(directory) / "absent-rui")
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertTrue(result.stdout.startswith("### Host memory\n\nNot measured: "), result.stdout)
-        self.assertIn("not measured", result.stdout)
-        self.assertIn("not measured", result.stderr)
+        with self.subTest(case="measured ramp with every publish-only row measured"):
+            readings = Readings({"Empty Host": [2188, 2184, 2192], "Model listing held at start": [10, 20],
+                                 "MCP tool listing held at start": [30, 40]}, ramps)
+            text = summary(version, MACHINE, readings, judged)
+            self.assertIn(f"Measured on {version} on ubuntu24 20261101.1, Example CPU @ 2.10GHz, "
+                          "kernel 6.8.0, glibc 2.39.", text)
+            self.assertIn("| Empty Host | Private_Dirty | 3 | 2188 | 2184-2192 |", text)
+            self.assertIn("| 100 agents waiting on the model | Private_Dirty | 5 |", text)
+            self.assertIn("| 1,000 agents waiting on the model | Private_Dirty | 5 |", text)
+            self.assertIn("| Model listing held at start | Anonymous | 2 | 15 | 10-20 |", text)
+            self.assertIn(f"Per agent ({RAMP_FROM:,} -> {RAMP_TO:,} waiting agents, same Host): {judged.per_agent:,} bytes "
+                          "median of 5", text)
+            self.assertIn(COMPARABLE, text)
+            self.assertTrue(text.endswith(judged.line))
 
-    def test_the_notes_file_gets_the_same_text_when_the_environment_names_one(self):
-        with tempfile.TemporaryDirectory() as directory:
-            notes = Path(directory) / "notes.md"
-            result = self.run_main(Path(directory) / "absent-rui", {**os.environ, "RUI_HOST_MEMORY_NOTES": str(notes)})
-            self.assertEqual(result.returncode, 1)
-            self.assertEqual(notes.read_text(), result.stdout)
+        with self.subTest(case="ramp did not run"):
+            not_run = verdict("no ramp run started")
+            text = summary(version, MACHINE, Readings({}, "no ramp run started"), not_run)
+            self.assertIn("| 1,000 agents waiting on the model | Private_Dirty | not measured: no ramp run started | | |", text)
+            self.assertIn(f"Per agent ({RAMP_FROM:,} -> {RAMP_TO:,} waiting agents, same Host): not measured.", text)
+            self.assertTrue(text.endswith(not_run.line))
+
+        with self.subTest(case="publish-only failure leaves the verdict and its line as they were"):
+            text = summary(version, MACHINE, Readings({"Empty Host": "timed out | twice"}, ramps), judged)
+            self.assertIn("| Empty Host | Private_Dirty | not measured: timed out / twice | | |", text)
+            self.assertTrue(judged.within)
+            self.assertTrue(text.endswith(judged.line))
+
+        with self.subTest(case="scenario rows have distinct names and smaps fields"):
+            self.assertEqual(len({scenario.name for scenario in SCENARIOS}), len(SCENARIOS))
+            self.assertTrue({scenario.metric for scenario in SCENARIOS} <= {"Private_Dirty", "Anonymous"})
+
+        with self.subTest(case="absent binary is not measured and exits 1"):
+            with tempfile.TemporaryDirectory() as directory:
+                result = run_main(Path(directory) / "absent-rui")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertTrue(result.stdout.startswith("### Host memory\n\nNot measured: "), result.stdout)
+            self.assertIn("not measured", result.stdout)
+            self.assertIn("not measured", result.stderr)
+
+        with self.subTest(case="notes file gets the same text"):
+            with tempfile.TemporaryDirectory() as directory:
+                notes = Path(directory) / "notes.md"
+                result = run_main(Path(directory) / "absent-rui", {**os.environ, "RUI_HOST_MEMORY_NOTES": str(notes)})
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(notes.read_text(), result.stdout)
 
 
 if __name__ == "__main__":
