@@ -653,7 +653,7 @@ test "a list stays the drawn one only while its rows are the same, across every 
 
 test "SUI-24 archive completion refreshes before accepting and preserves replacement boundaries" {
     const ArchiveState = @import("session_archive.zig").State;
-    const entries = [_]skill_suggestions.Entry{.{ .name = "archx", .description = "Skill" }};
+    const entries = [_]skill_suggestions.Entry{.{ .name = "archx", .description = "Archive and unarchive notes" }};
     var reads: Reads = .{};
     var rows: Rows = .{};
     _ = reads.answer(reads.ask("").?.read, testPage(&entries), "");
@@ -693,6 +693,15 @@ test "SUI-24 archive completion refreshes before accepting and preserves replace
     };
     for (unavailable) |case| {
         try std.testing.expect(reads.shown(&rows, case.draft, case.draft.len, 2, .{ .archive_state = case.state }, null) == null);
+    }
+
+    for ([_]struct { state: ArchiveState, exact: []const u8 }{
+        .{ .state = .active, .exact = "/archive" },
+        .{ .state = .archived, .exact = "/unarchive" },
+    }) |case| {
+        const shown = reads.shown(&rows, case.exact, case.exact.len, 3, .{ .archive_state = case.state }, null).?;
+        try std.testing.expectEqualStrings(case.exact, shown.list.shown()[0].shown);
+        try std.testing.expectEqualStrings("/archx", shown.list.shown()[1].shown);
     }
 
     for ([_][]const u8{ "/arch this change", "/arch.foo" }) |draft| {
