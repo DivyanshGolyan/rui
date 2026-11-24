@@ -23,7 +23,7 @@ def draft(screen, text):
 
 
 def cases():
-    """SUI-116 Right Arrow transfers keyboard input to the selected Session."""
+    """SUI-120 Right Arrow transfers keyboard input to the selected Session."""
     keyboard_activation()
     creator_gestures()
 
