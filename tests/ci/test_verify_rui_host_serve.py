@@ -86,7 +86,8 @@ class FakeHostProcesses:
     def body(self, host):
         providers = {name: 'unserved' for name in ('codex', 'openai', 'chatgpt')}
         providers.update(host['providers'])
-        return {'instance': f"instance-{host['pid']}", 'capabilities': {'providers': providers}}
+        return {'instance': f"instance-{host['pid']}", 'capabilities': {'connections': [
+            {'name': name, 'route': route} for name, route in providers.items() if route != 'unserved']}}
 
     def rui_cmd(self, *args, **_kwargs):
         if args[:2] == ('host', 'status'):

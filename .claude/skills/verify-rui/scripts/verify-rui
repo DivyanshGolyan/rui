@@ -873,9 +873,8 @@ def host_status(run):
 
 
 def served_providers(body):
-    """The providers a ready Host serves; a provider reported as unserved is not served."""
-    providers = (body or {}).get("capabilities", {}).get("providers", {})
-    return {name for name, value in providers.items() if value != "unserved"}
+    """The connections a ready Host serves, by name."""
+    return {entry["name"] for entry in (body or {}).get("capabilities", {}).get("connections", [])}
 
 
 class HostProcesses:
