@@ -27,7 +27,7 @@ Start the Host first:
 STORE="$HOME/.local/share/rui/store"
 rui host start --store "$STORE"
 RECEIPT=$(printf '%s' 'Investigate the failing test' | rui session start --store "$STORE" \
-	--workspace "$PWD" --provider chatgpt --model gpt-6-luna --permission-mode ask)
+	--workspace "$PWD" --connection chatgpt --model gpt-6-luna --permission-mode ask)
 SESSION=$(printf '%s' "$RECEIPT" | jq -r .context.session)
 HANDLE=$(printf '%s' "$RECEIPT" | jq -r .context.key)
 ```
@@ -49,7 +49,7 @@ Use `--parent ID` with `session start` or with `session configure` without `--se
 printf '%s' 'Investigate the error path' | rui session start --store "$STORE" --parent "$SESSION" --tools bash --permission-mode ask
 ```
 
-The child inherits the parent's provider, Workspace and saved Bash environment. Do not pass `--provider` or `--workspace`, even with the parent's values. The child's tools must be within the parent's configured allowed tools, and an asking parent cannot have a bypass child. Other omitted settings use CLI creation defaults. If the ordinary default provider differs from the parent, set `--compaction-trigger` explicitly to choose the desired threshold.
+The child inherits the parent's provider, Workspace and saved Bash environment. Do not pass `--connection` or `--workspace`, even with the parent's values. The child's tools must be within the parent's configured allowed tools, and an asking parent cannot have a bypass child. Other omitted settings use CLI creation defaults. If the ordinary default provider differs from the parent, set `--compaction-trigger` explicitly to choose the desired threshold.
 
 `session start` still admits the first Message in the same transaction. Its receipt reports `configuration.provider` as null and includes `configuration.parent`, because the provider comes from the parent. `session configure --parent` creates the child without a Message. A parent cannot be added to an existing Session. Recovering a captured request keeps the original child and does not replace its inherited environment.
 
