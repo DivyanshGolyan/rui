@@ -169,9 +169,10 @@ test "configuration pre-Workspace decisions allow model revisions" {
 test "configure refuses a tool name the tool set lacks and a provider tool its provider does not run" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const hosted: tool_defs.Record = .{ .name = "code_interpreter", .owner = .provider };
-            const records = [_]tool_defs.Record{ tool_defs.bash_record, hosted, tool_defs.web_search_record };
-            const digests = [_][32]u8{ tool_defs.recordDigest(&records[0]), tool_defs.recordDigest(&records[1]), tool_defs.recordDigest(&records[2]) };
+            // The Host set holds every built-in (a Store refuses a set without them) and one provider tool.
+            const records = comptime testingHostToolRecords(&.{.{ .name = "code_interpreter", .owner = .provider }});
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: store_core.Store = undefined;

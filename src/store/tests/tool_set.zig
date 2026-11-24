@@ -1438,7 +1438,7 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
             // Create: the declaration and a selection of its name in one request.
             var created = try completeConfiguration("sh175-create", "", workspace, "model-a");
             declareAppTools(&created.configuration, ask_and_other_declaration);
-            created.configuration.tools = try .of(&.{ "find_tools", "ask" });
+            created.configuration.tools = try .of(&.{ "ask", "find_tools" });
             const created_reply = try storage.configure(&created, .{});
             try std.testing.expect(created_reply == .accepted);
             const root = keepRef(&refs[0], created_reply.accepted.session.slice());
@@ -1454,7 +1454,7 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
             try replace_ask.key.set("sh175-replace-ask");
             try replace_ask.session.set(root);
             declareAppTools(&replace_ask.configuration, ask_only_declaration);
-            replace_ask.configuration.tools = try .of(&.{ "find_tools", "ask" });
+            replace_ask.configuration.tools = try .of(&.{ "ask", "find_tools" });
             try std.testing.expect((try storage.configure(&replace_ask, .{})) == .accepted);
 
             // Clear: an empty declaration leaves the lane no app tools, so naming `ask` is refused.
@@ -1469,7 +1469,7 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
             var omitted: wire_request.ConfigureCommand = .{};
             try omitted.key.set("sh175-omitted");
             try omitted.session.set(root);
-            omitted.configuration.tools = try .of(&.{ "find_tools", "ask" });
+            omitted.configuration.tools = try .of(&.{ "ask", "find_tools" });
             try std.testing.expect((try storage.configure(&omitted, .{})) == .accepted);
 
             // Host precedence: a declaration whose `lookup` the Host shadows creates, and the Host name is selected.
@@ -1490,7 +1490,7 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
             // A real subset: the root names `ask` alone of its two app tools, so its child may not name `other`.
             var subset_root_command = try completeConfiguration("sh175-subset-root", "", workspace, "model-a");
             declareAppTools(&subset_root_command.configuration, ask_and_other_declaration);
-            subset_root_command.configuration.tools = try .of(&.{ "find_tools", "ask" });
+            subset_root_command.configuration.tools = try .of(&.{ "ask", "find_tools" });
             const subset_reply = try storage.configure(&subset_root_command, .{});
             try std.testing.expect(subset_reply == .accepted);
             const subset_root = keepRef(&refs[2], subset_reply.accepted.session.slice());
