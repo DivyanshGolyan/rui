@@ -1565,7 +1565,6 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                     switch (gesture) {
                         .open => try clickOpen(state, reference, &effects),
                         .wait, .toggle => {
-                            state.browse_target = null;
                             state.selected = .{ .session = reference };
                             if (gesture == .toggle) {
                                 endCarry(state);
@@ -2783,6 +2782,8 @@ fn startUpgrade(state: *State) void {
 fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{OutOfMemory}!void {
     const input = delivery.key;
     if (delivery.pasted or input == .ignored) return;
+    const browse_move = input == .action and (input.action == .previous or input.action == .next);
+    if (!browse_move) state.browse_target = null;
     if (input == .action and input.action == .exit) {
         effects.add(.exit);
         return;
@@ -2796,17 +2797,13 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
     const before = state.selected;
     switch (input) {
         .ignored => unreachable,
-        .enter => {
-            state.browse_target = null;
-            try activateList(state, .enter, effects);
-        },
+        .enter => try activateList(state, .enter, effects),
         .left => if (state.selected == .archived) {
             state.selected = .sessions;
         },
         .action => |action| switch (action) {
             .exit => unreachable,
             .open_session => {
-                state.browse_target = null;
                 switch (state.selected) {
                     .session => try activateList(state, .open_session, effects),
                     .sessions => state.selected = .archived,
@@ -8818,6 +8815,53 @@ test "Overview browse explicit Enter and Right share activation and focus depart
     const cancelled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = false } });
     try std.testing.expectEqual(@as(usize, 0), cancelled.len);
     try std.testing.expect(state.browse_target == null);
+}
+
+test "Overview browse target cancels when explicit session navigation opens its own destination" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    _ = try step(&state, .{ .conversation = "b2c3d4".* });
+    state.selected = .{ .session = "b2c3d4".* };
+    _ = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } });
+    try std.testing.expectEqualStrings("c3d4e5", &state.selected.session);
+    try std.testing.expectEqualStrings("c3d4e5", &state.browse_target.?);
+
+    const activated = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next_session } } });
+    try std.testing.expect(state.browse_target == null);
+    var opens: usize = 0;
+    for (activated.slice()) |effect| switch (effect) {
+        .open => |reference| {
+            try std.testing.expectEqualStrings("c3d4e5", &reference);
+            opens += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), opens);
+
+    const settled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = true } });
+    for (settled.slice()) |effect| try std.testing.expect(effect != .open);
+}
+
+test "Overview explicit adjacent navigation cancels its queued browse preview before opening" {
+    const rows = [_]Listed{
+        session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" }),
+        session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" }),
+        session("cccccc", .{ .finished = ago(3) }, .{ .label = "third" }),
+    };
+    var state = try opened(&rows);
+    defer state.deinit();
+    _ = try step(&state, .{ .conversation = rows[0].reference });
+    state.selected = .{ .session = rows[0].reference };
+    _ = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } });
+    try std.testing.expectEqualSlices(u8, &rows[1].reference, &state.selected.session);
+    try std.testing.expectEqualSlices(u8, &rows[1].reference, &state.browse_target.?);
+
+    const activated = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next_session } } });
+    try std.testing.expect(state.browse_target == null);
+    try expectEffects(&.{.{ .open = rows[1].reference }}, activated);
+    const settled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = true } });
+    try expectEffects(&.{}, settled);
+    try std.testing.expect(!settled.browse_open);
 }
 
 test "Overview browse New Session never activates until Enter and remains reachable from chat lists" {
