@@ -2,6 +2,8 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const preference_document = @import("preference_document.zig");
 const provider_selection = @import("provider_selection.zig");
+const provider_route = @import("provider_route.zig");
+const connection = @import("connection.zig");
 const model_capability = @import("model_capability.zig");
 const TerminalText = @import("TerminalText.zig");
 
@@ -31,11 +33,15 @@ pub const Names = struct {
     /// Every provider's wire name, joined with `|`.
     choices: []const u8,
 
-    pub fn shownFor(self: *const Names, provider: protocol.Provider) []const u8 {
+    /// The label a connection name is shown under: a built-in provider's own, else the name itself.
+    pub fn shownFor(self: *const Names, name: []const u8) []const u8 {
+        const provider = provider_route.builtInOf(connection.Name.parse(name) orelse return name) orelse return name;
         return self.shown[@backingInt(provider)];
     }
 
-    pub fn loginFor(self: *const Names, provider: protocol.Provider) []const u8 {
+    /// The sign-in command a connection name is pointed at; only a built-in provider has one.
+    pub fn loginFor(self: *const Names, name: []const u8) []const u8 {
+        const provider = provider_route.builtInOf(connection.Name.parse(name) orelse return "") orelse return "";
         return self.login[@backingInt(provider)];
     }
 };
@@ -169,13 +175,11 @@ pub fn writeJson(writer: *std.Io.Writer, facts: *const Facts) !void {
 }
 
 fn shownOf(names: *const Names, saved: []const u8) []const u8 {
-    const provider = std.meta.stringToEnum(protocol.Provider, saved) orelse return saved;
-    return names.shownFor(provider);
+    return names.shownFor(saved);
 }
 
 fn loginOf(names: *const Names, saved: []const u8) []const u8 {
-    const provider = std.meta.stringToEnum(protocol.Provider, saved) orelse return "";
-    return names.loginFor(provider);
+    return names.loginFor(saved);
 }
 
 fn safeText(out: *std.Io.Writer, value: []const u8) !void {
@@ -214,7 +218,7 @@ pub fn writeText(writer: *std.Io.Writer, facts: *const Facts) !void {
     switch (selection) {
         .unsupported_provider => try writer.print("Next Session: saved provider is unsupported; no fallback. Repair with `rui defaults configure --provider {s} --model {s}`.\n", .{ names.choices, facts.defaults.recommended_model }),
         .unsupported_model => try writer.print("Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure --provider {s} --model {s}`.\n", .{ names.choices, facts.defaults.recommended_model }),
-        .chooser => try writer.print("Next Session: choose a provider with `rui defaults configure --provider {s}`; ChatGPT login: `{s}`; OpenAI key: `{s}`.\n", .{ names.choices, names.loginFor(.chatgpt), names.loginFor(.openai) }),
+        .chooser => try writer.print("Next Session: choose a provider with `rui defaults configure --provider {s}`; ChatGPT login: `{s}`; OpenAI key: `{s}`.\n", .{ names.choices, names.loginFor("chatgpt"), names.loginFor("openai") }),
         .selected => |selected| {
             const login = loginOf(names, selected.provider);
             try writer.print("Next Session: {s} / {s} (", .{ shownOf(names, selected.provider), selected.model });
@@ -251,15 +255,15 @@ fn chatgptLines(writer: *std.Io.Writer, plan: provider_selection.Readiness, devi
             }
             try writer.writeAll(" (remote acceptance not checked).\n");
         },
-        .missing => if (device == .missing) try writer.print("ChatGPT: not signed in; sign in with `{s}` (add --device-code to use a code instead of the browser).\n", .{names.loginFor(.chatgpt)}),
-        .refresh_required => try writer.print("ChatGPT: a renewal did not finish; sign in again with `{s}`.\n", .{names.loginFor(.chatgpt)}),
+        .missing => if (device == .missing) try writer.print("ChatGPT: not signed in; sign in with `{s}` (add --device-code to use a code instead of the browser).\n", .{names.loginFor("chatgpt")}),
+        .refresh_required => try writer.print("ChatGPT: a renewal did not finish; sign in again with `{s}`.\n", .{names.loginFor("chatgpt")}),
         .credential_error => try writer.writeAll("ChatGPT: error reading private Rui credential; inspect it before use.\n"),
     }
     switch (device) {
         .missing => {},
         .configured => try writer.writeAll("ChatGPT (device code): signed in (remote acceptance not checked).\n"),
         .renewal_due => try writer.writeAll("ChatGPT (device code): signed in; renewal due at dispatch (remote acceptance not checked).\n"),
-        .refresh_required => try writer.print("ChatGPT (device code): a renewal did not finish; sign in again with `{s}`.\n", .{names.loginFor(.codex)}),
+        .refresh_required => try writer.print("ChatGPT (device code): a renewal did not finish; sign in again with `{s}`.\n", .{names.loginFor("codex")}),
         .credential_error => try writer.writeAll("ChatGPT (device code): error reading private Rui credential; inspect it before use.\n"),
     }
 }
@@ -269,17 +273,17 @@ fn hostProvidersLine(connections: protocol.Connections, names: *const Names, buf
     var line = std.Io.Writer.fixed(buffer);
     line.writeAll("Host: serves") catch unreachable;
     var first = true;
-    for (std.enums.values(protocol.Provider)) |provider| if (connections.route(@tagName(provider)) != .unserved) {
-        line.print("{s} {s}", .{ if (first) "" else ",", names.shownFor(provider) }) catch unreachable;
+    for (connections.slice()) |fact| {
+        line.print("{s} {s}", .{ if (first) "" else ",", fact.label.slice() }) catch unreachable;
         first = false;
-    };
+    }
     line.writeAll(" (credentials checked locally, not by status)") catch unreachable;
     for (std.enums.values(protocol.Provider)) |provider| if (connections.route(@tagName(provider)) == .unserved) {
-        const login = names.loginFor(provider);
+        const login = names.loginFor(@tagName(provider));
         if (login.len != 0)
-            line.print("; to add {s}, stop and restart it after `{s}`", .{ names.shownFor(provider), login }) catch unreachable
+            line.print("; to add {s}, stop and restart it after `{s}`", .{ names.shownFor(@tagName(provider)), login }) catch unreachable
         else
-            line.print("; {s} needs a sign-in this terminal cannot make yet", .{names.shownFor(provider)}) catch unreachable;
+            line.print("; {s} needs a sign-in this terminal cannot make yet", .{names.shownFor(@tagName(provider))}) catch unreachable;
     };
     line.writeAll(".\n") catch unreachable;
     return line.buffered();
@@ -323,7 +327,7 @@ pub fn writeSignIns(writer: *std.Io.Writer, readiness: *const provider_selection
                 try safeText(writer, name);
                 try writer.writeAll(" is not one valid key; fix it.\n");
             },
-        } else try writer.print("OpenAI API key: unreadable, not owner-only or not one key; save it again with `{s}`.\n", .{names.loginFor(.openai)}),
+        } else try writer.print("OpenAI API key: unreadable, not owner-only or not one key; save it again with `{s}`.\n", .{names.loginFor("openai")}),
     }
 }
 
@@ -515,11 +519,11 @@ test "CLI-30 the defaults report is a function of its facts" {
                 const provider = std.meta.stringToEnum(protocol.Provider, name).?;
                 const said = hostProvidersLine(protocol.connectionsOfRoutes(routes), &table, &buffer);
                 var expected_buffer: [256]u8 = undefined;
-                const login = table.loginFor(provider);
+                const login = table.loginFor(@tagName(provider));
                 const expected = if (login.len != 0)
-                    try std.fmt.bufPrint(&expected_buffer, "; to add {s}, stop and restart it after `{s}`", .{ table.shownFor(provider), login })
+                    try std.fmt.bufPrint(&expected_buffer, "; to add {s}, stop and restart it after `{s}`", .{ table.shownFor(@tagName(provider)), login })
                 else
-                    try std.fmt.bufPrint(&expected_buffer, "; {s} needs a sign-in this terminal cannot make yet", .{table.shownFor(provider)});
+                    try std.fmt.bufPrint(&expected_buffer, "; {s} needs a sign-in this terminal cannot make yet", .{table.shownFor(@tagName(provider))});
                 try std.testing.expect(std.mem.indexOf(u8, said, expected) != null);
             }
         }
@@ -535,7 +539,7 @@ test "CLI-30 the defaults report is a function of its facts" {
         var output = std.Io.Writer.fixed(&output_buffer);
         try writeText(&output, &facts);
         var expected_buffer: [256]u8 = undefined;
-        const expected = try std.fmt.bufPrint(&expected_buffer, "Next Session: {s} / gpt-6.1-sol (local credential configured; remote acceptance not checked).\n", .{names.shownFor(provider)});
+        const expected = try std.fmt.bufPrint(&expected_buffer, "Next Session: {s} / gpt-6.1-sol (local credential configured; remote acceptance not checked).\n", .{names.shownFor(@tagName(provider))});
         try std.testing.expect(std.mem.indexOf(u8, output.buffered(), expected) != null);
         var json_buffer: [4096]u8 = undefined;
         var json = std.Io.Writer.fixed(&json_buffer);
