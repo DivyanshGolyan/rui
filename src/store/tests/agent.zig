@@ -315,7 +315,7 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
                     try expectToolSetNames(&storage, child.tool_set_id, entry.names);
                     try std.testing.expectEqualStrings("ask", child.permission_mode.slice());
                     try std.testing.expectEqualStrings(create.configuration.workspace.value.slice(), child.workspace.slice());
-                    try std.testing.expectEqual(protocol.Provider.codex, child.provider.?);
+                    try std.testing.expectEqualStrings("codex", child.provider.?.slice());
                     started += 1;
                 }
                 try std.testing.expectEqual(1 + started, try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));

@@ -128,7 +128,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const reopened = try storage.inspectSessionForTesting(created_session_0.slice());
-    try std.testing.expectEqual(protocol.Provider.codex, reopened.provider.?);
+    try std.testing.expectEqualStrings("codex", reopened.provider.?.slice());
     try tests.expectToolSetNames(&storage, reopened.tool_set_id, &.{"bash"});
     try std.testing.expectEqualStrings("ask", reopened.permission_mode.slice());
     try expectModelRevisions(&storage, created_session_0.slice(), "after-reopen");
@@ -140,7 +140,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
     try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='other' WHERE session_ref=?1", .{created_session_0.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='x_y' WHERE session_ref=?1", .{created_session_0.slice()});
     var view: TestingPage = undefined;
     view.open(&storage, binding);
     try std.testing.expectError(error.CorruptStore, testSettings(&view));
@@ -159,7 +159,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
 
-    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET provider='other' WHERE session_ref=?1", .{created_session_0.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET provider='x_y' WHERE session_ref=?1", .{created_session_0.slice()});
     try std.testing.expectError(error.CorruptStore, storage.inspectSessionForTesting(created_session_0.slice()));
 }
 

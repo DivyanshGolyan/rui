@@ -284,7 +284,7 @@ pub const Table = struct {
 };
 
 fn testMemo(session: []const u8, model: []const u8, anchor: ?u64, admission_position: u64, length: u64) !Memo {
-    var key: Key = .{ .session = .{}, .wire = .{ .connection = "openai", .dialect = .openai_responses }, .model = .{}, .anchor = anchor };
+    var key: Key = .{ .session = .{}, .wire = .{ .connection = @import("connection.zig").Name.parse("openai").?, .dialect = .openai_responses }, .model = .{}, .anchor = anchor };
     try key.session.set(session);
     try key.model.set(model);
     return .{
@@ -316,7 +316,7 @@ test "a memo serves only the same Session, model and anchor with a containing vi
     key.wire.dialect = .anthropic_messages;
     try std.testing.expect(!memo.serves(&key, 30));
     key = memo.key;
-    key.wire.connection = "codex";
+    key.wire.connection = @import("connection.zig").Name.parse("codex").?;
     try std.testing.expect(!memo.serves(&key, 30));
     key = memo.key;
     try key.session.set("abc124");

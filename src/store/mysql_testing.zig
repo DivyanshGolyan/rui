@@ -211,7 +211,7 @@ fn sendAfter(comptime prefix: []const u8, comptime sql: []const u8, fixture_args
     }
     const template = comptime rsql.sentTemplate(sql);
     const Args = @TypeOf(args);
-    const served = protocol.routesAll(.endpoint);
+    const served = protocol.servedBuiltIns(.endpoint);
     const bound: literal.Bound = .{ .now = 0, .served = &served };
     const length = prefix.len + try literal.length(template, Args, &args, bound);
     const writer = try root.beginQuery(length);
@@ -996,7 +996,7 @@ test "Store target MySQL owns admitted identity routes and neutral diagnostics" 
     try std.testing.expect(diagnostic == .mysql);
     try std.testing.expectEqualStrings(diagnostic.mysql.doublewrite.slice(), storage.admissionDiagnostic().doublewrite.?);
     try std.testing.expect(storage.hostTools().set_id != 0);
-    try std.testing.expect(storage.engine.mysql.state.served == &storage.served);
+    try std.testing.expect(storage.engine.mysql.state.served == &storage.servedSet().*);
     try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
 }
 

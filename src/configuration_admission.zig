@@ -33,6 +33,7 @@ pub const Rejection = enum {
     revision_exhausted,
     skills_unavailable,
     preferences_on_update,
+    connection_unserved,
 };
 
 const std = @import("std");
