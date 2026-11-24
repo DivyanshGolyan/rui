@@ -33,6 +33,8 @@ def semantics(platform_name):
     TRANSPORT_WAKE_DESCRIPTORS = 2 if DARWIN else 1
     HOST_FIXED_DESCRIPTORS = 2 + 4 + 1 + TRANSPORT_WAKE_DESCRIPTORS + 1
     AUTHENTICATION_DESCRIPTORS = 2 + TRANSPORT_WAKE_DESCRIPTORS + 1 + 2
+    # descriptor_capacity.ordinary_exchange_descriptors: protocol.max_request_contents (4) + 2, on every platform.
+    ORDINARY_EXCHANGE_DESCRIPTORS = 4 + 2
 
     INHERITED_DESCRIPTORS = {3, 4} if DARWIN else {3}
 

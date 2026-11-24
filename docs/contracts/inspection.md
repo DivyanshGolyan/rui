@@ -21,7 +21,7 @@ Explicit **Full** contains Current plus the following closed inventory:
 A Message or Action Resolution with parts appears in both profiles as its `parts` content value with its owner, where text would be inlined; Full Conversation entries carry the same content value as Conversation pages.
 
 Full model Operations include `offered_tools`, the sorted tool names in the effective offer frozen at that Operation’s admission.
-Current settings and Full revision settings expose configured allowed intent as `tools` and loaded intent as `loaded_tools`; neither reconstructs an existing Operation’s offer.
+Current settings and Full revision settings expose configured allowed intent as `tools` and loaded intent as `loaded_tools`, and app tool names as `app_tools`: Current settings name the app tools the Session's lane declares now, and a Full revision names the app tools that revision itself declared, so a child's revisions are empty and the lane root's revisions carry the declaration history; none reconstructs an existing Operation’s offer.
 An allowed or loaded edit, later discovery, or a changed Host tool set cannot change that Operation’s `offered_tools`.
 The field reads the existing frozen tool-set identity; no stored copy or Store-format change is needed.
 
@@ -209,7 +209,7 @@ That settlement stores the call's position on the Action as `approval_position` 
 Forwarded `approval_requested` and `turn_ended` rows have their own receiving-Session position and carry the originating child's `session`, while all remaining fields come from the child's own Action or Turn facts.
 A Session's own `turn_ended` row likewise carries its own `session`; forwarding does not alter the child's row or backfill a captured ancestor feed prefix.
 A `session_changed` row (D138, D218) carries `revision`, `field` and required nullable `provider_text` (explicit `null` for ordinary changes).
-An ordinary row names a setting the revision changed (`provider`, `model`, `instructions`, `tools`, `loaded_tools`, `permission_mode`, `output_schema`, `compaction_trigger`, `output_reservation`, `reasoning_effort` or `label`) and has null provider text.
+An ordinary row names a setting the revision changed (`provider`, `model`, `instructions`, `tools`, `loaded_tools`, `app_tools`, `permission_mode`, `output_schema`, `compaction_trigger`, `output_reservation`, `reasoning_effort` or `label`) and has null provider text.
 The revision's commit writes those rows at one position, never edited; creation and an unchanged revision have none.
 A refused effort update is also an immutable row, with `field:"reasoning_effort_refused"`, the revision whose effort was refused, and the provider report in `provider_text`, using the same bounded, control-normalized report as other provider failures.
 Settlement writes it once at its own position even though it changes no setting, and never edits the revision or its original change rows.

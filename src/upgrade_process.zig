@@ -168,7 +168,7 @@ pub const Download = struct {
         return self.outputUntil(allocator, io, request, cancellation, limit, "curl", .fromNow(io, .{ .raw = .fromNanoseconds(policy.download_timeout_ns), .clock = .awake }));
     }
 
-    fn outputUntil(self: *Download, allocator: std.mem.Allocator, io: std.Io, request: Request, cancellation: ?*const client.Cancellation, limit: usize, executable: []const u8, deadline: std.Io.Clock.Timestamp) ![]u8 {
+    pub fn outputUntil(self: *Download, allocator: std.mem.Allocator, io: std.Io, request: Request, cancellation: ?*const client.Cancellation, limit: usize, executable: []const u8, deadline: std.Io.Clock.Timestamp) ![]u8 {
         var family = self.family;
         while (true) {
             try check(cancellation);

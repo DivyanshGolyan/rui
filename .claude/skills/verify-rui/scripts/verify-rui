@@ -3595,7 +3595,7 @@ def frame_drive_upgrade(run, terminal, state, fixture, steps=None):
     if state["upgrade"] in ("current", "available"):
         if before:
             return
-        terminal.wait(lambda _c: f"/releases/tag/v{releases.version}" in releases.requests, "release discovery HTTP response")
+        terminal.wait(lambda _c: "/releases/redirect" in releases.requests, "release discovery HTTP response")
         return
     steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
                                 {"keys": ["Down"] * 5 + ["Enter"]}])
