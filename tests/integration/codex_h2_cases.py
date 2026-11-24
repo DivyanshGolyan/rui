@@ -319,7 +319,7 @@ def named_key_connections_run():
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.load_cert_chain(root / "cert.pem", root / "key.pem")
     tls.set_alpn_protocols(["h2"])
-    endpoint = h2_fixture.Endpoint(tls, 1, sse=True, eager_sse=True)
+    endpoint = h2_fixture.Endpoint(tls, 1, sse=True, eager_sse=True, named_answers=True)
     endpoint.max_streams = 1
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
