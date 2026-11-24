@@ -733,7 +733,7 @@ test "fromSettings serves each key connection at its own URL with its own key, a
 test "a connection keeps its own facts under a built-in name, and a built-in entry carries the built-in facts" {
     var settings: @import("host_settings.zig").Settings = .{};
     inline for (std.enums.values(Provider)) |named| @field(settings.providers.entries, @tagName(named)) = null;
-    settings.providers.entries.codex = .{};
+    settings.providers.entries.codex = .{ .credential_file = .{} };
     var connected: Connected = .{};
     defer connected.wipe();
     _ = try connected.add(connection.Name.parse("openai").?, .{ .label = "Alpha", .codec = .@"openai-responses/3", .web_search = false }, "https://alpha.example/v1/responses", "sk-alpha-key", false);
@@ -745,4 +745,25 @@ test "a connection keeps its own facts under a built-in name, and a built-in ent
     try std.testing.expect(served.runsTool("beta", "web_search"));
     try std.testing.expectEqual(Provider.codex.codec(), served.codecOf("codex").?);
     try std.testing.expectEqual(Provider.codex.runsTool("web_search"), served.runsTool("codex", "web_search"));
+}
+
+test "the served set holds the longest connections list beside every built-in, and an openai connection replaces its built-in" {
+    var settings: @import("host_settings.zig").Settings = .{};
+    settings.providers.entries.codex = .{};
+    settings.providers.entries.chatgpt = .{};
+    settings.providers.entries.openai = .{};
+    inline for (.{ false, true }) |replace_openai| {
+        var connected: Connected = .{};
+        defer connected.wipe();
+        var names: [connection.max_list][4]u8 = undefined;
+        for (0..connection.max_list) |index| {
+            const name = if (replace_openai and index == 0) "openai" else std.fmt.bufPrint(&names[index], "c{d}", .{index}) catch unreachable;
+            _ = try connected.add(connection.Name.parse(name).?, .{ .label = "Alpha", .codec = .@"openai-responses/2", .web_search = false }, "https://alpha.example/v1/responses", "sk-alpha-key", false);
+        }
+        settings.providers.entries.codex.?.credential_file = .{};
+        settings.providers.entries.chatgpt.?.credential_file = .{};
+        const served = fromSettings(&settings, &connected).served();
+        try std.testing.expectEqual(connection.max_list + 3 - @intFromBool(replace_openai), served.items().len);
+        try std.testing.expectEqual(protocol.Route.key_file, served.route("openai"));
+    }
 }

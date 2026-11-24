@@ -1274,8 +1274,15 @@ test "allows reads the allow list, and a connection without one allows every mod
 
 // ---------------------------------------------------------------- the connections list
 
-/// The most connections one document may list, and the most a Host serves.
-pub const max_list = 16;
+/// The most names one Host serves: every listed connection plus every
+/// built-in. A listed connection under a built-in name replaces it.
+pub const max_served = 16;
+/// The most built-in names a Host serves beside the listed connections;
+/// provider_route checks the built-in list against it.
+pub const max_built_in = 3;
+/// The most connections one document may list: what the served set holds
+/// beside every built-in.
+pub const max_list = max_served - max_built_in;
 
 /// The connections a settings document lists, in order. Each entry keeps the
 /// connection the parser read and the JSON it came from, which `write` emits
