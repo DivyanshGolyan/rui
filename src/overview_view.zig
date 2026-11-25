@@ -13,6 +13,7 @@ const model_picker_view = @import("model_picker_view.zig");
 const overview_style = @import("overview_style.zig");
 const provider_name = @import("provider_name.zig");
 const connection = @import("connection.zig");
+const connection_names = @import("connection_names.zig");
 const provider_route = @import("provider_route.zig");
 const session_list = @import("session_list.zig");
 const session_work = @import("session_work.zig");
@@ -351,6 +352,8 @@ pub const Host = struct {
     started_at: u64,
     slots: u64,
     slots_in_use: u64,
+    /// The connection names the Host serves, from its reported capabilities.
+    served: connection_names.NameSet = .{},
 };
 
 pub const StopOutcome = union(enum) {

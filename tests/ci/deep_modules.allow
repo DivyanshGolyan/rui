@@ -517,7 +517,6 @@ shallow-module host_reply
 shallow-module mcp/document
 shallow-module output_format
 shallow-module platform
-shallow-module provider
 shallow-module provider_name
 shallow-module providers
 shallow-module server_host

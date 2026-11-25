@@ -13,13 +13,14 @@ import h2.settings
 import control_fixture as control
 import host_process
 import model_fixture as dispatch
+from product_defaults import compaction_trigger
 
 
 class Endpoint(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, tls, population, refuse_at=None, dead_reuse=False, bad_header=False, drop_once=False, sse=False, isolation=None, after_progress=False, early_protocol_error=False, eager_sse=False, observed_shape=False, held=False, flow_probe=False):
+    def __init__(self, tls, population, refuse_at=None, dead_reuse=False, bad_header=False, drop_once=False, sse=False, isolation=None, after_progress=False, early_protocol_error=False, eager_sse=False, observed_shape=False, held=False, flow_probe=False, named_answers=False):
         super().__init__(("127.0.0.1", 0), StreamHandler)
         self.tls = tls
         self.population = population
@@ -55,6 +56,7 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.held_prefixes = {}
         self.held = threading.Event()
         self.flow_probe = flow_probe
+        self.named_answers = named_answers
         self.flow_release = threading.Event()
         self.flow_ping_acked = threading.Event()
         self.flow_body_sent = threading.Event()
@@ -244,6 +246,8 @@ class StreamHandler(socketserver.BaseRequestHandler):
                                 answer = "F" * 256 * 1024
                             elif self.server.after_progress and text == "held-0":
                                 answer = "L" * 80_000 + text
+                            elif self.server.named_answers:
+                                answer = f"answer-{text}"
                             else:
                                 answer = f"answer-{text}" if len(self.server.streams) % 2 else "L" * 8192 + text
                             self.server.answers[text] = answer.encode()
@@ -407,3 +411,9 @@ def closed_host_request(socket_path, store, kind, *, timeout=15, deadline=None, 
     result = body if kind == "read_result" else json.loads(body)
     assert deadline is None or time.monotonic() < deadline, "Host request exceeded original deadline"
     return result
+
+
+def codex_wait_configuration(workspace) -> dict:
+    """The configuration every waiting-agent h2 load uses."""
+    return {"workspace": str(workspace), "connection": "codex", "model": "gpt-6-sol", "tools": ["bash"],
+            "permissionMode": "ask", "compactAt": compaction_trigger("codex", "gpt-6-sol"), "effort": "medium"}
