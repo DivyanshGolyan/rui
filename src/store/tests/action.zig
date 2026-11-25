@@ -2401,6 +2401,13 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
             const hidden_entry = try store_testing.queryU64(&storage, "SELECT min(e.session_position) FROM conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id WHERE m.session_ref=?1 AND m.source_kind=4", .{session.slice()});
             _ = try storage.openActivityContent(&.{ .session = session, .position = value_at.?.position, .ordinal = value_at.?.ordinal });
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = session, .position = hidden_entry }));
+            const found = try std.testing.allocator.create(protocol.ActivitySearchFacts);
+            defer std.testing.allocator.destroy(found);
+            var search: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.received), .limit = 4 };
+            try search.query.set("hidden value");
+            try storage.searchActivity(&search, found);
+            try std.testing.expectEqual(@as(usize, 4), found.count);
+            var value_user: ?struct { position: u64, ordinal: u64 } = null;
 
             for ([_]@FieldType(protocol.ActivityPage, "direction"){ .forward, .backward }) |direction| {
                 var request: protocol.ActivityPage = .{ .session = session, .direction = direction, .kinds = .initMany(&.{ .admission, .received, .user }), .limit = 3 };
@@ -2417,6 +2424,8 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
                             .admission, .received, .user => |value| value,
                             else => unreachable,
                         };
+                        if (item.value == .user and value_user == null and message.source_action != null and message.source_action.? == action_id and
+                            std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("hidden value"))) value_user = .{ .position = item.position, .ordinal = item.ordinal };
                         if (std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("visible person"))) person_count += 1;
                         if (message.sender != null) peer_count += 1;
                         if (message.source_action != null and message.source_action.? == action_id) {
@@ -2435,6 +2444,7 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
                 try std.testing.expectEqual(@as(usize, 2), final_count);
                 try std.testing.expectEqual(@as(usize, 40), value_count);
             }
+            _ = try storage.openActivityContent(&.{ .session = session, .position = value_user.?.position, .ordinal = value_user.?.ordinal });
             var conversation: protocol.ConversationPage = .{ .session = session };
             var person_count: usize = 0;
             var peer_count: usize = 0;

@@ -615,7 +615,7 @@ pub const missing_assistant_entry = rsql.Read(.{
 });
 
 pub fn publicEntryRead(comptime columns: []const u8, comptime also: []const u8, comptime rest: []const u8) []const u8 {
-    return "SELECT " ++ columns ++ "," ++ publicEntryColumns(also) ++ " FROM conversation_entry e " ++ public_entry_joins ++ " " ++ rest;
+    return "SELECT " ++ columns ++ "," ++ publicEntryColumns(also) ++ " FROM conversation_entry e @index(conversation_entry_history) " ++ public_entry_joins ++ " " ++ rest;
 }
 
 pub fn publicEntryColumns(comptime also: []const u8) []const u8 {

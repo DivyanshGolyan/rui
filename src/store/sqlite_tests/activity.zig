@@ -580,7 +580,7 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
     try std.testing.expectEqual(steps[0], steps[1]);
 }
 
-test "a long history of Action values does not increase one-row received page work" {
+test "a long history of Action values does not increase one-row Activity page work" {
     var costs: [2][2]i64 = undefined;
     for ([_]usize{ 100, 10_000 }, &costs) |history, *directions| {
         var tmp = std.testing.tmpDir(.{});
@@ -613,7 +613,7 @@ test "a long history of Action values does not increase one-row received page wo
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
         try store_core.reloadIdentitiesForTesting(&storage);
         for ([_]@FieldType(protocol.ActivityPage, "direction"){ .forward, .backward }, directions) |direction, *cost| {
-            const request: protocol.ActivityPage = .{ .session = session, .direction = direction, .kinds = .initOne(.received), .limit = 1 };
+            const request: protocol.ActivityPage = .{ .session = session, .direction = direction, .kinds = .initMany(&.{ .received, .user }), .limit = 1 };
             const page = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 1), page.count);
             cost.* = try activityPageSteps(&storage, request);

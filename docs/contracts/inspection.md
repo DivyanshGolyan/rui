@@ -312,10 +312,10 @@ Call fields are in `name`, `call_id`, `arguments` order.
 Content references carry exact decimal-string bytes and SHA-256; no preview truncation or private provider content enters activity.
 
 A page's cost does not grow with the Session's history.
-Each source of rows (Message admissions, User and assistant entries, Tool Calls, rejected calls and Action results by their acceptance, Turn outcomes, Session stops and refused sends) is read through an index on its Session and position: a range seek from the cursor in the page's direction that stops after 17 rows, the three groups merged and cut to the page plus one.
+Each source of rows (Message admissions, User and assistant entries, Tool Calls, rejected calls and Action results by their acceptance, Turn outcomes, Session stops and refused sends) is read through an index on its Session and position: a range seek from the cursor in the page's direction that stops after 17 rows, the four groups merged and cut to the page plus one.
 A Tool Result's group is judged only for the positions on the page, and a single row resolves by the same seeks at its own position.
 A forward page's live call activity reads only the calls accepted after the page, and those still waiting.
-Store tests hold opening and forward pages to equal SQLite VM steps after 10 and 10,000 earlier rows, including hidden Action values.
+Store tests hold opening and forward pages to equal SQLite VM steps after 10 and 10,000 earlier rows, including a long history of Action values.
 
 `POST /v1/activity-content` takes `kind:"activity_content"`, `session`, decimal-string `position` and `ordinal`, resolving the public row and provenance again.
 Admissions, applied input, assistant text, complete Tool Results and outcome content (a completed Turn's answer or a failed one's report) stream completely once under the whole-stream reader/framing/failure contract above; calls and approval requests stream their original arguments JSON, and stops and contentless outcomes have no byte value.
