@@ -36,6 +36,19 @@ fn unitTests() []const std.builtin.TestFn {
     {
         var environ = unit_environ.createMap(std.heap.page_allocator) catch @panic("OOM");
         defer environ.deinit();
+        if (environ.get("RUI_UNIT_ONLY")) |prefixes| {
+            var only_count: usize = 0;
+            for (selected[0..count]) |test_fn| {
+                var listed = std.mem.tokenizeScalar(u8, prefixes, ' ');
+                while (listed.next()) |prefix| {
+                    if (!std.mem.startsWith(u8, test_fn.name, prefix)) continue;
+                    selected[only_count] = test_fn;
+                    only_count += 1;
+                    break;
+                }
+            }
+            count = only_count;
+        }
         if (environ.get("RUI_UNIT_EXCLUSIVE")) |_| {
             var exclusive_count: usize = 0;
             for (selected[0..count]) |test_fn| {

@@ -272,7 +272,35 @@ def cancellation(stop):
             signal.signal(signum, handler)
 
 
+MYSQL_ONLY = "RUI_STORE_MYSQL_ONLY"
+
+
+def split_mysql(environ):
+    """A PR's Store run as (SQLite-only environment, MySQL environment for the listed tests), or None.
+
+    MYSQL_ONLY names test prefixes (select_tests.mysql_test_modules). The whole root runs on SQLite; only those
+    tests also run on live MySQL. Promotion sets no MYSQL_ONLY and runs every test on both engines.
+    """
+    prefixes = environ.get(MYSQL_ONLY, "").strip()
+    if not prefixes or not environ.get(live_engines.MYSQL_SOCKET):
+        return None
+    sqlite = {name: value for name, value in environ.items()
+              if name not in live_engines.ENGINES["mysql"] and name != MYSQL_ONLY}
+    engines = [engine for engine in environ.get(live_engines.REQUIRE, "").split(",") if engine and engine != "mysql"]
+    if engines:
+        sqlite[live_engines.REQUIRE] = ",".join(engines)
+    else:
+        sqlite.pop(live_engines.REQUIRE, None)
+    mysql = {name: value for name, value in environ.items() if name != MYSQL_ONLY}
+    mysql["RUI_UNIT_ONLY"] = prefixes
+    return sqlite, mysql
+
+
 def run(binary, arguments, timeout, mode, environ, output=None):
+    if mode == "run" and (split := split_mysql(environ)):
+        sqlite, mysql = split
+        print(f"Store root: every test on SQLite, then on MySQL only {mysql['RUI_UNIT_ONLY']}", flush=True)
+        return run(binary, arguments, timeout, mode, sqlite, output) or run(binary, arguments, timeout, mode, mysql, output)
     started = time.monotonic()
     record = environ.get(live_engines.MYSQL_RECORD)
     count = SHARD_COUNT if mode in ("run", "native") else 1

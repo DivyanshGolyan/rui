@@ -196,6 +196,7 @@ jobs:
       policy_skips: ${{ steps.select.outputs.policy_skips }}
       pr_job: ${{ steps.select.outputs.pr_job }}
       pr_mysql_migration: ${{ steps.select.outputs.pr_mysql_migration }}
+      pr_mysql_tests: ${{ steps.select.outputs.pr_mysql_tests }}
       pr_setup_targets: ${{ steps.select.outputs.pr_setup_targets }}
       compile_only: ${{ steps.select.outputs.compile_only }}
       main_red: ${{ steps.main_red.outputs.main_red }}
@@ -419,6 +420,7 @@ jobs:
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
           QUARANTINE: ${{ needs.plan.outputs.quarantine }}
+          RUI_STORE_MYSQL_ONLY: ${{ needs.plan.outputs.pr_mysql_tests }}
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail

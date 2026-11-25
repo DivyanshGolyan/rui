@@ -1113,6 +1113,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
         reasons.add("Store migration step or migration input: the PR runs test-store against a live MySQL 8.4 migration check")
     if mysql_legs:
         reasons.add("Test code with a MySQL leg (" + ", ".join(mysql_legs) + "): the PR runs it against live MySQL 8.4")
+    mysql_tests = mysql_test_modules(changed) if mysql_migration else []
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)
@@ -1137,6 +1138,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             "mac_required": mac_required, "upgrade_required": upgrade_required,
             "unit_compile_required": "src/store/schema.zig" in paths,
             "mysql_migration": mysql_migration,
+            "mysql_tests": mysql_tests,
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,
             "typecheck_macos": typecheck_macos,
@@ -1166,6 +1168,20 @@ def revision_text(commit, path):
 # What marks Zig code as running a MySQL leg: a call of the engine loop (a test file or a production file's inline
 # tests, as read_transcript.zig has), or an import of the live MySQL fixture owner itself.
 MYSQL_LEG = re.compile(r"\bforEachEngine\(|@import\(\"(?:[./]*store/)?mysql_testing\.zig\"\)")
+
+
+# Always part of a PR's MySQL leg: the migration and dialect check that drives MySQL 8.4 through the wire client.
+MYSQL_CHECK_MODULE = "store.mysql_dialect_check."
+
+
+def mysql_test_modules(paths):
+    """The Store test name prefixes a PR runs on live MySQL: the dialect check and each changed Store source.
+
+    Every other Store test runs on SQLite on the PR and on MySQL in Promote (store_shards.py's split).
+    """
+    changed = {path[len("src/"):-len(".zig")].replace("/", ".") + "."
+               for path in paths if path.startswith("src/store/") and path.endswith(".zig")}
+    return sorted(changed | {MYSQL_CHECK_MODULE})
 
 
 def mysql_leg_tests(paths, contents):

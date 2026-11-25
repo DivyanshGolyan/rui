@@ -2881,5 +2881,14 @@ class PolicyPrepushTest(unittest.TestCase):
         self.assertIn('select(paths, "development", available)["policy_skips"]', source)
 
 
+
+class MysqlTestModulesTest(unittest.TestCase):
+    def test_dialect_check_and_each_changed_store_source(self):
+        from select_tests import mysql_test_modules
+        self.assertEqual(mysql_test_modules(["src/store/tests/tool_set.zig", "src/store/domain/tool_offer.zig",
+                                             "src/tool_name.zig", "docs/x.md"]),
+                         ["store.domain.tool_offer.", "store.mysql_dialect_check.", "store.tests.tool_set."])
+        self.assertEqual(mysql_test_modules([]), ["store.mysql_dialect_check."])
+
 if __name__ == "__main__":
     unittest.main()
