@@ -154,6 +154,7 @@ const cores = .{
     .{ "result_layout.zig", @import("result_layout.zig") },
     .{ "retention_capacity.zig", @import("retention_capacity.zig") },
     .{ "retry_policy.zig", @import("retry_policy.zig") },
+    .{ "saved_label.zig", @import("saved_label.zig") },
     .{ "schema_json.zig", @import("schema_json.zig") },
     .{ "secret_value.zig", @import("secret_value.zig") },
     .{ "serve_grammar.zig", @import("serve_grammar.zig") },
