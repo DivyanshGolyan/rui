@@ -182,23 +182,23 @@ fn reachedSince(rows: Rows, failed_row: usize, since: u64, viewer: Viewer) bool 
 
 const Probe = struct {
     work: WorkState,
-    group: enum { needs_you, working, queued, done },
+    standing: Standing,
 };
 
-// The work states as Host-served groups, written from the base client classification (the overview's
-// ordering over the served `group`), independently of `standing`.
+// The work states with the standing each must have, written from the base client classification
+// independently of `session_work.standing`; a failed Turn is its own standing.
 const probes = [_]Probe{
-    .{ .work = .{ .idle = .{ .since = 1 } }, .group = .done },
-    .{ .work = .{ .pending = .{ .since = 1 } }, .group = .queued },
-    .{ .work = .{ .working = .{ .since = 1 } }, .group = .working },
-    .{ .work = .{ .retrying = .{ .since = 1, .due_at_ms = 5_000, .cause = .{}, .attempt = 1 } }, .group = .working },
-    .{ .work = .{ .bash = .{ .since = 1, .call = 0, .description = null, .running = 1, .approvals = 0 } }, .group = .working },
-    .{ .work = .{ .bash = .{ .since = 1, .call = 0, .description = null, .running = 1, .approvals = 2 } }, .group = .needs_you },
-    .{ .work = .{ .approval = .{ .since = 1 } }, .group = .needs_you },
-    .{ .work = .{ .stopping = .{ .since = 1 } }, .group = .working },
-    .{ .work = .{ .finished = .{ .since = 1 } }, .group = .done },
-    .{ .work = .{ .failed = .{ .since = 1, .code = .{}, .resets_at = null } }, .group = .done },
-    .{ .work = .{ .stopped = .{ .since = 1, .cause = .stop } }, .group = .done },
+    .{ .work = .{ .idle = .{ .since = 1 } }, .standing = .done },
+    .{ .work = .{ .pending = .{ .since = 1 } }, .standing = .queued },
+    .{ .work = .{ .working = .{ .since = 1 } }, .standing = .working },
+    .{ .work = .{ .retrying = .{ .since = 1, .due_at_ms = 5_000, .cause = .{}, .attempt = 1 } }, .standing = .working },
+    .{ .work = .{ .bash = .{ .since = 1, .call = 0, .description = null, .running = 1, .approvals = 0 } }, .standing = .working },
+    .{ .work = .{ .bash = .{ .since = 1, .call = 0, .description = null, .running = 1, .approvals = 2 } }, .standing = .needs_you },
+    .{ .work = .{ .approval = .{ .since = 1 } }, .standing = .needs_you },
+    .{ .work = .{ .stopping = .{ .since = 1 } }, .standing = .working },
+    .{ .work = .{ .finished = .{ .since = 1 } }, .standing = .done },
+    .{ .work = .{ .failed = .{ .since = 1, .code = .{}, .resets_at = null } }, .standing = .failed },
+    .{ .work = .{ .stopped = .{ .since = 1, .cause = .stop } }, .standing = .done },
 };
 
 test "SUI-169 a Session's class follows its work, archive state, listing and the viewer's inputs" {
@@ -219,14 +219,7 @@ test "SUI-169 a Session's class follows its work, archive state, listing and the
                     const got = classify(facts, .{ .filter = filter, .now_ms = now_ms });
                     const archived = archive == .archived;
                     const due = probe.work == .retrying and now_ms >= probe.work.retrying.due_at_ms;
-                    const expected_standing: Standing = if (archived)
-                        .done
-                    else switch (probe.group) {
-                        .needs_you => .needs_you,
-                        .working => .working,
-                        .queued => .queued,
-                        .done => if (probe.work == .failed) .failed else .done,
-                    };
+                    const expected_standing: Standing = if (archived) .done else probe.standing;
                     const expected_kind: Kind = if (archived) .stopped else if (stop_pending) .stopping else if (decidable) .approval else if (due) .pending else std.meta.activeTag(probe.work);
                     const listed = in_list and switch (filter) {
                         .active => !archived,

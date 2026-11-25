@@ -189,7 +189,7 @@ test "SUI-58 host_retry_work_version" {
             const full = try TestingListing.read(&storage, &tmp, .{});
             var before_row = try testingListRow(&storage, &tmp, session.slice());
             defer before_row.deinit();
-            try std.testing.expectEqualStrings("working", before_row.get(&.{ "work", "group" }).string);
+            try std.testing.expectEqualStrings("retrying", before_row.get(&.{ "work", "state", "kind" }).string);
             var commits: CommitCounter = .{};
             var counted: store_core.CommitSubscriber = .{ .context = &commits, .notify = CommitCounter.notify };
             storage.commitSubscriber().store(&counted, .release);
@@ -207,13 +207,13 @@ test "SUI-58 host_retry_work_version" {
             try delta.expectReferences(&.{session.slice()[0..change_ring.id_bytes].*});
             var after_row = try testingListRow(&storage, &tmp, session.slice());
             defer after_row.deinit();
-            try std.testing.expectEqualStrings("queued", after_row.get(&.{ "work", "group" }).string);
+            try std.testing.expectEqualStrings("pending", after_row.get(&.{ "work", "state", "kind" }).string);
             var request: protocol.ActivityPage = .{};
             try request.session.set(session.slice());
             const activity = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(crossing.generation, activity.work.read_version.generation);
             try std.testing.expect(activity.work.work.state == .pending);
-            try std.testing.expectEqual(@import("../../session_work.zig").Group.queued, protocol.SessionWork.fromCore(activity.work.work).group);
+            try std.testing.expectEqual(@import("../../session_work.zig").Standing.queued, @import("../../session_work.zig").standing(activity.work.work.state));
             const unchanged = try storage.publishRetryCrossings(due, due + 1);
             try std.testing.expectEqual(crossing.generation, unchanged.generation);
             storage.io.vtable = &before;
@@ -224,7 +224,7 @@ test "SUI-58 host_retry_work_version" {
             try reverse_delta.expectReferences(&.{session.slice()[0..change_ring.id_bytes].*});
             var reversed_row = try testingListRow(&storage, &tmp, session.slice());
             defer reversed_row.deinit();
-            try std.testing.expectEqualStrings("working", reversed_row.get(&.{ "work", "group" }).string);
+            try std.testing.expectEqualStrings("retrying", reversed_row.get(&.{ "work", "state", "kind" }).string);
         }
     }.run);
 }
@@ -1959,8 +1959,8 @@ test "SL-8: a creator subtree's rollup is its descendants' own rows, for every w
                         .subtree_state_change_at = try number(row, "subtree_state_change_at"),
                         .descendants = try number(row, "descendant_count"),
                         .needs_you_descendants = try number(row, "descendant_needs_you_count"),
-                        // The row's own group, which session_work.group derives and the list row serves.
-                        .needs_you = std.meta.stringToEnum(session_work.Group, row.get("work").?.object.get("group").?.string).? == .needs_you,
+                        // The row's own state asks for a decision: an approval, or a Bash proposal with approvals pending.
+                        .needs_you = asksForDecision(row.get("work").?.object.get("state").?.object),
                     };
                     total += 1;
                 }
@@ -1972,6 +1972,12 @@ test "SL-8: a creator subtree's rollup is its descendants' own rows, for every w
 
         fn number(object: std.json.ObjectMap, name: []const u8) !u64 {
             return std.fmt.parseInt(u64, object.get(name).?.string, 10);
+        }
+
+        fn asksForDecision(state: std.json.ObjectMap) bool {
+            const kind = state.get("kind").?.string;
+            if (std.mem.eql(u8, kind, "approval")) return true;
+            return std.mem.eql(u8, kind, "bash") and !std.mem.eql(u8, state.get("approvals").?.string, "0");
         }
 
         /// An approval allowed once and admitted, so its Action runs in a live Turn; with `stop_queued`, the Session

@@ -50,7 +50,7 @@ export function fakeFeed(sessions: readonly string[] = ["k7m2qx"]) {
 			items: items.map((row) => ({ position: String(row.position), ordinal: "0", at: "1", value: { stop: { key: row.key, turn: null, cutoff: "1", completion: "completed" } } })),
 			more: after.length > items.length, end: String(last),
 			queued: { count: "0" },
-			work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working", since: "1" } },
+			work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working", since: "1" } },
 		});
 	};
 	return {

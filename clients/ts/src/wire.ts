@@ -2123,9 +2123,6 @@ export interface components {
                 work: {
                     state: components["schemas"]["WorkStateJson"];
                     first_action: components["schemas"]["Decimal"] | null;
-                    attention: components["schemas"]["WorkAttentionJson"] | null;
-                    /** @enum {string} */
-                    group: "needs_you" | "working" | "queued" | "done";
                     actions: components["schemas"]["WorkActionsJson"];
                 };
             };
@@ -2159,9 +2156,6 @@ export interface components {
                 work: {
                     state: components["schemas"]["WorkStateJson"];
                     first_action: components["schemas"]["Decimal"] | null;
-                    attention: components["schemas"]["WorkAttentionJson"] | null;
-                    /** @enum {string} */
-                    group: "needs_you" | "working" | "queued" | "done";
                     actions: components["schemas"]["WorkActionsJson"];
                 };
             };
@@ -2195,9 +2189,6 @@ export interface components {
                 work: {
                     state: components["schemas"]["WorkStateJson"];
                     first_action: components["schemas"]["Decimal"] | null;
-                    attention: components["schemas"]["WorkAttentionJson"] | null;
-                    /** @enum {string} */
-                    group: "needs_you" | "working" | "queued" | "done";
                     actions: components["schemas"]["WorkActionsJson"];
                 };
                 recovery: components["schemas"]["MessageRecoveryJson"];
@@ -2231,9 +2222,6 @@ export interface components {
                         since: components["schemas"]["Decimal"];
                     };
                     first_action: components["schemas"]["Decimal"] | null;
-                    attention: components["schemas"]["WorkAttentionJson"] | null;
-                    /** @enum {string} */
-                    group: "needs_you" | "working" | "queued" | "done";
                     actions: components["schemas"]["WorkActionsJson"];
                 };
             };
@@ -2271,9 +2259,6 @@ export interface components {
                         since: components["schemas"]["Decimal"];
                     };
                     first_action: components["schemas"]["Decimal"] | null;
-                    attention: components["schemas"]["WorkAttentionJson"] | null;
-                    /** @enum {string} */
-                    group: "needs_you" | "working" | "queued" | "done";
                     actions: components["schemas"]["WorkActionsJson"];
                 };
             };
@@ -2311,9 +2296,6 @@ export interface components {
                         since: components["schemas"]["Decimal"];
                     };
                     first_action: components["schemas"]["Decimal"] | null;
-                    attention: components["schemas"]["WorkAttentionJson"] | null;
-                    /** @enum {string} */
-                    group: "needs_you" | "working" | "queued" | "done";
                     actions: components["schemas"]["WorkActionsJson"];
                 };
                 recovery: components["schemas"]["MessageRecoveryJson"];
@@ -2938,9 +2920,6 @@ export interface components {
             turn: components["schemas"]["Decimal"] | null;
             operation: components["schemas"]["Decimal"] | null;
             first_action: components["schemas"]["Decimal"] | null;
-            attention: components["schemas"]["WorkAttentionJson"] | null;
-            /** @enum {string} */
-            group: "needs_you" | "working" | "queued" | "done";
             actions: components["schemas"]["WorkActionsJson"];
             revision: components["schemas"]["Decimal"];
             workspace: string;
@@ -3400,9 +3379,6 @@ export interface components {
             turn: components["schemas"]["Decimal"] | null;
             operation: components["schemas"]["Decimal"] | null;
             first_action: components["schemas"]["Decimal"] | null;
-            attention: components["schemas"]["WorkAttentionJson"] | null;
-            /** @enum {string} */
-            group: "needs_you" | "working" | "queued" | "done";
             actions: components["schemas"]["WorkActionsJson"];
         };
         SkillSuggestionsReply: {
@@ -3509,12 +3485,6 @@ export interface components {
             stop: boolean;
             interrupt: components["schemas"]["WorkInterruptJson"] | null;
             decide: components["schemas"]["Decimal"] | null;
-        };
-        WorkAttentionJson: {
-            /** @enum {string} */
-            kind: "approval" | "failed" | "finished";
-            turn: components["schemas"]["Decimal"];
-            step: components["schemas"]["Decimal"];
         };
         WorkInterruptJson: {
             turn: components["schemas"]["Decimal"];
@@ -3666,9 +3636,6 @@ export interface components {
             turn: components["schemas"]["Decimal"] | null;
             operation: components["schemas"]["Decimal"] | null;
             first_action: components["schemas"]["Decimal"] | null;
-            attention: components["schemas"]["WorkAttentionJson"] | null;
-            /** @enum {string} */
-            group: "needs_you" | "working" | "queued" | "done";
             actions: components["schemas"]["WorkActionsJson"];
             latest_outcome: components["schemas"]["domainreportCurrentJsonOutcome"] | null;
         };

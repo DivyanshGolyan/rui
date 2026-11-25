@@ -2174,13 +2174,12 @@ const Seen = struct {
 
 fn fixtureWork(value: protocol.session_work.Work) protocol.session_work.Work {
     var served = value;
-    served.served_attention = protocol.session_work.attention(served);
-    served.served_group = protocol.session_work.group(served);
-    served.actions.stop = switch (served.served_group.?) {
+    const standing = protocol.session_work.standing(served.state);
+    served.actions.stop = switch (standing) {
         .needs_you, .working, .queued => true,
-        .done => false,
+        .failed, .done => false,
     };
-    served.actions.decide = if (served.served_group.? == .needs_you) served.first_action else null;
+    served.actions.decide = if (standing == .needs_you) served.first_action else null;
     return served;
 }
 
