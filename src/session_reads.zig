@@ -208,6 +208,7 @@ pub const Job = struct {
         at_end: bool = false,
         new_rows: usize = 0,
         queued: protocol.Queued = .{},
+        attached_pending: ?struct { key: [36]u8, row: Key } = null,
         queued_line: ?queued_line.Shown = null,
         live: View.Live = .{},
         latest_ending: ?LatestEnding = null,

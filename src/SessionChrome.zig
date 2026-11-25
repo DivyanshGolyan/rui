@@ -57,8 +57,10 @@ pub const View = struct {
     repair_details: bool = false,
     facts: Identity = .{},
     notice: ?[]const u8 = null,
+    notice_priority: enum { normal, recovery } = .normal,
     overview: ?[]const u8 = null,
     overlay: ?@import("InputArea.zig").Panel = null,
+    info_footer: ?vxfw.Widget = null,
     choice: chrome.ChoiceState = .closed,
     width: u16,
 };
@@ -84,7 +86,7 @@ close: Chip,
 keys: chrome.FooterKeys = chrome.footerKeys(.closed),
 details: Chip,
 repair_details: bool = false,
-force_notice: bool = false,
+notice_priority: @FieldType(View, "notice_priority") = .normal,
 list_visible: bool = false,
 stoppable: bool = false,
 
@@ -122,10 +124,15 @@ pub fn place(self: *Self, screen: *AppScreen.Session, input: *@import("InputArea
     self.keys = chrome.footerKeys(view.choice);
     self.details.label = if (view.details) "alt+d details" else "";
     self.repair_details = view.repair_details;
+    self.notice_priority = view.notice_priority;
     self.state.text = stateText(self.status.bar.left, self.status.key.label);
     self.state.style = if (self.status.bar.tone == .attention) self.status.attention else self.status.quiet;
     input.facts = .{ .userdata = self, .drawFn = drawFooter };
     input.status = self.state.widget();
+    if (view.info_footer) |footer| {
+        input.facts = footer;
+        input.status = null;
+    }
     screen.tail = null;
     self.marker.label = chrome.marker(&self.marker_text, view.new_entries);
     screen.marker = if (view.browsing) self.marker.widget() else empty_marker.widget();
@@ -166,7 +173,7 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         const primary_width = primary.width() + self.status.key.width() + self.status.stop.width() + 9;
         if (primary_width + self.details.width() > ctx.max.width.?) self.details.label = "";
     }
-    const notice = if (repair_details and !self.force_notice) null else self.status.bar.notice;
+    const notice = if (repair_details and self.notice_priority == .normal) null else self.status.bar.notice;
     const keys = [_]*Chip{ primary, secondary, &self.details, &self.status.key, &self.status.stop };
     var right: std.ArrayList(u8) = .empty;
     for (keys) |key| if (key.label.len != 0) {
@@ -299,9 +306,10 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     var transcript: @import("DocumentView.zig") = .{ .document = document };
     var facade: AppScreen.Content = .{ .shown = transcript.widget() };
     var screen: AppScreen.Session = .{ .content = &facade, .input = input.widget(), .userdata = &recorder, .on_event = Recorder.event };
-    self.activity.work = .{ .mark = "◝", .tone = .normal, .words = "Thinking", .clock = .{ .elapsed = 12 } };
-    self.activity.live.count = 0;
-    self.activity.live.total = 5;
+    self.activity.present(.{
+        .work = .{ .mark = "◝", .tone = .normal, .words = "Thinking", .clock = .{ .elapsed = 12 } },
+        .live = .{ .total = 5 },
+    });
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -372,6 +380,42 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
     self.place(&screen, &input, .{ .width = 80, .notice = "Copied 12 lines", .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries" });
     try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", self.status.bar.left);
     try std.testing.expectEqualStrings("ctrl+r retries", self.status.key.label);
+}
+
+test "SUI-162 recovery notice priority follows the current view" {
+    var recorder: Recorder = .{};
+    var self: Self = .init(recorder.actions());
+    var bytes: [16]u8 = undefined;
+    var editor: @import("DraftEditor.zig") = .init(&bytes);
+    var input: @import("InputArea.zig") = .{ .composer = .{ .editor = &editor } };
+    var screen: AppScreen.Session = undefined;
+    screen.input = input.widget();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} };
+    var view: View = .{ .width = 80, .repair_details = true, .details = true, .notice = "ctrl+r retries" };
+    for ([_]bool{ false, true, false }) |recovery| {
+        view.notice_priority = if (recovery) .recovery else .normal;
+        self.place(&screen, &input, view);
+        const footer = try input.facts.draw(ctx);
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (footer.buffer) |cell| if (cell.char.width != 0) try text.writer.writeAll(cell.char.grapheme);
+        try std.testing.expectEqual(recovery, std.mem.indexOf(u8, text.written(), "ctrl+r retries") != null);
+    }
+    view.repair_details = false;
+    self.place(&screen, &input, view);
+    const footer = try input.facts.draw(ctx);
+    var text: std.Io.Writer.Allocating = .init(arena.allocator());
+    for (footer.buffer) |cell| if (cell.char.width != 0) try text.writer.writeAll(cell.char.grapheme);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "ctrl+r retries") != null);
+    var info_footer: vxfw.Text = .{ .text = "info footer" };
+    view.info_footer = info_footer.widget();
+    view.notice_priority = .recovery;
+    self.place(&screen, &input, view);
+    try std.testing.expect(input.facts.eql(info_footer.widget()) and input.status == null);
+    view.notice_priority = .normal;
+    self.place(&screen, &input, view);
+    try std.testing.expect(input.facts.eql(info_footer.widget()) and input.status == null);
 }
 
 test "SessionChrome footer keeps identity left and active keys right, with back only while the list is hidden" {

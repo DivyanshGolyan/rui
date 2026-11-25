@@ -54,7 +54,6 @@ field-leak FeedView.FeedView.hover_style
 field-leak FeedView.FeedView.latest_ending
 field-leak FeedView.FeedView.message_note
 field-leak FeedView.FeedView.method
-field-leak FeedView.FeedView.pending
 field-leak FeedView.FeedView.retry_actionable
 field-leak FeedView.FeedView.size
 field-leak FeedView.FeedView.style
