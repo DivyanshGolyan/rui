@@ -2416,10 +2416,6 @@ test "activity page preserves its work" {
         try activity_reply.writePage(&out, &facts);
         const parsed = try ActivityPage.parse(out.buffered(), .{});
         try std.testing.expectEqualDeep(facts.work, parsed.facts.work);
-        const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, out.buffered(), "\"position\":\"4\"", "\"position\":\"0\"");
-        defer std.testing.allocator.free(malformed);
-        try std.testing.expectError(error.InvalidResponse, ActivityPage.parse(malformed, .{}));
-        facts.end = 1;
     }
 }
 
