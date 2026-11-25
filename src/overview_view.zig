@@ -515,8 +515,8 @@ pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes
         const request = &state.requests[at];
         if (request.kind != .send or request.status != .unknown) continue;
         return switch (request.sent) {
-            .saved => |saved| std.fmt.bufPrint(buffer, "! Not confirmed · rui request recover {s}", .{&saved.original.key}),
-            else => std.fmt.bufPrint(buffer, "! {s}: send not confirmed; details on exit", .{&request.session.?}),
+            .saved => |saved| std.fmt.bufPrint(buffer, state_marks.attention_sign ++ "Not confirmed · rui request recover {s}", .{&saved.original.key}),
+            else => std.fmt.bufPrint(buffer, state_marks.attention_sign ++ "{s}: send not confirmed; details on exit", .{&request.session.?}),
         } catch unreachable;
     }
     return null;
@@ -1215,7 +1215,7 @@ pub const State = struct {
 
     fn request(self: *State, kind: @FieldType(Request, "kind"), ref: ?Reference) bool {
         if (self.request_count == max_requests) {
-            self.say(.attention, "! Busy; try again shortly.", .{});
+            self.say(.attention, "Busy; try again shortly.", .{});
             return false;
         }
         self.requests[self.request_count] = .{ .kind = kind, .session = ref };
@@ -1429,6 +1429,7 @@ pub const State = struct {
     fn say(self: *State, colour: Colour, comptime format: []const u8, args: anytype) void {
         var notice: Notice = .{ .colour = colour };
         var writer = std.Io.Writer.fixed(&notice.bytes);
+        if (colour == .attention) writer.writeAll(state_marks.attention_sign) catch {};
         writer.print(format, args) catch {};
         notice.len = writer.buffered().len;
         self.notice = notice;
@@ -1721,11 +1722,11 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .accepted => state.answer(at, .done, ""),
                 .failed => |code| {
                     state.answer(at, .failed, code);
-                    state.say(.attention, "! {s} not {s}: {s}", .{ &ref, if (result.request.pinned) "pinned" else "unpinned", code });
+                    state.say(.attention, "{s} not {s}: {s}", .{ &ref, if (result.request.pinned) "pinned" else "unpinned", code });
                 },
                 .unconfirmed => |handle| {
                     state.answer(at, .unknown, handle);
-                    state.say(.attention, "! {s} pin unsure; recover {s}.", .{ &ref, handle });
+                    state.say(.attention, "{s} pin unsure; recover {s}.", .{ &ref, handle });
                 },
             }
             state.next_list_ms = 0;
@@ -1738,11 +1739,11 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .requested => state.answer(at, .done, ""),
                 .failed => |code| {
                     state.answer(at, .failed, code);
-                    state.say(.attention, "! {s} not {s}: {s}", .{ &ref, if (result.request.archived) "archived" else "restored", code });
+                    state.say(.attention, "{s} not {s}: {s}", .{ &ref, if (result.request.archived) "archived" else "restored", code });
                 },
                 .unconfirmed => |handle| {
                     state.answer(at, .unknown, handle);
-                    state.say(.attention, "! {s} {s} unsure; recover {s}.", .{ &ref, if (result.request.archived) "archive" else "restore", handle });
+                    state.say(.attention, "{s} {s} unsure; recover {s}.", .{ &ref, if (result.request.archived) "archive" else "restore", handle });
                 },
             }
             state.next_list_ms = 0;
@@ -1753,11 +1754,11 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .stopped => state.answer(at, .done, ""),
                 .failed => |code| {
                     state.answer(at, .failed, code);
-                    state.say(.attention, "! {s} not stopped: {s}", .{ &result.reference, code });
+                    state.say(.attention, "{s} not stopped: {s}", .{ &result.reference, code });
                 },
                 .unconfirmed => |handle| {
                     state.answer(at, .unknown, handle);
-                    state.say(.attention, "! {s} stop unsure; details on exit", .{&result.reference});
+                    state.say(.attention, "{s} stop unsure; details on exit", .{&result.reference});
                 },
             }
             state.next_list_ms = 0;
@@ -1780,15 +1781,15 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                     const missing = if (std.mem.eql(u8, code, "model_capability_unavailable")) connection.Name.parse(next orelse "") else null;
                     if (missing) |provider| {
                         if (loginOf(provider)) |command|
-                            state.say(.attention, "! {s} sign-in missing · {s}", .{ shownOf(provider), command })
+                            state.say(.attention, "{s} sign-in missing · {s}", .{ shownOf(provider), command })
                         else
-                            state.say(.attention, "! {s} sign-in missing · this terminal cannot sign in to it yet", .{shownOf(provider)});
-                    } else state.say(.attention, "! Not created: {s}", .{code});
+                            state.say(.attention, "{s} sign-in missing · this terminal cannot sign in to it yet", .{shownOf(provider)});
+                    } else state.say(.attention, "Not created: {s}", .{code});
                 },
                 .unconfirmed => |handle| {
                     state.answer(at, .unknown, handle);
                     state.next_list_ms = 0;
-                    state.say(.attention, "! Creation unsure; details on exit", .{});
+                    state.say(.attention, "Creation unsure; details on exit", .{});
                 },
             }
         },
@@ -2902,7 +2903,7 @@ fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
 
 fn refuseStop(state: *State, ref: Reference, kind: Kind) void {
     if (state.openStop(ref)) |held| if (held.status == .unknown)
-        return state.say(.attention, "! {s} stop unsure; details on exit", .{&ref});
+        return state.say(.attention, "{s} stop unsure; details on exit", .{&ref});
     if (rules.get(kind).word) |word_| return state.say(.quiet, "{s} is already {s}.", .{ &ref, word_ });
     if (kind == .stopping) return state.say(.quiet, "{s}: {s}", .{ &ref, work_line.stopping.words });
     state.say(.quiet, "{s} cannot be stopped now.", .{&ref});
@@ -2937,7 +2938,7 @@ fn select(state: *State, action: Action) void {
     move(state, action);
 }
 
-pub const upgrade_recovery = session_upgrade.recovery;
+pub const upgrade_recovery = session_upgrade.recovery_words;
 
 fn admitHostRequest(state: *State) bool {
     if (!state.holdsHost()) return true;
@@ -3162,7 +3163,7 @@ fn organizationHeld(state: *State, reference: Reference) bool {
         if (held.kind != .archive and held.kind != .unarchive and held.kind != .pin and held.kind != .unpin) continue;
         if (held.status != .pending and held.status != .unknown) continue;
         if (std.mem.eql(u8, &held.session.?, &reference)) {
-            state.say(.attention, "! {s} organization request {s}; details on exit.", .{ &reference, if (held.status == .pending) "pending" else "unsure" });
+            state.say(.attention, "{s} organization request {s}; details on exit.", .{ &reference, if (held.status == .pending) "pending" else "unsure" });
             return true;
         }
     }
@@ -3204,7 +3205,7 @@ fn changeArchiveView(state: *State, filter: ArchiveFilter, effects: *Effects) er
     try archivedReads(state, effects);
 }
 
-const no_selection = "! Select a chat first.";
+const no_selection = "Select a chat first.";
 
 fn move(state: *State, action: Action) void {
     const order = state.order.items;
@@ -4357,6 +4358,18 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                 if (binding) |expected_binding| try std.testing.expect(expected_binding.eql(&got.create.?));
             },
         }
+    }
+}
+
+test "SUI-172 an attention notice starts with the sign and the other tones carry none" {
+    var state = try opened(&.{session("aaaaaa", .{ .idle = ago(1) }, .{})});
+    defer state.deinit();
+    for (std.enums.values(Colour)) |colour| {
+        state.say(colour, "Select {s}.", .{"a chat"});
+        var expected: [32]u8 = undefined;
+        const sign = if (colour == .attention) state_marks.attention_sign else "";
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{s}Select a chat.", .{sign}), state.notice.?.text());
+        try std.testing.expectEqual(colour, state.notice.?.colour);
     }
 }
 
@@ -6351,7 +6364,7 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     try expectStatus(&state, "Checking for updates…", .normal);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     try expectStatus(&state, "Preparing Upgrade · no Hosts running · esc cancels", .normal);
-    state.say(.attention, "! Select a chat first.", .{});
+    state.say(.attention, "Select a chat first.", .{});
     try expectStatus(&state, "Preparing Upgrade · no Hosts running · esc cancels", .normal);
     _ = try press(&state, .next);
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = false } }, .outcome = .compatible } } });
@@ -6422,7 +6435,7 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
         try std.testing.expectEqual(@as(usize, 0), effects.len);
         effects = try press(&state, .archive);
         try std.testing.expectEqual(@as(usize, 0), effects.len);
-        try expectNotice(&state, no_selection);
+        try expectNotice(&state, state_marks.attention_sign ++ no_selection);
         _ = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = direction } } });
         if (direction == .previous) {
             try std.testing.expect(state.selected == .sessions);
@@ -6526,7 +6539,7 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     try expectEffects(&.{}, try submit(&views));
     try expectEffects(&.{}, try press(&views, .open_session));
     try expectEffects(&.{}, try press(&views, .archive));
-    try expectNotice(&views, no_selection);
+    try expectNotice(&views, state_marks.attention_sign ++ no_selection);
 
     // A completed newer-page answer also proves omissions above its newest returned key.
     var above = try opened(&.{});
@@ -8376,7 +8389,7 @@ fn stopCase4() !void {
             state.upgrade.after = if (blocked) .blocked else .reobserving;
             try expectEffects(&.{}, try step(&state, event));
             try std.testing.expectEqual(@as(usize, 0), state.request_count);
-            try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
+            try std.testing.expectEqualStrings(state_marks.attention_sign ++ upgrade_recovery, state.notice.?.text());
             state.upgrade.after = .open;
             try expectEffects(&.{.{ .stop = ref }}, try step(&state, event));
         }
@@ -8435,7 +8448,7 @@ test "archive admission reports only a new ledger request across every surface c
                 try std.testing.expectEqual(expected_request.sent, actual_request.sent);
             }
             if (hold != .active) {
-                try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
+                try std.testing.expectEqualStrings(state_marks.attention_sign ++ upgrade_recovery, state.notice.?.text());
             } else if (!case.restore and archive != .active) {
                 try std.testing.expect(state.notice == null);
             } else if (held != .none) {
@@ -8898,7 +8911,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
                         try std.testing.expectEqual(Selection.new_session, state.selected);
                     },
                     .clear => try expectNotice(&state, null),
-                    .stop, .archive => try expectNotice(&state, if (phase.held) upgrade_recovery else no_selection),
+                    .stop, .archive => try expectNotice(&state, if (phase.held) state_marks.attention_sign ++ upgrade_recovery else state_marks.attention_sign ++ no_selection),
                     .previous, .next, .first, .last, .select_previous, .select_next => {
                         const expected: Selection = if (action == .last) .settings else if (action == .next or action == .select_next) .sessions else .new_session;
                         try std.testing.expectEqual(expected, state.selected);
@@ -9018,7 +9031,7 @@ test "Overview browse explicit Enter and Right share activation and focus depart
     try expectEffects(&.{}, try submit(&none));
     try expectEffects(&.{}, try press(&none, .open_session));
     try expectEffects(&.{}, try press(&none, .archive));
-    try expectNotice(&none, no_selection);
+    try expectNotice(&none, state_marks.attention_sign ++ no_selection);
     try std.testing.expect(none.selected == .none);
 
     var state = try opened(&mixed);

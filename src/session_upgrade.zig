@@ -1,5 +1,6 @@
 const std = @import("std");
 const upgrade_status = @import("upgrade_status.zig");
+const state_marks = @import("marks.zig");
 
 pub const Outcome = upgrade_status.Outcome;
 
@@ -12,7 +13,8 @@ pub const Phase = enum {
     active,
 };
 
-pub const recovery = "! This window can't continue after the update. Select Version in Settings to retry, or open rui in a new terminal.";
+pub const recovery_words = "This window can't continue after the update. Select Version in Settings to retry, or open rui in a new terminal.";
+pub const recovery = state_marks.attention_sign ++ recovery_words;
 pub const rereading = "Reading this chat…";
 
 pub fn refusal(phase: Phase) []const u8 {
