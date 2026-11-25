@@ -1860,7 +1860,7 @@ test "SUI-176 every row that starts with a glyph tags it, and only a row that as
         try sink.feed(" " ++ words);
         try Check.wraps(&document, true, "permission");
     }
-    for ([_][]const u8{ content_mark, command_mark }) |mark| {
+    inline for (.{ content_mark, command_mark }) |mark| {
         var document: Document = .{ .quotes = true };
         var sink: Sink = .{ .document = &document };
         try sink.feed(mark ++ words);
