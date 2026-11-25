@@ -945,6 +945,12 @@ const NativePromotion = struct {
         return store_testing.queryU64(storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{model.operation_id});
     }
 
+    fn sendPeer(storage: *Store, tmp: *std.testing.TmpDir, sender: []const u8, target: []const u8, text: []const u8) !u64 {
+        const binding = try shared_fixtures.proposeMessageAgent(storage, tmp, sender, target, text);
+        try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(binding, target, text, .{}));
+        return binding.action_id;
+    }
+
     fn command(session: []const u8, key: []const u8, action: u64) !@import("../../command_input.zig").ActionBackgroundCommand {
         var result: @import("../../command_input.zig").ActionBackgroundCommand = .{ .action_id = action };
         try result.session.set(session);
@@ -1631,7 +1637,7 @@ test "queue records source kinds and source predicates for person peer and actio
                 var storage: Store = undefined;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
-                const parent = try shared_fixtures.configureTestSessionWithMode(&storage, "source-parent", "bypass");
+                const parent = try shared_fixtures.configurePeerSender(&storage, "source-parent");
                 var configure: wire_request.ConfigureCommand = .{};
                 try configure.key.set("source-child");
                 configure.configuration = try shared_fixtures.testingAgentSpec(&.{"bash"}, "bypass");
@@ -1647,10 +1653,7 @@ test "queue records source kinds and source predicates for person peer and actio
                         break :blk "source-person-key";
                     },
                     .peer => blk: {
-                        _ = try NativePromotion.propose(&storage, &tmp, parent.slice());
-                        const sender = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
-                        try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(sender, child.slice(), "Peer input", .{}));
-                        const sender_action = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation WHERE session_ref=?1", .{parent.slice()});
+                        const sender_action = try NativePromotion.sendPeer(&storage, &tmp, parent.slice(), child.slice(), "Peer input");
                         break :blk try std.fmt.bufPrint(&key_buffer, "rui.core/message_agent/{d}", .{sender_action});
                     },
                     .action_final => blk: {
@@ -1688,7 +1691,7 @@ test "background owed stop excludes person peer and previously admitted final in
                     var storage: Store = undefined;
                     try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                     defer storage.close() catch unreachable;
-                    const parent = try shared_fixtures.configureTestSessionWithMode(&storage, "parent", "bypass");
+                    const parent = try shared_fixtures.configurePeerSender(&storage, "parent");
                     var configure: wire_request.ConfigureCommand = .{};
                     try configure.key.set("attached-child");
                     configure.configuration = try shared_fixtures.testingAgentSpec(&.{"bash"}, "bypass");
@@ -1704,10 +1707,7 @@ test "background owed stop excludes person peer and previously admitted final in
                     switch (source) {
                         .person => try submitTestMessage(&storage, &tmp, "late-person", "late-person-key", child.slice(), "Pending person input"),
                         .peer => {
-                            _ = try NativePromotion.propose(&storage, &tmp, parent.slice());
-                            const sender = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
-                            try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(sender, child.slice(), "Pending peer input", .{}));
-                            _ = try storage.settleActionAttempt(sender, .succeeded, "Sent", .{});
+                            _ = try NativePromotion.sendPeer(&storage, &tmp, parent.slice(), child.slice(), "Pending peer input");
                             const continuation = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
                             try NativePromotion.finishModel(&storage, &tmp, continuation);
                         },
@@ -1874,10 +1874,9 @@ test "interrupt regression: person and peer Messages decline approval alongside 
                 var storage: Store = undefined;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
-                const sender = try shared_fixtures.configureTestSessionWithMode(&storage, "sender", "bypass");
-                _ = try NativePromotion.propose(&storage, &tmp, sender.slice());
-                const sender_action = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                const sender = try shared_fixtures.configurePeerSender(&storage, "sender");
                 const target = try configureTestSessionAsk(&storage, "target");
+                const sender_action = try shared_fixtures.proposeMessageAgent(&storage, &tmp, sender.slice(), target.slice(), "new peer message");
                 try submitTestMessage(&storage, &tmp, "seed", "seed", target.slice(), "run both");
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try settleTwoActionsForTesting(&storage, &tmp, model, "mixed-calls");

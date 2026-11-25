@@ -183,23 +183,22 @@ test "session creator names the Session that sent a creatorless Session's first 
             var tools: wire_request.ConfigureCommand = .{};
             try tools.key.set("creator-sender-tools");
             try tools.session.set(sender);
-            tools.configuration.tools = try .of(&.{"bash"});
+            tools.configuration.tools = try .of(&.{ "bash", "message_agent" });
             tools.configuration.permission_mode.state = .value;
             try tools.configuration.permission_mode.value.set("bypass");
             try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
-            try testing.submitTestMessage(&storage, &tmp, "creator-sender-seed", "creator-sender-seed", sender, "start chats");
-            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try fixtures.settleTwoActionsForTesting(&storage, &tmp, model, "creator-sender-calls");
-            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
 
-            // Created by configure (no creator), then first messaged by the sender: the sender is its creator.
             const configured = try testing.configureTestSession(&storage, "creator-configured");
-            try std.testing.expectEqual(@import("domain/command.zig").AgentDelivery.delivered, try storage.deliverAgentMessage(action, configured.slice(), "work on this", .{}));
-            try expectOrigin(&storage, configured.slice(), sender, null, .all, true);
-            // A person's first Message leaves no creator, and a later peer Message adds none.
             const personal = try testing.configureTestSession(&storage, "creator-personal");
             try testing.submitTestMessage(&storage, &tmp, "creator-personal-first", "creator-personal-first", personal.slice(), "work on this");
-            try std.testing.expectEqual(@import("domain/command.zig").AgentDelivery.delivered, try storage.deliverAgentMessage(action, personal.slice(), "work on this too", .{}));
+            const first = try fixtures.proposeMessageAgentCalls(&storage, &tmp, sender, &.{ configured.slice(), personal.slice() });
+
+            // Created by configure (no creator), then first messaged by the sender: the sender is its creator.
+            try std.testing.expectEqual(@import("domain/command.zig").AgentDelivery.delivered, try storage.deliverAgentMessage(first, configured.slice(), "work on this", .{}));
+            try expectOrigin(&storage, configured.slice(), sender, null, .all, true);
+            // A person's first Message leaves no creator, and a later peer Message adds none.
+            const second = try fixtures.nextMessageAgent(&storage);
+            try std.testing.expectEqual(@import("domain/command.zig").AgentDelivery.delivered, try storage.deliverAgentMessage(second, personal.slice(), "work on this too", .{}));
             try expectOrigin(&storage, personal.slice(), null, null, .all, true);
         }
     }.run);

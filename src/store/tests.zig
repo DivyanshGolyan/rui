@@ -235,6 +235,68 @@ pub fn configureTestSessionWithMode(
     return reply.accepted.session;
 }
 
+/// A Session whose tools include `message_agent`, so its Turn can send a peer Message.
+pub fn configurePeerSender(
+    storage: *Store,
+    key: []const u8,
+) !protocol.Bounded(protocol.max_session_bytes) {
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration(key, "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{ "bash", "message_agent" });
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("bypass");
+    const reply = try storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    return reply.accepted.session;
+}
+
+/// Runs `sender`'s Turn up to one `message_agent` call per target and returns the first call's binding;
+/// the caller delivers it with `deliverAgentMessage`, as the Host does, and takes the next with `nextMessageAgent`.
+pub fn proposeMessageAgentCalls(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    sender: []const u8,
+    targets: []const []const u8,
+) !ActionAttemptBinding {
+    var key_buffer: [96]u8 = undefined;
+    const key = try std.fmt.bufPrint(&key_buffer, "send-task-{s}", .{sender});
+    try store_testing.submitTestMessage(storage, tmp, key, key, sender, "Send the message.");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var decoded_buffers: [4][256]u8 = undefined;
+    var encoded_buffers: [4][384]u8 = undefined;
+    var calls: [4]TestingCall = undefined;
+    const ids = [_][]const u8{ "a", "b", "c", "d" };
+    for (targets, 0..) |target, index| {
+        const decoded = try std.fmt.bufPrint(&decoded_buffers[index], "{{\"id\":\"{s}\",\"text\":\"hello\"}}", .{target});
+        const encoded = try std.fmt.bufPrint(&encoded_buffers[index], "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hello\\\"}}", .{target});
+        calls[index] = .{
+            .item_id = ids[index],
+            .name = "message_agent",
+            .encoded_call_id = ids[index],
+            .decoded_call_id = ids[index],
+            .encoded_arguments = encoded,
+            .decoded_arguments = decoded,
+        };
+    }
+    try settleCallsForTesting(storage, tmp, model, "send-calls", calls[0..targets.len]);
+    return nextMessageAgent(storage);
+}
+
+pub fn nextMessageAgent(storage: *Store) !ActionAttemptBinding {
+    return (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action.binding;
+}
+
+pub fn proposeMessageAgent(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    sender: []const u8,
+    target: []const u8,
+    _: []const u8,
+) !ActionAttemptBinding {
+    return proposeMessageAgentCalls(storage, tmp, sender, &.{target});
+}
+
 pub const TestingCall = struct {
     item_id: []const u8,
     name: []const u8,

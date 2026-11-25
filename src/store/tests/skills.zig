@@ -388,14 +388,11 @@ test "inline skills a peer Session's Message may list the recipient's skills" {
             const receiver = try configureTestSession(&storage, "skills-peer-accept-receiver");
             var update: wire_request.ConfigureCommand = .{ .session = sender };
             try update.key.set("skills-peer-accept-bypass");
-            update.configuration.tools = try .of(&.{"bash"});
+            update.configuration.tools = try .of(&.{ "bash", "message_agent" });
             update.configuration.permission_mode.state = .value;
             try update.configuration.permission_mode.value.set("bypass");
             try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
-            try submitTestMessage(&storage, &tmp, "skills-peer-accept-input", "skills-peer-accept-input", sender.slice(), "Ask my peer to use its skill");
-            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try settleTwoActionsForTesting(&storage, &tmp, model, "skills-peer-accept-call");
-            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            const action = try shared_fixtures.proposeMessageAgent(&storage, &tmp, sender.slice(), receiver.slice(), "");
             const authored = "check the flaky tests";
             const body = "Skill file: \"/receiver/skills/demo/SKILL.md\"\n\nreceiver body";
             const capture: skills_fixture_domain.MessageCapture = .{ .bound = &.{.{ .name = "demo", .bytes = body }} };

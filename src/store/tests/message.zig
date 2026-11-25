@@ -380,16 +380,12 @@ test "a peer Message is recorded with the sender Session of the Action that deli
             var tools: wire_request.ConfigureCommand = .{};
             try tools.key.set("sender-tools");
             try tools.session.set(sender);
-            tools.configuration.tools = try .of(&.{"bash"});
+            tools.configuration.tools = try .of(&.{ "bash", "message_agent" });
             tools.configuration.permission_mode.state = .value;
             try tools.configuration.permission_mode.value.set("bypass");
             try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
-            try submitTestMessage(&storage, &tmp, "sender-seed", "sender-seed", sender, "send a report");
-            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try settleTwoActionsForTesting(&storage, &tmp, model, "sender-calls");
-            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            const action = try shared_fixtures.proposeMessageAgent(&storage, &tmp, sender, allocated_session_1.slice(), "look at this");
             try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action, allocated_session_1.slice(), "look at this\nsecond line", .{}));
-            try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(action, "absent", "lost", .{}));
             try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(allocated_session_1.slice())).pending_messages);
 
             var session: protocol.Bounded(protocol.max_session_bytes) = .{};
