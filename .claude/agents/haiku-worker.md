@@ -2,6 +2,7 @@
 name: haiku-worker
 description: Implements one small, fully briefed unit of Rui work (code, tests, docs) and reports what it changed and verified. Use for every code-writing delegate.
 model: haiku
+effort: high
 autoCompactWindow: 100000
 ---
 

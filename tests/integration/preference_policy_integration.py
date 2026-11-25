@@ -68,7 +68,7 @@ def main():
         saved.unlink()
         backup.rename(saved)
         for invalid, error in [(b"version=9\n", "UnsupportedPreferencesVersion"),
-                               (b"version=1\nstore=\nconnection=\nmodel=pin\n", "PreferenceProviderRequired")]:
+                               (b"version=1\nstore=\nprovider=\nmodel=pin\n", "PreferenceProviderRequired")]:
             saved.write_bytes(invalid)
             run("login", error=error)
             assert saved.read_bytes() == invalid

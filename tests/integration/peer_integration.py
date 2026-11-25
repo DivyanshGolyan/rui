@@ -277,23 +277,24 @@ def assistant_session_link_journey(installed, store, home, workspace, session_a,
 
 def session_link_journey(installed, store, home, session_a):
     from human_cli_fixture import current_screen, keyed_frame, overview_title, read_terminal
+    from terminal_screen import chat_footer_shown
     from terminal_process import terminal_process
     env = {"PATH": os.environ["PATH"], "HOME": str(home)}
 
-    def showing(label):
-        return lambda frame, x, y: f"\n ‹ {label} · " in frame
+    def showing(frame, x, y):
+        return chat_footer_shown(frame)
 
     with terminal_process([str(installed), "session", "resume", "--store", str(store), session_a], env=env) as (_, master):
         read_terminal(master, f"Received message from {B_LABEL}")
-        frame = keyed_frame(master, b"", showing(A_LABEL))
+        frame = keyed_frame(master, b"", showing, chat=A_LABEL)
         rows = frame.split("\n")
         row = next(index for index, line in enumerate(rows) if f"Received message from {B_LABEL}" in line)
         column = rows[row].index(B_LABEL) + 2
         click = f"\x1b[<0;{column};{row + 1}M\x1b[<0;{column};{row + 1}m".encode()
-        keyed_frame(master, click, showing(B_LABEL))
-        keyed_frame(master, b"\x1b", showing(A_LABEL))
-        keyed_frame(master, b"\x0f", showing(B_LABEL))
-        keyed_frame(master, b"\x1b", showing(A_LABEL))
+        keyed_frame(master, click, showing, chat=B_LABEL)
+        keyed_frame(master, b"\x1b", showing, chat=A_LABEL)
+        keyed_frame(master, b"\x0f", showing, chat=B_LABEL)
+        keyed_frame(master, b"\x1b", showing, chat=A_LABEL)
         keyed_frame(master, b"\x1b", lambda frame, x, y: overview_title(frame))
 
 def main(report_source):

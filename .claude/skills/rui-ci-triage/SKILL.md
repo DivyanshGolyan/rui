@@ -10,6 +10,8 @@ Rerun, retry and assertion rules live in [Landing](../../../docs/agents/landing.
 
 ## 1. Find the failure record
 
+- For a Promote or other qualification run, read its `qualify / report` job's annotations first (`get_check_run` or the check run's annotations): each `Promotion verdict` notice is one filed cause as `job | failed steps | signature | escape class | #issue`.
+  Open logs only for what a verdict leaves unexplained; a run's job list alone is about 80K characters.
 - Fetch failed-job logs through the GitHub MCP: `get_job_logs` with `run_id` and `failed_only: true` (or one `job_id`) and `return_content: true`.
   Large logs land in a file; search the file.
   Fetch logs yourself rather than asking the user.
@@ -32,7 +34,7 @@ Read that upstream failure rather than blaming the aggregate.
 A Promote run whose step has failed is red; report it as red at once.
 A scheduled Promote run is Promote's tier on `main` every three hours; it files `main-red` issues, and you triage its runs as a promotion's.
 A Promote run whose only failure is batch's `Fail a scheduled run whose main HEAD is red` step is a reminder, not a new red: triage the run its error names, file nothing, and leave it out of green-rate counts.
-A Promote failure ranks each failed step's suspects inside that job: read every `Promotion suspects: <step>:` line and the log excerpt the job prints before diagnosing the commit each names, since a suspect is the commit to read first, not a verdict. A manual bisect (Promote's `bisect-step` dispatch) prints `Promotion bisect:` verdict lines and retains its replay logs; it refuses a step that is not a build target, and a `Promotion excerpt:` line is the failed step's output tail.
+A Promote failure ranks each failed step's suspects inside that job: read every `Promotion suspects: <step>:` line and the log excerpt the job prints before diagnosing the commit each names, since a suspect is the commit to read first, not a verdict. A manual bisect (Promote's `bisect-step` dispatch) prints `Promotion bisect:` verdict lines and retains its replay logs; it refuses a step that is not a build target, and the `Promotion excerpt:` lines are the failed step's first failure-shaped lines (`error: `, `FAIL`, `Traceback (`, `failed: exit=`, ...), then `...`, then its tail.
 A `stopped at the 90-minute cap` verdict names only a range of commits, so diagnose from the replays it ran and that range.
 A Release failure inside a green promotion is publication or the post-publication wire recheck; [Release publication](../../../docs/verification/release.md#release-publication) says which, and what recovers each.
 

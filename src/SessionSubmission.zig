@@ -6,6 +6,7 @@ const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const Task = @import("ClientTask.zig");
 const original_state = @import("submission_state.zig");
+const queue_lifecycle = @import("queue_lifecycle.zig");
 const Self = @This();
 
 pub const Intent = union(enum) {
@@ -65,7 +66,7 @@ last_error: ?anyerror = null,
 accepted: ?Accepted = null,
 retry: ?[36]u8 = null,
 retain_message: bool = false,
-projected: bool = false,
+queue: queue_lifecycle.State = .{},
 settled_message: ?struct { ticket: Input.Ticket, key: [36]u8 } = null,
 
 pub fn view(self: *const Self) ?View {
@@ -83,17 +84,18 @@ pub fn recovery(self: *const Self) Recovery {
     return original_state.recovery(original, self.accepted);
 }
 
-pub fn begin(self: *Self, intent: Intent) !void {
+pub fn begin(self: *Self, intent: Intent, before: ?queue_lifecycle.Queue) !void {
     std.debug.assert(self.intent == null and self.task.thread == null);
     std.debug.assert(intent.ticket() == null or self.settled_message == null);
     self.intent = intent;
-    self.projected = false;
     self.state = .not_started;
     self.reply = null;
     self.publication = .not_sent;
     self.key = @splat(0);
+    if (intent.ticket() != null) self.queue = queue_lifecycle.step(self.queue, .{ .begin = .{ .key = self.key, .before = before } }).state;
     const target: client.CaptureTarget = .{ .generated = self.directory };
     self.target = .{ .reserved = try target.resolve(self.io, &self.path, &self.key) };
+    if (intent.ticket() != null) self.queue = queue_lifecycle.step(self.queue, .{ .reserved = .{ .before = @splat(0), .key = self.key } }).state;
     try self.startWorker(submit);
     self.state = .submitting;
 }
@@ -315,10 +317,9 @@ fn apply(self: *Self, result: anyerror!void) !End {
             else => null,
         };
         const denies: ?u64 = if (intent == .message_then_deny) intent.message_then_deny.action else null;
-        if (self.retain_message and intent.ticket() != null and !self.projected) {
-            std.debug.assert(self.settled_message == null);
-            self.settled_message = .{ .ticket = intent.ticket().?, .key = self.key };
-            self.retire();
+        if (intent.ticket() != null) self.queue = queue_lifecycle.step(self.queue, .{ .receipt = .{ .key = self.key, .admission = admission } }).state;
+        if (self.retain_message and intent.ticket() != null and !queue_lifecycle.accounted(self.queue, self.key)) {
+            self.holdAccepted(intent.ticket().?, self.key);
             return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission, .denies = denies } };
         }
         self.release();
@@ -345,16 +346,26 @@ pub fn messageHasImage(self: *const Self) bool {
     return (self.input.messageImage(ticket) catch unreachable) != null;
 }
 
-pub fn observeMessage(self: *Self, key: [36]u8) void {
-    if (self.settled_message) |settled| {
-        if (std.mem.eql(u8, &key, &settled.key)) {
+/// Holds the accepted Message `ticket` under `key` until the queue shows it, and retires the
+/// original. Reached from `apply` once the queue has taken the Message's receipt.
+pub fn holdAccepted(self: *Self, ticket: Input.Ticket, key: [36]u8) void {
+    std.debug.assert(self.settled_message == null);
+    self.settled_message = .{ .ticket = ticket, .key = key };
+    self.retire();
+}
+
+/// Applies the single local presentation transition and releases only a matching settled loan.
+pub fn observe(self: *Self, event: queue_lifecycle.Event) struct { await_adoption: bool, stopped: bool } {
+    const held = self.messageKey();
+    const next = queue_lifecycle.step(self.queue, event);
+    self.queue = next.state;
+    if (next.accounted) if (self.settled_message) |settled| {
+        if (self.queue.message) |message| if (std.mem.eql(u8, &message.key, &settled.key)) {
             self.input.release(settled.ticket) catch unreachable;
             self.settled_message = null;
-        }
-    }
-    if (self.intent) |intent| if (intent.ticket() != null and std.mem.eql(u8, &key, &self.key)) {
-        self.projected = true;
+        };
     };
+    return .{ .await_adoption = next.await_adoption, .stopped = next.stopped and held != null and self.queue.message != null and std.mem.eql(u8, &held.?, &self.queue.message.?.key) };
 }
 
 pub fn messageKey(self: *const Self) ?[36]u8 {
@@ -362,9 +373,18 @@ pub fn messageKey(self: *const Self) ?[36]u8 {
     return if (self.settled_message) |settled| settled.key else null;
 }
 
-pub fn messageProjected(self: *const Self) bool {
-    if (self.intent) |intent| if (intent.ticket() != null) return self.projected;
-    return false;
+pub fn queueView(self: *const Self, queue: ?queue_lifecycle.Queue, at_latest: bool) queue_lifecycle.Presentation {
+    return queue_lifecycle.view(self.queue, queue, self.heldTicket() != null, at_latest);
+}
+
+pub fn lastMessageKey(self: *const Self) ?[36]u8 {
+    return queue_lifecycle.lastKey(self.queue);
+}
+
+pub fn messageAdmission(self: *const Self) ?u64 {
+    const key = self.messageKey() orelse return null;
+    const message = self.queue.message orelse return null;
+    return if (std.mem.eql(u8, &key, &message.key)) message.admission else null;
 }
 
 pub fn messageHeld(self: *const Self) bool {
@@ -381,6 +401,7 @@ pub fn disposeMessage(self: *Self) void {
 pub fn discardRejected(self: *Self) !void {
     if (self.intent == null) return;
     if (!original_state.discardable(self.state, self.task.thread != null)) return error.SubmissionUnresolved;
+    if (self.intent.?.ticket() != null) self.queue = queue_lifecycle.step(self.queue, .{ .discard = self.key }).state;
     self.release();
 }
 
@@ -396,7 +417,6 @@ fn retire(self: *Self) void {
     self.publication = .not_sent;
     self.last_error = null;
     self.retry = null;
-    self.projected = false;
 }
 
 pub fn close(self: *Self) void {
@@ -413,8 +433,13 @@ fn submit(raw: *anyopaque, task: *Task) !void {
         .message, .message_then_deny => try self.captureDraft(task.io, self.intent.?.ticket().?),
         .decision => |decision| try client.capturePermissionDecision(task.io, .{ .store = self.store, .session = self.session, .action_id = decision.action, .decision = decision.decision }, self.target),
     };
-    self.publication = .published;
+    self.markPublished();
     self.reply = try task.requests().sendCaptured(&self.captured.?, self.environment, &self.reply_buffer).get();
+}
+
+/// The request's capture is sent: from here its outcome is known only through its reply.
+pub fn markPublished(self: *Self) void {
+    self.publication = .published;
 }
 
 fn captureDraft(self: *Self, io: std.Io, ticket: Input.Ticket) !client.CapturedRecord {
@@ -455,14 +480,14 @@ test "submission reservation failure retains unsent intent ahead of accepted his
     for (0..3) |kind| {
         var input: Input = undefined;
         input.init();
-        var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .key = @splat('A'), .projected = true, .accepted = .{ .kind = .message, .key = @splat('A') } };
+        var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .key = @splat('A'), .queue = .{ .message = .{ .key = @splat('A'), .before_newest = null, .phase = .represented } }, .accepted = .{ .kind = .message, .key = @splat('A') } };
         const intent: Intent = if (kind == 0) .{ .message = input.submitText("original café!") } else .{ .decision = .{ .action = 9, .decision = if (kind == 1) .allow_once else .deny } };
         _ = input.typed("next té!\x1b[D");
-        try std.testing.expectError(error.EntropyUnavailable, self.begin(intent));
+        try std.testing.expectError(error.EntropyUnavailable, self.begin(intent, null));
         try std.testing.expectEqual(.not_started, self.view().?.state);
         try std.testing.expectEqual(@as([36]u8, @splat(0)), self.view().?.key);
-        self.observeMessage(@splat('A'));
-        try std.testing.expect(!self.messageProjected());
+        _ = self.observe(.{ .applied = @splat('A') });
+        try std.testing.expectEqual(kind == 0, self.queueView(null, true).held);
         try std.testing.expectEqual(@as([36]u8, @splat('A')), self.accepted.?.key);
         try std.testing.expectEqual(intent.kind(), self.recovery().not_sent);
         try std.testing.expect(self.join() == .absent);
@@ -595,7 +620,7 @@ test "a chat Message captures require_model so the Host refuses a Session whose 
     input.init();
     var self: Self = .{ .io = io, .store = root, .session = "k7m2qx", .directory = root, .input = &input, .environment = .empty };
     defer self.close();
-    try self.begin(.{ .message = input.submitText("hello") });
+    try self.begin(.{ .message = input.submitText("hello") }, null);
     _ = self.join();
     const captured = &(self.captured orelse return error.TestExpectedCapture);
     var bytes: [4096]u8 = undefined;
@@ -623,7 +648,7 @@ test "SUI-114 clipboard image submission recovers the original multipart identit
         const ticket = input.typed("\r").message;
         var self: Self = .{ .io = io, .store = root, .session = "k7m2qx", .directory = root, .input = &input, .environment = .empty };
         defer self.close();
-        try self.begin(.{ .message = ticket });
+        try self.begin(.{ .message = ticket }, null);
         _ = self.join();
         const capture = self.captured orelse return error.TestExpectedCapture;
         try std.testing.expectEqual(.parts, capture.target.message.form);
@@ -668,7 +693,7 @@ test "submission recovery validates reopened originals and pins the saved reader
             var self: Self = .{ .io = .{ .userdata = io.userdata, .vtable = &vtable }, .store = root, .session = "k7m2qx", .directory = root, .input = &input, .environment = .empty };
             defer self.close();
             const intent: Intent = if (kind == 0) .{ .message = input.submitText("original café!") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
-            try self.begin(intent);
+            try self.begin(intent, null);
             try std.testing.expectEqual(error.NoSpaceLeft, self.join().failed.err);
             const key = self.view().?.key;
             try std.testing.expectEqualSlices(u8, &key, &self.recovery().uncertain);
@@ -783,7 +808,7 @@ test "submission settles wire Admission only after join and releases only accept
                 self.close();
             }
             const intent: Intent = if (kind == 0) .{ .message = input.submitText("original café!") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
-            try self.begin(intent);
+            try self.begin(intent, null);
             const peer = try listener.accept(io);
             defer peer.close(io);
             const file: std.Io.File = .{ .handle = peer.socket.handle, .flags = .{ .nonblocking = false } };
@@ -824,6 +849,7 @@ test "accepted native Message keeps its exact input loan until canonical inserti
     input.init();
     const ticket = input.submitText("same text\nsecond line");
     var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .intent = .{ .message = ticket }, .key = @splat('A'), .state = .submitting, .retain_message = true };
+    self.queue = queue_lifecycle.step(.{}, .{ .begin = .{ .key = @splat('A'), .before = null } }).state;
     self.reply = .{ .status = 200, .context = .{ .kind = .message }, .target = .{ .message = .{ .bytes = 21, .digest = protocol.contentDigest("same text\nsecond line") } }, .answer = .{ .replayed = false, .result = .{ .accepted = .{ .message = .{ .admission = 37 } } } } };
     const end = try self.apply({});
     try std.testing.expect(end == .accepted);
@@ -837,18 +863,19 @@ test "accepted native Message keeps its exact input loan until canonical inserti
     try self.requestRecovery(null);
     try std.testing.expect(self.retry == null);
     try std.testing.expect(self.recovery() == .accepted);
-    self.observeMessage(@splat('B'));
+    _ = self.observe(.{ .applied = @splat('B') });
     try std.testing.expect(self.messageHeld());
-    self.observeMessage(@splat('A'));
+    _ = self.observe(.{ .applied = @splat('A') });
     try std.testing.expect(!self.messageHeld() and self.messageText() == null);
     try std.testing.expectError(error.NoSubmission, input.message(ticket));
-    self.observeMessage(@splat('A'));
+    _ = self.observe(.{ .applied = @splat('A') });
     const next = input.typed("\r");
     try std.testing.expect(next == .message);
     self.intent = .{ .message = next.message };
     self.key = @splat('B');
-    self.observeMessage(@splat('A'));
-    try std.testing.expect(!self.messageProjected());
+    self.queue = queue_lifecycle.step(self.queue, .{ .begin = .{ .key = self.key, .before = null } }).state;
+    _ = self.observe(.{ .applied = @splat('A') });
+    try std.testing.expect(self.queueView(null, true).held);
     try std.testing.expectEqualStrings("next draft", self.messageText().?);
     self.state = .rejected;
     try self.discardRejected();
@@ -859,10 +886,11 @@ test "uncertain canonical observation hides only the echo and retains original r
     input.init();
     const ticket = input.submitText("same text");
     var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .intent = .{ .message = ticket }, .key = @splat('A'), .state = .unconfirmed, .publication = .published, .retain_message = true };
-    self.observeMessage(@splat('B'));
-    try std.testing.expect(!self.messageProjected());
-    self.observeMessage(@splat('A'));
-    try std.testing.expect(self.messageProjected());
+    self.queue = queue_lifecycle.step(.{}, .{ .begin = .{ .key = @splat('A'), .before = null } }).state;
+    _ = self.observe(.{ .applied = @splat('B') });
+    try std.testing.expect(self.queueView(null, true).held);
+    _ = self.observe(.{ .applied = @splat('A') });
+    try std.testing.expect(!self.queueView(null, true).held);
     try std.testing.expectEqual(State.unconfirmed, self.view().?.state);
     try std.testing.expectEqualStrings("same text", try input.message(ticket));
     try self.requestRecovery(null);
@@ -884,6 +912,7 @@ test "accepted reason presentation loan never delays or borrows the denial autho
     input.init();
     const ticket = input.submitText("reason");
     var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .intent = .{ .message_then_deny = .{ .ticket = ticket, .action = 19 } }, .key = @splat('A'), .state = .submitting, .retain_message = true };
+    self.queue = queue_lifecycle.step(.{}, .{ .begin = .{ .key = @splat('A'), .before = null } }).state;
     self.reply = .{ .status = 200, .context = .{ .kind = .message }, .target = .{ .message = .{ .bytes = 6, .digest = protocol.contentDigest("reason") } }, .answer = .{ .replayed = false, .result = .{ .accepted = .{ .message = .{ .admission = 37 } } } } };
     const end = try self.apply({});
     try std.testing.expectEqual(@as(?u64, 19), end.accepted.denies);
@@ -895,7 +924,7 @@ test "accepted reason presentation loan never delays or borrows the denial autho
     try self.task.start(self.io, &self, Worker.done);
     try std.testing.expectEqual(@as([36]u8, @splat('A')), self.messageKey().?);
     try std.testing.expectEqualStrings("reason", self.messageText().?);
-    self.observeMessage(@splat('A'));
+    _ = self.observe(.{ .applied = @splat('A') });
     try std.testing.expect(!self.messageHeld());
     try std.testing.expect(self.task.thread != null and self.intent.? == .decision);
     try std.testing.expectError(error.NoSubmission, input.message(ticket));
