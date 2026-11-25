@@ -297,7 +297,8 @@ def session_link_journey(installed, store, home, session_a):
         click = f"\x1b[<0;{column};{row + 1}M\x1b[<0;{column};{row + 1}m".encode()
         keyed_frame(master, click, showing, chat=B_LABEL)
         keyed_frame(master, b"\x1b", showing, chat=A_LABEL)
-        keyed_frame(master, b"\x0f", showing, chat=B_LABEL)
+        # Ctrl-O follows the last openable item, which is now the Assistant answer's final link.
+        keyed_frame(master, b"\x0f", showing, chat=STOPPED_LABEL)
         keyed_frame(master, b"\x1b", showing, chat=A_LABEL)
         keyed_frame(master, b"\x1b", lambda frame, x, y: overview_title(frame))
 
