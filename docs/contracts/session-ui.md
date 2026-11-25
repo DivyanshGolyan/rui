@@ -820,7 +820,7 @@ It shows while Ctrl-X would ask to stop the work the conversation shows, so not 
 The name is the Label, else the first line of the first Message, else the reference, as in overview rows.
 Context appears only from half used, including exactly half, and reads `N% context left`. The percentage is how far Current's `context_estimate` is from the compaction trigger, rounded up, so `0% context left` means the next model call compacts; below half used or without a trigger it is omitted.
 The chat footer reserves its one-space input gutter even beside the list; the hidden-list variant adds `‹ ` after that gutter.
-Identity fits whole items before its right-aligned keys, marking omitted items with ` · …`; only an oversized name is shortened at a word boundary.
+The facts fit whole items before the right-aligned keys and drop an item that does not fit; only an oversized model is cut with `…`.
 The overview keeps its own line-fitting policy.
 The ordinary chat footer keeps its previous placement above the bottom single-row state slot, which is blank while idle; chat info suppresses that slot and puts its replacement footer on the last content row.
 A chat notice occupies that bottom state slot and never replaces the facts; it uses the failure colour when it starts with `!`. An unresolved Permission Decision takes priority there, then the newest local notice and the overview's state. Opening and Permission Decision progress use the existing footer notice area instead of allocating a state row, and a newer local notice takes priority. A transient notice goes after five seconds or the next key; an unresolved send remains. Overview notices keep their own policy.

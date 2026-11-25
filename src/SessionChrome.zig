@@ -551,6 +551,28 @@ test "SessionChrome footer identity covers list visibility context threshold and
     };
 }
 
+test "SessionChrome footer with no facts still draws one clickable row at both list states and widths" {
+    for ([_]bool{ false, true }) |list_visible| for ([_]u16{ 46, 140 }) |width| {
+        var recorder: Recorder = .{};
+        var self: Self = .init(recorder.actions());
+        self.list_visible = list_visible;
+        self.facts.identity = .{};
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        try std.testing.expectEqual(@as(u16, 1), footer.size.height);
+        try std.testing.expectEqual(width, footer.size.width);
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (footer.buffer) |cell| if (cell.char.width != 0) try text.writer.writeAll(cell.char.grapheme);
+        try std.testing.expectEqualStrings(if (list_visible) "" else "‹", std.mem.trim(u8, text.written(), " "));
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        defer ctx.cmds.deinit(arena.allocator());
+        const info_before = recorder.clicked.get(.status_page);
+        try clickAt(footer, arena.allocator(), &ctx, 0, @intCast(width - 1));
+        try std.testing.expectEqual(info_before + 1, recorder.clicked.get(.status_page));
+    };
+}
+
 test "Session chrome back control exists only while the shell hides the list" {
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
