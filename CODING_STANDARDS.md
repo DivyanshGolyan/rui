@@ -177,7 +177,7 @@ The [Code Review Rules](AGENTS.md#code-review-rules) own how it groups and order
 The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.
 Reviewers apply the rules below and the [product tenets](docs/verification/gates.md#product-tenets).
 The author fixes each finding at its class ([Ownership and transitions](#ownership-and-transitions)), or records in the PR why it stays.
-Review signoff does not gate landing a green change ([Landing](AGENTS.md#landing)).
+A person's signoff does not gate landing a green change with a clean review ([Landing](AGENTS.md#landing), [Review evidence](docs/agents/landing.md#review-evidence)).
 
 Review parity and failure paths as well as the diff:
 

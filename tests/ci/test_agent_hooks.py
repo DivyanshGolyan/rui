@@ -1,3 +1,4 @@
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -5,6 +6,7 @@ import sys
 import unittest
 
 HOOK = Path(__file__).resolve().parents[2] / ".claude/hooks/block_full_runs.py"
+MERGE_HOOK = HOOK.with_name("review_before_merge.py")
 
 
 def run(command):
@@ -35,6 +37,68 @@ class BlockFullRunsTest(unittest.TestCase):
                         "git log --grep 'build check'", "echo test"):
             with self.subTest(command=command):
                 self.assertEqual(run(command).returncode, 0, command)
+
+
+def load_merge_hook():
+    spec = importlib.util.spec_from_file_location("review_before_merge", MERGE_HOOK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def merge_call(tool, **args):
+    return {"tool_name": tool, "tool_input": args}
+
+
+class ReviewBeforeMergeTest(unittest.TestCase):
+    def setUp(self):
+        self.hook = load_merge_hook()
+
+    def test_every_way_to_merge_a_rui_pr_is_recognised(self):
+        rui = {"owner": "DivyanshGolyan", "repo": "rui"}
+        for payload, numbers in (
+                (merge_call("mcp__github__merge_pull_request", pullNumber=2302, **rui), [2302]),
+                (merge_call("mcp__github__enable_pr_auto_merge", pullNumber=2289, **rui), [2289]),
+                (merge_call("mcp__github__merge_pull_request", owner="divyanshgolyan", repo="Rui", pullNumber=7), [7]),
+                (merge_call("Bash", command="gh pr merge 2302 --squash"), [2302]),
+                (merge_call("Bash", command="cd rui && gh pr merge --squash --auto 2289"), [2289]),
+                (merge_call("Bash", command="gh pr merge https://github.com/DivyanshGolyan/rui/pull/2305"), [2305]),
+                (merge_call("Bash", command="gh pr merge -R DivyanshGolyan/rui --body 'fixes 9' 11"), [11]),
+                (merge_call("Bash", command="gh pr merge 2310; gh pr merge 5 && echo done"), [2310, 5]),
+                (merge_call("Bash", command="gh api -X PUT repos/DivyanshGolyan/rui/pulls/2288/merge"), [2288])):
+            with self.subTest(payload=payload):
+                self.assertEqual(self.hook.merged_prs(payload), numbers)
+
+    def test_a_merge_without_a_number_resolves_the_branch_pr(self):
+        for command in ("gh pr merge --squash --auto", "gh pr merge", "gh pr merge --squash --delete-branch", "gh pr merge fix/x"):
+            with self.subTest(command=command):
+                asked = []
+                view = lambda argv: asked.append(argv) or "2310\n"
+                self.assertEqual(self.hook.merged_prs(merge_call("Bash", command=command), view), [2310])
+                self.assertIn("--repo", asked[0])
+
+    def test_other_calls_and_other_repositories_are_ignored(self):
+        for payload in (merge_call("mcp__github__merge_pull_request", owner="someone", repo="else", pullNumber=1),
+                        merge_call("mcp__github__pull_request_read", owner="DivyanshGolyan", repo="rui", pullNumber=1),
+                        merge_call("Bash", command="gh pr merge --repo other/thing 5"),
+                        merge_call("Bash", command="gh pr view 2302"),
+                        merge_call("Read", file_path="x")):
+            with self.subTest(payload=payload):
+                self.assertEqual(self.hook.merged_prs(payload), [])
+
+    def test_an_unreviewed_pr_is_refused_and_a_reviewed_one_passes(self):
+        merge = merge_call("mcp__github__merge_pull_request", owner="DivyanshGolyan", repo="rui", pullNumber=2302)
+        code, message = self.hook.judge(merge, lambda number: f"PR #{number} has no completed review. open_pr.py review")
+        self.assertEqual(code, 2)
+        self.assertIn("open_pr.py review", message)
+        self.assertEqual(self.hook.judge(merge, lambda number: None), (0, ""))
+
+    def test_an_unreadable_review_record_does_not_block(self):
+        def offline(number):
+            raise subprocess.CalledProcessError(1, ["gh"], stderr="offline")
+        code, message = self.hook.judge(merge_call("Bash", command="gh pr merge 2302"), offline)
+        self.assertEqual(code, 0)
+        self.assertIn("not blocking", message)
 
 
 if __name__ == "__main__":
