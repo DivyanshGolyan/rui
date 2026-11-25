@@ -2,7 +2,7 @@ const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const session_id = @import("session_id.zig");
 
-pub const max_description_bytes = @import("mcp/shape.zig").description_max_bytes;
+pub const max_description_bytes = @import("tool_line.zig").max_bytes;
 
 pub const max_label_bytes = 100;
 

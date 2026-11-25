@@ -360,7 +360,7 @@ pub const OutputItem = struct {
     members: Cursor,
 };
 
-pub const HostedAction = enum(u8) { none = 0, search = 1, open_page = 2, find_in_page = 3 };
+pub const HostedAction = @import("hosted_action.zig").HostedAction;
 pub const HostedCall = struct {
     action: HostedAction = .none,
     target: ?Range = null,
