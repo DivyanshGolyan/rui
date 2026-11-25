@@ -138,6 +138,7 @@ def main():
                       "Run `open_pr.py ready` after Codex review is clean to start the full selected suite.")
             else:
                 print("Opened ready; Codex reviews automatically. Selected CI runs beside review.")
+            print(f"Now call subscribe_pr_activity for PR #{pr['number']}: a failed required check reaches you as an event.")
             print("Merge requires current-candidate admission and clean Codex evidence; "
                   "on a draft, comment `@codex review` after each push.")
             return 0
