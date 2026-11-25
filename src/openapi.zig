@@ -39,6 +39,11 @@ const Variant = struct {
 
 /// The Archived window cursor: `head`, `tail`, `below:<key>` or `above:<key>`, keys canonical and nonzero.
 const archived_cursor_pattern = "^(head|tail|(below|above):[1-9][0-9]{0,18})$";
+/// The Archived window page size: a canonical decimal from 1 to `session_list.max_window_rows`.
+const archived_limit_pattern = "^([1-9]|[1-3][0-9]|40)$";
+comptime {
+    std.debug.assert(session_list.max_window_rows == 40);
+}
 const live_list_deltas = .{ "not_modified", "changed", "full" };
 
 fn windowVariant(comptime shape: anytype, comptime examples: anytype) Variant {
@@ -48,6 +53,8 @@ fn windowVariant(comptime shape: anytype, comptime examples: anytype) Variant {
             var built = try d.shapeSchema(value);
             const window = built.object.getPtr("properties").?.object.getPtr("window").?;
             try window.object.put(d.arena, "pattern", .{ .string = archived_cursor_pattern });
+            const limit = built.object.getPtr("properties").?.object.getPtr("limit").?;
+            try limit.object.put(d.arena, "pattern", .{ .string = archived_limit_pattern });
             return built;
         }
         fn example(out: *std.Io.Writer, optional: bool) anyerror!void {
@@ -229,7 +236,7 @@ pub const routes = [_]Route{
             } ++ protocol.list_sessions_request.tail, .{ .{ 3, "0" }, .{ 4, "0" }, .{ 5, since_example }, .{ 7, "\"aaaaaa\"" } }),
             // The Archived window: archive is the constant archived; no since or through; window matches its grammar.
             windowVariant(protocol.list_sessions_request.head ++ protocol.list_sessions_request.archived_archive ++
-                protocol.list_sessions_request.cursor ++ protocol.list_sessions_request.window ++ protocol.list_sessions_request.tail, .{ .{ 2, "0" }, .{ 3, "0" }, .{ 4, "below:12" } }),
+                protocol.list_sessions_request.cursor ++ protocol.list_sessions_request.window ++ protocol.list_sessions_request.tail, .{ .{ 2, "0" }, .{ 3, "0" }, .{ 4, "below:12" }, .{ 5, "12" } }),
         },
         // Live replies never carry the window delta; the window reply carries only it.
         .reply = deltaReply(.{
@@ -1859,6 +1866,12 @@ fn matches(pattern: []const u8, text: []const u8) bool {
         for (text) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false;
         return true;
     }
+    if (std.mem.eql(u8, pattern, archived_limit_pattern)) {
+        if (text.len == 0 or text.len > 2 or text[0] == '0') return false;
+        for (text) |byte| if (!std.ascii.isDigit(byte)) return false;
+        const rows = std.fmt.parseInt(usize, text, 10) catch unreachable;
+        return rows <= session_list.max_window_rows;
+    }
     if (std.mem.eql(u8, pattern, archived_cursor_pattern)) return if (session_list.parseArchivedCursor(text)) |_| true else |_| false;
     const lower_name = std.mem.startsWith(u8, pattern, "^[a-z0-9_-]{1,");
     if (lower_name or std.mem.startsWith(u8, pattern, "^[A-Za-z0-9_-]{1,")) {
@@ -1876,6 +1889,18 @@ fn matches(pattern: []const u8, text: []const u8) bool {
     if (text.len != length) return false;
     for (text) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false;
     return true;
+}
+
+test "the Archived window limit pattern admits exactly 1 to the page bound" {
+    for ([_][]const u8{ "", "0", "00", "01", "+1", "-1", " 1", "41", "99", "100", "18446744073709551615" }) |text| {
+        try std.testing.expect(!matches(archived_limit_pattern, text));
+    }
+    var rows: usize = 1;
+    var text: [2]u8 = undefined;
+    while (rows <= session_list.max_window_rows) : (rows += 1) {
+        const written = try std.fmt.bufPrint(&text, "{d}", .{rows});
+        try std.testing.expect(matches(archived_limit_pattern, written));
+    }
 }
 
 test "action read replies conform to the published schema" {

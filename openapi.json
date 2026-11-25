@@ -7344,6 +7344,10 @@
                 "type": "string",
                 "x-rui-max-bytes": 25,
                 "pattern": "^(head|tail|(below|above):[1-9][0-9]{0,18})$"
+              },
+              "limit": {
+                "$ref": "#/components/schemas/Decimal",
+                "pattern": "^([1-9]|[1-3][0-9]|40)$"
               }
             },
             "required": [
@@ -7354,7 +7358,8 @@
               "archive",
               "after",
               "ceiling",
-              "window"
+              "window",
+              "limit"
             ],
             "additionalProperties": false
           }

@@ -1782,6 +1782,7 @@ export interface components {
             after: components["schemas"]["Decimal"];
             ceiling: components["schemas"]["Decimal"];
             window: string;
+            limit: components["schemas"]["Decimal"];
         };
         MessageConflictReply: {
             /** @constant */
