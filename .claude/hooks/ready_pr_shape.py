@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Refuse to open (draft or ready) or mark ready a Rui PR whose body admission would reject (tests/ci/pr_shape.py ready_refusal).
+
+Admission is the last job of a ready PR's run, so a missing Goal, Summary sketch or screen line surfaces
+20 minutes after the PR is ready, and only to whoever reads the failure. The hook asks the same owner first,
+when the PR opens and again when it turns ready. A UI PR cannot open through this route without a screen line:
+`open_pr.py open --frames DIR` is the route that carries captured frames.
+An unreadable PR (no network, no `gh`, no local main) lets the call through with a warning.
+"""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "ci"))
+
+REPO = "DivyanshGolyan/rui"
+
+
+def ready_call(payload):
+    """(number or None, head, body override, base branch or None) when this call opens a Rui PR or makes it ready for review, else None."""
+    tool, args = payload.get("tool_name", ""), payload.get("tool_input", {})
+    if f"{args.get('owner')}/{args.get('repo')}" != REPO:
+        return None
+    if tool == "mcp__github__create_pull_request":
+        return None, args.get("head"), args.get("body"), args.get("base") or "main"
+    if tool == "mcp__github__update_pull_request" and args.get("draft") is False:
+        return args.get("pullNumber"), None, args.get("body"), None
+    return None
+
+
+def refusal(call, api, judge=None):
+    from pr_shape import ready_refusal
+    judge = judge or ready_refusal
+    from conflict_alert import pages
+    number, head, body, base = call
+    if number:
+        pr = api("GET", f"repos/{REPO}/pulls/{number}")
+        files = list(pages(api, f"repos/{REPO}/pulls/{number}/files?"))
+        body = pr["body"] or "" if body is None else body
+        base = pr["base"]["ref"]
+    else:
+        files = api("GET", f"repos/{REPO}/compare/{base}...{head}")["files"]
+        body = body or ""
+    reason = judge([row["filename"] for row in files], body, base=f"origin/{base}", repo=REPO, number=number)
+    return f"Refused: this PR would fail admission on its body. {reason}" if reason else None
+
+
+def main(stdin=None, api=None):
+    call = ready_call(json.load(stdin or sys.stdin))
+    if call is None:
+        return 0
+    if api is None:
+        from conflict_alert import github as api
+    try:
+        reason = refusal(call, api)
+    except (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError) as error:
+        print(f"warning: could not judge the PR body ({error}); not blocking.", file=sys.stderr)
+        return 0
+    if reason:
+        print(reason, file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
