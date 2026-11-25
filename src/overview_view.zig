@@ -701,11 +701,6 @@ pub fn pn(provider: provider_name.Provider) Provider {
     return connection.Name.parse(@tagName(provider)).?;
 }
 
-fn sameProvider(a: ?Provider, b: ?Provider) bool {
-    if (a == null or b == null) return a == null and b == null;
-    return a.?.eql(b.?);
-}
-
 fn shownOf(name: Provider) []const u8 {
     return if (provider_route.builtInOf(name)) |built_in| built_in.shown() else name.slice();
 }
@@ -3231,7 +3226,6 @@ fn move(state: *State, action: Action) void {
     else if (target > order.len + 1) .settings else .{ .session = state.rows.items[order[target - 2]].reference };
 }
 
-pub const Trouble = failure_class.Trouble;
 pub const Band = session_class.Band;
 
 fn troubleRows(state: *const State) session_class.Rows {
@@ -4004,7 +3998,7 @@ pub fn newestEmpty(rows: []const Row, binding: ?Default) ?Reference {
     var newest: ?*const Row = null;
     for (rows) |*row| {
         if (!row.listed or row.archive_state == .archived or row.first != null) continue;
-        if (binding) |want| if (!sameProvider(row.provider, want.provider) or !row.model.eql(want.model.slice())) continue;
+        if (binding) |want| if (!Provider.eqlOptional(row.provider, want.provider) or !row.model.eql(want.model.slice())) continue;
         if (newest == null or row.created_at > newest.?.created_at or
             (row.created_at == newest.?.created_at and std.mem.order(u8, &row.reference, &newest.?.reference) == .gt)) newest = row;
     }
@@ -6036,8 +6030,8 @@ test "the band derives provider trouble from rows, in priority order" {
     defer state.deinit();
     state.now_ms = (test_now_s + 10) * 1000;
     try std.testing.expectEqual(@as(?Band, null), band(&state));
-    try std.testing.expectEqual(Trouble.sign_in, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), failedRow("bbbbbb", 90, "provider_http_401", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
-    try std.testing.expectEqual(Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
+    try std.testing.expectEqual(failure_class.Trouble.sign_in, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), failedRow("bbbbbb", 90, "provider_http_401", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
+    try std.testing.expectEqual(failure_class.Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
 }
 
 test "a failure band clears only when its own provider and model are reached after it" {

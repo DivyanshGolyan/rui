@@ -1,5 +1,5 @@
 //! What a Session means to the person looking at the list: whether it is listed, whose it is,
-//! what it asks of them and which kind of work it shows. One pure function of the facts a viewer
+//! what it asks of them, which kind of work it shows and which provider trouble the list tells them about. One pure function of the facts a viewer
 //! holds about the Session and of the viewer's own inputs, so every screen that lists Sessions
 //! agrees; a screen draws the answer and never re-derives it from raw fields.
 
@@ -161,11 +161,9 @@ pub const Band = struct {
 /// after it. Rows on another provider or model say nothing about this one's quota or sign-in. Sign-in and key failures end
 /// at the viewer's last sign-in, a quota failure at its reset; the order of `Trouble` is the order of precedence, with
 /// rate limits last.
-///
 pub fn trouble(rows: Rows, viewer: Viewer) ?Band {
     const Held = struct { row: usize, failed: WorkState.Failed };
-    const failing = [_]Trouble{ .sign_in, .api_key, .quota };
-    var newest: [failing.len]?Held = @splat(null);
+    var newest: [std.enums.values(Trouble).len]?Held = @splat(null);
     var limited: u32 = 0;
     for (0..rows.count) |index| {
         const facts = rows.get(index);
@@ -181,7 +179,8 @@ pub fn trouble(rows: Rows, viewer: Viewer) ?Band {
             else => {},
         }
     }
-    for (failing, newest) |found, held_or_null| {
+    for (std.enums.values(Trouble), newest) |found, held_or_null| {
+        if (found == .rate_limit) break;
         const held = held_or_null orelse continue;
         const failed = held.failed;
         if (reachedSince(rows, held.row, failed.since, viewer)) continue;
@@ -197,16 +196,11 @@ fn listedAndLive(facts: Facts, viewer: Viewer) bool {
     return facts.archive != .archived and classify(facts, viewer).visible;
 }
 
-fn sameProvider(a: ?connection.Name, b: ?connection.Name) bool {
-    if (a == null or b == null) return a == null and b == null;
-    return a.?.eql(b.?);
-}
-
 fn reachedSince(rows: Rows, failed_row: usize, since: u64, viewer: Viewer) bool {
     const failed = rows.get(failed_row);
     for (0..rows.count) |index| {
         const facts = rows.get(index);
-        if (!listedAndLive(facts, viewer) or !sameProvider(facts.provider, failed.provider) or !std.mem.eql(u8, facts.model, failed.model)) continue;
+        if (!listedAndLive(facts, viewer) or !connection.Name.eqlOptional(facts.provider, failed.provider) or !std.mem.eql(u8, facts.model, failed.model)) continue;
         const work = facts.state.asOf(viewer.now_ms);
         if (std.meta.activeTag(work).answered() and work.since() >= since) return true;
     }
@@ -234,7 +228,7 @@ const probes = [_]Probe{
     .{ .work = .{ .stopped = .{ .since = 1, .cause = .stop } }, .group = .done },
 };
 
-test "SUI-168 a Session's class follows its work, archive state, listing and the viewer's inputs" {
+test "SUI-169 a Session's class follows its work, archive state, listing and the viewer's inputs" {
     var cases: usize = 0;
     for (probes) |probe| for (std.enums.values(session_archive.State)) |archive| for (std.enums.values(session_archive.Filter)) |filter| {
         for (0..1 << 7) |bits| {
@@ -316,7 +310,7 @@ fn listedFacts(state: *const WorkState, provider: []const u8, model: []const u8)
     return .{ .state = state, .archive = .active, .in_list = true, .creator = true, .pinned = false, .first_message = true, .from_person = true, .decidable = false, .open = false, .stop_pending = false, .provider = connection.Name.parse(provider), .model = model };
 }
 
-test "SUI-169 provider trouble follows failures, answers since, sign-in and resets, then retries" {
+test "SUI-170 provider trouble follows failures, answers since, sign-in and resets, then retries" {
     const now_s: u64 = 10_000;
     const viewer: Viewer = .{ .filter = .active, .now_ms = now_s * 1000 };
     const sign_in = failedWork("provider_http_401", 100, null);
@@ -324,6 +318,8 @@ test "SUI-169 provider trouble follows failures, answers since, sign-in and rese
     const quota = failedWork("provider_quota", 100, now_s + 60);
     const spent_quota = failedWork("provider_quota", 100, now_s - 1);
     const other_failure = failedWork("provider_policy", 100, null);
+    const newer_sign_in = failedWork("provider_http_401", 120, null);
+    const edge_quota = failedWork("provider_quota", 100, now_s);
     const limited = retryingWork("provider_temporary_http_429", (now_s + 5) * 1000);
     const due_limit = retryingWork("provider_temporary_http_429", now_s * 1000);
     const transient = retryingWork("provider_temporary_error", (now_s + 5) * 1000);
@@ -341,6 +337,10 @@ test "SUI-169 provider trouble follows failures, answers since, sign-in and rese
     var empty_answer = listedFacts(&answered_later, "codex", "m");
     empty_answer.creator = false;
     empty_answer.first_message = false;
+    var archived_failure = listedFacts(&newer_sign_in, "openai", "m");
+    archived_failure.archive = .archived;
+    var unlisted_failure = listedFacts(&newer_sign_in, "openai", "m");
+    unlisted_failure.in_list = false;
     const cases = [_]Case{
         .{ .rows = &.{listedFacts(&sign_in, "codex", "m")}, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("codex") } },
         .{ .rows = &.{listedFacts(&api_key, "codex", "m")}, .expected = .{ .trouble = .api_key, .provider = connection.Name.parse("codex") } },
@@ -364,6 +364,21 @@ test "SUI-169 provider trouble follows failures, answers since, sign-in and rese
         // Precedence, and the newest failure of a trouble is the one named.
         .{ .rows = &.{ listedFacts(&quota, "codex", "m"), listedFacts(&sign_in, "openai", "m"), listedFacts(&limited, "codex", "m") }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("openai") } },
         .{ .rows = &.{ listedFacts(&quota, "codex", "m"), listedFacts(&limited, "codex", "m") }, .expected = .{ .trouble = .quota, .resets_at = now_s + 60, .provider = connection.Name.parse("codex") } },
+        // The newest failure of a trouble is the one named, in either row order; a tie keeps the first row.
+        .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), listedFacts(&newer_sign_in, "openai", "m") }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("openai") } },
+        .{ .rows = &.{ listedFacts(&newer_sign_in, "openai", "m"), listedFacts(&sign_in, "codex", "m") }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("openai") } },
+        .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), listedFacts(&sign_in, "openai", "m") }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("codex") } },
+        // Only the newest failure is judged against the answers: an answer to it hides an older failure of the same trouble too.
+        .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), listedFacts(&newer_sign_in, "openai", "m"), listedFacts(&answered_later, "openai", "m") }, .expected = null },
+        // An archived or unlisted failure names nothing.
+        .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), archived_failure }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("codex") } },
+        .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), unlisted_failure }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("codex") } },
+        // A failure that is over, answered or ended, falls through to rate limits.
+        .{ .rows = &.{ listedFacts(&spent_quota, "codex", "m"), listedFacts(&limited, "codex", "m") }, .expected = .{ .trouble = .rate_limit, .sessions = 1 } },
+        .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), listedFacts(&answered_later, "codex", "m"), listedFacts(&limited, "codex", "n") }, .expected = .{ .trouble = .rate_limit, .sessions = 1 } },
+        // A reset time that has just been reached ends a quota failure; a sign-in at the failure's own second is the last that clears it.
+        .{ .rows = &.{listedFacts(&edge_quota, "codex", "m")}, .expected = null },
+        .{ .rows = &.{listedFacts(&sign_in, "codex", "m")}, .viewer = .{ .filter = .all, .now_ms = viewer.now_ms, .login_at = 101 }, .expected = null },
         // Rate limits count their Sessions; a due retry reads as pending work, and other retries ask nothing.
         .{ .rows = &.{ listedFacts(&limited, "codex", "m"), listedFacts(&limited, "codex", "n"), listedFacts(&transient, "codex", "m") }, .expected = .{ .trouble = .rate_limit, .sessions = 2 } },
         .{ .rows = &.{ listedFacts(&due_limit, "codex", "m"), listedFacts(&transient, "codex", "m") }, .expected = null },
