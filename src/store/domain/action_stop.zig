@@ -141,7 +141,7 @@ pub const Stop = struct {
         const found = t.target.?;
         if (at == .content) {
             const content_id = try content.importBytes(r, &t.content, stopped_text);
-            try action.queueResolution(r, .{ .action_id = id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() }, found.session, .cancelled, content_id);
+            try action.queueResolution(r, .{ .action_id = id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() }, found.session, .cancelled, content_id, .call_line);
             if (r.faults().before_commit) return error.InjectedCommitFailure;
             return .commit;
         }

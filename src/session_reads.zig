@@ -454,7 +454,7 @@ fn pageCursor(job: *const Job, plan: FeedPolicy.Page) protocol_reply.ActivityCur
     var cursor: protocol_reply.ActivityCursor = .{
         .direction = if (plan.direction == .backward) .backward else .forward,
         .limit = plan.limit,
-        .kinds = if (plan.kinds == .all) .full else .initMany(&.{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed }),
+        .kinds = if (plan.kinds == .all) .full else .initMany(&.{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop }),
         .end = if (plan.kinds == .all and plan.continuing) job.cursor.end else null,
     };
     if (plan.from) |from| {
@@ -1960,7 +1960,10 @@ test "session_reads policy cursor is inclusive only for a fresh provisional repl
     try std.testing.expect(!above.kinds.contains(.approval_requested));
     try std.testing.expect(!above.kinds.contains(.session_changed));
     try std.testing.expect(!above.kinds.contains(.compacted));
-    for ([_]protocol.ActivityItem.Kind{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed }) |kind| try std.testing.expect(above.kinds.contains(kind));
+    for ([_]protocol.ActivityItem.Kind{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop }) |kind| try std.testing.expect(above.kinds.contains(kind));
+    // A peer send draws on its own tool row; the Session never reads the separate send entries.
+    try std.testing.expect(!above.kinds.contains(.sent));
+    try std.testing.expect(!above.kinds.contains(.send_failed));
 }
 
 test "SUI-51 opening reads expose ordered rows and scan boundaries" {

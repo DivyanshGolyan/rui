@@ -733,8 +733,9 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
 }
 
 const stored_presentation = rsql.Read(.{
-    .sql = "SELECT tool_call.description," ++ tool_fulfillment.codeSql("tool_call", "a") ++ " AS code,a.authorized,item.session_ref,item.session_position " ++
+    .sql = "SELECT tool_call.description," ++ tool_fulfillment.codeSql("tool_call", "a") ++ " AS code,a.authorized,item.session_ref,item.session_position," ++ outcome_columns ++ " " ++
         "FROM model_tool_call tool_call LEFT JOIN action_operation a ON a.parent_operation_id=tool_call.operation_id AND a.call_ordinal=tool_call.call_ordinal " ++
+        outcome_join ++ " " ++
         "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
         "WHERE tool_call.operation_id=?1 AND tool_call.call_ordinal=?2",
     .Args = struct { operation: u64, ordinal: u64 },
@@ -744,9 +745,41 @@ const stored_presentation = rsql.Read(.{
         authorized: ?bool,
         session_ref: SessionText,
         session_position: rsql.Positive,
+        outcome_text: ?Bounded(tool_presentation.max_description_bytes),
+        outcome_link_at: ?u64,
+        outcome_link_session: ?SessionText,
+        outcome_label: ?Bounded(tool_presentation.max_label_bytes),
+        outcome_completion: ?u8,
     },
     .cardinality = .each,
 });
+
+/// The columns and join that bring a resolved call's outcome line to a read, with the label of the Session it names.
+/// Every read that builds a presentation selects these from the action as `a`, so the outcome has one reader.
+pub const outcome_columns = "a.outcome_text,a.outcome_link_at,a.outcome_link_session,outcome_session.label AS outcome_label,a.outcome_completion";
+pub const outcome_join = "LEFT JOIN session outcome_session ON outcome_session.session_ref=a.outcome_link_session";
+
+/// What `outcome_columns` read, kept together until `presentationOf` turns it into a Line.
+pub const StoredOutcome = struct {
+    text: ?Bounded(tool_presentation.max_description_bytes) = null,
+    link_at: ?u64 = null,
+    link_session: ?SessionText = null,
+    label: ?Bounded(tool_presentation.max_label_bytes) = null,
+    completion: ?u8 = null,
+
+    fn line(self: *const StoredOutcome) error{CorruptStore}!?tool_presentation.Line {
+        const text = self.text orelse return null;
+        const session = self.link_session orelse {
+            if (self.link_at != null) return error.CorruptStore;
+            return tool_presentation.Line.plain(text.slice()) catch return error.CorruptStore;
+        };
+        const at = std.math.cast(usize, self.link_at orelse return error.CorruptStore) orelse return error.CorruptStore;
+        if (at > text.len) return error.CorruptStore;
+        var peer: tool_presentation.NamedPeer = .{ .session = session };
+        if (self.label) |label| peer.label = label;
+        return tool_presentation.Line.fromParts(text.slice()[0..at], peer, text.slice()[at..]) catch return error.CorruptStore;
+    }
+};
 
 const PresentationRead = struct {
     operation: u64,
@@ -755,6 +788,7 @@ const PresentationRead = struct {
     session: SessionText = undefined,
     proposal: ProposalRead = undefined,
     description: ?Bounded(tool_presentation.max_description_bytes) = null,
+    outcome: StoredOutcome = .{},
     code: ?tool_presentation.ToolPresentation.Code = null,
     authorized: ?bool = null,
     count: RowCount = .{},
@@ -774,6 +808,7 @@ const PresentationRead = struct {
 
     fn keep(read: *PresentationRead, row: *const stored_presentation.Row) error{CorruptStore}!void {
         read.description = row.description;
+        read.outcome = .{ .text = row.outcome_text, .link_at = row.outcome_link_at, .link_session = row.outcome_link_session, .label = row.outcome_label, .completion = row.outcome_completion };
         read.code = row.code;
         read.authorized = row.authorized;
         read.session = row.session_ref;
@@ -790,20 +825,22 @@ const PresentationRead = struct {
 
     fn finish(read: *PresentationRead) !void {
         try read.proposal.found();
-        read.out.* = try presentationOf(read.description, read.code, read.authorized, read.out.publication_position);
+        read.out.* = try presentationOf(read.description, read.outcome, read.code, read.authorized, read.out.publication_position);
     }
 };
 
 /// The one place a saved description, a derived code and an authorization become a presentation.
-/// Until a call's resolution carries an outcome line the row shows its call line, plain, finished as `done`.
+/// A resolved call that recorded an outcome line shows it, finished as that outcome chose; every other row shows its call line, plain, as `done`.
 pub fn presentationOf(
     description: ?Bounded(tool_presentation.max_description_bytes),
+    outcome: StoredOutcome,
     code: ?tool_presentation.ToolPresentation.Code,
     authorized: ?bool,
     publication_position: ?u64,
 ) error{CorruptStore}!tool_presentation.ToolPresentation {
-    const line: ?tool_presentation.Line = if (description) |words| tool_presentation.Line.plain(words.slice()) catch return error.CorruptStore else null;
     const derived: tool_presentation.ToolPresentation.Code = code orelse if (authorized orelse false) .unresolved else .pending_permission;
+    if (try outcome.line()) |shown| return tool_presentation.ToolPresentation.of(shown, derived, std.enums.fromInt(tool_presentation.Completion, outcome.completion orelse return error.CorruptStore) orelse return error.CorruptStore, publication_position);
+    const line: ?tool_presentation.Line = if (description) |words| tool_presentation.Line.plain(words.slice()) catch return error.CorruptStore else null;
     return tool_presentation.ToolPresentation.of(line, derived, .done, publication_position);
 }
 
@@ -839,7 +876,7 @@ const HostedRead = struct {
 
     fn keep(read: *HostedRead, row: *const hosted_call.Row) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
-        read.presentation.* = try presentationOf(row.description, if (row.call_failed) .failed else .succeeded, null, read.position);
+        read.presentation.* = try presentationOf(row.description, .{}, if (row.call_failed) .failed else .succeeded, null, read.position);
         read.at = (row.resolved_at orelse return error.CorruptStore).get();
     }
 

@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 94;
+pub const schema_version: u32 = 95;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -74,6 +74,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 92, .digest = 0xdbe10b74e562edbd },
     .{ .schema_version = 93, .digest = 0x0028c239ba46341d },
     .{ .schema_version = 94, .digest = 0x9803d541a1a4945e },
+    .{ .schema_version = 95, .digest = 0x569206da4a94d076 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -1045,6 +1046,25 @@ pub const migrations = [_]Migration{
             "PREPARE rui_field_check FROM @rui_field_ddl",
             "EXECUTE rui_field_check",
             "DEALLOCATE PREPARE rui_field_check",
+        },
+    },
+    // A tool's row says what the call did once it resolves: the words around one Session it names, and whether it
+    // handed work on. Calls resolved before format 95 keep their call line; a delivered Message or a started agent
+    // takes its outcome line from the command that admitted it (Divyansh, 2026-11-25).
+    .{
+        .from = 94,
+        .sqlite = &.{
+            "ALTER TABLE action_operation ADD COLUMN outcome_text TEXT CHECK(outcome_text IS NULL OR length(CAST(outcome_text AS BLOB))<=200)",
+            "ALTER TABLE action_operation ADD COLUMN outcome_link_at INTEGER CHECK(outcome_link_at IS NULL OR outcome_link_at>=0)",
+            "ALTER TABLE action_operation ADD COLUMN outcome_link_session TEXT CHECK(outcome_link_session IS NULL OR length(CAST(outcome_link_session AS BLOB)) BETWEEN 1 AND 128)",
+            "ALTER TABLE action_operation ADD COLUMN outcome_completion INTEGER CHECK((outcome_text IS NULL AND outcome_link_at IS NULL AND outcome_link_session IS NULL AND outcome_completion IS NULL) OR (resolution_code IS NOT NULL AND outcome_text IS NOT NULL AND outcome_completion IN (0,1) AND (outcome_link_at IS NULL)=(outcome_link_session IS NULL)))",
+            "UPDATE action_operation SET outcome_text='Messaged ',outcome_link_at=9,outcome_link_session=(SELECT c.target FROM core_command c WHERE c.command_key='rui.core/message_agent/'||action_operation.action_id),outcome_completion=1 WHERE resolution_code='succeeded' AND EXISTS(SELECT 1 FROM core_command c WHERE c.command_key='rui.core/message_agent/'||action_operation.action_id)",
+            "UPDATE action_operation SET outcome_text='Started ',outcome_link_at=8,outcome_link_session=(SELECT c.target FROM core_command c WHERE c.command_key='rui.core/start_agent/'||action_operation.action_id),outcome_completion=1 WHERE resolution_code='succeeded' AND EXISTS(SELECT 1 FROM core_command c WHERE c.command_key='rui.core/start_agent/'||action_operation.action_id)",
+        },
+        .mysql = &.{
+            "ALTER TABLE action_operation ADD COLUMN outcome_text VARCHAR(200) AFTER background_at, ADD COLUMN outcome_link_at BIGINT AFTER outcome_text, ADD COLUMN outcome_link_session VARCHAR(128) AFTER outcome_link_at, ADD COLUMN outcome_completion BIGINT AFTER outcome_link_session, ADD CHECK(outcome_link_at IS NULL OR outcome_link_at>=0), ADD CHECK((outcome_text IS NULL AND outcome_link_at IS NULL AND outcome_link_session IS NULL AND outcome_completion IS NULL) OR (resolution_code IS NOT NULL AND outcome_text IS NOT NULL AND outcome_completion IN (0,1) AND (outcome_link_at IS NULL)=(outcome_link_session IS NULL)))",
+            "UPDATE action_operation SET outcome_text='Messaged ',outcome_link_at=9,outcome_link_session=(SELECT c.target FROM core_command c WHERE c.command_key=CONCAT('rui.core/message_agent/',action_operation.action_id)),outcome_completion=1 WHERE resolution_code='succeeded' AND EXISTS(SELECT 1 FROM core_command c WHERE c.command_key=CONCAT('rui.core/message_agent/',action_operation.action_id))",
+            "UPDATE action_operation SET outcome_text='Started ',outcome_link_at=8,outcome_link_session=(SELECT c.target FROM core_command c WHERE c.command_key=CONCAT('rui.core/start_agent/',action_operation.action_id)),outcome_completion=1 WHERE resolution_code='succeeded' AND EXISTS(SELECT 1 FROM core_command c WHERE c.command_key=CONCAT('rui.core/start_agent/',action_operation.action_id))",
         },
     },
 };
@@ -2027,6 +2047,20 @@ pub const tables = [_]Table{
             .{ .name = "background_content_id", .type = .int, .nullable = true, .sqlite_added = true, .holds = .value },
             .{ .name = "background_position", .type = .int, .nullable = true, .check = "(background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))", .sqlite_added = true },
             .{ .name = "background_at", .type = .int, .nullable = true, .check = "(background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)", .sqlite_added = true },
+            // What a tool said about itself when it resolved the call: the words of its row around one Session it
+            // names (NULL: the row keeps its call line), where in the words that Session belongs, and whether the
+            // call handed work on (1) or just finished (0). No foreign key: a send to an unknown Session still names it.
+            .{ .name = "outcome_text", .type = .{ .text = .{ .min = 0, .max = 200 } }, .nullable = true, .sqlite_added = true },
+            .{ .name = "outcome_link_at", .type = .int, .nullable = true, .sqlite_added = true, .check = "outcome_link_at IS NULL OR outcome_link_at>=0" },
+            .{ .name = "outcome_link_session", .type = .{ .text = .{ .min = 1, .max = 128 } }, .nullable = true, .sqlite_added = true },
+            .{
+                .name = "outcome_completion",
+                .type = .int,
+                .nullable = true,
+                .sqlite_added = true,
+                .check = "(outcome_text IS NULL AND outcome_link_at IS NULL AND outcome_link_session IS NULL AND outcome_completion IS NULL) OR " ++
+                    "(resolution_code IS NOT NULL AND outcome_text IS NOT NULL AND outcome_completion IN (0,1) AND (outcome_link_at IS NULL)=(outcome_link_session IS NULL))",
+            },
         },
         .primary_key = &.{"action_id"},
         .uniques = &.{&.{ "parent_operation_id", "call_ordinal" }},

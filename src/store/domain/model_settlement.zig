@@ -1767,7 +1767,7 @@ const Settlement = struct {
             .approval_position = if (authorized) null else s.first_item_position + record.ordinal,
         });
         if (unserved_content_id) |content_id| {
-            try action_domain.queueResolution(a, .{ .action_id = action_id, .parent_operation_id = s.binding.operation_id, .turn_id = s.binding.turn_id }, s.session, .failed, content_id);
+            try action_domain.queueResolution(a, .{ .action_id = action_id, .parent_operation_id = s.binding.operation_id, .turn_id = s.binding.turn_id }, s.session, .failed, content_id, .call_line);
             return;
         }
         if (!authorized) try forward_domain.queue(a, &s.session.ref, &s.session.ref, .approval, action_id);

@@ -325,6 +325,11 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
     }.run);
 }
 
+/// A peer send records its words ("Messaged ", "Started ") on its own action, then the Session it reached, and finishes as `sent`.
+fn expectOutcomeLine(storage: *Store, action_id: u64, words: []const u8, session: []const u8) !void {
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL AND outcome_text=?2 AND outcome_link_at=?3 AND outcome_link_session=?4 AND outcome_completion=1", .{ action_id, words, @as(u64, words.len), session }));
+}
+
 test "session message writer covers peer message_agent start_agent and ending with wake and refusal" {
     const owner = @embedFile("../domain/sourced_input.zig");
     const callers = @embedFile("../domain/command.zig");
@@ -400,12 +405,26 @@ test "session message writer covers peer message_agent start_agent and ending wi
                         command.sender_handle = peer.sender_handle;
                         try std.testing.expect(storage.submitMessageWithModel(&command, commits.callback(), .{}) == .accepted);
                     },
-                    .message_agent => try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action.binding, receiver.slice(), text, .{})),
+                    .message_agent => {
+                        try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action.binding, receiver.slice(), text, .{}));
+                        try expectOutcomeLine(&storage, action.binding.action_id, "Messaged ", receiver.slice());
+                        const report_bytes = try testingSessionReportWithProfile(&storage, &tmp, sender.slice(), 256 * 1024, .current);
+                        defer std.testing.allocator.free(report_bytes);
+                        var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
+                        defer report.deinit();
+                        const resolved = report.value.object.get("actions").?.object.get("resolved").?.array.items;
+                        const presentation = resolved[0].object.get("presentation").?.object;
+                        const line = presentation.get("line").?.object;
+                        try std.testing.expectEqualStrings("sent", presentation.get("sign").?.string);
+                        try std.testing.expectEqualStrings("Messaged ", line.get("before").?.string);
+                        try std.testing.expectEqualStrings(receiver.slice(), line.get("peer").?.object.get("session").?.string);
+                    },
                     .start_agent => {
                         var spec = try testingAgentSpec(&.{"message_agent"}, "bypass");
                         try std.testing.expectEqual(command_domain.AgentStart.started, try storage.startAgent(action.binding, sender.slice(), text, true, &spec, commits.callback(), .{}));
                         const sent = try store_core.activityPageForTesting(&storage, .{ .session = sender, .kinds = .initOne(.sent) });
                         receiver = sent.items[0].value.sent.target.session;
+                        try expectOutcomeLine(&storage, action.binding.action_id, "Started ", receiver.slice());
                     },
                     .ending => try std.testing.expect(try storage.deliverChildEnding(model.turn_id, .{})),
                 }
@@ -431,6 +450,7 @@ test "session message writer covers peer message_agent start_agent and ending wi
                 } else if (source == .message_agent) {
                     const missing = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
                     try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(missing.binding, "zzzzzz", text, .{}));
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL AND outcome_text IS NULL AND outcome_link_at IS NULL AND outcome_link_session IS NULL AND outcome_completion IS NULL", .{missing.binding.action_id}));
                 }
             }
         }
@@ -766,6 +786,33 @@ test "ending migration preserves unsettled and settled Messages exactly once wit
                     try std.testing.expectEqual(@as(u64, if (suppress_message) 1 else 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{"parent"}));
                 }
             }
+        }
+    }.run);
+}
+
+fn outcomeBackfill94() history.Start {
+    @setEvalBranchQuota(100_000);
+    return .{ .format = 94, .sql = history.FormatSql.neutral(
+        "UPDATE action_operation SET resolution_code='succeeded',resolution_content_id=2,acceptance_position=20,resolved_at=1793781720 WHERE action_id=1;" ++
+            "UPDATE action_operation SET resolution_code='succeeded',resolution_content_id=2,acceptance_position=21,resolved_at=1793781720 WHERE action_id=2;" ++
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
+            "SELECT 'rui.core/message_agent/1',kind,'k7m2qx',input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,20 FROM core_command WHERE command_key='fixture-answer-key';" ++
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
+            "SELECT 'rui.core/start_agent/2',kind,'p4t9vw',input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,21 FROM core_command WHERE command_key='fixture-answer-key';",
+    ) };
+}
+
+test "the step to format 95 gives a call that already sent or started the line it would have shown" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            const start = comptime outcomeBackfill94();
+            try history.openAt(case, &storage, &tmp, std.testing.io, &start);
+            defer storage.close() catch unreachable;
+            try expectOutcomeLine(&storage, 1, "Messaged ", "k7m2qx");
+            try expectOutcomeLine(&storage, 2, "Started ", "p4t9vw");
         }
     }.run);
 }
