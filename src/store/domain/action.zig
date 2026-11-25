@@ -258,7 +258,7 @@ const next_core_action = rsql.Read(.{
         "UNION ALL SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session,action.background_position IS NOT NULL AS background,0 AS auto_deny,'read_image' AS tool " ++
         "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
-        "WHERE " ++ image_ready_sql ++ " AND " ++ capacity_sql ++ " " ++
+        "WHERE " ++ LocalSelection(.read_image).ready_sql ++ " AND " ++ capacity_sql ++ " " ++
         "ORDER BY auto_deny DESC,action_id LIMIT 1",
     .Args = CoreNames.Args(struct { foreground: bool, background: bool }),
     .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: Bounded(session_id.max_reference_bytes), background: bool, auto_deny: bool, tool: SelectionTool },
@@ -475,6 +475,7 @@ pub const ActionExecutionInput = struct {
     runner: union(enum) {
         bash: struct { workspace: Bounded(workspace_path.max_bytes) },
         read_image: struct { workspace: Bounded(workspace_path.max_bytes) },
+        github_pr_watch: struct { workspace: Bounded(workspace_path.max_bytes) },
         mcp: struct {
             bash_offered: bool,
             parent: ?Bounded(session_id.max_reference_bytes),
@@ -603,6 +604,10 @@ pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *A
 
 pub fn readImageExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
     return readLocalExecutionInput(a, .read_image, binding, out);
+}
+
+pub fn readGithubPrWatchExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
+    return readLocalExecutionInput(a, .github_pr_watch, binding, out);
 }
 
 fn readLocalExecutionInput(a: anytype, comptime runner: tool_defs.Runner, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
@@ -863,7 +868,7 @@ const resolve_uncertain = rsql.Write(.{
 
 fn recoveryContent(runner: tool_defs.Runner) error{CorruptStore}!content_domain.Import {
     return switch (runner) {
-        inline .bash, .mcp, .read_image => |kind| comptime blk: {
+        inline .bash, .mcp, .read_image, .github_pr_watch => |kind| comptime blk: {
             @setEvalBranchQuota(1_000_000);
             break :blk .ofBytes(kind.indeterminateText(), false);
         },
@@ -980,26 +985,28 @@ const next_mcp_action = rsql.Read(.{
 });
 pub const next_mcp_action_sql = next_mcp_action.sql;
 
-const image_ready_sql = "action.authorized=1 AND action.attempt_ordinal=0 AND " ++ eligibleSql("action", "operation", "active") ++ " AND " ++ builtinCallSql(.read_image);
-const image_facts_sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position,action.background_position IS NOT NULL AS background,NULL AS timeout_override_ms " ++
-    "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-    "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
-    "WHERE " ++ image_ready_sql;
-const next_image_action = rsql.Read(.{
-    .sql = image_facts_sql ++ " AND " ++ capacity_sql ++ " ORDER BY action.action_id LIMIT 1",
-    .Args = struct { foreground: bool, background: bool },
-    .Row = ReadyFacts,
-    .cardinality = .optional,
-});
-const image_facts = rsql.Read(.{
-    .sql = image_facts_sql ++ " AND action.action_id=?1",
-    .Args = struct { action_id: u64 },
-    .Row = ReadyFacts,
-    .cardinality = .optional,
-});
-
-fn queueNextImageAction(a: anytype, capacity: Capacity, next: *next_image_action.Result) void {
-    a.read(next_image_action, .{ .foreground = capacity.hasCredit(), .background = capacity.hasCredit() }, next);
+/// The selection of an authorized, unattempted call of a built-in runner that executes on the Host,
+/// ordered by Action id; `ready_sql` is the predicate the core lane's selection shares for `read_image`.
+fn LocalSelection(comptime runner: tool_defs.Runner) type {
+    return struct {
+        const ready_sql = "action.authorized=1 AND action.attempt_ordinal=0 AND " ++ eligibleSql("action", "operation", "active") ++ " AND " ++ builtinCallSql(runner);
+        const facts_sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position,action.background_position IS NOT NULL AS background,NULL AS timeout_override_ms " ++
+            "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+            "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
+            "WHERE " ++ ready_sql;
+        const next = rsql.Read(.{
+            .sql = facts_sql ++ " AND " ++ capacity_sql ++ " ORDER BY action.action_id LIMIT 1",
+            .Args = struct { foreground: bool, background: bool },
+            .Row = ReadyFacts,
+            .cardinality = .optional,
+        });
+        const facts = rsql.Read(.{
+            .sql = facts_sql ++ " AND action.action_id=?1",
+            .Args = struct { action_id: u64 },
+            .Row = ReadyFacts,
+            .cardinality = .optional,
+        });
+    };
 }
 
 pub const ReadyAction = struct {
@@ -1016,12 +1023,13 @@ pub fn nextAction(a: anytype, comptime runner: tool_defs.Runner, capacity: Capac
         const found = next orelse return null;
         return .{ .action_id = found.action_id.get(), .runner = .bash, .background = found.background };
     }
-    if (runner == .read_image) {
-        var next: next_image_action.Result = undefined;
-        queueNextImageAction(a, capacity, &next);
+    if (runner == .read_image or runner == .github_pr_watch) {
+        const selection = LocalSelection(runner);
+        var next: selection.next.Result = undefined;
+        a.read(selection.next, .{ .foreground = capacity.hasCredit(), .background = capacity.hasCredit() }, &next);
         try a.run();
         const found = next orelse return null;
-        return .{ .action_id = found.action_id.get(), .runner = .read_image, .background = found.background };
+        return .{ .action_id = found.action_id.get(), .runner = runner, .background = found.background };
     }
     if (runner != .mcp) @compileError("only Action runners can select Actions");
     var row: next_mcp_action.Result = undefined;
@@ -1051,7 +1059,8 @@ fn queueReadyFacts(a: anytype, selected: ReadyAction, facts: *mcp_facts.Result) 
     switch (selected.runner) {
         .bash => a.read(bash_facts, CoreNames.of().args(.{ .action_id = selected.action_id }), facts),
         .mcp => a.read(mcp_facts, .{ .action_id = selected.action_id }, facts),
-        .read_image => a.read(image_facts, .{ .action_id = selected.action_id }, facts),
+        .read_image => a.read(LocalSelection(.read_image).facts, .{ .action_id = selected.action_id }, facts),
+        .github_pr_watch => a.read(LocalSelection(.github_pr_watch).facts, .{ .action_id = selected.action_id }, facts),
         .core, .provider, .app => unreachable,
     }
 }
