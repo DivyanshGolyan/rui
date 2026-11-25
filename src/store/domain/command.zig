@@ -14,6 +14,7 @@ const content_value = @import("../../content_value.zig");
 const input_parts = @import("../../input_parts.zig");
 const tool_defs = @import("../../tool_record.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
+const saved_label = @import("../../saved_label.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const cli_value = @import("../../cli_value.zig");
@@ -2785,7 +2786,7 @@ fn readRecovery(a: anytype, key: []const u8, out: *reads_domain.Recovery) !void 
             .action_id = row.action_id.get(),
             .operation_id = row.parent_operation_id.get(),
             .call = row.call_ordinal,
-            .description = row.description,
+            .description = if (row.description) |saved| saved_label.callWords(saved.slice()) else null,
             .at = row.resolved_at.get(),
         };
     }

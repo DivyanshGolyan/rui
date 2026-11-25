@@ -8,6 +8,7 @@ const session_report = @import("../../session_report.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
+const saved_label = @import("../../saved_label.zig");
 const tool_name = @import("../../tool_name.zig");
 const app_tools = @import("../../tool_record.zig").app_tools;
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -1051,7 +1052,7 @@ pub const WorkRead = struct {
                 .latest_decision_at = optional(row.latest_decision_at),
             };
         } else if (Row == WorkOldestRow) {
-            w.description = row.description;
+            w.description = if (row.description) |saved| saved_label.callWords(saved.slice()) else null;
             w.inputs.latest.?.actions.oldest_running = .{ .at = row.attempt_at.get(), .call = row.call_ordinal, .description = null };
         } else if (Row == command_domain.stop_cutoff.Row) {
             w.cutoff = row.admission_cutoff;

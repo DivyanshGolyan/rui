@@ -224,6 +224,11 @@ test "a saved tool label reads as one line on every publication route, and only 
                 } else |err| err,
                 .live_activity, .settled_activity => if (store_core.activityPageForTesting(&storage, request)) |page| blk: {
                     if (route == .live_activity) if (description.words) |words| try std.testing.expectEqualStrings(words, page.call_activity.entries[0].presentation.line.?.words.slice());
+                    if (description.words) |words| for (page.items[0..page.count]) |item| switch (item.value) {
+                        .call => |call| if (call.call_ordinal == 0) try std.testing.expectEqualStrings(words, call.description.?.slice()),
+                        .approval_requested => |asked| if (asked.call_ordinal == 0) try std.testing.expectEqualStrings(words, asked.description.?.slice()),
+                        else => {},
+                    };
                     break :blk {};
                 } else |err| err,
                 .conversation => if (store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })) |_| {} else |err| err,

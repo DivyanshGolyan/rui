@@ -42,6 +42,12 @@ pub const SavedLabel = struct {
     }
 };
 
+/// A saved call label read as one tidy line of words, or fallback_words when it has none. Total.
+/// Every reader of the saved column goes through this, so a stored label reads the same on every surface.
+pub fn callWords(saved: []const u8) Bounded(max_bytes) {
+    return readWords(max_bytes, saved) orelse Bounded(max_bytes).from(fallback_words) catch unreachable;
+}
+
 /// `bytes` as one tidy line of at most `max` bytes: repaired, line separators and space runs collapsed to one
 /// space, leading and trailing spaces trimmed, and cut at a scalar boundary. Null when no words are left.
 pub fn readWords(comptime max: usize, bytes: []const u8) ?Bounded(max) {
