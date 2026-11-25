@@ -145,6 +145,12 @@ test "a Session saved with a retired built-in is offered, listed and resaved wit
     const frozen = "(SELECT tool_set_id FROM model_operation WHERE operation_id=?1)";
     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE m.tool_set_id=" ++ frozen ++ " AND t.name='read_action'", .{binding.operation_id}));
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m WHERE m.tool_set_id=" ++ frozen, .{binding.operation_id}));
+
+    // An Operation frozen before the removal holds the retired record in its own offered set and must still settle.
+    try sqlite_only.exec(&storage, "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) " ++
+        "SELECT " ++ frozen ++ ",2,tool_record_id FROM tool_record WHERE name='read_action'", .{binding.operation_id});
+    const answer = "{\"type\":\"message\",\"id\":\"retired-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}";
+    try store_testing.settleItemsForTesting(&storage, &tmp, binding, &.{answer}, "hello");
 }
 
 test "persisted settings survive reopen and corrupt canonical provider fences current and historical reads" {
