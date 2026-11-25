@@ -198,10 +198,14 @@ def assistant_session_link_journey(installed, store, home, workspace, session_a,
     # SUI-26: the rendered Assistant link carries its exact Session through the feed.
     from human_cli_fixture import keyed_frame, read_terminal, terminal_capture
     from terminal_process import terminal_process
+    from terminal_screen import chat_footer_shown
     env = {"PATH": os.environ["PATH"], "HOME": str(home)}
 
-    def showing(label):
-        return lambda frame, x, y: f"\n ‹ {label} · " in frame
+    def showing(frame, x, y):
+        return chat_footer_shown(frame)
+
+    def footer_of(frame):
+        return next(line.strip() for line in frame.split("\n") if line.startswith(" ‹ "))
 
     def pointer(frame, label, drag=False):
         rows = frame.split("\n")
@@ -214,7 +218,7 @@ def assistant_session_link_journey(installed, store, home, workspace, session_a,
     with terminal_process([str(installed), "session", "resume", "--store", str(store), session_a], env=env) as (_, master):
         read_terminal(master, f"Messaged {B_LABEL}")
         (workspace / "b-release").write_text("")
-        frame = keyed_frame(master, b"", lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "Open worker" in screen)
+        frame = keyed_frame(master, b"", lambda screen, x, y: showing(screen, x, y) and "Open worker" in screen, chat=A_LABEL)
         assert "rui-session:" not in frame and "[Open worker]" not in frame, frame
         for session in (session_a, session_b):
             def settled(session=session):
@@ -233,36 +237,36 @@ def assistant_session_link_journey(installed, store, home, workspace, session_a,
         capture = terminal_capture(master)
         before = len(capture.clipboard)
         frame = keyed_frame(master, pointer(frame, "Open worker", drag=True),
-                            lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "Copied 1 line" in screen)
+                            lambda screen, x, y: showing(screen, x, y) and "Copied 1 line" in screen, chat=A_LABEL)
         assert len(capture.clipboard) == before + 1, capture.clipboard
-        worker = keyed_frame(master, pointer(frame, "Open worker"), showing(B_LABEL))
+        worker = keyed_frame(master, pointer(frame, "Open worker"), showing, chat=B_LABEL)
         assert "draft survives" not in worker, worker
-        frame = keyed_frame(master, b"\x1b", lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "draft survives" in screen)
-        target = keyed_frame(master, pointer(frame, "Open empty"), showing(EMPTY_LABEL))
+        frame = keyed_frame(master, b"\x1b", lambda screen, x, y: showing(screen, x, y) and "draft survives" in screen, chat=A_LABEL)
+        target = keyed_frame(master, pointer(frame, "Open empty"), showing, chat=EMPTY_LABEL)
         assert "draft survives" not in target, target
-        frame = keyed_frame(master, b"\x1b", lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "draft survives" in screen)
+        frame = keyed_frame(master, b"\x1b", lambda screen, x, y: showing(screen, x, y) and "draft survives" in screen, chat=A_LABEL)
         linked_footers = {}
         for text, label in (("Open archived", ARCHIVED_LABEL), ("Open stopped", STOPPED_LABEL)):
             target = keyed_frame(master, pointer(frame, text), lambda screen, x, y:
-                                 showing(label)(screen, x, y) and (label != STOPPED_LABEL or "Work to stop" in screen))
-            linked_footers[label] = next(line.strip() for line in target.split("\n") if f"‹ {label} · " in line)
-            frame = keyed_frame(master, b"\x1b", lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "draft survives" in screen)
+                                 showing(screen, x, y) and (label != STOPPED_LABEL or "Work to stop" in screen), chat=label)
+            linked_footers[label] = footer_of(target)
+            frame = keyed_frame(master, b"\x1b", lambda screen, x, y: showing(screen, x, y) and "draft survives" in screen, chat=A_LABEL)
         assert "Archived" in linked_footers[ARCHIVED_LABEL], linked_footers
 
     for session, label in ((endpoint.archived, ARCHIVED_LABEL), (endpoint.stopped, STOPPED_LABEL)):
         with terminal_process([str(installed), "session", "resume", "--store", str(store), session], env=env) as (_, master):
             direct = keyed_frame(master, b"", lambda screen, x, y:
-                                 showing(label)(screen, x, y) and (label != STOPPED_LABEL or "Work to stop" in screen))
-            footer = next(line.strip() for line in direct.split("\n") if f"‹ {label} · " in line)
+                                 showing(screen, x, y) and (label != STOPPED_LABEL or "Work to stop" in screen), chat=label)
+            footer = footer_of(direct)
             assert footer == linked_footers[label], (label, footer, linked_footers[label])
 
     # Reopening reads the saved Assistant answer and still follows its link.
     with terminal_process([str(installed), "session", "resume", "--store", str(store), session_a], env=env) as (caller, master):
-        frame = keyed_frame(master, b"", lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "Open worker" in screen)
-        keyed_frame(master, pointer(frame, "Open worker"), showing(B_LABEL))
-        frame = keyed_frame(master, b"\x1b", showing(A_LABEL))
+        frame = keyed_frame(master, b"", lambda screen, x, y: showing(screen, x, y) and "Open worker" in screen, chat=A_LABEL)
+        keyed_frame(master, pointer(frame, "Open worker"), showing, chat=B_LABEL)
+        frame = keyed_frame(master, b"\x1b", showing, chat=A_LABEL)
         returned = keyed_frame(master, pointer(frame, "Open missing"), lambda screen, x, y:
-                               showing(A_LABEL)(screen, x, y) and "That Session no longer exists" in screen)
+                               showing(screen, x, y) and "That Session no longer exists" in screen, chat=A_LABEL)
         assert caller.poll() is None, returned
 
     with terminal_process([str(installed), "session", "resume", "--store", str(store), missing], env=env) as (caller, master):
