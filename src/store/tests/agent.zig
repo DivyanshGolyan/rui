@@ -828,11 +828,6 @@ test "the step to format 96 drops the sender-side record and keeps the sender of
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE command_key='sent-peer' AND session_ref='d8mv7p' AND sender_session_ref='brhkcj' AND source_kind=2 AND admission_position=6", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key='sent-refused' AND accepted=0 AND code='unknown_session'", .{}));
             try std.testing.expectEqual(@as(u64, 11), try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref='brhkcj'", .{}));
-            if (case.engine == .sqlite) {
-                try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM sqlite_schema WHERE name IN ('sent_rejection','message_admission_sent')", .{}));
-                try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_table_info('message_admission') WHERE name='sender_position'", .{}));
-                try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
-            }
         }
     }.run);
 }

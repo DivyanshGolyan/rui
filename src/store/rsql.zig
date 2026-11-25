@@ -3383,7 +3383,6 @@ test "a Message's write names its two Sessions, each on its own column" {
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "UPDATE message_admission SET admitted_at=@now WHERE session_ref=@session(?1) AND sender_session_ref IS NULL", struct { session: SessionHead }, void));
     try std.testing.expectEqualStrings("rsql: an UPDATE of message_admission names its second Session as the conjunct sender_session_ref=@session(?j) of its WHERE", comptime statementError(.write, "UPDATE message_admission SET turn_id=?1 WHERE session_ref=@session(?2) AND turn_id IN (SELECT turn_id FROM turn WHERE session_ref=@session(?3))", struct { turn_id: u64, session: SessionHead, sender: SessionHead }, void).?);
     try std.testing.expectEqualStrings("rsql: an UPDATE or DELETE names its Session as the conjunct session_ref=@session(?k) of its WHERE", comptime statementError(.write, "UPDATE turn SET session_ref=(SELECT session_ref FROM session) WHERE turn_id=?1 AND session_ref=@session(?2)", Update, void).?);
-
 }
 
 test "a write to a table that carries no Sessions names no Session" {
