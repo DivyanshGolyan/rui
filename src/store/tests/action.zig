@@ -203,7 +203,7 @@ test "EXR-68 runner SQL agrees with Runner.of over every owner and built-in name
                 .mcp => .mcp,
                 .provider => .provider,
                 .app => .app,
-                .rui => if (std.mem.eql(u8, entry.name, "bash")) .bash else if (std.mem.eql(u8, entry.name, "read_image")) .read_image else if (std.mem.eql(u8, entry.name, "web_search")) .provider else if (std.mem.eql(u8, entry.name, "not_a_built_in_tool")) .bash else .core,
+                .rui => if (std.mem.eql(u8, entry.name, "bash")) .bash else if (std.mem.eql(u8, entry.name, "read_image")) .read_image else if (std.mem.eql(u8, entry.name, "watch_github_pr")) .github_pr_watch else if (std.mem.eql(u8, entry.name, "web_search")) .provider else if (std.mem.eql(u8, entry.name, "not_a_built_in_tool")) .bash else .core,
             };
         }
 
@@ -246,6 +246,7 @@ test "core tool table routes every built-in and promotion excludes the full core
                 const expected: records.Runner = switch (tool) {
                     .bash => .bash,
                     .read_image => .read_image,
+                    .watch_github_pr => .github_pr_watch,
                     .web_search => .provider,
                     else => .core,
                 };
@@ -271,6 +272,7 @@ test "core tool table routes every built-in and promotion excludes the full core
                 const arguments = switch (tool) {
                     .bash => "{\"cmd\":\"true\",\"description\":\"Run table check\"}",
                     .read_image => "{\"path\":\"image.png\"}",
+                    .watch_github_pr => "{\"url\":\"https://github.com/org/repo/pull/42\"}",
                     .message_agent => "{\"id\":\"zzzzzz\",\"text\":\"hi\"}",
                     .stop_action => "{\"action\":\"1\"}",
                     else => "{}",
@@ -300,6 +302,9 @@ test "core tool table routes every built-in and promotion excludes the full core
                     try std.testing.expectEqual(binding.operation_id, attempted.parent_operation_id);
                     try std.testing.expectEqual(binding.turn_id, attempted.turn_id);
                     try std.testing.expect((try storage.nextCoreWork(.fromFree(1, false))) == null);
+                } else if (expected == .github_pr_watch) {
+                    // The Host runs the watcher only when the dispatcher asks for it by runner.
+                    try std.testing.expect((try storage.nextAction(.github_pr_watch, .fromFree(1, false))) != null);
                 } else if (core) |work| {
                     const call = work.action;
                     try std.testing.expectEqualStrings(@tagName(tool), @tagName(call.tool));
@@ -534,7 +539,7 @@ test "runner action seam covers selection admission input settlement stop and re
             };
             const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             const write_rounds: u64 = if (case.rerun) 4 else 2;
-            inline for (.{ .bash, .mcp, .read_image }) |runner| {
+            inline for (.{ .bash, .mcp, .read_image, .github_pr_watch }) |runner| {
                 for (0..4) |scenario| {
                     var tmp = std.testing.tmpDir(.{});
                     defer tmp.cleanup();
@@ -548,9 +553,15 @@ test "runner action seam covers selection admission input settlement stop and re
                         .bash => "bash",
                         .mcp => "fetch_page",
                         .read_image => "read_image",
+                        .github_pr_watch => "watch_github_pr",
                         else => unreachable,
                     };
-                    const arguments = if (runner == .bash) "{\"cmd\":\"printf seam\",\"description\":\"Print seam\",\"timeout_ms\":5678}" else if (runner == .read_image) "{\"path\":\"./image.png\"}" else "{}";
+                    const arguments = switch (runner) {
+                        .bash => "{\"cmd\":\"printf seam\",\"description\":\"Print seam\",\"timeout_ms\":5678}",
+                        .read_image => "{\"path\":\"./image.png\"}",
+                        .github_pr_watch => "{\"url\":\"https://github.com/org/repo/pull/42\"}",
+                        else => "{}",
+                    };
                     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
                     defer std.testing.allocator.free(encoded);
                     configure.configuration.tools = try .of(&.{tool});
@@ -567,7 +578,7 @@ test "runner action seam covers selection admission input settlement stop and re
                     const selection_rounds = storage.testing_content_work.rounds;
                     const selected = (try storage.nextAction(runner, .{ .free_credit = .one, .mcp_open = true })).?;
                     if (runner == .bash) try std.testing.expectEqual(selection_rounds + 1, storage.testing_content_work.rounds);
-                    inline for (.{ .bash, .mcp, .read_image }) |other| {
+                    inline for (.{ .bash, .mcp, .read_image, .github_pr_watch }) |other| {
                         if (runner != other) {
                             var wrong = selected;
                             wrong.runner = other;
@@ -592,6 +603,7 @@ test "runner action seam covers selection admission input settlement stop and re
                             .bash => "Bash outcome is indeterminate after Host recovery; the command was not replayed.",
                             .mcp => "Outcome unknown: the Host stopped while this MCP call was running; it was not retried.",
                             .read_image => "The Host stopped before saving this image read result. The read may have completed; it was not automatically repeated.",
+                            .github_pr_watch => "The Host stopped while watching this pull request. The watch was not automatically repeated.",
                             else => unreachable,
                         },
                         else => "Runner seam rejected before execution.",
@@ -618,7 +630,7 @@ test "runner action seam covers selection admission input settlement stop and re
                         try std.testing.expectEqual(@as(u64, if (runner == .bash) 5678 else 1234), input.timeout_ms);
                         try std.testing.expectEqual(@as(u64, arguments.len), input.arguments.length);
                         try std.testing.expectEqualSlices(u8, &protocol.contentDigest(arguments), &input.arguments.digest);
-                        inline for (.{ .bash, .mcp, .read_image }) |other| {
+                        inline for (.{ .bash, .mcp, .read_image, .github_pr_watch }) |other| {
                             if (runner != other) try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(other, binding, &input));
                         }
                         try storage.readActionExecutionInput(runner, binding, &input);
@@ -626,6 +638,8 @@ test "runner action seam covers selection admission input settlement stop and re
                             try std.testing.expectEqualStrings(workspace, input.runner.bash.workspace.slice());
                         } else if (runner == .read_image) {
                             try std.testing.expectEqualStrings(workspace, input.runner.read_image.workspace.slice());
+                        } else if (runner == .github_pr_watch) {
+                            try std.testing.expectEqualStrings(workspace, input.runner.github_pr_watch.workspace.slice());
                         } else {
                             try std.testing.expect(input.runner.mcp.parent == null);
                             try std.testing.expectEqualStrings(session.slice(), input.runner.mcp.root.slice());
@@ -654,6 +668,63 @@ test "runner action seam covers selection admission input settlement stop and re
                     try std.testing.expectEqualStrings(expected_code, actions[0].object.get("resolution").?.string);
                     try std.testing.expectEqualStrings(expected_text, actions[0].object.get("result").?.object.get("text").?.string);
                 }
+            }
+        }
+    }.run);
+}
+
+test "PRW-60 a settled watch call is selected only as a watch and reads its raw arguments" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const arguments = "{\"url\":\"https://github.com/org/repo/pull/42\",\"account\":\"octocat\"}";
+            for ([_]enum { recovered, stopped }{ .recovered, .stopped }) |ending| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try completeConfiguration("watch-select", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                configure.configuration.tools = try .of(&.{"watch_github_pr"});
+                const configured = try storage.configure(&configure, .{});
+                try std.testing.expect(configured == .accepted);
+                const session = configured.accepted.session;
+                try submitTestMessage(&storage, &tmp, "watch-input", "watch-message", session.slice(), "watch");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleCallsForTesting(&storage, &tmp, model, "watch-calls", &.{
+                    .{ .item_id = "watch-item", .name = "watch_github_pr", .encoded_call_id = "watch-call", .decoded_call_id = "watch-call", .encoded_arguments = "{\\\"url\\\":\\\"https://github.com/org/repo/pull/42\\\",\\\"account\\\":\\\"octocat\\\"}", .decoded_arguments = arguments },
+                });
+                const capacity: action_domain.Capacity = .{ .free_credit = .one, .mcp_open = true };
+                // No other runner's selection, the core lane or the Bash lane returns the watch.
+                try std.testing.expect((try storage.nextAction(.bash, capacity)) == null);
+                try std.testing.expect((try storage.nextAction(.mcp, capacity)) == null);
+                try std.testing.expect((try storage.nextAction(.read_image, capacity)) == null);
+                try std.testing.expect((try storage.nextCoreWork(capacity)) == null);
+                try std.testing.expect((try storage.admitNextActionAttempt(capacity, 300_000, .{})) == null);
+                try std.testing.expect((try storage.nextAction(.github_pr_watch, .{ .free_credit = .none, .mcp_open = true })) == null);
+                const selected = (try storage.nextAction(.github_pr_watch, capacity)).?;
+                try std.testing.expectEqual(tool_defs.Runner.github_pr_watch, selected.runner);
+                const binding = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
+                var input: action_domain.ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.github_pr_watch, binding, &input);
+                try std.testing.expectEqual(@as(u64, arguments.len), input.arguments.length);
+                try std.testing.expectEqualSlices(u8, &protocol.contentDigest(arguments), &input.arguments.digest);
+                try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.read_image, binding, &input));
+                try std.testing.expect((try storage.nextAction(.github_pr_watch, capacity)) == null);
+                const text: []const u8 = switch (ending) {
+                    .recovered => "The Host stopped while watching this pull request. The watch was not automatically repeated.",
+                    .stopped => "Stopped before this pull request watch completed.",
+                };
+                const code: []const u8 = if (ending == .recovered) "indeterminate" else "cancelled";
+                switch (ending) {
+                    .recovered => try std.testing.expect(try storage.recoverOneUncertainAction(ActiveOperationFilter.empty())),
+                    .stopped => {
+                        var stop = try completeSessionStop("watch-stop", session.slice());
+                        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                        try std.testing.expectEqual(ActionSettlement.Outcome.session_stop, (try storage.settleActionAttempt(binding, .succeeded, "Watch finished.", .{})).outcome);
+                    },
+                }
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code=?2 AND c.digest=?3", .{ selected.action_id, code, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
             }
         }
     }.run);

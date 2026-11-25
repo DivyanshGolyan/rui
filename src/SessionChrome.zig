@@ -52,7 +52,6 @@ pub const View = struct {
     facts: Identity = .{},
     notice: ?[]const u8 = null,
     notice_priority: enum { normal, recovery } = .normal,
-    overview: ?[]const u8 = null,
     overlay: ?@import("InputArea.zig").Panel = null,
     info_footer: ?vxfw.Widget = null,
     choice: chrome.ChoiceState = .closed,
@@ -107,7 +106,6 @@ pub fn place(self: *Self, screen: *AppScreen.Session, input: *@import("InputArea
         .needs = view.needs,
         .progress = view.progress,
         .notice = view.notice,
-        .overview = view.overview,
         .width = view.width,
         .method = self.status.method,
     });
