@@ -907,8 +907,9 @@ test "read_transcript lists instruction rows with their text and first line" {
             var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
             defer output.deinit();
             try outline(&database, arena, session.slice(), item, &output.writer);
-            const expected = try std.fmt.allocPrint(arena, "{d}.0 instruction {d} bytes: \"You are the release steward.\"\n", .{ item.position, text.len });
-            try std.testing.expectEqualStrings(expected, output.written());
+            const line = try outlineLine(arena, output.written(), try std.fmt.allocPrint(arena, "{d}.0 instruction at=", .{item.position}));
+            try std.testing.expect(std.mem.indexOf(u8, line, " turn=1 revision=2 ") != null);
+            try std.testing.expect(std.mem.endsWith(u8, line, try std.fmt.allocPrint(arena, " {d} bytes: \"You are the release steward.\"", .{text.len})));
         }
     }.check);
 }
