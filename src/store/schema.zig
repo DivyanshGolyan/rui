@@ -75,6 +75,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 93, .digest = 0x0028c239ba46341d },
     .{ .schema_version = 94, .digest = 0x9803d541a1a4945e },
     .{ .schema_version = 95, .digest = 0x09bff41030bad2a0 },
+    .{ .schema_version = 96, .digest = 0xd906bbe6a14311be },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
