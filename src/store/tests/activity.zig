@@ -1005,7 +1005,7 @@ test "instruction rows serve each entry that gave the model its instructions, at
             try std.testing.expectEqual(@as(usize, 1), newest.count);
             try std.testing.expectEqual(rows[rows.len - 1].revision, newest.items[0].value.instruction.revision);
             try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT max(session_position) FROM conversation_entry WHERE session_ref=?1 AND entry_kind=2", .{session.slice()}), newest.items[0].position);
-            var others: protocol.ActivityPage = .{ .kinds = .full, .limit = 255 };
+            var others: protocol.ActivityPage = .{ .kinds = .full };
             others.kinds.remove(.instruction);
             try others.session.set(session.slice());
             while (true) {
