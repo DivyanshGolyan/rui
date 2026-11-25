@@ -13,6 +13,7 @@ import h2.settings
 import control_fixture as control
 import host_process
 import model_fixture as dispatch
+from product_defaults import compaction_trigger
 
 
 class Endpoint(socketserver.ThreadingTCPServer):
@@ -410,3 +411,9 @@ def closed_host_request(socket_path, store, kind, *, timeout=15, deadline=None, 
     result = body if kind == "read_result" else json.loads(body)
     assert deadline is None or time.monotonic() < deadline, "Host request exceeded original deadline"
     return result
+
+
+def codex_wait_configuration(workspace) -> dict:
+    """The configuration every waiting-agent h2 load uses."""
+    return {"workspace": str(workspace), "connection": "codex", "model": "gpt-6-sol", "tools": ["bash"],
+            "permissionMode": "ask", "compactAt": compaction_trigger("codex", "gpt-6-sol"), "effort": "medium"}
