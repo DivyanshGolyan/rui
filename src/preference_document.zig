@@ -54,16 +54,37 @@ const effort_key = "reasoning_effort=";
 const permission_key = "permission_mode=";
 const PermissionMode = @import("cli_value.zig").PermissionMode;
 
+const current_version = 4;
+
+/// Reads only the current document: version 4 with a `connection=` line.
 pub fn decode(bytes: []const u8) !Values {
+    if (try version(bytes) != current_version) return error.UnsupportedPreferencesVersion;
+    return decodeLayout(bytes, current_version, "connection=");
+}
+
+/// Rewrites a document an earlier release wrote as the current document of the same values, or returns null for any other document.
+/// Releases before 0.94 wrote versions 1 to 4 with a `provider=` line; 0.94 renamed it in place, so version 4 has both layouts.
+pub fn migrate(bytes: []const u8, buffer: *[max_file_bytes]u8) !?[]const u8 {
+    const number = try version(bytes);
+    const values = decodeLayout(bytes, number, "provider=") catch |err| return if (number == current_version) null else err;
+    return try encode(&values, buffer);
+}
+
+fn version(bytes: []const u8) !usize {
     if (bytes.len > max_file_bytes) return error.InvalidPreferences;
-    var lines = std.mem.splitScalar(u8, bytes, '\n');
-    const version_line = lines.next() orelse "";
+    const line = bytes[0 .. std.mem.indexOfScalar(u8, bytes, '\n') orelse bytes.len];
     const known = [_][]const u8{ "version=1", "version=2", "version=3", "version=4" };
-    const number = for (known, 1..) |name, at| {
-        if (std.mem.eql(u8, version_line, name)) break at;
-    } else return error.UnsupportedPreferencesVersion;
+    for (known, 1..) |name, number| {
+        if (std.mem.eql(u8, line, name)) return number;
+    }
+    return error.UnsupportedPreferencesVersion;
+}
+
+fn decodeLayout(bytes: []const u8, number: usize, connection_key: []const u8) !Values {
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    _ = lines.next();
     var result: Values = .{};
-    const fields = .{ .{ "store=", &result.store }, .{ "connection=", &result.provider }, .{ "model=", &result.model } };
+    const fields = .{ .{ "store=", &result.store }, .{ connection_key, &result.provider }, .{ "model=", &result.model } };
     inline for (fields) |field| {
         const line = lines.next() orelse return error.InvalidPreferences;
         if (!std.mem.startsWith(u8, line, field[0])) return error.InvalidPreferences;
@@ -182,26 +203,18 @@ pub fn encode(values: *const Values, buffer: *[max_file_bytes]u8) ![]const u8 {
     }) catch return error.InvalidPreferences;
 }
 
-test "CLI-22 a defaults file reads versions 1 through 4 and always writes version 4" {
-    const literals = [_]struct { text: []const u8, encoded: []const u8 }{
-        .{ .text = "version=1\nstore=\nconnection=codex\nmodel=gpt-6-luna\n", .encoded = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\n" },
-        .{ .text = "version=2\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\n", .encoded = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=\npermission_mode=\n" },
-        .{ .text = "version=3\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\n", .encoded = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=\n" },
-        .{ .text = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=ask\n", .encoded = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=ask\n" },
-    };
-    for (literals) |case| {
-        const values = try decode(case.text);
-        var buffer: [max_file_bytes]u8 = undefined;
-        try std.testing.expectEqualStrings(case.encoded, try encode(&values, &buffer));
-    }
+test "CLI-22 a defaults file reads and writes only the current version 4 document" {
+    const current = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=ask\n";
+    var buffer: [max_file_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(current, try encode(&try decode(current), &buffer));
     const refusals = [_][]const u8{
-        "version=1\nstore=\nconnection=\n",                                                                    "version=1\nconnection=\nstore=\nmodel=\n",
-        "version=1\nstore=\nconnection=\nmodel=",                                                              "version=1\nstore=\nconnection=\nmodel=\nextra\n",
-        "version=2\nstore=\nconnection=\nmodel=\nnotifications=maybe\n",                                       "version=3\nstore=\nconnection=\nmodel=\nnotifications=on\nreasoning_effort=\n",
+        "version=4\nstore=\nprovider=codex\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=\n",  "version=4\nstore=\nconnection=\nmodel=\nnotifications=on\nreasoning_effort=\n",
         "version=4\nstore=\nconnection=\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=plan\n", "version=4\nstore=\nconnection=\nmodel=\nnotifications=on\nreasoning_effort=\npermission\n",
+        "version=4\nconnection=\nstore=\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=\n",     "version=4\nstore=\nconnection=\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=\nextra\n",
     };
     for (refusals) |text| try std.testing.expectError(error.InvalidPreferences, decode(text));
-    try std.testing.expectError(error.UnsupportedPreferencesVersion, decode("version=9\n"));
+    for ([_][]const u8{ "version=9\n", "version=1\nstore=\nprovider=codex\nmodel=\n", "version=3\nstore=\nconnection=\nmodel=\nnotifications=on\nreasoning_effort=high\n" }) |text|
+        try std.testing.expectError(error.UnsupportedPreferencesVersion, decode(text));
     const oversized: [1025]u8 = @splat('x');
     try std.testing.expectError(error.InvalidPreferences, decode(&oversized));
     for ([_]bool{ false, true }) |notifications| {
@@ -218,6 +231,48 @@ test "CLI-22 a defaults file reads versions 1 through 4 and always writes versio
             }
         }
     }
+}
+
+test "CLI-37 a document an earlier release wrote migrates to the current document of the same values" {
+    const literals = [_]struct { text: []const u8, migrated: []const u8 }{
+        .{ .text = "version=1\nstore=/s\nprovider=codex\nmodel=gpt-6-luna\n", .migrated = "version=4\nstore=/s\nconnection=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\n" },
+        .{ .text = "version=2\nstore=\nprovider=codex\nmodel=\nnotifications=off\n", .migrated = "version=4\nstore=\nconnection=codex\nmodel=\nnotifications=off\nreasoning_effort=\npermission_mode=\n" },
+        .{ .text = "version=3\nstore=\nprovider=chatgpt\nmodel=gpt-6.2-sol\nnotifications=on\nreasoning_effort=medium\n", .migrated = "version=4\nstore=\nconnection=chatgpt\nmodel=gpt-6.2-sol\nnotifications=on\nreasoning_effort=medium\npermission_mode=\n" },
+        .{ .text = "version=4\nstore=\nprovider=openai\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=bypass\n", .migrated = "version=4\nstore=\nconnection=openai\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=bypass\n" },
+    };
+    var buffer: [max_file_bytes]u8 = undefined;
+    for (literals) |case| try std.testing.expectEqualStrings(case.migrated, (try migrate(case.text, &buffer)).?);
+    const unmigrated = [_][]const u8{
+        "version=4\nstore=\nconnection=codex\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=\n",
+        "version=4\nstore=\nconnection=\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=plan\n",
+        "version=4\nstore=\nprovider=\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=plan\n",
+    };
+    for (unmigrated) |text| try std.testing.expectEqual(@as(?[]const u8, null), try migrate(text, &buffer));
+    const refusals = [_][]const u8{
+        "version=1\nstore=\nconnection=codex\nmodel=\n",                                      "version=1\nstore=\nprovider=\n",
+        "version=2\nstore=\nprovider=\nmodel=\nnotifications=maybe\n",                        "version=3\nstore=\nprovider=\nmodel=\nnotifications=on\nreasoning_effort=\n",
+        "version=3\nstore=\nprovider=\nmodel=\nnotifications=on\nreasoning_effort=high\nx\n",
+    };
+    for (refusals) |text| try std.testing.expectError(error.InvalidPreferences, migrate(text, &buffer));
+    try std.testing.expectError(error.UnsupportedPreferencesVersion, migrate("version=9\n", &buffer));
+    for ([_]bool{ false, true }) |notifications| for ([_]?model_capability.ReasoningEffort{ null, .none, .high }) |effort| for ([_]?PermissionMode{ null, .ask }) |mode| for ([_]bool{ false, true }) |with_store| for ([_]bool{ false, true }) |with_provider| {
+        var values: Values = .{ .notifications = notifications, .reasoning_effort = effort, .permission_mode = mode };
+        if (with_store) try values.store.set("/tmp/store");
+        if (with_provider) try values.provider.set("codex");
+        for (1..5) |number| {
+            if (number == 1 and !notifications) continue;
+            if (number < 3 and effort != null) continue;
+            if (number == 3 and effort == null) continue;
+            if (number < 4 and mode != null) continue;
+            var legacy: [max_file_bytes]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&legacy);
+            try writer.print("version={d}\nstore={s}\nprovider={s}\nmodel=\n", .{ number, values.store.slice(), values.provider.slice() });
+            if (number >= 2) try writer.print("notifications={s}\n", .{if (notifications) "on" else "off"});
+            if (number >= 3) try writer.print("reasoning_effort={s}\n", .{if (effort) |value| @tagName(value) else ""});
+            if (number >= 4) try writer.print("permission_mode={s}\n", .{if (mode) |value| @tagName(value) else ""});
+            try std.testing.expectEqualDeep(values, try decode((try migrate(writer.buffered(), &buffer)).?));
+        }
+    };
 }
 
 test "CLI-23 an edit changes only what it names" {

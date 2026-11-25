@@ -1622,7 +1622,7 @@ test "login owner preserves interruption, publication and independent defaults" 
         login_state.store(.cancelled, .release);
         const lock = try directory.createFile(io, ".codex.json.lock", .{ .read = true, .permissions = .fromMode(0o600) });
         lock.close(io);
-        const prior_defaults = "version=1\nstore=\nconnection=legacy\nmodel=legacy-model\n";
+        const prior_defaults = "version=1\nstore=\nprovider=legacy\nmodel=legacy-model\n";
         var prior_bytes: [4096]u8 = undefined;
         defer std.crypto.secureZero(u8, &prior_bytes);
         var prior_auth: []const u8 = &.{};
