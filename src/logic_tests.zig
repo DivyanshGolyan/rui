@@ -178,6 +178,7 @@ const cores = .{
     .{ "skill_suggestions.zig", @import("skill_suggestions.zig") },
     .{ "slash_commands.zig", @import("slash_commands.zig") },
     .{ "slash_menu.zig", @import("slash_menu.zig") },
+    .{ "source_kind.zig", @import("source_kind.zig") },
     .{ "start_report.zig", @import("start_report.zig") },
     .{ "status_page.zig", @import("status_page.zig") },
     .{ "store/command_replay.zig", @import("store/command_replay.zig") },
