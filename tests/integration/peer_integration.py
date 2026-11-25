@@ -378,11 +378,11 @@ def main(report_source):
             "--connection", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "bypass", home=home))
         endpoint.a = session_a
         endpoint.empty = allocated(run(installed, "session", "configure", "--store", store, "--workspace", workspace,
-            "--provider", "codex", "--model", "gpt-6-sol", "--label", EMPTY_LABEL, home=home))
+            "--connection", "codex", "--model", "gpt-6-sol", "--label", EMPTY_LABEL, home=home))
         endpoint.archived = allocated(run(installed, "session", "configure", "--store", store, "--workspace", workspace,
-            "--provider", "codex", "--model", "gpt-6-sol", "--label", ARCHIVED_LABEL, home=home))
+            "--connection", "codex", "--model", "gpt-6-sol", "--label", ARCHIVED_LABEL, home=home))
         endpoint.stopped = allocated(run(installed, "session", "configure", "--store", store, "--workspace", workspace,
-            "--provider", "codex", "--model", "gpt-6-sol", "--label", STOPPED_LABEL, home=home))
+            "--connection", "codex", "--model", "gpt-6-sol", "--label", STOPPED_LABEL, home=home))
         archived = run(installed, "session", "archive", "--store", store, "--session", endpoint.archived, home=home)
         assert archived["answer"]["status"] == "accepted", archived
         wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", endpoint.archived,
