@@ -430,8 +430,7 @@ test "session message writer covers peer message_agent start_agent and ending wi
                     .start_agent => {
                         var spec = try testingAgentSpec(&.{"message_agent"}, "bypass");
                         try std.testing.expectEqual(command_domain.AgentStart.started, try storage.startAgent(action.binding, sender.slice(), text, true, &spec, commits.callback(), .{}));
-                        const sent = try store_core.activityPageForTesting(&storage, .{ .session = sender, .kinds = .initOne(.sent) });
-                        receiver = sent.items[0].value.sent.target.session;
+                        try receiver.set(commits.calls[0].session.slice());
                         try expectOutcomeLine(&storage, action.binding.action_id, "Started ", receiver.slice());
                     },
                     .ending => try std.testing.expect(try storage.deliverChildEnding(model.turn_id, .{})),
@@ -969,11 +968,11 @@ test "configure parent refuses every widening field, missing or ended parents an
     }.run);
 }
 
-test "received and sent Activity reject disagreement with their accepted Message source" {
+test "received Activity rejects disagreement with their accepted Message source" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const Damage = enum { kind, accepted, target, content, missing_content, missing_command };
-            inline for (.{ false, true }) |sent| {
+            {
                 inline for (std.enums.values(Damage)) |damage| {
                     var tmp = std.testing.tmpDir(.{});
                     defer tmp.cleanup();
@@ -997,7 +996,7 @@ test "received and sent Activity reject disagreement with their accepted Message
                     const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
                     const original = "\xef\xbb\xbfexact\x00peer";
                     try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action.binding, receiver.slice(), original, .{}));
-                    const request: protocol.ActivityPage = .{ .session = if (sent) sender else receiver, .kinds = if (sent) .initOne(.sent) else .initOne(.received) };
+                    const request: protocol.ActivityPage = .{ .session = receiver, .kinds = .initOne(.received) };
                     const page = try store_core.activityPageForTesting(&storage, request);
                     try std.testing.expectEqual(@as(usize, 1), page.count);
                     const id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{receiver.slice()});

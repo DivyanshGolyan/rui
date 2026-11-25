@@ -27,7 +27,7 @@ pub const Item = struct {
     ordinal: u64 = 0,
     at: u64,
     value: Value,
-    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: content_value.Value, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction, skill: Skill };
+    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: content_value.Value, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction, skill: Skill };
     pub const Kind = std.meta.Tag(Value);
 
     /// What a row's text is: the one owner of which of its contents a reader can open. A row with no text has `none`.
@@ -47,9 +47,8 @@ pub const Item = struct {
             .skill => |skill| .{ .value = .{ .text = skill.content } },
             .call => |call| .{ .call = .{ .name = call.fields[@backingInt(tool_proposal.Field.name)], .arguments = call.fields[@backingInt(tool_proposal.Field.arguments)] } },
             .tool_result => |result| .{ .value = result.content },
-            .sent => |sent| .{ .value = sent.content },
             .turn_ended => |ended| if (ended.content) |reference| .{ .value = .{ .text = reference } } else .none,
-            .hosted_call, .stop, .send_failed, .approval_requested, .session_changed, .compacted, .model_call => .none,
+            .hosted_call, .stop, .approval_requested, .session_changed, .compacted, .model_call => .none,
         };
     }
     pub const Message = struct { admission: u64, key: Bounded(idempotency_key.max_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: content_value.Value, admitted_at: u64, sender: ?NamedPeer = null, source_action: ?u64 = null };
@@ -58,12 +57,6 @@ pub const Item = struct {
     pub const Assistant = struct { content: content_value.Reference, final: bool = false };
     pub const TurnEnded = struct { session: Bounded(session_id.bytes), turn: u64, operation: u64, ending: turn_ending.TurnEnding, code: Bounded(outcome_code.max_bytes), content: ?content_value.Reference };
     pub const Stop = struct { key: Bounded(idempotency_key.max_bytes), turn: ?u64, cutoff: u64, completion: mutation_answer.SessionStopCompletion };
-    pub const Sent = struct { admission: u64, target: NamedPeer, content: content_value.Value, admitted_at: u64 };
-    pub const SendFailed = struct {
-        key: Bounded(idempotency_key.max_bytes),
-        target: ?NamedPeer,
-        code: Bounded(outcome_code.max_bytes),
-    };
     pub const ApprovalRequested = struct {
         session: Bounded(session_id.bytes),
         action: u64,

@@ -18,7 +18,7 @@ from conversation_page_fixture import dispose_page, host_resources
 from conversation_page_fixture import request, whole_stream_shape
 
 
-ACTIVITY_KINDS = ["admission", "user", "assistant", "call", "tool_result", "hosted_call", "turn_ended", "stop", "sent", "send_failed", "received", "approval_requested", "session_changed", "compacted"]
+ACTIVITY_KINDS = ["admission", "user", "assistant", "call", "tool_result", "hosted_call", "turn_ended", "stop", "received", "approval_requested", "session_changed", "compacted"]
 
 
 def main():

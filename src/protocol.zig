@@ -738,9 +738,9 @@ pub const session_list_reply = struct {
     pub const changed_tail = facts ++ .{ "{\"through\":\"", Hole.decimal, "\",\"after_reference\":", Hole{ .string = session_id_bytes }, "}}" };
     pub const last_tail = facts ++ .{"null}"};
     pub const window_tail = facts ++ .{ "{\"first\":", Hole.optional_id, ",\"last\":", Hole.optional_id, ",\"more_above\":", Hole.boolean, ",\"more_below\":", Hole.boolean, "}}" };
-    /// A live page carries up to session_list_page_size full rows; a window page up to archived_window_size slim
+    /// A live page carries up to session_list_page_size full rows; a window page up to max_window_rows slim
     /// rows. The reply bound is the larger of the two, so a window page fits the same budget.
-    pub const max_bytes = shapeBytes(head) + @max(jsonListBytes(session_list_page_size, SessionRow.max_json_bytes), jsonListBytes(session_list.archived_window_size, ArchivedRow.Fields.max_json_bytes)) + maxShapeBytes(.{ full_tail, changed_tail, last_tail, window_tail });
+    pub const max_bytes = shapeBytes(head) + @max(jsonListBytes(session_list_page_size, SessionRow.max_json_bytes), jsonListBytes(session_list.max_window_rows, ArchivedRow.Fields.max_json_bytes)) + maxShapeBytes(.{ full_tail, changed_tail, last_tail, window_tail });
 };
 
 pub const ActivityFacts = activity_facts.Page;
@@ -1645,9 +1645,11 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseListSessions(self: *Parser, out: *ListSessions, members: *Members) !void {
-            const Field = enum { workspace, archive, after, ceiling, since, through, after_reference, window };
+            const Field = enum { workspace, archive, after, ceiling, since, through, after_reference, window, limit };
             var seen: std.enums.EnumSet(Field) = .empty;
             var through: u64 = 0;
+            var cursor: ?session_list.ArchivedCursor = null;
+            var rows: u64 = 0;
             var reference: Bounded(session_id_bytes) = .{};
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .workspace => if (!try self.readNull()) {
@@ -1674,9 +1676,12 @@ fn ParserOf(comptime Custody: type) type {
                 .window => {
                     var text: Bounded(session_list.archived_cursor_text_bytes) = .{};
                     try self.readSmallString(&text);
-                    out.window = session_list.parseArchivedCursor(text.slice()) catch return error.InvalidCursor;
+                    cursor = session_list.parseArchivedCursor(text.slice()) catch return error.InvalidCursor;
                 },
+                .limit => rows = try self.readCanonicalU64(),
             };
+            if (seen.contains(.window) != seen.contains(.limit)) return error.InvalidCursor;
+            if (cursor) |at| out.window = .{ .cursor = at, .rows = std.math.cast(u8, rows) orelse return error.InvalidCursor };
             try require(Field, seen, &.{ .workspace, .after, .ceiling });
             if (seen.contains(.through) or seen.contains(.after_reference)) {
                 if (!seen.contains(.through) or !seen.contains(.after_reference) or out.since == null) return error.InvalidCursor;
@@ -2315,7 +2320,7 @@ pub const list_sessions_request = struct {
     pub const through = .{ ",\"through\":\"", Hole.decimal, "\"" };
     pub const after_reference = .{ ",\"after_reference\":", Hole{ .string = session_id_bytes } };
     /// The Archived window cursor, one field: `head`, `tail`, `below:<key>` or `above:<key>`.
-    pub const window = .{ ",\"window\":\"", Hole{ .text = session_list.archived_cursor_text_bytes }, "\"" };
+    pub const window = .{ ",\"window\":\"", Hole{ .text = session_list.archived_cursor_text_bytes }, "\",\"limit\":\"", Hole.decimal, "\"" };
     pub const tail = .{"}"};
     pub const all = head ++ archive ++ cursor ++ since ++ through ++ after_reference ++ tail;
 };
@@ -3275,23 +3280,31 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
     }
 }
 
-test "Archived window wire: one request field decodes both ways, refuses other combinations, and rows and tails encode" {
+test "Archived window wire: the window and its row limit decode both ways, refuse other combinations, and rows and tails encode" {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"archive\":\"archived\",\"after\":\"0\",\"ceiling\":\"0\"";
-    const Case = struct { json: []const u8, window: ?session_list.ArchivedCursor = null, failure: ?anyerror = null };
+    const Case = struct { json: []const u8, window: ?session_list.ArchivedWindow = null, failure: ?anyerror = null };
     const cases = [_]Case{
-        .{ .json = head ++ ",\"window\":\"head\"}", .window = .head },
-        .{ .json = head ++ ",\"window\":\"tail\"}", .window = .tail },
-        .{ .json = head ++ ",\"window\":\"below:12\"}", .window = .{ .below = 12 } },
-        .{ .json = head ++ ",\"window\":\"above:9223372036854775807\"}", .window = .{ .above = std.math.maxInt(i64) } },
-        .{ .json = head ++ ",\"window\":\"below:0\"}", .failure = error.InvalidCursor },
-        .{ .json = head ++ ",\"window\":\"below:012\"}", .failure = error.InvalidCursor },
-        .{ .json = head ++ ",\"window\":\"below:\"}", .failure = error.InvalidCursor },
-        .{ .json = head ++ ",\"window\":\"sideways:4\"}", .failure = error.InvalidCursor },
-        .{ .json = head ++ ",\"window\":\"above:9223372036854775808\"}", .failure = error.InvalidCursor },
-        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"archive\":\"active\",\"after\":\"0\",\"ceiling\":\"0\",\"window\":\"head\"}", .failure = error.InvalidCursor },
-        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\",\"archive\":\"archived\",\"after\":\"0\",\"ceiling\":\"0\",\"window\":\"head\"}", .failure = error.InvalidCursor },
-        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"archive\":\"archived\",\"after\":\"8\",\"ceiling\":\"12\",\"window\":\"head\"}", .failure = error.InvalidCursor },
-        .{ .json = head ++ ",\"since\":\"abababababababababababababababab.42\",\"window\":\"head\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"head\",\"limit\":\"12\"}", .window = .{ .cursor = .head, .rows = 12 } },
+        .{ .json = head ++ ",\"window\":\"head\",\"limit\":\"1\"}", .window = .{ .cursor = .head, .rows = 1 } },
+        .{ .json = head ++ ",\"window\":\"head\",\"limit\":\"40\"}", .window = .{ .cursor = .head, .rows = session_list.max_window_rows } },
+        .{ .json = head ++ ",\"window\":\"head\",\"limit\":\"0\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"head\",\"limit\":\"41\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"head\",\"limit\":\"256\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"head\",\"limit\":\"012\"}", .failure = error.InvalidIdentity },
+        .{ .json = head ++ ",\"window\":\"head\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"limit\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"tail\",\"limit\":\"12\"}", .window = .{ .cursor = .tail, .rows = 12 } },
+        .{ .json = head ++ ",\"window\":\"below:12\",\"limit\":\"12\"}", .window = .{ .cursor = .{ .below = 12 }, .rows = 12 } },
+        .{ .json = head ++ ",\"window\":\"above:9223372036854775807\",\"limit\":\"12\"}", .window = .{ .cursor = .{ .above = std.math.maxInt(i64) }, .rows = 12 } },
+        .{ .json = head ++ ",\"window\":\"below:0\",\"limit\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"below:012\",\"limit\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"below:\",\"limit\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"sideways:4\",\"limit\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"above:9223372036854775808\",\"limit\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"archive\":\"active\",\"after\":\"0\",\"ceiling\":\"0\",\"window\":\"head\",\"limit\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\",\"archive\":\"archived\",\"after\":\"0\",\"ceiling\":\"0\",\"window\":\"head\",\"limit\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"archive\":\"archived\",\"after\":\"8\",\"ceiling\":\"12\",\"window\":\"head\",\"limit\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"since\":\"abababababababababababababababab.42\",\"window\":\"head\",\"limit\":\"12\"}", .failure = error.InvalidCursor },
     };
     for (cases) |case| {
         var source: MetadataSource = .{ .input = case.json };
@@ -3308,16 +3321,17 @@ test "Archived window wire: one request field decodes both ways, refuses other c
     var buffer: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     const cursors = [_]session_list.ArchivedCursor{ .head, .tail, .{ .below = 77 }, .{ .above = 1 } };
-    for (cursors) |cursor| {
+    for (cursors, 0..) |cursor, at| {
+        const rows: u8 = @intCast(1 + at * 13);
         out.end = 0;
         var text: [session_list.archived_cursor_text_bytes]u8 = undefined;
         try writeShape(&out, list_sessions_request.head ++ list_sessions_request.archive ++ list_sessions_request.cursor ++ list_sessions_request.window ++ list_sessions_request.tail, .{
-            "s", @as(?[]const u8, null), SessionArchiveFilter.archived, @as(u64, 0), @as(u64, 0), session_list.formatArchivedCursor(cursor, &text),
+            "s", @as(?[]const u8, null), SessionArchiveFilter.archived, @as(u64, 0), @as(u64, 0), session_list.formatArchivedCursor(cursor, &text), @as(u64, rows),
         });
         var source: MetadataSource = .{ .input = out.buffered() };
         var parser = Tested.Parser{ .source = &source };
         const request = (try parseForTest(&parser)).list_sessions;
-        try std.testing.expectEqualDeep(cursor, request.window.?);
+        try std.testing.expectEqualDeep(session_list.ArchivedWindow{ .cursor = cursor, .rows = rows }, request.window.?);
     }
 
     var row_buffer: [512]u8 = undefined;

@@ -134,7 +134,7 @@ pub const Operations = struct {
     host: *const fn (*Self) HostRead,
     start_host: *const fn (*Self) HostLaunch,
     list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, protocol.SessionArchiveFilter, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
-    window: *const fn (*Self, client.Requests, session_list.ArchivedCursor, *protocol_reply.ArchivedWindowPage) anyerror!?protocol_reply.ReadFailure,
+    window: *const fn (*Self, client.Requests, session_list.ArchivedWindow, *protocol_reply.ArchivedWindowPage) anyerror!?protocol_reply.ReadFailure,
     first_line: *const fn (*Self, client.Requests, []const u8, u64, content_value.Value, []u8) anyerror!protocol_reply.ActivityPrefixReply,
     create: *const fn (*Self, client.Requests, configure_input.ConfigureInput, *Reply) anyerror!void,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
@@ -1495,7 +1495,7 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
         },
         .archived => |read| {
             self.answer = .{ .archived = undefined };
-            if (try self.ops.window(self, requests, read.from, &self.answer.archived)) |failure| return failure.err();
+            if (try self.ops.window(self, requests, .{ .cursor = read.from, .rows = read.rows }, &self.answer.archived)) |failure| return failure.err();
         },
         .lines => |reads| {
             self.answer = .{ .lines = @splat(.{}) };
@@ -1594,7 +1594,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         },
         .archived => |read| {
             outcome catch return self.event(.{ .archived = .{ .read = read, .page = null } });
-            var rows: [session_list.archived_window_size]view.Listed = undefined;
+            var rows: [session_list.max_window_rows]view.Listed = undefined;
             const page = view.ArchivedPage.of(&answer.archived, &rows);
             return self.event(.{ .archived = .{ .read = read, .page = page } });
         },
@@ -2051,7 +2051,7 @@ fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.Sessi
 }
 
 /// One Archived window page: a single round trip, one job.
-fn windowPage(self: *Self, requests: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+fn windowPage(self: *Self, requests: client.Requests, window: session_list.ArchivedWindow, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
     const Sink = struct {
         io: std.Io,
         file: std.Io.File,
@@ -2065,8 +2065,8 @@ fn windowPage(self: *Self, requests: client.Requests, cursor: session_list.Archi
     const file = self.scratch.?;
     var sink: Sink = .{ .io = self.init.io, .file = file };
     var buffer: client.ReplyBuffer = .{};
-    const reply = try requests.listArchivedWindow(self.options.store, cursor, &sink, &buffer);
-    switch (try protocol_reply.ArchivedWindowReply.decode(self.init.io, file, cursor, reply)) {
+    const reply = try requests.listArchivedWindow(self.options.store, window, &sink, &buffer);
+    switch (try protocol_reply.ArchivedWindowReply.decode(self.init.io, file, window, reply)) {
         .page => |value| page.* = value,
         .failure => |failure| return failure,
     }
@@ -2202,7 +2202,7 @@ const fake_operations: Operations = .{
         }
     }.host,
     .window = struct {
-        fn window(_: *Self, _: client.Requests, _: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+        fn window(_: *Self, _: client.Requests, _: session_list.ArchivedWindow, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
             page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists } };
             return null;
         }
@@ -4617,10 +4617,10 @@ fn sui4NestedKeys() !void {
 test "a wheel over the Archived list reports one viewport, after the draw that applies it" {
     const Window = struct {
         // One archived row, so the Archived list has a row for the viewport to name.
-        fn window(self: *Self, requests: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+        fn window(self: *Self, requests: client.Requests, asked: session_list.ArchivedWindow, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
             _ = self;
             _ = requests;
-            _ = cursor;
+            _ = asked;
             const identity: content_value.Reference = .{ .length = 7, .digest = @splat(0x5c) };
             const wire: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 9, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 9 } } }, .line = null } };
             var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
@@ -4668,11 +4668,11 @@ test "overview Archived window effect runs one job and its reply becomes the win
 
         // The slim row is written in the wire shape and decoded with the window reply's own row decoder: a
         // parts-form first Message with no inline line, so the overview must read its line by position.
-        fn window(self: *Self, requests: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+        fn window(self: *Self, requests: client.Requests, asked: session_list.ArchivedWindow, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
             _ = self;
             _ = requests;
             calls += 1;
-            last = cursor;
+            last = asked.cursor;
             const identity: content_value.Reference = .{ .length = 7, .digest = @splat(0x5c) };
             const wire: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 9, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 9 } } }, .line = null } };
             var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
@@ -4725,7 +4725,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
     };
     // The Archived window answers the one archived Session the listing names, as the Host's window would.
     const Windowing = struct {
-        fn window(_: *Self, _: client.Requests, _: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+        fn window(_: *Self, _: client.Requests, _: session_list.ArchivedWindow, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
             page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .count = 0 };
             if (Listing.archive_state != .archived) return null;
             page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
@@ -9352,8 +9352,8 @@ fn archivedLaterWindowCase() !void {
             return null;
         }
 
-        fn window(_: *Self, _: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
-            try std.testing.expect(cursor == .head);
+        fn window(_: *Self, _: client.Requests, asked: session_list.ArchivedWindow, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            try std.testing.expect(asked.cursor == .head);
             const wire: protocol.ArchivedRow.Fields = .{ .reference = &target, .archive_seq = 42, .stopped_at = test_now_s, .label = "Archive target", .first = .{ .position = 1, .admission = 4, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } }, .line = "A" } };
             var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
             var out = std.Io.Writer.fixed(&json);
@@ -9483,8 +9483,8 @@ fn archivedLaterRestoreCase() !void {
             return null;
         }
 
-        fn window(_: *Self, _: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
-            try std.testing.expect(cursor == .head);
+        fn window(_: *Self, _: client.Requests, asked: session_list.ArchivedWindow, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            try std.testing.expect(asked.cursor == .head);
             page.* = .{ .count = 2, .since = through, .first = 42, .last = 41, .more_above = false, .more_below = false };
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
