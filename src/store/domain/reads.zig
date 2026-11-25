@@ -760,7 +760,7 @@ const PresentationRead = struct {
     count: RowCount = .{},
 
     fn init(operation: u64, ordinal: u64, publication_position: ?u64, out: *tool_presentation.ToolPresentation) PresentationRead {
-        out.* = .{ .line = null, .code = .unresolved, .publication_position = publication_position };
+        out.* = .{ .line = null, .code = .unresolved, .sign = .active, .publication_position = publication_position };
         return .{ .operation = operation, .ordinal = ordinal, .out = out };
     }
 
