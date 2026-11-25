@@ -574,14 +574,32 @@ def main(now=None):
     issues, cases = known_issues(repository), fixtures()
     prior = list(issues)
     owners = escape_owners()
+    # One refused gh call costs only its own job or cause: run 77 stopped at a comment on the issue it had
+    # just created and filed nothing after it. Every failure is reported, and the step still fails.
+    failed = []
     for job in run_jobs(repository, args.run_id):
         if job["conclusion"] not in ("failure", "timed_out") or aggregate_only(job):
             continue
-        log = job_log(repository, job["id"])
-        infra = infra_verdict(job, annotations(repository, job), log if needs_log(job) else None)[0] == "infra"
-        for cause in job_causes(log, cases, args.workflow, job):
+        try:
+            log = job_log(repository, job["id"])
+            infra = infra_verdict(job, annotations(repository, job), log if needs_log(job) else None)[0] == "infra"
+            causes = job_causes(log, cases, args.workflow, job)
+        except subprocess.CalledProcessError as error:
+            failed.append(f"job {job['name']!r}: {gh_failure(error)}")
+            continue
+        for cause in causes:
             cause.escape = "" if infra else escape_class(job, cause, owners, cases)
-            print(file_cause(repository, issues, cause, args.workflow, args.sha, url, args.label, now, prior))
+            try:
+                print(file_cause(repository, issues, cause, args.workflow, args.sha, url, args.label, now, prior))
+            except subprocess.CalledProcessError as error:
+                failed.append(f"cause {cause.signature!r}: {gh_failure(error)}")
+    if failed:
+        raise SystemExit("Not filed:\n" + "\n".join(failed))
+
+
+def gh_failure(error):
+    command = " ".join(str(part) for part in error.cmd[:4])
+    return f"{command} exited {error.returncode}: {(error.stderr or '').strip()[:300]}"
 
 
 if __name__ == "__main__":

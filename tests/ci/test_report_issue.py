@@ -526,6 +526,22 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(comment[2], '5')
         self.assertNotIn('--add-label', edit)
 
+    def test_a_refused_gh_call_skips_only_its_own_cause_and_fails_after_filing_the_rest(self):
+        # Run 77: a comment on a just-created issue failed and the filer stopped there.
+        class Refusing(FakeGitHub):
+            def __call__(self, *args):
+                if args[:2] == ('issue', 'create') and not self.made('create'):
+                    self.calls.append(args)
+                    raise subprocess.CalledProcessError(1, ['gh', *args], stderr='HTTP 502')
+                return super().__call__(*args)
+        fake = Refusing([dict(id=1, name='macos / full-execution', conclusion='failure'),
+                         dict(id=2, name='linux / host-stop', conclusion='failure')], {1: BASH, 2: HOST_STOP})
+        with self.assertRaises(SystemExit) as raised:
+            self.run_main(fake)
+        self.assertEqual(len(fake.made('create')), 2, "the second job's cause is still filed")
+        self.assertIn("Not filed:", str(raised.exception))
+        self.assertIn("HTTP 502", str(raised.exception))
+
     def test_an_infrastructure_red_is_filed_without_an_escape_class(self):
         lost = dict(id=1, name='macos / full-execution', conclusion='failure')
         cancelled_setup = dict(id=1, name='macos / full-execution', conclusion='failure',
