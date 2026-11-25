@@ -146,6 +146,14 @@ pub fn noticeLine(arena: std.mem.Allocator, say: Say) std.mem.Allocator.Error![]
     text.finish(&out) catch unreachable;
     return out.buffered();
 }
+test "SUI-172 a chat notice draws the sign from its tone, and no other tone carries one" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("! Busy", try noticeLine(arena.allocator(), Say.attention("Busy")));
+    try std.testing.expectEqualStrings("Busy", try noticeLine(arena.allocator(), Say.quiet("Busy")));
+    try std.testing.expectEqualStrings("! ", Say.attention("").sign());
+}
+
 test "notice text flattens result lines and escapes terminal controls before Footer draws it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
