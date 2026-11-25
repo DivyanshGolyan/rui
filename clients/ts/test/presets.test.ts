@@ -116,7 +116,7 @@ test("the Host resolves omitted preset settings at creation and preserves explic
 		assert.equal(saved.model, "gpt-6.1-sol");
 		assert.equal(saved.reasoning_effort, "low");
 		assert.equal(saved.permission_mode, "bypass");
-		assert.equal(saved.compaction_trigger_override, "945000");
+		assert.equal(saved.compaction_trigger_override, "244800");
 		const imageTools = process.platform === "linux" || process.platform === "darwin" ? ["read_image"] : [];
 		assert.deepEqual(saved.tools, ["bash", "find_tools", "message_agent", "read_action", ...imageTools, "read_transcript", "skill", "start_agent", "stop_action", "web_search"]);
 		assert.deepEqual(saved.loaded_tools, saved.tools);

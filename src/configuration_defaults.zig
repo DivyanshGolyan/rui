@@ -386,19 +386,19 @@ test "ADM-29 configuration field wire grammar" {
 
 test "parent creation uses inherited provider for omitted compaction regardless of saved provider binding" {
     const bindings = [_]struct { saved_provider: connection.Name, saved_compact_at: u64 }{
-        .{ .saved_provider = testName("openai"), .saved_compact_at = 244800 },
+        .{ .saved_provider = testName("openai"), .saved_compact_at = 945000 },
         .{ .saved_provider = testName("codex"), .saved_compact_at = 244800 },
     };
     const omitted_tools: input.ToolsField = .{};
     const omitted_choice = choice(.omitted, "");
     const omitted_tokens = tokenField(.omitted, "");
     for (bindings) |binding| {
-        try std.testing.expectEqual(binding.saved_compact_at, compactionTrigger(catalog.shipped, binding.saved_provider, "gpt-6.1-sol"));
+        try std.testing.expectEqual(binding.saved_compact_at, compactionTrigger(catalog.shipped, binding.saved_provider, "gpt-6.2-astra"));
         const resolved = resolve(catalog.shipped, .{
             .creating = true,
             .parent = .{ .tools = "bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search", .permission_mode = .bypass },
             .provider = testName("codex"),
-            .model = "gpt-6.1-sol",
+            .model = "gpt-6.2-astra",
             .can_read_images = false,
             .tools = &omitted_tools,
             .loaded_tools = &omitted_tools,

@@ -303,7 +303,7 @@ To turn them off, run `rui defaults configure --notifications off`, or enter `/s
 
 When model context grows too large, Rui compacts it.
 Compaction never deletes saved conversation history.
-Rui stays under a model's long-context price line by default, starting compaction at 90% of it. `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-6.2-sol` start at an estimated 244,800 tokens, because OpenAI doubles their input price above 272K tokens. Other Codex and ChatGPT model IDs start at an estimated 244,800 tokens.
+Codex and ChatGPT models start compaction at an estimated 244,800 tokens or 90% of the context window if smaller. `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-6.2-sol` also stay under OpenAI's 272K-token long-context price line, where OpenAI doubles the input price, so they start at 244,800 tokens on any connection.
 A model Rui does not list is assumed to have a 128,000-token context, so it starts compaction at an estimated 115,200 tokens unless you set a threshold.
 A context-overflow error from the provider can still start compaction.
 

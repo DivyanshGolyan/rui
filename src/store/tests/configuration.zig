@@ -1331,13 +1331,13 @@ test "parent creation uses inherited provider for omitted compaction across save
                 child.configuration.parent.state = .value;
                 try child.configuration.parent.value.set(parent_session.slice());
                 child.configuration.model.state = .value;
-                try child.configuration.model.value.set("gpt-6.1-sol");
+                try child.configuration.model.value.set("gpt-6.2-astra");
                 const result = try storage.configure(&child, .{});
                 try std.testing.expect(result == .accepted);
                 const observed = try storage.inspectSessionForTesting(result.accepted.session.slice());
                 try std.testing.expectEqualStrings("codex", observed.provider.?.slice());
                 try std.testing.expectEqual(@as(?u64, 244800), observed.compaction_trigger);
-                try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
+                try std.testing.expectEqualStrings("gpt-6.2-astra", observed.model.slice());
                 try std.testing.expect((try storage.configure(&child, .{})).accepted.replayed);
             }
         }
