@@ -264,7 +264,6 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
             .descendant_needs_you_count = 0,
             .first = .{ .position = 1, .admission = 1, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } },
             .from_person_at = if (wrote) 100 else null,
-            .last_line = .{ .position = 1, .text = "Last answer" },
         };
         _ = try view.step(&state, .{ .list = .{ .page = .{ .rows = &.{listed}, .answer = .{ .delta = .full, .since = token } } } });
         state.selected = if (selected) .{ .session = listed.reference } else .new_session;

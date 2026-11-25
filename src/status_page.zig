@@ -7,6 +7,7 @@ const Provider = @import("connection.zig").Name;
 const ReasoningEffort = model_capability.ReasoningEffort;
 const WorkKind = @import("session_work.zig").Kind;
 const ArchiveState = @import("session_archive.zig").State;
+const PermissionMode = @import("cli_value.zig").PermissionMode;
 const indent = "   ";
 
 pub const max_session_bytes = 128;
@@ -34,7 +35,7 @@ pub const Session = struct {
     model: Bounded(max_model_bytes),
     effort: ?ReasoningEffort,
     effort_override: bool,
-    permission: enum { ask, bypass },
+    permission: PermissionMode,
     tools: @import("command_input.zig").ToolsField,
     loaded_tools: @import("command_input.zig").ToolsField = .{ .state = .value },
     instructions: bool,
@@ -85,8 +86,8 @@ pub const Work = struct {
 pub fn archiveBadge(state: ArchiveState) ?[]const u8 {
     return switch (state) {
         .active => null,
-        .archiving => "Stopping and archiving",
-        .archived => "Archived · /unarchive",
+        .archiving => ArchiveState.archiving.badge(),
+        .archived => comptime ArchiveState.archived.badge().? ++ " · /unarchive",
     };
 }
 

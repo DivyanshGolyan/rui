@@ -85,7 +85,7 @@ pub const Line = struct {
     model: Bounded(protocol.max_model_bytes) = .{},
     provider: ?@import("connection.zig").Name = null,
     effort: ?protocol.ReasoningEffort = null,
-    left: ?u8 = null,
+    context: ?session_line.Context = null,
     archive_state: protocol.SessionArchiveState = .active,
 
     pub const First = struct { position: u64, content: content_value.Value };
@@ -108,7 +108,7 @@ pub const Line = struct {
             .model = plain(protocol.max_model_bytes, settings.model.slice()),
             .provider = @import("connection.zig").Name.parse(settings.connection.value.slice()),
             .effort = if (settings.reasoning_effort) |effort| effort.value else null,
-            .left = if (trigger != null and estimate != null) session_line.left(trigger.?.value, estimate.?.value) else null,
+            .context = session_line.Context.of(if (estimate) |tokens| tokens.value else null, if (trigger) |limit| limit.value else null),
             .archive_state = current.archive_state,
         };
     }
@@ -131,7 +131,7 @@ pub const Line = struct {
             .folder = if (self.folder) |*folder| folder.slice() else null,
             .home = home,
             .effort = self.effort,
-            .left = self.left,
+            .context = self.context,
         };
     }
 };
@@ -1228,7 +1228,7 @@ test "session_reads the Session line takes archive and other facts from Current 
                 try std.testing.expectEqualStrings("/w", facts.folder.?);
             } else try std.testing.expect(facts.folder == null);
             try std.testing.expectEqualStrings("gpt\\x01x", facts.model);
-            try std.testing.expectEqual(case.left, facts.left);
+            try std.testing.expectEqual(case.left, if (facts.context) |context| context.left() else null);
             try std.testing.expectEqual(!std.mem.eql(u8, case.effort, "null"), facts.effort != null);
             try std.testing.expectEqual(!std.mem.eql(u8, case.first, "null"), line.?.first != null);
         }

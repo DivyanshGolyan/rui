@@ -26,6 +26,24 @@
             "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/review_before_merge.py"
           }
         ]
+      },
+      {
+        "matcher": "mcp__github__create_pull_request|mcp__github__update_pull_request",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/ready_pr_shape.py"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__hearthbot__post_message|mcp__hearthbot__update_progress_checklist|mcp__hearthbot__request_decision",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/person_messages.py"
+          }
+        ]
       }
     ]
   }

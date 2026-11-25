@@ -653,3 +653,19 @@ class StoreInventoryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MysqlSplitTest(unittest.TestCase):
+    MYSQL = {"RUI_TEST_REQUIRE_ENGINES": "sqlite,mysql", "RUI_TEST_MYSQL_SOCKET": "/s",
+             "RUI_TEST_MYSQL_ROOT_PASSWORD": "p", "RUI_TEST_MYSQL_RECORD": "/r", "PATH": "/bin"}
+
+    def test_pr_runs_every_test_on_sqlite_and_only_listed_tests_on_mysql(self):
+        from store_shards import split_mysql
+        sqlite, mysql = split_mysql(dict(self.MYSQL, RUI_STORE_MYSQL_ONLY="store.a. store.b."))
+        self.assertEqual(sqlite, {"RUI_TEST_REQUIRE_ENGINES": "sqlite", "PATH": "/bin"})
+        self.assertEqual(mysql, dict(self.MYSQL, RUI_UNIT_ONLY="store.a. store.b."))
+
+    def test_promotion_and_runs_without_mysql_do_not_split(self):
+        from store_shards import split_mysql
+        self.assertIsNone(split_mysql(self.MYSQL))
+        self.assertIsNone(split_mysql({"RUI_STORE_MYSQL_ONLY": "store.a.", "PATH": "/bin"}))

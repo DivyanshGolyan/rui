@@ -9,6 +9,8 @@ const status = @import("status_page.zig");
 const catalog = @import("model_catalog.zig");
 const capability = @import("model_capability.zig");
 const tools = @import("built_in_tool.zig");
+const session_line = @import("session_line.zig");
+const setting_words = @import("setting_words.zig");
 const ModelChoice = @import("model_choice.zig");
 const keymap = @import("keymap.zig");
 const keypress = @import("keypress.zig");
@@ -203,12 +205,12 @@ fn bind(self: *Self) void {
     self.panel.on_pick = pick;
     self.panel.title = self.title();
     self.fields = .{
-        .{ .label = "Effort", .value = if (!self.ready) "unavailable" else if (self.session.effort_override) if (self.session.effort) |effort| @tagName(effort) else "model default" else "model default", .tail = self.failures[0] },
-        .{ .label = "Permissions", .value = if (!self.ready) "unavailable" else if (self.session.permission == .bypass) "run without asking" else "ask first", .tail = self.failures[1] },
+        .{ .label = "Effort", .value = if (!self.ready) "unavailable" else setting_words.effort(if (self.session.effort_override) self.session.effort else null), .tail = self.failures[0] },
+        .{ .label = "Permissions", .value = if (!self.ready) "unavailable" else setting_words.permission(self.session.permission), .tail = self.failures[1] },
         .{ .label = "Allowed tools", .value = "", .tail = self.failures[2] },
         .{ .label = "Folder", .value = if (self.ready) self.session.workspace.slice() else "unavailable", .selectable = false },
         .{ .label = "Model", .value = if (self.ready) self.session.model.slice() else "unavailable", .tail = self.failures[4] },
-        .{ .label = "Context", .value = "", .selectable = false, .visible = self.ready and self.session.context_estimate != null },
+        .{ .label = "Context", .value = "", .selectable = false, .visible = self.ready and self.contextReading() != null },
     };
     if (self.pending) |row| if (row < self.fields.len) {
         self.fields[row].tail = " · saving";
@@ -250,19 +252,19 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
     self.unconfirmed_keys[row] = null;
     switch (row) {
         0 => {
-            self.effort_labels[0] = "model default";
+            self.effort_labels[0] = setting_words.effort_default;
             self.effort_count = 1;
             const shown = if (self.standalone != null or self.session.effort_override) self.session.effort else null;
             var current: ?usize = if (shown == null) 0 else null;
             for (std.enums.values(catalog.ReasoningEffort)) |effort| {
                 if (!capability.supportsReasoningEffort(catalog.shipped, self.session.model.slice(), effort)) continue;
                 if (shown == effort) current = self.effort_count;
-                self.effort_labels[self.effort_count] = @tagName(effort);
+                self.effort_labels[self.effort_count] = setting_words.effort(effort);
                 self.effort_count += 1;
             }
             self.panel.openChoice(self.effort_labels[0..self.effort_count], current);
         },
-        1 => self.panel.openChoice(&.{ "run without asking", "ask first" }, if (self.session.permission == .bypass) 0 else 1),
+        1 => self.panel.openChoice(&setting_words.permission_labels, setting_words.permissionChoice(self.session.permission)),
         2 => {
             self.tool_draft = self.session.builtInTools();
             self.updateTools();
@@ -306,6 +308,10 @@ fn pickModel(raw: *anyopaque, ctx: *vxfw.EventContext, model: []const u8) !void 
     try self.save(ctx, 4, .{ .model = model });
 }
 
+fn contextReading(self: *const Self) ?session_line.Context {
+    return session_line.Context.of(self.session.context_estimate, self.session.compaction_trigger);
+}
+
 fn updateTools(self: *Self) void {
     inline for (std.enums.values(tools.BuiltInTool), 0..) |tool, at| {
         const name = comptime tools.shown(tool);
@@ -317,7 +323,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize, choice: usize) !vo
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (row) {
         0 => try self.save(ctx, row, .{ .effort = if (choice == 0) null else std.meta.stringToEnum(catalog.ReasoningEffort, self.effort_labels[choice]).? }),
-        1 => try self.save(ctx, row, .{ .permission = if (choice == 0) .bypass else .ask }),
+        1 => try self.save(ctx, row, .{ .permission = setting_words.permissionAt(choice) }),
         2 => {
             self.tool_draft.?.toggle(std.enums.values(tools.BuiltInTool)[choice]);
             self.updateTools();
@@ -546,13 +552,13 @@ fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.
         self.fields[3].value = try self.folderValue(ctx, Panel.valueWidth(size.width));
         self.fields[4].value = try safe(ctx.arena, self.session.model.slice());
         // Without a trigger (a codec that does not compact) the context row is omitted.
-        if (self.session.context_estimate) |tokens| if (self.session.compaction_trigger) |trigger| {
+        if (self.contextReading()) |reading| {
             var context: std.Io.Writer.Allocating = .init(ctx.arena);
-            try status.writeGrouped(&context.writer, tokens);
+            try status.writeGrouped(&context.writer, reading.estimate);
             try context.writer.writeAll(" of ");
-            try status.writeGrouped(&context.writer, trigger);
+            try status.writeGrouped(&context.writer, reading.trigger);
             self.fields[5].value = context.written();
-        };
+        }
     }
     const actions = try ctx.arena.alloc([]const u8, 3);
     var action_width: usize = 3 + 2 * 5;
@@ -1334,7 +1340,7 @@ test "Chat info Context appears only for measured estimates regardless of work o
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "unknown") == null);
 }
 
-test "Chat info Context shows the Host reported threshold" {
+test "SUI-171 Chat info Context shows the Host reported threshold" {
     var fixture: Fixture = .{};
     fixture.init();
     var page: Self = .{ .backend = fixture.backend() };
@@ -1343,6 +1349,8 @@ test "Chat info Context shows the Host reported threshold" {
     const cases = [_]struct { estimate: ?u64, trigger: ?u64, value: ?[]const u8 }{
         .{ .estimate = null, .trigger = null, .value = null },
         .{ .estimate = null, .trigger = 244_800, .value = null },
+        .{ .estimate = 18, .trigger = null, .value = null },
+        .{ .estimate = 18, .trigger = 0, .value = null },
         .{ .estimate = 0, .trigger = 115_200, .value = "0 of 115,200" },
         .{ .estimate = 18, .trigger = 244_800, .value = "18 of 244,800" },
         .{ .estimate = 31_200, .trigger = 12_345, .value = "31,200 of 12,345" },

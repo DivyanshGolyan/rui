@@ -177,7 +177,23 @@ test "opening and decision progress share the footer while unresolved decisions 
     try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Opening…", .width = 80 }).left);
 }
 
-pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + "100% context left".len + 4 * " · ".len + "Stopping and archiving".len;
+pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + session_line.Context.footer_bytes + 4 * " · ".len + @import("session_archive.zig").State.longest_badge;
+
+test "SUI-174 the facts row's room holds the widest row with the longest archive badge" {
+    const protocol = @import("protocol.zig");
+    var buffer: [facts_bytes]u8 = undefined;
+    var model: [@import("model_capability.zig").max_model_bytes]u8 = undefined;
+    @memset(&model, 'm');
+    var folder: [protocol.max_workspace_bytes]u8 = undefined;
+    @memset(&folder, 'f');
+    folder[0] = '/';
+    const facts: session_line.Facts = .{ .model = &model, .folder = &folder, .effort = .high };
+    for (std.enums.values(protocol.SessionArchiveState)) |state| {
+        const row = factsRow(&buffer, facts, state.badge(), 1 << 20, .unicode);
+        try std.testing.expect(row.len <= facts_bytes);
+        if (state.badge()) |words| try std.testing.expect(std.mem.endsWith(u8, row, words));
+    }
+}
 
 /// The footer's facts row: model, effort and context or folder, then the archive `badge`. The chat's name
 /// is never part of it; the Session list and the terminal title carry the name.
@@ -190,7 +206,7 @@ pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, badge: ?
     const separator = session_line.cells(session_line.separator, method);
     const tail = if (badge) |text| separator + session_line.cells(text, method) else 0;
     const room = width -| tail;
-    var percent: ["100% context left".len]u8 = undefined;
+    var percent: [session_line.Context.footer_bytes]u8 = undefined;
     var folder_buffer: [@import("protocol.zig").max_workspace_bytes + 1]u8 = undefined;
     const folder: ?[]const u8 = if (facts) |value| if (value.folder) |path| blk: {
         const short = @import("home_path.zig").shortPath(value.home, path);
@@ -199,7 +215,7 @@ pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, badge: ?
     const parts: [4]?[]const u8 = if (facts) |value| .{
         value.model,
         if (value.effort) |effort| @tagName(effort) else null,
-        if (if (folder == null and (value.left orelse 101) <= 50) value.left else null) |left| std.fmt.bufPrint(&percent, "{d}% context left", .{left}) catch unreachable else null,
+        if (folder == null) if (value.context) |context| context.footerWords(&percent) else null else null,
         folder,
     } else @splat(null);
     var kept: [4]?[]const u8 = @splat(null);
@@ -264,12 +280,12 @@ test "the facts row ends with the archive badge, which stays when the row is sho
 
 test "a short facts row preserves editable words before context" {
     var buffer: [facts_bytes]u8 = undefined;
-    const facts: session_line.Facts = .{ .model = "gpt-6.1-sol", .effort = .high, .left = 100 };
+    const facts: session_line.Facts = .{ .model = "gpt-6.1-sol", .effort = .high, .context = session_line.Context.atLeft(100) };
     try std.testing.expectEqualStrings("gpt-6.1-sol · high", factsRow(&buffer, facts, null, 140, .unicode));
     try std.testing.expectEqualStrings("gpt-6.1-sol · high", factsRow(&buffer, facts, null, 19, .unicode));
     try std.testing.expectEqualStrings("gpt-6.1-… · high", factsRow(&buffer, facts, null, 16, .unicode));
     try std.testing.expectEqualStrings("gpt-6.1-sol · high · Archived", factsRow(&buffer, facts, "Archived", 30, .unicode));
-    const pressed: session_line.Facts = .{ .model = "gpt-6.1-sol", .effort = .high, .left = 40 };
+    const pressed: session_line.Facts = .{ .model = "gpt-6.1-sol", .effort = .high, .context = session_line.Context.atLeft(40) };
     try std.testing.expectEqualStrings("gpt-6.1-sol · high · 40% context left", factsRow(&buffer, pressed, null, 140, .unicode));
     try std.testing.expectEqualStrings("gpt-6.1-sol · high", factsRow(&buffer, pressed, null, 30, .unicode));
     for (0..141) |width| {
@@ -498,7 +514,7 @@ test "footer focus domain routes opening escape text and drawn click identity" {
 test "footer spans identify only whole model and effort words across widths efforts and permissions" {
     for ([_]usize{ 140, 46 }) |width| for ([_]?session_line.ReasoningEffort{ null, .low, .xhigh }) |effort| {
         var buffer: [facts_bytes]u8 = undefined;
-        const facts: session_line.Facts = .{ .model = "model", .effort = effort, .left = 62 };
+        const facts: session_line.Facts = .{ .model = "model", .effort = effort, .context = session_line.Context.atLeft(62) };
         const fitted = factsSpans(&buffer, facts, null, width, .unicode);
         var expected: [facts_bytes]u8 = undefined;
         const want = try std.fmt.bufPrint(&expected, "model{s}{s}", .{ if (effort != null) " · " else "", if (effort) |value| @tagName(value) else "" });
@@ -610,7 +626,7 @@ test "copy success shares short reply next-key replacement and expiry owner" {
 }
 
 test "empty chat facts fit model effort and home folder with semantic fields" {
-    const facts: session_line.Facts = .{ .model = "gpt-6.1-sol", .effort = .low, .folder = "/home/u/code/rui", .home = "/home/u", .left = 100 };
+    const facts: session_line.Facts = .{ .model = "gpt-6.1-sol", .effort = .low, .folder = "/home/u/code/rui", .home = "/home/u", .context = session_line.Context.atLeft(100) };
     for ([_]usize{ 33, 46, 140 }) |width| {
         var buffer: [facts_bytes]u8 = undefined;
         const shown = factsSpans(&buffer, facts, null, width, .unicode);
@@ -637,7 +653,7 @@ test "empty chat facts fit model effort and home folder with semantic fields" {
 test "footer facts domain fits the context threshold at both widths and never carries a name" {
     for ([_]usize{ 46, 140 }) |width| for ([_]u8{ 49, 50, 51 }) |used| {
         var buffer: [facts_bytes]u8 = undefined;
-        const facts: session_line.Facts = .{ .model = "model", .effort = .high, .left = 100 - used };
+        const facts: session_line.Facts = .{ .model = "model", .effort = .high, .context = session_line.Context.atLeft(100 - used) };
         const shown = factsSpans(&buffer, facts, null, width, .unicode);
         var expected: [facts_bytes]u8 = undefined;
         const want = if (used < 50)

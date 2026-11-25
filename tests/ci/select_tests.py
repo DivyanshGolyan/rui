@@ -1113,6 +1113,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
         reasons.add("Store migration step or migration input: the PR runs test-store against a live MySQL 8.4 migration check")
     if mysql_legs:
         reasons.add("Test code with a MySQL leg (" + ", ".join(mysql_legs) + "): the PR runs it against live MySQL 8.4")
+    mysql_tests = mysql_test_modules(changed) if mysql_migration else []
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)
@@ -1137,6 +1138,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             "mac_required": mac_required, "upgrade_required": upgrade_required,
             "unit_compile_required": "src/store/schema.zig" in paths,
             "mysql_migration": mysql_migration,
+            "mysql_tests": mysql_tests,
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,
             "typecheck_macos": typecheck_macos,
@@ -1166,6 +1168,29 @@ def revision_text(commit, path):
 # What marks Zig code as running a MySQL leg: a call of the engine loop (a test file or a production file's inline
 # tests, as read_transcript.zig has), or an import of the live MySQL fixture owner itself.
 MYSQL_LEG = re.compile(r"\bforEachEngine\(|@import\(\"(?:[./]*store/)?mysql_testing\.zig\"\)")
+
+
+# Always part of a PR's MySQL leg: the migration and dialect check that drives MySQL 8.4 through the wire
+# client, and one quick forEachEngine suite, so the acceptance record counts a passed conformance test.
+MYSQL_ALWAYS = ("store.mysql_dialect_check.", "store.tests.session.")
+STORE_TESTS = "src/store/tests/"
+
+
+def store_module(path):
+    return path[len("src/"):-len(".zig")].replace("/", ".") + "."
+
+
+def mysql_test_modules(paths, root=ROOT):
+    """The Store test name prefixes a PR runs on live MySQL: MYSQL_ALWAYS, each changed Store source, and each
+    Store test file that imports a changed Store source by name.
+
+    Every other Store test runs on SQLite on the PR and on MySQL in Promote (store_shards.py's split).
+    """
+    changed = [path for path in paths if path.startswith("src/store/") and path.endswith(".zig")]
+    names = {'/' + Path(path).name + '"' for path in changed} | {'"' + Path(path).name + '"' for path in changed}
+    importers = [str(test.relative_to(root)) for test in sorted((root / STORE_TESTS).glob("*.zig"))
+                 if any(name in test.read_text(encoding="utf-8") for name in names)] if names else []
+    return sorted({store_module(path) for path in [*changed, *importers]} | set(MYSQL_ALWAYS))
 
 
 def mysql_leg_tests(paths, contents):

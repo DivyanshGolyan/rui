@@ -1,6 +1,27 @@
 const std = @import("std");
 
-pub const State = enum { active, archiving, archived };
+pub const State = enum {
+    active,
+    archiving,
+    archived,
+
+    /// The words that name this state to a person; null while the Session is active.
+    pub fn badge(self: State) ?[]const u8 {
+        return switch (self) {
+            .active => null,
+            .archiving => "Stopping and archiving",
+            .archived => "Archived",
+        };
+    }
+
+    pub const longest_badge = longest: {
+        var longest: usize = 0;
+        for (std.enums.values(State)) |state| {
+            if (state.badge()) |words| longest = @max(longest, words.len);
+        }
+        break :longest longest;
+    };
+};
 
 pub const Filter = enum {
     active,
