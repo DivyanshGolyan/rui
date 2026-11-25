@@ -139,6 +139,20 @@ class PlanTest(unittest.TestCase):
                     self.assertEqual(result.outputs['targets'], [])
                     self.assertEqual(result.outputs['native_targets'], [])
 
+    def test_red_main_selects_nothing_on_any_pull_request(self):
+        for draft, kind in product((False, True), ChangeKind):
+            with self.subTest(draft=draft, kind=kind):
+                result = plan(dict(selection(), unit_compile_required=True), event_name='pull_request', draft=draft,
+                              promotion=False, change_kind=kind, main_red=True).outputs
+                self.assertEqual(result['change_kind'], 'documentation')
+                self.assertFalse(result['pr_job'])
+                self.assertEqual(result['targets'], [])
+                self.assertEqual(result['native_targets'], [])
+                self.assertFalse(result['native'])
+        result = plan(selection(), event_name='schedule', draft=False, promotion=False,
+                      change_kind=ChangeKind.NORMAL, main_red=True).outputs
+        self.assertNotEqual(result['targets'], [])
+
     def test_ready_pr_tier_runs_only_linux_compile_and_selected_linux_suites(self):
         promotion_only = ('cache_execution_checks', 'typecheck_macos', 'linux_memory_checks')
         for mac_required, native_targets, upgrade, retry, obligations in product(
