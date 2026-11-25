@@ -1296,7 +1296,7 @@ pub const State = struct {
             if (position(self, row.reference) != null and !before.eql(&after)) self.presentation_revision +%= 1;
             try arrange(self);
         };
-        if (!read.opening or read.work.served_attention == null) return;
+        if (!read.opening or session_work.attention(read.work) == null) return;
         _ = attention.observe(&(try self.record(read.reference)).acknowledged, read.work);
     }
 
@@ -4564,6 +4564,25 @@ test "SUI-100 creator tree uses served subtree facts and disjoint nested pins" {
     try creatorRootOrderCase();
     try creatorSenderOrderCase();
     try creatorQueuedOrderCase();
+}
+
+test "SUI-21 opening a Session records its outcome as seen from the work state alone" {
+    var state = try opened(&.{session("b4n8wd", .{ .idle = ago(20) }, .{ .label = "Pinned" })});
+    defer state.deinit();
+    _ = try step(&state, .{ .conversation = "b4n8wd".* });
+    // The read carries no served attention: the finished state is what the person opened and saw.
+    var work: session_work.Work = .{ .state = .{ .finished = ago(1) }, .turn = 2 };
+    work.served_attention = null;
+    work.served_group = session_work.group(work);
+    _ = try step(&state, .{ .observed = .{ .reference = "b4n8wd".*, .read_version = testToken(3), .work = work, .opening = true } });
+    const seen = (try state.record("b4n8wd".*)).acknowledged.?;
+    try std.testing.expectEqual(session_work.attention(work).?, seen);
+    // A state that asks nothing records nothing, as before.
+    var quiet = try opened(&.{session("c5d9xe", .{ .idle = ago(20) }, .{ .label = "Quiet" })});
+    defer quiet.deinit();
+    _ = try step(&quiet, .{ .conversation = "c5d9xe".* });
+    _ = try step(&quiet, .{ .observed = .{ .reference = "c5d9xe".*, .read_version = testToken(3), .work = fixtureWork(.{ .state = .{ .working = ago(1) } }), .opening = true } });
+    try std.testing.expectEqual(@as(?attention.Attention, null), (try quiet.record("c5d9xe".*)).acknowledged);
 }
 
 fn creatorSnapshotCase() !void {
