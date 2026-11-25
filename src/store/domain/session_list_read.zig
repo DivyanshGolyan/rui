@@ -332,6 +332,8 @@ pub const archived_oldest_page = rsql.Read(.{
 });
 
 const ArchivedPage = struct {
+    /// One row is over 1 KiB, so it decodes in place here and is copied into `rows`.
+    decoded: ArchivedWindowRow = undefined,
     rows: [archived_page_capacity]ArchivedWindowRow = undefined,
     count: usize = 0,
     failure: ?error{CorruptStore} = null,

@@ -4613,7 +4613,7 @@ test "a wheel over the Archived list reports one viewport, after the draw that a
             _ = requests;
             _ = asked;
             const identity: content_value.Reference = .{ .length = 7, .digest = @splat(0x5c) };
-            const wire: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 9, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 9 } } }, .line = null } };
+            const wire: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 9, .admitted_at = 1, .sender = null, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 9 } } } }, .first_prefix = null };
             var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
             var out = std.Io.Writer.fixed(&json);
             try wire.writeJson(&out);
@@ -4665,7 +4665,7 @@ test "overview Archived window effect runs one job and its reply becomes the win
             calls += 1;
             last = asked.cursor;
             const identity: content_value.Reference = .{ .length = 7, .digest = @splat(0x5c) };
-            const wire: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 9, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 9 } } }, .line = null } };
+            const wire: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 9, .admitted_at = 1, .sender = null, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 9 } } } }, .first_prefix = null };
             var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
             var out = std.Io.Writer.fixed(&json);
             try wire.writeJson(&out);
@@ -4720,7 +4720,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
             page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .count = 0 };
             if (Listing.archive_state != .archived) return null;
             page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
-            page.rows[0] = .{ .reference = .{ .value = protocol.Bounded(protocol.max_session_bytes).from("k7m2qx") catch unreachable }, .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 4, .content = .{ .text = .{ .length = 1, .digest = @splat(0x1) } }, .line = null } };
+            page.rows[0] = .{ .reference = .{ .value = protocol.Bounded(protocol.max_session_bytes).from("k7m2qx") catch unreachable }, .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 4, .admitted_at = 1, .sender = null, .content = .{ .text = .{ .length = 1, .digest = @splat(0x1) } } }, .first_prefix = null };
             return null;
         }
     };
@@ -9344,7 +9344,7 @@ fn archivedLaterWindowCase() !void {
 
         fn window(_: *Self, _: client.Requests, asked: session_list.ArchivedWindow, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
             try std.testing.expect(asked.cursor == .head);
-            const wire: protocol.ArchivedRow.Fields = .{ .reference = &target, .archive_seq = 42, .stopped_at = test_now_s, .label = "Archive target", .first = .{ .position = 1, .admission = 4, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } }, .line = "A" } };
+            const wire: protocol.ArchivedRow.Fields = .{ .reference = &target, .archive_seq = 42, .stopped_at = test_now_s, .label = "Archive target", .first = .{ .position = 1, .admission = 4, .admitted_at = 1, .sender = null, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } } }, .first_prefix = "A" };
             var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
             var out = std.Io.Writer.fixed(&json);
             try wire.writeJson(&out);
@@ -9479,7 +9479,7 @@ fn archivedLaterRestoreCase() !void {
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             for ([_][]const u8{ &target, &other }, [_]u64{ 42, 41 }, 0..) |ref, seq, i| {
-                const wire: protocol.ArchivedRow.Fields = .{ .reference = ref, .archive_seq = seq, .stopped_at = test_now_s, .label = null, .first = .{ .position = 1, .admission = if (i == 0) 200 else 500, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } }, .line = "A" } };
+                const wire: protocol.ArchivedRow.Fields = .{ .reference = ref, .archive_seq = seq, .stopped_at = test_now_s, .label = null, .first = .{ .position = 1, .admission = if (i == 0) 200 else 500, .admitted_at = 1, .sender = null, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } } }, .first_prefix = "A" };
                 var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
                 var out = std.Io.Writer.fixed(&json);
                 try wire.writeJson(&out);

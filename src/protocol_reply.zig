@@ -4617,16 +4617,16 @@ test "WIR-4 a public parts reply reads back as the Host writes it and refuses an
     try std.testing.expectError(error.InvalidPartList, PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = wire.len } }, .{ .session = "k7m2qx", .owner = .{ .action = 9 }, .identity = identity }));
 }
 
-test "Archived window wire: a slim row reads back with its position, admission, content and line" {
+test "Archived window wire: a slim row reads back with its first Message and raw prefix" {
     const digest: [32]u8 = @splat(0x5a);
     const identity: content_value.Reference = .{ .length = 7, .digest = digest };
-    const cases = [_]struct { label: ?[]const u8, first: ?protocol.ArchivedFirstFields }{
-        .{ .label = "Review", .first = .{ .position = 1, .admission = 2, .content = .{ .text = identity }, .line = "hello" } },
-        .{ .label = null, .first = .{ .position = 9, .admission = 8, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 8 } } }, .line = null } },
-        .{ .label = null, .first = null },
+    const cases = [_]struct { label: ?[]const u8, first: ?protocol.FirstMessage, prefix: ?[]const u8 }{
+        .{ .label = "Review", .first = .{ .position = 1, .admission = 2, .admitted_at = 30, .sender = null, .content = .{ .text = identity } }, .prefix = "hello\n  and more" },
+        .{ .label = null, .first = .{ .position = 9, .admission = 8, .admitted_at = 31, .sender = .{ .session = protocol.Bounded(protocol.max_session_bytes).from("p3q4r5") catch unreachable }, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 8 } } } }, .prefix = null },
+        .{ .label = null, .first = null, .prefix = null },
     };
     for (cases) |case| {
-        const row: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = 1700, .label = case.label, .first = case.first };
+        const row: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = 1700, .label = case.label, .first = case.first, .first_prefix = case.prefix };
         var buffer: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
         var out = std.Io.Writer.fixed(&buffer);
         try row.writeJson(&out);
@@ -4641,8 +4641,10 @@ test "Archived window wire: a slim row reads back with its position, admission, 
             const read = decoded.first orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(first.position, read.position);
             try std.testing.expectEqual(first.admission, read.admission);
+            try std.testing.expectEqual(first.admitted_at, read.admitted_at);
             try std.testing.expectEqualDeep(first.content, read.content);
-            if (first.line) |line| try std.testing.expectEqualStrings(line, read.line.?.slice()) else try std.testing.expect(read.line == null);
+            if (first.sender) |sender| try std.testing.expectEqualStrings(sender.session.slice(), read.sender.?.session.slice()) else try std.testing.expect(read.sender == null);
         } else try std.testing.expect(decoded.first == null);
+        if (case.prefix) |prefix| try std.testing.expectEqualStrings(prefix, decoded.first_prefix.?.slice()) else try std.testing.expect(decoded.first_prefix == null);
     }
 }

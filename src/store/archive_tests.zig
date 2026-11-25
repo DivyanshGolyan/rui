@@ -701,14 +701,15 @@ test "Session list membership and order equal the state reference for every filt
 
 const WindowRow = struct { reference: [6]u8, key: u64, first: ?WindowFirst = null };
 
-/// What the window carries of a row's first Message: its position, admission, content, and whether a line came inline.
+/// What the window carries of a row's first Message: the live row's facts, and the raw prefix when it is inline Text.
 const WindowFirst = struct {
     position: u64,
     admission: u64,
+    admitted_at: u64,
     content: content_value.Value,
-    has_line: bool,
-    line_buf: [@import("../session_line.zig").max_line_bytes]u8 = undefined,
-    line_len: ?usize = null,
+    has_prefix: bool,
+    prefix_buf: [session_list.max_first_prefix_bytes]u8 = undefined,
+    prefix_len: ?usize = null,
 };
 
 /// Records one Archived window page: its rows (newest first), and the page's tail.
@@ -727,10 +728,10 @@ const WindowVisitor = struct {
     pub fn archivedRow(self: *WindowVisitor, archived: *const session_list.ArchivedRow) !void {
         if (self.count == self.rows.len or archived.reference.len != 6) return error.TooManyRows;
         const first: ?WindowFirst = if (archived.first) |first| blk: {
-            var out: WindowFirst = .{ .position = first.position, .admission = first.admission, .content = first.content, .has_line = first.line != null };
-            if (first.line) |line| {
-                @memcpy(out.line_buf[0..line.len], line);
-                out.line_len = line.len;
+            var out: WindowFirst = .{ .position = first.position, .admission = first.admission, .admitted_at = first.admitted_at, .content = first.content, .has_prefix = archived.first_prefix != null };
+            if (archived.first_prefix) |prefix| {
+                @memcpy(out.prefix_buf[0..prefix.len], prefix);
+                out.prefix_len = prefix.len;
             }
             break :blk out;
         } else null;
@@ -778,10 +779,10 @@ test "Archived window carries the first Message's position, admission and conten
             var storage: Store = undefined;
             try testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            // A parts-form first Message: its line needs a parts read, so the window carries none.
+            // A parts-form first Message: its line needs a parts read, so the window carries no prefix.
             const parts = try testing.configureTestSession(&storage, "window-parts-first");
             try testing.submitTestMessageParts(&storage, &tmp, "window-parts-message", parts.slice(), &.{ .{ .bytes = "first" }, .{ .bytes = "second" } });
-            // An inline-Text first Message: its line rides the window.
+            // An inline-Text first Message: its raw prefix rides the window.
             const text = try testing.configureTestSession(&storage, "window-text-first");
             try testing.submitTestMessage(&storage, &tmp, "window-text-message", "window-text-message", text.slice(), "hello window");
             var parts_archive = try archiveCommand("window-parts-archive", parts.slice(), true);
@@ -794,7 +795,7 @@ test "Archived window carries the first Message's position, admission and conten
             try std.testing.expectEqual(@as(usize, 2), page.count);
             for (page.rowsSlice()) |row| {
                 const first = row.first orelse return error.TestUnexpectedResult;
-                try std.testing.expect(first.position != 0 and first.admission != 0);
+                try std.testing.expect(first.position != 0 and first.admission != 0 and first.admitted_at != 0);
                 const is_parts = std.mem.eql(u8, &row.reference, parts.slice()[0..6]);
                 switch (first.content) {
                     .parts => |value| {
@@ -807,7 +808,7 @@ test "Archived window carries the first Message's position, admission and conten
                         try std.testing.expectEqual(@as(u64, "hello window".len), value.length);
                     },
                 }
-                try std.testing.expectEqual(!is_parts, first.has_line);
+                try std.testing.expectEqual(!is_parts, first.has_prefix);
             }
         }
     }.run);
@@ -1073,7 +1074,7 @@ test "Archived window equals the Archived membership over the archive's edge cas
             try std.testing.expect(bare_page.rowsSlice()[0].first == null);
             try expectWindowMatchesWalk(&storage);
 
-            // A pending admission before the first turn: the first Message is that admission, with its line.
+            // A pending admission before the first turn: the first Message is that admission, with its prefix.
             const pending = try testing.configureTestSession(&storage, "edge-pending-first-session");
             try testing.submitTestMessage(&storage, &tmp, "edge-pending-file", "edge-pending-message", pending.slice(), "pending first line");
             var pending_archive = try archiveCommand("edge-pending-archive", pending.slice(), true);
@@ -1083,12 +1084,12 @@ test "Archived window equals the Archived membership over the archive's edge cas
             const pending_row = pending_page.rowsSlice()[0];
             try std.testing.expectEqualSlices(u8, pending.slice()[0..6], &pending_row.reference);
             const pending_first = pending_row.first orelse return error.TestUnexpectedResult;
-            try std.testing.expect(pending_first.admission != 0 and pending_first.has_line);
-            try std.testing.expectEqualStrings("pending first line", pending_first.line_buf[0..pending_first.line_len.?]);
+            try std.testing.expect(pending_first.admission != 0 and pending_first.has_prefix);
+            try std.testing.expectEqualStrings("pending first line", pending_first.prefix_buf[0..pending_first.prefix_len.?]);
             try expectWindowMatchesWalk(&storage);
 
-            // A leading blank line: the first line is blank, so the Session is named by its reference, as the
-            // client names it.
+            // A leading blank line: the Host serves the raw bytes, blank line included; the client applies the line
+            // rule and names the Session by its reference.
             const blank = try testing.configureTestSession(&storage, "edge-blank-session");
             try testing.submitTestMessage(&storage, &tmp, "edge-blank-file", "edge-blank-message", blank.slice(), "\nFix CI");
             var blank_archive = try archiveCommand("edge-blank-archive", blank.slice(), true);
@@ -1097,7 +1098,8 @@ test "Archived window equals the Archived membership over the archive's edge cas
             try readWindow(&storage, .head, &blank_page);
             const blank_row = blank_page.rowsSlice()[0];
             try std.testing.expectEqualSlices(u8, blank.slice()[0..6], &blank_row.reference);
-            try std.testing.expect(!(blank_row.first orelse return error.TestUnexpectedResult).has_line);
+            const blank_first = blank_row.first orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("\nFix CI", blank_first.prefix_buf[0..blank_first.prefix_len.?]);
             try expectWindowMatchesWalk(&storage);
 
             // A stale anchor: the newest Session is restored. Its key now names no Archived Session, so the page

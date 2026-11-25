@@ -3339,12 +3339,13 @@ test "Archived window wire: the window and its row limit decode both ways, refus
         .archive_seq = 42,
         .stopped_at = 1700,
         .label = null,
-        .first = .{ .position = 3, .admission = 7, .content = .{ .text = .{ .length = 5, .digest = digest } }, .line = "hello" },
+        .first = .{ .position = 3, .admission = 7, .admitted_at = 90, .sender = null, .content = .{ .text = .{ .length = 5, .digest = digest } } },
+        .first_prefix = "hello",
     };
     try row.writeJson(&row_out);
     try std.testing.expectEqualStrings(
-        "{\"reference\":\"k7m2qx\",\"archive_seq\":\"42\",\"stopped_at\":\"1700\",\"label\":null,\"first\":{\"position\":\"3\",\"admission\":\"7\",\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++
-            @as([64]u8, @splat('0')) ++ "\"},\"line\":\"hello\"}}",
+        "{\"reference\":\"k7m2qx\",\"archive_seq\":\"42\",\"stopped_at\":\"1700\",\"label\":null,\"first\":{\"position\":\"3\",\"admission\":\"7\",\"admitted_at\":\"90\",\"sender\":null,\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++
+            @as([64]u8, @splat('0')) ++ "\"}},\"first_prefix\":\"hello\"}",
         row_out.buffered(),
     );
     comptime std.debug.assert(ArchivedRow.Fields.max_json_bytes <= session_list.ArchivedRow.max_json_bytes);
