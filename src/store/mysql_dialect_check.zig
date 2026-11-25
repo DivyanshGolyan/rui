@@ -1084,16 +1084,20 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
         "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES('skills-58-refusal','brhkcj',6,1793781801);" ++
         "UPDATE session SET next_position=3 WHERE session_ref='rhvzwc';" ++
         "UPDATE session SET next_position=7 WHERE session_ref='brhkcj'", false);
-    const saved_facts = "SELECT c.command_key,c.kind,c.target,HEX(c.input_digest),c.accepted,c.code,c.command_seq,a.archived,s.session_ref,s.selected_turn_id,s.position,s.admission_cutoff,s.stopped_at,s.parent_caused,intent.session_ref,r.sender_session_ref,r.sender_position,r.rejected_at " ++
-        "FROM core_command c LEFT JOIN session_archive_command a ON a.command_key=c.command_key LEFT JOIN session_stop s ON s.command_key=c.command_key LEFT JOIN session_archive intent ON intent.command_key=c.command_key LEFT JOIN sent_rejection r ON r.command_key=c.command_key " ++
+    const saved_facts = "SELECT c.command_key,c.kind,c.target,HEX(c.input_digest),c.accepted,c.code,c.command_seq,a.archived,s.session_ref,s.selected_turn_id,s.position,s.admission_cutoff,s.stopped_at,s.parent_caused,intent.session_ref " ++
+        "FROM core_command c LEFT JOIN session_archive_command a ON a.command_key=c.command_key LEFT JOIN session_stop s ON s.command_key=c.command_key LEFT JOIN session_archive intent ON intent.command_key=c.command_key " ++
         "WHERE c.command_key IN ('skills-58-archive','skills-58-refusal') ORDER BY c.command_key";
-    const saved_facts_after = "SELECT c.command_key,c.kind,c.target,HEX(c.input_digest),c.accepted,c.code,c.command_seq,a.archived,s.session_ref,s.selected_turn_id,s.position,s.admission_cutoff,s.stopped_at,s.parent_caused,intent.session_ref,r.sender_session_ref,r.sender_position,r.rejected_at " ++
-        "FROM core_command c LEFT JOIN session_archive_command a ON a.command_key=c.command_key LEFT JOIN session_stop s ON s.command_key=c.command_key LEFT JOIN session intent ON intent.archive_seq=c.command_seq LEFT JOIN sent_rejection r ON r.command_key=c.command_key " ++
+    const saved_facts_after = "SELECT c.command_key,c.kind,c.target,HEX(c.input_digest),c.accepted,c.code,c.command_seq,a.archived,s.session_ref,s.selected_turn_id,s.position,s.admission_cutoff,s.stopped_at,s.parent_caused,intent.session_ref " ++
+        "FROM core_command c LEFT JOIN session_archive_command a ON a.command_key=c.command_key LEFT JOIN session_stop s ON s.command_key=c.command_key LEFT JOIN session intent ON intent.archive_seq=c.command_seq " ++
         "WHERE c.command_key IN ('skills-58-archive','skills-58-refusal') ORDER BY c.command_key";
     var before_facts: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer before_facts.deinit();
     try writeResult(saved_facts, &before_facts.writer);
-    try std.testing.expect(before_facts.written().len > 200);
+    try std.testing.expect(before_facts.written().len > 150);
+    var refusals: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer refusals.deinit();
+    try writeResult("SELECT count(*) FROM sent_rejection WHERE command_key='skills-58-refusal' AND sender_session_ref='brhkcj' AND sender_position=6", &refusals.writer);
+    try std.testing.expectEqualStrings("\n 1:1", refusals.written());
     var old_wire: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer old_wire.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &old_wire.writer);

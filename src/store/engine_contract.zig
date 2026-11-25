@@ -1444,7 +1444,7 @@ fn sh109_the_touch_oracle_names_a_sender_whose(case: *store_testing.Case) !void 
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
         try touchForTesting(&storage, recipient.slice());
-        try store_testing.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,sender_position=1000000,source_kind=2 WHERE command_key='oracle-message'", .{sender.slice()});
+        try store_testing.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,source_kind=2 WHERE command_key='oracle-message'", .{sender.slice()});
         try std.testing.expectEqualStrings(sender.slice(), &store_core.untouchedForTesting(&storage).?);
         try touchForTesting(&storage, sender.slice());
         try std.testing.expect(store_core.untouchedForTesting(&storage) == null);

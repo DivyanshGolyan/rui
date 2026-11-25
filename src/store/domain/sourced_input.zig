@@ -53,9 +53,9 @@ const admit_message = rsql.Write(.{
 pub const person_sql = admit_message.sql;
 
 const admit_sent_message = rsql.Write(.{
-    .sql = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position,source_kind) " ++
-        "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6),?7,?8)",
-    .Args = struct { admission_id: u64, session: rsql.SessionHead, key: []const u8, content_id: u64, position: u64, sender: rsql.SessionHead, sender_position: u64, source_kind: u8 },
+    .sql = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,source_kind) " ++
+        "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6),?7)",
+    .Args = struct { admission_id: u64, session: rsql.SessionHead, key: []const u8, content_id: u64, position: u64, sender: rsql.SessionHead, source_kind: u8 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -121,7 +121,6 @@ pub fn queue(a: anytype, target: *const rsql.SessionHead, source: Source, conten
             .position = position,
             .source_kind = source_kind,
             .sender = peer.session,
-            .sender_position = try (try a.positions(peer.session)).take(1),
         }),
     }
     return admission_id;
