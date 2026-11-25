@@ -198,6 +198,7 @@ const cores = .{
     .{ "store_target.zig", @import("store_target.zig") },
     .{ "submission_state.zig", @import("submission_state.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
+    .{ "testing/say_text.zig", @import("testing/say_text.zig") },
     .{ "theme.zig", @import("theme.zig") },
     .{ "tool_digests_generated.zig", @import("tool_digests_generated.zig") },
     .{ "tool_fold.zig", @import("tool_fold.zig") },
