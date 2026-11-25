@@ -215,9 +215,17 @@ class VerifyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, "record")
             if record is not None:
-                path.write_text(record)
+                Path(live_engines.accepted(str(path))).write_text(record)
             with patch("builtins.print"):
                 return live_engines.verify_mysql({live_engines.MYSQL_RECORD: str(path)})
+
+    def test_another_binary_writing_the_record_path_cannot_decide_the_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "record")
+            Path(live_engines.accepted(str(path))).write_text("prepares=3 migrations=1 conformance=1\n")
+            path.write_text("prepares=57 migrations=0 conformance=0\n")
+            with patch("builtins.print"):
+                self.assertIsNone(live_engines.verify_mysql({live_engines.MYSQL_RECORD: str(path)}))
 
     def test_a_record_with_prepares_passes(self):
         self.assertIsNone(self.verify("ddl=40 ddl_refused=0 prepares=812 prepare_refused=0 probes=4 migrations=1 conformance=1\n"))

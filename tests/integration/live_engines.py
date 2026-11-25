@@ -34,10 +34,18 @@ def parse_record(text):
     return counts
 
 
+def accepted(record):
+    """Where store_shards.py joins its Store shards' records. Only that join writes it: any other test binary
+    that inherits MYSQL_RECORD writes the record path itself, and the last such writer would otherwise decide
+    the gate (#2306's first two attempts: a later test-logic run left prepares=57, conformance=0)."""
+    return record + ".accepted"
+
+
 def verify_mysql(environ):
-    path = environ.get(MYSQL_RECORD)
-    if not path:
+    record = environ.get(MYSQL_RECORD)
+    if not record:
         return f"{MYSQL_RECORD} is not set, so the live dialect check kept no record"
+    path = accepted(record)
     try:
         with open(path, encoding="utf-8") as record:
             text = record.read()
