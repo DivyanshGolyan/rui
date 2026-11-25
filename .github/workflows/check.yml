@@ -205,10 +205,24 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           filter: blob:none
+      # GitHub rebuilds a PR's merge lazily; check the merge on main as it is now.
+      - name: Merge onto current main
+        id: fresh
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          MERGE=$(python3 -B tests/ci/fresh_candidate.py)
+          git fetch --no-tags --filter=blob:none origin "$MERGE"
+          git checkout --detach "$MERGE"
+          echo "ref=$MERGE" >> "$GITHUB_OUTPUT"
       - name: Select existing targets
         id: select
         env:
-          CANDIDATE_REF: ${{ github.sha }}
+          CANDIDATE_REF: ${{ steps.fresh.outputs.ref || github.sha }}
           # A PR's base.sha can trail the main its merge commit was built on.
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || inputs.base }}
           DRAFT: ${{ github.event.pull_request.draft || false }}
