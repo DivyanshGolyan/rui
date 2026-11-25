@@ -30,7 +30,7 @@ pub fn parseUrl(url: []const u8) error{InvalidUrl}!PrKey {
 fn validOwner(s: []const u8) bool {
     if (s.len == 0 or s.len > 39 or !std.ascii.isAlphanumeric(s[0]) or !std.ascii.isAlphanumeric(s[s.len - 1])) return false;
     for (s, 0..) |c, i| {
-        if (!std.ascii.isAlphanumeric(c) and c != '-') return false;
+        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return false;
         if (c == '-' and i > 0 and s[i - 1] == '-') return false;
     }
     return true;
@@ -191,6 +191,8 @@ fn reduceReviews(reviews: []const Review, coverage: Coverage, requested: bool) R
 }
 
 test "PRW-1 URL accepts only bounded unambiguous GitHub pull requests" {
+    _ = try parseUrl("https://github.com/alice_acme/repo/pull/1");
+    try std.testing.expectError(error.InvalidUrl, parseUrl("https://github.com/_alice/repo/pull/1"));
     const key = try parseUrl("https://github.com/Octocat/a-repo_1.git/pull/42");
     try std.testing.expectEqualStrings("Octocat", key.owner);
     try std.testing.expectEqualStrings("a-repo_1.git", key.repo);
