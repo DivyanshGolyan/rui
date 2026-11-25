@@ -480,8 +480,9 @@ fn scanWorker(raw: *anyopaque, task: *Task, prepare_permission: bool) !void {
     };
     const paths = try requests.resolveActivityRoute(job.store, job.session, pageCursor(job, plan));
     const reads = client.SessionReads.bound(requests, &paths, job.session);
-    try scanAt(job, task, reads, plan);
+    // Asked before the page, so a Turn that takes the Message after this answer still finds its row in the page.
     if (job.accepted) |probe| job.result.accepted = try readAccepted(requests, &paths, job.session, probe);
+    try scanAt(job, task, reads, plan);
     if (prepare_permission) if (job.result.work.work.first_action) |action| {
         try job.files.action.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
@@ -492,18 +493,19 @@ fn scanWorker(raw: *anyopaque, task: *Task, prepare_permission: bool) !void {
 
 /// The one Store read that settles a held accepted Message, whether or not its row lies on the loaded
 /// page: the Host's answer for its key, asked of the route the Activity read resolved, and only when
-/// that route is the canonical Store whose receipt took the Message.
+/// that route is the canonical Store whose receipt took the Message. A transport or Host failure is the
+/// read's failure, as for the page; only an answer that is not this Message's leaves it unverified.
 fn readAccepted(requests: client.Requests, paths: *const @import("platform.zig").Paths, session: []const u8, probe: Submission.Probe) !Submission.Verdict {
-    if (!paths.store_identity.eql(probe.store.slice())) return .unverified;
+    if (!paths.store_identity.eql(probe.store.slice())) return .elsewhere;
     const address = protocol_reply.MessageAddress.init(probe.store.slice(), session, &probe.key) catch return .unverified;
-    var buffer: client.ObservationBuffer = .{};
-    const reply = requests.observeCommandAt(paths, address.key.slice(), null, &buffer, null) catch |err| {
-        if (@as(anyerror, err) == error.Cancelled) return err;
-        return .unverified;
+    const reply = requests.observeMessageAt(paths, &address) catch |err| switch (@as(anyerror, err)) {
+        error.RequestNotAdmitted, error.RequestBindingMismatch => return .unverified,
+        else => return err,
     };
     return switch (reply) {
-        .observation => |observed| Submission.verdict(observed.facts.forMessage(&address) catch return .unverified),
-        .failure, .not_modified => .unverified,
+        .observation => |observed| Submission.verdict(observed.facts),
+        .failure => |failure| requests.failRead(failure),
+        .not_modified => .unverified,
     };
 }
 
@@ -1292,22 +1294,22 @@ const FakeHost = struct {
     }
 };
 
-test "SUI-163 one observation read settles an accepted Message on the Store that took it" {
+test "SUI-164 one observation read settles an accepted Message on the Store that took it" {
     const key = "01234567-89ab-4cde-8012-0123456789ab";
     const head = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"" ++ key ++ "\",\"delta\":\"full\",\"since\":null,\"observation\":";
     const accepted = "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"state\":\"";
     const input = "\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"admission\":\"23\",\"admitted_at\":\"1762329000\"}";
     const binding = ",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
     const work = ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}";
-    const Case = struct { body: ?[]const u8, store: enum { took, other }, verdict: Submission.Verdict, asked: bool = true };
+    const Case = struct { body: ?[]const u8, store: enum { took, other }, verdict: ?Submission.Verdict, asked: bool = true };
     const cases = [_]Case{
         .{ .body = head ++ accepted ++ "processing" ++ input ++ binding ++ work ++ "}}", .store = .took, .verdict = .taken },
         .{ .body = head ++ accepted ++ "queued" ++ input ++ work ++ "}}", .store = .took, .verdict = .queued },
         .{ .body = head ++ accepted ++ "cancelled" ++ input ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}}}", .store = .took, .verdict = .stopped },
         .{ .body = head ++ "{\"status\":\"absent\"}}", .store = .took, .verdict = .unverified },
         .{ .body = head ++ "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"a1b2c3\",\"state\":\"processing" ++ input ++ binding ++ work ++ "}}", .store = .took, .verdict = .unverified },
-        .{ .body = null, .store = .took, .verdict = .unverified },
-        .{ .body = head ++ accepted ++ "processing" ++ input ++ binding ++ work ++ "}}", .store = .other, .verdict = .unverified, .asked = false },
+        .{ .body = null, .store = .took, .verdict = null },
+        .{ .body = head ++ accepted ++ "processing" ++ input ++ binding ++ work ++ "}}", .store = .other, .verdict = .elsewhere, .asked = false },
     };
     const Action = struct {
         case: Case,
@@ -1316,7 +1318,9 @@ test "SUI-163 one observation read settles an accepted Message on the Store that
             const paths = try client.resolveClientPaths(io, root);
             var probe: Submission.Probe = .{ .store = paths.store_identity, .key = key.* };
             if (action.case.store == .other) try probe.store.set("/another-store");
-            try std.testing.expectEqual(action.case.verdict, try readAccepted(.{ .io = io }, &paths, "k7m2qx", probe));
+            const settled = readAccepted(.{ .io = io }, &paths, "k7m2qx", probe);
+            // No answer is the read's failure, as for the page; it never reads as a verdict.
+            if (action.case.verdict) |verdict| try std.testing.expectEqual(verdict, try settled) else try std.testing.expect(std.meta.isError(settled));
             try std.testing.expectEqual(@as(usize, @intFromBool(action.case.asked)), host.observed);
             try std.testing.expectEqual(@as(usize, 0), host.pages + host.others);
         }

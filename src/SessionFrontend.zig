@@ -2634,10 +2634,11 @@ fn refreshAcceptedMessage(self: *Self) void {
 fn settleAccepted(self: *Self, key: [36]u8, verdict: Submission.Verdict) void {
     if (!self.submission.settleAccepted(key, verdict)) return;
     switch (verdict) {
-        .taken => self.notice = "Message sent earlier in the conversation · Enter sends this draft",
+        .taken => self.notice = "Message sent earlier in the conversation",
         .queued => self.notice = "Message accepted and still queued",
         .stopped => self.shown_notice.show("! Stopped before it ran · send it again to run it", self.nowMs()),
         .unverified => self.notice = "Message accepted; could not confirm it yet · Enter asks again",
+        .elsewhere => self.notice = "Message accepted on another Store; reopen that Store to settle it",
     }
     self.dirty = true;
 }
@@ -6953,7 +6954,7 @@ test "App Session accepted message refresh keeps the next draft intact without p
     try std.testing.expect(ChromeFixture.find(&shown, "◌ accepted original") != null);
 }
 
-test "SUI-163 a refresh asks the Host about a held accepted Message and settles it on the answer" {
+test "SUI-165 a refresh asks the Host about a held accepted Message and settles it on the answer" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -6975,12 +6976,22 @@ test "SUI-163 a refresh asks the Host about a held accepted Message and settles 
         self.settleAccepted(key, verdict);
         const released = verdict == .taken or verdict == .stopped;
         try std.testing.expectEqual(!released, self.submission.messageHeld());
-        try std.testing.expect(self.notice != null or verdict == .stopped);
+        const said: []const u8 = switch (verdict) {
+            .taken => "Message sent earlier in the conversation",
+            .queued => "Message accepted and still queued",
+            .unverified => "Message accepted; could not confirm it yet · Enter asks again",
+            .elsewhere => "Message accepted on another Store; reopen that Store to settle it",
+            .stopped => "! Stopped before it ran · send it again to run it",
+        };
+        if (verdict == .stopped) {
+            try std.testing.expectEqualStrings(said, self.shown_notice.bytes[0..self.shown_notice.len]);
+            self.shown_notice.len = 0;
+        } else try std.testing.expectEqualStrings(said, self.notice.?);
         try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
         // A page that already accounted for the Message leaves nothing for the answer to say.
         self.notice = null;
         self.settleAccepted(key, verdict);
-        try std.testing.expect(released == (self.notice == null));
+        try std.testing.expectEqual(released, self.notice == null and self.shown_notice.len == 0);
         self.input.clear();
     }
 }

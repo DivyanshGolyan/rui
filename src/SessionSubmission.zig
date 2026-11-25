@@ -362,8 +362,10 @@ pub const Verdict = enum {
     queued,
     /// Cancelled before any Turn took it.
     stopped,
-    /// No answer, a different Store, or an answer that is not this Message's.
+    /// An answer that is not this Message's.
     unverified,
+    /// The selector now names a Store other than the one that took the Message, so no read here can settle it.
+    elsewhere,
 };
 
 /// The route and key of the one read that settles the held accepted Message. The receipt's canonical
@@ -395,7 +397,7 @@ pub fn settleAccepted(self: *Self, key: [36]u8, answer: Verdict) bool {
     switch (answer) {
         .taken => _ = self.observe(.{ .applied = key }),
         .stopped => _ = self.observe(.{ .excluded = key }),
-        .queued, .unverified => {},
+        .queued, .unverified, .elsewhere => {},
     }
     return true;
 }
