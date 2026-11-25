@@ -7101,14 +7101,14 @@ test "SUI-165 a refresh asks the Host about a held accepted Message and settles 
             .stopped => "! Stopped before it ran · send it again to run it",
         };
         if (verdict == .stopped) {
-            try std.testing.expectEqualStrings(said, self.shown_notice.bytes[0..self.shown_notice.len]);
-            self.shown_notice.len = 0;
+            try say_text.expect(said, self.shown_notice.current(self.nowMs()).?);
+            self.shown_notice.dismiss();
         } else try say_text.expect(said, self.notice.?);
         try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
         // A page that already accounted for the Message leaves nothing for the answer to say.
         self.notice = null;
         self.settleAccepted(key, verdict);
-        try std.testing.expectEqual(released, self.notice == null and self.shown_notice.len == 0);
+        try std.testing.expectEqual(released, self.notice == null and self.shown_notice.current(self.nowMs()) == null);
         self.input.clear();
     }
 }
