@@ -561,7 +561,7 @@ test "derived work facts are served across all work replies" {
             try observation_buffer.render(@import("host_reply.zig").renderFullCommandObservation, .{ "facts-message", &observed, @as(?[]const u8, null) });
             const observation = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, observation_buffer.bytes[0..observation_buffer.len], .{});
             defer observation.deinit();
-            inline for (.{ "state", "first_action", "attention", "group", "actions" }) |field| {
+            inline for (.{ "state", "first_action", "actions" }) |field| {
                 try checkField(expected, list_work, field);
                 try checkField(expected, activity.value.object.get("work").?, field);
                 try checkField(expected, observation.value.object.get("observation").?.object.get("work").?, field);

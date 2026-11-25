@@ -2280,14 +2280,14 @@ test "message observation renders Host state binding live work and persistent re
     } } };
     try observation.target.set("s");
     const message = &observation.kind.message.?;
-    try Expect.rendered(&observation, accepted ++ "queued\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"10\"},\"first_action\":null,\"attention\":null,\"group\":\"queued\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}");
+    try Expect.rendered(&observation, accepted ++ "queued\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"10\"},\"first_action\":null,\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}");
     message.work = .{ .state = .{ .approval = .{ .since = 10 } }, .first_action = 7 };
-    try Expect.rendered(&observation, accepted ++ "waiting_for_permission\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"10\"},\"first_action\":\"7\",\"attention\":{\"kind\":\"approval\",\"turn\":\"0\",\"step\":\"7\"},\"group\":\"needs_you\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}");
+    try Expect.rendered(&observation, accepted ++ "waiting_for_permission\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"10\"},\"first_action\":\"7\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}");
     message.queue.?.state = .{ .processing = bound };
     message.work = .{ .state = .{ .working = .{ .since = 10 } } };
     message.recovery.count = 1;
     message.recovery.calls[0] = .{ .action_id = 8, .operation_id = 3, .call = 1, .at = 12 };
-    try Expect.rendered(&observation, accepted ++ "processing\"" ++ input ++ queue ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"10\"},\"first_action\":null,\"attention\":null,\"group\":\"working\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" ++ recovery ++ "}}");
+    try Expect.rendered(&observation, accepted ++ "processing\"" ++ input ++ queue ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"10\"},\"first_action\":null,\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" ++ recovery ++ "}}");
     message.queue.?.state = .{ .completed = .{ .binding = bound, .answer = .{ .length = 6, .digest = @splat(0xff) } } };
     try Expect.rendered(&observation, accepted ++ "completed\"" ++ input ++ queue ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"6\",\"sha256\":\"" ++ full_digest ++ "\"}}" ++ recovery ++ "}}");
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
@@ -2417,7 +2417,7 @@ test "Message observation work and recovery fit their exchange-owned response bo
         } },
         .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
         .admitted_at = max,
-        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max, .served_attention = .{ .kind = .approval, .turn = max, .step = max }, .served_group = .needs_you, .actions = .{ .stop = false, .interrupt = .{ .turn = max, .operation = max }, .decide = max } },
+        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max, .actions = .{ .stop = false, .interrupt = .{ .turn = max, .operation = max }, .decide = max } },
     } } };
     try observation.target.set(&escaped_session);
     observation.kind.message.?.recovery.count = protocol.message_recovery_limit;
@@ -4845,7 +4845,7 @@ const ReplyDomainWitness = struct {
         if (observed != .object) return false;
         const work = observed.object.get("work") orelse return false;
         if (work != .object) return false;
-        return !work.object.contains("attention") or !work.object.contains("group") or !work.object.contains("actions");
+        return !work.object.contains("actions");
     }
 
     noinline fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool, legacy_work: ?[]const bool) !void {
@@ -5008,14 +5008,10 @@ test "reply decoder frozen field domain from 5472ccf5" {
 }
 
 test "reply decoder requires the served work fields and closed enums" {
-    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"state\":\"queued\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"admission\":\"1\",\"admitted_at\":\"2\"},\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"2\"},\"first_action\":null,\"attention\":null,\"group\":\"queued\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}";
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"state\":\"queued\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"admission\":\"1\",\"admitted_at\":\"2\"},\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"2\"},\"first_action\":null,\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}";
     try std.testing.expectEqual(@as(u8, 'a'), ReplyDomainWitness.observation(body));
     const edits = [_]struct { before: []const u8, after: []const u8 }{
-        .{ .before = "\"attention\":null,", .after = "" },
-        .{ .before = "\"group\":\"queued\",", .after = "" },
         .{ .before = ",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}", .after = "" },
-        .{ .before = "\"group\":\"queued\"", .after = "\"group\":\"invented\"" },
-        .{ .before = "\"attention\":null", .after = "\"attention\":{\"kind\":\"invented\",\"turn\":\"1\",\"step\":\"2\"}" },
         .{ .before = "\"stop\":false,", .after = "" },
         .{ .before = "\"interrupt\":null,", .after = "" },
         .{ .before = ",\"decide\":null", .after = "" },

@@ -102,7 +102,7 @@ def main():
             assert int(row["created_at"]) > 0 and row["label"] is None and row["revision"] == "1" and row["end"] == "0", row
             assert row["first_message"] is None and row["peers"] == {"from_person_at": None}, row
             assert row["work"] == {"state": {"kind": "idle", "since": row["created_at"]}, "turn": None, "operation": None,
-                "first_action": None, "attention": None, "group": "done",
+                "first_action": None,
                 "actions": {"stop": False, "interrupt": None, "decide": None}}, row
             assert [item["reference"] for item in listing(str(other))[1]["sessions"]] == [names[3]]
             assert listing(str(root) + "-alias")[1]["sessions"] == []
@@ -155,7 +155,7 @@ def main():
             read_version_bytes = sum(len(', "read_version": ' + json.dumps(row["read_version"]))
                                      for row in after_growth[1]["sessions"])
             derived_work_bytes = sum(len(', ' + json.dumps(name) + ': ' + json.dumps(row["work"][name]))
-                                     for row in after_growth[1]["sessions"] for name in ("attention", "group", "actions"))
+                                     for row in after_growth[1]["sessions"] for name in ("actions",))
             rollup_names = ("state_change_at", "subtree_state_change_at", "descendant_count", "descendant_needs_you_count")
             for row in after_growth[1]["sessions"]:
                 assert all(isinstance(row[name], str) and row[name].isdecimal() for name in rollup_names), row

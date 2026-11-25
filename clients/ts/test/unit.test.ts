@@ -499,7 +499,7 @@ test("environment entries the Host would refuse are left out, never split", () =
 
 function pageOf(rows: number): Buffer {
 	const items = Array.from({ length: rows }, (_, index) => ({ position: String(index + 1), ordinal: "0", at: "t", value: { stop: {} } }));
-	return Buffer.from(JSON.stringify({ work: { attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items, more: false, end: String(rows) }));
+	return Buffer.from(JSON.stringify({ work: { actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items, more: false, end: String(rows) }));
 }
 
 test("an aborted feed stops between the entries of one page", async () => {
@@ -528,7 +528,7 @@ test("the feed asks for every kind by default and keeps approval requests when a
 	const link: Link = {
 		exchange: async (_path, body) => {
 			bodies.push(body("store"));
-			return Buffer.from(JSON.stringify({ work: { attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: [row], more: false, end: "1" }));
+			return Buffer.from(JSON.stringify({ work: { actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: [row], more: false, end: "1" }));
 		},
 	};
 	assert.equal((await listActivity(link, "s").next()).value?.kind, "approval_requested");
@@ -594,7 +594,7 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 	const controller = new AbortController();
 	const line = scriptedLink(async (_path, build) => {
 		bodies.push(build("/s"));
-		return Buffer.from(JSON.stringify({ delta: "full", since: null, items: [], more: false, end: "9", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } }));
+		return Buffer.from(JSON.stringify({ delta: "full", since: null, items: [], more: false, end: "9", queued: { count: "0" }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } }));
 	});
 	const feed = listActivity(line.link, "k7m2qx", { follow: true, kinds: ["received"], signal: controller.signal });
 	const ended = feed.next();
@@ -668,12 +668,12 @@ test("session summaries preserve independent creator and parent references and n
 	for (const parent of [null, "p33rs1"]) for (const creator of [null, "cr3at0"]) {
 		const link: Link = {
 			exchange: async () => Buffer.from(JSON.stringify({
-				sessions: [{ reference: "k7m2qx", label: "child", work: { state: { kind: "pending" }, attention: null, group: "queued", actions: { stop: true, interrupt: null, decide: null } }, archive_state: "archiving", parent, creator, state_change_at: "9007199254740993", subtree_state_change_at: "9007199254740994", descendant_count: "9007199254740995", descendant_needs_you_count: "9007199254740994" }],
+				sessions: [{ reference: "k7m2qx", label: "child", work: { state: { kind: "pending" }, actions: { stop: true, interrupt: null, decide: null } }, archive_state: "archiving", parent, creator, state_change_at: "9007199254740993", subtree_state_change_at: "9007199254740994", descendant_count: "9007199254740995", descendant_needs_you_count: "9007199254740994" }],
 				next: null,
 			})),
 		};
 		assert.deepEqual(await new Sessions(link).list(), [
-			{ id: "k7m2qx", label: "child", state: "pending", attention: null, group: "queued", canStop: true, decide: null, interruptTarget: null, archiveState: "archiving", parent, creator, stateChangeAt: "9007199254740993", subtreeStateChangeAt: "9007199254740994", descendantCount: "9007199254740995", descendantNeedsYouCount: "9007199254740994" },
+			{ id: "k7m2qx", label: "child", state: "pending", canStop: true, decide: null, interruptTarget: null, archiveState: "archiving", parent, creator, stateChangeAt: "9007199254740993", subtreeStateChangeAt: "9007199254740994", descendantCount: "9007199254740995", descendantNeedsYouCount: "9007199254740994" },
 		]);
 	}
 });
@@ -684,7 +684,7 @@ test("approval and ending feed entries expose the child sessionId", async () => 
 		{ approval_requested: { session: "ch1ld1", action: "7", operation: "2", call_ordinal: "0" } },
 		{ turn_ended: { session: "ch1ld1", turn: "3", operation: "2", ending: "stopped", code: "cancelled", content: null } },
 	]) {
-		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ work: { attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: [{ position: "1", ordinal: "0", at: "1", value }], more: false, end: "1" })) };
+		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ work: { actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: [{ position: "1", ordinal: "0", at: "1", value }], more: false, end: "1" })) };
 		const entry = (await listActivity(link, "p4rent").next()).value;
 		assert.ok(entry && (entry.kind === "approval_requested" || entry.kind === "turn_ended"));
 		const sessionId: string = entry.sessionId;

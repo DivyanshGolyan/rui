@@ -65,21 +65,15 @@ type CommandObservation = Extract<components["schemas"]["ObserveCommandReply"], 
 type PendingMessageWork = Extract<CommandObservation, { kind: "message"; work: unknown }>["work"];
 
 function messageWorkTypeContract(work: PendingMessageWork): void {
-	const { attention: _attention, ...withoutAttention } = work;
-	const { group: _group, ...withoutGroup } = work;
 	const { actions: _actions, ...withoutActions } = work;
-	// @ts-expect-error Message work always carries the Host's attention, even when null.
-	const missingAttention: PendingMessageWork = withoutAttention;
-	// @ts-expect-error Message work always carries the Host's group.
-	const missingGroup: PendingMessageWork = withoutGroup;
 	// @ts-expect-error Message work always carries the Host's valid actions.
 	const missingActions: PendingMessageWork = withoutActions;
-	void [missingAttention, missingGroup, missingActions];
+	void missingActions;
 }
 void messageWorkTypeContract;
 
 const idleWork: CurrentReport["work"] = {
-	state: { kind: "idle", since: "9007199254740993" }, turn: null, operation: null, first_action: null, attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null }, latest_outcome: null,
+	state: { kind: "idle", since: "9007199254740993" }, turn: null, operation: null, first_action: null, actions: { stop: false, interrupt: null, decide: null }, latest_outcome: null,
 };
 
 test("status requests the Current profile and maps reported facts and parent losslessly", async () => {
@@ -95,20 +89,20 @@ test("status requests the Current profile and maps reported facts and parent los
 			},
 		};
 		assert.deepEqual(await new Session(link, 'session"\n').status(), {
-			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, attention: null, group: "done", canStop: false, decide: null, interruptTarget: null, pendingMessages: "9007199254740993",
+			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, canStop: false, decide: null, interruptTarget: null, pendingMessages: "9007199254740993",
 			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], loadedTools: ["bash"], appTools: [], permissionMode: "ask", latestOutcome,
 		});
 	}
 });
 
 async function servedCase0() {
-	const facts = { attention: { kind: "approval", turn: "7", step: "9" }, group: "needs_you", actions: { stop: true, interrupt: { turn: "7", operation: "8" }, decide: null } } as const;
+	const facts = { actions: { stop: true, interrupt: { turn: "7", operation: "8" }, decide: null } } as const;
 	const link: Link = { async exchange(path) {
 		return Buffer.from(JSON.stringify(path === "/v1/inspect-session"
 			? report({ ...idleWork, ...facts })
 			: { sessions: [{ reference: "abc123", label: null, state: "idle", archive_state: "active", parent: null, creator: null, work: { ...idleWork, ...facts } }], next: null }));
 	} };
-	const expected = { attention: facts.attention, group: facts.group, canStop: true, decide: null, interruptTarget: facts.actions.interrupt };
+	const expected = { canStop: true, decide: null, interruptTarget: facts.actions.interrupt };
 	const status = await new Session(link, "abc123").status();
 	const [row] = await new Sessions(link).list();
 	for (const result of [status, row]) {
@@ -118,7 +112,7 @@ async function servedCase0() {
 }
 
 async function servedCase1() {
-	for (const missing of ["attention", "group", "actions"] as const) {
+	for (const missing of ["actions"] as const) {
 		const work: Record<string, unknown> = { ...idleWork };
 		delete work[missing];
 		const link: Link = { async exchange(path) { return Buffer.from(JSON.stringify(path === "/v1/inspect-session"
@@ -474,7 +468,7 @@ test("stop Action preserves the existing Resolution position", async () => {
 });
 
 async function servedCase2() {
-	for (const missing of ["attention", "group", "actions"] as const) {
+	for (const missing of ["actions"] as const) {
 		const work: Record<string, unknown> = { ...idleWork };
 		delete work[missing];
 		const session = new Session({ async exchange() {

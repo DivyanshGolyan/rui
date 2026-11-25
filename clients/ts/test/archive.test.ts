@@ -50,12 +50,12 @@ test("session lists keep archive visibility across pages and expose independent 
 			assert.equal(path, "/v1/list-sessions");
 			requests.push(JSON.parse(build("/store")));
 			return Buffer.from(JSON.stringify({
-				sessions: [{ reference: requests.length === 1 ? "k7m2qx" : "09azvw", label: null, parent: null, creator: null, work: { state: { kind: "idle" }, attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null } }, archive_state: "archived", state_change_at: "1", subtree_state_change_at: "1", descendant_count: "0", descendant_needs_you_count: "0" }],
+				sessions: [{ reference: requests.length === 1 ? "k7m2qx" : "09azvw", label: null, parent: null, creator: null, work: { state: { kind: "idle" }, actions: { stop: false, interrupt: null, decide: null } }, archive_state: "archived", state_change_at: "1", subtree_state_change_at: "1", descendant_count: "0", descendant_needs_you_count: "0" }],
 				next: requests.length === 1 ? { after: "8", ceiling: "23" } : null,
 			}));
 		} });
 		const options: ListSessionsOptions | undefined = archive === undefined ? undefined : { archive };
-		assert.deepEqual(await sessions.list(options), ["09azvw", "k7m2qx"].map((id) => ({ id, label: null, parent: null, creator: null, state: "idle", attention: null, group: "done", canStop: false, decide: null, interruptTarget: null, archiveState: "archived", stateChangeAt: "1", subtreeStateChangeAt: "1", descendantCount: "0", descendantNeedsYouCount: "0" })));
+		assert.deepEqual(await sessions.list(options), ["09azvw", "k7m2qx"].map((id) => ({ id, label: null, parent: null, creator: null, state: "idle", canStop: false, decide: null, interruptTarget: null, archiveState: "archived", stateChangeAt: "1", subtreeStateChangeAt: "1", descendantCount: "0", descendantNeedsYouCount: "0" })));
 		assert.deepEqual(requests.map(({ archive, workspace, after, ceiling }) => ({ archive, workspace, after, ceiling })), [
 			{ archive: archive ?? "active", workspace: null, after: "0", ceiling: "0" },
 			{ archive: archive ?? "active", workspace: null, after: "8", ceiling: "23" },
@@ -74,7 +74,7 @@ test("archival reaches an idle watcher only through the Host's nudge, and submit
 		}
 		assert.equal(path, "/v1/activity-page");
 		pageReads++;
-		return Buffer.from(JSON.stringify({ delta: "full", since: "token", end: "0", items: [], more: false, queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle" } } }));
+		return Buffer.from(JSON.stringify({ delta: "full", since: "token", end: "0", items: [], more: false, queued: { count: "0" }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle" } } }));
 	});
 	const session = new Session(line.link, "k7m2qx");
 	const followed = session.watch({ signal: controller.signal }).next();
