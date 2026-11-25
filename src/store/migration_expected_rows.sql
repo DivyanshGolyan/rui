@@ -42,9 +42,9 @@ INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider
 ('brhkcj',1,'fixture-ask-config','/home/user/rui-pr6d','codex','openai-responses/1','model-a',1,1,2,0,NULL,NULL,NULL,NULL,NULL),
 ('d8mv7p',1,'fixture-answer-config','/home/user/rui-pr6d','codex','openai-responses/1','model-a',1,1,4,1,NULL,NULL,NULL,NULL,NULL),
 ('rhvzwc',1,'fixture-stop-config','/home/user/rui-pr6d','codex','openai-responses/1','model-a',1,1,4,1,NULL,NULL,NULL,NULL,NULL);
-INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_kind) VALUES
-(1,'d8mv7p','fixture-answer-key',2,1,1,1793781720,NULL,NULL,1),
-(2,'brhkcj','fixture-ask-message',6,1,2,1793781720,NULL,NULL,1);
+INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,source_kind) VALUES
+(1,'d8mv7p','fixture-answer-key',2,1,1,1793781720,NULL,1),
+(2,'brhkcj','fixture-ask-message',6,1,2,1793781720,NULL,1);
 INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id,outcome_position,outcome_at,continuation_operation_id) VALUES
 (1,'d8mv7p',1,1,1,'completed',5,5,1793781720,NULL),
 (2,'brhkcj',2,2,2,NULL,NULL,NULL,NULL,NULL);
@@ -59,7 +59,7 @@ INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_
 ('brhkcj',1,2,1,2,2,1,NULL,NULL,NULL,6,1793781720),
 ('d8mv7p',1,2,1,1,1,1,NULL,NULL,NULL,2,1793781720),
 ('d8mv7p',2,4,3,1,NULL,NULL,NULL,1,0,5,1793781720);
-INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) VALUES
+INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,hosted_action,call_failed) VALUES
 (1,0,'d8mv7p',4,2,5,1,X'39dbe3cba52908fdb3610df812d007a7fc134eea8803b34a97e9aa229d815fae',0,0,4,1,NULL,0),
 (2,0,'brhkcj',4,3,NULL,1,X'0fdadc71d7984bbccd4a62ba37f7193aa30afb66119760165a70058d4aea629d',0,0,7,0,NULL,0),
 (2,1,'brhkcj',5,3,NULL,1,X'f9102a092552727d93c8e12e9a1a876ff1935a88476f27d45f0af576e99c4ce5',0,0,8,0,NULL,0);

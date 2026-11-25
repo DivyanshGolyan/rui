@@ -16,6 +16,8 @@ const content_string = @import("../../content_string.zig");
 const action_domain = @import("action.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const saved_label = @import("../../saved_label.zig");
+const tool_line = @import("../../tool_line.zig");
+const hosted_action = @import("../../hosted_action.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const provider_name = @import("../../provider_name.zig");
@@ -127,6 +129,7 @@ pub const read_failures = .{
     .{ activity_entry, error.ActivityReadFailed },
     .{ public_tool_result, error.PublicContentReadFailed },
     .{ hosted_call, error.ActivityReadFailed },
+    .{ hosted_targets, error.ActivityReadFailed },
     .{ activity_item, error.ActivityReadFailed },
     .{ answer_entry, error.ActivityReadFailed },
     .{ approval_request, error.ActivityReadFailed },
@@ -881,7 +884,7 @@ const PresentationRead = struct {
     }
 };
 
-/// The one place a saved description, a derived code and an authorization become a presentation.
+/// The one place a call line, a derived code and an authorization become a presentation.
 /// A resolved call that recorded an outcome line shows it, finished as that outcome chose; every other row shows its call line, plain, as `done`.
 pub fn presentationOf(
     description: ?Bounded(tool_presentation.max_description_bytes),
@@ -896,30 +899,89 @@ pub fn presentationOf(
     return tool_presentation.ToolPresentation.of(line, derived, .done, publication_position);
 }
 
+/// A hosted call's row: the action it took, how many targets the Store holds, and the leading bytes of the first target and of
+/// the pattern, from which its line is derived here and never stored. Both prefixes are public inline text or the row is corrupt.
 const hosted_call = rsql.Read(.{
-    .sql = "SELECT item.description,item.call_failed,op.resolved_at," ++
+    .sql = "SELECT item.hosted_action,item.call_failed,item.hosted_pattern_content_id AS pattern_content_id,op.resolved_at," ++
         "op.session_ref=item.session_ref AND op.attempt_ordinal=item.attempt_ordinal AND op.purpose=0 AND " ++
         store_schema.oneOf("op.resolution_code", &accepted_resolutions) ++
-        " AS consistent FROM model_output_item item @index(model_output_hosted_history) LEFT JOIN model_operation op ON op.operation_id=item.operation_id " ++
+        " AND (first_target.content_id IS NULL OR (first_content.private=0 AND first_content.form=0)) AND (item.hosted_pattern_content_id IS NULL OR (pattern.private=0 AND pattern.form=0))" ++
+        " AS consistent,(SELECT count(*) FROM hosted_target total WHERE total.operation_id=item.operation_id AND total.item_ordinal=item.item_ordinal) AS targets_total," ++
+        "CASE WHEN first_content.private=0 AND first_content.form=0 THEN substr(@payload(first_content),1,400) END AS target_prefix," ++
+        "CASE WHEN pattern.private=0 AND pattern.form=0 THEN substr(@payload(pattern),1,400) END AS pattern_prefix," ++
+        "pattern.byte_length AS pattern_length,pattern.digest AS pattern_digest " ++
+        "FROM model_output_item item @index(model_output_hosted_history) LEFT JOIN model_operation op ON op.operation_id=item.operation_id " ++
+        "LEFT JOIN hosted_target first_target ON first_target.operation_id=item.operation_id AND first_target.item_ordinal=item.item_ordinal AND first_target.target_ordinal=0 " ++
+        "LEFT JOIN content first_content ON first_content.content_id=first_target.content_id " ++
+        "LEFT JOIN content pattern ON pattern.content_id=item.hosted_pattern_content_id " ++
         "WHERE item.session_ref=?1 AND item.session_position=?2 AND item.item_kind=5",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {
-        description: Bounded(tool_presentation.max_description_bytes),
+        hosted_action: u8,
         call_failed: bool,
+        pattern_content_id: ?rsql.Positive,
         resolved_at: ?rsql.Positive,
         consistent: bool,
+        targets_total: u64,
+        target_prefix: ?rsql.Blob(tool_line.WebSearchCall.excerpt_bytes),
+        pattern_prefix: ?rsql.Blob(tool_line.WebSearchCall.excerpt_bytes),
+        pattern_length: ?u64,
+        pattern_digest: ?[32]u8,
     },
     .cardinality = .each,
 });
 
+/// The first served targets of a hosted call, each as the reference to its exact public text and the content that holds it.
+const hosted_targets = rsql.Read(.{
+    .sql = "SELECT target.target_ordinal AS ordinal,target.content_id,content.byte_length AS length,content.digest,content.private=0 AND content.form=0 AS inline_public " ++
+        "FROM model_output_item item @index(model_output_hosted_history) JOIN hosted_target target ON target.operation_id=item.operation_id AND target.item_ordinal=item.item_ordinal " ++
+        "JOIN content ON content.content_id=target.content_id " ++
+        "WHERE item.session_ref=?1 AND item.session_position=?2 AND item.item_kind=5 AND target.target_ordinal<" ++ std.fmt.comptimePrint("{d}", .{activity_facts.Item.HostedAction.Targets.max_served}) ++ " " ++
+        "ORDER BY target.target_ordinal",
+    .Args = struct { session: []const u8, position: u64 },
+    .Row = struct { ordinal: u64, content_id: rsql.Positive, length: u64, digest: [32]u8, inline_public: bool },
+    .cardinality = .each,
+});
+
+/// A hosted call row. The conversation page reads only the presentation; an Activity row also reads the action's facts into `action`.
 const HostedRead = struct {
     position: u64,
     presentation: *tool_presentation.ToolPresentation,
+    action: ?*activity_facts.Item.HostedAction = null,
     at: u64 = 0,
     count: RowCount = .{},
+    served: ServedTargets = .{},
+    /// The content of each served target and of the pattern, for the `activity-content` field that names one.
+    target_ids: [activity_facts.Item.HostedAction.Targets.max_served]u64 = undefined,
+    pattern_id: ?u64 = null,
+
+    const ServedTargets = struct {
+        out: ?*activity_facts.Item.HostedAction.Targets = null,
+        ids: ?*[activity_facts.Item.HostedAction.Targets.max_served]u64 = null,
+        failure: ?error{CorruptStore} = null,
+
+        pub fn visit(read: *ServedTargets, row: *const hosted_targets.Row) bool {
+            const out = read.out orelse return false;
+            if (row.ordinal != out.len or !row.inline_public) {
+                read.failure = error.CorruptStore;
+                return false;
+            }
+            read.ids.?[out.len] = row.content_id.get();
+            out.append(.{ .length = row.length, .digest = row.digest }) catch {
+                read.failure = error.CorruptStore;
+                return false;
+            };
+            return true;
+        }
+    };
 
     fn queue(read: *HostedRead, a: *ReadAccess, session: []const u8) void {
         readRow(a, hosted_call, .{ .session = session, .position = read.position }, read);
+        if (read.action) |action| {
+            action.targets = .{};
+            read.served = .{ .out = &action.targets, .ids = &read.target_ids };
+            a.readEach(hosted_targets, .{ .session = session, .position = read.position }, activity_facts.Item.HostedAction.Targets.max_served, &read.served);
+        }
     }
 
     pub fn visit(read: *HostedRead, row: *const hosted_call.Row) bool {
@@ -928,12 +990,36 @@ const HostedRead = struct {
 
     fn keep(read: *HostedRead, row: *const hosted_call.Row) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
-        read.presentation.* = try presentationOf(row.description, .{}, if (row.call_failed) .failed else .succeeded, null, read.position);
+        const kind = std.enums.fromInt(hosted_action.HostedAction, row.hosted_action) orelse return error.CorruptStore;
+        // An action of none names nothing, so a row that holds targets under it was not written by a settlement.
+        if (kind == .none and (row.targets_total != 0 or row.pattern_content_id != null)) return error.CorruptStore;
+        // A settlement keeps at most `max_targets`, so a count past it was written by something else.
+        if (row.targets_total > hosted_action.max_targets) return error.CorruptStore;
+        const target: []const u8 = if (row.target_prefix) |*prefix| prefix.slice() else "";
+        const pattern: []const u8 = if (row.pattern_prefix) |*prefix| prefix.slice() else "";
+        read.presentation.* = try presentationOf(tool_line.ofHosted(kind, target, pattern), .{}, if (row.call_failed) .failed else .succeeded, null, read.position);
         read.at = (row.resolved_at orelse return error.CorruptStore).get();
+        const action = read.action orelse return;
+        action.kind = kind;
+        action.targets_total = row.targets_total;
+        action.pattern = if (row.pattern_length) |length| .{ .length = length, .digest = row.pattern_digest orelse return error.CorruptStore } else null;
+        read.pattern_id = if (row.pattern_content_id) |id| id.get() else null;
     }
 
     fn found(read: *const HostedRead) !void {
         if (!try read.count.found()) return error.ContentNotFound;
+        if (read.served.failure) |err| return err;
+        const action = read.action orelse return;
+        if (action.targets.len != @min(action.targets_total, activity_facts.Item.HostedAction.Targets.max_served)) return error.CorruptStore;
+    }
+
+    /// The content that holds the row's `field`th exact string, counted over the targets served and then the pattern (`Item.body`).
+    fn content(read: *const HostedRead, field: u8) ?struct { id: u64, reference: content_value.Reference } {
+        const action = read.action orelse return null;
+        const served = action.targets.served();
+        if (field < served.len) return .{ .id = read.target_ids[field], .reference = served[field] };
+        if (field == served.len) if (action.pattern) |pattern| return .{ .id = read.pattern_id.?, .reference = pattern };
+        return null;
     }
 };
 
@@ -1178,7 +1264,7 @@ fn searchContent(a: *ReadAccess, scratch: *SearchScratch, location: ContentLocat
 
 const ActivityPageRow = struct { position: rsql.Positive, ordinal: u64 };
 
-const ItemAt = struct { position: u64, ordinal: u64 };
+const ItemAt = struct { position: u64, ordinal: u64, field: u8 = 0 };
 
 const call_candidates_sql = "ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL AND background_position IS NULL " ++
     "UNION SELECT operation_id FROM model_tool_call @index(model_tool_call_acceptance) WHERE session_ref=?1 AND acceptance_position>=?2 " ++
@@ -1556,6 +1642,8 @@ const ItemRead = struct {
     round: u8 = 0,
     done: bool = false,
     kind: u8 = 0,
+    /// Which of a hosted row's exact strings `activity-content` opens (`Item.body` order); other rows have one text.
+    field: u8 = 0,
     state: union {
         first: struct { missing: missing_assistant_entry.Result, row: activity_item.Result },
         message: struct { read: MessageRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined, entry: PublicContentRead },
@@ -1717,11 +1805,14 @@ const ItemRead = struct {
                 }
                 if (!call.found.get()) return error.CorruptStore;
                 try checkCallDetails(&call.resolved, &item.value.call);
+                if (call.resolved.description.*) |*text| text.* = saved_label.callWords(text.slice());
                 item.at = call.resolved.resolved_at.get();
             },
             10 => {
-                try read.state.hosted.found();
-                item.at = read.state.hosted.at;
+                const hosted = &read.state.hosted;
+                try hosted.found();
+                item.at = hosted.at;
+                if (hosted.content(read.field)) |found| read.exposes(found.id, .{ .text = found.reference });
             },
             6 => {
                 const outcome = &read.state.outcome;
@@ -1760,6 +1851,7 @@ const ItemRead = struct {
                 }
                 if (!approval.found.get()) return error.CorruptStore;
                 try checkCallDetails(&approval.details, &approval.metadata);
+                if (approval.details.description.*) |*text| text.* = saved_label.callWords(text.slice());
             },
             13 => {
                 const change = &read.state.change;
@@ -1807,8 +1899,8 @@ const ItemRead = struct {
                 read.state = .{ .call = .{ .proposal = .{ .position = read.position, .metadata = &item.value.call } } };
             },
             10 => {
-                item.value = .{ .hosted_call = undefined };
-                read.state = .{ .hosted = .{ .position = read.position, .presentation = &item.value.hosted_call } };
+                item.value = .{ .hosted_call = .{ .presentation = undefined, .action = .{ .kind = .none } } };
+                read.state = .{ .hosted = .{ .position = read.position, .presentation = &item.value.hosted_call.presentation, .action = &item.value.hosted_call.action } };
             },
             6 => {
                 item.value = .{ .turn_ended = undefined };
@@ -1860,7 +1952,7 @@ const ActivityItemReads = struct {
 noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, end: u64, at: []const ItemAt, items: []activity_facts.Item, calls: ?*CallRows, located: ?*?Located) !void {
     std.debug.assert(at.len <= max and max <= activity_read.ActivityPage.items);
     const reads = &a.store.reportScratch(ActivityItemReads).items;
-    for (at, items, reads[0..at.len]) |place, *item, *read| read.* = .{ .position = place.position, .ordinal = place.ordinal, .item = item };
+    for (at, items, reads[0..at.len]) |place, *item, *read| read.* = .{ .position = place.position, .ordinal = place.ordinal, .field = place.field, .item = item };
     var round: u8 = 0;
     while (true) : (round += 1) {
         var busy = round == 0;
@@ -1887,10 +1979,12 @@ pub fn openActivityContent(a: *ReadAccess, request: *const activity_read.ReadAct
     if (guard != null) return store_core.fence(a.store, error.CorruptStore);
     var item: activity_facts.Item = undefined;
     var located: ?Located = null;
-    readItems(1, a, request.session.slice(), std.math.maxInt(i64), &.{.{ .position = request.position, .ordinal = request.ordinal }}, (&item)[0..1], null, &located) catch |err| switch (err) {
+    readItems(1, a, request.session.slice(), std.math.maxInt(i64), &.{.{ .position = request.position, .ordinal = request.ordinal, .field = request.field }}, (&item)[0..1], null, &located) catch |err| switch (err) {
         error.ContentNotFound => return err,
         else => return store_core.fence(a.store, err),
     };
+    // Only a hosted row holds more than one exact text, so a field other than the first names nothing on any other row.
+    if (request.field != 0 and item.value != .hosted_call) return error.ContentNotFound;
     const content = located orelse return error.ContentNotFound;
     return .{ .store = a.store, .content_id = content.id, .reference = switch (content.value) {
         .text => |reference| reference,

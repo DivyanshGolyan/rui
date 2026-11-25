@@ -306,7 +306,7 @@ noinline fn outlineHeader(store: *storage.Store, arena: std.mem.Allocator, sessi
                 note = try arena.dupe(u8, description.slice());
             };
         },
-        .hosted_call => |*presentation| if (presentation.line) |*line| {
+        .hosted_call => |*hosted| if (hosted.presentation.line) |*line| {
             note = try arena.dupe(u8, (line.description() orelse return error.CorruptStore).slice());
         },
         .assistant, .instruction, .skill, .turn_ended, .stop, .approval_requested, .session_changed, .compacted, .model_call => {},
@@ -347,6 +347,33 @@ fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, it
             var shown = try Shown.open(store, arena, session, item, value);
             total = try shown.length();
             text = try shown.read(arena, offset, window_bytes);
+        },
+        .hosted => |hosted| {
+            // The targets and then the pattern, one per line.
+            const refs = hosted.refs();
+            total = 0;
+            for (refs, 0..) |reference, index| total += reference.length + @intFromBool(index != 0);
+            if (offset > total) return error.InvalidOffset;
+            const bytes = try arena.alloc(u8, @intCast(@min(window_bytes, total - offset)));
+            var filled: usize = 0;
+            var cursor = offset;
+            var origin: u64 = 0;
+            for (refs, 0..) |reference, index| {
+                const end = origin + reference.length;
+                if (cursor < end and filled < bytes.len) {
+                    const piece = try readLocation(arena, try store.openContent(.{ .length = reference.length, .digest = reference.digest }), cursor - origin, bytes.len - filled);
+                    @memcpy(bytes[filled..][0..piece.len], piece);
+                    filled += piece.len;
+                    cursor += piece.len;
+                }
+                if (index + 1 < refs.len and cursor == end and filled < bytes.len) {
+                    bytes[filled] = '\n';
+                    filled += 1;
+                    cursor += 1;
+                }
+                origin = end + 1;
+            }
+            text = bytes;
         },
         .none => {
             if (offset != 0) return error.InvalidOffset;
@@ -785,7 +812,7 @@ test "read_transcript hosted call uses its recorded provider presentation" {
             try storage.testingSubmitMessage(&database, &tmp, "hosted-input", "hosted-input", session.slice(), "search");
             const model = (try database.admitNextModelAttempt(.{})).?.permit.binding;
             try storage.settleAnswerItemsForTesting(&database, &tmp, model, &.{
-                "{\"type\":\"web_search_call\",\"id\":\"hosted\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"recorded provider query\"}}",
+                "{\"type\":\"web_search_call\",\"id\":\"hosted\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"recorded provider query\",\"queries\":[\"recorded provider query\",\"second\\nline\"]}}",
                 "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}",
             }, "answer");
             const page = try arena.create(protocol.ActivityFacts);
@@ -798,7 +825,56 @@ test "read_transcript hosted call uses its recorded provider presentation" {
             const prefix = try std.fmt.allocPrint(arena, "{d}.0 hosted_call at=", .{item.position});
             try std.testing.expect(std.mem.startsWith(u8, output.written(), prefix));
             try std.testing.expect(std.mem.indexOf(u8, output.written(), " code=succeeded ") != null);
+            try std.testing.expect(std.mem.indexOf(u8, output.written(), " action.kind=search action.targets_total=2") != null);
             try std.testing.expect(std.mem.endsWith(u8, output.written(), ": Search “recorded provider query”\n"));
+            // Full text reads every target exactly, one per line, in windows that cut inside a target too.
+            const joined = "recorded provider query\nsecond\nline";
+            for ([_]u64{ 0, 9, 23, 24 }) |offset| {
+                var window: std.Io.Writer.Allocating = .init(std.testing.allocator);
+                defer window.deinit();
+                try full(&database, arena, session.slice(), item, offset, &window.writer);
+                const header = try std.fmt.allocPrint(arena, "Entry {d}.0 hosted_call, bytes {d} to {d} of {d}:\n{s}", .{ item.position, offset, joined.len, joined.len, joined[offset..] });
+                try std.testing.expectEqualStrings(header, window.written());
+            }
+        }
+    }.check);
+}
+
+test "read_transcript reads a hosted call with nothing to open as its outline, not as an empty text" {
+    try storage.testing.forEachEngine(struct {
+        fn check(case: *storage.testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var database: storage.Store = undefined;
+            try storage.testing.testingStore(case, &database, &tmp, std.testing.io);
+            defer database.close() catch unreachable;
+            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer memory.deinit();
+            const arena = memory.allocator();
+            const session = try storage.testing.configureTestSession(&database, "hosted-bare-transcript");
+            try storage.testingSubmitMessage(&database, &tmp, "hosted-bare-input", "hosted-bare-input", session.slice(), "search");
+            const model = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+            // A provider that says nothing of what the search did leaves an action of none: no target, no pattern.
+            try storage.settleAnswerItemsForTesting(&database, &tmp, model, &.{
+                "{\"type\":\"web_search_call\",\"id\":\"bare\",\"status\":\"completed\"}",
+                "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}",
+            }, "answer");
+            const page = try arena.create(protocol.ActivityFacts);
+            try database.activityPage(&.{ .session = session, .kinds = .initOne(.hosted_call) }, page);
+            try std.testing.expectEqual(@as(usize, 1), page.count);
+            const item = &page.items[0];
+            try std.testing.expect(item.value.hosted_call.action.kind == .none);
+            try std.testing.expect(item.body() == .none);
+            var outlined: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer outlined.deinit();
+            try outline(&database, arena, session.slice(), item, &outlined.writer);
+            var opened: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer opened.deinit();
+            try full(&database, arena, session.slice(), item, 0, &opened.writer);
+            try std.testing.expectEqualStrings(outlined.written(), opened.written());
+            var late: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer late.deinit();
+            try std.testing.expectError(error.InvalidOffset, full(&database, arena, session.slice(), item, 1, &late.writer));
         }
     }.check);
 }

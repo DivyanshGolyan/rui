@@ -672,6 +672,7 @@ export interface components {
             session: string;
             position: components["schemas"]["Decimal"];
             ordinal: components["schemas"]["Decimal"];
+            field?: components["schemas"]["Decimal"];
         };
         ActivityItem: {
             position: components["schemas"]["Decimal"];
@@ -756,6 +757,7 @@ export interface components {
             value: {
                 hosted_call: {
                     presentation: components["schemas"]["ToolPresentation"];
+                    action: components["schemas"]["HostedAction"];
                 };
             };
         } | {
@@ -1172,6 +1174,12 @@ export interface components {
             /** @enum {string} */
             route: "unserved" | "endpoint" | "chatgpt_device" | "key_file" | "chatgpt_plan";
         };
+        ContentText: {
+            /** @constant */
+            type: "text";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+        };
         ContentValue: {
             /** @constant */
             type: "text";
@@ -1554,6 +1562,13 @@ export interface components {
             kind: "host_stop";
             store: string;
             drain_seconds: components["schemas"]["Decimal"];
+        };
+        HostedAction: {
+            /** @enum {string} */
+            kind: "none" | "search" | "open_page" | "find_in_page";
+            targets: components["schemas"]["ContentText"][];
+            targets_total: components["schemas"]["Decimal"];
+            pattern: components["schemas"]["ContentText"] | null;
         };
         InputPartSchema: {
             /** @constant */

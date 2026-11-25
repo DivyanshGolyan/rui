@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 95;
+pub const schema_version: u32 = 97;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -75,6 +75,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 93, .digest = 0x0028c239ba46341d },
     .{ .schema_version = 94, .digest = 0x9803d541a1a4945e },
     .{ .schema_version = 95, .digest = 0x09bff41030bad2a0 },
+    .{ .schema_version = 96, .digest = 0x3c118fb5fc591e54 },
+    .{ .schema_version = 97, .digest = 0x3a4f2e911f30dd94 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -1067,6 +1069,64 @@ pub const migrations = [_]Migration{
             "UPDATE action_operation SET outcome_text='Started ',outcome_link_at=8,outcome_link_session=(SELECT c.target FROM core_command c WHERE c.command_key=CONCAT('rui.core/start_agent/',action_operation.action_id)),outcome_completion=1 WHERE resolution_code='succeeded' AND EXISTS(SELECT 1 FROM core_command c WHERE c.command_key=CONCAT('rui.core/start_agent/',action_operation.action_id))",
         },
     },
+    // A hosted web search keeps the facts its provider reported (the action, each target, the pattern) and no sentence: a reader
+    // derives the line when it reads. A search saved before format 96 kept only its sentence, so it reads as an action of none
+    // with no targets, and its line is "Search the web" (Divyansh, 2026-11-25, #2282 open question 4).
+    .{
+        .from = 95,
+        .sqlite = &.{
+            "ALTER TABLE model_output_item RENAME TO model_output_item_before_96",
+            "CREATE TABLE model_output_item(\n operation_id INTEGER NOT NULL REFERENCES model_operation(operation_id),\n item_ordinal INTEGER NOT NULL CHECK(item_ordinal>=0),\n session_ref TEXT NOT NULL,\n session_position INTEGER NOT NULL CHECK(session_position>0),\n item_kind INTEGER NOT NULL CHECK(item_kind BETWEEN 1 AND 5),\n message_content_id INTEGER REFERENCES content(content_id) CHECK((message_content_id IS NOT NULL)=(item_kind=2)),\n attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal>0),\n item_id_digest BLOB NOT NULL CHECK(length(item_id_digest)=32),\n replay_omits_reasoning_text INTEGER NOT NULL CHECK(replay_omits_reasoning_text IN (0,1) AND (replay_omits_reasoning_text=0 OR item_kind=1)),\n phase INTEGER NOT NULL DEFAULT 0 CHECK(phase IN (0,1,2) AND (phase=0 OR item_kind=2)),\n extras_content_id INTEGER NOT NULL REFERENCES content(content_id),\n part_count INTEGER NOT NULL CHECK(part_count>=0 AND (part_count=0 OR item_kind IN (1,2))),\n hosted_action INTEGER CHECK(hosted_action IN (0,1,2,3) AND (hosted_action IS NOT NULL)=(item_kind=5)),\n hosted_pattern_content_id INTEGER REFERENCES content(content_id) CHECK(hosted_pattern_content_id IS NULL OR item_kind=5),\n call_failed INTEGER NOT NULL DEFAULT 0 CHECK(call_failed IN (0,1) AND (call_failed=0 OR item_kind=5)),\n PRIMARY KEY(operation_id,item_ordinal),\n UNIQUE(session_ref,session_position),\n UNIQUE(operation_id,item_id_digest)\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,hosted_action,call_failed) SELECT operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,CASE WHEN item_kind=5 THEN 0 END,call_failed FROM model_output_item_before_96",
+            "DROP TABLE model_output_item_before_96",
+            "CREATE INDEX model_output_history ON model_output_item(session_ref,session_position)",
+            "CREATE INDEX model_output_call_history ON model_output_item(session_ref,session_position) WHERE item_kind=3",
+            "CREATE INDEX model_output_hosted_history ON model_output_item(session_ref,session_position) WHERE item_kind=5",
+            "CREATE INDEX model_output_compaction_history ON model_output_item(session_ref,session_position) WHERE item_kind=4",
+            "CREATE INDEX model_output_compaction_anchor ON model_output_item(operation_id,item_ordinal) WHERE item_kind=4",
+            "CREATE TABLE hosted_target(\n operation_id INTEGER NOT NULL,\n item_ordinal INTEGER NOT NULL,\n target_ordinal INTEGER NOT NULL CHECK(target_ordinal>=0),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n PRIMARY KEY(operation_id,item_ordinal,target_ordinal),\n FOREIGN KEY(operation_id,item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal)\n) STRICT, WITHOUT ROWID",
+        },
+        .mysql = &.{
+            "ALTER TABLE model_output_item ADD COLUMN hosted_action BIGINT AFTER part_count, ADD COLUMN hosted_pattern_content_id BIGINT AFTER hosted_action, ADD FOREIGN KEY(hosted_pattern_content_id) REFERENCES content(content_id)",
+            "UPDATE model_output_item SET hosted_action=0 WHERE item_kind=5",
+            "ALTER TABLE model_output_item ADD CHECK(hosted_action IN (0,1,2,3) AND (hosted_action IS NOT NULL)=(item_kind=5)), ADD CHECK(hosted_pattern_content_id IS NULL OR item_kind=5)",
+            "SET @rui_hosted_ddl=(SELECT CONCAT('ALTER TABLE model_output_item ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') SEPARATOR ', '),', DROP COLUMN description') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='model_output_item' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('description',cc.CHECK_CLAUSE)>0)",
+            "PREPARE rui_hosted FROM @rui_hosted_ddl",
+            "EXECUTE rui_hosted",
+            "DEALLOCATE PREPARE rui_hosted",
+            "SET @rui_hosted_ddl=NULL",
+            "CREATE TABLE hosted_target(\n operation_id BIGINT NOT NULL,\n item_ordinal BIGINT NOT NULL,\n target_ordinal BIGINT NOT NULL,\n content_id BIGINT NOT NULL,\n PRIMARY KEY(operation_id,item_ordinal,target_ordinal),\n FOREIGN KEY(operation_id,item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n CHECK(target_ordinal>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        },
+    },
+    // A peer send is one record, the tool row of the call that made it (#2269): the sender-side record goes. A Message no
+    // longer takes a position in its sender's feed, so `sender_position`, its unique index and the table of refusals saved
+    // beside it are dropped; `sender_session_ref` still names the sender. A saved sender position was only the order of that
+    // sender's own record, which Activity no longer draws (Divyansh, 2026-11-25).
+    .{
+        .from = 96,
+        .sqlite = &.{
+            "DROP TABLE sent_rejection",
+            "ALTER TABLE message_admission RENAME TO message_admission_before_97",
+            "CREATE TABLE message_admission(\n admission_id INTEGER PRIMARY KEY NOT NULL CHECK(admission_id>0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_position INTEGER CHECK(admission_position>0),\n turn_id INTEGER REFERENCES turn(turn_id),\n admitted_at INTEGER NOT NULL CHECK(admitted_at>0),\n sender_session_ref TEXT REFERENCES session(session_ref),\n source_action_id INTEGER UNIQUE REFERENCES action_operation(action_id),\n source_kind INTEGER NOT NULL CHECK(source_kind BETWEEN 1 AND 5),\n UNIQUE(admission_id,source_kind),\n CHECK(source_action_id IS NULL OR sender_session_ref IS NULL),\n CHECK((source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL))\n) STRICT",
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,source_action_id,source_kind) SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,source_action_id,source_kind FROM message_admission_before_97",
+            "DROP TABLE message_admission_before_97",
+            "CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id)",
+            "CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE source_kind=1",
+            "CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL",
+            "CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position)",
+            "CREATE INDEX message_admission_activity ON message_admission(session_ref,source_kind,admission_position)",
+        },
+        .mysql = &.{
+            "DROP TABLE sent_rejection",
+            "SET @rui_sender_ddl=(SELECT CONCAT('ALTER TABLE message_admission ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') SEPARATOR ', ')) FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='message_admission' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('sender_position',cc.CHECK_CLAUSE)>0)",
+            "PREPARE rui_sender_check FROM @rui_sender_ddl",
+            "EXECUTE rui_sender_check",
+            "DEALLOCATE PREPARE rui_sender_check",
+            "ALTER TABLE message_admission ADD INDEX sender_session_ref(sender_session_ref), DROP INDEX message_admission_sent, DROP COLUMN sender_position",
+        },
+    },
 };
 
 comptime {
@@ -1624,7 +1684,6 @@ pub const tables = [_]Table{
             .{ .name = "turn_id", .type = .int, .nullable = true },
             .{ .name = "admitted_at", .type = .int, .check = "admitted_at>0", .read_by = .both },
             .{ .name = "sender_session_ref", .type = .{ .text = null }, .nullable = true, .read_by = .both },
-            .{ .name = "sender_position", .type = .int, .nullable = true, .check = "sender_position>0", .read_by = .both },
             .{ .name = "source_action_id", .type = .int, .nullable = true },
             .{ .name = "source_kind", .type = .int, .check = "source_kind BETWEEN 1 AND 5" },
         },
@@ -1638,7 +1697,7 @@ pub const tables = [_]Table{
             references("sender_session_ref", "session", session_reference),
             references("source_action_id", "action_operation", &.{"action_id"}),
         },
-        .checks = &.{ "(sender_session_ref IS NULL)=(sender_position IS NULL)", "source_action_id IS NULL OR sender_session_ref IS NULL", "(source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL)" },
+        .checks = &.{ "source_action_id IS NULL OR sender_session_ref IS NULL", "(source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL)" },
     },
     .{
         .name = "action_value",
@@ -1654,22 +1713,6 @@ pub const tables = [_]Table{
         .primary_key = &.{ "action_id", "ordinal" },
         .uniques = &.{ &.{ "handle", "publication_key" }, &.{"admission_id"} },
         .foreign_keys = &.{ references("action_id", "action_operation", &.{"action_id"}), references("content_id", "content", content_reference), references("admission_id", "message_admission", &.{"admission_id"}) },
-        .without_rowid = true,
-    },
-    .{
-        .name = "sent_rejection",
-        .columns = &.{
-            .{ .name = "command_key", .type = .{ .text = null } },
-            .{ .name = "sender_session_ref", .type = .{ .text = null } },
-            .{ .name = "sender_position", .type = .int, .check = "sender_position>0" },
-            .{ .name = "rejected_at", .type = .int, .check = "rejected_at>0" },
-        },
-        .primary_key = &.{"command_key"},
-        .uniques = &.{&.{ "sender_session_ref", "sender_position" }},
-        .foreign_keys = &.{
-            references("command_key", "core_command", command_reference),
-            references("sender_session_ref", "session", session_reference),
-        },
         .without_rowid = true,
     },
     .{
@@ -1954,7 +1997,8 @@ pub const tables = [_]Table{
             .{ .name = "phase", .type = .int, .default = "0", .check = "phase IN (0,1,2) AND (phase=0 OR item_kind=2)" },
             .{ .name = "extras_content_id", .type = .int },
             .{ .name = "part_count", .type = .int, .check = "part_count>=0 AND (part_count=0 OR item_kind IN (1,2))" },
-            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 200 } }, .nullable = true, .check = "(description IS NOT NULL)=(item_kind=5)" },
+            .{ .name = "hosted_action", .type = .int, .nullable = true, .check = "hosted_action IN (0,1,2,3) AND (hosted_action IS NOT NULL)=(item_kind=5)" },
+            .{ .name = "hosted_pattern_content_id", .type = .int, .nullable = true, .check = "hosted_pattern_content_id IS NULL OR item_kind=5" },
             .{ .name = "call_failed", .type = .flag, .default = "0", .check = "(call_failed=0 OR item_kind=5)" },
         },
         .primary_key = &.{ "operation_id", "item_ordinal" },
@@ -1963,6 +2007,24 @@ pub const tables = [_]Table{
             references("operation_id", "model_operation", &.{"operation_id"}),
             references("message_content_id", "content", content_reference),
             references("extras_content_id", "content", content_reference),
+            references("hosted_pattern_content_id", "content", content_reference),
+        },
+        .without_rowid = true,
+    },
+    // One string a hosted call named, in provider order: a search's query, each of its `queries`, or the url of an open or find.
+    // The strings are public content; the line a reader shows is derived from them and never stored.
+    .{
+        .name = "hosted_target",
+        .columns = &.{
+            .{ .name = "operation_id", .type = .int },
+            .{ .name = "item_ordinal", .type = .int },
+            .{ .name = "target_ordinal", .type = .int, .check = "target_ordinal>=0" },
+            .{ .name = "content_id", .type = .int },
+        },
+        .primary_key = &.{ "operation_id", "item_ordinal", "target_ordinal" },
+        .foreign_keys = &.{
+            .{ .columns = &.{ "operation_id", "item_ordinal" }, .references = "model_output_item", .referenced = &.{ "operation_id", "item_ordinal" } },
+            references("content_id", "content", content_reference),
         },
         .without_rowid = true,
     },
@@ -2153,7 +2215,6 @@ pub const indexes = [_]Index{
     .{ .name = "session_workspace_list", .table = "session", .columns = &.{ "workspace_digest", "created_seq" } },
     .{ .name = "session_creator", .table = "session", .columns = &.{ "creator_ref", "session_ref" } },
     .{ .name = "session_tab", .table = "session", .columns = &.{ "archive_seq", "created_seq" } },
-    .{ .name = "message_admission_sent", .table = "message_admission", .columns = &.{ "sender_session_ref", "sender_position" }, .unique = true, .where = "sender_session_ref IS NOT NULL" },
     .{ .name = "turn_one_active_per_session", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NULL" },
     .{ .name = "turn_tool_continuation", .table = "turn", .columns = &.{"operation_id"}, .where = "outcome_code IS NULL AND continuation_operation_id=operation_id" },
     .{ .name = "message_admission_session_order", .table = "message_admission", .columns = &.{ "session_ref", "turn_id", "admission_id" } },
@@ -3628,7 +3689,6 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     const utf8_overlong = utf8_line ++ "a";
     const updates = .{
         "UPDATE model_tool_call SET description=?1 WHERE operation_id=2 AND call_ordinal=0",
-        "UPDATE model_output_item SET description=?1 WHERE operation_id=2 AND item_ordinal=2",
     };
     inline for (updates) |sql| {
         const statement = try sqlite.prepare(database, sql);
@@ -3647,8 +3707,14 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
         const columns_read = try sqlite.prepare(database, "SELECT group_concat('\"'||replace(name,'\"','\"\"')||'\"',',') FROM pragma_table_info('original_" ++ name ++ "')");
         defer _ = c.sqlite3_finalize(columns_read);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(columns_read));
-        const columns = try columnText(columns_read, 0);
-        try std.testing.expect(columns.len > 0);
+        const read_columns = try columnText(columns_read, 0);
+        try std.testing.expect(read_columns.len > 0);
+        // Format 96 drops the sentence a hosted search kept: every other column of the item must come through the steps unchanged.
+        const columns = if (comptime std.mem.eql(u8, name, "model_output_item")) dropped: {
+            try std.testing.expect(std.mem.indexOf(u8, read_columns, "\"description\",") != null);
+            break :dropped try std.mem.replaceOwned(u8, std.testing.allocator, read_columns, "\"description\",", "");
+        } else try std.testing.allocator.dupe(u8, read_columns);
+        defer std.testing.allocator.free(columns);
         const current_columns = if (comptime std.mem.eql(u8, name, "action_operation")) columns: {
             try std.testing.expect(std.mem.indexOf(u8, columns, "\"bash_timeout_ms\"") != null);
             break :columns try std.mem.replaceOwned(u8, std.testing.allocator, columns, "\"bash_timeout_ms\"", "\"attempt_timeout_ms\"");
@@ -3677,7 +3743,9 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
         }
     }
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_tool_call WHERE operation_id=2 AND call_ordinal=0 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
-    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_output_item WHERE operation_id=2 AND item_ordinal=2 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
+    // The hosted item the step carried reads as an action of none: its old sentence is not kept.
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_output_item WHERE operation_id=2 AND item_ordinal=2 AND hosted_action=0 AND hosted_pattern_content_id IS NULL"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM hosted_target"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
     try openExisting(std.testing.io, database, root, null, null);
 }
@@ -3947,11 +4015,13 @@ test "schema 82 backfills input sources and preserves admissions" {
     }
 }
 
-test "schema 83 migration rebuilds canonical input tables" {
+test "schema 83 and 97 migrations rebuild canonical input tables" {
     for (comptime objects(.sqlite)) |object| {
         if (!std.mem.eql(u8, object.name, "message_admission") and !std.mem.eql(u8, object.name, "conversation_entry")) continue;
         var found = false;
-        for (migrations[82 - migration_baseline].sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
+        // message_admission last took its canonical form at 97 (the step from 96), when it dropped sender_position.
+        const step = if (std.mem.eql(u8, object.name, "message_admission")) migrations[96 - migration_baseline] else migrations[82 - migration_baseline];
+        for (step.sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
         try std.testing.expect(found);
     }
 }

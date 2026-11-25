@@ -6,7 +6,7 @@ const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const tool_defs = @import("../../call_classification.zig");
-const tool_line = @import("../../tool_line.zig");
+const codec_abi = @import("../../codec_abi.zig");
 const tool_record = @import("../../tool_record.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const mcp_arguments = @import("../../mcp/arguments.zig");
@@ -753,8 +753,8 @@ const insert_part = rsql.Write(.{
 
 const insert_item = rsql.Write(.{
     .sql = "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest," ++
-        "replay_omits_reasoning_text,phase,extras_content_id,part_count,message_content_id,description,call_failed) " ++
-        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+        "replay_omits_reasoning_text,phase,extras_content_id,part_count,message_content_id,hosted_action,hosted_pattern_content_id,call_failed) " ++
+        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
     .Args = struct {
         operation_id: u64,
         item_ordinal: u64,
@@ -768,9 +768,16 @@ const insert_item = rsql.Write(.{
         extras_content_id: u64,
         part_count: u64,
         message_content_id: ?u64,
-        description: ?tool_record.Description,
+        hosted_action: ?u64,
+        hosted_pattern_content_id: ?u64,
         call_failed: bool,
     },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+const insert_hosted_target = rsql.Write(.{
+    .sql = "INSERT INTO hosted_target(operation_id,item_ordinal,target_ordinal,content_id) VALUES(?1,?2,?3,?4)",
+    .Args = struct { operation_id: u64, item_ordinal: u64, target_ordinal: u64, content_id: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -1105,8 +1112,8 @@ fn recordImport(record: *const OutputMetadataRecord) ?content_domain.Import {
         },
         .extras => .{ record.decoded_length, true },
         .text => .{ record.decoded_length, false },
-        .name, .call_id, .arguments => .{ record.decoded_length, false },
-        .item, .action, .pattern, .member, .usage => return null,
+        .name, .call_id, .arguments, .target, .pattern => .{ record.decoded_length, false },
+        .item, .action, .member, .usage => return null,
     };
     return .{ .digest = record.content_digest, .length = length, .private = private };
 }
@@ -1478,13 +1485,12 @@ const Settlement = struct {
             if (record.ordinal != s.imported_items) return error.CorruptOutputMetadata;
             if (index == batch.digest_count) return error.CorruptOutputMetadata;
             if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
-            var description: tool_record.Description = .{};
             var progress: ItemProgress = .{ .offset = region_start };
-            const neutral = try s.importItem(a, batch, record, region_start, reader.offset, &progress, oversized.cut, &description) orelse {
+            const neutral = try s.importItem(a, batch, record, region_start, reader.offset, &progress, oversized.cut) orelse {
                 oversized.paused = .{ .item_at = record_start, .region_start = region_start, .progress = progress };
                 return;
             };
-            try s.recordItem(a, batch, record, batch.ids.digests[index], neutral, &description);
+            try s.recordItem(a, batch, record, batch.ids.digests[index], neutral, .{ .start = region_start, .end = reader.offset });
             index += 1;
         }
         if (batch.stopped) |err| return err;
@@ -1496,13 +1502,12 @@ const Settlement = struct {
         var reader = try OutputMetadataReader.init(s.io, s.output.metadata);
         reader.offset = paused.item_at;
         const record = try reader.next() orelse return error.CorruptOutputMetadata;
-        var description: tool_record.Description = .{};
-        const neutral = try s.importItem(a, batch, record, paused.region_start, reader.offset, &paused.progress, oversized.cut, &description) orelse return;
+        const neutral = try s.importItem(a, batch, record, paused.region_start, reader.offset, &paused.progress, oversized.cut) orelse return;
         oversized.paused = null;
-        try s.recordItem(a, batch, record, record.id_digest, neutral, &description);
+        try s.recordItem(a, batch, record, record.id_digest, neutral, .{ .start = paused.region_start, .end = reader.offset });
     }
 
-    fn recordItem(s: *Settlement, a: anytype, batch: *Batch, record: OutputMetadataRecord, id_digest: [32]u8, neutral: ImportedNeutral, description: *const tool_record.Description) !void {
+    fn recordItem(s: *Settlement, a: anytype, batch: *Batch, record: OutputMetadataRecord, id_digest: [32]u8, neutral: ImportedNeutral, region: struct { start: u64, end: u64 }) !void {
         a.write(insert_item, .{
             .operation_id = s.binding.operation_id,
             .item_ordinal = record.ordinal,
@@ -1516,9 +1521,11 @@ const Settlement = struct {
             .extras_content_id = neutral.bag,
             .part_count = neutral.part_count,
             .message_content_id = neutral.text,
-            .description = if (neutral.described and description.len != 0) description.* else null,
+            .hosted_action = neutral.hosted_action,
+            .hosted_pattern_content_id = neutral.pattern,
             .call_failed = neutral.call_failed,
         });
+        if (neutral.hosted_action != null) try s.recordTargets(a, batch, record.ordinal, neutral.target_count, region.start, region.end);
         s.imported_items += 1;
         if (s.purpose != .assistant_response or record.kind != .message) return;
         const text = neutral.text.?;
@@ -1541,7 +1548,24 @@ const Settlement = struct {
         });
     }
 
-    fn importItem(s: *Settlement, a: anytype, batch: *Batch, item: OutputMetadataRecord, metadata_start: u64, metadata_end: u64, progress: *ItemProgress, cut: ?u64, description: *tool_record.Description) !?ImportedNeutral {
+    /// One `hosted_target` row per target record of the item, in provider order. The contents were imported with the item,
+    /// so each lookup finds the row it wrote.
+    noinline fn recordTargets(s: *Settlement, a: anytype, batch: *Batch, item_ordinal: u64, expected: u64, start: u64, end: u64) !void {
+        var metadata = try OutputMetadataReader.init(s.io, s.output.metadata);
+        metadata.offset = start;
+        metadata.length = end;
+        var written: u64 = 0;
+        while (try metadata.next()) |record| {
+            if (record.tag == .item) break;
+            if (record.tag != .target) continue;
+            const row = try content(a, batch, recordImport(&record).?);
+            a.write(insert_hosted_target, .{ .operation_id = s.binding.operation_id, .item_ordinal = item_ordinal, .target_ordinal = written, .content_id = row.id });
+            written += 1;
+        }
+        if (written != expected) return error.CorruptOutputMetadata;
+    }
+
+    fn importItem(s: *Settlement, a: anytype, batch: *Batch, item: OutputMetadataRecord, metadata_start: u64, metadata_end: u64, progress: *ItemProgress, cut: ?u64) !?ImportedNeutral {
         var metadata = try OutputMetadataReader.init(s.io, s.output.metadata);
         metadata.offset = progress.offset;
         metadata.length = metadata_end;
@@ -1552,7 +1576,8 @@ const Settlement = struct {
         var part_count = progress.part_count;
         var part: ?struct { record: OutputMetadataRecord, start: u64, text: ?u64 } = null;
         var action: ?OutputMetadataRecord = null;
-        var pattern: ?OutputMetadataRecord = null;
+        var pattern: ?u64 = null;
+        var target_count: u64 = 0;
         while (true) {
             if (cut) |at| if (metadata.offset == at) {
                 std.debug.assert(part == null and item_bag == null and text == null and action == null);
@@ -1613,9 +1638,14 @@ const Settlement = struct {
                     if (item.kind != .web_search_call or action != null) return error.CorruptOutputMetadata;
                     action = record;
                 },
+                .target => {
+                    if (action == null or pattern != null or target_count == codec_abi.max_hosted_targets) return error.CorruptOutputMetadata;
+                    _ = try s.importDecoded(a, batch, record);
+                    target_count += 1;
+                },
                 .pattern => {
                     if (action == null or pattern != null) return error.CorruptOutputMetadata;
-                    pattern = record;
+                    pattern = try s.importDecoded(a, batch, record);
                 },
                 .member, .name, .call_id, .arguments => {},
                 .usage => return error.CorruptOutputMetadata,
@@ -1624,14 +1654,15 @@ const Settlement = struct {
         }
         if (part != null or (text != null) != (item.kind == .message) or
             (action != null) != (item.kind == .web_search_call)) return error.CorruptOutputMetadata;
-        if (action) |call| description.* = try describeWebSearch(s.io, s.output.source, call, pattern);
         return .{
             .bag = item_bag orelse return error.CorruptOutputMetadata,
             .part_count = part_count,
             .text = text,
             .text_length = if (text_record) |record| record.decoded_length else 0,
             .text_digest = if (text_record) |record| record.content_digest else @splat(0),
-            .described = action != null,
+            .hosted_action = if (action) |call| @backingInt(call.action) else null,
+            .pattern = pattern,
+            .target_count = target_count,
             .call_failed = if (action) |call| call.call_failed else false,
         };
     }
@@ -1775,19 +1806,7 @@ const Settlement = struct {
     }
 };
 
-const ImportedNeutral = struct { bag: u64, part_count: u64, text: ?u64, text_length: u64, text_digest: [32]u8, described: bool, call_failed: bool };
-
-noinline fn describeWebSearch(io: std.Io, source: std.Io.File, call: OutputMetadataRecord, pattern: ?OutputMetadataRecord) !tool_record.Description {
-    var target: [tool_line.WebSearchCall.excerpt_bytes]u8 = undefined;
-    var found: [tool_line.WebSearchCall.excerpt_bytes]u8 = undefined;
-    const words = tool_line.describe(.{ .web_search = .{
-        .action = call.action,
-        .target = try excerpt(io, source, call, &target),
-        .pattern = if (pattern) |field| try excerpt(io, source, field, &found) else "",
-    } });
-    std.debug.assert(tool_presentation.ToolPresentation.validDescription(words.slice()));
-    return words;
-}
+const ImportedNeutral = struct { bag: u64, part_count: u64, text: ?u64, text_length: u64, text_digest: [32]u8, hosted_action: ?u64, pattern: ?u64, target_count: u64, call_failed: bool };
 
 fn excerpt(io: std.Io, source: std.Io.File, record: OutputMetadataRecord, buffer: []u8) ![]const u8 {
     var reader: output_format.NameReader = .{ .io = io, .file = source, .position = record.start, .end = try record.end() };

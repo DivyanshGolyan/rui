@@ -225,6 +225,11 @@ test "a saved tool label reads as one line on every publication route, and only 
                 } else |err| err,
                 .live_activity, .settled_activity => if (store_core.activityPageForTesting(&storage, request)) |page| blk: {
                     if (route == .live_activity) if (description.words) |words| try std.testing.expectEqualStrings(words, page.call_activity.entries[0].presentation.line.?.words.slice());
+                    if (description.words) |words| for (page.items[0..page.count]) |item| switch (item.value) {
+                        .call => |call| if (call.call_ordinal == 0) try std.testing.expectEqualStrings(words, call.description.?.slice()),
+                        .approval_requested => |asked| if (asked.call_ordinal == 0) try std.testing.expectEqualStrings(words, asked.description.?.slice()),
+                        else => {},
+                    };
                     break :blk {};
                 } else |err| err,
                 .conversation => if (store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })) |_| {} else |err| err,
@@ -375,8 +380,8 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position,source_kind) " ++
-                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,'{2s}',value,2 FROM history; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,source_kind) " ++
+                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,'{2s}',2 FROM history; " ++
                 "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
             .{ history, session.slice(), peer.slice() },
             0,
@@ -595,8 +600,8 @@ test "a page of approval requests costs the same however many calls ran without 
         fn addBypassed(store: *Store, ref: []const u8, comptime first: u64) !void {
             const sequence = std.fmt.comptimePrint("WITH RECURSIVE sequence(value) AS (VALUES({d}) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) ", .{ first, first + 999 });
             try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
-                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) " ++
-                "SELECT operation_id+value*1000,item_ordinal,session_ref,session_position+value*10+1000000,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed " ++
+                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,hosted_action,call_failed) " ++
+                "SELECT operation_id+value*1000,item_ordinal,session_ref,session_position+value*10+1000000,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,hosted_action,call_failed " ++
                 "FROM model_output_item CROSS JOIN sequence WHERE session_ref=?1 AND item_kind=3 AND operation_id<1000", .{ref});
             try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
                 "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,decided_at) " ++

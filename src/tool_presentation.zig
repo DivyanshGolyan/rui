@@ -46,10 +46,9 @@ pub const Line = struct {
         return .{ .words = Bounded(max_description_bytes).from(words) catch return error.InvalidLine };
     }
 
-    /// The line a saved label reads as: its words as one tidy line, or fallback_words when it has none. Total.
+    /// The line a saved label reads as: savedWords as a plain Line. Total.
     pub fn ofSaved(saved: []const u8) Line {
-        const words = saved_label.readWords(max_description_bytes, saved) orelse return plain(saved_label.fallback_words) catch unreachable;
-        return plain(words.slice()) catch unreachable;
+        return plain(saved_label.callWords(saved).slice()) catch unreachable;
     }
 
     /// Words with one Session named between them: `linked("Messaged ", id, "")`.
@@ -360,6 +359,16 @@ test "TPR-3 a saved label always reads as a valid tool row line" {
     try std.testing.expect(bounded.link == null);
     try std.testing.expectEqual(max_description_bytes, bounded.words.slice().len);
     try std.testing.expectEqualStrings(long[0..max_description_bytes], bounded.words.slice());
+}
+
+test "TPR-3 a saved label reads the same in every reader" {
+    try std.testing.expectEqualStrings("Run tests then lint", saved_label.callWords("Run  tests\nthen lint").slice());
+    try std.testing.expectEqualStrings("Tool call", saved_label.callWords("").slice());
+    const long: [300]u8 = @splat('x');
+    const inputs = [_][]const u8{ "", "a\tb", &long, "\xff" };
+    for (inputs) |saved| {
+        try std.testing.expectEqualStrings(saved_label.callWords(saved).slice(), Line.ofSaved(saved).words.slice());
+    }
 }
 
 test "TPR-2 a tool chooses how a success reads and never how a failure reads" {

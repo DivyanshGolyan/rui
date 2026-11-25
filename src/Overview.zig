@@ -4394,6 +4394,9 @@ test "App sets the terminal title once per change, with how many Sessions need t
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try appEvent(rig.overview, &ctx, .tick);
     try appEvent(rig.overview, &ctx, .tick);
+    // A listing still running lands on a later tick and recomputes the counts from its rows, so the fake count
+    // would be overwritten whenever the worker was slow; settle it first.
+    _ = try rig.settle();
     rig.overview.state.summary.counts.needs_you = 2;
     try appEvent(rig.overview, &ctx, .tick);
     var titles: std.ArrayList([]const u8) = .empty;

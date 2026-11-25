@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { Follows } from "./follow.ts";
 import { RuiRequestError, RuiWaitTimeoutError, type RequestAnswer } from "./errors.ts";
-import { servedWork, listActivity, watchActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions, type WatchOptions } from "./feed.ts";
+import { servedWork, listActivity, watchActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type ContentOptions, type FeedEntry, type ListActivityOptions, type WatchOptions } from "./feed.ts";
 import { readPartBytes, type ContentValue } from "./parts.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
@@ -268,13 +268,13 @@ export class Session {
 	}
 
 	/** The whole text of an entry (D134). Past about 512 MiB a string cannot hold it and this throws: use `readContentBytes`. */
-	readContent(entry: Pick<FeedEntry, "position" | "ordinal">): Promise<string> {
-		return readContent(this.#link, this.id, entry);
+	readContent(entry: Pick<FeedEntry, "position" | "ordinal">, options?: ContentOptions): Promise<string> {
+		return readContent(this.#link, this.id, entry, options);
 	}
 
 	/** The whole text of an entry as UTF-8 bytes, up to the Host's limit of about 1 GiB. */
-	readContentBytes(entry: Pick<FeedEntry, "position" | "ordinal">): Promise<Buffer> {
-		return readContentBytes(this.#link, this.id, entry);
+	readContentBytes(entry: Pick<FeedEntry, "position" | "ordinal">, options?: ContentOptions): Promise<Buffer> {
+		return readContentBytes(this.#link, this.id, entry, options);
 	}
 
 	/** The exact bytes of one part of a parts entry; rejects with `TypeError` for an entry whose content is not parts. */

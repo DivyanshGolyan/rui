@@ -62,6 +62,28 @@ test "Message recovery observation seeks stay bounded as the Turn accumulates re
     try std.testing.expectEqual(costs[0], costs[1]);
 }
 
+test "TPR-3 a saved tool label reads as one tidy line in a Message's recovered Actions" {
+    const sqlite = @import("../sqlite.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try tests.configureTestSessionWithMode(&storage, "recovery-label-config", "bypass");
+    try submitTestMessage(&storage, &tmp, "recovery-label-input", "recovery-label", session.slice(), "run");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    _ = try tests.recoverPairForTesting(&storage, &tmp, binding, "recovery-label");
+    try sqlite.exec(storage.sqliteDatabase(), "UPDATE model_tool_call SET description='  Run' || char(10) || 'first   command ' WHERE call_ordinal=0");
+    var out: store_core.Observed = undefined;
+    try storage.observeCommand("recovery-label", null, &out);
+    const recovery = out.full.observation.kind.message.?.recovery;
+    try std.testing.expectEqual(@as(u8, 2), recovery.count);
+    for (recovery.calls[0..recovery.count]) |call| try std.testing.expectEqualStrings(
+        if (call.call == 0) "Run first command" else "Run second command",
+        call.description.?.slice(),
+    );
+}
+
 test "SH-68 compound observations project identity and parts listing certifies content" {
     const sqlite = @import("../sqlite.zig");
     const cases = [_]struct { mutation: [:0]const u8, listing_error: ?anyerror = null }{

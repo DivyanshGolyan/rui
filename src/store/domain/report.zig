@@ -1052,7 +1052,7 @@ pub const WorkRead = struct {
                 .latest_decision_at = optional(row.latest_decision_at),
             };
         } else if (Row == WorkOldestRow) {
-            w.description = row.description;
+            w.description = if (row.description) |saved| saved_label.callWords(saved.slice()) else null;
             w.inputs.latest.?.actions.oldest_running = .{ .at = row.attempt_at.get(), .call = row.call_ordinal, .description = null };
         } else if (Row == command_domain.stop_cutoff.Row) {
             w.cutoff = row.admission_cutoff;
