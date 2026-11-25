@@ -283,7 +283,6 @@ field-leak overview_view.Row.actions
 field-leak overview_view.Row.attention
 field-leak overview_view.Row.first_action
 field-leak overview_view.Row.group
-field-leak overview_view.Row.last_line
 field-leak overview_view.Row.line
 field-leak overview_view.Row.listed
 field-leak overview_view.Row.model
