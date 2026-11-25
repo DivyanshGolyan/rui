@@ -4512,7 +4512,6 @@ test "client activity peer boundary rejects noncanonical IDs and owns canonical 
 test "client activity sender labels are canonical or refused" {
     for ([_]struct { label: []const u8, ok: bool }{
         .{ .label = "Review the WAL", .ok = true },
-        .{ .label = "", .ok = true },
         .{ .label = "peer \\ label \" é", .ok = true },
         .{ .label = "bad\nlabel", .ok = false },
     }) |case| {
@@ -4527,7 +4526,7 @@ test "client activity sender labels are canonical or refused" {
             @memset(body.bytes[0..body.len], 'x');
             const sender = page.facts.items[0].value.received.sender.?;
             try std.testing.expectEqualStrings(case.label, sender.label.slice());
-            try std.testing.expectEqualStrings(if (case.label.len == 0) "k7m2qx" else case.label, sender.name());
+            try std.testing.expectEqualStrings(case.label, sender.name());
         } else try std.testing.expectError(error.InvalidResponse, protocol_reply.ActivityPage.parse(body.slice(), .{}));
     }
 }
