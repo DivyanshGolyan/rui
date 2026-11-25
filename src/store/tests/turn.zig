@@ -120,6 +120,37 @@ test "a done Turn marks its answer final once its ending is within the page" {
     }.run);
 }
 
+test "a backward Activity read of the assistant kind with a limit of one is the newest answer, whatever follows it" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |later_message| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "newest-config");
+                try submitTestMessage(&storage, &tmp, "newest-input", "newest-key", session.slice(), "answer");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleMessagesForTesting(&storage, &tmp, binding, 3, false, null);
+                if (later_message) try submitTestMessage(&storage, &tmp, "later-input", "later-key", session.slice(), "a later message");
+                var request: protocol.ActivityPage = .{};
+                try request.session.set(session.slice());
+                request.kinds = .initOne(.assistant);
+                const all = try store_core.activityPageForTesting(&storage, request);
+                try std.testing.expectEqual(@as(usize, 3), all.count);
+                request.direction = .backward;
+                request.limit = 1;
+                const newest = try store_core.activityPageForTesting(&storage, request);
+                try std.testing.expectEqual(@as(usize, 1), newest.count);
+                try std.testing.expectEqual(all.items[2].position, newest.items[0].position);
+                try std.testing.expectEqual(all.items[2].ordinal, newest.items[0].ordinal);
+                try std.testing.expectEqualDeep(all.items[2].value.assistant.content, newest.items[0].value.assistant.content);
+            }
+        }
+    }.run);
+}
+
 test "saved Turn outcomes read back as the outcome that closed the Turn" {
     const Saved = struct { code: []const u8, content_id: ?i64, tag: TurnOutcome.Tag };
     const saved = [_]Saved{
