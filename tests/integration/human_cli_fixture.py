@@ -1,4 +1,4 @@
-from terminal_screen import RULE_GLYPHS, VERTICAL_DIVIDER, split_pane_row
+from terminal_screen import RULE_GLYPHS, VERTICAL_DIVIDER, chat_footer_shown, names_chat, split_pane_row
 import errno
 import fcntl
 import json
@@ -191,28 +191,35 @@ def composer_ready(screen, x, y):
     return x >= 3 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
 
 
-def keyed_frame(master, keys, accept, timeout=15):
+def keyed_frame(master, keys, accept, timeout=15, *, chat=None):
+    """The first frame `accept` takes after `keys`; with `chat`, also once the terminal title names that chat (the chat footer never does)."""
     capture = terminal_capture(master)
     found = []
 
+    def arrived(screen, x, y):
+        return accept(screen, x, y) and (chat is None or names_chat(capture.title, chat))
+
     def observe(screen, x, y):
-        if not found and accept(screen, x, y):
+        if not found and arrived(screen, x, y):
             found.append(screen)
 
     capture.listener = observe
     try:
         if keys:
             os.write(master, keys)
-        elif accept(capture.completed, capture.screen.cursor.x, capture.screen.cursor.y):
+        elif arrived(capture.completed, capture.screen.cursor.x, capture.screen.cursor.y):
             return capture.completed
         deadline = time.monotonic() + timeout
         while not found:
             remaining = deadline - time.monotonic()
             assert remaining > 0 and select.select([master], [], [], remaining)[0], (
-                "keyed frame", keys, capture.completed)
+                "keyed frame", keys, chat, capture.completed)
             chunk = os.read(master, 65536)
             assert chunk, ("terminal closed before keyed frame", keys)
             capture.feed(chunk)
+            # The title is not part of a frame: it can arrive after the frame that opened the chat.
+            if not found and chat is not None and arrived(capture.completed, capture.screen.cursor.x, capture.screen.cursor.y):
+                found.append(capture.completed)
     finally:
         capture.listener = None
     return found[0]
