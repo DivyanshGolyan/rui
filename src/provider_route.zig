@@ -196,7 +196,9 @@ test "CM-64 connection display labels preserve precedence and borrowed lifetime"
     const openai = connection.Name.parse("openai").?;
     var beta = connection.Name.parse("beta").?;
     try std.testing.expectEqualStrings("Alpha Gateway", shownOf(&served, &alpha));
-    try std.testing.expectEqualStrings("Device route", shownOf(&served, &codex));
+    const served_label = shownOf(&served, &codex);
+    try std.testing.expectEqualStrings("Device route", served_label);
+    try std.testing.expectEqual(@intFromPtr(served.of("codex").?.label.slice().ptr), @intFromPtr(served_label.ptr));
     try std.testing.expectEqualStrings("OpenAI", shownOf(&served, &openai));
     const fallback = shownOf(&served, &beta);
     try std.testing.expectEqualStrings("beta", fallback);
@@ -206,14 +208,14 @@ test "CM-64 connection display labels preserve precedence and borrowed lifetime"
 }
 
 test "CM-65 connection login lookup returns only built-in commands" {
-    const cases = .{
-        .{ "codex", "rui auth login chatgpt --device-code" },
-        .{ "chatgpt", "rui auth login chatgpt" },
-        .{ "openai", "rui auth login openai" },
-    };
-    try std.testing.expectEqual(@typeInfo(Provider).@"enum".field_names.len, @typeInfo(@TypeOf(cases)).@"struct".field_names.len);
-    inline for (cases) |case| {
-        try std.testing.expectEqualStrings(case[1], loginOf(connection.Name.parse(case[0]).?).?);
+    const Expected = std.enums.EnumArray(Provider, []const u8);
+    const expected = Expected.init(.{
+        .codex = "rui auth login chatgpt --device-code",
+        .chatgpt = "rui auth login chatgpt",
+        .openai = "rui auth login openai",
+    });
+    for (std.enums.values(Provider)) |provider| {
+        try std.testing.expectEqualStrings(expected.get(provider), loginOf(connection.Name.parse(@tagName(provider)).?).?);
     }
     for ([_][]const u8{ "alpha", "beta" }) |name| {
         try std.testing.expectEqual(@as(?[]const u8, null), loginOf(connection.Name.parse(name).?));
