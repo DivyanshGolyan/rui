@@ -6,7 +6,7 @@ import textwrap
 import unittest
 
 from release_numbers import (MIGRATIONS, SCHEMA, digest_rows, drifted_row_fix, git, main_base, migration_steps, released_tag,
-                             schema_version)
+                             schema_version, touches_mysql_migration)
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINES = ("src/store/migration_baseline.sqlite.sql", "src/store/migration_baseline.mysql.sql",
@@ -205,6 +205,48 @@ class StoreSchemaVersionTest(unittest.TestCase):
             steps = edited_shipped_steps(migration_steps(source), migration_steps(git(ROOT, "show", f"{tag}:{SCHEMA}")), released)
             self.assertEqual(steps, [], f"migration steps from {steps} shipped by {tag} must keep their released text: "
                              "restore them, and put the change in a new step")
+
+
+class MySqlMigrationOwnerTest(unittest.TestCase):
+    """touches_mysql_migration: the rule that makes a ready PR start MySQL 8.4 for the migration check."""
+
+    STEPS = textwrap.dedent("""\
+        pub const schema_version: u32 = 92;
+        pub const migrations = [_]Migration{
+            .{ .from = 91, .sqlite = &.{"A"}, .mysql = &.{"B"} },
+            .{ .from = 92, .sqlite = &.{"C"}, .mysql = &.{"D"} },
+        };
+        """)
+
+    def test_the_rule_over_the_domain_of_changes(self):
+        base = self.STEPS
+        cases = (
+            ('a step text changed', [SCHEMA], base.replace('.mysql = &.{"D"}', '.mysql = &.{"E"}'), True),
+            ('a step added', [SCHEMA], base.replace('};', '    .{ .from = 93, .sqlite = &.{}, .mysql = &.{} },\n};'), True),
+            ('a step removed', [SCHEMA], base.replace('    .{ .from = 92, .sqlite = &.{"C"}, .mysql = &.{"D"} },\n', ''), True),
+            ('schema.zig whitespace only', [SCHEMA],
+             base.replace('.sqlite = &.{"C"}', '.sqlite = &.{ "C" }'), False),
+            ('schema.zig outside the step table', [SCHEMA], base.replace('u32 = 92;', 'u32 = 92;\n// a note'), False),
+            ('schema.zig unchanged text', [SCHEMA], base, False),
+        )
+        for name, paths, after, expected in cases:
+            with self.subTest(case=name):
+                self.assertEqual(touches_mysql_migration(paths, {SCHEMA: (base, after)}), expected)
+        # Each migration input, and a glob match of a new one, is a MySQL migration change whatever schema.zig did.
+        for path in ('src/store/migration_baseline.mysql.sql', 'src/store/migration_baseline.sqlite.sql',
+                     'src/store/migration_baseline_rows.sql', 'src/store/migration_expected_content.mysql.sql',
+                     'src/store/migration_expected_rows.sql', 'src/store/migration_window_rows.sql',
+                     'src/store/migration_future_input.sql'):
+            with self.subTest(path=path):
+                self.assertTrue(touches_mysql_migration([path], {}))
+        for paths in (['README.md'], ['src/store/store_helpers.zig'], ['src/store/mysql_dialect_check.zig'], []):
+            with self.subTest(paths=paths):
+                self.assertFalse(touches_mysql_migration(paths, {}))
+
+    def test_a_step_table_that_cannot_be_read_counts_as_changed(self):
+        self.assertTrue(touches_mysql_migration([SCHEMA], {SCHEMA: (self.STEPS, 'pub const migrations = [_]Migration{ .{ .from = 9')}))
+        self.assertTrue(touches_mysql_migration([SCHEMA], {}), 'a schema.zig change without its text')
+        self.assertFalse(touches_mysql_migration([SCHEMA], {SCHEMA: (None, None)}))
 
 
 if __name__ == "__main__":
