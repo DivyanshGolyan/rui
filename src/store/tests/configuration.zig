@@ -124,7 +124,7 @@ test "configuration pre-Workspace decisions allow model revisions" {
             .model_requested = null,
             .expected = null,
         },
-        .{ .name = "a different connection name is immutable on an existing Session", .has_current = true, .workspace_requested = false, .provider_requested = "other", .model_requested = null, .expected = .provider_is_immutable },
+        .{ .name = "a different connection name is immutable on an existing Session", .has_current = true, .workspace_requested = false, .provider_requested = "other", .model_requested = null, .expected = .connection_is_immutable },
     };
 
     var existing: CurrentConfiguration = .{};
@@ -158,7 +158,7 @@ test "configuration pre-Workspace decisions allow model revisions" {
         const current: ?*const CurrentConfiguration = if (case.has_current) &existing else null;
         std.testing.expectEqual(
             case.expected,
-            configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, &tool_defs.built_in_tool_set, &served_builtins, current, &requested, connection.Name.parse("codex").?),
+            configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, current, &requested),
         ) catch |err| {
             std.debug.print("configuration pre-Workspace case failed: {s}\n", .{case.name});
             return err;
@@ -167,27 +167,40 @@ test "configuration pre-Workspace decisions allow model revisions" {
 }
 
 test "configure refuses a tool name the tool set lacks and a provider tool its provider does not run" {
-    const hosted: tool_defs.Record = .{ .name = "code_interpreter", .owner = .provider };
-    const records = [_]tool_defs.Record{ tool_defs.bash_record, hosted, tool_defs.web_search_record };
-    const digests = [_][32]u8{ tool_defs.recordDigest(&records[0]), tool_defs.recordDigest(&records[1]), tool_defs.recordDigest(&records[2]) };
-    const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
-    try std.testing.expect(host_tool_set.valid());
-    var existing: CurrentConfiguration = .{};
-    existing.provider = connection.Name.parse("codex").?;
-    try existing.model.set("model-a");
-    const Case = struct { names: []const []const u8, expected: ?protocol.ConfigurationRejection };
-    for ([_]Case{
-        .{ .names = &.{ "bash", "web_search" }, .expected = null },
-        .{ .names = &.{}, .expected = null },
-        .{ .names = &.{"edit"}, .expected = .unknown_tool },
-        .{ .names = &.{ "bash", "edit" }, .expected = .unknown_tool },
-        .{ .names = &.{"code_interpreter"}, .expected = .provider_tool_missing },
-    }) |case| {
-        var requested: wire_request.Configuration = .{};
-        requested.tools = try .of(case.names);
-        var served = protocol.servedBuiltIns(.endpoint);
-        try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(@import("../../model_catalog.zig").shipped, &host_tool_set, &served, &existing, &requested, connection.Name.parse("codex").?));
-    }
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            // The Host set holds every built-in (a Store refuses a set without them) and one provider tool.
+            const records = comptime testingHostToolRecords(&.{.{ .name = "code_interpreter", .owner = .provider }});
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: store_core.Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try storage.saveHostToolSet(&.{ .records = &records, .digests = &digests });
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const Case = struct { names: []const []const u8, expected: ?protocol.ConfigurationRejection };
+            for ([_]Case{
+                .{ .names = &.{ "bash", "web_search" }, .expected = null },
+                .{ .names = &.{}, .expected = null },
+                .{ .names = &.{"edit"}, .expected = .unknown_tool },
+                .{ .names = &.{ "bash", "edit" }, .expected = .unknown_tool },
+                .{ .names = &.{"code_interpreter"}, .expected = .provider_tool_missing },
+            }, 0..) |tool_case, index| {
+                var key_buffer: [32]u8 = undefined;
+                var create = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "tools-refusal-{d}", .{index}), "", workspace, "model-a");
+                create.configuration.tools = try .of(tool_case.names);
+                const reply = try storage.configure(&create, .{});
+                if (tool_case.expected) |code| {
+                    try std.testing.expectEqual(code, reply.rejected.code);
+                } else {
+                    try std.testing.expect(reply == .accepted);
+                }
+            }
+        }
+    }.run);
 }
 
 test "Store configuration requires Workspace and model and, on a Host serving several, a provider" {
@@ -295,7 +308,7 @@ test "a different connection name rejects mixed configuration atomically and rep
             const revision_count = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{});
             const rejected = try storage.configure(&update, .{});
             try std.testing.expect(rejected == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.provider_is_immutable, rejected.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.connection_is_immutable, rejected.rejected.code);
             try std.testing.expectEqual(content_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
             try std.testing.expectEqual(revision_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
             const current = try storage.inspectSessionForTesting(created_session_0.slice());
@@ -629,7 +642,7 @@ test "loaded tools select saved records even after the Host tool set changes or 
             const loaded_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
                 "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
             try std.testing.expectEqual(saved_record, loaded_record);
-            const expected_loaded = tool_set_domain.Selection.of(&original, &update.configuration.loaded_tools).?;
+            const expected_loaded = tool_set_domain.Selection.of(&original, &update.configuration.loaded_tools, 0).?;
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set saved ON saved.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1 AND saved.digest=?2", .{ first.slice(), store_testing.Blob{ .bytes = &expected_loaded.digest } }));
 
             var removed_records: [records.len - 1]tool_defs.Record = undefined;
@@ -940,7 +953,7 @@ test "explicit native and preset restrictions survive reopen and resumed model r
                     try request.preset.?.set("reader");
                     const arena = memory.allocator();
                     const bytes = try std.json.Stringify.valueAlloc(arena, .{
-                        .provider = "codex",
+                        .connection = "codex",
                         .workspace = workspace,
                         .model = create.configuration.model.value.slice(),
                         .effort = create.configuration.reasoning_effort.value.slice(),

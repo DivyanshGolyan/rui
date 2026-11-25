@@ -10,7 +10,7 @@ const max_key_bytes = @import("idempotency_key.zig").max_bytes;
 const max_session_bytes = session_id.max_reference_bytes;
 const validSessionId = session_id.valid;
 const max_workspace_bytes = @import("workspace_path.zig").max_bytes;
-pub const max_provider_bytes = 16;
+pub const max_connection_bytes = @import("connection.zig").max_name_bytes;
 const max_model_bytes = @import("model_capability.zig").max_model_bytes;
 const max_label_bytes = @import("tool_presentation.zig").max_label_bytes;
 const max_tool_names_bytes = tool_name.max_names_bytes;
@@ -166,7 +166,7 @@ fn ConfigurationOf(comptime Custody: type) type {
         const Configuration = @This();
 
         workspace: OptionalBounded(max_workspace_bytes) = .{},
-        provider: OptionalBounded(max_provider_bytes) = .{},
+        provider: OptionalBounded(max_connection_bytes) = .{},
         model: OptionalBounded(max_model_bytes) = .{},
         instructions: ContentField = .{},
         tools: ToolsField = .{},
@@ -177,6 +177,8 @@ fn ConfigurationOf(comptime Custody: type) type {
         output_reservation: OptionalBounded(20) = .{},
         reasoning_effort: OptionalBounded(16) = .{},
         label: OptionalBounded(max_label_bytes) = .{},
+        // The declared app records as one JSON document in file custody, validated when the declaration is parsed.
+        app_tools: ContentField = .{},
         parent: OptionalBounded(6) = .{},
         preferences: ?Preferences = null,
 
@@ -192,6 +194,7 @@ fn ConfigurationOf(comptime Custody: type) type {
                     .decimal_policy => OptionalBounded(20),
                     .content => ContentField,
                     .tools => ToolsField,
+                    .app_tools => ContentField,
                 };
                 if (Field != Expected) @compileError("Session setting kind/type mismatch: " ++ name);
             }
@@ -203,6 +206,9 @@ fn ConfigurationOf(comptime Custody: type) type {
                 cleanup_error = err;
             };
             self.output_schema.removeTemporaryContent(io) catch |err| {
+                cleanup_error = err;
+            };
+            self.app_tools.removeTemporaryContent(io) catch |err| {
                 cleanup_error = err;
             };
             if (cleanup_error) |err| return err;
@@ -283,6 +289,7 @@ fn hashSetting(hash: *std.crypto.hash.sha2.Sha256, comptime entry: session_setti
         .content => hashContent(hash, field),
         .tools => hashTools(hash, field),
         .text, .choice, .decimal_policy => hashOptional(hash, field),
+        .app_tools => hashContent(hash, field),
     }
 }
 

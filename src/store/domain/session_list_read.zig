@@ -924,7 +924,7 @@ fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_
         .parent = if (row.parent_ref) |*parent| parent.slice() else null,
         .creator = if (row.creator_ref) |*creator| creator.slice() else null,
         .workspace = row.workspace.slice(),
-        .provider = provider_route.builtInOf(row.provider) orelse unreachable,
+        .provider = row.provider,
         .model = row.model.slice(),
         .tools = names,
         .permission_mode = permission_mode,

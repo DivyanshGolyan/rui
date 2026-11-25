@@ -25,7 +25,7 @@ test "settings presets resolve MCP tools through the same tool set as configure"
             var refusal: start_report.Failure = undefined;
             try hs.apply(&settings, std.testing.allocator,
                 \\{"presets":{"reader":{"model":"model-a","effort":null,"compactAt":1000,"tools":["fetch_page"],"permissionMode":"ask"}}}
-            , .pipe, checkPreset, &refusal);
+            , .pipe, .{ .preset = checkPreset, .host_field = @import("provider.zig").hostField }, &refusal);
             var records = comptime store.testingHostToolRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "pages", .description = "Fetch page", .input_schema = "{\"type\":\"object\"}" },
             });

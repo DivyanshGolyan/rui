@@ -193,6 +193,7 @@ jobs:
       macos_matrix: ${{ steps.select.outputs.macos_matrix }}
       policy_skips: ${{ steps.select.outputs.policy_skips }}
       pr_job: ${{ steps.select.outputs.pr_job }}
+      pr_mysql_migration: ${{ steps.select.outputs.pr_mysql_migration }}
       pr_setup_targets: ${{ steps.select.outputs.pr_setup_targets }}
       compile_only: ${{ steps.select.outputs.compile_only }}
     steps:
@@ -346,6 +347,21 @@ jobs:
         id: format
         continue-on-error: true
         run: zig fmt --check --ast-check build.zig build src tests/ci/deep_modules
+      # Only a ready PR that changes a Store migration step (ci_plan pr_mysql_migration) starts MySQL 8.4;
+      # the steps match the split job's MySQL start, wait and verification in linux_suites.
+      - name: Start MySQL 8.4 for the live migration check
+        if: ${{ needs.plan.outputs.pr_mysql_migration == 'true' }}
+        # In the background, so the pull and initialisation overlap the compile; "Wait for MySQL 8.4" collects the outcome.
+        run: |
+          set -euo pipefail
+          socket_dir="$RUNNER_TEMP/mysql"
+          mkdir -p "$socket_dir"
+          password=$(openssl rand -hex 16)
+          RUI_TEST_MYSQL_ROOT_PASSWORD="$password" nohup python3 -B tests/integration/mysql_server.py \
+            start rui-mysql "$socket_dir" "$RUNNER_TEMP/mysql-started" > "$RUNNER_TEMP/mysql-start.log" 2>&1 &
+          RUI_TEST_REQUIRE_ENGINES="${RUI_TEST_REQUIRE_ENGINES:+$RUI_TEST_REQUIRE_ENGINES,}sqlite" \
+          python3 -B tests/ci/live_engine_step.py export mysql \
+            "$socket_dir/mysqld.sock" "$password" "$RUNNER_TEMP/mysql-dialect-check-record"
       # Policy is Python and Node on mostly one core; the compile analyses each binary on one
       # thread. Policy runs beside it at lower priority; this step fails only for the compile,
       # and the job's last step fails for policy, so a policy failure still lets tests run
@@ -364,7 +380,12 @@ jobs:
       - name: Give tests macOS's temporary directory shape
         if: ${{ needs.plan.outputs.targets != '[]' }}
         uses: ./.github/actions/darwin-tmpdir
-      - name: Run selected targets on SQLite, stopping at the first failure
+      - name: Wait for MySQL 8.4
+        if: ${{ needs.plan.outputs.pr_mysql_migration == 'true' }}
+        run: |
+          python3 -B tests/integration/mysql_server.py wait rui-mysql "$RUNNER_TEMP/mysql-started" \
+            || { cat "$RUNNER_TEMP/mysql-start.log"; exit 1; }
+      - name: Run selected targets, stopping at the first failure (SQLite; MySQL 8.4 when a migration step changed)
         if: ${{ needs.plan.outputs.targets != '[]' }}
         timeout-minutes: 35
         env:
@@ -375,6 +396,12 @@ jobs:
           set -euo pipefail
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 -B tests/ci/run_selected.py "$TARGETS" --ci-artifacts .zig-cache/o/ci-compiled --quarantine "$QUARANTINE"
+      - name: Require that the live MySQL migration check ran
+        # Same proof as linux_suites: fails when the check left no record or prepared nothing.
+        if: ${{ !cancelled() && needs.plan.outputs.pr_mysql_migration == 'true' }}
+        run: |
+          set -euo pipefail
+          python3 -B tests/ci/live_engine_step.py verify mysql | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

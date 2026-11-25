@@ -9,6 +9,7 @@ const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const tool_name = @import("../../tool_name.zig");
+const app_tools = @import("../../tool_record.zig").app_tools;
 const Bounded = @import("../../bounded.zig").Bounded;
 const mutation_answer = @import("../../mutation_answer.zig");
 const provider_name = @import("../../provider_name.zig");
@@ -1653,6 +1654,7 @@ const RevisionRow = struct {
     label: ?Bounded(tool_presentation.max_label_bytes),
     tools: ?Bounded(tool_set.max_names_bytes),
     loaded_tools: ?Bounded(tool_set.max_names_bytes),
+    app_tools: ?Bounded(app_tools.max_names_bytes),
     permission_mode: u8,
     instructions_id: rsql.Positive,
     instructions_length: u64,
@@ -1669,7 +1671,8 @@ pub const full_revisions = rsql.Page(.{
         .on = .{ .primary_key = "session_revision" },
         .alias = "r",
         .columns = "(SELECT max(revision) FROM session_revision WHERE session_ref=?1) AS newest,r.command_key,r.workspace,r.provider,r.model," ++
-            "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label," ++ tool_set.namesSql("r.tool_set_id") ++ " AS tools," ++ tool_set.namesSql(tool_set.offeredSetSql("r")) ++ " AS loaded_tools,r.permission_mode," ++
+            "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label," ++ tool_set.namesSql("r.tool_set_id") ++ " AS tools," ++ tool_set.namesSql(tool_set.offeredSetSql("r")) ++ " AS loaded_tools," ++
+            tool_set.namesSql("r.app_tool_set_id") ++ " AS app_tools,r.permission_mode," ++
             "r.instructions_content_id AS instructions_id,instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest," ++
             "r.output_schema_content_id AS output_schema_id,output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest," ++
             owner_column("instructions") ++ " AS instructions_owner," ++ owner_column("output_schema") ++ " AS output_schema_owner",
@@ -1732,6 +1735,7 @@ fn RevisionChunk(comptime Watcher: type) type {
         decoded: RevisionRow = undefined,
         tools: [tool_defs.max_tools][]const u8 = undefined,
         loaded_tools: [tool_defs.max_tools][]const u8 = undefined,
+        app_tools: [app_tools.max_records][]const u8 = undefined,
 
         const Failure = error{CorruptStore} || RowError(Watcher);
 
@@ -1788,7 +1792,7 @@ fn RevisionChunk(comptime Watcher: type) type {
                 .revision = row.revision.get(),
                 .command_key = row.command_key.slice(),
                 .workspace = row.workspace.slice(),
-                .provider = provider_route.builtInOf(row.provider) orelse unreachable,
+                .provider = row.provider,
                 .model = row.model.slice(),
                 .compaction_trigger = optional(row.compaction_trigger),
                 .output_reservation = row.output_reservation,
@@ -1796,6 +1800,7 @@ fn RevisionChunk(comptime Watcher: type) type {
                 .label = if (row.label) |*label| label.slice() else null,
                 .tools = try sortedToolNames(if (row.tools) |*names| names.slice() else null, &chunk.tools),
                 .loaded_tools = try sortedToolNames(if (row.loaded_tools) |*names| names.slice() else null, &chunk.loaded_tools),
+                .app_tools = try sortedToolNames(if (row.app_tools) |*names| names.slice() else null, &chunk.app_tools),
                 .permission_mode = try configuration_domain.permissionMode(row.permission_mode),
             };
         }

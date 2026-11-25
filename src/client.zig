@@ -312,9 +312,16 @@ pub const Requests = struct {
         try protocol_reply.validateIdentityInputs("", session);
         try cursor.validate();
         const paths = try resolveClientPaths(self.io, store_path);
+        return self.activityPageAt(&paths, session, cursor);
+    }
+
+    pub fn activityPageAt(self: Requests, paths: *const platform.Paths, session: []const u8, cursor: protocol_reply.ActivityCursor) !protocol_reply.ActivityPageReply {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        try cursor.validate();
         var body: protocol.RequestBuffer = .{};
         try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ paths.store_identity.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
-        const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
+        const fd = try openRead(self, paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
             buffer: protocol.FixedJsonBuffer(activity_reply.max_page_bytes) = .{},
@@ -1400,7 +1407,7 @@ test "SH-99 upgrade Host observation reads the current wire in one exchange and 
             const response_wire = responseWire(self.mode);
             const body_wire = if (self.mode == .body_mismatch or self.mode == .activation_body_version) protocol.wire_version else response_wire;
             var body_buffer: [1024]u8 = undefined;
-            const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store });
+            const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"connections\":[{{\"name\":\"codex\",\"label\":\"ChatGPT (device code)\",\"route\":\"endpoint\"}}]}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store });
             var error_buffer: [256]u8 = undefined;
             const body: []const u8 = switch (self.mode) {
                 .activation_400, .activation_bad_rejection, .activation_500, .activation_503, .strict_503 => try std.fmt.bufPrint(&error_buffer, "{{\"version\":\"{s}\",\"type\":\"invocation_error\",\"code\":\"{s}\"}}", .{ response_wire, if (self.mode == .activation_bad_rejection) "SomeOtherFailure" else "WrongWireVersion" }),
@@ -2847,6 +2854,8 @@ const Capture = struct {
         try self.write("{");
         var separator: []const u8 = "";
         inline for (@import("session_settings.zig").spec_entries) |entry| {
+            // ConfigureInput has no appTools field: the Zig CLI has no option for it, and only the TypeScript client sends it.
+            if (comptime entry.kind == .app_tools) continue;
             const value = @field(input, entry.field);
             const present = switch (entry.kind) {
                 .content => value.state != .omitted,
@@ -2870,6 +2879,7 @@ const Capture = struct {
                         .value => if (entry.json_object) try self.writeInputFile(value.path, protocol.max_sqlite_content_bytes, false, true) else try self.writeJsonFile(value.path),
                     },
                     .tools => try self.writeTools(value.?),
+                    .app_tools => unreachable,
                     .decimal_policy => if (value.value) |text| {
                         const tokens = try std.fmt.parseInt(u64, text, 10);
                         var digits: [20]u8 = undefined;
@@ -5713,7 +5723,7 @@ test "runtime catalog model list client accepts a reply larger than its shipped 
     var body: std.Io.Writer.Allocating = .init(allocator);
     defer body.deinit();
     try body.writer.writeAll(protocol.model_list_reply.head);
-    try body.writer.writeAll("[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[");
+    try body.writer.writeAll("[{\"connection\":\"codex\",\"source\":\"catalog\",\"models\":[");
     for (0..count) |index| {
         var digits_buffer: [20]u8 = undefined;
         const digits = try std.fmt.bufPrint(&digits_buffer, "{d}", .{index});
@@ -6555,6 +6565,7 @@ test "Session settings client writes every setting and the Host parser preserves
     var missing_buffer: [4096]u8 = undefined;
     var missing: std.Io.Writer = .fixed(&missing_buffer);
     inline for (session_settings.entries) |entry| {
+        if (comptime entry.kind == .app_tools) continue;
         if (@field(configuration, entry.field).state != .value)
             try missing.print("{s}: ConfigureInput fixture / client.Capture.writeConfiguration / Host Parser\n", .{entry.field});
     }
@@ -6907,7 +6918,7 @@ test "capture routing round trips six placements without conflating selector and
                 }
                 try std.testing.expectEqualStrings(expected, request[0..body_used]);
                 var body: protocol.ResponseBuffer = .{};
-                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null, .settings_digest = null };
+                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .connections = &.{}, .doublewrite = null, .settings_digest = null };
                 try body.render(@import("host_reply.zig").renderHostInfo, .{info});
                 var head_buffer: [512]u8 = undefined;
                 const head = try std.fmt.bufPrint(&head_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nConnection: close\r\n\r\n", .{body.len});

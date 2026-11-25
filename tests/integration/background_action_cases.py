@@ -250,7 +250,7 @@ def prove_model_action_read(state, *, deadline=None):
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", active_capacity=2)
         configured = command(
             "session", "configure", "--store", store, "--key", "configure", "--record", case / "configure.json",
-            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
+            "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-sol",
             "--tools", "bash,read_action", "--permission-mode", "ask",
         )
         assert configured["answer"]["status"] == "accepted", configured
@@ -413,7 +413,7 @@ def prove_message_background_and_stop(state, *, deadline=None):
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", active_capacity=2)
         configured = fixture.command(
             "session", "configure", "--store", store, "--key", "configure", "--record", case / "configure.json",
-            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
+            "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-sol",
             "--tools", "bash,read_action", "--permission-mode", "ask",
         )
         session = configured["context"]["session"]

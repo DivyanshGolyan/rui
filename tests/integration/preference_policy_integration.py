@@ -47,7 +47,7 @@ def main():
         run("login")
         private = home / ".config/rui"
         saved = private / "preferences"
-        assert saved.read_bytes() == b"version=4\nstore=\nprovider=codex\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=\n"
+        assert saved.read_bytes() == b"version=4\nstore=\nconnection=codex\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=\n"
         run("set", "deliberate-pin")
         old = saved.read_bytes()
         temporary = private / "preferences.tmp"
@@ -68,7 +68,7 @@ def main():
         saved.unlink()
         backup.rename(saved)
         for invalid, error in [(b"version=9\n", "UnsupportedPreferencesVersion"),
-                               (b"version=1\nstore=\nprovider=\nmodel=pin\n", "PreferenceProviderRequired")]:
+                               (b"version=1\nstore=\nconnection=\nmodel=pin\n", "PreferenceProviderRequired")]:
             saved.write_bytes(invalid)
             run("login", error=error)
             assert saved.read_bytes() == invalid

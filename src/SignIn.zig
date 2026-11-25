@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const core = @import("sign_in.zig");
@@ -1068,7 +1069,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             try append(&rows, a, "Browser", "Recommended. Paste callback if needed.", .browser, .{ .method = .browser });
             try append(&rows, a, "Device code", "Copy a code and approve in a browser.", .device, .{ .method = .device });
             const readiness = if (self.init != null and self.ready != null) self.ready.?(self.init.?, self.target.slice()) else core.Readinesses.initFill(.missing);
-            const usable: ?core.Provider = if (readiness.get(.chatgpt).usable()) .chatgpt else if (readiness.get(.codex).usable()) .codex else null;
+            const usable: ?core.Provider = if (readiness.get(provider_route.nameOf(.chatgpt)).usable()) .chatgpt else if (readiness.get(provider_route.nameOf(.codex)).usable()) .codex else null;
             try append(&rows, a, "Use saved login", if (usable != null) "Reuse this account's local sign-in" else "No usable saved ChatGPT sign-in", .reuse, if (usable) |provider| .{ .reuse = provider } else null);
             try button(&buttons, a, "Back", .back, .back);
         },
@@ -2227,7 +2228,7 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
             .os_launch => .failed(.os_launch, error.HostLaunchFailed),
             .timeout => .failed(.readiness_timeout, error.HostReadinessUnconfirmed),
             .activation_error => null,
-            .success, .pending => .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved } } }, .adopted = case == .pending } } },
+            .success, .pending => .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .connections = protocol.connectionsOfRoutes(.{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved }) } }, .adopted = case == .pending } } },
         };
         answer.pending = case == .pending;
         if (answer.launch) |*launch| {
@@ -2386,7 +2387,7 @@ test "Sign-in replacement retains whole prior launch and cleanup receipts across
     const Hooks = struct {
         fn ready(_: std.process.Init, _: []const u8) core.Readinesses {
             var result: core.Readinesses = .initFill(.missing);
-            result.set(.codex, .configured);
+            result.set(provider_route.nameOf(.codex), .configured);
             return result;
         }
         fn activate(init_: std.process.Init, _: selection.Intent, _: ?*const host_start.Connection) !Activation {
@@ -2507,7 +2508,7 @@ test "Sign-in native departure fully acknowledged successful launch remains succ
         const page = &rig.page;
         defer page.deinit();
         var answer = try testingActivation(page.init.?);
-        answer.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved } } } } } };
+        answer.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .connections = protocol.connectionsOfRoutes(.{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved }) } } } } };
         @memcpy(answer.launch.?.startup_bytes[0..marker.len], marker);
         answer.launch.?.startup_len = marker.len;
         const outcome: Outcome = .{ .published = .{ .defaults = {}, .activation = answer } };
@@ -2955,14 +2956,15 @@ test "Sign-in stale blank key cannot activate endpoint-only or source-only super
         try page.target.set(store);
         const first = try host_start.saveConnection(page.init.?, store, .{ .base = "https://first.example/v1" }, .{ .provided = "first-key" }, "custom-model", Hooks.yes);
         try std.testing.expect(first == .saved);
-        const assignment = try host_start.connectionAssignment(page.init.?, rig.arena.allocator(), &first.saved);
+        const assignment = try host_start.connectionAssignment(page.init.?, rig.arena.allocator(), store, &first.saved);
         try std.testing.expect(std.mem.indexOf(u8, assignment, "first-key") == null);
         try rig.send("\t\r");
         try std.testing.expect(page.state.page == .api and page.form.?.value.original.reusable());
         const endpoint = if (change == .endpoint) "https://second.example/v2/responses" else first.saved.endpoint.slice();
         if (change == .endpoint) {
             var failure: @import("start_report.zig").Failure = undefined;
-            try host_start.savedEdit(page.init.?, store, "providers.openai.endpoint", endpoint, &failure);
+            const moved = try std.fmt.allocPrint(rig.arena.allocator(), "[{{\"name\":\"openai\",\"label\":\"OpenAI\",\"base_url\":\"https://second.example/v2\",\"credential\":{{\"kind\":\"key\",\"source\":{{\"kind\":\"file\",\"path\":\"{s}\"}},\"placement\":\"bearer\"}},\"headers\":[],\"refusals\":[],\"formats\":[{{\"family\":\"responses\",\"dialect\":\"openai-responses/2\",\"web_search\":true}}],\"assign\":[],\"models\":{{\"list\":\"openai\"}}}}]", .{first.saved.key_file.slice()});
+            try host_start.savedEdit(page.init.?, store, "connections", moved, &failure);
             try std.Io.Dir.cwd().deleteFile(page.init.?.io, first.saved.key_file.slice());
         } else {
             const other = try host_start.saveConnection(page.init.?, store, .{ .unchanged = endpoint }, .{ .provided = "second-key" }, "custom-model", Hooks.yes);

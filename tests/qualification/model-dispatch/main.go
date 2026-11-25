@@ -145,7 +145,7 @@ func configure(deadline measurement.Deadline, binary, parent, store, key string)
 	var answer map[string]any
 	err = runJSON(deadline, binary, &answer,
 		"session", "configure", "--store", store, "--record", filepath.Join(parent, key+".json"),
-		"--key", key, "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna")
+		"--key", key, "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-luna")
 	if err != nil {
 		return "", err
 	}

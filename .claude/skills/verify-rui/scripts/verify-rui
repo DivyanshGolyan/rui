@@ -873,9 +873,8 @@ def host_status(run):
 
 
 def served_providers(body):
-    """The providers a ready Host serves; a provider reported as unserved is not served."""
-    providers = (body or {}).get("capabilities", {}).get("providers", {})
-    return {name for name, value in providers.items() if value != "unserved"}
+    """The connections a ready Host serves, by name."""
+    return {entry["name"] for entry in (body or {}).get("capabilities", {}).get("connections", [])}
 
 
 class HostProcesses:
@@ -1041,7 +1040,7 @@ def cmd_new(args):
     meta["sessions"] = {}
     for session, mode in () if args.no_sessions else (("demo", "bypass"), ("approve", "ask")):
         result = run.rui_cmd("session", "start", "--store", run.store, "--workspace", run.project,
-                             "--provider", "codex", "--model", "gpt-5.5", "--permission-mode", mode, "--label", session,
+                             "--connection", "codex", "--model", "gpt-5.5", "--permission-mode", mode, "--label", session,
                              input=f"verify-rui opened {session}")
         if result.returncode != 0:
             die(f"start {session} failed: {result.stderr}")
@@ -2678,7 +2677,7 @@ def seed_cast(run, entries, *, ordered=False):
         for i, text in enumerate(entry["messages"]):
             if sid is None:
                 model = entry.get("model", "gpt-6.1-sol")
-                argv = ["session", "configure" if entry.get("sender") else "start", "--store", run.store, "--workspace", workspace, "--provider", "codex",
+                argv = ["session", "configure" if entry.get("sender") else "start", "--store", run.store, "--workspace", workspace, "--connection", "codex",
                         "--model", model, "--permission-mode", entry["mode"], "--label", entry["label"]]
                 if entry.get("effort"):
                     argv += ["--reasoning-effort", entry["effort"]]
@@ -3595,7 +3594,7 @@ def frame_drive_upgrade(run, terminal, state, fixture, steps=None):
     if state["upgrade"] in ("current", "available"):
         if before:
             return
-        terminal.wait(lambda _c: f"/releases/tag/v{releases.version}" in releases.requests, "release discovery HTTP response")
+        terminal.wait(lambda _c: "/releases/redirect" in releases.requests, "release discovery HTTP response")
         return
     steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
                                 {"keys": ["Down"] * 5 + ["Enter"]}])

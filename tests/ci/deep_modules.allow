@@ -304,7 +304,6 @@ field-leak overview_view.State.archive
 field-leak overview_view.State.archived
 field-leak overview_view.State.arrivals
 field-leak overview_view.State.asking_models
-field-leak overview_view.State.browse_pending
 field-leak overview_view.State.carry
 field-leak overview_view.State.conversing
 field-leak overview_view.State.default
@@ -518,7 +517,6 @@ shallow-module host_reply
 shallow-module mcp/document
 shallow-module output_format
 shallow-module platform
-shallow-module provider
 shallow-module provider_name
 shallow-module providers
 shallow-module server_host
