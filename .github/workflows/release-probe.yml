@@ -1,0 +1,33 @@
+name: Release probe
+# Temporary diagnostic (not for merge): which release-creation request the run token is refused.
+on:
+  pull_request:
+    paths: ['.github/workflows/release-probe.yml']
+permissions:
+  contents: write
+jobs:
+  probe:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MAIN: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - name: Try each create shape, then delete what was made
+        run: |
+          set -u
+          tag="v0.0.0-probe-${GITHUB_RUN_ID}"
+          try() {
+            echo "== $1"
+            out=$(gh api -i --method POST "repos/$GITHUB_REPOSITORY/releases" --input - <<<"$2" 2>&1)
+            echo "$out" | grep -iE '^HTTP/|x-accepted-github-permissions|x-github-request-id|"message"|"id":' | head -6
+            id=$(echo "$out" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+            if [ -n "$id" ]; then gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$id" && echo "deleted $id"; fi
+          }
+          try "draft, target main sha" "{\"tag_name\":\"$tag-a\",\"target_commitish\":\"$MAIN\",\"draft\":true,\"name\":\"probe\",\"body\":\"probe\"}"
+          try "draft, no target" "{\"tag_name\":\"$tag-b\",\"draft\":true,\"name\":\"probe\",\"body\":\"probe\"}"
+          try "draft, target main branch" "{\"tag_name\":\"$tag-c\",\"target_commitish\":\"main\",\"draft\":true,\"name\":\"probe\",\"body\":\"probe\"}"
+          try "draft, target v0.93.1 sha" "{\"tag_name\":\"$tag-d\",\"target_commitish\":\"744f1e879de2caf376efa129861d0679bc3d7ee7\",\"draft\":true,\"name\":\"probe\",\"body\":\"probe\"}"
+          echo "== list drafts (read)"; gh api "repos/$GITHUB_REPOSITORY/releases?per_page=3" --jq '.[].tag_name'
+          git ls-remote --tags "https://github.com/$GITHUB_REPOSITORY" "v0.0.0-probe-*" || true
