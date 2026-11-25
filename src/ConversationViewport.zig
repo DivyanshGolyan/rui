@@ -1968,8 +1968,8 @@ pub fn testBandPadding() !void {
 fn legacyBandShape() !void {
     for ([_]u16{ 46, 140 }) |width| {
         var document: Sized(1024, true) = .{ .sidenotes = true };
-        try document.append("\x1b[90m›\x1b[39m \x1b[8m14:20\x1b[0mshort\n");
-        try document.append("\x1b[90m›\x1b[39m \x1b[8m14:21\x1b[0m");
+        try document.append(TerminalText.leader_on ++ "\x1b[90m›" ++ TerminalText.leader_off ++ "\x1b[39m \x1b[8m14:20\x1b[0mshort\n");
+        try document.append(TerminalText.leader_on ++ "\x1b[90m›" ++ TerminalText.leader_off ++ "\x1b[39m \x1b[8m14:21\x1b[0m");
         const count: usize = if (width == 46) 75 else 265;
         for (0..count) |_| try document.append("x");
         try document.append("\n");
