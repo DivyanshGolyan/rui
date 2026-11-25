@@ -183,13 +183,14 @@ test "the queued Messages cost the queue, not the history after a page's end" {
     try std.testing.expectEqual(steps[0], steps[1]);
 }
 
-test "persisted tool label corruption fences every publication route" {
-    const invalid = [_]struct { sql: []const u8, failure: anyerror = error.CorruptStore }{
-        .{ .sql = "' '" },
-        .{ .sql = "'Read' || char(10) || 'files'" },
-        .{ .sql = "char(160)" },
-        .{ .sql = "'Read' || char(8232) || 'files'" },
-        .{ .sql = "CAST(X'80' AS TEXT)" },
+test "a saved tool label reads as one line on every publication route, and only invalid UTF-8 fences" {
+    const invalid = [_]struct { sql: []const u8, words: ?[]const u8 }{
+        .{ .sql = "' '", .words = "Tool call" },
+        .{ .sql = "'Read' || char(10) || 'files'", .words = "Read files" },
+        .{ .sql = "char(160)", .words = "Tool call" },
+        .{ .sql = "'Read' || char(8232) || 'files'", .words = "Read files" },
+        .{ .sql = "'  Read   files  '", .words = "Read files" },
+        .{ .sql = "CAST(X'80' AS TEXT)", .words = null },
     };
     for (invalid) |description| {
         for ([_]enum { current, full, live_activity, settled_activity, conversation }{ .current, .full, .live_activity, .settled_activity, .conversation }) |route| {
@@ -221,12 +222,20 @@ test "persisted tool label corruption fences every publication route" {
                     std.testing.allocator.free(bytes);
                     break :blk {};
                 } else |err| err,
-                .live_activity, .settled_activity => if (store_core.activityPageForTesting(&storage, request)) |_| {} else |err| err,
+                .live_activity, .settled_activity => if (store_core.activityPageForTesting(&storage, request)) |page| blk: {
+                    if (route == .live_activity) if (description.words) |words| try std.testing.expectEqualStrings(words, page.call_activity.entries[0].presentation.line.?.words.slice());
+                    break :blk {};
+                } else |err| err,
                 .conversation => if (store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })) |_| {} else |err| err,
             };
-            try std.testing.expectError(description.failure, result);
-            try std.testing.expect(storage.isFenced());
-            try std.testing.expectError(error.StoreFenced, store_core.activityPageForTesting(&storage, request));
+            if (description.words == null) {
+                try std.testing.expectError(error.CorruptStore, result);
+                try std.testing.expect(storage.isFenced());
+                try std.testing.expectError(error.StoreFenced, store_core.activityPageForTesting(&storage, request));
+            } else {
+                try result;
+                try std.testing.expect(!storage.isFenced());
+            }
             try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
         }
