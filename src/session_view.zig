@@ -508,8 +508,9 @@ test "list rows share chat heading marks except unmarked finished Sessions" {
         if (case.tool) |code| {
             var heading: Sink = .{};
             try toolHeading(.{ .line = null, .code = code, .sign = tool_presentation.signOf(code, .done), .publication_position = null }, &heading, false);
-            const end = std.mem.indexOfScalar(u8, heading.bytes[0..heading.length], ' ').?;
-            try std.testing.expectEqualStrings(shared.unicode, heading.bytes[0..end]);
+            const shown = row_text.visible(heading.bytes[0..heading.length]);
+            const end = std.mem.indexOfScalar(u8, shown, ' ').?;
+            try std.testing.expectEqualStrings(shared.unicode, shown[0..end]);
         }
     }
     var states: std.enums.EnumSet(marks.Mark) = .full;
@@ -1637,7 +1638,7 @@ test "hosted calls draw as adjacent tool rows across outcomes" {
     }
     try std.testing.expectEqualStrings(
         "✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n× Find “Io” in ziglang.org/x\n✓ Search the web\n",
-        joined.bytes[0..joined.length],
+        row_text.visible(joined.bytes[0..joined.length]),
     );
 }
 

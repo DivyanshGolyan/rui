@@ -1523,7 +1523,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
                             var out = std.Io.Writer.fixed(&buffer);
                             var sink: Sink = .{ .out = &out };
                             const provisional = try View.render(requests, root, "k7m2qx", undefined, null, rows[index], queued, held, &sink, false, "", .{ .viewport = .wcwidth }, .none);
-                            try std.testing.expectEqualStrings(expected[index].text, row_text.visible(out.buffered()));
+                            try row_text.expectVisible(expected[index].text, out.buffered());
                             try std.testing.expectEqual(expected[index].provisional, provisional);
                             try std.testing.expectEqual(expected[index].lowest, sink.lowest);
                         }
@@ -1967,7 +1967,7 @@ test "activity golden stop with interrupted ending draws one line across pages" 
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
     _ = try View.render(undefined, "unused", session.slice(), undefined, null, page.facts.items[0], .{}, false, &sink, true, "", .{ .viewport = .wcwidth }, .none);
-    try std.testing.expectEqualStrings("\x1b[39m▪\x1b[39m Stopped\n", out.buffered());
+    try std.testing.expectEqualStrings("\x1b[39m▪\x1b[39m Stopped\n", row_text.visible(out.buffered()));
 }
 
 test "session_reads rendered row kinds keep their own text and feed_window draws the gap from adjacency in every order" {
