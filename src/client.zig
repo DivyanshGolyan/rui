@@ -272,15 +272,24 @@ pub const Requests = struct {
     }
 
     pub fn readActionArguments(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, destination: std.Io.File, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReply {
-        return readActionContent(self, store_path, session, action_id, protocol.read_action_arguments_request, "/v1/read-action-arguments", destination, reply_buffer);
+        const paths = try self.actionContentPaths(store_path, session, action_id);
+        return readActionContent(self, &paths, session, action_id, protocol.read_action_arguments_request, "/v1/read-action-arguments", destination, reply_buffer);
     }
 
     pub fn readActionArgumentsAt(self: Requests, paths: *const platform.Paths, session: []const u8, action_id: u64, destination: std.Io.File, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReply {
-        return readActionContentAt(self, paths, session, action_id, protocol.read_action_arguments_request, "/v1/read-action-arguments", destination, reply_buffer);
+        return readActionContent(self, paths, session, action_id, protocol.read_action_arguments_request, "/v1/read-action-arguments", destination, reply_buffer);
     }
 
     pub fn readActionCallId(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, destination: std.Io.File, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReply {
-        return readActionContent(self, store_path, session, action_id, protocol.read_action_call_id_request, "/v1/read-action-call-id", destination, reply_buffer);
+        const paths = try self.actionContentPaths(store_path, session, action_id);
+        return readActionContent(self, &paths, session, action_id, protocol.read_action_call_id_request, "/v1/read-action-call-id", destination, reply_buffer);
+    }
+
+    /// Refuses an invalid target before resolving the Store selector, so a bad target never touches the Store.
+    fn actionContentPaths(self: Requests, store_path: []const u8, session: []const u8, action_id: u64) !platform.Paths {
+        try self.check();
+        if (!protocol.validSessionId(session) or action_id == 0) return error.InvalidTarget;
+        return resolveClientPaths(self.io, store_path);
     }
 
     pub fn conversationPage(self: Requests, store_path: []const u8, session: []const u8, cursor: protocol_reply.ConversationCursor) !protocol_reply.ConversationPageReply {
@@ -2170,25 +2179,7 @@ pub fn readActionCallId(
     return (Requests{ .io = io }).readActionCallId(store_path, session, action_id, destination, reply_buffer);
 }
 
-fn readActionContent(
-    requests: Requests,
-    store_path: []const u8,
-    session: []const u8,
-    action_id: u64,
-    comptime shape: anytype,
-    comptime route: []const u8,
-    destination: std.Io.File,
-    reply_buffer: *ReplyBuffer,
-) !protocol_reply.ResultReply {
-    const io = requests.io;
-    reply_buffer.len = 0;
-    try requests.check();
-    if (!protocol.validSessionId(session) or action_id == 0) return error.InvalidTarget;
-    const paths = try resolveClientPaths(io, store_path);
-    return readActionContentAt(requests, &paths, session, action_id, shape, route, destination, reply_buffer);
-}
-
-fn readActionContentAt(requests: Requests, paths: *const platform.Paths, session: []const u8, action_id: u64, comptime shape: anytype, comptime route: []const u8, destination: std.Io.File, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReply {
+fn readActionContent(requests: Requests, paths: *const platform.Paths, session: []const u8, action_id: u64, comptime shape: anytype, comptime route: []const u8, destination: std.Io.File, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReply {
     const io = requests.io;
     reply_buffer.len = 0;
     try requests.check();

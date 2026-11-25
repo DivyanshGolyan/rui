@@ -180,7 +180,6 @@ field-leak client.Capture.input_failure
 field-leak client.Capture.parent
 field-leak client.Capture.temporary_name
 field-leak client.Requests.drop_reply
-field-leak client.Requests.io
 field-leak codec_abi.Headers.count
 field-leak codec_abi.Headers.names
 field-leak codecs/json.Reader.arrays
