@@ -7673,7 +7673,7 @@ test "archived window: a long wheel scroll after a selection holds the shown row
         _ = try wheelRows(&state, &host, &top_ref, true);
         most = @max(most, heldArchived(&state));
     }
-    try std.testing.expect(most <= 6 * archived_page_rows + 2 * 10);
+    try std.testing.expect(most <= 6 * @as(usize, archived_page_rows) + 2 * 10);
     try std.testing.expect(state.viewport != null);
 }
 
