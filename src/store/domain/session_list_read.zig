@@ -347,6 +347,31 @@ const ArchivedPage = struct {
         page.count += 1;
         return true;
     }
+
+    /// Resets the small fields only: a whole-struct store would write all 37 KB of rows.
+    fn reset(page: *ArchivedPage) void {
+        page.count = 0;
+        page.failure = null;
+    }
+
+    /// Settles a page read with one row beyond `size`: refuses a damaged read, keeps `size` rows and says whether
+    /// the extra row was there.
+    fn settle(page: *ArchivedPage, size: usize) error{CorruptStore}!bool {
+        if (page.failure) |err| return err;
+        const beyond = page.count > size;
+        page.count = @min(page.count, size);
+        return beyond;
+    }
+
+    fn held(page: *ArchivedPage) []ArchivedWindowRow {
+        return page.rows[0..page.count];
+    }
+
+    /// The keys of the newest and the oldest held row, null when none is held.
+    fn edges(page: *const ArchivedPage) struct { first: ?u64, last: ?u64 } {
+        if (page.count == 0) return .{ .first = null, .last = null };
+        return .{ .first = page.rows[0].archive_seq.get(), .last = page.rows[page.count - 1].archive_seq.get() };
+    }
 };
 
 /// The raw leading bytes of an inline Text first Message, whole UTF-8 scalars only. A screen's line rule is the
@@ -359,9 +384,7 @@ fn firstPrefix(blob: ?*const rsql.Blob(session_list.max_first_prefix_bytes)) ?[]
 /// Reads one Archived window page in one round. `head` and `below` read newest first; `above` and `tail`
 /// read oldest first from their key and are returned newest first.
 fn readArchivedWindow(a: *ReadAccess, window: session_list.ArchivedWindow, generation: u64, page: *ArchivedPage, visitor: anytype) !void {
-    // Resets the small fields only: a whole-struct store would write all 37 KB of rows.
-    page.count = 0;
-    page.failure = null;
+    page.reset();
     const cursor = window.cursor;
     const size: usize = window.rows;
     var more_above = false;
@@ -379,22 +402,18 @@ fn readArchivedWindow(a: *ReadAccess, window: session_list.ArchivedWindow, gener
     if (newest_below) |below| {
         a.readEach(archived_newest_page, .{ .below = below, .limit = size + 1 }, size + 1, page);
         try store_access.runAs(a, error.SessionReadFailed);
-        if (page.failure) |err| return err;
-        more_below = page.count > size;
+        more_below = try page.settle(size);
         more_above = std.meta.activeTag(cursor) == .below;
-        page.count = @min(page.count, size);
     } else if (oldest_above) |above| {
         a.readEach(archived_oldest_page, .{ .above = above, .limit = size + 1 }, size + 1, page);
         try store_access.runAs(a, error.SessionReadFailed);
-        if (page.failure) |err| return err;
         // The oldest-first read keeps the rows nearest the cursor; the extra row is further away.
-        more_above = page.count > size;
+        more_above = try page.settle(size);
         more_below = std.meta.activeTag(cursor) == .above;
-        page.count = @min(page.count, size);
-        std.mem.reverse(ArchivedWindowRow, page.rows[0..page.count]);
+        std.mem.reverse(ArchivedWindowRow, page.held());
     }
     try visitor.head();
-    for (page.rows[0..page.count]) |*row| {
+    for (page.held()) |*row| {
         if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
         var values: session_list.ArchivedRow = .{
             .reference = row.session_ref.slice(),
@@ -410,8 +429,8 @@ fn readArchivedWindow(a: *ReadAccess, window: session_list.ArchivedWindow, gener
     const since = (change_ring.Token{ .instance = a.store.instance, .generation = generation }).format(&token);
     try visitor.tail(.{ .window = .{
         .since = since,
-        .first = if (page.count != 0) page.rows[0].archive_seq.get() else null,
-        .last = if (page.count != 0) page.rows[page.count - 1].archive_seq.get() else null,
+        .first = page.edges().first,
+        .last = page.edges().last,
         .more_above = more_above,
         .more_below = more_below,
     } });
