@@ -806,7 +806,7 @@ class CandidatePlanTest(unittest.TestCase):
         with PlanFixture() as fixture:
             fixture.write('tests/ci/ci_plan.py', """from types import SimpleNamespace
 
-def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
+def plan(selection, *, event_name, draft, promotion, change_kind, compile_only, main_red=False):
     return SimpleNamespace(outputs=dict(owner='called', event=event_name, draft=draft,
         promotion=promotion, kind=change_kind.value, base=selection['base'], compile_only=compile_only),
         selection=dict(summary='from owner'))
