@@ -704,6 +704,13 @@ class SelectionTest(unittest.TestCase):
                         self.assertIn("upgrade-integration", result["native_targets"])
                         self.assertEqual(result["upgrade_required"], upgrade_required)
 
+    def test_host_endpoint_and_census_owners_run_the_previous_release_upgrade(self):
+        # #2120 moved the endpoint layout and only Promote's running-upgrade check saw the break.
+        for path in ("src/host_endpoint.zig", "src/host_restart_all.zig"):
+            with self.subTest(path=path):
+                self.assertTrue(select([path], "review", AVAILABLE)["upgrade_required"])
+                self.assertFalse(select([path], "development", AVAILABLE)["upgrade_required"])
+
     def test_installer_owners_select_standalone_fixture_in_both_phases(self):
         paths = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
                  "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py", "tests/ci/release.py", "tests/ci/git_command.py",

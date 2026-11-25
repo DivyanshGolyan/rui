@@ -14,8 +14,8 @@ pub const At = struct { source: enum { activity, conversation }, position: u64, 
 pub const Display = struct {
     /// Exact length of the display bytes `stream` delivers.
     length: u64,
-    store: []const u8,
-    session: []const u8,
+    reads: client.SessionReads,
+    selected_store: ?[]const u8,
     body: union(enum) {
         text: struct { at: At, reference: content_value.Reference },
         /// Borrows the scratch file `open` read the list into.
@@ -28,33 +28,53 @@ pub const Display = struct {
     /// into `scratch`, which every later `stream` re-reads, so it outlives the Display.
     /// `store` and `session` are borrowed for the Display's life.
     pub fn open(requests: client.Requests, store: []const u8, session: []const u8, at: At, value: content_value.Value, scratch: std.Io.File) !Opened {
+        return openUsing(client.SessionReads.selected(requests, store, session), store, at, value, scratch);
+    }
+
+    /// A scan can open only an Activity value through its bound route.
+    pub fn openActivity(reads: client.SessionReads, position: u64, ordinal: u64, value: content_value.Value, scratch: std.Io.File) !Opened {
+        return openUsing(reads, null, .{ .source = .activity, .position = position, .ordinal = ordinal }, value, scratch);
+    }
+
+    fn openUsing(reads: client.SessionReads, selected_store: ?[]const u8, at: At, value: content_value.Value, scratch: std.Io.File) !Opened {
         const parts = switch (value) {
-            .text => |reference| return .{ .display = .{ .length = reference.length, .store = store, .session = session, .body = .{ .text = .{ .at = at, .reference = reference } } } },
+            .text => |reference| return .{ .display = .{ .length = reference.length, .reads = reads, .selected_store = selected_store, .body = .{ .text = .{ .at = at, .reference = reference } } } },
             .parts => |parts| parts,
         };
-        const list = switch (try readList(requests, store, session, parts, scratch)) {
+        const list = switch (try readList(reads, parts, scratch)) {
             .list => |list| list,
             .failure => |failure| return .{ .failure = failure },
         };
         var iterator: protocol_reply.PartIterator = undefined;
         try list.iterator(&iterator);
-        return .{ .display = .{ .length = try part_text.displayLength(&iterator, labels(parts.owner)), .store = store, .session = session, .body = .{ .parts = list } } };
+        return .{ .display = .{ .length = try part_text.displayLength(&iterator, labels(parts.owner)), .reads = reads, .selected_store = selected_store, .body = .{ .parts = list } } };
     }
 
     /// Feeds exactly `length` display bytes into `sink`. Every Text part is read whole and
     /// must match its certified identity, or the read fails with `ContentBindingMismatch`.
     /// A sink with an `image(part)` method receives images instead of their placeholders.
     pub fn stream(self: *const Display, requests: client.Requests, sink: anytype) !?protocol_reply.ReadFailure {
+        return self.streamUsing(self.reads.withStandaloneRequests(requests), requests, sink);
+    }
+
+    /// Streams a Display returned by openActivity with its original read context.
+    /// A bound route is borrowed only until the originating worker completes;
+    /// Displays returned by open use stream with the caller's read context.
+    pub fn streamBound(self: *const Display, sink: anytype) !?protocol_reply.ReadFailure {
+        return self.streamUsing(self.reads, null, sink);
+    }
+
+    fn streamUsing(self: *const Display, reads: client.SessionReads, standalone: ?client.Requests, sink: anytype) !?protocol_reply.ReadFailure {
         switch (self.body) {
             .text => |text| {
                 const expected: protocol_reply.CommandObservation.ContentReference = .{ .bytes = text.reference.length, .digest = text.reference.digest };
                 return switch (text.at.source) {
-                    .activity => requests.readActivityContent(self.store, self.session, text.at.position, text.at.ordinal, expected, sink),
-                    .conversation => requests.readConversationContent(self.store, self.session, text.at.position, text.at.ordinal, expected, sink),
+                    .activity => reads.readActivityContent(text.at.position, text.at.ordinal, expected, sink),
+                    .conversation => if (reads.isBound()) error.InvalidTarget else if (standalone) |requests| requests.readConversationContent(self.selected_store orelse return error.InvalidTarget, reads.sessionId(), text.at.position, text.at.ordinal, expected, sink) else error.InvalidTarget,
                 };
             },
             .parts => |*list| {
-                var source: PartSource = .{ .requests = requests, .store = self.store, .session = self.session, .list = list, .pass = if (list.value.owner == .message) .images else .stored };
+                var source: PartSource = .{ .reads = reads, .list = list, .pass = if (list.value.owner == .message) .images else .stored };
                 try list.iterator(&source.iterator);
                 return part_text.streamDisplay(&source, labels(list.value.owner), null, sink);
             },
@@ -65,11 +85,15 @@ pub const Display = struct {
 /// The display's first line, for the activity entry at `position`. Parts join with "\n",
 /// so the line lies wholly in part 0: that Text part's first line, or the first placeholder.
 pub fn firstLine(requests: client.Requests, store: []const u8, session: []const u8, position: u64, value: content_value.Value, scratch: std.Io.File, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+    return firstLineWith(client.SessionReads.selected(requests, store, session), position, value, scratch, buffer);
+}
+
+pub fn firstLineWith(reads: client.SessionReads, position: u64, value: content_value.Value, scratch: std.Io.File, buffer: []u8) !protocol_reply.ActivityPrefixReply {
     const parts = switch (value) {
-        .text => return requests.readActivityPrefix(store, session, position, buffer),
+        .text => return reads.readActivityPrefix(position, buffer),
         .parts => |parts| parts,
     };
-    const list = switch (try readList(requests, store, session, parts, scratch)) {
+    const list = switch (try readList(reads, parts, scratch)) {
         .list => |list| list,
         .failure => |failure| return .{ .failure = failure },
     };
@@ -78,7 +102,7 @@ pub fn firstLine(requests: client.Requests, store: []const u8, session: []const 
     // The decoded list holds at least one part.
     const first = (try iterator.next()).?;
     switch (first.kind) {
-        .text => return requests.readPublicPartPrefix(store, session, parts.owner, first, buffer),
+        .text => return reads.readPublicPartPrefix(parts.owner, first, buffer),
         .image => |image| {
             var out: [part_text.max_placeholder_bytes]u8 = undefined;
             const text = part_text.displayPlaceholder(labels(parts.owner), 1, image, first.reference.length, &out);
@@ -94,11 +118,11 @@ fn labels(owner: content_value.Owner) part_text.Labels {
 }
 
 /// Reads the owner's list into `scratch` and accepts it only for this value's owner and manifest.
-fn readList(requests: client.Requests, store: []const u8, session: []const u8, parts: content_value.Value.Parts, scratch: std.Io.File) !protocol_reply.PublicPartsReply {
-    var sink: ScratchSink = .{ .io = requests.io, .file = scratch };
+fn readList(reads: client.SessionReads, parts: content_value.Value.Parts, scratch: std.Io.File) !protocol_reply.PublicPartsReply {
+    var sink: ScratchSink = .{ .io = reads.io(), .file = scratch };
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try requests.readPublicParts(store, session, parts.owner, &sink, &reply_buffer);
-    return protocol_reply.PublicPartsReply.decode(requests.io, scratch, reply, .{ .session = session, .owner = parts.owner, .identity = parts.identity });
+    const reply = try reads.readPublicParts(parts.owner, &sink, &reply_buffer);
+    return protocol_reply.PublicPartsReply.decode(reads.io(), scratch, reply, .{ .session = reads.sessionId(), .owner = parts.owner, .identity = parts.identity });
 }
 
 /// Writes the list from offset 0 whatever the file's cursor, so a reused scratch is overwritten.
@@ -115,9 +139,7 @@ const ScratchSink = struct {
 
 /// The certified list as a `part_text` source; Text parts come from the parts route.
 const PartSource = struct {
-    requests: client.Requests,
-    store: []const u8,
-    session: []const u8,
+    reads: client.SessionReads,
     list: *const protocol_reply.PartList,
     iterator: protocol_reply.PartIterator = undefined,
     pass: enum { stored, images, text },
@@ -139,7 +161,7 @@ const PartSource = struct {
     pub fn text(self: *PartSource, part: content_value.Part, start: u64, count: u64, sink: anytype) !?protocol_reply.ReadFailure {
         // A Display streams whole, so each Text part is asked for whole.
         std.debug.assert(start == 0 and count == part.reference.length);
-        return self.requests.readPublicPartContent(self.store, self.session, self.list.value.owner, part, sink);
+        return self.reads.readPublicPartContent(self.list.value.owner, part, sink);
     }
 };
 
@@ -328,6 +350,65 @@ test "SUI-60 parts values draw as text and image placeholders" {
             const refused = (try Display.open(requests, root, "k7m2qx", at, PartsHost.value, scratch)).failure;
             try std.testing.expectEqualStrings("ContentIsText", refused.diagnostic.code.slice());
             try std.testing.expectEqualStrings("ContentIsText", (try firstLine(requests, root, "k7m2qx", 4, PartsHost.value, lines, &line)).failure.diagnostic.code.slice());
+            host.refuse_list = false;
+
+            // A bound Display keeps the route and cancellation context it opened with,
+            // even when another Store contains the same certified bytes and owner IDs.
+            const Bound = struct {
+                paths: *const @import("platform.zig").Paths,
+                dir: std.Io.Dir,
+                alias: []const u8,
+                scratch: std.Io.File,
+                original: *PartsHost,
+                pub fn run(self: *@This(), other: *PartsHost, _: std.Io.Dir, other_root: []const u8) !void {
+                    const io_ = std.testing.io;
+                    const original_requests: client.Requests = .{ .io = io_ };
+                    const reads = client.SessionReads.bound(original_requests, self.paths, "k7m2qx");
+                    const text_display = (try Display.openActivity(reads, 4, 0, PartsHost.plainValue(), self.scratch)).display;
+                    const parts_display = (try Display.openActivity(reads, 4, 0, PartsHost.value, self.scratch)).display;
+                    try self.dir.deleteFile(io_, "route-alias");
+                    try self.dir.symLink(io_, other_root, "route-alias", .{ .is_directory = true });
+                    var stopped: client.Cancellation = .{};
+                    stopped.requestStop();
+                    var other_origin: client.FailureOrigin = .local;
+                    const replacement: client.Requests = .{ .io = io_, .cancellation = &stopped, .failure_origin = &other_origin };
+                    try std.testing.expect(!@hasDecl(Display, "streamWith"));
+                    try std.testing.expect(!@hasDecl(client.SessionReads, "readConversationContent"));
+                    try std.testing.expect(!@hasDecl(Display, "openWith"));
+                    // Public fields must not permit a forged conversation source to
+                    // replace the bound Store, even if both Hosts serve the same bytes.
+                    var forged = text_display;
+                    forged.body.text.at.source = .conversation;
+                    forged.selected_store = other_root;
+                    var forged_out: Collect = .{};
+                    try std.testing.expectError(error.InvalidTarget, forged.stream(original_requests, &forged_out));
+                    try std.testing.expectEqual(@as(usize, 0), other.text_reads);
+                    var text_out: Collect = .{};
+                    try std.testing.expectEqual(@as(?protocol_reply.ReadFailure, null), try text_display.stream(replacement, &text_out));
+                    try std.testing.expectEqualStrings(PartsHost.plain, text_out.slice());
+                    var parts_out: Collect = .{};
+                    try std.testing.expectEqual(@as(?protocol_reply.ReadFailure, null), try parts_display.stream(replacement, &parts_out));
+                    try std.testing.expectEqualStrings("Describe this screenshot.\n[image 1: PNG 1024x768, 245 KB]\nline one\nline two", parts_out.slice());
+                    try std.testing.expectEqual(client.FailureOrigin.local, other_origin);
+                    try std.testing.expectEqual(@as(usize, 0), other.text_reads + other.lists + other.part_reads);
+                    // The legacy selected adapter still uses the supplied context.
+                    const selected = (try Display.open(original_requests, self.alias, "k7m2qx", .{ .source = .activity, .position = 4, .ordinal = 0 }, PartsHost.plainValue(), self.scratch)).display;
+                    var stopped_out: Collect = .{};
+                    try std.testing.expectError(error.Cancelled, selected.stream(replacement, &stopped_out));
+                    var other_out: Collect = .{};
+                    try std.testing.expectEqual(@as(?protocol_reply.ReadFailure, null), try selected.stream(original_requests, &other_out));
+                    try std.testing.expectEqualStrings(PartsHost.plain, other_out.slice());
+                    try std.testing.expectEqual(@as(usize, 1), other.text_reads);
+                    try std.testing.expect(self.original.part_reads != 0);
+                }
+            };
+            try dir.symLink(io, ".", "route-alias", .{ .is_directory = true });
+            var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/route-alias", .{root});
+            const paths = try client.resolveClientPaths(io, alias);
+            var other: PartsHost = .{ .parts = host.parts, .texts = host.texts };
+            var bound: Bound = .{ .paths = &paths, .dir = dir, .alias = alias, .scratch = scratch, .original = host };
+            try fake_host.withHost(&other, &bound);
         }
     };
     const texts = [_][]const u8{ "Describe this screenshot.", "", "line one\nline two" };

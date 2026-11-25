@@ -746,30 +746,43 @@ pub fn actionToolFromCapture(observed: *const protocol_reply.Current, io: std.Io
 }
 
 pub fn actionTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File) !?ActionTool {
-    const observed = try current(requests, store, session, scratch);
-    return actionToolFromCapture(&observed, requests.io, scratch, action);
+    return actionToolWith(client.SessionReads.selected(requests, store, session), action, scratch);
+}
+
+fn actionToolWith(reads: client.SessionReads, action: u64, scratch: std.Io.File) !?ActionTool {
+    const observed = try currentWith(reads, scratch);
+    return actionToolFromCapture(&observed, reads.io(), scratch, action);
 }
 
 pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, unicode_script: bool) !bool {
-    const tool = try actionTool(requests, store, session, action, scratch) orelse return false;
-    try permissionForTool(requests, store, session, action, scratch, sink, colour, unicode_script, &tool);
+    return permissionWith(client.SessionReads.selected(requests, store, session), action, scratch, sink, colour, unicode_script);
+}
+
+pub fn permissionWith(reads: client.SessionReads, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, unicode_script: bool) !bool {
+    const tool = try actionToolWith(reads, action, scratch) orelse return false;
+    try permissionForToolWith(reads, action, scratch, sink, colour, unicode_script, &tool);
     return true;
 }
 
 pub fn permissionForTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, unicode_script: bool, tool: *const ActionTool) !void {
-    try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
-    try scratch.setLength(requests.io, 0);
+    return permissionForToolWith(client.SessionReads.selected(requests, store, session), action, scratch, sink, colour, unicode_script, tool);
+}
+
+fn permissionForToolWith(reads: client.SessionReads, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, unicode_script: bool, tool: *const ActionTool) !void {
+    const io = reads.io();
+    try io.vtable.fileSeekTo(io.userdata, scratch, 0);
+    try scratch.setLength(io, 0);
     var reply: client.ReplyBuffer = .{};
-    const result = try requests.readActionArguments(store, session, action, scratch, &reply);
+    const result = try reads.readActionArguments(action, scratch, &reply);
     if (result == .command) {
-        const failure = requests.captureReadFailure(result.command) catch {
+        const failure = reads.captureReadFailure(result.command) catch {
             try protocol_reply.checkCanonicalFailure(result.command);
             return error.ActionReadFailed;
         };
         if (failure.err() == error.CanonicalStoreFailure) return error.CanonicalStoreFailure;
         return error.ActionReadFailed;
     }
-    return renderPermissionArguments(requests.io, scratch, sink, colour, unicode_script, tool);
+    return renderPermissionArguments(io, scratch, sink, colour, unicode_script, tool);
 }
 
 const ArgumentSource = struct {
@@ -973,7 +986,12 @@ test "an Action's command and stdin lines carry the content mark, so neither can
 }
 
 pub fn current(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File) !protocol_reply.Current {
-    try scratch.setLength(requests.io, 0);
+    return currentWith(client.SessionReads.selected(requests, store, session), scratch);
+}
+
+pub fn currentWith(reads: client.SessionReads, scratch: std.Io.File) !protocol_reply.Current {
+    const io = reads.io();
+    try scratch.setLength(io, 0);
     const Capture = struct {
         io: std.Io,
         file: std.Io.File,
@@ -983,13 +1001,13 @@ pub fn current(requests: client.Requests, store: []const u8, session: []const u8
             self.offset += bytes.len;
         }
     };
-    var capture: Capture = .{ .io = requests.io, .file = scratch };
+    var capture: Capture = .{ .io = io, .file = scratch };
     var reply: client.ReplyBuffer = .{};
-    const report = try requests.inspectSession(store, session, .current, &capture, &reply);
-    return switch (try protocol_reply.CurrentReply.decode(requests.io, scratch, session, report)) {
+    const report = try reads.inspectCurrent(&capture, &reply);
+    return switch (try protocol_reply.CurrentReply.decode(io, scratch, reads.sessionId(), report)) {
         .current => |value| value,
         .unconfigured => error.SessionNotConfigured,
-        .failure => |failure| requests.failRead(failure),
+        .failure => |failure| reads.failRead(failure),
     };
 }
 
@@ -1198,6 +1216,10 @@ test "a queued Message is labelled only while work under way holds it" {
 }
 
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
+    return messageWith(client.SessionReads.selected(requests, store, session), scratch, item, value, labels, sink, colour);
+}
+
+fn messageWith(reads: client.SessionReads, scratch: std.Io.File, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
     if (!visibleMessage(value)) return;
     if (messageLabel(value.state, labels)) |text| {
         try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
@@ -1206,10 +1228,10 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(true);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     try userPrefix(sink, colour, value.admitted_at);
-    const display = try open(requests, store, session, scratch, item, value.content);
+    const display = try open(reads, scratch, item, value.content);
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, display.length, false);
-    try stream(requests, &display, &body);
+    try stream(reads, &display, &body);
     if (try body.finishMessage(block)) {
         try sink.feed("\n");
     } else try Text.writeBody(sink, "\n");
@@ -1218,20 +1240,20 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
 
 /// Opens the display of the value an activity entry shows. A parts value reads its
 /// certified list into `scratch`, which the returned Display borrows.
-fn open(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, item: protocol.ActivityItem, value: content_value.Value) !value_reads.Display {
-    return switch (try value_reads.Display.open(requests, store, session, .{ .source = .activity, .position = item.position, .ordinal = item.ordinal }, value, scratch)) {
+fn open(reads: client.SessionReads, scratch: std.Io.File, item: protocol.ActivityItem, value: content_value.Value) !value_reads.Display {
+    return switch (try value_reads.Display.openActivity(reads, item.position, item.ordinal, value, scratch)) {
         .display => |display| display,
-        .failure => |failure| requests.failRead(failure),
+        .failure => |failure| reads.failRead(failure),
     };
 }
 
-fn stream(requests: client.Requests, display: *const value_reads.Display, target: anytype) !void {
-    if (try display.stream(requests, target)) |failure| return requests.failRead(failure);
+fn stream(reads: client.SessionReads, display: *const value_reads.Display, target: anytype) !void {
+    if (try display.streamBound(target)) |failure| return reads.failRead(failure);
 }
 
-fn content(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, item: protocol.ActivityItem, value: content_value.Value, target: anytype) !void {
-    const display = try open(requests, store, session, scratch, item, value);
-    try stream(requests, &display, target);
+fn content(reads: client.SessionReads, scratch: std.Io.File, item: protocol.ActivityItem, value: content_value.Value, target: anytype) !void {
+    const display = try open(reads, scratch, item, value);
+    try stream(reads, &display, target);
 }
 
 pub fn toolResult(presentation: protocol.ToolPresentation, sink: anytype, colour: bool) !void {
@@ -1450,6 +1472,10 @@ pub fn visibleMessage(value: protocol.ActivityItem.Message) bool {
 
 /// `scratch` holds the part list of a parts value while its row draws.
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, provider: ?@import("connection.zig").Name, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
+    return renderWith(client.SessionReads.selected(requests, store, session), scratch, provider, item, queued, held, sink, colour, home, destination, fold);
+}
+
+pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@import("connection.zig").Name, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
     switch (item.value) {
         .admission, .received, .user => |value| if (!visibleMessage(value)) return false,
         else => {},
@@ -1461,28 +1487,28 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             _ = held;
             return false;
         },
-        .received => |value| try message(requests, store, session, scratch, item, value, .none, sink, colour),
+        .received => |value| try messageWith(reads, scratch, item, value, .none, sink, colour),
         .user => |value| {
             if (value.sender != null or value.source_action != null) return false;
-            try message(requests, store, session, scratch, item, value, .none, sink, colour);
+            try messageWith(reads, scratch, item, value, .none, sink, colour);
         },
         .assistant => |assistant| {
             var answer: Answer(@TypeOf(sink)) = undefined;
             answer.init(sink, home, colour, destination);
-            try content(requests, store, session, scratch, item, .{ .text = assistant.content }, &answer);
+            try content(reads, scratch, item, .{ .text = assistant.content }, &answer);
             try answer.finish();
             try Text.writeBody(sink, "\n");
         },
         .tool_result => |result| {
             if (fold == .open) {
                 fold.open.* = .{};
-                try content(requests, store, session, scratch, item, result.content, fold.open);
+                try content(reads, scratch, item, result.content, fold.open);
             } else {
                 const Discard = struct {
                     pub fn feed(_: *@This(), _: []const u8) !void {}
                 };
                 var discard: Discard = .{};
-                try content(requests, store, session, scratch, item, result.content, &discard);
+                try content(reads, scratch, item, result.content, &discard);
             }
             try toolHeadingWith(result.presentation, sink, colour, fold != .none);
             if (fold == .open) try fold.open.finish(sink);
@@ -1494,12 +1520,12 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         .call => {},
         .turn_ended => |ended| {
             if (ended.ending == .done) return false;
-            if (!std.mem.eql(u8, ended.session.slice(), session)) {
+            if (!std.mem.eql(u8, ended.session.slice(), reads.sessionId())) {
                 try agentEnded(sink, ended.session.slice(), ended.code.slice(), colour);
             } else try workEnded(sink, ended.code.slice(), provider, colour);
         },
         .stop => |stop| {
-            const excluded = try excludedAtStop(requests, store, session, scratch, item, sink, colour);
+            const excluded = try excludedAtStop(reads, scratch, item, sink, colour);
             if (stop.turn == null) {
                 if (excluded) try sink.feed("\n");
                 try ending(sink, .{ .mark = .stopped, .words = "Stopped" }, colour);
@@ -1512,14 +1538,14 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
     return false;
 }
 
-fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, stop: protocol.ActivityItem, sink: anytype, colour: bool) !bool {
+fn excludedAtStop(reads: client.SessionReads, scratch: std.Io.File, stop: protocol.ActivityItem, sink: anytype, colour: bool) !bool {
     if (stop.value.stop.cutoff == 0) return false;
     var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .direction = .backward, .kinds = .initOne(.admission) };
     var first: ?u64 = null;
     search: while (true) {
-        const page = switch (try requests.activityPage(store, session, cursor)) {
+        const page = switch (try reads.activityPage(cursor)) {
             .page => |page| page,
-            .failure => |failure| return requests.failRead(failure),
+            .failure => |failure| return reads.failRead(failure),
         };
         for (page.facts.items[0..page.facts.count]) |item| {
             const value = item.value.admission;
@@ -1534,9 +1560,9 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
     var wrote = false;
     cursor = .{ .end = stop.position - 1, .position = lowest - 1, .kinds = .initOne(.admission) };
     while (true) {
-        const page = switch (try requests.activityPage(store, session, cursor)) {
+        const page = switch (try reads.activityPage(cursor)) {
             .page => |page| page,
-            .failure => |failure| return requests.failRead(failure),
+            .failure => |failure| return reads.failRead(failure),
         };
         for (page.facts.items[0..page.facts.count]) |item| {
             var value = item.value.admission;
@@ -1544,7 +1570,7 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
             value.state = .excluded;
             if (wrote) try sink.feed("\n");
             wrote = true;
-            try message(requests, store, session, scratch, item, value, .lasting(false), sink, colour);
+            try messageWith(reads, scratch, item, value, .lasting(false), sink, colour);
         }
         cursor = page.continuation() orelse return wrote;
     }

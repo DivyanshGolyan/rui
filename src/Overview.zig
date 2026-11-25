@@ -2155,7 +2155,7 @@ const fake_operations: Operations = .{
     }.host,
     .window = struct {
         fn window(_: *Self, _: client.Requests, _: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
-            page.* = .{};
+            page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists } };
             return null;
         }
     }.window,
@@ -4577,7 +4577,7 @@ test "a wheel over the Archived list reports one viewport, after the draw that a
             try wire.writeJson(&out);
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
             page.rows[0] = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
             return null;
         }
@@ -4629,7 +4629,7 @@ test "overview Archived window effect runs one job and its reply becomes the win
             try wire.writeJson(&out);
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
             page.rows[0] = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
             return null;
         }
@@ -4675,9 +4675,9 @@ test "overview archive effects preserve server filter, pending visibility, and r
     // The Archived window answers the one archived Session the listing names, as the Host's window would.
     const Windowing = struct {
         fn window(_: *Self, _: client.Requests, _: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
-            page.* = .{ .count = 0 };
+            page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .count = 0 };
             if (Listing.archive_state != .archived) return null;
-            page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
             page.rows[0] = .{ .reference = .{ .value = protocol.Bounded(protocol.max_session_bytes).from("k7m2qx") catch unreachable }, .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 4, .content = .{ .text = .{ .length = 1, .digest = @splat(0x1) } }, .line = null } };
             return null;
         }
@@ -9212,4 +9212,259 @@ test "SUI-108 App overview keyboard and pointer precedence" {
     try std.testing.expectEqual(36, @import("widgets/RowInset.zig").contentWidth(40));
     try keyboardSelectionCase();
     try keyboardOriginCase();
+}
+
+fn archivedLaterWindowCase() !void {
+    const Script = struct {
+        const host: [16]u8 = @splat(1);
+        const old: protocol.SinceToken = .{ .instance = host, .generation = 1 };
+        const through: protocol.SinceToken = .{ .instance = host, .generation = 10 };
+        const archived: protocol.SinceToken = .{ .instance = host, .generation = 11 };
+        const target = "b4n8wd".*;
+
+        fn row(page: *protocol_reply.SessionListPage, index: usize, reference: []const u8) !void {
+            const r = &page.rows[index];
+            const target_row = std.mem.eql(u8, reference, &target);
+            const staged_work: view.WorkState = if (target_row) .{ .approval = .{ .since = test_now_s - 1800 } } else .{ .idle = .{ .since = test_now_s } };
+            r.* = .{ .read_version = if (std.mem.eql(u8, reference, "z00000")) archived else through, .work = fixtureSessionWork(.{ .state = staged_work, .turn = if (target_row) 7 else null, .first_action = if (target_row) 42 else null }) };
+            try r.reference.set(reference);
+            try r.workspace.set("/work");
+            try r.model.set("gpt-5.5");
+            r.end = 1;
+            const admission: u64 = if (target_row) 4 else @as(u64, reference[0]) + 100;
+            r.first_message = .{ .position = 1, .admission = admission, .admitted_at = test_now_s, .sender = null, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } } };
+            r.peers.from_person_at = test_now_s;
+        }
+
+        fn bootstrap(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, filter: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            const failure = try fake_operations.list(self, requests, cursor, filter, page);
+            if (page.count != 0) {
+                if (page.rows[0].first_message) |*first| first.admission = 1000;
+            }
+            return failure;
+        }
+
+        fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, filter: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            try std.testing.expectEqual(protocol.SessionArchiveFilter.active, filter);
+            try std.testing.expectEqualDeep(old, cursor.since.?);
+            if (cursor.changed == null) {
+                page.* = .{ .count = 8, .delta = .changed, .since = through, .next = .{ .since = old, .changed = .{ .through = 10, .after_reference = "h00000".* } } };
+                for ([_][]const u8{ "a00000", "b4n8wd", "c00000", "d00000", "e00000", "f00000", "g00000", "h00000" }, 0..) |ref, i| try row(page, i, ref);
+            } else {
+                try std.testing.expectEqual(@as(u64, 10), cursor.changed.?.through);
+                try std.testing.expectEqualStrings("h00000", &cursor.changed.?.after_reference);
+                page.* = .{ .count = 1, .delta = .changed, .since = through, .next = null };
+                try row(page, 0, "z00000");
+            }
+            return null;
+        }
+
+        fn window(_: *Self, _: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            try std.testing.expect(cursor == .head);
+            const wire: protocol.ArchivedRow.Fields = .{ .reference = &target, .archive_seq = 42, .stopped_at = test_now_s, .label = "Archive target", .first = .{ .position = 1, .admission = 4, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } }, .line = "A" } };
+            var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
+            var out = std.Io.Writer.fixed(&json);
+            try wire.writeJson(&out);
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            page.* = .{ .count = 1, .since = archived, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.rows[0] = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
+            return null;
+        }
+    };
+
+    var cancellation: client.Cancellation = .{};
+    var ops = fake_operations;
+    ops.list = Script.bootstrap;
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+
+    // Bootstrap with a real listed working status at token 1.
+    Seen.now.listed = 2;
+    Seen.now.working = 2;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualDeep(Script.old, overview.state.token.?);
+    try std.testing.expectEqualDeep(Script.host, overview.state.read_instance.?);
+    overview.ops.list = Script.list;
+    overview.ops.window = Script.window;
+
+    // The periodic walk queues Host then list. Finish the Host observation.
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .host);
+    try rig.answered();
+    try std.testing.expect(try overview.complete() == null);
+
+    // Finish page 1's worker but hold delivery; the Archived tab input queues
+    // the head window while the one worker is still owned by page 1.
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .list);
+    try rig.answered();
+    try std.testing.expect(try overview.event(.{ .clicked = .{ .target = .archived } }) == null);
+    try std.testing.expectEqual(@as(usize, 1), overview.job_count);
+    try std.testing.expect(overview.jobs[0] == .archived);
+    try std.testing.expect(try overview.complete() == null);
+    try std.testing.expectEqual(@as(usize, 8), overview.state.pending.items.len);
+    try std.testing.expect(overview.jobs[0] == .archived);
+    try std.testing.expect(overview.jobs[1] == .list);
+
+    // Scripted Host revision 11 reflects A's archive after the old page-1
+    // revision 10. Observe the production window converter and placement.
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .archived);
+    try rig.answered();
+    try std.testing.expectEqualDeep(Script.archived, overview.answer.archived.since);
+    try std.testing.expect(try overview.complete() == null);
+    try std.testing.expectEqual(view.ArchiveState.archived, overview.state.find(Script.target).?.archive_state);
+    try std.testing.expectEqual(@as(?u64, 42), overview.state.find(Script.target).?.archive_seq);
+    try std.testing.expectEqual(@as(usize, 1), overview.state.order.items.len);
+
+    // The older continuation must not replace generation-11 membership.
+    // Other jobs, e.g. first-line reads, may be queued *after* this continuation.
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .list);
+    try rig.answered();
+    try std.testing.expectEqualDeep(Script.archived, overview.answer.page.rows[0].read_version);
+    try std.testing.expect(try overview.complete() == null);
+    try std.testing.expectEqualDeep(Script.through, overview.state.token.?);
+    try std.testing.expectEqual(view.ArchiveState.archived, overview.state.find(Script.target).?.archive_state);
+    try std.testing.expectEqual(@as(?u64, 42), overview.state.find(Script.target).?.archive_seq);
+    try std.testing.expectEqualDeep(Script.through, overview.state.find(Script.target).?.read_version.?);
+    try std.testing.expectEqual(view.Kind.approval, std.meta.activeTag(overview.state.find(Script.target).?.state));
+    try std.testing.expectEqual(@as(usize, 1), overview.state.order.items.len);
+    try std.testing.expect(!overview.state.archived.reanchor);
+    try std.testing.expectEqual(@as(usize, 0), view.edgeAttention(&overview.state, .below, 0, 0));
+    overview.state.selected = .{ .session = Script.target };
+    const stopped = try view.step(&overview.state, .{ .input = .{ .key = .{ .action = .stop } } });
+    for (stopped.slice()) |effect| try std.testing.expect(effect != .stop);
+    const question = try view.step(&overview.state, .{ .input = .{ .key = .{ .action = .next_question } } });
+    for (question.slice()) |effect| try std.testing.expect(effect != .open);
+    var frame = try rig.shown(80, 24);
+    defer frame.deinit();
+    const text = try frame.text();
+    const name = std.mem.indexOf(u8, text, "Archive target") orelse return error.TestExpectedEqual;
+    const start = if (std.mem.lastIndexOfScalar(u8, text[0..name], '\n')) |at| at + 1 else 0;
+    const end = name + (std.mem.indexOfScalar(u8, text[name..], '\n') orelse text.len - name);
+    try std.testing.expect(std.mem.indexOf(u8, text[start..end], "now") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text[start..end], "30m") == null);
+}
+
+fn archivedLaterRestoreCase() !void {
+    const Script = struct {
+        const host: [16]u8 = @splat(1);
+        const old: protocol.SinceToken = .{ .instance = host, .generation = 1 };
+        const through: protocol.SinceToken = .{ .instance = host, .generation = 10 };
+        const newer: protocol.SinceToken = .{ .instance = host, .generation = 11 };
+        const target = "z00000".*;
+        const other = "x00000".*;
+
+        fn row(page: *protocol_reply.SessionListPage, index: usize, reference: []const u8, version: protocol.SinceToken) !void {
+            const r = &page.rows[index];
+            r.* = .{ .read_version = version, .work = fixtureSessionWork(.{ .state = .{ .idle = .{ .since = test_now_s } } }) };
+            try r.reference.set(reference);
+            try r.workspace.set("/work");
+            try r.model.set("gpt-5.5");
+            r.end = 1;
+            const admission: u64 = if (std.mem.eql(u8, reference, &target)) 200 else @as(u64, @intCast(index)) + 100;
+            r.first_message = .{ .position = 1, .admission = admission, .admitted_at = test_now_s, .sender = null, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } } };
+            r.peers.from_person_at = test_now_s;
+        }
+
+        fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, filter: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            try std.testing.expectEqual(protocol.SessionArchiveFilter.active, filter);
+            try std.testing.expectEqualDeep(old, cursor.since.?);
+            if (cursor.changed == null) {
+                page.* = .{ .count = 8, .delta = .changed, .since = through, .next = .{ .since = old, .changed = .{ .through = 10, .after_reference = "h00000".* } } };
+                for ([_][]const u8{ "a00000", "b00000", "c00000", "d00000", "e00000", "f00000", "g00000", "h00000" }, 0..) |ref, i| try row(page, i, ref, through);
+            } else {
+                try std.testing.expectEqual(@as(u64, 10), cursor.changed.?.through);
+                try std.testing.expectEqualStrings("h00000", &cursor.changed.?.after_reference);
+                // z was already a changed seed at through 10, but was restored
+                // after the window read. Rows use actual read version 11;
+                // the walk's resume boundary remains through 10.
+                page.* = .{ .count = 1, .delta = .changed, .since = through, .next = null };
+                try row(page, 0, &target, newer);
+            }
+            return null;
+        }
+
+        fn window(_: *Self, _: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            try std.testing.expect(cursor == .head);
+            page.* = .{ .count = 2, .since = through, .first = 42, .last = 41, .more_above = false, .more_below = false };
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            for ([_][]const u8{ &target, &other }, [_]u64{ 42, 41 }, 0..) |ref, seq, i| {
+                const wire: protocol.ArchivedRow.Fields = .{ .reference = ref, .archive_seq = seq, .stopped_at = test_now_s, .label = null, .first = .{ .position = 1, .admission = if (i == 0) 200 else 500, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } }, .line = "A" } };
+                var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
+                var out = std.Io.Writer.fixed(&json);
+                try wire.writeJson(&out);
+                page.rows[i] = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
+            }
+            return null;
+        }
+    };
+
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    Seen.now.listed = 0;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualDeep(Script.old, overview.state.token.?);
+    try std.testing.expectEqualDeep(Script.host, overview.state.read_instance.?);
+    overview.ops.list = Script.list;
+    overview.ops.window = Script.window;
+
+    // Periodic refresh queues Host then list. Leave page 1 completed but not
+    // delivered while tab input queues the Archived read ahead of continuation.
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .host);
+    try rig.answered();
+    try std.testing.expect(try overview.complete() == null);
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .list);
+    try rig.answered();
+    try std.testing.expect(try overview.event(.{ .clicked = .{ .target = .archived } }) == null);
+    try std.testing.expectEqual(@as(usize, 1), overview.job_count);
+    try std.testing.expect(overview.jobs[0] == .archived);
+    try std.testing.expect(try overview.complete() == null);
+    try std.testing.expectEqual(@as(usize, 8), overview.state.pending.items.len);
+    try std.testing.expect(overview.jobs[0] == .archived);
+    try std.testing.expect(overview.jobs[1] == .list);
+
+    // Both exact references are visibly archived at generation 10.
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .archived);
+    try rig.answered();
+    try std.testing.expectEqualDeep(Script.through, overview.answer.archived.since);
+    try std.testing.expect(try overview.complete() == null);
+    try std.testing.expectEqual(view.ArchiveState.archived, overview.state.find(Script.target).?.archive_state);
+    try std.testing.expectEqual(view.ArchiveState.archived, overview.state.find(Script.other).?.archive_state);
+    try std.testing.expectEqual(@as(usize, 2), overview.state.order.items.len);
+
+    // Continuation has an actual newer read for z only. Its changed-walk
+    // cursor still commits through 10; x must retain its archived membership.
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .list);
+    try rig.answered();
+    try std.testing.expectEqualDeep(Script.through, overview.answer.page.since);
+    try std.testing.expectEqualDeep(Script.newer, overview.answer.page.rows[0].read_version);
+    try std.testing.expectEqualStrings(&Script.target, overview.answer.page.rows[0].reference.slice());
+    try std.testing.expect(try overview.complete() == null);
+    try std.testing.expectEqualDeep(Script.through, overview.state.token.?);
+    try std.testing.expectEqual(view.ArchiveState.active, overview.state.find(Script.target).?.archive_state);
+    try std.testing.expectEqual(@as(?u64, null), overview.state.find(Script.target).?.archive_seq);
+    try std.testing.expectEqual(view.ArchiveState.archived, overview.state.find(Script.other).?.archive_state);
+    try std.testing.expectEqual(@as(?u64, 41), overview.state.find(Script.other).?.archive_seq);
+    try std.testing.expectEqual(@as(usize, 1), overview.state.order.items.len);
+    try std.testing.expect(!overview.state.archived.reanchor);
+}
+
+test "SUI-138 Archived membership respects observed Host order" {
+    try archivedLaterWindowCase();
+    try archivedLaterRestoreCase();
 }

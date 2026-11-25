@@ -36,7 +36,7 @@ def split_build(targets):
     return bool(UNIT_TARGETS & set(targets)) and set(targets) not in ({"test"}, {"test-native"}, {"test-store"})
 
 
-def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None):
+def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None, split_native_full=False):
     from select_tests import mysql_provisioning, tree_graph
     if mysql_suites is None:
         mysql_suites = tree_graph().live_mysql if platform == "linux" and targets else set()
@@ -48,13 +48,14 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None):
         return {"include": rows}
 
     if platform == "macos":
-        # One hosted job runs every native target: check-full whole (its parts run in one
-        # isolated batch), the remaining targets beside it, and test-logic when selected.
-        # Each extra job paid its own queue, setup and artifact restore.
+        # One hosted job runs every native target. Promotion can run both check-full
+        # partitions in that job; standalone qualification retains the unsplit gate.
         rows = []
         remaining = [t for t in targets if t not in RESOURCES]
         if remaining:
-            rows.append(dict(name="native", targets=remaining, part="all", resource=False, args=[]))
+            rows.append(dict(name="native", targets=remaining,
+                             part="both" if split_native_full and "check-full" in remaining else "all",
+                             resource=False, args=[]))
         rows.extend(shards([t for t in targets if t in RESOURCES], limit=None, mysql_suites=set())["include"])
         return provision(rows)
     rows, packed = [], []

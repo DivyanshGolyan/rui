@@ -371,6 +371,8 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
 
 UPGRADE_CHECK_PATHS = (UPGRADE, "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
                        "src/HostLifecycle.zig", "src/host_activation.zig", "src/host_identity.*", "src/host_launch.c",
+                       # Where a running Host listens and how a census finds it: an upgrade crosses both (#2120, #1878).
+                       "src/host_endpoint.zig", "src/host_restart_all.zig",
                        "src/store/migration_*", "install.sh", "release/*", "build.zig", "build.zig.zon",
                        "tests/integration/previous_release_upgrade.py", ".github/workflows/previous-release-upgrade.yml")
 
@@ -689,6 +691,8 @@ def setup_requirements(targets):
 def execution_batches(targets, check_part="all"):
     if check_part != "all" and "check-full" not in targets:
         raise ValueError("A full-check part requires check-full in the selection")
+    if check_part == "both":
+        return [*execution_batches(targets, "execution"), ["check-full", "-Dcheck-part=callers"]]
     if check_part == "execution":
         return [["check-full", "-Dcheck-part=execution"],
                 *execution_batches([target for target in targets if target != "check-full"])]
@@ -1098,11 +1102,15 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     fast_targets = fast_tier(targets, paths, bootstrap_only, linked or set(), unclassified,
                              shared_helper_importers(paths, graph))
     # A Store migration step or migration input runs the live MySQL migration check on the PR (ci_plan's
-    # pr_mysql_migration), which lives in test-store.
-    mysql_migration = touches_mysql_migration(changed, contents)
+    # pr_mysql_migration), which lives in test-store. So does Zig code with a MySQL leg: the PR is otherwise
+    # SQLite-only, and #2179 (history.zig) first met MySQL in Promote.
+    mysql_legs = mysql_leg_tests(changed, contents)
+    mysql_migration = touches_mysql_migration(changed, contents) or bool(mysql_legs)
     if mysql_migration:
         fast_targets = sorted(set(fast_targets) | {"test-store"})
         reasons.add("Store migration step or migration input: the PR runs test-store against a live MySQL 8.4 migration check")
+    if mysql_legs:
+        reasons.add("Test code with a MySQL leg (" + ", ".join(mysql_legs) + "): the PR runs it against live MySQL 8.4")
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)
@@ -1151,6 +1159,18 @@ def revision_text(commit, path):
     shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True,
                            encoding="utf-8", errors="surrogateescape")
     return shown.stdout if shown.returncode == 0 else None
+
+
+# What marks Zig code as running a MySQL leg: a call of the engine loop (a test file or a production file's inline
+# tests, as read_transcript.zig has), or an import of the live MySQL fixture owner itself.
+MYSQL_LEG = re.compile(r"\bforEachEngine\(|@import\(\"(?:[./]*store/)?mysql_testing\.zig\"\)")
+
+
+def mysql_leg_tests(paths, contents):
+    """The changed Zig sources whose new text runs a MySQL leg; contents maps a path to its (base, head) text."""
+    return sorted(path for path in paths
+                  if path.startswith("src/") and path.endswith(".zig")
+                  and MYSQL_LEG.search((contents or {}).get(path, ("", ""))[1] or ""))
 
 
 def revision_contents(paths, base, head):

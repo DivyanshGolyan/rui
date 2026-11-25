@@ -47,7 +47,7 @@ class PlanTest(unittest.TestCase):
                               change_kind=ChangeKind.NORMAL, native_targets=targets).outputs
                 self.assertEqual(result['native_targets'], targets)
                 self.assertIsNot(result['native_targets'], targets)
-                self.assertEqual(result['macos_matrix'], shards(targets, 'macos', mysql_suites=selected['mysql_suites']))
+                self.assertEqual(result['macos_matrix'], shards(targets, 'macos', mysql_suites=selected['mysql_suites'], split_native_full=True))
                 self.assertTrue(result['native'])
                 self.assertFalse(result['retry'])
                 self.assertEqual(result['quarantine'], 'off')
@@ -97,7 +97,8 @@ class PlanTest(unittest.TestCase):
                     change_kind='documentation' if documentation and event == 'pull_request' else 'normal',
                     draft_run=draft, targets=linux, linux_compile_targets=linux, native_targets=mac,
                     linux_matrix=shards([] if pr_job else linux, mysql_suites=original['mysql_suites']),
-                    macos_matrix=shards(mac, 'macos', mysql_suites=original['mysql_suites']),
+                    macos_matrix=shards(mac, 'macos', mysql_suites=original['mysql_suites'],
+                                        split_native_full=promotion),
                     linux_split=not pr_job and split_build(linux),
                     pr_job=pr_job, pr_setup_targets=sorted(linux) if pr_job else [],
                     native=bool(mac),
@@ -112,6 +113,8 @@ class PlanTest(unittest.TestCase):
                     pr_mysql_migration=False,
                 )
                 self.assertEqual(result.outputs, expected)
+                if promotion:
+                    self.assertEqual(result.outputs['macos_matrix']['include'][0]['part'], 'both')
                 self.assertEqual(original, before, 'the selector result is borrowed, not mutated')
                 self.assertEqual(result.selection['targets'], linux)
                 self.assertEqual(result.selection['native_targets'], mac)
@@ -215,8 +218,10 @@ class PlanTest(unittest.TestCase):
                               promotion=False, change_kind=ChangeKind.NORMAL, native_targets=native).outputs
                 self.assertEqual(output['native_targets'], native)
                 self.assertNotIn('macos_split', output)
-                self.assertEqual(output['macos_matrix'], shards(native, 'macos', mysql_suites=['host-status-integration']))
+                self.assertEqual(output['macos_matrix'], shards(native, 'macos', mysql_suites=['host-status-integration'], split_native_full=True))
                 self.assertEqual([row['name'] for row in output['macos_matrix']['include']], ['native'])
+                self.assertEqual(output['macos_matrix']['include'][0]['part'],
+                                 'both' if 'check-full' in native else 'all')
                 self.assertFalse(output['linux_split'])
 
     def test_compile_only_builds_every_gate_and_unit_root_and_runs_nothing(self):
@@ -312,6 +317,13 @@ pub const migrations = [_]Migration{
             (['src/store/migration_expected_rows.sql'], {}, True),
             (['src/store/migration_expected_rows.sql', 'README.md'], {}, True),
             (['README.md'], {}, False),
+            # Test code with a MySQL leg starts MySQL too (#2179 changed only history.zig, a MySQL user).
+            (['src/store/history.zig'], {'src/store/history.zig': ('', 'const mysql_testing = @import("mysql_testing.zig");')}, True),
+            (['src/store/tests/agent.zig'], {'src/store/tests/agent.zig': ('', 'try store_testing.forEachEngine(run);')}, True),
+            (['src/store/tests/agent.zig'], {'src/store/tests/agent.zig': ('', 'test "sqlite only" {}')}, False),
+            # A production file's inline engine test is a MySQL leg; a comment naming the loop is not.
+            (['src/read_transcript.zig'], {'src/read_transcript.zig': ('', 'try storage.testing.forEachEngine(run);')}, True),
+            (['src/store/Store.zig'], {'src/store/Store.zig': ('', '// forEachEngine runs both')}, False),
         )
         for paths, contents, expected in cases:
             with self.subTest(paths=paths, changed=bool(contents)):
