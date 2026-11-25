@@ -24,12 +24,6 @@ pub const NamedPeer = struct {
     }
 };
 
-/// A saved label read as one tidy line of words, or fallback_words when it has none. Total.
-/// Every reader of the saved column goes through this, so a stored label reads the same on every surface.
-pub fn savedWords(saved: []const u8) Bounded(max_description_bytes) {
-    return saved_label.readWords(max_description_bytes, saved) orelse Bounded(max_description_bytes).from(saved_label.fallback_words) catch unreachable;
-}
-
 /// What a tool row says: one line of words with at most one typed reference inside it.
 ///
 /// `words` holds the line without the reference's name; `link.at` is where that name belongs, so the
@@ -54,7 +48,7 @@ pub const Line = struct {
 
     /// The line a saved label reads as: savedWords as a plain Line. Total.
     pub fn ofSaved(saved: []const u8) Line {
-        return plain(savedWords(saved).slice()) catch unreachable;
+        return plain(saved_label.callWords(saved).slice()) catch unreachable;
     }
 
     /// Words with one Session named between them: `linked("Messaged ", id, "")`.
@@ -368,12 +362,12 @@ test "TPR-3 a saved label always reads as a valid tool row line" {
 }
 
 test "TPR-3 a saved label reads the same in every reader" {
-    try std.testing.expectEqualStrings("Run tests then lint", savedWords("Run  tests\nthen lint").slice());
-    try std.testing.expectEqualStrings("Tool call", savedWords("").slice());
+    try std.testing.expectEqualStrings("Run tests then lint", saved_label.callWords("Run  tests\nthen lint").slice());
+    try std.testing.expectEqualStrings("Tool call", saved_label.callWords("").slice());
     const long: [300]u8 = @splat('x');
     const inputs = [_][]const u8{ "", "a\tb", &long, "\xff" };
     for (inputs) |saved| {
-        try std.testing.expectEqualStrings(savedWords(saved).slice(), Line.ofSaved(saved).words.slice());
+        try std.testing.expectEqualStrings(saved_label.callWords(saved).slice(), Line.ofSaved(saved).words.slice());
     }
 }
 

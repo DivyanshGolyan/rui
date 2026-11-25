@@ -15,6 +15,7 @@ const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
 const action_domain = @import("action.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
+const saved_label = @import("../../saved_label.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const provider_name = @import("../../provider_name.zig");
@@ -1719,7 +1720,7 @@ const ItemRead = struct {
                 }
                 if (!call.found.get()) return error.CorruptStore;
                 try checkCallDetails(&call.resolved, &item.value.call);
-                if (call.resolved.description.*) |*text| text.* = tool_presentation.savedWords(text.slice());
+                if (call.resolved.description.*) |*text| text.* = saved_label.callWords(text.slice());
                 item.at = call.resolved.resolved_at.get();
             },
             10 => {
@@ -1763,7 +1764,7 @@ const ItemRead = struct {
                 }
                 if (!approval.found.get()) return error.CorruptStore;
                 try checkCallDetails(&approval.details, &approval.metadata);
-                if (approval.details.description.*) |*text| text.* = tool_presentation.savedWords(text.slice());
+                if (approval.details.description.*) |*text| text.* = saved_label.callWords(text.slice());
             },
             13 => {
                 const change = &read.state.change;
