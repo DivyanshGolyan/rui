@@ -6917,7 +6917,7 @@ test "App Session accepted message refresh keeps the next draft intact without p
     defer fixture.deinit();
     const self = fixture.self;
     const original = self.input.submitText("accepted original");
-    self.submission.settled_message = .{ .ticket = original, .key = @splat('K') };
+    self.submission.holdAccepted(original, @splat('K'));
     self.submission.accepted = .{ .kind = .message, .key = @splat('K') };
     defer self.submission.disposeMessage();
     _ = self.input.append("next draft");
@@ -7693,7 +7693,7 @@ fn queuedAndTakenAcrossWork() !void {
         try std.testing.expect(std.mem.indexOf(u8, working, "› first request") != null);
         try std.testing.expect(std.mem.indexOf(u8, working, "Thinking") != null);
         const ticket = self.input.submitText("waiting one");
-        self.submission.settled_message = .{ .ticket = ticket, .key = @splat('K') };
+        self.submission.holdAccepted(ticket, @splat('K'));
         defer self.submission.disposeMessage();
         var first_line: queued_line.Line = .{};
         try first_line.set("waiting one");
@@ -7869,9 +7869,9 @@ fn localAppliedFill() !void {
     defer fixture.destroy();
     const self = &fixture.held.self;
     const ticket = self.input.submitText("local input");
-    self.submission.settled_message = .{ .ticket = ticket, .key = @splat('K') };
-    testEnsureQueue(self);
+    _ = self.submission.observe(.{ .begin = .{ .key = @splat('K'), .before = null } });
     _ = self.submission.observe(.{ .receipt = .{ .key = @splat('K'), .admission = 7 } });
+    self.submission.holdAccepted(ticket, @splat('K'));
     defer self.submission.disposeMessage();
     try fixture.page(.opening, &.{}, true, true);
     self.live.queued = .{ .count = 2, .oldest_position = 1, .newest_admission = 7, .newest_position = 2 };
@@ -7978,9 +7978,9 @@ fn newerQueueHandoff() !void {
     defer fixture.destroy();
     const self = &fixture.held.self;
     const original = self.input.submitText("local original");
-    self.submission.settled_message = .{ .ticket = original, .key = @splat('K') };
-    testEnsureQueue(self);
+    _ = self.submission.observe(.{ .begin = .{ .key = @splat('K'), .before = null } });
     _ = self.submission.observe(.{ .receipt = .{ .key = @splat('K'), .admission = 7 } });
+    self.submission.holdAccepted(original, @splat('K'));
     defer self.submission.disposeMessage();
     try fixture.page(.opening, &.{}, true, true);
     const before = try fixture.held.shown();
@@ -8007,7 +8007,7 @@ fn stoppedQueueHandoff() !void {
     defer fixture.destroy();
     const self = &fixture.held.self;
     const ticket = self.input.submitText("stopped original");
-    self.submission.settled_message = .{ .ticket = ticket, .key = @splat('K') };
+    self.submission.holdAccepted(ticket, @splat('K'));
     defer self.submission.disposeMessage();
     try fixture.page(.opening, &.{}, true, true);
     try fixture.page(.scan, &.{.{ .key = 2, .text = "◌ not sent\nother\n", .excluded_key = @splat('J') }}, true, true);
@@ -8030,7 +8030,7 @@ fn queuedAdmissionRecovery() !void {
     self.submission.intent = .{ .message = ticket };
     self.submission.key = @splat('K');
     self.submission.state = .unconfirmed;
-    self.submission.publication = .published;
+    self.submission.markPublished();
     defer {
         self.submission.intent = null;
         self.input.release(ticket) catch unreachable;
@@ -8052,7 +8052,7 @@ fn keyedAcceptedHandoff() !void {
     defer fixture.destroy();
     const self = &fixture.held.self;
     const original = self.input.submitText("accepted keyed original");
-    self.submission.settled_message = .{ .ticket = original, .key = @splat('K') };
+    self.submission.holdAccepted(original, @splat('K'));
     defer self.submission.disposeMessage();
     _ = self.input.append("next draft");
     try fixture.page(.opening, &.{.{ .key = 10, .text = "other message\n", .message_key = @splat('J') }}, true, true);
@@ -8074,7 +8074,7 @@ fn uncertainAppliedHandoff() !void {
     self.submission.intent = .{ .message = original };
     self.submission.key = @splat('K');
     self.submission.state = .unconfirmed;
-    self.submission.publication = .published;
+    self.submission.markPublished();
     defer {
         self.submission.intent = null;
         self.input.release(original) catch unreachable;
@@ -10200,7 +10200,7 @@ test "Enter while the Host line or opening holds sending keeps the draft, names 
         defer held.self.app_hooks.host = null;
         held.self.reading.opening = opening;
         defer held.self.reading.opening = false;
-        if (accepted) held.self.submission.settled_message = .{ .ticket = held.self.input.submitText("accepted earlier"), .key = @splat('K') };
+        if (accepted) held.self.submission.holdAccepted(held.self.input.submitText("accepted earlier"), @splat('K'));
         defer if (accepted) held.self.submission.disposeMessage();
         try held.keys("sent right after a restart\r");
         try std.testing.expect(held.self.submission.intent == null);

@@ -319,9 +319,7 @@ fn apply(self: *Self, result: anyerror!void) !End {
         const denies: ?u64 = if (intent == .message_then_deny) intent.message_then_deny.action else null;
         if (intent.ticket() != null) self.queue = queue_lifecycle.step(self.queue, .{ .receipt = .{ .key = self.key, .admission = admission } }).state;
         if (self.retain_message and intent.ticket() != null and !queue_lifecycle.accounted(self.queue, self.key)) {
-            std.debug.assert(self.settled_message == null);
-            self.settled_message = .{ .ticket = intent.ticket().?, .key = self.key };
-            self.retire();
+            self.holdAccepted(intent.ticket().?, self.key);
             return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission, .denies = denies } };
         }
         self.release();
@@ -346,6 +344,14 @@ pub fn messageText(self: *const Self) ?[]const u8 {
 pub fn messageHasImage(self: *const Self) bool {
     const ticket = self.heldTicket() orelse return false;
     return (self.input.messageImage(ticket) catch unreachable) != null;
+}
+
+/// Holds the accepted Message `ticket` under `key` until the queue shows it, and retires the
+/// original. Reached from `apply` once the queue has taken the Message's receipt.
+pub fn holdAccepted(self: *Self, ticket: Input.Ticket, key: [36]u8) void {
+    std.debug.assert(self.settled_message == null);
+    self.settled_message = .{ .ticket = ticket, .key = key };
+    self.retire();
 }
 
 /// Applies the single local presentation transition and releases only a matching settled loan.
@@ -427,8 +433,13 @@ fn submit(raw: *anyopaque, task: *Task) !void {
         .message, .message_then_deny => try self.captureDraft(task.io, self.intent.?.ticket().?),
         .decision => |decision| try client.capturePermissionDecision(task.io, .{ .store = self.store, .session = self.session, .action_id = decision.action, .decision = decision.decision }, self.target),
     };
-    self.publication = .published;
+    self.markPublished();
     self.reply = try task.requests().sendCaptured(&self.captured.?, self.environment, &self.reply_buffer).get();
+}
+
+/// The request's capture is sent: from here its outcome is known only through its reply.
+pub fn markPublished(self: *Self) void {
+    self.publication = .published;
 }
 
 fn captureDraft(self: *Self, io: std.Io, ticket: Input.Ticket) !client.CapturedRecord {
