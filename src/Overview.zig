@@ -91,6 +91,8 @@ pub const Hooks = struct {
     configure: ?session_reads.Configure = null,
     requests: SessionFrontend.Requests,
     status: SessionFrontend.Status,
+    /// Fails with `error.SessionNotConfigured` when the Session does not exist; the direct `rui session resume` check is the same function.
+    confirm: *const fn (std.process.Init, client.ReadContext, []const u8, []const u8) anyerror!void,
     captured: *const fn (std.Io) anyerror!void,
     activate: ?SignIn.Activate = null,
     ready: ?SignIn.Ready = null,
@@ -139,10 +141,11 @@ pub const Operations = struct {
     archive: *const fn (*Self, client.Requests, client.SessionArchiveInput, *Reply) anyerror!void,
     pin: *const fn (*Self, client.Requests, client.SessionPinInput, *Reply) anyerror!void,
     models: *const fn (*Self, client.Requests, std.mem.Allocator) anyerror![]u8,
+    confirm: *const fn (*Self) anyerror!void,
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .window = windowPage, .first_line = firstLine, .create = createSession, .stop = stopSession, .archive = archiveSession, .pin = pinSession, .models = listModels, .open = openSession };
+pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .window = windowPage, .first_line = firstLine, .create = createSession, .stop = stopSession, .archive = archiveSession, .pin = pinSession, .models = listModels, .confirm = confirmSession, .open = openSession };
 
 pub const Left = struct {
     session: view.Reference,
@@ -754,7 +757,16 @@ fn dropFailedOpen(self: *Self, ctx: *vxfw.EventContext) !void {
     }
 }
 
+/// A Session that does not exist cannot be entered: its chat would never leave "Opening…".
+fn confirmSession(self: *Self) !void {
+    var origin: client.FailureOrigin = .local;
+    var failure: ?protocol_reply.ReadFailure = null;
+    const read: client.ReadContext = .{ .io = self.init.io, .origin = &origin, .cancellation = self.interrupted, .read_failure = &failure };
+    self.hooks.confirm(self.init, read, self.options.store, &self.opened) catch |err| return if (err == error.SessionNotConfigured) error.SessionNotFound else err;
+}
+
 fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
+    try self.ops.confirm(self);
     const reference = self.opened;
     const screen = self.session_screen;
     if (!self.screen_fresh) {
@@ -2272,6 +2284,9 @@ const fake_operations: Operations = .{
             return reply.toOwnedSlice();
         }
     }.models,
+    .confirm = struct {
+        fn confirm(_: *Self) !void {}
+    }.confirm,
     .open = struct {
         fn open(self: *Self, _: *vxfw.EventContext) !void {
             Seen.now.conversations += 1;
@@ -5143,12 +5158,12 @@ test "a Session link that no longer opens returns to the Session it left with a 
     Scratch.dir = tmp.dir;
     Scratch.count = 0;
     var ops = fake_operations;
-    ops.open = struct {
-        fn open(self: *Self, ctx: *vxfw.EventContext) !void {
+    ops.open = openSession;
+    ops.confirm = struct {
+        fn confirm(self: *Self) !void {
             if (std.mem.eql(u8, &self.opened, "m3n4p5")) return error.SessionNotFound;
-            return openSession(self, ctx);
         }
-    }.open;
+    }.confirm;
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6-luna" }, ops, &cancellation);
     defer rig.close();
