@@ -244,6 +244,7 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
     };
 }
 
+/// Every kind bit. Codes 8 and 9 belonged to the deleted `sent` and `send_failed` kinds; no row carries them, so their bits select nothing.
 const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 17) - 2});
 
 fn activityKindCode(kind: activity_facts.Item.Kind) u5 {

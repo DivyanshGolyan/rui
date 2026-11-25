@@ -1310,7 +1310,7 @@ const FakeHost = struct {
         return .{ .admission = .{ .admission = admission, .key = .{}, .turn = null, .state = .queued, .content = textValue(), .admitted_at = 1 } };
     }
 
-    /// A Message that arrived from another Session: a row the Session draws, unlike the retired `sent` entries.
+    /// A Message that arrived from another Session: a row the Session draws.
     fn received(admission: u64, peer: protocol.NamedPeer) protocol.ActivityItem.Message {
         var value = message(admission).admission;
         value.sender = peer;

@@ -375,7 +375,7 @@ test "skills reload out of memory in configure or the skill tool rolls back with
     }.run);
 }
 
-test "skills peer refusal persists authenticated activity diagnostic and keyed replay across reopen" {
+test "skills peer refusal persists its diagnostic and keyed replay across reopen" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});

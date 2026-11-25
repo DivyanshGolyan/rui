@@ -493,7 +493,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     }.run);
 }
 
-test "refused peer creation activity keeps invalid targets absent" {
+test "refused peer creation and addressed sends keep their command identity and replay" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});

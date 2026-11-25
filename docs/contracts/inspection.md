@@ -153,9 +153,6 @@ Instruction text is public, and a private or inconsistent entry fences like assi
 Activity and public Conversation retain `source_action` as a nullable Action ID alongside the shared Resolution content reference for background finals; person-only admission queries exclude them. Published Action values are sourced inputs like finals: Activity lists each as a `received` row (and as a User row once applied) naming its `source_action`, so the transcript holds everything the model was sent and a model can search and open it with `read_transcript`. Values add no public Conversation rows; that page is a filtered projection, and what a screen draws is decided in the view, never by what Activity holds.
 Admission, stop and every terminal outcome claim the existing Session sequence in their owning transaction, and each also records its commit time there.
 No copied log or second frontier exists; this schema change follows the [Store format policy](store.md#store-format-and-upgrades).
-This read-time projection covers existing refusals as well as new ones; null does not distinguish refused creation from a malformed addressed send and never means that a Session was created or not created.
-Every non-null peer remains strictly validated; a missing target or malformed peer is not an alternative null encoding.
-The human row with no peer reads `! Message rejected — No valid target reference`; model transcript outlines print no `target` for it, and never a label or invalid attempted spelling.
 Calls retain historical rejected proposals and all three complete field references under the proposal contract above.
 Tool Results validate the complete group's accepted call/output-item and Session/Turn/attempt provenance before exposure; malformed sibling links fence even when the caller skips proposal rows.
 Outcome provenance is the terminal Turn's causing model Operation, not a later Session Operation.
