@@ -3,6 +3,7 @@ import type { InterruptTarget, Link, ServedWork } from "./sessions.ts";
 import { ContentIsPartsError, RuiRequestError, RuiUnavailableError } from "./errors.ts";
 import { listParts, readPartBytes, type ContentValue, type Part } from "./parts.ts";
 import { WIRE_VERSION } from "./transport.ts";
+import { ENDING_SIGN } from "./turn-endings.ts";
 import type { components } from "./wire.ts";
 
 type Schemas = components["schemas"];
@@ -43,11 +44,13 @@ export const FEED_KINDS = [
 export type FeedKind = (typeof FEED_KINDS)[number];
 const complete: [Exclude<WireKind, FeedKind>] extends [never] ? true : never = true;
 void complete;
+type WireEnding = Extract<Row["value"], { turn_ended: unknown }>["turn_ended"]["ending"];
+const endingsSigned: [Exclude<WireEnding, keyof typeof ENDING_SIGN>] extends [never] ? true : never = true;
+void endingsSigned;
 
 /** Entry text is inline up to this many bytes (D168). */
 export const INLINE_TEXT_BYTES = 16 * 1024;
 const PAGE_ROWS = 16;
-const ENDINGS_WITH_TEXT = new Set(["provider_refused", "out_of_quota", "failed"]);
 
 /** Options for following a Session's feed on the client's line. */
 export interface WatchOptions {
@@ -119,7 +122,8 @@ function contentOf(payload: Record<string, unknown>): ContentValue | undefined {
 function entryOf(row: Row): { entry: FeedEntry; reference: Schemas["ContentValue"] | undefined } {
 	const [kind, payload] = Object.entries(row.value)[0] as [FeedKind, Record<string, unknown>];
 	const reference = contentOf(payload);
-	const wanted = kind !== "turn_ended" || ENDINGS_WITH_TEXT.has(String(payload.ending));
+	// A failed Turn's report is the entry's text; a finished Turn's answer is its assistant entry and a stopped one has none.
+	const wanted = kind !== "turn_ended" || ENDING_SIGN[payload.ending as WireEnding] === "failed";
 	const entry = {
 		kind,
 		cursor: encodeCursor(row.position, row.ordinal),
