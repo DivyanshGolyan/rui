@@ -87,6 +87,15 @@ Fix a repeat at the enforcing owner, not here; drop a row once its mistake can n
 | A CLI rename that changes help text keeps the upgrade check's `Dialect` reading this build as the newest release. | `Dialect.assert_newest` in [previous_release_upgrade.py](tests/integration/previous_release_upgrade.py); Promote only, so a judgment call on CLI PRs. |
 | A fake Host that serves a derived endpoint holds its interface directory's lock. | `host_process.claimed_endpoint` is the shared owner; nothing fails a hand-rolled bind, so a judgment call. |
 
+## Rules from agent corrections
+
+Each rule here is one the operator corrected an agent on more than once.
+Fix a repeat at the enforcing owner, not here; drop a row once its mistake can no longer be written.
+
+| Rule | Enforced by |
+| --- | --- |
+| A PR merges only after its latest completed review is clean (Codex's, or while Codex is out the `pr-reviewer` agent's). | `.claude/hooks/review_before_merge.py` refuses the merge; it reads reviews through `tests/ci/merge_review.py`; [Review evidence](docs/agents/landing.md#review-evidence). |
+
 ## Status updates and reports
 
 Report progress, blockers and verification results relevant to the requested task.
