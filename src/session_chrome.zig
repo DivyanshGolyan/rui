@@ -170,7 +170,7 @@ test "opening and decision progress share the footer while unresolved decisions 
 
 pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + "100% context left".len + 4 * " · ".len + @import("session_archive.zig").State.longest_badge;
 
-test "SUI-169 the facts row's room holds the widest row with the longest archive badge" {
+test "SUI-174 the facts row's room holds the widest row with the longest archive badge" {
     const protocol = @import("protocol.zig");
     var buffer: [facts_bytes]u8 = undefined;
     var model: [@import("model_capability.zig").max_model_bytes]u8 = undefined;
