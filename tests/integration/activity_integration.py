@@ -215,7 +215,7 @@ def main():
             stop_session(state, store, "stop", SESSION)
             stopped_end, stopped = wait_for(lambda: (h := history(store)) and (h if any(kind(r) == "turn_ended" and r["value"]["turn_ended"]["ending"] == "stopped" for r in h[1]) else None), "stopped outcome")
             assert history(store, third[0])[1] == third[1]
-            assert {kind(r) for r in stopped} == {"admission", "user", "assistant", "call", "approval_requested", "tool_result", "turn_ended", "stop", "model_call"}
+            assert {kind(r) for r in stopped} == {"admission", "user", "assistant", "call", "approval_requested", "tool_result", "turn_ended", "stop", "model_call", "instruction"}
             model_calls = [r["value"]["model_call"] for r in stopped if kind(r) == "model_call"]
             assert [r["status"] for r in model_calls] == ["tool_proposals", "answer", "tool_proposals"], model_calls
             assert all(r["attempts"] == "1" for r in model_calls), model_calls

@@ -32,6 +32,7 @@ const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const content_parts = @import("content_parts.zig");
 const sourced_input = @import("sourced_input.zig");
+const skills_domain = @import("skills.zig");
 const report_domain = @import("report.zig");
 const session_list_domain = @import("session_list_read.zig");
 const store_schema = @import("../schema.zig");
@@ -202,17 +203,28 @@ fn activityValueInputs(comptime range: fn (comptime []const u8, comptime []const
     return activityVisibleInputs(range, kinds, false, &.{4}) ++ " UNION ALL " ++ activityVisibleInputs(range, kinds, true, &.{4}) ++ order;
 }
 
+fn kindOn(comptime kinds: []const u8, comptime kind: u5) []const u8 {
+    return std.fmt.comptimePrint("({s}/{d})%2=1", .{ kinds, @as(u64, 1) << kind });
+}
+
+/// The entries delivered to a Turn that no other source owns: the model's text (kind 3) and the instruction text it was given (kind 2).
+/// SQLite allows 4 terms in a compound SELECT, so the pair sits in its own CTE beside the other inputs.
+fn activityDeliveredEntries(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime kinds: []const u8, comptime order: []const u8) []const u8 {
+    return "SELECT e.session_position AS position,0 AS ordinal,3 AS kind,e.source_admission_id AS id FROM conversation_entry e @index(conversation_entry_activity_assistant) " ++
+        "WHERE e.session_ref=?1 AND e.entry_kind=3 AND " ++ kindOn(kinds, 3) ++ " AND " ++ range("e.session_position", "0") ++
+        " UNION ALL SELECT e.session_position,0,16,NULL FROM conversation_entry e @index(conversation_entry_activity_assistant) " ++
+        "WHERE e.session_ref=?1 AND e.entry_kind=2 AND " ++ kindOn(kinds, 16) ++ " AND " ++ range("e.session_position", "0") ++ order;
+}
+
 fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime kinds: []const u8, comptime order: []const u8) [4][]const u8 {
-    const Kinds = struct {
-        fn on(comptime kind: u5) []const u8 {
-            return std.fmt.comptimePrint("({s}/{d})%2=1", .{ kinds, @as(u64, 1) << kind });
+    const on = struct {
+        fn of(comptime kind: u5) []const u8 {
+            return kindOn(kinds, kind);
         }
-    };
-    const on = Kinds.on;
+    }.of;
     return .{
         "SELECT position,ordinal,kind,id FROM visible_admissions UNION ALL SELECT position,ordinal,kind,id FROM visible_users" ++
-            " UNION ALL SELECT e.session_position,0,3,e.source_admission_id FROM conversation_entry e @index(conversation_entry_activity_assistant) " ++
-            "WHERE e.session_ref=?1 AND e.entry_kind=3 AND " ++ on(3) ++ " AND " ++ range("e.session_position", "0") ++
+            " UNION ALL SELECT position,ordinal,kind,id FROM delivered_entries" ++
             " UNION ALL SELECT session_position,0,4,NULL FROM model_output_item @index(model_output_call_history) " ++
             "WHERE session_ref=?1 AND item_kind=3 AND " ++ on(4) ++ " AND " ++ range("session_position", "0") ++ order,
         "SELECT position,ordinal,kind,NULL AS id FROM tool_completions UNION ALL SELECT position,ordinal,kind,id FROM visible_values" ++
@@ -234,7 +246,7 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
     };
 }
 
-const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 16) - 2});
+const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 17) - 2});
 
 fn activityKindCode(kind: activity_facts.Item.Kind) u5 {
     return switch (kind) {
@@ -253,6 +265,7 @@ fn activityKindCode(kind: activity_facts.Item.Kind) u5 {
         .session_changed => 13,
         .compacted => 14,
         .model_call => 15,
+        .instruction => 16,
     };
 }
 
@@ -271,10 +284,10 @@ fn anyActivityPosition(comptime position: []const u8, comptime ordinal: []const 
 const activity_item = blk: {
     const sources = activitySources(anyActivityPosition, all_activity_kinds, "");
     break :blk rsql.Read(.{
-        .sql = std.fmt.comptimePrint("WITH tool_completions AS ({s}), visible_admissions AS ({s}), visible_values AS ({s}), visible_users AS ({s}), entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}), " ++
+        .sql = std.fmt.comptimePrint("WITH tool_completions AS ({s}), visible_admissions AS ({s}), visible_values AS ({s}), visible_users AS ({s}), delivered_entries AS ({s}), entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}), " ++
             "activity AS (SELECT position,ordinal,kind,id FROM entries UNION ALL SELECT position,ordinal,kind,id FROM completions UNION ALL SELECT position,ordinal,kind,id FROM others " ++
             "UNION ALL SELECT position,ordinal,kind,id FROM changes) " ++
-            "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2", .{ activityToolSources(anyActivityPosition, all_activity_kinds, ""), activityVisibleInputs(anyActivityPosition, all_activity_kinds, false, input_kinds), activityValueInputs(anyActivityPosition, all_activity_kinds, ""), activityVisibleInputs(anyActivityPosition, all_activity_kinds, true, input_kinds), sources[0], sources[1], sources[2], sources[3] }),
+            "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2", .{ activityToolSources(anyActivityPosition, all_activity_kinds, ""), activityVisibleInputs(anyActivityPosition, all_activity_kinds, false, input_kinds), activityValueInputs(anyActivityPosition, all_activity_kinds, ""), activityVisibleInputs(anyActivityPosition, all_activity_kinds, true, input_kinds), activityDeliveredEntries(anyActivityPosition, all_activity_kinds, ""), sources[0], sources[1], sources[2], sources[3] }),
         .Args = struct { session: []const u8, end: u64, position: u64, ordinal: u64 },
         .Row = struct { kind: u8, id: ?rsql.Positive },
         .cardinality = .optional,
@@ -294,8 +307,8 @@ fn ActivityPage(comptime forward: bool) type {
     const order = if (forward) " ORDER BY 1,2 LIMIT 17" else " ORDER BY 1 DESC,2 DESC LIMIT 17";
     const sources = activitySources(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order);
     return rsql.Read(.{
-        .sql = std.fmt.comptimePrint("WITH tool_completions AS ({s}), visible_admissions AS ({s}), visible_values AS ({s}), visible_users AS ({s}), entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}) SELECT position,ordinal FROM entries " ++
-            "UNION ALL SELECT position,ordinal FROM completions UNION ALL SELECT position,ordinal FROM others UNION ALL SELECT position,ordinal FROM changes{s}", .{ activityToolSources(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order), activityVisibleInputs(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", false, input_kinds), activityValueInputs(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order), activityVisibleInputs(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", true, input_kinds), sources[0], sources[1], sources[2], sources[3], order }),
+        .sql = std.fmt.comptimePrint("WITH tool_completions AS ({s}), visible_admissions AS ({s}), visible_values AS ({s}), visible_users AS ({s}), delivered_entries AS ({s}), entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}) SELECT position,ordinal FROM entries " ++
+            "UNION ALL SELECT position,ordinal FROM completions UNION ALL SELECT position,ordinal FROM others UNION ALL SELECT position,ordinal FROM changes{s}", .{ activityToolSources(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order), activityVisibleInputs(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", false, input_kinds), activityValueInputs(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order), activityVisibleInputs(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", true, input_kinds), activityDeliveredEntries(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order), sources[0], sources[1], sources[2], sources[3], order }),
         .Args = if (forward) struct { session: []const u8, end: u64, position: u64, ordinal: u64, kinds: u64 } else struct { session: []const u8, position: u64, ordinal: u64, kinds: u64 },
         .Row = ActivityPageRow,
         .cardinality = .each,
@@ -633,16 +646,20 @@ pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
     "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
     "LEFT JOIN content c ON c.content_id=e.content_id";
 
-/// The Conversation entry a position holds. The public Conversation hides Action values (source kind 4); the Activity feed keeps them.
+/// An instruction entry's text is public and equals what its source saved: an authored revision's `instructions_content_id`, or the Skill catalog's instruction.
+const instruction_entry_consistent = "(e.entry_kind=2 AND c.content_id IS NOT NULL AND c.private=0 AND ((e.source_catalog_position IS NULL AND e.turn_id IS NOT NULL AND t.session_ref=e.session_ref AND " ++
+    "EXISTS(SELECT 1 FROM session_revision r WHERE r.session_ref=e.session_ref AND r.revision=e.source_revision AND r.instructions_content_id=e.content_id)) OR " ++ skills_domain.instructionConsistentSql("e") ++ ")) OR ";
+
+/// The Conversation entry a position holds. The public Conversation hides Action values (source kind 4) and instruction entries (kind 2); the Activity feed keeps them.
 fn entryRead(comptime hide_values: bool) type {
     return rsql.Read(.{
-        .sql = publicEntryRead("e.content_id,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
+        .sql = publicEntryRead("e.content_id,e.turn_id,e.source_revision,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
             "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender," ++
             "CASE WHEN e.entry_kind=1 THEN " ++ sourced_input.actionIdSql("m") ++ " END AS source_action," ++
-            "CASE WHEN e.entry_kind=1 THEN e.source_admission_id END AS admission,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)" ++
+            "CASE WHEN e.entry_kind=1 THEN e.source_admission_id END AS admission,e.recorded_at", if (hide_values) "" else instruction_entry_consistent, "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(" ++ (if (hide_values) "1,3" else "1,2,3") ++ ")" ++
             (if (hide_values) " AND " ++ visibleEntrySql("e") else "")),
         .Args = struct { session: []const u8, position: u64 },
-        .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, source_action: ?rsql.Positive, admission: ?rsql.Positive, recorded_at: rsql.Positive, consistent: bool },
+        .Row = struct { content_id: rsql.Positive, turn_id: ?rsql.Positive, source_revision: ?rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, source_action: ?rsql.Positive, admission: ?rsql.Positive, recorded_at: rsql.Positive, consistent: bool },
         .cardinality = .each,
     });
 }
@@ -688,7 +705,7 @@ const public_tool_result = rsql.Read(.{
 });
 
 /// `owner` is the Message admission or the resolved Action that may hold a parts value; null for model text.
-pub const PublicContent = struct { id: i64, value: content_value.Value, tool_operation: ?u64, admitted_at: ?u64, at: u64, source_action: ?u64 = null, owner: ?content_value.Owner = null };
+pub const PublicContent = struct { id: i64, value: content_value.Value, tool_operation: ?u64, admitted_at: ?u64, at: u64, source_action: ?u64 = null, owner: ?content_value.Owner = null, turn: ?u64 = null, revision: ?u64 = null };
 
 const PublicContentRead = struct {
     position: u64,
@@ -717,7 +734,7 @@ const PublicContentRead = struct {
     fn keep(read: *PublicContentRead, row: anytype) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
         if (@TypeOf(row.*) == public_entry.Row or @TypeOf(row.*) == activity_entry.Row) {
-            read.content = .{ .id = @intCast(row.content_id.get()), .value = undefined, .tool_operation = null, .admitted_at = if (row.admitted_at) |second| second.get() else null, .at = row.recorded_at.get(), .source_action = if (row.source_action) |action| action.get() else null, .owner = if (row.admission) |admission| .{ .message = admission.get() } else null };
+            read.content = .{ .id = @intCast(row.content_id.get()), .value = undefined, .tool_operation = null, .admitted_at = if (row.admitted_at) |second| second.get() else null, .at = row.recorded_at.get(), .source_action = if (row.source_action) |action| action.get() else null, .owner = if (row.admission) |admission| .{ .message = admission.get() } else null, .turn = if (row.turn_id) |turn| turn.get() else null, .revision = if (row.source_revision) |revision| revision.get() else null };
             if (read.sender) |sender| sender.* = if (row.sender) |session| .{ .session = session } else null;
         } else {
             read.content = .{ .id = @intCast(row.content_id.get()), .value = undefined, .tool_operation = row.operation_id.get(), .admitted_at = null, .at = row.at.get(), .owner = if (row.resolution_action) |action| .{ .action = action.get() } else null };
@@ -1601,7 +1618,7 @@ const ItemRead = struct {
                     if (kind == 2) message.entry.queueMetadata(a);
                 }
             },
-            3, 5 => {
+            3, 5, 16 => {
                 const content = &read.state.content;
                 switch (read.round) {
                     1 => content.read.queue(a, session),
@@ -1696,7 +1713,7 @@ const ItemRead = struct {
                 }
                 read.exposes(message.read.content_id, message.read.message.content);
             },
-            3, 5 => {
+            3, 5, 16 => {
                 const content = &read.state.content;
                 switch (read.round) {
                     1 => return content.read.found(),
@@ -1707,6 +1724,16 @@ const ItemRead = struct {
                         if (read.kind == 3) {
                             // An assistant entry has no owner, so its projection is text or fenced.
                             item.value = .{ .assistant = .{ .content = found.value.text, .final = content.answer != null } };
+                            read.exposes(@intCast(found.id), found.value);
+                            read.done = true;
+                            return;
+                        }
+                        if (read.kind == 16) {
+                            // Instruction text has no owner, so its projection is text or fenced.
+                            item.value = .{ .instruction = .{ .turn = found.turn, .revision = found.revision, .content = switch (found.value) {
+                                .text => |reference| reference,
+                                .parts => return error.CorruptStore,
+                            } } };
                             read.exposes(@intCast(found.id), found.value);
                             read.done = true;
                             return;
@@ -1872,6 +1899,7 @@ const ItemRead = struct {
                 read.state = .{ .compaction = undefined };
             },
             15 => read.state = .{ .model_call = .{ .operation = (row.id orelse return error.CorruptStore).get(), .item = item } },
+            16 => read.state = .{ .content = .{ .read = .{ .position = read.position, .ordinal = read.ordinal, .values = true } } },
             else => return error.CorruptStore,
         }
     }

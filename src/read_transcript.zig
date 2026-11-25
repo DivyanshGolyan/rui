@@ -137,6 +137,7 @@ fn contentOf(item: *const protocol.ActivityItem) ?content_value.Value {
     return switch (item.value) {
         .admission, .user, .received => |message| message.content,
         .assistant => |assistant| .{ .text = assistant.content },
+        .instruction => |instruction| .{ .text = instruction.content },
         .tool_result => |result| result.content,
         .sent => |sent| sent.content,
         .turn_ended => |ended| if (ended.content) |reference| .{ .text = reference } else null,
@@ -866,6 +867,39 @@ test "read_transcript hosted call uses its recorded provider presentation" {
             defer output.deinit();
             try outline(&database, arena, session.slice(), item, &output.writer);
             const expected = try std.fmt.allocPrint(arena, "{d}.0 hosted_call: Search “recorded provider query”\n", .{item.position});
+            try std.testing.expectEqualStrings(expected, output.written());
+        }
+    }.check);
+}
+
+test "read_transcript lists instruction rows with their text and first line" {
+    try storage.testing.forEachEngine(struct {
+        fn check(case: *storage.testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var database: storage.Store = undefined;
+            try storage.testing.testingStore(case, &database, &tmp, std.testing.io);
+            defer database.close() catch unreachable;
+            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer memory.deinit();
+            const arena = memory.allocator();
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try storage.testing.canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try storage.testing.completeConfiguration("instruction-transcript-create", "", workspace, "model-a");
+            const session = (try database.configure(&create, .{})).accepted.session;
+            const text = "You are the release steward.\nSecond line.";
+            var update = try storage.testing.completeConfiguration("instruction-transcript-update", session.slice(), workspace, "model-a");
+            update.configuration.instructions = .{ .state = .value, .borrowed = text.ptr, .length = text.len, .digest = protocol.contentDigest(text) };
+            try std.testing.expect(try database.configure(&update, .{}) == .accepted);
+            try storage.testing.answerTestTurn(&database, &tmp, session.slice(), "instruction-transcript", &.{.{ .encoded = "ok", .decoded = "ok" }});
+            const page = try arena.create(protocol.ActivityFacts);
+            try database.activityPage(&.{ .session = session, .kinds = .initOne(.instruction) }, page);
+            try std.testing.expectEqual(@as(usize, 1), page.count);
+            const item = &page.items[0];
+            var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer output.deinit();
+            try outline(&database, arena, session.slice(), item, &output.writer);
+            const expected = try std.fmt.allocPrint(arena, "{d}.0 instruction {d} bytes: \"You are the release steward.\"\n", .{ item.position, text.len });
             try std.testing.expectEqualStrings(expected, output.written());
         }
     }.check);

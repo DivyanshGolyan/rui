@@ -25,7 +25,7 @@ pub const Item = struct {
     ordinal: u64 = 0,
     at: u64,
     value: Value,
-    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: content_value.Value, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall };
+    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: content_value.Value, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction };
     pub const Kind = std.meta.Tag(Value);
     pub const Message = struct { admission: u64, key: Bounded(idempotency_key.max_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: content_value.Value, admitted_at: u64, sender: ?NamedPeer = null, source_action: ?u64 = null };
     pub const Call = activity_read.ProposalMetadata;
@@ -49,6 +49,9 @@ pub const Item = struct {
         server: ?activity_read.CallText.Server = null,
     };
     pub const SessionChanged = struct { revision: u64, field: session_settings.SessionField, provider_text: ?Bounded(outcome_code.max_report_bytes) = null };
+    /// Instruction text the model was given. `turn` and `revision` are both null exactly for the skill-catalog instruction,
+    /// which no Turn and no authored revision owns. The text is public; a private value never becomes a row.
+    pub const Instruction = struct { turn: ?u64, revision: ?u64, content: content_value.Reference };
     pub const Compacted = struct { operation: u64, dropped: u64 };
     pub const ModelCall = struct {
         model: Bounded(model_capability.max_model_bytes),

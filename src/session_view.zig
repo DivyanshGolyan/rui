@@ -1525,7 +1525,7 @@ pub fn tight(value: protocol.ActivityItem.Value) bool {
         .hosted_call => |presentation| presentation.code == .succeeded,
         .sent => true,
         .admission, .received, .user => |message_| message_.sender != null,
-        .assistant, .call, .turn_ended, .stop, .send_failed, .approval_requested, .session_changed, .compacted, .model_call => false,
+        .assistant, .call, .turn_ended, .stop, .send_failed, .approval_requested, .session_changed, .compacted, .model_call, .instruction => false,
     };
 }
 
@@ -1600,7 +1600,7 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
         },
         .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at),
         .send_failed => |failed| try sendFailed(sink, failed.target),
-        .approval_requested, .session_changed, .compacted, .model_call => {},
+        .approval_requested, .session_changed, .compacted, .model_call, .instruction => {},
     }
     return false;
 }
