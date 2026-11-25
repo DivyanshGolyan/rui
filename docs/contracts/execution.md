@@ -515,9 +515,9 @@ The environment never enters the Store, caller request records, digests, logs or
 
 The Host keeps one environment per Session in a [capped register](resources.md#resident-memory-invariant) (`src/SessionEnvironments.zig`).
 Intake reads a Message's environment straight into the one allocation the register keeps, so a Message costs one allocation and no copy; whatever the register does not keep is freed right after admission.
-The Store calls the intake back after a fresh Message commits and before it releases its lock, and the intake offers the environment with its rank: a person's Message outranks a peer's, and between equal origins the later Store admission wins.
+The Store calls the intake back after a fresh Message commits and before it releases its lock, and the intake offers the environment with its rank, and the later Store admission wins. Every Message a client sends carries an environment and is offered as a person's, including one an agent sends from its Bash with `rui session send`; a `message_agent` or `start_agent` delivery is written by the Host and carries none. (The peer rank remains in the register, unreachable until a follow-up deletes it.)
 The register keeps the highest rank, so its value depends only on what the Store admitted, not on which intake worker ran first.
-A peer's Message never displaces a person's environment and fills a Session that holds none.
+A delivery from `message_agent` or `start_agent` never displaces any environment, and fills none.
 A replayed admission installs nothing.
 Execution sees a new Turn only after the Store lock is released, so the Turn's first Bash already sees its environment.
 Lock order is the Store lock, then the register's leaf mutex; execution takes the register's mutex alone, and the register neither allocates nor frees under it.
@@ -650,7 +650,7 @@ Model replacement follows the retry policy above and may incur duplicate cost.
 | Cross-scenario matrix: splits, cutoff and status | `'resumable Bash parser'`, `'wide process exit'` | Native Linux and macOS. Cross-compilation does not qualify `WNOWAIT` |
 | Capture cannot be completed | `'stops a running Attempt'` | None |
 | [Bash environment](#bash-environment): the Turn's first Bash sees the sending terminal's environment led by this `rui`, without the Host's own variables or the terminal's `RUI_` names; a later terminal's Message switches it | `bash_environment_integration.py`, `'received keeps well-formed entries'` | Linux; the macOS system `PATH` and live terminals are lane evidence |
-| A peer's Message never displaces a person's environment and fills a Session that holds none; every order of offers keeps the highest rank | `bash_environment_integration.py`, `'Rank.outranks is a strict total order'`, `"every order of offers keeps each Session's highest rank"` | Fallback after a Host restart: unit evidence only |
+| A `message_agent` or `start_agent` delivery never displaces an environment; a Bash `rui session send` is offered as a person's; every order of offers keeps the highest rank | `bash_environment_integration.py`, `'Rank.outranks is a strict total order'`, `"every order of offers keeps each Session's highest rank"` | Fallback after a Host restart: unit evidence only |
 | Only a fresh admission installs, after commit and before the Store worker takes another request; a replay or rejection installs nothing | `'message admissions remain queued in order'`, `'a peer Message is recorded with the sender Session of the Action that delivered it'`, `'message conflicts and failed commits cannot create another admission'` | None |
 | An environment over 64 KiB is refused before connecting, naming its largest variables, and its capture recovers from a smaller environment; no environment value reaches a caller record | `bash_environment_integration.py`, `'a Message uploads its environment ahead of the unchanged record'` | None |
 | Host refuses a missing header, an oversized or malformed environment, a repeated name and the header on another route before admission | `bash_environment_integration.py`, `"a Message's environment header and entries are checked before admission"` | None |

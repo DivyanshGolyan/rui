@@ -161,9 +161,11 @@ def main(placement="default"):
         send(b, session, "show", "second")
         assert next_result(session, 1)[0] == "terminal-b"
 
+        # A Bash `rui session send` is a plain caller's: it carries the relaying Session's environment and is
+        # offered as a person's, so the later admission displaces. (message_agent carries none.)
         relay = configure(a)
         send(terminal(home, CLIENT_MARK="terminal-p"), relay, f"relay {session}", "relay-person")
-        assert next_result(session, 2)[0] == "terminal-b"
+        assert next_result(session, 2)[0] == "terminal-p"
         quiet = configure(a)
         send(terminal(home, CLIENT_MARK="terminal-p"), relay, f"relay {quiet}", "relay-quiet")
         assert next_result(quiet, 0)[0] == "terminal-p"
