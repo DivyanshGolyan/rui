@@ -16305,9 +16305,9 @@
               "type": "string",
               "pattern": "^[A-Za-z0-9_-]{1,64}$"
             },
-            "maxItems": 145,
+            "maxItems": 144,
             "uniqueItems": true,
-            "x-rui-max-bytes": 5147,
+            "x-rui-max-bytes": 5136,
             "description": "None repeated; the names' bytes total at most x-rui-max-bytes. The effective tool offer frozen at this Operation's admission."
           }
         },
