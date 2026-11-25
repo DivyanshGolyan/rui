@@ -1365,6 +1365,7 @@ pub const Store = struct {
         return switch (runner) {
             .bash => self.queue().run(readBashExecutionInputHeld, .{ self, binding, out }),
             .read_image => self.queue().run(readImageExecutionInputHeld, .{ self, binding, out }),
+            .github_pr_watch => self.queue().run(readGithubPrWatchExecutionInputHeld, .{ self, binding, out }),
             .mcp => self.queue().run(readMcpExecutionInputHeld, .{ self, binding, out }),
             // An app call runs in its app; the Host hands it no execution input.
             .core, .provider, .app => @compileError("only Action runners have execution input"),
@@ -1377,6 +1378,14 @@ pub const Store = struct {
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.action_attempt, action_domain.readMcpExecutionInput(&access, binding, out));
+    }
+
+    fn readGithubPrWatchExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.action_attempt, action_domain.readGithubPrWatchExecutionInput(&access, binding, out));
     }
 
     fn readImageExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
@@ -1634,7 +1643,7 @@ pub const Store = struct {
     }
 
     pub fn nextAction(self: *Store, comptime runner: tool_record.Runner, capacity: action_domain.Capacity) !?ReadyAction {
-        if (runner != .bash and runner != .mcp and runner != .read_image) @compileError("only Action runners can select Actions");
+        if (runner != .bash and runner != .mcp and runner != .read_image and runner != .github_pr_watch) @compileError("only Action runners can select Actions");
         return self.queue().run(nextActionHeld, .{ self, runner, capacity });
     }
     fn nextActionHeld(self: *Store, runner: tool_record.Runner, capacity: action_domain.Capacity) !?ReadyAction {
@@ -1646,6 +1655,7 @@ pub const Store = struct {
             .bash => action_domain.nextAction(&access, .bash, capacity),
             .mcp => action_domain.nextAction(&access, .mcp, capacity),
             .read_image => action_domain.nextAction(&access, .read_image, capacity),
+            .github_pr_watch => action_domain.nextAction(&access, .github_pr_watch, capacity),
             // App calls are claimed by their app (a later unit); execution never selects them.
             .core, .provider, .app => unreachable,
         });

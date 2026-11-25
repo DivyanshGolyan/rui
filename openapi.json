@@ -15409,6 +15409,7 @@
                   "skill",
                   "start_agent",
                   "stop_action",
+                  "watch_github_pr",
                   "web_search"
                 ]
               },

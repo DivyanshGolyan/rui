@@ -1785,7 +1785,7 @@ fn upgradeValue(raw: *anyopaque) session_upgrade.Upgrade {
 fn conversationLine(raw: *anyopaque, can_stop: bool) SessionFrontend.Lender.Said {
     const self: *Self = @ptrCast(@alignCast(raw));
     const said = view.conversation(&self.state, self.opened, can_stop);
-    return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
+    return .{ .notice = said.notice, .stoppable = said.stoppable };
 }
 
 fn departureText(self: *const Self, out: *std.Io.Writer) void {
