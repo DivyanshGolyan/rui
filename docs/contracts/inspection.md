@@ -143,7 +143,7 @@ Proposal metadata grants no authorization: a later approval still binds the fres
 
 ### Public Session activity
 
-Session activity is a separate projection with a row kind for each `Kind` in `src/activity_read.zig`, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), a sourced input (`received`, naming either its peer `sender` or its background `source_action`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
+Session activity is a separate projection with a row kind for each `Kind` in `src/activity_read.zig`, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), a sourced input (`received`, naming either its peer `sender` or its background `source_action`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop.
 The remaining kinds are `approval_requested` (a call whose Action was saved under an `ask` revision, D115), `session_changed` (a settings revision's change, D138), `compacted` (a successful compaction, D217), `model_call` (a resolved model Operation, D179), `instruction` and `skill`.
 An `instruction` row is the text a Turn was given as its System Instruction entry (Conversation entry kind `instruction`): `turn` and `revision` name the Turn and the authored revision, and `content` is the entry's text reference.
 The Skill catalog's instruction has no Turn and no authored revision, so both are null exactly for it.
@@ -153,15 +153,10 @@ A `skill` row is the complete raw `SKILL.md` a Message bound for its Turn (Conve
 The row sits at the entry's own Session position, which follows its Message's `user` row, dated its `recorded_at`; an entry whose bound skill, name, Message, Turn or text does not match, or whose text is private, fences like assistant text.
 Search does not read skill text, and a screen draws nothing for the kind.
 Every kind of entry a request is built from (`HistoricalEntryKind`) has an Activity row at its position, and a test over a Session that exercises each fails when a kind has none.
-`received` mirrors `sent` for peer Messages and records final Action input with its Action identity; it split from `admission` on 2026-11-03 so a page can list a person's Messages alone (design thread on Rui's core and plug-in points).
+`received` records a peer Message and final Action input with its Action identity; it split from `admission` on 2026-11-03 so a page can list a person's Messages alone (design thread on Rui's core and plug-in points).
 Activity and public Conversation retain `source_action` as a nullable Action ID alongside the shared Resolution content reference for background finals; person-only admission queries exclude them. Published Action values are sourced inputs like finals: Activity lists each as a `received` row (and as a User row once applied) naming its `source_action`, so the transcript holds everything the model was sent and a model can search and open it with `read_transcript`. Values add no public Conversation rows; that page is a filtered projection, and what a screen draws is decided in the view, never by what Activity holds.
-Admission, stop, send, refusal and every terminal outcome claim the existing Session sequence in their owning transaction, and each also records its commit time there.
+Admission, stop and every terminal outcome claim the existing Session sequence in their owning transaction, and each also records its commit time there.
 No copied log or second frontier exists; this schema change follows the [Store format policy](store.md#store-format-and-upgrades).
-A refused send's `send_failed.target` is required and nullable: it names the canonical attempted peer, including an unknown Session, or is null when the saved attempt has no valid Session reference.
-The Store derives that peer from the full saved target with the shared ID grammar, resolves a label only for a peer, and leaves the original command target, digest, refusal and replay identity unchanged.
-This read-time projection covers existing refusals as well as new ones; null does not distinguish refused creation from a malformed addressed send and never means that a Session was created or not created.
-Every non-null peer remains strictly validated; a missing target or malformed peer is not an alternative null encoding.
-The human row with no peer reads `! Message rejected — No valid target reference`; model transcript outlines print no `target` for it, and never a label or invalid attempted spelling.
 Calls retain historical rejected proposals and all three complete field references under the proposal contract above.
 Tool Results validate the complete group's accepted call/output-item and Session/Turn/attempt provenance before exposure; malformed sibling links fence even when the caller skips proposal rows.
 Outcome provenance is the terminal Turn's causing model Operation, not a later Session Operation.
@@ -204,7 +199,7 @@ Permission preparation consumes the same normal Activity scan before showing the
 Current's active attention and history-independent query contract remain unchanged.
 This projection has fixed resident storage, not history-independent query cost.
 
-`POST /v1/activity-page` takes `kind:"activity_page"`, `session`, nullable `end`, decimal-string `position`, nullable decimal-string `ordinal`, `direction:"forward"|"backward"`, `kinds`, the row kinds to list as a non-empty array of their names, each at most once and in this order: `admission`, `user`, `assistant`, `call`, `tool_result`, `hosted_call`, `turn_ended`, `stop`, `sent`, `send_failed`, `received`, `approval_requested`, `session_changed`, `compacted`, `model_call`; and decimal-string `limit`, from 1 to 16.
+`POST /v1/activity-page` takes `kind:"activity_page"`, `session`, nullable `end`, decimal-string `position`, nullable decimal-string `ordinal`, `direction:"forward"|"backward"`, `kinds`, the row kinds to list as a non-empty array of their names, each at most once and in this order: `admission`, `user`, `assistant`, `call`, `tool_result`, `hosted_call`, `turn_ended`, `stop`, `received`, `approval_requested`, `session_changed`, `compacted`, `model_call`; and decimal-string `limit`, from 1 to 16.
 The cursor may name a row of any kind; the page lists only the asked kinds, and each row source is gated by the kinds before it reads, so a kind not asked for costs no read unless it shares a source with an asked one: `user` and `assistant` share the Conversation entries, and a `received`-only page passes over the person's admissions.
 A person's Messages alone are one seek in the index of Messages without a Session sender or Action source, whatever the history's length; a page that lists received Messages reads all of a Session's Messages by position, as every unfiltered page does.
 Null end captures the current committed end; zero freezes empty history.
@@ -247,7 +242,7 @@ Query work may grow with history; item bounds do not promise traversal latency.
 `POST /v1/activity-search` takes `kind:"activity_search"`, `session`, `query`, `kinds`, nullable decimal-string `before_position` and `before_ordinal`, and decimal-string `limit` with the Activity page's kind and limit rules.
 The query is 1 to 256 UTF-8 bytes; matching folds only ASCII A–Z and keeps every other byte exact, independent of the Store engine.
 The Host streams existing public content through `ContentReader`, with a fixed 8 MiB content-byte scan budget per request, and SQL chooses only candidate identities, never text matches.
-Searched text is Message text (admission, user, received and sent), assistant text, Turn-ending content, Tool Results, and a call's tool name followed by a newline and its stored arguments JSON; instructions, output schemas, usage, call IDs and private provider material are not searched.
+Searched text is Message text (admission, user and received), assistant text, Turn-ending content, Tool Results, and a call's tool name followed by a newline and its stored arguments JSON; instructions, output schemas, usage, call IDs and private provider material are not searched.
 In a parts value each Text part is searched on its own, so no match spans two parts, and Image bytes are never searched; reading the manifest charges its bytes to the scan budget before any part, and an entry whose manifest does not fit waits for the continuation.
 The reply is `type:"activity_search"` with newest-first `items`, each naming `position`, `ordinal`, `kind` and up to three `hits`, and nullable `next` naming the last scanned entry.
 A hit carries a UTF-8-aligned `snippet` of at most 160 bytes, decimal-string byte `offset` and `length` inside that snippet, and `part`, the zero-based ordinal of the Text part it matched in a parts value or `null` for text; when the full matched query exceeds the snippet bound, the highlight is its visible prefix, but matching still uses the entire query.
@@ -303,7 +298,7 @@ Single-model admission reads and complete-catalog model-list reads share this se
 304 responses, failed refreshes and failed publication preserve the previously committed source; restart reads that same authority without waiting for discovery.
 
 Each row has position/ordinal, `at`, and one closed tagged `value`.
-`at` is the Host Unix second the row's owning fact committed: the admission for Message admission and sent Message rows, which is the same time on both rows of one Message; the Conversation entry for User and assistant rows; the producing Operation's resolution for a Tool Call; the group's last acceptance, the one at its greatest position, for a Tool Result (an Action's resolution, or the producing Operation's for a rejected call); and the fact itself for a Turn outcome, Session stop and refused send.
+`at` is the Host Unix second the row's owning fact committed: the admission for Message admission rows; the Conversation entry for User and assistant rows; the producing Operation's resolution for a Tool Call; the group's last acceptance, the one at its greatest position, for a Tool Result (an Action's resolution, or the producing Operation's for a rejected call); and the fact itself for a Turn outcome and Session stop.
 Times come from the Host wall clock: they order nothing, and they can repeat or step back across clock changes.
 Message facts include original key/admission, exact content reference and queued/applied/excluded state, with Turn binding visible only after its application position.
 A `turn_ended` row names how its Turn ended: `done`, `context_full`, `provider_refused`, `out_of_quota`, `provider_unavailable`, `stopped`, `interrupted` or `failed`, beside the saved `code` it was judged from and the content of a done Turn's answer or a failed one's report.
@@ -321,7 +316,7 @@ Call fields are in `name`, `call_id`, `arguments` order.
 Content references carry exact decimal-string bytes and SHA-256; no preview truncation or private provider content enters activity.
 
 A page's cost does not grow with the Session's history.
-Each source of rows (Message admissions, User and assistant entries, Tool Calls, rejected calls and Action results by their acceptance, Turn outcomes, Session stops and refused sends) is read through an index on its Session and position: a range seek from the cursor in the page's direction that stops after 17 rows, the four groups merged and cut to the page plus one.
+Each source of rows (Message admissions, User and assistant entries, Tool Calls, rejected calls and Action results by their acceptance, Turn outcomes and Session stops) is read through an index on its Session and position: a range seek from the cursor in the page's direction that stops after 17 rows, the four groups merged and cut to the page plus one.
 A Tool Result's group is judged only for the positions on the page, and a single row resolves by the same seeks at its own position.
 A forward page's live call activity reads only the calls accepted after the page, and those still waiting.
 Store tests hold opening and forward pages to equal SQLite VM steps after 10 and 10,000 earlier rows, including a long history of Action values.
