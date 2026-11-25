@@ -542,6 +542,23 @@ class ReportTest(unittest.TestCase):
         self.assertIn("Not filed:", str(raised.exception))
         self.assertIn("HTTP 502", str(raised.exception))
 
+    def test_each_filed_cause_prints_one_verdict_annotation(self):
+        fake = FakeGitHub([dict(id=1, name='macos / full-execution', conclusion='failure',
+                                steps=[dict(name='Run selected targets', conclusion='failure')])], {1: BASH})
+        out = self.run_main(fake)
+        [verdict] = [line for line in out.splitlines() if line.startswith('::notice title=Promotion verdict::')]
+        self.assertEqual(verdict.split('::', 2)[2].split(' | '), [
+            'macos / full-execution', 'Run selected targets',
+            'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError',
+            'macos', '#77'])
+
+    def test_a_verdict_escapes_log_text_that_would_end_the_workflow_command(self):
+        job = dict(name='j', steps=[dict(name='s', conclusion='failure')])
+        line = report_issue.verdict_line(job, report_issue.Cause('100%\r::error::x\ny', escape='macos'), 5)
+        self.assertEqual(line, '::notice title=Promotion verdict::j | s | 100%25%0D::error::x%0Ay | macos | #5')
+        self.assertNotIn('\r', line)
+        self.assertNotIn('\n', line)
+
     def test_an_infrastructure_red_is_filed_without_an_escape_class(self):
         lost = dict(id=1, name='macos / full-execution', conclusion='failure')
         cancelled_setup = dict(id=1, name='macos / full-execution', conclusion='failure',
