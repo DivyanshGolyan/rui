@@ -4658,6 +4658,64 @@ test "WIR-4 a public parts reply reads back as the Host writes it and refuses an
     try std.testing.expectError(error.InvalidPartList, PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = wire.len } }, .{ .session = "k7m2qx", .owner = .{ .action = 9 }, .identity = identity }));
 }
 
+/// One Archived window reply for `count` rows whose archive keys run down from `top`, as a Host would write it.
+fn archivedWindowWire(out: *std.Io.Writer.Allocating, top: u64, count: usize, more_above: bool, more_below: bool) ![]const u8 {
+    try out.writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
+    for (0..count) |index| {
+        if (index != 0) try out.writer.writeAll(",");
+        var reference: [6]u8 = undefined;
+        const row: protocol.ArchivedRow.Fields = .{ .reference = try std.fmt.bufPrint(&reference, "r{d:0>5}", .{index}), .archive_seq = top - index, .stopped_at = 1700, .label = null, .first = null };
+        try row.writeJson(&out.writer);
+    }
+    try out.writer.writeAll("],\"delta\":\"window\",\"since\":\"abababababababababababababababab.42\",\"next\":{\"first\":");
+    if (count == 0) try out.writer.writeAll("null,\"last\":null") else try out.writer.print("\"{d}\",\"last\":\"{d}\"", .{ top, top - (count - 1) });
+    try out.writer.print(",\"more_above\":{},\"more_below\":{}}}}}", .{ more_above, more_below });
+    return out.written();
+}
+
+test "Archived window reply: a page is accepted only within the rows asked for and on the cursor's side" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer file.close(io);
+    const Case = struct { window: session_list.ArchivedWindow, count: usize, more_above: bool, more_below: bool, accepted: bool };
+    const cases = [_]Case{
+        // The page size is the request's: exactly `rows` is read, one more is refused, at the small, the typical and the largest size.
+        .{ .window = .{ .cursor = .head, .rows = 1 }, .count = 1, .more_above = false, .more_below = true, .accepted = true },
+        .{ .window = .{ .cursor = .head, .rows = 1 }, .count = 2, .more_above = false, .more_below = true, .accepted = false },
+        .{ .window = .{ .cursor = .head, .rows = 12 }, .count = 12, .more_above = false, .more_below = true, .accepted = true },
+        .{ .window = .{ .cursor = .head, .rows = 12 }, .count = 13, .more_above = false, .more_below = true, .accepted = false },
+        .{ .window = .{ .cursor = .head, .rows = 12 }, .count = 40, .more_above = false, .more_below = true, .accepted = false },
+        .{ .window = .{ .cursor = .head, .rows = 40 }, .count = 40, .more_above = false, .more_below = true, .accepted = true },
+        .{ .window = .{ .cursor = .head, .rows = 12 }, .count = 0, .more_above = false, .more_below = false, .accepted = true },
+        // The cursor fixes the side: head has nothing above, tail nothing below, a keyed read stays on its side of the key.
+        .{ .window = .{ .cursor = .head, .rows = 12 }, .count = 3, .more_above = true, .more_below = false, .accepted = false },
+        .{ .window = .{ .cursor = .tail, .rows = 12 }, .count = 3, .more_above = true, .more_below = true, .accepted = false },
+        .{ .window = .{ .cursor = .tail, .rows = 12 }, .count = 3, .more_above = true, .more_below = false, .accepted = true },
+        .{ .window = .{ .cursor = .{ .below = 1001 }, .rows = 12 }, .count = 3, .more_above = true, .more_below = true, .accepted = true },
+        .{ .window = .{ .cursor = .{ .below = 1001 }, .rows = 12 }, .count = 3, .more_above = false, .more_below = true, .accepted = false },
+        .{ .window = .{ .cursor = .{ .below = 1000 }, .rows = 12 }, .count = 3, .more_above = true, .more_below = true, .accepted = false },
+        .{ .window = .{ .cursor = .{ .above = 997 }, .rows = 12 }, .count = 3, .more_above = true, .more_below = true, .accepted = true },
+        .{ .window = .{ .cursor = .{ .above = 997 }, .rows = 12 }, .count = 3, .more_above = true, .more_below = false, .accepted = false },
+        .{ .window = .{ .cursor = .{ .above = 998 }, .rows = 12 }, .count = 3, .more_above = true, .more_below = true, .accepted = false },
+    };
+    for (cases) |case| {
+        var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer out.deinit();
+        const wire = try archivedWindowWire(&out, 1000, case.count, case.more_above, case.more_below);
+        try file.writePositionalAll(io, wire, 0);
+        if (case.accepted) {
+            const page = try ArchivedWindowPage.read(io, file, wire.len, case.window);
+            try std.testing.expectEqual(case.count, page.count);
+            const decoded = try ArchivedWindowReply.decode(io, file, case.window, .{ .report = .{ .bytes = wire.len } });
+            try std.testing.expectEqual(case.count, decoded.page.count);
+        } else {
+            try std.testing.expectError(error.InvalidSessionPage, ArchivedWindowPage.read(io, file, wire.len, case.window));
+        }
+    }
+}
+
 test "Archived window wire: a slim row reads back with its position, admission, content and line" {
     const digest: [32]u8 = @splat(0x5a);
     const identity: content_value.Reference = .{ .length = 7, .digest = digest };
