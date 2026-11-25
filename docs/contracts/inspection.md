@@ -69,7 +69,7 @@ Results run newest-first, at most 16 items per page; Tool Results share their co
 Other entries use ordinal zero.
 Once a group settles its final acceptance position is newer than any prior fixed end, so incomplete results cannot materialize behind an existing cursor.
 Later appends are outside the fixed end.
-Each item carries kind, position, ordinal and its `content` value, with `display:"omitted"`; no payload is silently shortened into a preview.
+Each item carries kind, position, ordinal and its `content` value; no payload is silently shortened into a preview.
 A `content` value is `{"type":"text",bytes,sha256}` or, for a Message or Action Resolution with parts, `{"type":"parts",bytes,sha256,owner}`, whose owner reads its parts through [the parts routes](#typed-message-and-action-resolution-parts).
 Reverse the retrieved sequence for chronological presentation.
 An empty first page has no continuation, even if work later appends.
@@ -143,7 +143,8 @@ Proposal metadata grants no authorization: a later approval still binds the fres
 
 ### Public Session activity
 
-Session activity is a separate projection of eleven row kinds, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), a sourced input (`received`, naming either its peer `sender` or its background `source_action`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
+Session activity is a separate projection with one row per `Kind` in `src/activity_read.zig`, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), a sourced input (`received`, naming either its peer `sender` or its background `source_action`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
+The remaining kinds are `approval_requested` (a call whose Action was saved under an `ask` revision, D115), `session_changed` (a settings revision's change, D138), `compacted` (a successful compaction, D217) and `model_call` (a resolved model Operation, D179).
 `received` mirrors `sent` for peer Messages and records final Action input with its Action identity; it split from `admission` on 2026-11-03 so a page can list a person's Messages alone (design thread on Rui's core and plug-in points).
 Activity and public Conversation retain `source_action` as a nullable Action ID alongside the shared Resolution content reference for background finals; person-only admission queries exclude them. Action values add no Activity admission, received or User rows and no public Conversation rows; their provenance and model input remain in canonical history.
 Admission, stop, send, refusal and every terminal outcome claim the existing Session sequence in their owning transaction, and each also records its commit time there.
