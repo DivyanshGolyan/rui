@@ -31,6 +31,7 @@ const cores = .{
     .{ "chat_info_focus.zig", @import("chat_info_focus.zig") },
     .{ "chat_info_save.zig", @import("chat_info_save.zig") },
     .{ "chatgpt_plan_wire.zig", @import("chatgpt_plan_wire.zig") },
+    .{ "citation_marker.zig", @import("citation_marker.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
     .{ "cli_grammar.zig", @import("cli_grammar.zig") },
     .{ "cli_invocation.zig", @import("cli_invocation.zig") },
