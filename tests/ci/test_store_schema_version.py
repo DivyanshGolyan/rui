@@ -5,8 +5,9 @@ import subprocess
 import textwrap
 import unittest
 
-from release_numbers import (MIGRATIONS, SCHEMA, digest_rows, drifted_row_fix, git, main_base, migration_steps, released_tag,
-                             schema_version, touches_mysql_migration)
+from release_numbers import (MIGRATIONS, SCHEMA, check_clause_lint, check_clause_message, digest_rows, drifted_row_fix,
+                             git, main_base, migration_steps, quoted_check_needles, released_tag, schema_version,
+                             touches_mysql_migration)
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINES = ("src/store/migration_baseline.sqlite.sql", "src/store/migration_baseline.mysql.sql",
@@ -27,6 +28,11 @@ LITERAL_STEP = re.compile(r"\{\.from=\d+,\.sqlite=&\.\{" + LITERALS + r"\},\.mys
 # the field CHECK names.
 REPAIRED_STEPS = {91: "9f9e6210d1278947bcb8a8d51868fe62d31dc1ed16e9ef06f1ce26672f876bfa",
                   93: "7064e3c27f815b0f201e5ea9ce673a94e09bc843afb2373ca2088135a1c71e47"}
+
+
+# Format 94's MySQL step as main carries it (from 93), and as this revision repairs it.
+MAIN_94_FIELD_DDL = """SET @rui_field_ddl=(SELECT CONCAT('ALTER TABLE session_change DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK((field=''provider'' OR field=''model'' OR field=''instructions'' OR field=''tools'' OR field=''loaded_tools'' OR field=''permission_mode'' OR field=''output_schema'' OR field=''compaction_trigger'' OR field=''output_reservation'' OR field=''reasoning_effort'' OR field=''label'' OR field=''reasoning_effort_refused'' OR field=''app_tools''))') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session_change' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('''provider''',cc.CHECK_CLAUSE)>0 AND LOCATE('provider_text',cc.CHECK_CLAUSE)=0)"""
+REPAIRED_94_FIELD_DDL = """SET @rui_field_ddl=(SELECT CONCAT('ALTER TABLE session_change DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK((field=''provider'' OR field=''model'' OR field=''instructions'' OR field=''tools'' OR field=''loaded_tools'' OR field=''permission_mode'' OR field=''output_schema'' OR field=''compaction_trigger'' OR field=''output_reservation'' OR field=''reasoning_effort'' OR field=''label'' OR field=''reasoning_effort_refused'' OR field=''app_tools''))') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session_change' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('loaded_tools',cc.CHECK_CLAUSE)>0)"""
 
 
 def baseline_version(source):
@@ -247,6 +253,47 @@ class MySqlMigrationOwnerTest(unittest.TestCase):
         self.assertTrue(touches_mysql_migration([SCHEMA], {SCHEMA: (self.STEPS, 'pub const migrations = [_]Migration{ .{ .from = 9')}))
         self.assertTrue(touches_mysql_migration([SCHEMA], {}), 'a schema.zig change without its text')
         self.assertFalse(touches_mysql_migration([SCHEMA], {SCHEMA: (None, None)}))
+
+
+class CheckClauseLintTest(unittest.TestCase):
+    def test_a_quoted_needle_is_rejected_and_a_bare_token_accepted(self):
+        cases = [
+            ("main's format 94 step", MAIN_94_FIELD_DDL, ["'provider'"]),
+            ("repaired format 94 step", REPAIRED_94_FIELD_DDL, []),
+            ("INSTR with a quoted needle", "SELECT 1 WHERE INSTR(cc.CHECK_CLAUSE,'''provider''')>0", ["'provider'"]),
+            ("LIKE with a quoted needle", "SELECT 1 WHERE cc.CHECK_CLAUSE LIKE '%''provider''%'", ["%'provider'%"]),
+            ("reversed LIKE with a quoted needle", "SELECT 1 WHERE '%''provider''%' LIKE cc.CHECK_CLAUSE", ["%'provider'%"]),
+            ("reversed equality with a quoted needle", "SELECT 1 WHERE '''x''' = cc.CHECK_CLAUSE", ["'x'"]),
+            ("POSITION with a quoted needle", "SELECT 1 WHERE POSITION('''x''' IN cc.CHECK_CLAUSE)>0", ["'x'"]),
+            ("a bare token in LOCATE", "SELECT 1 WHERE LOCATE('loaded_tools',cc.CHECK_CLAUSE)>0", []),
+            ("a bare token in LIKE", "SELECT 1 WHERE cc.CHECK_CLAUSE LIKE '%read_only%'", []),
+            ("CHECK_CLAUSE only mentioned, not searched",
+             "SELECT cc.CHECK_CLAUSE, 'a''b' FROM information_schema.CHECK_CONSTRAINTS cc "
+             "WHERE LOWER(REPLACE(cc.CHECK_CLAUSE,'`',''))='x'", []),
+            ("a quoted literal beside an unrelated search",
+             "SELECT 1 WHERE LOCATE('''x''',t.name)>0 AND cc.CHECK_CLAUSE IS NOT NULL", []),
+        ]
+        for label, sql, expected in cases:
+            with self.subTest(case=label):
+                self.assertEqual(quoted_check_needles(sql), expected)
+
+    def test_the_message_says_why_and_names_the_fix(self):
+        message = check_clause_message(93, "'provider'")
+        self.assertIn("charset introducer", message)
+        self.assertIn("1064", message)
+        self.assertIn("LOCATE('loaded_tools',cc.CHECK_CLAUSE)", message)
+
+    def test_the_lint_reports_only_the_quoted_search_and_its_format(self):
+        steps = {92: '{.from=92,.sqlite=&.{"SELECT 1"},.mysql=&.{"SELECT LOCATE(\'provider\',cc.CHECK_CLAUSE)"},}',
+                 93: '{.from=93,.sqlite=&.{"SELECT 1"},.mysql=&.{"' + MAIN_94_FIELD_DDL + '"},}'}
+        failures = check_clause_lint(steps)
+        self.assertEqual(failures, {93: ["'provider'"]})
+
+    def test_every_current_step_passes_the_lint(self):
+        source = (ROOT / SCHEMA).read_text()
+        failures = check_clause_lint(migration_steps(source))
+        self.assertEqual(failures, {}, "; ".join(check_clause_message(start, needle)
+                                               for start, needles in failures.items() for needle in needles))
 
 
 if __name__ == "__main__":
