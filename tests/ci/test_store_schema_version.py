@@ -21,7 +21,12 @@ LITERAL_STEP = re.compile(r"\{\.from=\d+,\.sqlite=&\.\{" + LITERALS + r"\},\.mys
 # parenthesis, so MySQL refused it with error 1064 and no MySQL Store took it. Owner approved 2026-11-24. The repair
 # also matches the owner CHECK by LOCATE('provider'), because information_schema's CHECK_CLAUSE text did not equal the
 # normalised literal on MySQL 8.4.
-REPAIRED_STEPS = {91: "9f9e6210d1278947bcb8a8d51868fe62d31dc1ed16e9ef06f1ce26672f876bfa"}
+# Format 94's MySQL step (from 93) found the session_change field CHECK by the quoted literal 'provider', which MySQL
+# 8.4's CHECK_CLAUSE stores with a charset introducer, so its SET was NULL and PREPARE refused it (1064); no MySQL Store
+# took it and no release carries it. Owner approved 2026-11-25. The repair matches the bare 'loaded_tools', which only
+# the field CHECK names.
+REPAIRED_STEPS = {91: "9f9e6210d1278947bcb8a8d51868fe62d31dc1ed16e9ef06f1ce26672f876bfa",
+                  93: "7064e3c27f815b0f201e5ea9ce673a94e09bc843afb2373ca2088135a1c71e47"}
 
 
 def baseline_version(source):
