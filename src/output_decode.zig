@@ -1,6 +1,5 @@
 const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
-const citation_marker = @import("citation_marker.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
 const json = @import("codecs/json.zig");
@@ -588,32 +587,6 @@ const Decoded = struct {
         return .{ .length = sink.length, .digest = sink.hash.finalResult(), .non_whitespace = sink.non_whitespace };
     }
 
-    /// A message part's text as Rui keeps it: decoded without the provider's citation markers, the
-    /// same text the Store import writes (`model_settlement.writeMessageText`).
-    fn message(data: []const u8, range: codec_abi.Range, also: *Sha256) Decoded {
-        var sink: Sink = .{ .hash = protocol.contentHasher(), .also = also, .kept = null, .length = 0, .non_whitespace = false };
-        var stripped: Stripped = .{ .sink = &sink };
-        json.decodeContents(bytesOf(data, range), &stripped);
-        stripped.filter.finish(&stripped) catch unreachable;
-        return .{ .length = sink.length, .digest = sink.hash.finalResult(), .non_whitespace = sink.non_whitespace };
-    }
-
-    const Stripped = struct {
-        sink: *Sink,
-        filter: citation_marker.Filter = .{},
-
-        pub fn append(self: *Stripped, bytes: []const u8, scalar: ?u21) void {
-            if (scalar) |value| return self.filter.feed(value, self) catch unreachable;
-            for (bytes) |byte| self.filter.feed(byte, self) catch unreachable;
-        }
-
-        pub fn put(self: *Stripped, scalar: u21) error{}!void {
-            var encoded: [4]u8 = undefined;
-            const count = std.unicode.utf8Encode(scalar, &encoded) catch unreachable;
-            self.sink.append(encoded[0..count], scalar);
-        }
-    };
-
     const Sink = struct {
         hash: Sha256,
         also: ?*Sha256,
@@ -716,7 +689,7 @@ const Grammar = struct {
         while (codecs.nextMember(self.codec, data, &cursor)) |member| switch (member) {
             .bag => |range| try (if (in_part) part_bag else bag).add(metadata, data, self.base, range, ordinal, kind),
             .part => |part| {
-                const text = if (kind == .message) Decoded.message(data, part.text, text_hash) else Decoded.of(data, part.text, null, null);
+                const text = Decoded.of(data, part.text, if (kind == .message) text_hash else null, null);
                 if (kind == .message) {
                     text_length = try std.math.add(u64, text_length, text.length);
                     non_whitespace = non_whitespace or text.non_whitespace;
@@ -1833,30 +1806,6 @@ test "message phases select one answer without dropping or concatenating text" {
             try std.testing.expectEqual(@as(?u64, if (std.mem.eql(u8, case.answer.?, "first")) 0 else 1), accepted.output.answer_item_ordinal);
         }
     }
-}
-
-test "CM-66 an answer is certified and selected without the provider's citation markers" {
-    // The text is written with escapes and with raw scalars, split around the marker, and the refusal text is filtered too.
-    const cited = "Zig\\ue200cite\\ue202turn0search0\\ue202turn0search1\\ue201 is fast\u{e200}cite\u{e202}t1\u{e201}.\u{e200}cite";
-    const shown = "Zig is fast.\u{e200}cite";
-    const done = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"" ++ cited ++ "\"}]}}\n\n";
-    const refused = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"No\\ue200cite\\ue202x\\ue201.\"}]}}\n\n";
-    const only = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"\\ue200cite\\ue202x\\ue201\"}]}}\n\n";
-    const completed = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n";
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const result = try validateTestingSse(&tmp, done ++ completed, 4096);
-    try std.testing.expectEqual(@as(u64, shown.len), result.output.answer_length);
-    try std.testing.expectEqual(protocol.contentDigest(shown), result.output.answer_digest);
-    // The raw item is kept as received: only the decoded text drops the marker.
-    const item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"" ++ cited ++ "\"}]}";
-    try std.testing.expectEqual(protocol.contentDigest(item), result.first_item.content_digest);
-    const refusal = try validateTestingSse(&tmp, refused ++ completed, 4096);
-    try std.testing.expectEqual(protocol.contentDigest("No."), refusal.output.answer_digest);
-    // A message of only a marker is a blank answer, as an empty one is.
-    const blank = try validateTestingSse(&tmp, only ++ completed, 4096);
-    try std.testing.expectEqual(@as(u64, 0), blank.output.answer_length);
-    try std.testing.expectEqual(protocol.contentDigest(""), blank.output.answer_digest);
 }
 
 test "completion gate saves which requirement failed at the completed event" {

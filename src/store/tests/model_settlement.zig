@@ -230,8 +230,6 @@ const OversizedItem = struct {
         find_in_page,
         failed_search,
         done,
-        /// An answer whose raw text carries provider citation markers (escaped and literal) the Store must not keep.
-        cited,
     };
     const parts = 300;
     const usage_json = "{\"input_tokens\":400,\"output_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":100}}";
@@ -250,14 +248,6 @@ const OversizedItem = struct {
             else => index,
         };
         return std.fmt.bufPrint(buffer, "summary {d}", .{shown}) catch unreachable;
-    }
-
-    fn plainText(item: Item) []const u8 {
-        return switch (item) {
-            .done => "done",
-            .cited => "Zig is fast\u{e200}cite.",
-            else => unreachable,
-        };
     }
 
     fn messageText(index: usize, blank: bool, buffer: *[16]u8) []const u8 {
@@ -291,7 +281,6 @@ const OversizedItem = struct {
                 .find_in_page => try writer.print("{{\"type\":\"web_search_call\",\"id\":\"item{d}\",\"action\":{{\"type\":\"find_in_page\",\"url\":\"ziglang.org\",\"pattern\":\"Io\"}}}}", .{ordinal}),
                 .failed_search => try writer.print("{{\"type\":\"web_search_call\",\"id\":\"item{d}\",\"status\":\"failed\",\"action\":{{\"type\":\"search\",\"query\":\"zig\"}}}}", .{ordinal}),
                 .done => try writer.writeAll("{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"),
-                .cited => try writer.writeAll("{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Zig\\ue200cite\\ue202turn0search0\\ue202turn0search1\\ue201 is fast\u{e200}cite.\"}]}"),
             }
             output.bytes[ordinal] = try json.toOwnedSlice();
             output.built += 1;
@@ -309,7 +298,7 @@ const OversizedItem = struct {
                 var buffer: [16]u8 = undefined;
                 try writer.writeAll(messageText(index, message.blank, &buffer));
             },
-            .done, .cited => try writer.writeAll(plainText(item)),
+            .done => try writer.writeAll("done"),
             .reasoning, .find_in_page, .failed_search => unreachable,
         }
     }
@@ -387,14 +376,14 @@ const OversizedItem = struct {
                     try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_part p JOIN content b ON b.content_id=p.extras_content_id " ++
                         "WHERE p.operation_id=?1 AND p.item_ordinal=?2 AND p.part_ordinal=?3 AND p.part_kind=1 AND p.text_length=?4 AND p.text_content_id IS NULL AND b.digest=?5 AND b.byte_length=?6 AND b.private=1", .{ operation, ordinal, index, messageText(index, message.blank, &buffer).len, store_testing.Blob{ .bytes = &protocol.contentDigest(bag) }, bag.len }));
                 },
-                .done, .cited => try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_part p JOIN content b ON b.content_id=p.extras_content_id " ++
-                    "WHERE p.operation_id=?1 AND p.item_ordinal=?2 AND p.part_ordinal=0 AND p.part_kind=1 AND p.text_length=?3 AND p.text_content_id IS NULL AND b.byte_length=0 AND b.private=1", .{ operation, ordinal, plainText(item).len })),
+                .done => try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_part p JOIN content b ON b.content_id=p.extras_content_id " ++
+                    "WHERE p.operation_id=?1 AND p.item_ordinal=?2 AND p.part_ordinal=0 AND p.part_kind=1 AND p.text_length=4 AND p.text_content_id IS NULL AND b.byte_length=0 AND b.private=1", .{ operation, ordinal })),
                 .find_in_page, .failed_search => {},
             }
             const part_count: usize = switch (item) {
                 .reasoning => |count| count,
                 .message => |message| message.parts,
-                .done, .cited => 1,
+                .done => 1,
                 .find_in_page, .failed_search => 0,
             };
             part_rows += part_count;
@@ -408,7 +397,7 @@ const OversizedItem = struct {
                     if (item == .find_in_page) "Find “Io” in ziglang.org" else "Search “zig”",
                     @intFromBool(item == .failed_search),
                 })),
-                .message, .done, .cited => {
+                .message, .done => {
                     messages += 1;
                     var whole: std.Io.Writer.Allocating = .init(std.testing.allocator);
                     defer whole.deinit();
@@ -527,7 +516,6 @@ test "an item cut across settlement batches saves what the same output saves who
         .{ .name = "an empty answer cut twice", .output = .{ .items = &.{.{ .message = .{ .parts = 600, .blank = true } }}, .answer = 0, .empty_answer = true }, .rounds = 4 },
         .{ .name = "an empty answer cut only for its empty text", .output = .{ .items = &.{.{ .message = .{ .parts = 255, .blank = true } }}, .answer = 0, .empty_answer = true }, .rounds = 3 },
         .{ .name = "web search calls around a later reasoning item, then usage", .output = .{ .items = &.{ .find_in_page, .{ .reasoning = OversizedItem.parts }, .failed_search, .done }, .answer = 3, .usage = true }, .rounds = 5 },
-        .{ .name = "a cited answer saves its text without the provider's citation markers", .output = .{ .items = &.{.cited}, .answer = 0 }, .rounds = 2 },
         .{ .name = "reasoning cut twice", .output = .{ .items = &.{ .{ .reasoning = 600 }, .done }, .answer = 1 }, .rounds = 5 },
         .{ .name = "a later answer cut once, then a web search call and usage", .output = .{ .items = &.{ .{ .reasoning = 5 }, .{ .message = .{ .parts = OversizedItem.parts } }, .find_in_page }, .answer = 1, .usage = true }, .rounds = 5 },
     };
