@@ -536,13 +536,13 @@ class SessionListValuesTest(unittest.TestCase):
         from session_list_fixture import session_values
         row = {"read_version": "a"*32 + ".1", "reference": "aaaaaa", "revision": "1",
                "work": {"state": {"kind": "finished", "since": "1"}},
-               "last_line": {"position": "2", "text": "Answer"}, "label": "Label"}
+               "label": "Label"}
         before = {"sessions": [row]}
         later = {"sessions": [{**row, "read_version": "a"*32 + ".2"}]}
         self.assertEqual(session_values(before), session_values(later))
         for field, value in (("reference", "bbbbbb"), ("revision", "2"),
                              ("work", {"state": {"kind": "stopped", "since": "1"}}),
-                             ("last_line", {"position": "3", "text": None}), ("label", "Changed")):
+                             ("label", "Changed")):
             with self.subTest(field=field):
                 self.assertNotEqual(session_values(before), session_values({"sessions": [{**row, field: value}]}))
         self.assertIn("read_version", row, "the comparison must not mutate the reply")

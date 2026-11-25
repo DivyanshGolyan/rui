@@ -158,7 +158,7 @@ pub const ActivityPage = struct {
         const Items = JsonArray(Item, 16);
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
         const Calls = JsonArray(CallEntry, 3);
-        const Work = struct { creator: ?JsonString(protocol.session_id_bytes), read_version: JsonString(protocol.SinceToken.max_bytes), state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), attention: ?JsonWorkAttention, group: JsonEnum(@import("session_work.zig").Group), actions: JsonWorkActions, last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) } = null, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
+        const Work = struct { creator: ?JsonString(protocol.session_id_bytes), read_version: JsonString(protocol.SinceToken.max_bytes), state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), attention: ?JsonWorkAttention, group: JsonEnum(@import("session_work.zig").Group), actions: JsonWorkActions, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
         const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20), newest_content: ?Ref };
         const Wire = struct { version: JsonString(8), type: JsonString(32), delta: JsonEnum(enum { full }), since: ?JsonString(SessionToken.max_bytes), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
         var storage: [2 * activity_reply.max_page_bytes]u8 = undefined;
@@ -254,8 +254,8 @@ pub const ActivityPage = struct {
                 .turn_ended => |ended| {
                     if (!protocol.validSessionId(ended.session.slice())) return error.InvalidActivityPage;
                     const ending = ended.ending.value;
-                    const done = ending == .done;
-                    const cancelled = ending == .stopped or ending == .interrupted;
+                    const done = ending.sign() == .finished;
+                    const cancelled = ending.sign() == .stopped;
                     if (ended.code.slice().len == 0 or done != ended.code.eql("completed") or cancelled != ended.code.eql("cancelled") or
                         (done and ended.content == null) or (cancelled and ended.content != null)) return error.InvalidActivityPage;
                     fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try textOf(reference) else null } };
@@ -301,7 +301,6 @@ pub const ActivityPage = struct {
             fact.* = if (value) |text| try id(text, false) else null;
         }
         if ((work.turn == null) != (work.operation == null)) return error.InvalidActivityPage;
-        if (wire.work.last_line) |line| facts.last_line = .{ .position = try id(line.position, false), .text = if (line.text) |text| text.value else null };
         if (wire.work.creator) |creator| {
             if (!protocol.validSessionId(creator.slice())) return error.InvalidActivityPage;
             facts.creator = creator.value;
@@ -1454,7 +1453,6 @@ pub const SessionListPage = struct {
                 revision: JsonString(20),
                 end: JsonString(20),
                 first_message: ?JsonFirstMessage,
-                last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) },
                 work: struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), attention: ?JsonWorkAttention, group: JsonEnum(@import("session_work.zig").Group), actions: JsonWorkActions },
                 peers: struct { from_person_at: ?JsonString(20) },
             };
@@ -1502,10 +1500,6 @@ pub const SessionListPage = struct {
             if (row.state_change_at < row.created_at or row.subtree_state_change_at < row.state_change_at or row.descendant_needs_you_count > row.descendant_count) return error.InvalidCharacter;
             if ((row.archive_state == .active) != (row.archive_seq == null)) return error.InvalidCharacter;
             if (wire.first_message) |first| row.first_message = first.value;
-            if (wire.last_line) |last| {
-                row.last_line = .{ .position = try ActivityPage.id(last.position, false), .text = if (last.text) |text| text.value else null };
-                if (row.last_line.?.position > row.end) return error.InvalidCharacter;
-            }
             const work = row.work;
             if ((work.turn == null) != (work.operation == null)) return error.InvalidCharacter;
             if (row.first_message) |first| {
@@ -2408,27 +2402,20 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     }
 }
 
-test "activity page preserves the canonical row preview with its work" {
+test "activity page preserves its work" {
     var facts: protocol.ActivityFacts = .{ .end = 4, .work = .{
         .revision = 1,
         .work = .{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1, .operation = 1 },
-        .last_line = .{ .position = 4, .text = .{} },
     } };
     facts.work.work.served_attention = @import("session_work.zig").attention(facts.work.work);
     facts.work.work.served_group = @import("session_work.zig").group(facts.work.work);
     try facts.work.workspace.set("/work");
-    try facts.work.last_line.?.text.?.set("New completed answer");
     var buffer: [activity_reply.max_page_bytes]u8 = undefined;
-    for ([_]bool{ true, false }) |has_text| {
-        if (!has_text) facts.work.last_line.?.text = null;
+    {
         var out = std.Io.Writer.fixed(&buffer);
         try activity_reply.writePage(&out, &facts);
         const parsed = try ActivityPage.parse(out.buffered(), .{});
         try std.testing.expectEqualDeep(facts.work, parsed.facts.work);
-        const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, out.buffered(), "\"position\":\"4\"", "\"position\":\"0\"");
-        defer std.testing.allocator.free(malformed);
-        try std.testing.expectError(error.InvalidResponse, ActivityPage.parse(malformed, .{}));
-        facts.end = 1;
     }
 }
 
@@ -3081,11 +3068,11 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
 
 const testing_list_facts = "],\"delta\":\"full\",\"since\":\"abababababababababababababababab.42\",\"next\":";
 const testing_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null" ++ testing_row_details;
-const testing_row_details = ",\"parent\":null,\"creator\":null,\"label\":null,\"created_at\":\"1\",\"state_change_at\":\"1\",\"subtree_state_change_at\":\"1\",\"descendant_count\":\"0\",\"descendant_needs_you_count\":\"0\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
+const testing_row_details = ",\"parent\":null,\"creator\":null,\"label\":null,\"created_at\":\"1\",\"state_change_at\":\"1\",\"subtree_state_change_at\":\"1\",\"descendant_count\":\"0\",\"descendant_needs_you_count\":\"0\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null," ++
     "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"peers\":{\"from_person_at\":null}";
 const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":null,\"creator\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"state_change_at\":\"1792925300\",\"subtree_state_change_at\":\"1792925400\",\"descendant_count\":\"2\",\"descendant_needs_you_count\":\"1\",\"revision\":\"1\",\"end\":\"9\"," ++
     "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
-    "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"peers\":{\"from_person_at\":\"1792925001\"}";
+    "\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
 fn listValidationCase0() !void {
     const io = std.testing.io;
@@ -3096,7 +3083,7 @@ fn listValidationCase0() !void {
     const digest = @as([64]u8, @splat('a'));
     const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"state_change_at\":\"1792925300\",\"subtree_state_change_at\":\"1792925400\",\"descendant_count\":\"2\",\"descendant_needs_you_count\":\"1\",\"revision\":\"3\",\"end\":\"9\"," ++
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
-        "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"2\",\"step\":\"8\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"},\"decide\":null}}," ++
+        "\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"2\",\"step\":\"8\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"},\"decide\":null}}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
     const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"archive_seq\":null,\"workspace\":\"/w\\nµ\",\"connection\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         facts ++ ",\"extra\":[null,{\"discard\":true}]}" ++ testing_list_facts ++ "null,\"extra\":1}";
@@ -3117,8 +3104,6 @@ fn listValidationCase0() !void {
     try std.testing.expectEqual(@as(u64, 2), row.descendant_count);
     try std.testing.expectEqual(@as(u64, 1), row.descendant_needs_you_count);
     try std.testing.expectEqual(@as(u64, 9), row.end);
-    try std.testing.expectEqual(@as(u64, 8), row.last_line.?.position);
-    try std.testing.expectEqualStrings("Saved preview", row.last_line.?.text.?.slice());
     try std.testing.expectEqualStrings("p33rs1", row.first_message.?.sender.?.session.slice());
     try std.testing.expectEqual(@as(u64, 1792925300), row.work.state.since());
     try std.testing.expectEqualStrings("Run the tests", row.work.state.bash.description.?.slice());
@@ -3326,12 +3311,6 @@ fn listValidationCase1() !void {
         .{ "\"descendant_needs_you_count\":\"1\"", "\"descendant_needs_you_count\":\"3\"" },
         .{ "\"revision\":\"1\"", "\"revision\":\"0\"" },
         .{ "\"end\":\"9\"", "\"end\":\"9\",\"end\":\"9\"" },
-        .{ ",\"last_line\":null", "" },
-        .{ "\"last_line\":null", "\"last_line\":{\"position\":\"0\",\"text\":null}" },
-        .{ "\"last_line\":null", "\"last_line\":{\"position\":\"10\",\"text\":null}" },
-        .{ "\"last_line\":null", "\"last_line\":{\"position\":\"8\"}" },
-        .{ "\"last_line\":null", "\"last_line\":{\"position\":\"8\",\"text\":false}" },
-        .{ "\"last_line\":null", "\"last_line\":{\"position\":\"8\",\"text\":\"" ++ @as([session_list.max_last_line_bytes + 1]u8, @splat('x')) ++ "\"}" },
         .{ "\"end\":\"9\"", "\"end\":\"0\"" },
         .{ "\"sender\":null", "\"sender\":{\"session\":\"k7m2qX\"}" },
         .{ "\"from_person_at\":\"1792925001\"", "\"from_person_at\":null" },
@@ -3523,7 +3502,6 @@ fn listValidationCase2() !void {
     var description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
     try description.set(&call_text);
     maximal.work = .{ .state = .{ .bash = .{ .since = largest, .call = largest, .description = description, .running = largest, .approvals = largest } }, .turn = largest, .operation = largest, .first_action = largest };
-    maximal.last_line = .{ .position = largest, .text = description };
     maximal.peers = .{ .from_person_at = largest };
     for (0..8) |index| {
         if (index != 0) try writer.writeAll(",");

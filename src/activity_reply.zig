@@ -133,13 +133,13 @@ pub const PageWorkJson = struct {
     value: *const activity_facts.PageWork,
 
     pub const openapi_name = "PageWork";
-    pub const json_shape = .{ "{\"creator\":", H{ .optional_string = protocol.session_id_bytes }, ",\"read_version\":\"", H{ .text = change_ring.Token.max_bytes }, "\"," } ++ protocol.SessionWork.fields ++ .{ ",\"last_line\":", H{ .optional_json = protocol.LastLine.Fields }, ",\"revision\":\"", H.decimal, "\",\"workspace\":", H{ .string = protocol.max_workspace_bytes }, "}" };
+    pub const json_shape = .{ "{\"creator\":", H{ .optional_string = protocol.session_id_bytes }, ",\"read_version\":\"", H{ .text = change_ring.Token.max_bytes }, "\"," } ++ protocol.SessionWork.fields ++ .{ ",\"revision\":\"", H.decimal, "\",\"workspace\":", H{ .string = protocol.max_workspace_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: *const PageWorkJson, out: *std.Io.Writer) !void {
         var token_buffer: [change_ring.Token.max_bytes]u8 = undefined;
         const work: protocol.SessionWork = .fromCore(self.value.work);
-        try writeShape(out, json_shape, .{ if (self.value.creator) |*creator| creator.slice() else null, self.value.read_version.format(&token_buffer) } ++ work.args() ++ .{ if (self.value.last_line) |*line| protocol.LastLine.Fields{ .position = line.position, .text = if (line.text) |*text| text.slice() else null } else null, self.value.revision, self.value.workspace.slice() });
+        try writeShape(out, json_shape, .{ if (self.value.creator) |*creator| creator.slice() else null, self.value.read_version.format(&token_buffer) } ++ work.args() ++ .{ self.value.revision, self.value.workspace.slice() });
     }
 };
 

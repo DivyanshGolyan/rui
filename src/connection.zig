@@ -43,6 +43,13 @@ pub const Name = struct {
     pub fn eql(self: *const Name, other: Name) bool {
         return std.mem.eql(u8, self.slice(), other.slice());
     }
+
+    /// Two optional names are the same when both are absent or both are present and equal.
+    pub fn eqlOptional(a: ?Name, b: ?Name) bool {
+        const left = a orelse return b == null;
+        const right = b orelse return false;
+        return left.eql(right);
+    }
 };
 
 /// A wire-format family: the shape of request and response bytes, without a

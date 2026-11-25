@@ -1932,7 +1932,7 @@ fi
     def test_a_dispatch_selects_from_its_explicit_base(self):
         workflow = Path('.github/workflows/check.yml').read_text()
         prefix = dedent(re.search(
-            r'(?s)        run: \|\n(          set -euo pipefail\n.*?)'
+            r'(?s)- name: Select existing targets\n.*?        run: \|\n(          set -euo pipefail\n.*?)'
             r'          python3 tests/ci/select_tests.py', workflow)[1])
         candidate = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
         with patch.dict(os.environ, BASE='1' * 40, EVENT_NAME='workflow_dispatch', CANDIDATE_REF=candidate):
@@ -2880,6 +2880,21 @@ class PolicyPrepushTest(unittest.TestCase):
         self.assertIn("from select_tests import", source)
         self.assertIn('select(paths, "development", available)["policy_skips"]', source)
 
+
+
+class MysqlTestModulesTest(unittest.TestCase):
+    def test_always_listed_changed_sources_and_their_importing_tests(self):
+        import tempfile
+        from pathlib import Path
+        from select_tests import MYSQL_ALWAYS, mysql_test_modules
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src/store/tests").mkdir(parents=True)
+            (root / "src/store/tests/tool_set.zig").write_text('const o = @import("../domain/tool_offer.zig");')
+            (root / "src/store/tests/other.zig").write_text('const o = @import("../domain/tool_offering.zig");')
+            self.assertEqual(mysql_test_modules(["src/store/domain/tool_offer.zig", "src/tool_name.zig", "docs/x.md"], root),
+                             sorted({"store.domain.tool_offer.", "store.tests.tool_set.", *MYSQL_ALWAYS}))
+            self.assertEqual(mysql_test_modules([], root), sorted(MYSQL_ALWAYS))
 
 if __name__ == "__main__":
     unittest.main()

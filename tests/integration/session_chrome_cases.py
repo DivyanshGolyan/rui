@@ -102,9 +102,10 @@ class Chrome:
         if kind is None:
             shutil.rmtree(self.state)
 
-    def session(self, permission="bypass"):
-        reply = json.loads(run(self.home, "session", "configure", "--workspace", self.workspace,
-            "--connection", "codex", "--model", "gpt-6-sol", "--permission-mode", permission))
+    def session(self, permission="bypass", model="gpt-6-sol"):
+        flags = ("--reasoning-effort", "high") if model == "gpt-6.1-terra" else ()
+        reply = json.loads(private_chrome_command(self, "session", "configure", "--store", self.store,
+            "--workspace", self.workspace, "--connection", "codex", "--model", model, "--permission-mode", permission, *flags))
         return reply["answer"]["session"]
 
     def answered(self, session, *inputs):
@@ -115,8 +116,11 @@ class Chrome:
     def open(self, session, ready, *, columns=80, height=ROWS):
         master, slave = open_pty(columns, height)
         self.descriptors += [master, slave]
-        caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
-            env={**os.environ, "HOME": str(self.home)}, cwd=str(self.workspace),
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in ("RUI_STORE", "RUI_ADDRESS", "RUI_SENDER_HANDLE")}
+        environment["HOME"] = str(self.home)
+        caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(self.store), "--", session],
+            env=environment, cwd=str(self.workspace),
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         self.callers.append(caller)
         screen = self.frame(master, b"", lambda screen: ready(screen) and composing(screen, "") and "Opening…" not in screen)
@@ -721,7 +725,159 @@ def opening_case():
     print("session chrome: Host-admitted waiting Messages preserve aggregate and FIFO; Ctrl-O selects the lowest tool or Message, and reopening keeps tools folded", flush=True)
 
 
+
+def private_chrome_command(chrome, *arguments, input=None):
+    assert "--store" in arguments, ("private Store must be explicit", arguments)
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ("RUI_STORE", "RUI_ADDRESS", "RUI_SENDER_HANDLE")}
+    environment["HOME"] = str(chrome.home)
+    result = subprocess.run([str(fixture.RUI), *map(str, arguments)], env=environment,
+                            cwd=chrome.workspace, capture_output=True, text=True, input=input, timeout=20)
+    assert result.returncode == 0, (arguments, result.stdout, result.stderr)
+    return result.stdout
+
+
+def verify_private_chrome(chrome):
+    expected_endpoint = f"providers.codex.endpoint=http://127.0.0.1:{chrome.endpoint.server_port}/responses"
+    assert chrome.host.poll() is None and expected_endpoint in chrome.host.args, chrome.host.args
+    assert "providers.codex.unauthenticated=true" in chrome.host.args, chrome.host.args
+    status = json.loads(private_chrome_command(chrome, "host", "status", "--store", chrome.store))
+    assert status["store"] == str(chrome.store), status
+    assert len(chrome.endpoint.requests) == 0
+
+
+def configure_refresh_case():
+    # SUI-136: a delayed Current never leaves stale settings on an actionable footer.
+    for field in ("effort", "model"):
+        release = threading.Event()
+        captured = threading.Event()
+        statuses = []
+        with Chrome("rui-chrome-configure-refresh.", [fixture.sse_answer("r", "q", "m", "DONE")[0]]) as chrome:
+            verify_private_chrome(chrome)
+            session = chrome.session(model="gpt-6.1-terra")
+            master, caller, opened = chrome.open(session, lambda frame: "gpt-6.1-terra" in frame,
+                                                 columns=120, height=36)
+            marker = "high" if field == "effort" else "gpt-6.1-terra"
+            chrome.frame(master, footer_click(opened, marker=marker),
+                         lambda frame: "✓" in frame)
+            def hold_current(response):
+                statuses.append(json.loads(response.split(b"\r\n\r\n", 1)[1]))
+                captured.set()
+                assert release.wait(15), "Current gate not released"
+                return response
+            proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/inspect-session", hold_current)
+            try:
+                os.write(master, b"\x1b[A\r" if field == "effort" else b"gpt-5.5\r")
+                assert captured.wait(10), "accepted Current was not requested"
+                expected_model = "gpt-6.1-terra" if field == "effort" else "gpt-5.5"
+                expected_effort = "medium" if field == "effort" else "high"
+                assert statuses[0]["session"]["model"] == expected_model, statuses
+                assert statuses[0]["session"]["reasoning_effort"] == expected_effort, statuses
+                os.write(master, b"config probe\r")
+                fixture.wait_for(lambda: len(chrome.endpoint.requests) == 1, "configured provider request")
+                shown = chrome.frame(master, b"", lambda frame: "config probe" in frame)
+                assert "gpt-6.1-terra · high" not in footer(shown), ("stale configured footer", shown)
+                assert "Updating" in footer(shown), shown
+                request = json.loads(chrome.endpoint.requests[0])
+                assert request["model"] == expected_model and request["reasoning"]["effort"] == expected_effort, request
+            finally:
+                release.set()
+                proxy.close()
+            chrome.frame(master, b"", lambda frame: f"{expected_model} · {expected_effort}" in frame)
+            chrome.leave(master, caller)
+    print("session chrome: a pending Current refresh does not display stale settings for a send", flush=True)
+
+
+def configure_receipt_case():
+    # SUI-135/136/137: A may be admitted only after later B and a chat switch.
+    def draft_visible(frame):
+        return any(composer_line(frame, index).rstrip() == " › next draft" for index in range(len(rows(frame))))
+    for b_unknown in (False, True):
+        responses = [fixture.sse_answer("seed-a", "r1", "m1", "SEED A")[0],
+                     fixture.sse_answer("seed-b", "r2", "m2", "SEED B")[0]]
+        with Chrome("rui-chrome-configure-receipt.", responses) as chrome:
+            verify_private_chrome(chrome)
+            original = chrome.session(model="gpt-6.1-terra")
+            other = chrome.session(model="gpt-6.1-terra")
+            private_chrome_command(chrome, "session", "configure", "--store", chrome.store, "--session", original, "--label", "original-config")
+            private_chrome_command(chrome, "session", "configure", "--store", chrome.store, "--session", other, "--label", "other-config")
+            for session in (original, other):
+                private_chrome_command(chrome, "session", "send", "--store", chrome.store, "--session", session, input="seed")
+                fixture.wait_for(lambda: json.loads(private_chrome_command(chrome, "session", "inspect", "--store", chrome.store, "--session", session))["work"]["state"]["kind"] == "finished", "seeded Session finished")
+            master, caller, opened = chrome.open(original, lambda frame:
+                "original-config" in frame and "other-config" in frame and "gpt-6.1-terra" in frame,
+                columns=120, height=36)
+            draft = chrome.frame(master, b"next draft", lambda frame: composing(frame, "next draft"))
+            chrome.frame(master, footer_click(draft, marker="high"), lambda frame: "Effort" in frame and "✓" in frame)
+            attempts = []
+            def forward(record):
+                attempts.append(record)
+                return len(attempts) > 1 and not (b_unknown and len(attempts) == 2)
+            proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/configure", lambda response: response,
+                                                 before_forward=forward)
+            try:
+                failed = chrome.frame(master, b"\x1b[A\r", lambda frame: "not confirmed" in frame.lower(), timeout=20)
+                fixture.wait_for(lambda: len(attempts) == 1, "first original Configure")
+                a = json.loads(attempts[0])["key"]
+                assert draft_visible(failed), failed
+                settled = chrome.frame(master, b"", lambda frame: "gpt-6.1-terra · high" in frame and "not confirmed" in frame.lower())
+                closed = chrome.frame(master, b"\x1b", lambda frame: "Effort" not in conversation_text(frame))
+                chrome.frame(master, footer_click(closed, marker="gpt-6.1-terra"), lambda frame: "✓" in frame)
+                second = chrome.frame(master, b"gpt-5.5\r", lambda frame:
+                    (("Model" in conversation_text(frame) and
+                      (footer(frame).endswith("enter retry · esc close") or footer(frame).endswith("enter edit · esc close")))
+                     if b_unknown else "gpt-5.5 · high" in frame), timeout=20)
+                fixture.wait_for(lambda: len(attempts) == 2, "second independent Configure")
+                b = json.loads(attempts[1])["key"]
+                assert a != b and draft_visible(second), (a, b, second)
+                if b_unknown:
+                    assert footer(second).endswith("enter edit · esc close"), second
+                    second = chrome.frame(master, b"\x1b", lambda frame: draft_visible(frame) and
+                                          not footer(frame).endswith(("enter retry · esc close", "enter edit · esc close")))
+            finally:
+                proxy.close()
+
+            def sidebar_click(frame, label):
+                for row, line in enumerate(frame.splitlines(), 1):
+                    left = line.split("┆", 1)[0]
+                    if label in left:
+                        col = left.index(label) + 1
+                        return f"\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m".encode()
+                raise AssertionError((label, frame))
+
+            switched = chrome.frame(master, sidebar_click(second, "other-config"),
+                                    lambda frame: composing(frame, "") and "other-config" in frame)
+            recovered = json.loads(private_chrome_command(chrome, "request", "recover", "--store", chrome.store, "--kind", "configure", "--record", chrome.home / ".config/rui/requests" / (a + ".json")))
+            assert recovered["context"]["key"] == a and recovered["answer"]["status"] == "accepted", recovered
+            assert recovered["answer"]["replayed"] is False, recovered
+            host_after_a = json.loads(private_chrome_command(chrome, "session", "inspect", "--store", chrome.store, "--session", original))["session"]
+            assert host_after_a["reasoning_effort"] == "medium", host_after_a
+            assert host_after_a["model"] == ("gpt-6.1-terra" if b_unknown else "gpt-5.5"), host_after_a
+            reopened = chrome.frame(master, sidebar_click(switched, "original-config"),
+                                    lambda frame: composing(frame, "next draft"))
+            assert composing(reopened, "next draft"), reopened
+            requests = chrome.frame(master, b"\x7f" * len("next draft") + b"/requests\r", lambda frame:
+                                    "Local recovery handles" in frame and a in frame and b in frame, timeout=20)
+            if b_unknown:
+                assert b in requests, requests
+            current = chrome.frame(master, b"", lambda frame: " · medium" in footer(frame) and "Updating" not in footer(frame), timeout=20)
+            assert "gpt-6.1-terra" in footer(current) if b_unknown else "gpt-5.5" in footer(current), current
+            os.write(master, b"\x03")
+            _, errors = terminal_exit(caller, master)
+            assert caller.returncode == 0, errors
+            assert a.encode() not in errors, errors
+            if b_unknown:
+                assert b.encode() in errors and b"model: gpt-5.5" in errors, errors
+                reply = json.loads(private_chrome_command(chrome, "request", "recover", "--store", chrome.store, "--kind", "configure", "--record", chrome.home / ".config/rui/requests" / (b + ".json")))
+                assert reply["context"]["key"] == b and reply["answer"]["status"] == "accepted", reply
+                assert reply["answer"]["replayed"] is False, reply
+            else:
+                assert b.encode() not in errors, errors
+    print("session chrome: distinct Configure keys survive a later edit, chat switch and original recovery", flush=True)
+
 def main():
+    configure_refresh_case()
+    configure_receipt_case()
     send_recovery_case()
     activity_case()
     thinking_queue_case()

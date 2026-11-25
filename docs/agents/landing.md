@@ -11,6 +11,7 @@ The description lists every behavior change in the diff, small ones included, so
 PRs changing `src/` follow [Shape before code](../../CODING_STANDARDS.md#shape-before-code); the plan checks the description, and review checks the shape.
 Every PR commit states its actual test commands and results.
 Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which reports overlapping work, opens it as a draft and requests `@codex review`.
+It refuses a body admission would reject, so a PR that changes UI files opens with its screens captured (`verify-rui frames`, then `--frames DIR`) or with a `No screen change:` line; publish the frames with `verify-rui publish DIR --pr N` as soon as it prints the number.
 A draft runs only the plan job, so Codex rounds do not start, then cancel, the selected suite.
 Codex reviews a draft only on request: after each fix push, comment `@codex review` again.
 Once Codex is clean on the published head, run `python3 tests/ci/open_pr.py ready`; selected CI then runs once on that head, and the PR merges when it is green.
@@ -38,9 +39,10 @@ A local path or CI artifact pointer alone does not meet the evidence requirement
 Keep published commits unchanged so their CI evidence retains its SHA.
 
 Green means the required `admission` check completed successfully for the PR's current head; it need not be rerun after `main` moves.
+When `admission` fails, [Admission notice](../../.github/workflows/admission-notice.yml) comments its errors on the PR; when only `plan` and `admission` failed, editing the PR body reruns them against the new body.
 [The main ruleset](../../.github/main-ruleset.json) records the required GitHub enforcement; the live ruleset must keep matching it.
 Pending, skipped, cancelled or earlier-head success is not green.
-A green PR squash-merges without waiting for review signoff or a promotion.
+A green PR with a clean review squash-merges without waiting for a person's signoff or a promotion.
 Follow [Review](../../CODING_STANDARDS.md#review) for Codex requests and findings.
 Ship later fixes as follow-up PRs.
 
@@ -50,6 +52,20 @@ Use it only when every red or missing check is a macOS job that GitHub never ass
 Merge `origin/main` into a PR only when it conflicts with `main`; [Conflict alert](../../.github/workflows/conflict-alert.yml) comments on each PR a move of `main` leaves conflicting.
 After that merge, refresh local evidence invalidated by integration and wait for the new head's CI, including its required all-unit compile.
 A PR that merely trails `main` merges as it is.
+
+## Review evidence
+
+A PR merges only when its latest completed review is clean.
+Codex is that review ([Review](../../CODING_STANDARDS.md#review)).
+While Codex is out of allowance (through Tue 2026-12-01), the [pr-reviewer agent](../../.claude/agents/pr-reviewer.md) gives each PR one review instead, once per PR and not per push.
+Start it with the PR number alone, then post its verdict with `python3 tests/ci/open_pr.py review --head SHA [--pr N] [--findings FILE]`, where SHA is the head the reviewer reported.
+Fix each finding at its class, post `open_pr.py review --fixed` (it refuses unless a finding is unresolved), and merge on green; there is no second review, and the gate is per PR, not per head.
+A bare Codex "no major issues" receipt does not clear it.
+A revert or fix-forward PR for a red `main` needs the same one review while Codex is out; run it as soon as the PR is open, since the review is short.
+A `sonnet-review-state:v1` marker counts only from a maintainer ([pr_timeline.py](../../tests/ci/pr_timeline.py) reads it with Codex's).
+[review_before_merge.py](../../.claude/hooks/review_before_merge.py) refuses `merge_pull_request`, `enable_pr_auto_merge` and `gh pr merge` on a PR whose latest review is missing or has unresolved findings, and [merge_review.py](../../tests/ci/merge_review.py) names the next step.
+It lets a merge through, with a warning, when GitHub cannot be read.
+When Codex reviews again, the same check reads Codex's reviews; delete the interim paragraph then.
 
 ## Concurrent PRs
 
@@ -81,6 +97,8 @@ The pre-push hook re-runs the last CI red as described in [local feedback eviden
 A red whose failing file or fixture is outside the PR's diff is first reproduced on `main`; when `main` itself is red, it gets one fix owner, and the PR's owner is not asked to fix it.
 
 `main` is red while an open `main-red` issue says so.
+While `main` is red, a PR selects nothing, as a documentation change does: `plan` lists the open `main-red` issues updated in the last day with [main_red.py](../../tests/ci/main_red.py), and `admission` fails first, naming them, to save runner minutes.
+A PR whose body names one of those issues as `#N`, usually its fix with `Fixes #N`, runs as usual; a revert names it too.
 PRs run a fast tier, so a break can reach `main`; [scheduled promotion](../verification/release.md#scheduled-promotion) finds it within one three-hour tick, names each failed step's suspect commits, most direct first, and files one `main-red` issue per cause, listing them.
 The thread that authored the named commit's PR owns the fix and starts it promptly, as its next work: a fix-forward PR with `Fixes #N`, or a pure revert of that one PR, which merges on green `admission` without another Codex review.
 When that thread has ended, the coordinating agent hands the issue to the thread that owns the failing fixture.
