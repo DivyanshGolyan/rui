@@ -13,7 +13,7 @@ const content_value = @import("content_value.zig");
 pub const session_list_page_size: usize = 8;
 /// The most Archived rows one window page serves: a reply cost bound, not a screen size. A slim row is
 /// at most `ArchivedRow.max_json_bytes`, so a full page is `max_window_rows * max_json_bytes` bytes
-/// (about 88 KiB), inside the list reply bound that a live page already allows (8 full rows at 36 KiB
+/// (about 192 KiB), inside the list reply bound that a live page already allows (8 full rows at 36 KiB
 /// each, 288 KiB). A request asks for 1 to this many.
 pub const max_window_rows: usize = 40;
 /// The leading bytes of an inline Text first Message an Archived row carries, raw: the bytes the Store
@@ -159,7 +159,7 @@ pub const ArchivedRow = struct {
     /// Bytes of JSON for one slim row at its worst case: the protocol shape computes it (reference, label,
     /// the first Message with its sender and parts content reference, the prefix at `max_first_prefix_bytes`,
     /// the fixed fields). protocol.zig asserts it.
-    pub const max_json_bytes: usize = 4000;
+    pub const max_json_bytes: usize = 4911;
 };
 
 pub const Tail = union(enum) {
