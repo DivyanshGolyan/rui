@@ -605,7 +605,12 @@ def verdict_line(job, cause, filed):
     issue = "#" + str(filed).strip().rsplit("/", 1)[-1]
     fields = (job["name"], ", ".join(failed_steps(job)) or "no failed step", cause.signature[:300],
               cause.escape or "no escape class", issue)
-    return "::notice title=" + VERDICT_TITLE + "::" + " | ".join(field.replace("\n", " ") for field in fields)
+    return "::notice title=" + VERDICT_TITLE + "::" + " | ".join(map(command_data, fields))
+
+
+def command_data(text):
+    """A workflow command's message, escaped as GitHub's toolkit does so log text cannot end it early."""
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
 VERDICT_TITLE = "Promotion verdict"

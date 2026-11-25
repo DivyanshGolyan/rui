@@ -552,6 +552,13 @@ class ReportTest(unittest.TestCase):
             'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError',
             'macos', '#77'])
 
+    def test_a_verdict_escapes_log_text_that_would_end_the_workflow_command(self):
+        job = dict(name='j', steps=[dict(name='s', conclusion='failure')])
+        line = report_issue.verdict_line(job, Cause('100%\r::error::x\ny', escape='macos'), 5)
+        self.assertEqual(line, '::notice title=Promotion verdict::j | s | 100%25%0D::error::x%0Ay | macos | #5')
+        self.assertNotIn('\r', line)
+        self.assertNotIn('\n', line)
+
     def test_an_infrastructure_red_is_filed_without_an_escape_class(self):
         lost = dict(id=1, name='macos / full-execution', conclusion='failure')
         cancelled_setup = dict(id=1, name='macos / full-execution', conclusion='failure',
