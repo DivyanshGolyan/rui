@@ -8,7 +8,8 @@ ROW = re.compile(r"\.\{ \.schema_version = (\d+), \.digest = 0x([0-9a-fA-F]+) \}
 MIGRATIONS = re.compile(r"^pub const migrations = \[_\]Migration\{", re.MULTILINE)
 FROM = re.compile(r"\.from\s*=\s*(\d+)")
 # The inputs a MySQL 8.4 migration check reads beyond schema.zig's code: the migration fixtures and the check's own sources.
-MIGRATION_INPUTS = ("src/store/migration_*", "src/store/mysql_dialect_check.zig", "src/store/testing.zig")
+MIGRATION_INPUTS = ("src/store/migration_*", "src/store/mysql_dialect_check.zig", "src/store/testing.zig",
+                    "src/store/mysql_testing.zig")
 
 
 def bump_error(name, candidate, base, released):
