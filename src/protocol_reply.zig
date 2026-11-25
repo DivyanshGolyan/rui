@@ -1,4 +1,5 @@
 const std = @import("std");
+const activity_facts = @import("activity_facts.zig");
 const model_catalog = @import("model_catalog.zig");
 const protocol = @import("protocol.zig");
 const provider_route = @import("provider_route.zig");
@@ -285,9 +286,9 @@ pub const ActivityPage = struct {
         if (wire.aggregates) |wire_aggregates| {
             const last = if (page.facts.direction == .forward and page.facts.more) page.facts.items[page.facts.count - 1] else null;
             const as_of = try id(wire_aggregates.as_of, true);
-            if (as_of != if (last) |item| item.position else page.facts.end) return error.InvalidActivityPage;
+            if (as_of != activity_facts.Aggregates.position(page.facts.end, page.facts.direction == .forward, page.facts.more, if (last) |item| item.position else null)) return error.InvalidActivityPage;
             const boundary_ordinal: ?u64 = if (last) |item| item.ordinal else null;
-            var aggregates: @import("activity_facts.zig").Aggregates = .{ .as_of = as_of };
+            var aggregates: activity_facts.Aggregates = .{ .as_of = as_of };
             aggregates.call_activity.total = try id(wire_aggregates.call_activity.total, true);
             aggregates.call_activity.count = wire_aggregates.call_activity.entries.count;
             if (aggregates.call_activity.count != @min(3, aggregates.call_activity.total)) return error.InvalidActivityPage;
@@ -2619,30 +2620,27 @@ test "an activity page's queued Messages are none or a span at its boundary" {
 }
 
 test "an activity page's aggregates are read exactly when every kind is asked for, and are taken where its rows stop" {
-    const Case = struct { kinds: protocol.ActivityPage.Kinds, rows: usize, as_of: ?u64, valid: bool };
-    for ([_]Case{
-        .{ .kinds = .full, .rows = 0, .as_of = 40, .valid = true },
-        .{ .kinds = .full, .rows = 0, .as_of = null, .valid = false },
-        .{ .kinds = .full, .rows = 0, .as_of = 39, .valid = false },
-        .{ .kinds = .full, .rows = 0, .as_of = 41, .valid = false },
-        .{ .kinds = .initOne(.session_changed), .rows = 0, .as_of = null, .valid = true },
-        .{ .kinds = .initOne(.session_changed), .rows = 0, .as_of = 40, .valid = false },
-        // A forward page with more follows takes them at its last row.
-        .{ .kinds = .full, .rows = 1, .as_of = 7, .valid = true },
-        .{ .kinds = .full, .rows = 1, .as_of = 40, .valid = false },
-    }) |case| {
-        var facts: protocol.ActivityFacts = .{ .end = 40, .count = case.rows, .more = case.rows != 0, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
-        if (case.rows != 0) facts.items[0] = .{ .position = 7, .at = 1, .value = .{ .session_changed = .{ .revision = 2, .field = .label } } };
-        if (case.as_of) |as_of| facts.aggregates = .{ .as_of = as_of };
-        try facts.work.workspace.set("/w");
-        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        try activity_reply.writePage(&writer, &facts);
-        const cursor: ActivityCursor = .{ .kinds = case.kinds, .limit = 1 };
-        if (case.valid) {
-            try std.testing.expectEqual(case.as_of, if ((try ActivityPage.parse(writer.buffered(), cursor)).facts.aggregates) |aggregates| aggregates.as_of else null);
-        } else try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), cursor));
-    }
+    const Direction = @FieldType(protocol.ActivityFacts, "direction");
+    // The whole domain: direction x more x rows x kinds; each takes its own position, and every other answer is refused.
+    for ([_]Direction{ .forward, .backward }) |direction| for ([_]bool{ false, true }) |more| for ([_]usize{ 0, 1 }) |rows| for ([_]bool{ true, false }) |full| {
+        if (more and rows == 0) continue;
+        const expected = activity_facts.Aggregates.position(40, direction == .forward, more, if (rows == 0) null else 7);
+        for ([_]?u64{ null, expected, if (expected == 40) 7 else 40, 41 }) |as_of| {
+            var facts: protocol.ActivityFacts = .{ .end = 40, .direction = direction, .count = rows, .more = more, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+            if (rows != 0) facts.items[0] = .{ .position = 7, .at = 1, .value = .{ .session_changed = .{ .revision = 2, .field = .label } } };
+            if (as_of) |value| facts.aggregates = .{ .as_of = value };
+            try facts.work.workspace.set("/w");
+            var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            try activity_reply.writePage(&writer, &facts);
+            const cursor: ActivityCursor = .{ .direction = direction, .kinds = if (full) .full else .initOne(.session_changed), .limit = 1 };
+            const valid = if (full) as_of != null and as_of.? == expected else as_of == null;
+            if (valid) {
+                const page = try ActivityPage.parse(writer.buffered(), cursor);
+                try std.testing.expectEqual(as_of, if (page.facts.aggregates) |aggregates| aggregates.as_of else null);
+            } else try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), cursor));
+        }
+    };
 }
 
 test "a turn_ended row's ending agrees with its saved code and content, and a final answer crosses" {

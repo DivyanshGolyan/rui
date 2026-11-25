@@ -1,4 +1,5 @@
 const std = @import("std");
+const activity_facts = @import("activity_facts.zig");
 const row_text = @import("testing/row_text.zig");
 const connection_names = @import("connection_names.zig");
 const provider_route = @import("provider_route.zig");
@@ -10023,7 +10024,7 @@ fn paginatedReplayCount() !void {
             job.feed_page = FeedPolicy.request(read, frontend.feedState());
             job.line_read = .{ .revision = 1, .end = end };
             job.queued_line = 1;
-            if (job.feed_page.?.kinds == .all) facts.aggregates = .{ .as_of = if (facts.direction == .forward and facts.more) last else end, .queued = .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1, .newest_content = content } };
+            if (job.feed_page.?.kinds == .all) facts.aggregates = .{ .as_of = activity_facts.Aggregates.position(end, facts.direction == .forward, facts.more, last), .queued = .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1, .newest_content = content } };
             try frontend.launch(job, reads.scan);
             var buffer: [16384]u8 = undefined;
             var out = std.Io.Writer.fixed(&buffer);

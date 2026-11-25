@@ -169,7 +169,20 @@ pub const Aggregates = struct {
     as_of: u64,
     call_activity: CallActivity = .{},
     queued: Queued = .{},
+
+    /// The one owner of `as_of`: the Store takes the counts there, and the client refuses a page that names another.
+    /// `last` is the position of the page's last row, which a forward page with more must have.
+    pub fn position(end: u64, forward: bool, more: bool, last: ?u64) u64 {
+        return if (forward and more) last.? else end;
+    }
 };
+
+test "aggregates are taken at a forward page's last row only while more follows" {
+    try std.testing.expectEqual(@as(u64, 7), Aggregates.position(40, true, true, 7));
+    try std.testing.expectEqual(@as(u64, 40), Aggregates.position(40, true, false, 7));
+    try std.testing.expectEqual(@as(u64, 40), Aggregates.position(40, false, true, 7));
+    try std.testing.expectEqual(@as(u64, 40), Aggregates.position(40, false, false, null));
+}
 
 pub const PageWork = struct {
     creator: ?Bounded(session_id.bytes) = null,

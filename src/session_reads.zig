@@ -1373,7 +1373,7 @@ const FakeHost = struct {
             next = step(row, end, direction);
         }
         facts.more = next != null;
-        const boundary = if (direction == .forward and facts.more) facts.items[facts.count - 1].position else end;
+        const boundary = activity_facts.Aggregates.position(end, direction == .forward, facts.more, if (facts.count == 0) null else facts.items[facts.count - 1].position);
         var aggregates: activity_facts.Aggregates = .{ .as_of = boundary };
         for (self.tail, @as(usize, @intCast(self.history)) + 1..) |_, at| {
             if (at > boundary) break;

@@ -1089,8 +1089,7 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     const lower = if (forward) request.position + 1 else if (boundary) |item| item.position else 0;
     const upper = if (forward) (if (boundary) |item| item.position else end) else if (request.position == 0) end else @min(end, request.position - @intFromBool((request.ordinal orelse 0) == 0));
     const last = if (forward) boundary else null;
-    // The aggregates are counted where the page's own rows stop: its last row when a forward page has more, else its end.
-    const call_position = if (forward and page.more) last.?.position else end;
+    const call_position = activity_facts.Aggregates.position(end, forward, page.more, if (last) |item| item.position else null);
     var missing: missing_assistant_entry.Result = null;
     var call_activity_facts: activity_facts.CallActivity = .{};
     var calls: CallRows = .{ .activity = &call_activity_facts, .args = .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null } };

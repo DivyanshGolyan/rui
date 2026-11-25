@@ -447,7 +447,7 @@ Opening reads the newest backward Activity page of at most 16 rows, with all kin
 The joined page paints immediately; earlier rows are fetched by the feed's margin rule, not by a separate opening traversal.
 Forward catch-up starts at the captured end; later appends cannot enter that opening read.
 Current supplies settings and attention, not a pending-input inventory.
-The page's own `queued` facts identify waiting Messages and the newest one's first line; a refused line fails the read like a refused page.
+The page's own `aggregates.queued` facts identify waiting Messages and the newest one's first line; a refused line fails the read like a refused page.
 Applied Messages belong at their user rows, excluded Messages at their stop, and waiting Messages derive their provisional placement from those page facts in either direction.
 
 The conversation frontend is one full-screen libvaxis interface with a composer; there is no inline renderer or renderer selection.
@@ -476,7 +476,7 @@ Forward replay replaces that provisional suffix, so an applied Message appears o
 The queued strip keeps its row when space runs short and leaves in the same frame as the Message's applied or excluded row.
 A scroll fill attaches rows without the queue aggregate, so the window holds one position, `through` (`queue_horizon.zig`): the newer of the held aggregate's cutoff and the newest attached applied person-Message or Stop row. An aggregate taken before `through` is not adopted, and an attached row beyond `through` clears the strip until a later aggregate arrives. A forward page's cutoff is its last row while more follow, otherwise its end; the page names it as the `as_of` of its `aggregates`.
 A stop finds excluded Messages by walking Admission-only pages backward from itself, then renders them in admission order; no previous read's queue or drawing state decides placement.
-Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
+A page that asks for every kind carries `aggregates` (`as_of`, `call_activity`, `queued`); a page of any other kinds carries `aggregates: null`, which means not read, never an empty queue. The field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](inspection.md#public-session-activity); non-null peers keep their canonical ID grammar.
 
 Wire version 18 adds the desired-state Session pin command, its keyed observation, and required nullable `pin_order` on Session list rows.
