@@ -361,11 +361,24 @@ pub const OutputItem = struct {
 };
 
 pub const HostedAction = @import("hosted_action.zig").HostedAction;
+/// The most targets one hosted call keeps as public facts; `hosted_action` owns the number.
+pub const max_hosted_targets = @import("hosted_action.zig").max_targets;
+
+/// What a hosted call says it did. A search's targets are its `query` and then each string of `queries` (a first one
+/// equal to `query` is the same search and is not repeated); an open or find names its url. `target` is the single
+/// string, `queries` the offset of the array, and `HostedCursor` walks both through the codec's `nextHostedTarget`.
 pub const HostedCall = struct {
     action: HostedAction = .none,
     target: ?Range = null,
+    queries: ?u64 = null,
     pattern: ?Range = null,
     failed: bool = false,
+};
+
+pub const HostedCursor = struct {
+    state: enum { single, queries, done } = .single,
+    at: u64 = 0,
+    first: bool = true,
 };
 
 pub const Completed = struct {

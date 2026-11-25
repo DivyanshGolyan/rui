@@ -1820,16 +1820,13 @@ pub fn hostedCall(data: []const u8, item: *const codec_abi.OutputItem) codec_abi
     if (data[@intCast(start)] != '{') return call;
     const Strings = struct { type: ?Range = null, query: ?Range = null, url: ?Range = null, pattern: ?Range = null };
     var strings: Strings = .{};
-    var first_query: ?Range = null;
+    var queries: ?u64 = null;
     offset = start;
     while (nextKey(data, &offset)) |member| {
         const value = json.valueAt(data, @intCast(member.value));
         offset = value.end;
         if (data[@intCast(member.value)] == '[' and json.decodedTag(enum { queries }, slice(data, member.key)) != null) {
-            if (first_query == null) {
-                var element: u64 = member.value;
-                if (nextElement(data, &element)) |at| first_query = json.valueAt(data, @intCast(at)).string;
-            }
+            if (queries == null) queries = member.value;
             continue;
         }
         const string = value.string orelse continue;
@@ -1845,7 +1842,8 @@ pub fn hostedCall(data: []const u8, item: *const codec_abi.OutputItem) codec_abi
     switch (json.decodedTag(enum { search, open_page, find_in_page }, slice(data, kind)) orelse return call) {
         .search => {
             call.action = .search;
-            call.target = strings.query orelse first_query;
+            call.target = strings.query;
+            call.queries = queries;
         },
         .open_page => {
             call.action = .open_page;
@@ -1858,6 +1856,33 @@ pub fn hostedCall(data: []const u8, item: *const codec_abi.OutputItem) codec_abi
         },
     }
     return call;
+}
+
+/// The next target of `call` in provider order, or null at the end. A search names its `query` first, then each string
+/// of `queries`; a first string of `queries` equal to `query` is the same search and is skipped.
+pub fn nextHostedTarget(data: []const u8, call: *const codec_abi.HostedCall, cursor: *codec_abi.HostedCursor) ?Range {
+    while (true) switch (cursor.state) {
+        .single => {
+            cursor.state = if (call.queries) |at| queries: {
+                cursor.at = at;
+                break :queries .queries;
+            } else .done;
+            if (call.target) |target| return target;
+        },
+        .queries => {
+            const at = nextElement(data, &cursor.at) orelse {
+                cursor.state = .done;
+                continue;
+            };
+            const value = json.valueAt(data, @intCast(at));
+            cursor.at = value.end;
+            const string = value.string orelse continue;
+            const repeats = cursor.first and if (call.target) |target| std.mem.eql(u8, slice(data, target), slice(data, string)) else false;
+            cursor.first = false;
+            if (!repeats) return string;
+        },
+        .done => return null,
+    };
 }
 
 fn partOf(data: []const u8, start: u64, kind: codec_abi.OutputKind, array: codec_abi.PartArray) struct { kind: codec_abi.PartKind, text: Range, member: Range } {
@@ -2308,16 +2333,21 @@ test "every entry point answers the same with 0xAA or leftover scratch" {
     try std.testing.expect(std.mem.indexOf(u8, expected.buffered(), "  part content output_text ok\n  bag \"annotations\":[]\n  part_end\n") != null);
 }
 
-test "a web search call reads as its action, its strings and its outcome" {
-    const Case = struct { item: []const u8, action: codec_abi.HostedAction, target: ?[]const u8 = null, pattern: ?[]const u8 = null, failed: bool = false };
+test "a web search call reads as its action, its targets, its pattern and its outcome" {
+    const Case = struct { item: []const u8, action: codec_abi.HostedAction, targets: []const []const u8 = &.{}, pattern: ?[]const u8 = null, failed: bool = false };
     for ([_]Case{
-        .{ .item = "{\"type\":\"web_search_call\",\"id\":\"ws\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"zig \\\"io\\\"\",\"queries\":[\"a\"]}}", .action = .search, .target = "zig \\\"io\\\"" },
-        .{ .item = "{ \"action\" : { \"url\" : \"https://a.b\" , \"type\" : \"open_page\" } , \"status\" : \"failed\" }", .action = .open_page, .target = "https://a.b", .failed = true },
-        .{ .item = "{\"action\":{\"type\":\"find_in_page\",\"url\":\"u\",\"pattern\":\"p\",\"pattern\":\"q\"},\"action\":{\"type\":\"search\"}}", .action = .find_in_page, .target = "u", .pattern = "p" },
+        .{ .item = "{\"type\":\"web_search_call\",\"id\":\"ws\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"zig \\\"io\\\"\",\"queries\":[\"zig \\\"io\\\"\"]}}", .action = .search, .targets = &.{"zig \\\"io\\\""} },
+        .{ .item = "{ \"action\" : { \"url\" : \"https://a.b\" , \"type\" : \"open_page\" } , \"status\" : \"failed\" }", .action = .open_page, .targets = &.{"https://a.b"}, .failed = true },
+        .{ .item = "{\"action\":{\"type\":\"find_in_page\",\"url\":\"u\",\"pattern\":\"p\",\"pattern\":\"q\"},\"action\":{\"type\":\"search\"}}", .action = .find_in_page, .targets = &.{"u"}, .pattern = "p" },
         .{ .item = "{\"action\":{\"type\":\"search\",\"query\":7}}", .action = .search },
-        .{ .item = "{\"action\":{\"type\":\"search\",\"queries\":[ \"first\" , \"second\" ]}}", .action = .search, .target = "first" },
+        // Every string of `queries`, in provider order.
+        .{ .item = "{\"action\":{\"type\":\"search\",\"queries\":[ \"first\" , \"second\", \"third\" ]}}", .action = .search, .targets = &.{ "first", "second", "third" } },
+        // A `query` comes first and its repeat at the head of `queries` is the same search.
+        .{ .item = "{\"action\":{\"type\":\"search\",\"queries\":[\"a\",\"b\"],\"query\":\"a\"}}", .action = .search, .targets = &.{ "a", "b" } },
+        .{ .item = "{\"action\":{\"type\":\"search\",\"query\":\"a\",\"queries\":[\"b\",\"a\"]}}", .action = .search, .targets = &.{ "a", "b", "a" } },
         .{ .item = "{\"action\":{\"type\":\"search\",\"queries\":[]}}", .action = .search },
-        .{ .item = "{\"action\":{\"type\":\"search\",\"queries\":[7,\"late\"]}}", .action = .search },
+        .{ .item = "{\"action\":{\"type\":\"search\",\"queries\":[7,\"late\",null,\"last\"]}}", .action = .search, .targets = &.{ "late", "last" } },
+        .{ .item = "{\"action\":{\"type\":\"open_page\",\"url\":\"u\",\"queries\":[\"ignored\"]}}", .action = .open_page, .targets = &.{"u"} },
         .{ .item = "{\"action\":{\"type\":\"future\",\"query\":\"q\"},\"status\":\"completed\"}", .action = .none },
         .{ .item = "{\"action\":null,\"status\":null}", .action = .none },
         .{ .item = "{\"id\":\"ws\",\"status\":\"fail\\u0065d\"}", .action = .none, .failed = true },
@@ -2335,9 +2365,15 @@ test "a web search call reads as its action, its strings and its outcome" {
         const call = hostedCall(case.item, &item);
         try std.testing.expectEqual(case.action, call.action);
         try std.testing.expectEqual(case.failed, call.failed);
-        for ([_]?Range{ call.target, call.pattern }, [_]?[]const u8{ case.target, case.pattern }) |range, expected| {
-            if (expected) |text| try std.testing.expectEqualStrings(text, slice(case.item, range.?)) else try std.testing.expect(range == null);
+        var cursor: codec_abi.HostedCursor = .{};
+        var count: usize = 0;
+        while (nextHostedTarget(case.item, &call, &cursor)) |range| : (count += 1) {
+            try std.testing.expect(count < case.targets.len);
+            try std.testing.expectEqualStrings(case.targets[count], slice(case.item, range));
         }
+        try std.testing.expectEqual(case.targets.len, count);
+        try std.testing.expect(nextHostedTarget(case.item, &call, &cursor) == null);
+        if (case.pattern) |text| try std.testing.expectEqualStrings(text, slice(case.item, call.pattern.?)) else try std.testing.expect(call.pattern == null);
     }
 }
 

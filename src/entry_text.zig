@@ -21,7 +21,7 @@ const skipped = .{
     .{ "ApprovalRequested", "description" },
 };
 
-const Leaf = enum { integer, flag, tag, quoted, peer, presentation, body };
+const Leaf = enum { integer, flag, tag, quoted, peer, presentation, hosted, body };
 
 fn leaf(comptime Owner: type, comptime name: []const u8, comptime T: type) Leaf {
     const Base = switch (@typeInfo(T)) {
@@ -39,6 +39,8 @@ fn leaf(comptime Owner: type, comptime name: []const u8, comptime T: type) Leaf 
             .peer
         else if (Base == tool_presentation.ToolPresentation)
             .presentation
+        else if (Base == facts.Item.HostedAction)
+            .hosted
         else if (Base == content_value.Reference or Base == activity_read.ProposalFieldReference)
             .body
         else
@@ -104,6 +106,8 @@ fn writeField(out: *std.Io.Writer, comptime Owner: type, comptime name: []const 
             try std.json.Stringify.value(present.session.slice(), .{}, out);
         },
         .presentation => try writePresentation(out, present),
+        // The kind and how many targets the Store holds; the targets and the pattern are the row's body.
+        .hosted => try out.print(" {s}.kind={s} {s}.targets_total={d}", .{ name, @tagName(present.kind), name, present.targets_total }),
         .body => {},
     }
 }
@@ -199,7 +203,11 @@ test "INS-14 entry text prints every fact of every Activity row" {
             if (comptime isSkipped(Payload, name)) continue;
             if (comptime leaf(Payload, name, @FieldType(Payload, name)) == .body) continue;
             var needle: [64]u8 = undefined;
-            const expected = if (comptime leaf(Payload, name, @FieldType(Payload, name)) == .presentation) " code=" else std.fmt.bufPrint(&needle, " {s}=", .{name}) catch unreachable;
+            const expected = switch (comptime leaf(Payload, name, @FieldType(Payload, name))) {
+                .presentation => " code=",
+                .hosted => " action.kind=",
+                else => std.fmt.bufPrint(&needle, " {s}=", .{name}) catch unreachable,
+            };
             if (std.mem.indexOf(u8, text, expected) == null) {
                 std.debug.print("{s} row prints no {s} in: {s}\n", .{ @tagName(kind), expected, text });
                 return error.TestUnexpectedResult;

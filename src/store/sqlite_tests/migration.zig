@@ -787,7 +787,7 @@ test "schema 88 creator migration names the Session that sent each Session's fir
     // Baseline Sessions keep their creator unless their own first Message came from another Session.
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session s JOIN before_creators b ON b.session_ref=s.session_ref WHERE b.creator_ref IS NOT NULL AND s.creator_ref IS NOT b.creator_ref"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_foreign_key_check"));
-    // The step to 96 drops the sender-side record and keeps each peer Message's sender.
+    // The step to 97 drops the sender-side record and keeps each peer Message's sender.
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM sqlite_schema WHERE name IN ('sent_rejection','message_admission_sent')"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_table_info('message_admission') WHERE name='sender_position'"));
     try std.testing.expect(try sqlite.pragmaInt(raw, "SELECT count(*) FROM message_admission WHERE source_kind=2 AND sender_session_ref IS NOT NULL") > 0);

@@ -1995,8 +1995,8 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
     const Kind = struct { value: protocol.ActivityItem.Value, line: []const u8, packed_: bool };
     const kinds = [_]Kind{
         .{ .value = .{ .received = .{ .admission = 5, .key = .{}, .turn = 3, .state = .applied, .content = content, .admitted_at = std.math.maxInt(u64), .sender = peer } }, .line = "← Received message from 9f8e7d", .packed_ = true },
-        .{ .value = .{ .hosted_call = .{ .line = search, .code = .succeeded, .sign = .finished, .publication_position = null } }, .line = "✓ Search", .packed_ = true },
-        .{ .value = .{ .hosted_call = .{ .line = find, .code = .failed, .sign = .failed, .publication_position = null } }, .line = "× Find", .packed_ = false },
+        .{ .value = .{ .hosted_call = .{ .presentation = .{ .line = search, .code = .succeeded, .sign = .finished, .publication_position = null }, .action = .{ .kind = .search } } }, .line = "✓ Search", .packed_ = true },
+        .{ .value = .{ .hosted_call = .{ .presentation = .{ .line = find, .code = .failed, .sign = .failed, .publication_position = null }, .action = .{ .kind = .find_in_page } } }, .line = "× Find", .packed_ = false },
         .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 0, .completion = .completed } }, .line = "▪ Stopped", .packed_ = false },
     };
     var documents: [kinds.len]Viewport.Sized(512, true) = undefined;

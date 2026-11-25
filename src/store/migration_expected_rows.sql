@@ -59,7 +59,7 @@ INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_
 ('brhkcj',1,2,1,2,2,1,NULL,NULL,NULL,6,1793781720),
 ('d8mv7p',1,2,1,1,1,1,NULL,NULL,NULL,2,1793781720),
 ('d8mv7p',2,4,3,1,NULL,NULL,NULL,1,0,5,1793781720);
-INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) VALUES
+INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,hosted_action,call_failed) VALUES
 (1,0,'d8mv7p',4,2,5,1,X'39dbe3cba52908fdb3610df812d007a7fc134eea8803b34a97e9aa229d815fae',0,0,4,1,NULL,0),
 (2,0,'brhkcj',4,3,NULL,1,X'0fdadc71d7984bbccd4a62ba37f7193aa30afb66119760165a70058d4aea629d',0,0,7,0,NULL,0),
 (2,1,'brhkcj',5,3,NULL,1,X'f9102a092552727d93c8e12e9a1a876ff1935a88476f27d45f0af576e99c4ce5',0,0,8,0,NULL,0);

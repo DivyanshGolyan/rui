@@ -816,7 +816,7 @@ fn senderRecord95() history.Start {
     ) };
 }
 
-test "the step to format 96 drops the sender-side record and keeps the sender of each peer Message" {
+test "the step to format 97 drops the sender-side record and keeps the sender of each peer Message" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});

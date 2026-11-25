@@ -151,9 +151,10 @@ test("TS-17 a failed Turn ending carries its report text inline and no other end
 test("feed camelCases only row keys, preserving nested wire values and content references", async () => {
 	const presentation = { line: { before: "tool", peer: null, after: null }, code: "succeeded", sign: "finished", publication_position: "7" };
 	const content = { type: "text", bytes: "2", sha256: "hash" } as const;
+	const hostedAction = { kind: "search", targets: [content, { type: "text", bytes: "3", sha256: "other" }], targets_total: "2", pattern: null } as const;
 	const rows = [
 		{ position: "1", ordinal: "0", at: "1", value: { tool_result: { content, presentation } } },
-		{ position: "2", ordinal: "0", at: "1", value: { hosted_call: { presentation } } },
+		{ position: "2", ordinal: "0", at: "1", value: { hosted_call: { presentation, action: hostedAction } } },
 		{ position: "3", ordinal: "0", at: "1", value: { approval_requested: { session: "ch1ld1", action: "8", operation: "9", call_ordinal: "10" } } },
 	];
 	const link: Link = { exchange: async (path) => path === "/v1/activity-content" ? Buffer.from("ok") : Buffer.from(JSON.stringify({ work: { actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: rows, more: false, end: "3" })) };
@@ -166,6 +167,7 @@ test("feed camelCases only row keys, preserving nested wire values and content r
 	assert.equal(entries[0].contentBytes, "2");
 	assert.ok(entries[1]?.kind === "hosted_call");
 	assert.deepEqual(entries[1].presentation, presentation);
+	assert.deepEqual(entries[1].action, hostedAction);
 	assert.ok(entries[2]?.kind === "approval_requested");
 	assert.equal(entries[2].callOrdinal, "10");
 	assert.equal(entries[2].sessionId, "ch1ld1");
@@ -222,6 +224,22 @@ test("a refused effort change retains its revision and inline provider text", as
     }
 });
 
+
+test("readContent names a hosted row's exact text by its field and sends no field otherwise", async () => {
+	const bodies: Schemas["ActivityContentRequest"][] = [];
+	const link: Link = { exchange: async (_path, build) => {
+		const body = JSON.parse(build("store")) as Schemas["ActivityContentRequest"];
+		bodies.push(body);
+		return Buffer.from(body.field === "1" ? "second" : "first");
+	} };
+	const session = new Session(link, "s");
+	const entry = { position: "5", ordinal: "0" };
+	assert.equal(await session.readContent(entry), "first");
+	assert.equal(await session.readContent(entry, { field: 0 }), "first");
+	assert.equal(await session.readContent(entry, { field: 1 }), "second");
+	assert.deepEqual(await session.readContentBytes(entry, { field: 1 }), Buffer.from("second"));
+	assert.deepEqual(bodies.map((body) => body.field), [undefined, "0", "1", "1"]);
+});
 
 test("call and approval mapping preserves saved facts and readContent opens original JSON", async () => {
     const facts = { description: "Fetch saved page", tool: "fetch_page", server: "docs" };
