@@ -1059,15 +1059,23 @@ test "SL-11: an Archived window row's first Message is its list row's first Mess
             try testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
 
-            const Shape = struct { name: []const u8, text: ?[]const u8, parts: bool };
+            // `prefix` is the leading bytes the window must serve, written out by hand: the Message whole when it fits,
+            // else its first 512 bytes less a scalar the cut would split (the 2-byte scalar below starts at byte 511).
+            const Shape = struct { name: []const u8, text: ?[]const u8, parts: bool, prefix: ?[]const u8 };
             const shapes = [_]Shape{
-                .{ .name = "sl11-text", .text = "first words\nsecond line", .parts = false },
-                .{ .name = "sl11-parts", .text = null, .parts = true },
-                .{ .name = "sl11-none", .text = null, .parts = false },
-                .{ .name = "sl11-blank", .text = "\n  Fix CI", .parts = false },
+                .{ .name = "sl11-text", .text = "first words\nsecond line", .parts = false, .prefix = "first words\nsecond line" },
+                .{ .name = "sl11-parts", .text = null, .parts = true, .prefix = null },
+                .{ .name = "sl11-none", .text = null, .parts = false, .prefix = null },
+                .{ .name = "sl11-blank", .text = "\n  Fix CI", .parts = false, .prefix = "\n  Fix CI" },
+                .{ .name = "sl11-long", .text = "a" ** 600, .parts = false, .prefix = "a" ** 512 },
+                .{ .name = "sl11-exact", .text = "b" ** 512, .parts = false, .prefix = "b" ** 512 },
+                .{ .name = "sl11-split", .text = "c" ** 511 ++ "é" ++ "tail", .parts = false, .prefix = "c" ** 511 },
+                .{ .name = "sl11-whole", .text = "d" ** 510 ++ "é" ++ "tail", .parts = false, .prefix = "d" ** 510 ++ "é" },
             };
-            for (shapes) |shape| {
+            var made: [shapes.len][6]u8 = undefined;
+            for (shapes, 0..) |shape, shape_index| {
                 const session = try testing.configureTestSession(&storage, shape.name);
+                made[shape_index] = session.slice()[0..6].*;
                 var file_key: [64]u8 = undefined;
                 const file = try std.fmt.bufPrint(&file_key, "{s}-file", .{shape.name});
                 if (shape.text) |text| try testing.submitTestMessage(&storage, &tmp, file, file, session.slice(), text);
@@ -1101,7 +1109,15 @@ test "SL-11: an Archived window row's first Message is its list row's first Mess
                         .text => try std.testing.expect(got.has_prefix),
                         .parts => try std.testing.expect(!got.has_prefix),
                     }
-                } else try std.testing.expect(row.first == null);
+                }
+                const shape_at = for (made, 0..) |ref, index| {
+                    if (std.mem.eql(u8, &ref, &row.reference)) break index;
+                } else return error.TestUnexpectedResult;
+                if (shapes[shape_at].prefix) |want| {
+                    const got = row.first orelse return error.TestUnexpectedResult;
+                    try std.testing.expectEqualStrings(want, got.prefix_buf[0..got.prefix_len orelse return error.TestUnexpectedResult]);
+                } else if (row.first) |got| try std.testing.expect(got.prefix_len == null);
+                if (live == null) try std.testing.expect(row.first == null);
             }
         }
     }.run);
