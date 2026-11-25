@@ -35,7 +35,7 @@ pub fn effort(chosen: ?catalog.ReasoningEffort) []const u8 {
     return if (chosen) |value| @tagName(value) else effort_default;
 }
 
-test "SUI-170 both settings surfaces name Permissions and Effort from one owner" {
+test "SUI-175 both settings surfaces name Permissions and Effort from one owner" {
     for (std.enums.values(PermissionMode)) |mode| {
         try std.testing.expectEqual(mode, permissionAt(permissionChoice(mode)));
         try std.testing.expectEqualStrings(permission(mode), permission_labels[permissionChoice(mode)]);
