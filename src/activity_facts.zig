@@ -85,6 +85,19 @@ pub const Queued = struct {
     newest_content: ?content_value.Value = null,
 };
 
+/// The position a page's queued aggregate (and call activity) is taken at: the last row of a
+/// forward page that has more, otherwise the page's end. The Store and the client both use it.
+pub fn queueCutoff(end: u64, forward: bool, more: bool, last: ?u64) u64 {
+    return if (forward and more) last.? else end;
+}
+
+test "queueCutoff takes a forward page's aggregate at its last row only while more follows" {
+    try std.testing.expectEqual(@as(u64, 7), queueCutoff(40, true, true, 7));
+    try std.testing.expectEqual(@as(u64, 40), queueCutoff(40, true, false, 7));
+    try std.testing.expectEqual(@as(u64, 40), queueCutoff(40, false, true, 7));
+    try std.testing.expectEqual(@as(u64, 40), queueCutoff(40, false, false, null));
+}
+
 pub const PageWork = struct {
     creator: ?Bounded(session_id.bytes) = null,
     read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },

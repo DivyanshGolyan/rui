@@ -61,6 +61,7 @@ const slash_commands = slash_commands_shared.conversation;
 const model_capability = @import("model_capability.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
+const QueueHorizon = @import("queue_horizon.zig");
 const queue_lifecycle = @import("queue_lifecycle.zig");
 const status_page = @import("status_page.zig");
 const ChatInfo = @import("chat_info.zig");
@@ -140,6 +141,7 @@ inspection: struct {
 admission: struct {
     sent: u64 = 0,
 } = .{},
+queue_horizon: QueueHorizon = .{},
 live: struct {
     view: View.Live = .{},
     latest_ending: ?reads.LatestEnding = null,
@@ -3221,6 +3223,8 @@ fn showStaged(self: *Self) !void {
         if (scan.rows == .count_only) return;
     }
     if (read == .opening) {
+        self.queue_horizon = .{};
+        self.live.queued = .{};
         window.trim(window.count, 0);
         self.screen.anchor.follow();
         self.new_below = 0;
@@ -3260,6 +3264,7 @@ fn showStaged(self: *Self) !void {
                 if (seen.await_adoption) result.attached_pending = .{ .key = key, .row = entry.key };
             }
         }
+        if (row.queue_terminal and self.queue_horizon.attach(row.key.position)) self.live.queued = .{};
         inserted += 1;
     }
     if (!complete and inserted == 0) self.reading.fills = self.reading.fills.failed(read, page);
@@ -3459,8 +3464,10 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             const result = &self.job.result;
             observed = .{ .snapshot = .{ .read_version = result.work.read_version, .work = result.work.work, .last_line = result.work.last_line }, .opening = read == .opening };
             self.live.work = .fromCore(result.work.work);
-            self.live.queued = result.queued;
-            if (result.queued_line) |shown| self.live.queued_line = shown;
+            if (if (result.queue_cutoff) |cutoff| self.queue_horizon.adopt(cutoff) else false) {
+                self.live.queued = result.queued;
+                if (result.queued_line) |shown| self.live.queued_line = shown;
+            }
             if (result.attached_pending) |pending| if (self.screen.feed.indexOf(pending.row) != null) {
                 _ = self.submission.observe(.{ .pending = .{ .key = pending.key, .position = pending.row.position, .page_all = true, .adopted = true, .queue = self.queueFacts() } });
             };
@@ -7667,7 +7674,7 @@ test "SessionFrontend failed historical fills retain the edge while scans approv
 const FeedFixture = struct {
     held: *HeldFrontend,
     file: std.Io.File,
-    const Row = struct { key: u64, text: []const u8, provisional: bool = false, target: ?View.Collapsed = null, message_key: ?[36]u8 = null, excluded_key: ?[36]u8 = null };
+    const Row = struct { key: u64, text: []const u8, provisional: bool = false, target: ?View.Collapsed = null, message_key: ?[36]u8 = null, excluded_key: ?[36]u8 = null, queue_terminal: bool = false };
 
     fn create() !FeedFixture {
         return createWithDrafts("unused", null);
@@ -7702,11 +7709,12 @@ const FeedFixture = struct {
         frontend.job.result.at_end = end;
         frontend.job.result.low = if (rows.len == 0) null else .{ .position = rows[0].key };
         frontend.job.result.high = if (rows.len == 0) frontend.screen.feed.high else .{ .position = rows[rows.len - 1].key, .ordinal = if (end) std.math.maxInt(u64) else 0 };
+        if (read == .opening or read == .scan) frontend.job.result.queue_cutoff = if (frontend.job.result.high) |high| high.position else 0;
         if (frontend.job.result.high) |high| frontend.job.result.cursor = .{ .position = high.position, .ordinal = if (high.ordinal == std.math.maxInt(u64)) null else high.ordinal };
         var offset: u64 = 0;
         for (rows, 0..) |row, i| {
             try self.file.writePositionalAll(std.testing.io, row.text, offset);
-            frontend.job.result.rows[i] = .{ .key = .{ .position = row.key }, .offset = offset, .length = row.text.len, .tight = false, .provisional = row.provisional, .message_key = row.message_key, .excluded_key = row.excluded_key };
+            frontend.job.result.rows[i] = .{ .key = .{ .position = row.key }, .offset = offset, .length = row.text.len, .tight = false, .provisional = row.provisional, .message_key = row.message_key, .excluded_key = row.excluded_key, .queue_terminal = row.queue_terminal };
             if (row.target) |target| {
                 frontend.job.result.rows[i].collapsed_targets[0] = target;
                 frontend.job.result.rows[i].collapsed_count = 1;
@@ -7735,6 +7743,82 @@ fn firstRows(text: []const u8, count: usize) []const u8 {
     var end: usize = 0;
     for (0..count) |_| end = 1 + (std.mem.indexOfScalarPos(u8, text, end, '\n') orelse return text);
     return text[0..end];
+}
+
+test "SUI-166 attached terminal rows fence older queue aggregates without losing newer ones" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    try fixture.page(.opening, &.{.{ .key = 24, .text = "earlier\n" }}, true, false);
+    self.live.queued = .{ .count = 20, .oldest_position = 5, .newest_admission = 21, .newest_position = 24 };
+    self.live.queued_line = .{ .admission = 21, .line = .{} };
+    try self.live.queued_line.?.line.set("queued-19");
+    try std.testing.expect(self.queuedRow() != null);
+    try fixture.page(.fill_below, &.{.{ .key = 45, .text = "› queued-19\n", .queue_terminal = true }}, false, true);
+    try std.testing.expect(self.queuedRow() == null);
+    try std.testing.expect(std.mem.indexOf(u8, try fixture.held.shown(), "queued-19") != null);
+    // A frozen catch-up page read before that row attached cannot repaint the Message as waiting.
+    self.reading.phase = .activity;
+    self.reading.feed_read = .scan;
+    self.job.feed_page = FeedPolicy.request(.scan, self.feedState());
+    self.job.result.queue_cutoff = 24;
+    self.job.result.queued = .{ .count = 20, .oldest_position = 5, .newest_admission = 21, .newest_position = 24 };
+    self.job.result.queued_line = .{ .admission = 21, .line = .{} };
+    try self.job.result.queued_line.?.line.set("queued-19");
+    try self.applyReader(.complete);
+    try std.testing.expect(self.queuedRow() == null);
+    // A later aggregate keeps its own queue and count.
+    self.job.result.queue_cutoff = 50;
+    self.job.result.queued = .{ .count = 2, .oldest_position = 48, .newest_admission = 23, .newest_position = 50 };
+    self.job.result.queued_line = .{ .admission = 23, .line = .{} };
+    try self.job.result.queued_line.?.line.set("newer queued Message");
+    try self.applyReader(.complete);
+    const newer = self.queuedRow().?;
+    try std.testing.expectEqual(@as(u64, 2), newer.waiting.count);
+    try std.testing.expectEqualStrings("newer queued Message", newer.waiting.line);
+}
+
+test "SUI-166 a newer aggregate reuses its unchanged queued preview after another Message is taken" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    try fixture.page(.opening, &.{.{ .key = 24, .text = "earlier\n" }}, true, false);
+    self.live.queued = .{ .count = 2, .oldest_position = 5, .newest_admission = 22, .newest_position = 24 };
+    self.live.queued_line = .{ .admission = 22, .line = .{} };
+    try self.live.queued_line.?.line.set("still waiting");
+    try fixture.page(.fill_below, &.{.{ .key = 45, .text = "› taken earlier\n", .queue_terminal = true }}, false, true);
+    try std.testing.expect(self.queuedRow() == null);
+    try std.testing.expectEqual(@as(u64, 22), self.live.queued_line.?.admission);
+    self.reading.phase = .activity;
+    self.reading.feed_read = .scan;
+    self.job.feed_page = FeedPolicy.request(.scan, self.feedState());
+    self.job.result.queue_cutoff = 50;
+    self.job.result.queued = .{ .count = 1, .oldest_position = 24, .newest_admission = 22, .newest_position = 24 };
+    self.job.result.queued_line = null;
+    try self.applyReader(.complete);
+    const waiting = self.queuedRow().?;
+    try std.testing.expectEqual(@as(u64, 1), waiting.waiting.count);
+    try std.testing.expectEqualStrings("still waiting", waiting.waiting.line);
+}
+
+test "SUI-166 a replay page whose aggregate is refused still hands off the keyed pending Message" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const ticket = self.input.submitText("local input");
+    _ = self.submission.observe(.{ .begin = .{ .key = @splat('K'), .before = null } });
+    _ = self.submission.observe(.{ .receipt = .{ .key = @splat('K'), .admission = 7 } });
+    self.submission.holdAccepted(ticket, @splat('K'), .{});
+    defer self.submission.disposeMessage();
+    try fixture.page(.opening, &.{.{ .key = 1, .text = "earlier\n" }}, true, true);
+    // A newer aggregate is held: the replay's first page below is partial, so its cutoff is older.
+    try std.testing.expect(self.queue_horizon.adopt(100));
+    self.live.queued = .{ .count = 2, .oldest_position = 3, .newest_admission = 7, .newest_position = 50 };
+    self.live.queued_line = .{ .admission = 7, .line = .{} };
+    try self.live.queued_line.?.line.set("local input");
+    try fixture.page(.scan, &.{.{ .key = 3, .text = "", .provisional = true, .message_key = @splat('K') }}, false, false);
+    try std.testing.expect(self.queue_horizon.through == 100);
+    try std.testing.expectEqual(queue_lifecycle.Phase.represented, self.submission.queue.message.?.phase);
 }
 
 fn queuedAndTakenAcrossWork() !void {

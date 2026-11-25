@@ -4,6 +4,7 @@ const fake_host = @import("testing/fake_host.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
+const activity_facts = @import("activity_facts.zig");
 const content_value = @import("content_value.zig");
 const value_reads = @import("value_reads.zig");
 const activity_reply = @import("activity_reply.zig");
@@ -41,6 +42,8 @@ pub const RenderedRow = struct {
     collapsed_count: usize = 0,
     message_key: ?[36]u8 = null,
     excluded_key: ?[36]u8 = null,
+    /// An applied person-Message or a Stop: the rows after which an older queue aggregate is stale.
+    queue_terminal: bool = false,
 };
 
 pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ChatInfo.Edit) anyerror!bool;
@@ -215,6 +218,7 @@ pub const Job = struct {
         at_end: bool = false,
         new_rows: usize = 0,
         queued: protocol.Queued = .{},
+        queue_cutoff: ?u64 = null,
         attached_pending: ?struct { key: [36]u8, row: Key } = null,
         queued_line: ?queued_line.Shown = null,
         accepted: ?Submission.Verdict = null,
@@ -540,6 +544,7 @@ fn scanAt(job: *Job, task: *Task, reads: client.SessionReads, plan: FeedPolicy.P
         };
         job.result.live = View.Live.init(page.facts.call_activity);
         job.result.queued = page.facts.queued;
+        job.result.queue_cutoff = activity_facts.queueCutoff(page.facts.end, plan.direction == .forward, page.facts.more, if (page.facts.count == 0) null else page.facts.items[page.facts.count - 1].position);
         const queued = page.facts.queued;
         if (queued.count != 0 and queued.newest_admission != job.queued_line) {
             job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(reads, job, queued.newest_position, queued.newest_content orelse return error.InvalidActivityPage, .fails)).? };
@@ -560,7 +565,18 @@ fn scanAt(job: *Job, task: *Task, reads: client.SessionReads, plan: FeedPolicy.P
             else => {},
         }
         const pending = item.value == .admission and item.value.admission.state == .queued;
-        var row: RenderedRow = .{ .key = key, .offset = offset, .length = 0, .tight = false, .provisional = pending };
+        var row: RenderedRow = .{
+            .key = key,
+            .offset = offset,
+            .length = 0,
+            .tight = false,
+            .provisional = pending,
+            .queue_terminal = switch (item.value) {
+                .user => |message| message.sender == null and message.source_action == null and message.state == .applied,
+                .stop => true,
+                else => false,
+            },
+        };
         if (toggled != null and toggled.?.key.order(key) != .eq) continue;
         const open = if (toggled) |one| one.open else job.opened.has(key);
         var capture: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .watch_key = job.local_message_key, .cap_target = switch (item.value) {
