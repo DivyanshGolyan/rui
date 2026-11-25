@@ -1050,6 +1050,11 @@ const FirstWalk = struct {
     }
 };
 
+fn repeat(comptime byte: u8, comptime count: usize) *const [count]u8 {
+    const bytes: [count]u8 = @splat(byte);
+    return &bytes;
+}
+
 test "SL-11: an Archived window row's first Message is its list row's first Message, and its prefix is the leading bytes of inline Text only" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {
@@ -1067,10 +1072,10 @@ test "SL-11: an Archived window row's first Message is its list row's first Mess
                 .{ .name = "sl11-parts", .text = null, .parts = true, .prefix = null },
                 .{ .name = "sl11-none", .text = null, .parts = false, .prefix = null },
                 .{ .name = "sl11-blank", .text = "\n  Fix CI", .parts = false, .prefix = "\n  Fix CI" },
-                .{ .name = "sl11-long", .text = "a" ** 600, .parts = false, .prefix = "a" ** 512 },
-                .{ .name = "sl11-exact", .text = "b" ** 512, .parts = false, .prefix = "b" ** 512 },
-                .{ .name = "sl11-split", .text = "c" ** 511 ++ "é" ++ "tail", .parts = false, .prefix = "c" ** 511 },
-                .{ .name = "sl11-whole", .text = "d" ** 510 ++ "é" ++ "tail", .parts = false, .prefix = "d" ** 510 ++ "é" },
+                .{ .name = "sl11-long", .text = repeat('a', 600), .parts = false, .prefix = repeat('a', 512) },
+                .{ .name = "sl11-exact", .text = repeat('b', 512), .parts = false, .prefix = repeat('b', 512) },
+                .{ .name = "sl11-split", .text = repeat('c', 511) ++ "é" ++ "tail", .parts = false, .prefix = repeat('c', 511) },
+                .{ .name = "sl11-whole", .text = repeat('d', 510) ++ "é" ++ "tail", .parts = false, .prefix = repeat('d', 510) ++ "é" },
             };
             var made: [shapes.len][6]u8 = undefined;
             for (shapes, 0..) |shape, shape_index| {
