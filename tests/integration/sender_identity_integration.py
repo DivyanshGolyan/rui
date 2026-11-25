@@ -111,7 +111,7 @@ def main():
 
         def configure(*options):
             configured = run("session", "configure", "--store", store, "--workspace", workspace,
-                             "--provider", "codex", "--model", "gpt-6-sol", *options)
+                             "--connection", "codex", "--model", "gpt-6-sol", *options)
             session = configured["context"]["session"]
             assert re.fullmatch("[0123456789abcdefghjkmnpqrstvwxyz]{6}", session), configured
             assert configured["answer"]["session"] == session, configured

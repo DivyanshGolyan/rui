@@ -29,7 +29,9 @@ pub const openssl_version = "3.6.5";
 
 pub const max_url_bytes = url_value.max_url_bytes;
 pub const max_host_bytes = url_value.max_host_bytes;
-pub const max_endpoints = 6;
+/// The most endpoints one client holds: a served connection each (16 at most, `connection.max_served`)
+/// plus each model listing (3). provider.Reactor checks that this covers the served set.
+pub const max_endpoints = 19;
 pub const max_fields = 16;
 pub const owned_fields = [_][]const u8{ "content-length", "accept-encoding", "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "host" };
 pub const max_field_block_bytes = 64 * 1024;

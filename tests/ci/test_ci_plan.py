@@ -47,7 +47,7 @@ class PlanTest(unittest.TestCase):
                               change_kind=ChangeKind.NORMAL, native_targets=targets).outputs
                 self.assertEqual(result['native_targets'], targets)
                 self.assertIsNot(result['native_targets'], targets)
-                self.assertEqual(result['macos_matrix'], shards(targets, 'macos', mysql_suites=selected['mysql_suites']))
+                self.assertEqual(result['macos_matrix'], shards(targets, 'macos', mysql_suites=selected['mysql_suites'], split_native_full=True))
                 self.assertTrue(result['native'])
                 self.assertFalse(result['retry'])
                 self.assertEqual(result['quarantine'], 'off')
@@ -97,7 +97,8 @@ class PlanTest(unittest.TestCase):
                     change_kind='documentation' if documentation and event == 'pull_request' else 'normal',
                     draft_run=draft, targets=linux, linux_compile_targets=linux, native_targets=mac,
                     linux_matrix=shards([] if pr_job else linux, mysql_suites=original['mysql_suites']),
-                    macos_matrix=shards(mac, 'macos', mysql_suites=original['mysql_suites']),
+                    macos_matrix=shards(mac, 'macos', mysql_suites=original['mysql_suites'],
+                                        split_native_full=promotion),
                     linux_split=not pr_job and split_build(linux),
                     pr_job=pr_job, pr_setup_targets=sorted(linux) if pr_job else [],
                     native=bool(mac),
@@ -109,8 +110,11 @@ class PlanTest(unittest.TestCase):
                     typecheck_macos=not documentation and name in ('manual', 'promotion'),
                     policy_skips=['test_unchanged'] if event == 'pull_request' else [],
                     compile_only=False,
+                    pr_mysql_migration=False,
                 )
                 self.assertEqual(result.outputs, expected)
+                if promotion:
+                    self.assertEqual(result.outputs['macos_matrix']['include'][0]['part'], 'both')
                 self.assertEqual(original, before, 'the selector result is borrowed, not mutated')
                 self.assertEqual(result.selection['targets'], linux)
                 self.assertEqual(result.selection['native_targets'], mac)
@@ -214,8 +218,10 @@ class PlanTest(unittest.TestCase):
                               promotion=False, change_kind=ChangeKind.NORMAL, native_targets=native).outputs
                 self.assertEqual(output['native_targets'], native)
                 self.assertNotIn('macos_split', output)
-                self.assertEqual(output['macos_matrix'], shards(native, 'macos', mysql_suites=['host-status-integration']))
+                self.assertEqual(output['macos_matrix'], shards(native, 'macos', mysql_suites=['host-status-integration'], split_native_full=True))
                 self.assertEqual([row['name'] for row in output['macos_matrix']['include']], ['native'])
+                self.assertEqual(output['macos_matrix']['include'][0]['part'],
+                                 'both' if 'check-full' in native else 'all')
                 self.assertFalse(output['linux_split'])
 
     def test_compile_only_builds_every_gate_and_unit_root_and_runs_nothing(self):
@@ -257,6 +263,118 @@ class PlanTest(unittest.TestCase):
                 promoted = plan(source, event_name='workflow_dispatch',
                                 draft=False, promotion=True, change_kind=ChangeKind.NORMAL).outputs
                 self.assertTrue({'check-full', 'rsql-table'} <= set(promoted['targets']))
+
+
+class PrMySqlMigrationTest(unittest.TestCase):
+    """pr_mysql_migration: only a ready normal PR whose diff touches a Store migration starts MySQL 8.4."""
+
+    def test_only_a_ready_normal_pull_request_with_a_migration_change_starts_mysql(self):
+        cases = (
+            ('ready', 'pull_request', False, False, ChangeKind.NORMAL, True, True),
+            ('ready, no migration change', 'pull_request', False, False, ChangeKind.NORMAL, False, False),
+            ('ready, documentation', 'pull_request', False, False, ChangeKind.DOCUMENTATION, True, False),
+            ('draft', 'pull_request', True, False, ChangeKind.NORMAL, True, False),
+            ('manual', 'workflow_dispatch', False, False, ChangeKind.NORMAL, True, False),
+            ('promotion', 'workflow_dispatch', False, True, ChangeKind.NORMAL, True, False),
+            ('compile only', 'push', False, False, ChangeKind.NORMAL, True, False),
+        )
+        for name, event, draft, promotion, kind, migration, expected in cases:
+            with self.subTest(case=name):
+                # A documentation-only diff selects nothing, so it is documentation whatever the selection says.
+                base = selection(kind is ChangeKind.DOCUMENTATION)
+                source = dict(base, fast_targets=['test-logic', 'test-store'], mysql_migration=migration)
+                output = plan(source, event_name=event, draft=draft, promotion=promotion, change_kind=kind,
+                              compile_only=name == 'compile only').outputs
+                self.assertIs(output['pr_mysql_migration'], expected)
+        # A selection from before the owner existed has no key: no MySQL.
+        output = plan(selection(), event_name='pull_request', draft=False, promotion=False,
+                      change_kind=ChangeKind.NORMAL).outputs
+        self.assertIs(output['pr_mysql_migration'], False)
+
+    def test_the_migration_change_adds_no_target_and_no_other_output(self):
+        base = dict(selection(), fast_targets=['test-logic', 'test-store'])
+        without = plan(dict(base, mysql_migration=False), event_name='pull_request', draft=False,
+                       promotion=False, change_kind=ChangeKind.NORMAL).outputs
+        with_change = plan(dict(base, mysql_migration=True), event_name='pull_request', draft=False,
+                           promotion=False, change_kind=ChangeKind.NORMAL).outputs
+        self.assertEqual(with_change.pop('pr_mysql_migration'), True)
+        without.pop('pr_mysql_migration')
+        self.assertEqual(with_change, without)
+
+    def test_a_schema_step_change_selects_test_store_on_the_pr(self):
+        import build_files
+        from select_tests import select
+        available = set(build_files.steps())
+        before = """pub const schema_version: u32 = 92;
+pub const migrations = [_]Migration{
+    .{ .from = 91, .sqlite = &.{"A"}, .mysql = &.{"B"} },
+    .{ .from = 92, .sqlite = &.{"C"}, .mysql = &.{"D"} },
+};
+"""
+        cases = (
+            (['src/store/schema.zig'], {'src/store/schema.zig': (before, before.replace('"D"', '"E"'))}, True),
+            (['src/store/schema.zig'], {'src/store/schema.zig': (before, before + '// a note\n')}, False),
+            (['src/store/migration_expected_rows.sql'], {}, True),
+            (['src/store/migration_expected_rows.sql', 'README.md'], {}, True),
+            (['README.md'], {}, False),
+            # Test code with a MySQL leg starts MySQL too (#2179 changed only history.zig, a MySQL user).
+            (['src/store/history.zig'], {'src/store/history.zig': ('', 'const mysql_testing = @import("mysql_testing.zig");')}, True),
+            (['src/store/tests/agent.zig'], {'src/store/tests/agent.zig': ('', 'try store_testing.forEachEngine(run);')}, True),
+            (['src/store/tests/agent.zig'], {'src/store/tests/agent.zig': ('', 'test "sqlite only" {}')}, False),
+            # A production file's inline engine test is a MySQL leg; a comment naming the loop is not.
+            (['src/read_transcript.zig'], {'src/read_transcript.zig': ('', 'try storage.testing.forEachEngine(run);')}, True),
+            (['src/store/Store.zig'], {'src/store/Store.zig': ('', '// forEachEngine runs both')}, False),
+        )
+        for paths, contents, expected in cases:
+            with self.subTest(paths=paths, changed=bool(contents)):
+                selected = select(paths, 'review', available, contents=contents)
+                self.assertIs(selected['mysql_migration'], expected)
+                if expected:
+                    self.assertIn('test-store', selected['fast_targets'])
+                ready = plan(selected, event_name='pull_request', draft=False, promotion=False,
+                             change_kind=ChangeKind.NORMAL).outputs
+                self.assertIs(ready['pr_mysql_migration'], expected)
+                if expected:
+                    self.assertIn('test-store', ready['linux_compile_targets'])
+                    self.assertIn('test-store', ready['targets'])
+
+
+class PrLinuxMySqlWorkflowTest(unittest.TestCase):
+    """check.yml's pr_linux starts, waits for and verifies MySQL only behind the migration output."""
+
+    def test_the_mysql_steps_are_guarded_and_the_run_step_names_its_engines(self):
+        import re
+        from pathlib import Path
+        text = Path(__file__).resolve().parents[2].joinpath('.github/workflows/check.yml').read_text()
+        plan_job = re.search(r'(?ms)^  plan:\n(.*?)(?=^  [\w-]+:\n|\Z)', text)[1]
+        self.assertIn("pr_mysql_migration: ${{ steps.select.outputs.pr_mysql_migration }}", plan_job)
+        job = re.search(r'(?ms)^  pr_linux:\n(.*?)(?=^  [\w-]+:\n|\Z)', text)[1]
+        guard = "if: ${{ needs.plan.outputs.pr_mysql_migration == 'true' }}"
+        steps = re.split(r'(?m)^      - ', job)
+        by_name = {}
+        for step in steps:
+            name = re.match(r'name: (.*)', step)
+            if name:
+                by_name[name[1].strip()] = step
+        start = by_name['Start MySQL 8.4 for the live migration check']
+        wait = by_name['Wait for MySQL 8.4']
+        verify = by_name['Require that the live MySQL migration check ran']
+        run = [name for name in by_name if name.startswith('Run selected targets')]
+        self.assertEqual(run, ['Run selected targets, stopping at the first failure (SQLite; MySQL 8.4 when a migration step changed)'])
+        self.assertNotIn('on SQLite,', job)
+        self.assertIn(guard, start)
+        self.assertIn(guard, wait)
+        self.assertIn("if: ${{ !cancelled() && needs.plan.outputs.pr_mysql_migration == 'true' }}", verify)
+        self.assertIn('tests/integration/mysql_server.py', start)
+        self.assertIn('tests/ci/live_engine_step.py export mysql', start)
+        # The MySQL steps come before the compile, and the wait before the run.
+        order = [name for name in by_name]
+        self.assertLess(order.index('Start MySQL 8.4 for the live migration check'),
+                        order.index('Compile only the binaries the selected targets need'))
+        self.assertLess(order.index('Wait for MySQL 8.4'), order.index(run[0]))
+        self.assertLess(order.index(run[0]), order.index('Require that the live MySQL migration check ran'))
+        # Every other PR keeps its steps: only the three new ones and the renamed run step carry the output.
+        self.assertEqual(job.count('needs.plan.outputs.pr_mysql_migration'), 3)
 
 
 if __name__ == '__main__':

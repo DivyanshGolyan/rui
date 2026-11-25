@@ -263,7 +263,7 @@ test "creation receipt names reject empty segments and sort valid names" {
 
 fn creationReceipt(row: *const creation_receipt_read.Row, out: *command_reply.CreationConfiguration) !void {
     if (row.tools_invalid or row.loaded_invalid or row.tools_count != row.tools_rows or row.loaded_count != row.loaded_rows) return error.CorruptStore;
-    out.provider = provider_route.builtInOf(row.provider) orelse return error.CorruptStore;
+    out.connection = row.provider;
     out.model = row.model.*;
     out.reasoning_effort = row.reasoning_effort;
     out.workspace = row.workspace.*;
@@ -279,7 +279,7 @@ fn freshReceipt(reads: *const configuration_domain.ConfigurationReads, out: *com
     const next = &reads.next;
     const tools = if (reads.tools) |*selection| selection.names else return error.CorruptStore;
     const loaded = if (reads.loaded_tools) |*selection| selection.names else tools;
-    out.provider = provider_route.builtInOf(next.provider) orelse return error.CorruptStore;
+    out.connection = next.provider;
     out.model = next.model;
     out.reasoning_effort = next.reasoning_effort;
     out.workspace = next.workspace;
@@ -372,11 +372,15 @@ pub const SubmitMessage = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{.always},
         .replay = .{.branch},
+        .lane = .{.branch},
         .model = .{.branch},
         .saved_tools = .{.branch},
         .saved_loaded = .{.branch},
         .loaded_source = .{.branch},
         .loaded = .{.branch},
+        .app_set = .{.branch},
+        .app_texts = .{.branch},
+        .app_records = .{.branch},
         .creation = .{.paged},
         .catalog = .{.branch},
         .text = .{.branch},
@@ -431,13 +435,16 @@ pub const SubmitMessage = struct {
         switch (at) {
             .facts => return t.decide(r),
             .replay => return t.replayed(),
-            .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => {
+            .lane, .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => {
                 if (try t.validate(r, switch (at) {
-                    inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
+                    inline .lane, .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
                     else => unreachable,
                 })) |next| return next;
                 return t.applyValidated(r);
             },
+            .app_set => return t.apply(r, .app_set),
+            .app_texts => return t.apply(r, .app_texts),
+            .app_records => return t.apply(r, .app_records),
             .creation => return t.apply(r, .creation),
             .catalog => return t.apply(r, .catalog),
             .text => {
@@ -465,6 +472,7 @@ pub const SubmitMessage = struct {
     }
 
     noinline fn start(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        r.resetDeclarations();
         const command = t.input.command;
         if (command.configuration != null) {
             t.creation = r.configurationReads();
@@ -480,7 +488,7 @@ pub const SubmitMessage = struct {
         }
         readMessage(r, t.input.selector, command, message);
         if (command.configuration) |*configuration| {
-            configuration_domain.prepareConfiguration(r, t.input.tools.host_tool_set, "", configuration, t.creation);
+            configuration_domain.prepareConfiguration(r, "", configuration, t.creation);
         } else {
             readTarget(r, command.session.slice(), &t.target);
             if (t.input.parts_saving == null) content_domain.lookup(r, &message.text);
@@ -602,8 +610,9 @@ pub const SubmitMessage = struct {
         return (try t.validate(r, null)).?;
     }
 
-    fn request(t: *SubmitMessage) configuration_domain.Request {
+    fn request(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) configuration_domain.Request {
         return .{
+            .declarations = r.declarationArena(),
             .io = t.input.io,
             .tools = t.input.tools,
             .served = t.input.served,
@@ -615,7 +624,7 @@ pub const SubmitMessage = struct {
     }
 
     noinline fn validate(t: *SubmitMessage, r: *transition.Round(SubmitMessage), ran: ?configuration_domain.ValidationRound) !?transition.Next(SubmitMessage) {
-        return switch (try configuration_domain.validateStep(r, &t.request(), t.creation, ran)) {
+        return switch (try configuration_domain.validateStep(r, &t.request(r), t.creation, ran)) {
             .round => |round| .{ .round = switch (round) {
                 inline else => |tag| @field(rounds.At, @tagName(tag)),
             } },
@@ -641,7 +650,7 @@ pub const SubmitMessage = struct {
             try checkFreshSelection(&t.scratch.fresh, t.creation);
             t.fresh_checked = true;
         }
-        switch (try configuration_domain.applyStep(r, &t.request(), r.faults(), t.creation, ran)) {
+        switch (try configuration_domain.applyStep(r, &t.request(r), r.faults(), t.creation, ran)) {
             .round => |round| {
                 if (round == .creation and !t.fresh_checked) if (t.input.receipt) |receipt| {
                     t.scratch = .{ .fresh = undefined };
@@ -1006,11 +1015,15 @@ pub const AgentStart = enum {
 pub const StartAgent = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{.always},
+        .lane = .{.branch},
         .model = .{.branch},
         .saved_tools = .{.branch},
         .saved_loaded = .{.branch},
         .loaded_source = .{.branch},
         .loaded = .{.branch},
+        .app_set = .{.branch},
+        .app_texts = .{.branch},
+        .app_records = .{.branch},
         .creation = .{.paged},
         .catalog = .{.branch},
         .outcome = .{.always},
@@ -1060,10 +1073,13 @@ pub const StartAgent = struct {
         const at = ran orelse return t.start(r);
         switch (at) {
             .facts => return t.decide(r),
-            .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => return t.validate(r, switch (at) {
-                inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
+            .lane, .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => return t.validate(r, switch (at) {
+                inline .lane, .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
                 else => unreachable,
             }),
+            .app_set => return t.apply(r, .app_set),
+            .app_texts => return t.apply(r, .app_texts),
+            .app_records => return t.apply(r, .app_records),
             .creation => return t.apply(r, .creation),
             .catalog => return t.apply(r, .catalog),
             .outcome => return t.settle(r),
@@ -1072,6 +1088,7 @@ pub const StartAgent = struct {
     }
 
     noinline fn start(t: *StartAgent, r: *transition.Round(StartAgent)) !transition.Next(StartAgent) {
+        r.resetDeclarations();
         const binding = t.input.binding;
         const configuration = t.input.configuration;
         t.key = std.fmt.bufPrint(&t.key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
@@ -1084,7 +1101,7 @@ pub const StartAgent = struct {
         t.creation = r.configurationReads();
         t.creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         t.creation.attach_parent = t.input.attached;
-        configuration_domain.prepareConfiguration(r, t.input.tools.host_tool_set, "", configuration, t.creation);
+        configuration_domain.prepareConfiguration(r, "", configuration, t.creation);
         return .{ .round = .facts };
     }
 
@@ -1094,28 +1111,39 @@ pub const StartAgent = struct {
         if (found.stopped) return .{ .done = .stopped };
         const creation = t.creation;
         if (!creation.parent_found.get()) return error.CorruptStore;
-        const host_tool_set = t.input.tools.host_tool_set;
         const configuration = t.input.configuration;
         const buffer = t.input.result_buffer;
         if (t.later.taken != null) return t.fail(r, "Rui could not start the agent: its command key is already taken. Nothing was started.");
-        if (try configuration_domain.inheritParent(host_tool_set, t.input.served, configuration, creation)) |code| {
-            if (configuration_domain.missingToolMessage(host_tool_set, code, &configuration.tools)) |detail| {
-                var writer = std.Io.Writer.fixed(buffer);
-                try detail.write(&writer);
-                try writer.print(" ({s}). Nothing was started.", .{@tagName(code)});
-                return t.fail(r, writer.buffered());
-            }
-            if (creation.parent_failure) |failure| return t.fail(r, failure.text(buffer, "started"));
-            return t.fail(r, std.fmt.bufPrint(buffer, "Rui could not start the agent ({s}). Nothing was started.", .{@tagName(code)}) catch unreachable);
-        }
+        if (try configuration_domain.inheritParent(configuration, creation)) |code| return t.fail(r, try t.refusalText(code));
         if (t.input.captured) |value| if (value.* == .failed)
             return t.fail(r, std.fmt.bufPrint(buffer, "{s} Nothing was started.", .{@import("../../excerpt.zig").bytePrefix(value.failed.bytes, 150)}) catch unreachable);
         t.later = .{ .saved = undefined };
         return t.validate(r, null);
     }
 
-    fn request(t: *StartAgent) configuration_domain.Request {
+    /// The refusal a rejection code gives, named by the lane's tools when a tool is missing, else by the parent
+    /// or the missing spec. Both the early parent check and the lane round refuse through this one owner.
+    fn refusalText(t: *StartAgent, code: anytype) ![]const u8 {
+        const buffer = t.input.result_buffer;
+        var writer = std.Io.Writer.fixed(buffer);
+        if (configuration_domain.missingToolMessage(&t.creation.lane_tools, code, &t.input.configuration.tools)) |detail| {
+            try detail.write(&writer);
+        } else if (t.creation.parent_failure) |failure| {
+            return failure.text(buffer, "started");
+        } else {
+            try writer.writeAll("Rui could not start the agent");
+            if (t.creation.missing) |missing| {
+                try writer.writeAll(": its spec is missing ");
+                try missing.writeJson(&writer);
+            }
+        }
+        try writer.print(" ({s}). Nothing was started.", .{@tagName(code)});
+        return writer.buffered();
+    }
+
+    fn request(t: *StartAgent, r: *transition.Round(StartAgent)) configuration_domain.Request {
         return .{
+            .declarations = r.declarationArena(),
             .io = t.input.io,
             .tools = t.input.tools,
             .served = t.input.served,
@@ -1127,26 +1155,17 @@ pub const StartAgent = struct {
     }
 
     noinline fn validate(t: *StartAgent, r: *transition.Round(StartAgent), ran: ?configuration_domain.ValidationRound) !transition.Next(StartAgent) {
-        return switch (try configuration_domain.validateStep(r, &t.request(), t.creation, ran)) {
+        return switch (try configuration_domain.validateStep(r, &t.request(r), t.creation, ran)) {
             .round => |round| .{ .round = switch (round) {
                 inline else => |tag| @field(rounds.At, @tagName(tag)),
             } },
-            .rejected => |code| rejected: {
-                var writer = std.Io.Writer.fixed(t.input.result_buffer);
-                try writer.writeAll("Rui could not start the agent");
-                if (t.creation.missing) |missing| {
-                    try writer.writeAll(": its spec is missing ");
-                    try missing.writeJson(&writer);
-                }
-                try writer.print(" ({s}). Nothing was started.", .{@tagName(code)});
-                break :rejected t.fail(r, writer.buffered());
-            },
+            .rejected => |code| t.fail(r, try t.refusalText(code)),
             .ready => t.apply(r, null),
         };
     }
 
     noinline fn apply(t: *StartAgent, r: *transition.Round(StartAgent), ran: ?configuration_domain.ApplyRound) !transition.Next(StartAgent) {
-        const applied = switch (try configuration_domain.applyStep(r, &t.request(), r.faults(), t.creation, ran)) {
+        const applied = switch (try configuration_domain.applyStep(r, &t.request(r), r.faults(), t.creation, ran)) {
             .round => |round| return .{ .round = switch (round) {
                 inline else => |tag| @field(rounds.At, @tagName(tag)),
             } },
@@ -1218,11 +1237,15 @@ pub const StartAgent = struct {
 pub const Configure = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{.always},
+        .lane = .{.branch},
         .model = .{.branch},
         .saved_tools = .{.branch},
         .saved_loaded = .{.branch},
         .loaded_source = .{.branch},
         .loaded = .{.branch},
+        .app_set = .{.branch},
+        .app_texts = .{.branch},
+        .app_records = .{.branch},
         .creation = .{.paged},
         .catalog = .{.branch},
         .skills = .{.branch},
@@ -1277,10 +1300,13 @@ pub const Configure = struct {
                 if (!t.receipt_found.get()) return error.CorruptStore;
                 return t.finishReplay();
             },
-            .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => return t.validate(r, switch (at) {
-                inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
+            .lane, .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => return t.validate(r, switch (at) {
+                inline .lane, .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
                 else => unreachable,
             }),
+            .app_set => return t.apply(r, .app_set),
+            .app_texts => return t.apply(r, .app_texts),
+            .app_records => return t.apply(r, .app_records),
             .creation => return t.apply(r, .creation),
             .catalog => return t.apply(r, .catalog),
             .skills => return t.reload(r, .latest),
@@ -1292,11 +1318,12 @@ pub const Configure = struct {
     }
 
     noinline fn start(t: *Configure, r: *transition.Round(Configure)) transition.Next(Configure) {
+        r.resetDeclarations();
         const command = t.input.command;
         t.reads = r.configurationReads();
         t.reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         lookupCommand(r, command.key.slice(), &t.reads.saved_command);
-        configuration_domain.prepareConfiguration(r, t.input.tools.host_tool_set, command.session.slice(), &command.configuration, t.reads);
+        configuration_domain.prepareConfiguration(r, command.session.slice(), &command.configuration, t.reads);
         return .{ .round = .facts };
     }
 
@@ -1351,8 +1378,9 @@ pub const Configure = struct {
         return .{ .done = {} };
     }
 
-    fn request(t: *Configure) configuration_domain.Request {
+    fn request(t: *Configure, r: *transition.Round(Configure)) configuration_domain.Request {
         return .{
+            .declarations = r.declarationArena(),
             .io = t.input.io,
             .tools = t.input.tools,
             .served = t.input.served,
@@ -1364,7 +1392,7 @@ pub const Configure = struct {
     }
 
     noinline fn validate(t: *Configure, r: *transition.Round(Configure), ran: ?configuration_domain.ValidationRound) !transition.Next(Configure) {
-        return switch (try configuration_domain.validateStep(r, &t.request(), t.reads, ran)) {
+        return switch (try configuration_domain.validateStep(r, &t.request(r), t.reads, ran)) {
             .round => |round| .{ .round = switch (round) {
                 inline else => |tag| @field(rounds.At, @tagName(tag)),
             } },
@@ -1380,7 +1408,7 @@ pub const Configure = struct {
             try checkFreshSelection(&t.projection.fresh, t.reads);
             t.fresh_checked = true;
         }
-        const applied = switch (try configuration_domain.applyStep(r, &t.request(), r.faults(), t.reads, ran)) {
+        const applied = switch (try configuration_domain.applyStep(r, &t.request(r), r.faults(), t.reads, ran)) {
             .round => |round| {
                 if (round == .creation and creating and !t.fresh_checked) if (t.input.receipt) |receipt| {
                     t.projection = .{ .fresh = undefined };
@@ -1485,7 +1513,7 @@ pub const Configure = struct {
     pub fn committed(t: *const Configure) Result {
         const command = t.input.command;
         t.input.reply.* = if (t.rejection) |code|
-            .{ .rejected = .{ .replayed = false, .code = code, .missing = if (code == .missing_settings) t.reads.missing.? else null } }
+            .{ .rejected = .{ .replayed = false, .code = code, .message = configuration_domain.missingToolMessage(&t.reads.lane_tools, code, &command.configuration.tools), .missing = if (code == .missing_settings) t.reads.missing.? else null } }
         else if (t.reloaded) |result|
             .{ .accepted = .{ .replayed = false, .revision = t.reads.next.revision, .created = false, .session = command.session, .skills = result.reload_status } }
         else

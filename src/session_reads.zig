@@ -78,7 +78,7 @@ pub const Line = struct {
     first: ?First = null,
     folder: ?Bounded(protocol.max_workspace_bytes) = null,
     model: Bounded(protocol.max_model_bytes) = .{},
-    provider: ?protocol.Provider = null,
+    provider: ?@import("connection.zig").Name = null,
     effort: ?protocol.ReasoningEffort = null,
     left: ?u8 = null,
     archive_state: protocol.SessionArchiveState = .active,
@@ -101,7 +101,7 @@ pub const Line = struct {
             .first = if (first) |message| .{ .position = message.value.position, .content = message.value.content } else null,
             .folder = if (first == null) plain(protocol.max_workspace_bytes, settings.workspace.slice()) else null,
             .model = plain(protocol.max_model_bytes, settings.model.slice()),
-            .provider = settings.provider.value,
+            .provider = @import("connection.zig").Name.parse(settings.connection.value.slice()),
             .effort = if (settings.reasoning_effort) |effort| effort.value else null,
             .left = if (trigger != null and estimate != null) session_line.left(trigger.?.value, estimate.?.value) else null,
             .archive_state = current.archive_state,
@@ -131,21 +131,21 @@ pub const Hint = union(enum) {
     line: Bounded(session_line.max_line_bytes),
 };
 
-fn readHint(requests: client.Requests, job: *const Job, first: Line.First) !Hint {
-    const line = try readFirstLine(requests, job, first.position, first.content, .absent) orelse return .absent;
+fn readHint(reads: client.SessionReads, job: *const Job, first: Line.First) !Hint {
+    const line = try readFirstLine(reads, job, first.position, first.content, .absent) orelse return .absent;
     return if (line.len == 0) .absent else .{ .line = line };
 }
 
 /// The first display line of the Message at `position`, whose stored value is `value`.
-fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, value: content_value.Value, refused: enum { absent, fails }) !?queued_line.Line {
+fn readFirstLine(reads: client.SessionReads, job: *const Job, position: u64, value: content_value.Value, refused: enum { absent, fails }) !?queued_line.Line {
     var buffer: [session_line.max_line_bytes + 1]u8 = undefined;
-    const reply = value_reads.firstLine(requests, job.store, job.session, position, value, job.files.parts, &buffer) catch |err| switch (err) {
+    const reply = value_reads.firstLineWith(reads, position, value, job.files.parts, &buffer) catch |err| switch (err) {
         error.InvalidResponse => return if (refused == .absent) null else err,
         else => return err,
     };
     return switch (reply) {
         .line => |bytes| plain(session_line.max_line_bytes, session_line.firstLine(bytes)),
-        .failure => |failure| if (refused == .absent and failure.err() != error.CanonicalStoreFailure) null else requests.failRead(failure),
+        .failure => |failure| if (refused == .absent and failure.err() != error.CanonicalStoreFailure) null else reads.failRead(failure),
     };
 }
 
@@ -194,7 +194,7 @@ pub const Job = struct {
     status_actions: std.Io.File = undefined,
     line_read: ?Moment = null,
     hint_wanted: bool = false,
-    provider: ?protocol.Provider = null,
+    provider: ?@import("connection.zig").Name = null,
     result: struct {
         work: protocol.PageWork = .{},
         line: ?Line = null,
@@ -225,7 +225,7 @@ pub const Job = struct {
         retry: ?Retry = null,
     } = .{},
 
-    fn sessionProvider(self: *const Job) ?protocol.Provider {
+    fn sessionProvider(self: *const Job) ?@import("connection.zig").Name {
         return if (self.result.line) |line| line.provider else self.provider;
     }
 
@@ -435,14 +435,7 @@ pub const CommandRun = struct {
 };
 
 pub fn permission(raw: *anyopaque, task: *Task) !void {
-    const job: *Job = @ptrCast(@alignCast(raw));
-    try scan(raw, task);
-    if (job.result.work.work.first_action) |action| {
-        try job.files.action.setLength(task.io, 0);
-        var output: DisplayCapture = .{ .task = task, .file = job.files.action };
-        if (!try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour, job.unicode_script)) return;
-        job.result.action = action;
-    }
+    return scanWorker(raw, task, true);
 }
 
 fn pageCursor(job: *const Job, plan: FeedPolicy.Page) protocol_reply.ActivityCursor {
@@ -469,6 +462,10 @@ fn pageCursor(job: *const Job, plan: FeedPolicy.Page) protocol_reply.ActivityCur
 }
 
 pub fn scan(raw: *anyopaque, task: *Task) !void {
+    return scanWorker(raw, task, false);
+}
+
+fn scanWorker(raw: *anyopaque, task: *Task, prepare_permission: bool) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
     const plan = job.feed_page orelse FeedPolicy.Page{
@@ -479,15 +476,27 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         .continuing = !job.opening and job.cursor.end != null,
         .novelty_after = if (job.opening or job.cursor.position == 0) null else .{ .position = job.cursor.position, .ordinal = job.cursor.ordinal orelse std.math.maxInt(u64) },
     };
-    const page = switch (try requests.activityPage(job.store, job.session, pageCursor(job, plan))) {
+    const paths = try requests.resolveActivityRoute(job.store, job.session, pageCursor(job, plan));
+    const reads = client.SessionReads.bound(requests, &paths, job.session);
+    try scanAt(job, task, reads, plan);
+    if (prepare_permission) if (job.result.work.work.first_action) |action| {
+        try job.files.action.setLength(task.io, 0);
+        var output: DisplayCapture = .{ .task = task, .file = job.files.action };
+        if (!try View.permissionWith(reads, action, job.files.scratch, &output, job.colour, job.unicode_script)) return;
+        job.result.action = action;
+    };
+}
+
+fn scanAt(job: *Job, task: *Task, reads: client.SessionReads, plan: FeedPolicy.Page) !void {
+    const page = switch (try reads.activityPage(pageCursor(job, plan))) {
         .page => |page| page,
-        .failure => |failure| return requests.failRead(failure),
+        .failure => |failure| return reads.failRead(failure),
     };
     if (plan.kinds == .all) {
         job.result.work = page.facts.work;
         const line_stale = Line.stale(job.line_read, &page.facts);
         if (job.open_status or job.watch_status or line_stale) {
-            const current = try View.current(requests, job.store, job.session, job.files.scratch);
+            const current = try View.currentWith(reads, job.files.scratch);
             if (line_stale) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
             if (job.open_status or job.watch_status) {
                 job.result.status = try job.status(task.io, &current, job.files.scratch, job.status_taken, if (job.open_status) null else job.status_shown, job.status_actions);
@@ -496,16 +505,16 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.latest_ending = if (job.opening) null else job.latest_ending;
         for (page.facts.items[0..page.facts.count]) |item| observeEnding(&job.result.latest_ending, item, job.session, job.sessionProvider());
         if (job.opening and job.result.latest_ending == null and page.facts.more) {
-            try latestEnding(requests, job, page.facts.end);
+            try latestEnding(reads, job, page.facts.end);
         }
         if (job.result.line) |*line| if (job.hint_wanted and line.label == null) if (line.first) |first| {
-            job.result.hint = try readHint(requests, job, first);
+            job.result.hint = try readHint(reads, job, first);
         };
         job.result.live = View.Live.init(page.facts.call_activity);
         job.result.queued = page.facts.queued;
         const queued = page.facts.queued;
         if (queued.count != 0 and queued.newest_admission != job.queued_line) {
-            job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(requests, job, queued.newest_position, queued.newest_content orelse return error.InvalidActivityPage, .fails)).? };
+            job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(reads, job, queued.newest_position, queued.newest_content orelse return error.InvalidActivityPage, .fails)).? };
         }
     }
     try job.files.inspection.setLength(task.io, 0);
@@ -530,7 +539,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = .{ .text = answer.content } },
             else => null,
         } };
-        row.provisional = try View.render(requests, job.store, job.session, job.files.parts, job.sessionProvider(), item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
+        row.provisional = try View.renderWith(reads, job.files.parts, job.sessionProvider(), item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
         row.tight = View.tight(item.value);
         try capture.finish();
         row.length = capture.length;
@@ -557,7 +566,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
 }
 
-fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: []const u8, provider: ?protocol.Provider) void {
+fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: []const u8, provider: ?@import("connection.zig").Name) void {
     const key: Key = .{ .position = item.position, .ordinal = item.ordinal };
     if (latest.*) |old| if (key.order(old.key) != .gt) return;
     const marks = @import("marks.zig");
@@ -569,12 +578,12 @@ fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: [
     latest.* = .{ .key = key, .cause = cause };
 }
 
-fn latestEnding(requests: client.Requests, job: *Job, end: u64) !void {
+fn latestEnding(reads: client.SessionReads, job: *Job, end: u64) !void {
     var cursor: protocol_reply.ActivityCursor = .{ .end = end, .direction = .backward, .kinds = .initMany(&.{ .turn_ended, .stop }) };
     while (true) {
-        const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
+        const page = switch (try reads.activityPage(cursor)) {
             .page => |page| page,
-            .failure => |failure| return requests.failRead(failure),
+            .failure => |failure| return reads.failRead(failure),
         };
         for (page.facts.items[0..page.facts.count]) |item| observeEnding(&job.result.latest_ending, item, job.session, job.sessionProvider());
         if (job.result.latest_ending != null) return;
@@ -1022,7 +1031,7 @@ test "session_reads the Session line takes archive and other facts from Current 
     }) |case| {
         for ([_]protocol.SessionArchiveState{ .active, .archiving, .archived }) |archive| {
             var bytes: [4096]u8 = undefined;
-            const report = try std.fmt.bufPrint(&bytes, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt\\u0001x\",\"revision\":\"3\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"{s}\",\"instructions\":" ++ reference_format ++ ",\"output_schema\":null,\"reasoning_effort\":{s},\"reasoning_effort_override\":null,\"compaction_trigger\":{s},\"context_estimate\":{s},\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":{s},\"created_at\":\"1\"}},\"archive_state\":\"{s}\",\"pending_messages\":\"0\",\"work\":{{\"state\":{{\"kind\":\"idle\",\"since\":\"1\"}},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"latest_outcome\":null}},\"peers\":{{\"from_person_at\":null}},\"first_message\":{s},\"selected_message\":null,\"recent_messages\":[],\"actions\":{{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]}},\"rejected_calls\":{{\"count\":\"0\",\"items\":[]}},\"actionable_permissions\":[],\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}}}", .{ case.mode, case.effort, case.trigger, case.estimate, case.label, @tagName(archive), case.first });
+            const report = try std.fmt.bufPrint(&bytes, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"connection\":\"codex\",\"model\":\"gpt\\u0001x\",\"revision\":\"3\",\"tools\":[],\"loaded_tools\":[],\"app_tools\":[],\"permission_mode\":\"{s}\",\"instructions\":" ++ reference_format ++ ",\"output_schema\":null,\"reasoning_effort\":{s},\"reasoning_effort_override\":null,\"compaction_trigger\":{s},\"context_estimate\":{s},\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":{s},\"created_at\":\"1\"}},\"archive_state\":\"{s}\",\"pending_messages\":\"0\",\"work\":{{\"state\":{{\"kind\":\"idle\",\"since\":\"1\"}},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"latest_outcome\":null}},\"peers\":{{\"from_person_at\":null}},\"first_message\":{s},\"selected_message\":null,\"recent_messages\":[],\"actions\":{{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]}},\"rejected_calls\":{{\"count\":\"0\",\"items\":[]}},\"actionable_permissions\":[],\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}}}", .{ case.mode, case.effort, case.trigger, case.estimate, case.label, @tagName(archive), case.first });
             try file.setLength(io, 0);
             try file.writePositionalAll(io, report, 0);
             const reply = protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } }) catch |err| {
@@ -1382,6 +1391,216 @@ test "SUI-49 Message placement preserves provenance across pages" {
     var host: FakeHost = .{ .history = 0, .tail = &.{}, .end = 0 };
     var domain: Domain = .{};
     try host.withHost(&domain);
+}
+
+test "CLI-35 an Activity read keeps its resolved Store across alias retarget" {
+    const Host = struct {
+        first: [8192]u8 = undefined,
+        first_len: usize = 0,
+        pub fn answer(self: *@This(), fd: std.posix.fd_t) !void {
+            var request_buffer: [8192]u8 = undefined;
+            const request = try fake_host.readRequest(fd, &request_buffer) orelse return;
+            try std.testing.expect(request.is("/v1/activity-page"));
+            if (self.first_len == 0) {
+                @memcpy(self.first[0..request.body.len], request.body);
+                self.first_len = request.body.len;
+            } else {
+                try std.testing.expectEqualSlices(u8, self.first[0..self.first_len], request.body);
+            }
+            var storage: [2048]u8 = undefined;
+            var arena = std.heap.FixedBufferAllocator.init(&storage);
+            const body = try std.json.parseFromSliceLeaky(struct { store: []const u8 }, arena.allocator(), request.body, .{ .ignore_unknown_fields = true });
+            const fixture: FakeHost = .{ .history = 50, .tail = &.{}, .end = 50 };
+            var page = fixture.page(50, 25, null, .backward, .full, 7);
+            try page.work.workspace.set(body.store);
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            try activity_reply.writePage(&output.writer, &page);
+            fake_host.respond(fd, "200 OK", "application/json", "", output.written());
+        }
+    };
+    const Action = struct {
+        pub fn run(_: *@This(), host: *Host, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            try dir.createDir(io, "other", .fromMode(0o700));
+            try dir.symLink(io, ".", "alias", .{ .is_directory = true });
+            var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias", .{root});
+            const paths = try client.resolveClientPaths(io, alias);
+            const requests: client.Requests = .{ .io = io };
+            const cursor: protocol_reply.ActivityCursor = .{ .end = 50, .position = 25, .direction = .backward, .limit = 7 };
+            try std.testing.expectError(error.InvalidSession, requests.activityPageAt(&paths, "invalid", cursor));
+            try std.testing.expectError(error.InvalidCursor, requests.activityPageAt(&paths, "k7m2qx", .{ .limit = 0 }));
+            var cancelled: client.Cancellation = .{};
+            cancelled.requestStop();
+            try std.testing.expectError(error.Cancelled, (client.Requests{ .io = io, .cancellation = &cancelled }).activityPageAt(&paths, "k7m2qx", cursor));
+            const initial = try requests.activityPage(alias, "k7m2qx", cursor);
+            try std.testing.expect(initial == .page);
+            try std.testing.expectEqualStrings(paths.store_identity.slice(), initial.page.facts.work.workspace.slice());
+            try dir.deleteFile(io, "alias");
+            try dir.symLink(io, "other", "alias", .{ .is_directory = true });
+            const retargeted = try client.resolveClientPaths(io, alias);
+            try std.testing.expect(!paths.store_identity.eql(retargeted.store_identity.slice()));
+            const reply = try requests.activityPageAt(&paths, "k7m2qx", cursor);
+            try std.testing.expect(reply == .page);
+            try std.testing.expectEqualStrings(paths.store_identity.slice(), reply.page.facts.work.workspace.slice());
+            try std.testing.expectEqualDeep(initial.page.continuation(), reply.page.continuation());
+            try std.testing.expectEqual(@as(u64, 18), reply.page.continuation().?.position);
+            _ = host;
+        }
+    };
+    var host: Host = .{};
+    var action: Action = .{};
+    try fake_host.withHost(&host, &action);
+}
+
+test "CLI-36 one Session scan and permission retain their resolved Store route" {
+    const current = "{\"version\":\"" ++ protocol.wire_version ++ "\"," ++
+        \\"type":"session_report","delta":"full","since":null,"profile":"current","session":{"reference":"k7m2qx","parent":null,"workspace":"/w","connection":"codex","model":"model-a","compaction_trigger":"115200","context_estimate":"56","output_reservation":"0","compaction_trigger_override":"115200","output_reservation_override":null,"reasoning_effort":"low","reasoning_effort_override":"low","revision":"1","tools":["bash","web_search"],"loaded_tools":["bash","web_search"],"app_tools":[],"permission_mode":"ask","instructions":{"type":"text","bytes":"0","sha256":"11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"},"output_schema":null,"label":null,"created_at":"1"},"archive_state":"active","pending_messages":"0","work":{"state":{"kind":"approval","since":"1"},"turn":"2","operation":"2","first_action":"2","attention":{"kind":"approval","turn":"2","step":"2"},"group":"needs_you","actions":{"stop":true,"interrupt":null,"decide":"2"},"latest_outcome":null},"peers":{"from_person_at":"1"},"first_message":{"position":"1","admission":"1","admitted_at":"1","sender":null,"content":{"type":"text","bytes":"5","sha256":"295e577a7a0c2608c470cb327496d5b7f60b8f53b5ebf48f6878d2cdd614e333"}},"selected_message":"golden-mixed-key","recent_messages":[{"turn":"1","message":"golden-answer-key","outcome":"completed"}],"actions":{"count":"2","unresolved":[{"action":"2","parent_operation":"2","call_ordinal":"1","tool":"bash","permission_revision":"1","authorization":"pending","call_id":{"type":"text","bytes":"3","sha256":"8e86e6644aa2b109430eaa8ca07939190490ac61a33862f788b398d49d2e35a5"},"arguments":{"type":"text","bytes":"52","sha256":"7ef3f0e0b68ea2d333b93093dbe1261a18c901ad73ef684361bf94d12056045c"},"presentation":{"description":"Run","code":"pending_permission","publication_position":null}}],"resolved":[{"action":"1","parent_operation":"2","call_ordinal":"0","code":"denied","acceptance_position":"13","result":{"type":"text","bytes":"18","sha256":"a251e0c566a1f73bb2338367bf1cd6e75d2ebc1e0b6d0657a7debe776a3bd881"},"presentation":{"description":"Run","code":"denied","publication_position":null}}]},"rejected_calls":{"count":"1","items":[{"parent_operation":"2","call_ordinal":"2","code":"unknown_tool","acceptance_position":"12","result":{"type":"text","bytes":"20","sha256":"e64dbe3bb67e66a800ef3ea2b21801b5f5d5025f4ba2d7a088788e6b4e0d23a7"},"name":{"type":"text","bytes":"5","sha256":"f23807757d15c3493a5f622898047eee4f2949fc3ae4d5d05afa1185dcbd240b"},"call_id":{"type":"text","bytes":"5","sha256":"3decf9438cc4009dec87c0e881fc714a1ad6abdd7fb6f231e1b5996e7aa26932"},"arguments":{"type":"text","bytes":"2","sha256":"de16d1a68a8e3c9eea4e69185cb547810c9ac3a2999dec7e76dbf073dac34663"},"presentation":{"description":null,"code":"unknown_tool","publication_position":null}}]},"actionable_permissions":[{"action":"2","permission_revision":"1"}],"execution":{"status":"partial","dispatch_fenced":false,"custody_occupied":"0","scratch_used_bytes":"0","unavailable":["structured_output"]}}
+    ;
+    const Mode = enum { queued, stop, permission };
+    const Host = struct {
+        mode: Mode,
+        change_alias: bool,
+        refuse_content: bool,
+        retarget_after_stop_search: bool = false,
+        dir: std.Io.Dir = undefined,
+        root: []const u8 = "",
+        moved: bool = false,
+        page_count: usize = 0,
+        content_count: usize = 0,
+        current_count: usize = 0,
+        arguments_count: usize = 0,
+
+        fn retarget(self: *@This()) !void {
+            if (!self.change_alias or self.moved) return;
+            try self.dir.deleteFile(std.testing.io, "route-alias");
+            try self.dir.symLink(std.testing.io, "other", "route-alias", .{ .is_directory = true });
+            self.moved = true;
+        }
+
+        pub fn answer(self: *@This(), fd: std.posix.fd_t) !void {
+            var buffer: [8192]u8 = undefined;
+            const request = try fake_host.readRequest(fd, &buffer) orelse return;
+            var storage: [4096]u8 = undefined;
+            var arena = std.heap.FixedBufferAllocator.init(&storage);
+            const Cursor = struct { store: []const u8, session: []const u8, action: ?[]const u8 = null, end: ?[]const u8 = null, position: ?[]const u8 = null, ordinal: ?[]const u8 = null, direction: []const u8 = "forward", kinds: []const protocol.ActivityItem.Kind = &.{}, limit: []const u8 = "16" };
+            const wire = try std.json.parseFromSliceLeaky(Cursor, arena.allocator(), request.body, .{ .ignore_unknown_fields = true });
+            try std.testing.expectEqualStrings(self.root, wire.store);
+            try std.testing.expectEqualStrings("k7m2qx", wire.session);
+            if (request.is("/v1/activity-page")) {
+                self.page_count += 1;
+                var page: protocol.ActivityFacts = undefined;
+                if (self.mode == .permission) {
+                    page = .{ .end = 2, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .approval = .{ .since = 1 } }, .turn = 2, .operation = 2, .first_action = 2, .actions = .{ .stop = true, .decide = 2 } } } };
+                    try page.work.workspace.set("/w");
+                } else {
+                    const admission = FakeHost.message(1);
+                    const tails = [_]FakeHost.Tail{
+                        .{ .value = admission, .excluded_at = if (self.mode == .stop) 2 else null },
+                        .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 1, .completion = .completed } } },
+                    };
+                    const fixture: FakeHost = .{ .history = 0, .tail = tails[0..if (self.mode == .stop) 2 else 1], .end = if (self.mode == .stop) 2 else 1, .held = self.mode == .queued };
+                    const end = if (wire.end) |value| try std.fmt.parseInt(u64, value, 10) else fixture.end;
+                    const position = if (wire.position) |value| try std.fmt.parseInt(u64, value, 10) else 0;
+                    const ordinal = if (wire.ordinal) |value| try std.fmt.parseInt(u64, value, 10) else null;
+                    var kinds: protocol.ActivityPage.Kinds = .{};
+                    for (wire.kinds) |kind| kinds.insert(kind);
+                    page = fixture.page(end, position, ordinal, if (std.mem.eql(u8, wire.direction, "backward")) .backward else .forward, kinds, try std.fmt.parseInt(u8, wire.limit, 10));
+                }
+                if (self.mode != .permission and self.page_count == 1 and !self.retarget_after_stop_search) try self.retarget();
+                if (self.mode == .stop and self.page_count == 2 and self.retarget_after_stop_search) try self.retarget();
+                var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+                defer output.deinit();
+                try activity_reply.writePage(&output.writer, &page);
+                fake_host.respond(fd, "200 OK", "application/json", "", output.written());
+                return;
+            }
+            if (request.is("/v1/activity-content")) {
+                self.content_count += 1;
+                if (self.refuse_content) return fake_host.refuse(fd, .activity_unavailable, "ContentNotFound");
+                fake_host.respondContent(fd, FakeHost.text);
+                return;
+            }
+            if (request.is("/v1/inspect-session")) {
+                self.current_count += 1;
+                try self.retarget();
+                fake_host.respond(fd, "200 OK", "application/json", "", current);
+                return;
+            }
+            if (request.is("/v1/read-action-arguments")) {
+                self.arguments_count += 1;
+                try std.testing.expectEqualStrings("2", wire.action.?);
+                fake_host.respond(fd, "200 OK", "text/plain; charset=utf-8", "", "{\"description\":\"Run\",\"cmd\":\"true\",\"timeout_ms\":null}");
+                return;
+            }
+            return error.UnexpectedRequest;
+        }
+    };
+    const Action = struct {
+        mode: Mode,
+        pub fn run(self: *@This(), host: *Host, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            try dir.createDir(io, "other", .fromMode(0o700));
+            try dir.symLink(io, ".", "route-alias", .{ .is_directory = true });
+            var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/route-alias", .{root});
+            // Each role gets its own file: permission reads arguments from scratch while writing its display to action.
+            const names = [_][]const u8{ "scan-scratch", "scan-inspection", "scan-action", "scan-details", "scan-actions-0", "scan-actions-1", "scan-parts" };
+            var files: [names.len]std.Io.File = undefined;
+            for (names, &files) |name, *file| file.* = try dir.createFile(io, name, .{ .read = true });
+            defer for (files) |file| file.close(io);
+            host.dir = dir;
+            host.root = root;
+            var job: Job = .{ .store = alias, .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = if (self.mode == .queued) 1 else 2 } };
+            job.files = .{ .scratch = files[0], .inspection = files[1], .action = files[2], .details = files[3], .actions = .{ files[4], files[5] }, .parts = files[6] };
+            var task: Task = .{ .io = io };
+            if (host.refuse_content) {
+                try std.testing.expectError(error.HostInvocationFailed, scan(&job, &task));
+                try std.testing.expectEqualStrings("ContentNotFound", task.read_failure.?.diagnostic.code.slice());
+                return;
+            }
+            if (self.mode == .permission) try permission(&job, &task) else try scan(&job, &task);
+            try std.testing.expectEqual(host.change_alias, host.moved);
+            if (self.mode == .queued) {
+                try std.testing.expectEqualStrings("please wait", job.result.queued_line.?.line.slice());
+                try std.testing.expectEqual(@as(usize, 1), host.content_count);
+            } else if (self.mode == .stop) {
+                try std.testing.expectEqual(@as(usize, 3), host.page_count);
+                try std.testing.expectEqual(@as(usize, 1), host.content_count);
+            } else {
+                try std.testing.expectEqual(@as(?u64, 2), job.result.action);
+                try std.testing.expectEqual(@as(usize, 1), host.current_count);
+                try std.testing.expectEqual(@as(usize, 1), host.arguments_count);
+            }
+        }
+    };
+    for ([_]Mode{ .queued, .stop, .permission }) |mode| for ([_]bool{ false, true }) |change_alias| {
+        var host: Host = .{ .mode = mode, .change_alias = change_alias, .refuse_content = false };
+        var action: Action = .{ .mode = mode };
+        try fake_host.withHost(&host, &action);
+    };
+    {
+        var host: Host = .{ .mode = .stop, .change_alias = true, .refuse_content = false, .retarget_after_stop_search = true };
+        var action: Action = .{ .mode = .stop };
+        try fake_host.withHost(&host, &action);
+    }
+    for ([_]bool{ false, true }) |change_alias| {
+        var host: Host = .{ .mode = .queued, .change_alias = change_alias, .refuse_content = true };
+        var action: Action = .{ .mode = .queued };
+        try fake_host.withHost(&host, &action);
+    }
+    try std.testing.expect(!@hasDecl(client.SessionReads, "sendCaptured"));
+    try std.testing.expect(!@hasDecl(client.SessionReads, "publishAction"));
+    var cancelled: Task = .{ .io = std.testing.io };
+    cancelled.cancellation.requestStop();
+    var invalid: Job = .{ .store = "/never-open", .session = "invalid" };
+    try std.testing.expectError(error.Cancelled, scan(&invalid, &cancelled));
+    var task: Task = .{ .io = std.testing.io };
+    try std.testing.expectError(error.InvalidSession, scan(&invalid, &task));
+    invalid.session = "k7m2qx";
+    invalid.feed_page = .{ .direction = .forward, .kinds = .all, .started_from = null, .from = null, .limit = 0 };
+    try std.testing.expectError(error.InvalidCursor, scan(&invalid, &task));
 }
 
 test "session_reads opening reads one Activity page whatever the history before it" {

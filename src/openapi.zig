@@ -1,7 +1,10 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const model_catalog = @import("model_catalog.zig");
 const session_settings = @import("session_settings.zig");
 const tool_name = @import("tool_name.zig");
+const tool_record = @import("tool_record.zig");
+const app_tools = @import("tool_record.zig").app_tools;
 const protocol = @import("protocol.zig");
 const command_spec = @import("command_spec.zig");
 const wire_request = @import("wire_request.zig");
@@ -134,7 +137,7 @@ pub const routes = [_]Route{
         .kind = .host_info,
         .summary = "The Host's identity, capacity and provider routes. Also the readiness probe.",
         .variants = &.{variant(protocol.host_info_request, .{})},
-        .reply = jsonReply(.{protocol.host_info_reply.head ++ .{ Optional(protocol.host_info_reply.doublewrite), Optional(protocol.host_info_reply.settings_digest) } ++ protocol.host_info_reply.tail}),
+        .reply = jsonReply(.{protocol.host_info_reply.head ++ .{ Optional(protocol.host_info_reply.doublewrite), Optional(protocol.host_info_reply.settings_digest) } ++ .{ protocol.host_info_reply.connections_head, ListOf(ConnectionEntry), protocol.host_info_reply.connections_tail }}),
     },
     .{
         .path = "/v1/control/host-stop",
@@ -303,7 +306,7 @@ pub const routes = [_]Route{
     .{
         .path = "/v1/model-list",
         .kind = .model_list,
-        .summary = "The models each served provider offers.",
+        .summary = "The models each served connection offers.",
         .variants = &.{variant(protocol.model_list_request, .{})},
         .reply = jsonReply(.{.{ protocol.model_list_reply.head, ListOf(ModelListEntry), protocol.model_list_reply.tail }}),
     },
@@ -457,6 +460,20 @@ const Tool = protocol.BuiltInTool;
 
 const ToolNameList = ToolNameListOf(false);
 
+/// The names of the app tools a lane root declared: the report's `app_tools`, not the offer.
+const AppToolNameList = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        return d.object(.{
+            .type = Value{ .string = "array" },
+            .items = try toolName(d),
+            .maxItems = Value{ .integer = app_tools.max_records },
+            .uniqueItems = Value{ .bool = true },
+            .@"x-rui-max-bytes" = Value{ .integer = protocol.max_tool_list_name_bytes },
+            .description = Value{ .string = "None repeated; the names' bytes total at most x-rui-max-bytes. Current: the app tools this Session's lane declares. Full revision: the app tools that revision itself declared (empty on a child)." },
+        });
+    }
+};
+
 fn ToolNameListOf(comptime offered: bool) type {
     return struct {
         pub fn openapi_inline(d: *Document) !Value {
@@ -506,12 +523,43 @@ fn configurationMembers(comptime index: usize) type {
         .decimal_policy => Plain(TokenCount, entry.nullable),
         .tools => Plain(ToolNameList, entry.nullable),
         .content => Plain(if (entry.json_object) SchemaObject else Content, entry.nullable),
+        .app_tools => Plain(AppToolList, entry.nullable),
     };
     const member = .{ (if (index == 0) "" else ",") ++ "\"" ++ entry.spec ++ "\":", value };
     return struct {
         const shape = .{Optional(member)} ++ configurationMembers(index + 1).shape;
     };
 }
+
+/// One declared app tool, as tool_record.app_tools reads it; the bounds are the owners' constants.
+const app_tool_record_schema = std.fmt.comptimePrint(
+    "{{\"type\":\"object\",\"properties\":{{" ++
+        "\"name\":{{\"type\":\"string\",\"pattern\":\"^[A-Za-z0-9_-]{{1,{d}}}$\"}}," ++
+        "\"description\":{{\"type\":\"string\",\"minLength\":1,\"x-rui-max-bytes\":{d}}}," ++
+        "\"input_schema\":{{\"type\":\"object\",\"additionalProperties\":true}}," ++
+        "\"replay\":{{\"type\":\"string\",\"enum\":[\"safe\",\"unsafe\"]}}," ++
+        "\"restart_limit\":{{\"type\":\"integer\",\"minimum\":0,\"maximum\":{d}}}," ++
+        "\"wait_ms\":{{\"type\":\"integer\",\"minimum\":{d},\"maximum\":{d}}}}}," ++
+        "\"required\":[\"name\",\"description\",\"input_schema\"],\"additionalProperties\":false}}",
+    .{
+        tool_name.max_bytes,
+        @import("tool_presentation.zig").max_description_bytes,
+        tool_record.max_app_restart_limit,
+        tool_record.min_app_wait_ms,
+        tool_record.max_app_wait_ms,
+    },
+);
+
+/// The `appTools` member of a lane root's create or configure: the records, at most `app_tools.max_records`.
+const AppToolList = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        const item = try std.json.parseFromSliceLeaky(Value, d.arena, app_tool_record_schema, .{});
+        return d.object(.{ .type = Value{ .string = "array" }, .items = item, .maxItems = Value{ .integer = app_tools.max_records } });
+    }
+    pub fn openapi_example(out: *std.Io.Writer) !void {
+        try out.writeAll("[]");
+    }
+};
 
 const SchemaObject = struct {
     pub fn openapi_inline(d: *Document) !Value {
@@ -541,8 +589,12 @@ const ConversationItem = struct {
     }
 };
 
+const ConnectionEntry = struct {
+    pub const openapi_shape = protocol.host_info_reply.connection_entry;
+};
+
 const ModelListEntry = struct {
-    pub const openapi_shape = .{ "{\"provider\":\"", Hole{ .tag = protocol.Provider }, "\",\"source\":\"", Hole{ .tag = model_list.Source }, "\",\"models\":", ListOf(.{ "{\"id\":", Hole{ .string = protocol.max_model_bytes }, ",\"known\":", Hole.boolean, "}" }), "}" };
+    pub const openapi_shape = .{ "{\"connection\":\"", Hole{ .text = @import("connection.zig").max_name_bytes }, "\",\"source\":\"", Hole{ .tag = model_list.Source }, "\",\"models\":", ListOf(.{ "{\"id\":", Hole{ .string = protocol.max_model_bytes }, ",\"known\":", Hole.boolean, "}" }), "}" };
 };
 
 const ToolNames = struct {
@@ -730,6 +782,7 @@ pub const Document = struct {
         if (@hasDecl(T, "openapi_list")) return d.object(.{ .type = Value{ .string = "array" }, .items = try d.typeRef(T.openapi_list) });
         if (@hasDecl(T, "openapi_tools")) return ToolNameList.openapi_inline(d);
         if (@hasDecl(T, "openapi_offered_tools")) return ToolNameListOf(true).openapi_inline(d);
+        if (@hasDecl(T, "openapi_app_tool_names")) return AppToolNameList.openapi_inline(d);
         if (@hasDecl(T, "openapi_tool_name")) return toolName(d);
         if (@hasDecl(T, "openapi_content")) return Content.openapi_inline(d);
         const name = comptime componentName(T);
@@ -846,6 +899,12 @@ pub const Document = struct {
             value = try d.osBytes(if (fact.native_path_limit) null else fact.max_bytes.?, hex.pattern, if (fact.native_path_limit) null else hex.max_length);
         } else if (fact.format != null and std.mem.eql(u8, fact.format.?, "agent-spec")) {
             value = try d.ref("AgentSpec");
+        } else if (fact.format != null and std.mem.eql(u8, fact.format.?, "connection-list")) {
+            value = try d.object(.{
+                .type = Value{ .string = "array" },
+                .maxItems = try d.unsigned(fact.set_capacity.?),
+                .items = try d.object(.{ .type = Value{ .string = "object" } }),
+            });
         } else {
             value = try d.object(.{ .type = Value{ .string = @tagName(fact.type) } });
             if (fact.max_bytes) |maximum| value = try d.boundedString(maximum);
@@ -906,7 +965,7 @@ pub const Document = struct {
         }
         try spec.object.put(d.arena, "required", .{ .array = required });
         const spec_properties = spec.object.getPtr("properties").?;
-        try spec_properties.object.put(d.arena, "provider", try d.enumeration(protocol.Provider, false));
+        try spec_properties.object.put(d.arena, "connection", try d.boundedString(@import("connection.zig").max_name_bytes));
         try spec_properties.object.put(d.arena, "workspace", try d.wireSchema([]const u8));
         try d.schemas.put(d.arena, "AgentSpec", spec);
         var visitor: SettingsSchema = .{ .document = d };
@@ -1562,13 +1621,13 @@ fn applySettingsSample(d: *Document, pattern: []const u8, value: Value, accepted
     defer settings.deinit();
     var failure: start_report.Failure = undefined;
     if (accepted) {
-        try host_settings.apply(settings, d.arena, text, .pipe, checkSettingsPreset, &failure);
+        try host_settings.apply(settings, d.arena, text, .pipe, .{ .preset = checkSettingsPreset, .host_field = @import("provider.zig").hostField }, &failure);
         var output: std.Io.Writer.Allocating = .init(d.arena);
         try host_settings.write(settings, &output.writer);
         const written = try std.json.parseFromSliceLeaky(Value, d.arena, output.written(), .{ .parse_numbers = false });
         try std.testing.expect(conforms(d.schemas, schema, written));
     } else {
-        try std.testing.expectError(error.SettingsInvalid, host_settings.apply(settings, d.arena, text, .pipe, checkSettingsPreset, &failure));
+        try std.testing.expectError(error.SettingsInvalid, host_settings.apply(settings, d.arena, text, .pipe, .{ .preset = checkSettingsPreset, .host_field = @import("provider.zig").hostField }, &failure));
     }
 }
 
@@ -1961,8 +2020,8 @@ fn publishedReplyExamples() !void {
     const ids = "gpt-6.1-sol\nmy\"model\n";
     try out.writer.writeAll(protocol.model_list_reply.head);
     try model_list.writeProviders(&out.writer, model_catalog.shipped, &.{
-        .{ .provider = .codex, .list = .catalog },
-        .{ .provider = .openai, .list = .{ .live = .{ .bytes = ids } } },
+        .{ .provider = provider_route.nameOf(.codex), .list = .catalog },
+        .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = ids } } },
     });
     try out.writer.writeAll(protocol.model_list_reply.tail);
     try Case.check(schemas, "ModelListReply", out.written(), a);
@@ -2052,7 +2111,7 @@ test "Host information has one schema with an omittable bounded diagnostic" {
                 .started_at = 1792918800,
                 .custody_occupied = 0,
                 .paused = false,
-                .routes = protocol.routesAll(.unserved),
+                .connections = &.{},
                 .doublewrite = doublewrite,
                 .settings_digest = null,
             }});
@@ -2076,7 +2135,7 @@ test "Host information has one schema with an omittable bounded diagnostic" {
         .started_at = 1792918800,
         .custody_occupied = 0,
         .paused = false,
-        .routes = protocol.routesAll(.unserved),
+        .connections = &.{},
         .doublewrite = null,
         .settings_digest = @splat(0xaa),
     }});

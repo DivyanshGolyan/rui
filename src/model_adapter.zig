@@ -1575,8 +1575,7 @@ pub const Preparation = struct {
         self.request.length = self.writer.offset;
         self.request.charged = self.writer.charged;
         self.request.structured_output = self.settings.output_schema != null;
-        // Until the Host takes connection names (commit 6), only built-in names reach a Preparation: the Store writes served names only.
-        self.request.provider = provider_route.builtInOf(self.settings.provider) orelse unreachable;
+        self.request.provider = self.settings.provider;
         self.request.codec = self.settings.codec;
         return .{ .prepared = &self.request };
     }

@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
             std.fmt.bytesToHex(ready.instance, .lower),
             ready.active_capacity,
             if (ready.capabilities.bash) "true" else "false",
-            @tagName(ready.capabilities.providers.codex),
+            @tagName(ready.capabilities.connections.route("codex")),
             ready.started_at,
             ready.custody_occupied,
         }),

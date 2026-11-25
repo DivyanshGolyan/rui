@@ -224,6 +224,16 @@ The endpoint comes from the [Host settings](#save-host-settings); a running Host
 An invalid one stops a Host explicitly configured to serve `openai`; with automatic provider selection, the Host reports it and starts serving its ChatGPT sign-ins only.
 Sessions of a provider the Host does not serve wait until a Host that serves it starts.
 Without a `providers` setting, every start path uses automatic provider selection: device-code sign-in is served even while signed out, browser sign-in when its credential is usable, and OpenAI when its key is usable. To serve no model providers, pass `--set 'providers={}'`.
+
+## Key connections
+
+A settings document may name key connections in a `connections` list. Each entry is served under its own `name` (lowercase letters, digits and `-`, at most 16 bytes) at its own `base_url`, with the key its `credential` source names: a private `file`, an `env` variable, or the connection's saved key file (`RUI_<NAME>_KEY_FILE`, else `HOME/.config/rui/<name>.key`). The Host reads each key once at start, as it does for `providers`; the key bytes never enter the settings document. Only one shape is served: a key, one Responses format, and no extra headers, refusal rules or command sources. Other shapes are refused by name at start.
+
+A document with no `connections` list adds no connection: OpenAI is served, or not, by the `providers` selection above.
+
+`rui auth login openai` saves its key as the connection named `openai` in the document's `connections` list, with the key in a private file beside the document. It leaves the other connections as they are. A connection named `openai` takes the place of the built-in `openai` provider, with its own endpoint, format and tools.
+
+This version serves a connection only under a built-in name (`codex`, `openai` or `chatgpt`), where it replaces that provider's entry; a connection under any other name is refused by name at start. The model picker does not list a connection's models yet.
 The [Host reference](contracts/host.md#platforms-and-server-lifetime) states the startup and shutdown guarantees.
 
 ## Export a failed model response

@@ -1,4 +1,5 @@
 const std = @import("std");
+const connection = @import("connection.zig");
 const ModelLists = @import("ModelLists.zig");
 const test_pause = @import("testing/pause.zig");
 const cli_grammar = @import("cli_grammar.zig");
@@ -1102,32 +1103,6 @@ pub const Probes = struct {
     }
 };
 
-pub const Host = struct {
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    lease: *platform.StoreLease,
-    store: *store_module.Store,
-    lifecycle: *Lifecycle = undefined,
-    /// Set by serveOpened, or by TestParts.attach in tests, before any Host method that reads probes runs.
-    probes: *Probes = undefined,
-    instance: protocol.InstanceId = undefined,
-    limits: Limits = .{},
-    providers: *const providers_module.Providers = &providers_module.none,
-    presets: []const core_tools.Preset = &.{},
-    model_lists: ModelLists = .{},
-    bash_facts: environment.HostFacts = bash.default_facts,
-    environments: ?*SessionEnvironments = null,
-    mcp_servers: @import("mcp/servers.zig").Servers = .{},
-    retention: *output_retention.Queue = undefined,
-    intake_capacity: usize = product_defaults.intake_capacity,
-    descriptor_soft_limit: ?usize = null,
-    scratch_used: std.atomic.Value(u64) = .init(0),
-    started_at: u64 = 0,
-    /// The frozen settings frame a detached Host was started with; null for a foreground Host.
-    settings_digest: ?settings_handoff.Digest = null,
-    allowance_diagnostic: AllowanceDiagnostic = .{},
-};
-
 pub fn nowNs(io: std.Io) u64 {
     return @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
 }
@@ -1169,7 +1144,7 @@ fn allowanceField(comptime T: type, field: provider.AllowanceField(T), buffer: [
 
 fn formatAllowance(observation: provider.AllowanceObservation, lost: bool, buffer: []u8) ![]const u8 {
     var values: [6][64]u8 = undefined;
-    return std.fmt.bufPrint(buffer, "rui: allowance source_account=unconfirmed provider={s} turn={d} operation={d} attempt={d} status={d} observed_at={d} delivery=completion prior_loss={s} primary_used={s} primary_minutes={s} primary_reset_at={s} secondary_used={s} secondary_minutes={s} secondary_reset_at={s}\n", .{ @tagName(observation.provider), observation.binding.turn_id, observation.binding.operation_id, observation.binding.attempt_ordinal, observation.status, observation.observed_at, if (lost) "true" else "false", allowanceField(f64, observation.primary.used, &values[0]), allowanceField(u64, observation.primary.minutes, &values[1]), allowanceField(u64, observation.primary.reset_at, &values[2]), allowanceField(f64, observation.secondary.used, &values[3]), allowanceField(u64, observation.secondary.minutes, &values[4]), allowanceField(u64, observation.secondary.reset_at, &values[5]) });
+    return std.fmt.bufPrint(buffer, "rui: allowance source_account=unconfirmed provider={s} turn={d} operation={d} attempt={d} status={d} observed_at={d} delivery=completion prior_loss={s} primary_used={s} primary_minutes={s} primary_reset_at={s} secondary_used={s} secondary_minutes={s} secondary_reset_at={s}\n", .{ observation.provider.slice(), observation.binding.turn_id, observation.binding.operation_id, observation.binding.attempt_ordinal, observation.status, observation.observed_at, if (lost) "true" else "false", allowanceField(f64, observation.primary.used, &values[0]), allowanceField(u64, observation.primary.minutes, &values[1]), allowanceField(u64, observation.primary.reset_at, &values[2]), allowanceField(f64, observation.secondary.used, &values[3]), allowanceField(u64, observation.secondary.minutes, &values[4]), allowanceField(u64, observation.secondary.reset_at, &values[5]) });
 }
 
 test "CM-54 allowance diagnostic delivers bounded typed records and reports loss" {
@@ -1192,7 +1167,7 @@ test "CM-54 allowance diagnostic delivers bounded typed records and reports loss
     var diagnostic: AllowanceDiagnostic = .{};
     const sparse: provider.AllowanceObservation = .{
         .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 3 },
-        .provider = .codex,
+        .provider = connection.Name.parse("codex").?,
         .status = 200,
         .observed_at = 123,
         .primary = .{ .used = .{ .value = 9.5 }, .reset_at = .invalid },
@@ -1204,7 +1179,7 @@ test "CM-54 allowance diagnostic delivers bounded typed records and reports loss
     try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=codex turn=1 operation=2 attempt=3 status=200 observed_at=123 delivery=completion prior_loss=false primary_used=9.5e0 primary_minutes=missing primary_reset_at=invalid secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
     const extreme: provider.AllowanceObservation = .{
         .binding = .{ .turn_id = std.math.maxInt(u64), .operation_id = std.math.maxInt(u64), .attempt_ordinal = std.math.maxInt(u64) },
-        .provider = .chatgpt,
+        .provider = connection.Name.parse("chatgpt").?,
         .status = 599,
         .observed_at = std.math.maxInt(i64),
         .primary = .{ .used = .{ .value = std.math.floatMax(f64) }, .minutes = .{ .value = std.math.maxInt(u64) } },

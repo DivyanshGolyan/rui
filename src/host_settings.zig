@@ -1,6 +1,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const provider_name = @import("provider_name.zig");
+const connection = @import("connection.zig");
 const secret_value = @import("secret_value.zig");
 const preset_value = @import("preset_value.zig");
 const start_report = @import("start_report.zig");
@@ -30,6 +31,13 @@ pub const default_bash_path = "/bin/bash";
 pub const Error = error{ SettingsInvalid, OutOfMemory };
 pub const Origin = enum { pipe, file };
 pub const PresetCheck = *const fn (std.mem.Allocator, std.json.ObjectMap) error{OutOfMemory}!?[]const u8;
+
+/// The two owners a document needs from its shell: the preset checker, and
+/// the Host-owned header names a connection may not set (`provider.hostField`).
+pub const Checks = struct {
+    preset: PresetCheck,
+    host_field: connection.HostField,
+};
 const Kind = enum { text, path, url, count, flag, choice, secret, named, providers, presets };
 
 pub fn Text(comptime capacity: usize) type {
@@ -187,6 +195,7 @@ pub const Settings = struct {
     interface: Interface = .{},
     execution: Execution = .{},
     presets: Presets = .{},
+    connections: connection.Connections = .{},
     pub const doc = .{
         .store = "Where the Host keeps canonical facts. One Adapter.",
         .providers = "The providers served, exactly the listed set when present.",
@@ -196,6 +205,7 @@ pub const Settings = struct {
         .interface = "Where clients reach the Host and what ends it.",
         .execution = "How Turns run.",
         .presets = "Named creation specs held only by this Host.",
+        .connections = "Key connections this Host serves, each by its name.",
     };
     pub fn wipe(self: *Settings) void {
         wipeValue(Settings, self);
@@ -295,6 +305,11 @@ pub const Presets = struct {
         resetVacant(Presets, self, .{});
     }
 };
+/// Whether T is the connections list, whose parse, names and writing belong to the connection owner.
+fn isList(comptime T: type) bool {
+    return T == connection.Connections;
+}
+
 fn pathDefault(comptime text: []const u8) OsBytes(max_path_bytes) {
     var result: OsBytes(max_path_bytes) = .{};
     result.set(text) catch @compileError("invalid default path");
@@ -321,6 +336,7 @@ fn osBytesBound(bytes: usize) usize {
 }
 fn composedBound(comptime T: type) usize {
     if (@typeInfo(T) == .optional) return @max(4, composedBound(@typeInfo(T).optional.child));
+    if (comptime isList(T)) return 2 + connection.max_list * (6 * connection.max_document_bytes + 2);
     if (comptime isKind(T)) return switch (T.kind) {
         .text => quotedBound(T.max_bytes),
         .path => @max(4, osBytesBound(T.max_bytes)),
@@ -359,6 +375,7 @@ pub fn unresolved(settings: *const Settings) bool {
     return unresolvedValue(Settings, settings);
 }
 fn unresolvedValue(comptime T: type, value: *const T) bool {
+    if (comptime isList(T)) return true;
     if (@typeInfo(T) == .optional) {
         if (value.*) |*present| return unresolvedValue(@typeInfo(T).optional.child, present);
         return true;
@@ -466,6 +483,7 @@ fn isKind(comptime T: type) bool {
     };
 }
 fn collect(comptime T: type, comptime value: T, comptime prefix: []const u8, comptime doc: []const u8, comptime nullable: bool) []const Leaf {
+    if (comptime isList(T)) return &.{listLeaf(prefix, doc)};
     if (@typeInfo(T) == .optional) return collect(@typeInfo(T).optional.child, value orelse .{}, prefix, doc, true);
     if (comptime isKind(T)) {
         switch (T.kind) {
@@ -507,6 +525,18 @@ fn collect(comptime T: type, comptime value: T, comptime prefix: []const u8, com
         else => @compileError("not a Host settings kind: " ++ @typeName(T)),
     }
     return result;
+}
+fn listLeaf(comptime pattern: []const u8, comptime doc: []const u8) Leaf {
+    return .{
+        .pattern = pattern,
+        .kind = "connections",
+        .secret = false,
+        .default = "[]",
+        .doc = doc,
+        .json_schema = .{ .type = .object, .format = "connection-list", .set_capacity = connection.max_list },
+        .sample_json = "[]",
+        .sample_text = "[]",
+    };
 }
 fn leafFor(comptime T: type, comptime value: T, comptime pattern: []const u8, comptime doc: []const u8, comptime nullable: bool) Leaf {
     var row: Leaf = .{ .pattern = pattern, .kind = @tagName(T.kind), .secret = T.kind == .secret, .default = "", .doc = doc, .json_schema = .{ .type = .string, .nullable = nullable }, .sample_json = "", .sample_text = "" };
@@ -583,7 +613,7 @@ fn leafFor(comptime T: type, comptime value: T, comptime pattern: []const u8, co
             row.json_schema.format = "agent-spec";
             row.json_schema.set_capacity = preset_value.max_presets;
             row.json_schema.name_max_bytes = preset_value.max_preset_name_bytes;
-            row.sample_json = "{\"workspace\":\"/tmp/host-settings\",\"provider\":\"" ++ @tagName(std.enums.values(provider_name.Provider)[0]) ++ "\",\"model\":\"sample-model\",\"effort\":null,\"compactAt\":1000,\"tools\":[\"bash\"],\"permissionMode\":\"ask\"}";
+            row.sample_json = "{\"workspace\":\"/tmp/host-settings\",\"connection\":\"" ++ @tagName(std.enums.values(provider_name.Provider)[0]) ++ "\",\"model\":\"sample-model\",\"effort\":null,\"compactAt\":1000,\"tools\":[\"bash\"],\"permissionMode\":\"ask\"}";
             row.sample_text = row.sample_json;
         },
         .named, .providers => @compileError("set is not an atomic leaf"),
@@ -618,6 +648,7 @@ fn fieldKeys(comptime T: type) []const []const u8 {
     return keys;
 }
 fn collectGroups(comptime T: type, comptime prefix: []const u8, comptime doc: []const u8, comptime nullable: bool) []const Group {
+    if (comptime isList(T)) return &.{};
     if (@typeInfo(T) == .optional) return collectGroups(@typeInfo(T).optional.child, prefix, doc, true);
     if (comptime isKind(T)) return switch (T.kind) {
         .named => &[_]Group{.{ .pattern = prefix, .kind = .named, .doc = doc, .max_entries = T.max, .name_max_bytes = max_mcp_name_bytes, .name_format = .mcp }} ++ collectGroups(T.Child, joined(prefix, "*"), doc, false),
@@ -682,7 +713,7 @@ const Read = struct {
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
     origin: Origin,
-    check: PresetCheck,
+    checks: Checks,
     failure: *start_report.Failure,
     max_bytes: usize = max_document_bytes,
     max_depth: usize = protocol.max_json_depth,
@@ -771,16 +802,16 @@ fn parseJson(read: *const Read, document: []const u8, at: []const u8) Error!std.
     }
 }
 
-pub fn apply(settings: *Settings, gpa: std.mem.Allocator, document: []const u8, origin: Origin, check: PresetCheck, failure: *start_report.Failure) Error!void {
-    return applyBounded(settings, gpa, document, origin, check, failure, max_document_bytes, protocol.max_json_depth);
+pub fn apply(settings: *Settings, gpa: std.mem.Allocator, document: []const u8, origin: Origin, checks: Checks, failure: *start_report.Failure) Error!void {
+    return applyBounded(settings, gpa, document, origin, checks, failure, max_document_bytes, protocol.max_json_depth);
 }
 /// Decode only the private composed document. Public apply and assign keep
 /// their original per-layer limits and file/pipe admission policy.
-pub fn applyComposed(settings: *Settings, gpa: std.mem.Allocator, document: []const u8, check: PresetCheck, failure: *start_report.Failure) Error!void {
+pub fn applyComposed(settings: *Settings, gpa: std.mem.Allocator, document: []const u8, checks: Checks, failure: *start_report.Failure) Error!void {
     // A root preset assignment gains Settings and presets containers.
-    return applyBounded(settings, gpa, document, .file, check, failure, max_composed_document_bytes, protocol.max_json_depth + 2);
+    return applyBounded(settings, gpa, document, .file, checks, failure, max_composed_document_bytes, protocol.max_json_depth + 2);
 }
-fn applyBounded(settings: *Settings, gpa: std.mem.Allocator, document: []const u8, origin: Origin, check: PresetCheck, failure: *start_report.Failure, max_bytes: usize, max_depth: usize) Error!void {
+fn applyBounded(settings: *Settings, gpa: std.mem.Allocator, document: []const u8, origin: Origin, checks: Checks, failure: *start_report.Failure, max_bytes: usize, max_depth: usize) Error!void {
     var wiping: secret_value.WipingAllocator = .{ .backing = gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer memory.deinit();
@@ -788,7 +819,7 @@ fn applyBounded(settings: *Settings, gpa: std.mem.Allocator, document: []const u
         .arena = memory.allocator(),
         .gpa = gpa,
         .origin = origin,
-        .check = check,
+        .checks = checks,
         .failure = failure,
         .max_bytes = max_bytes,
         .max_depth = max_depth,
@@ -813,6 +844,7 @@ fn readValue(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, 
         if (dest.* == null) resetVacant(T, dest, .{});
         return readValue(Child, &dest.*.?, value, at, read);
     }
+    if (comptime isList(T)) return readList(dest, value, at, read);
     if (comptime isKind(T)) return readKind(T, dest, value, at, read);
     const fields = try object(value, at, read);
     switch (@typeInfo(T)) {
@@ -979,6 +1011,16 @@ pub fn validName(text: []const u8) bool {
     for (text) |byte| if (!(std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '-')) return false;
     return true;
 }
+/// The connections array, parsed and named by the connection owner. A refusal
+/// names the entry and the field the parser named.
+fn readList(dest: *connection.Connections, value: std.json.Value, at: []const u8, read: *const Read) Error!void {
+    if (value != .array) return refuse(read.failure, at, "must be an array of connections");
+    const found = try dest.parseItems(read.gpa, read.arena, value.array.items, read.checks.host_field) orelse return;
+    const here = if (found.index) |index| try std.fmt.allocPrint(read.arena, "{s}[{d}]", .{ at, index }) else at;
+    const field = if (found.field.len == 0) here else try std.fmt.allocPrint(read.arena, "{s}.{s}", .{ here, found.field });
+    return refuse(read.failure, field, found.reason);
+}
+
 fn readPresets(dest: *Presets, value: std.json.Value, at: []const u8, read: *const Read) Error!void {
     const entries = try object(value, at, read);
     if (entries.count() > preset_value.max_presets) return refuse(read.failure, at, "too many presets");
@@ -987,7 +1029,7 @@ fn readPresets(dest: *Presets, value: std.json.Value, at: []const u8, read: *con
         const here = try childPath(read.arena, at, entry.key_ptr.*);
         if (!preset_value.validPresetName(entry.key_ptr.*)) return refuse(read.failure, here, "invalid preset name");
         const spec = try object(entry.value_ptr.*, here, read);
-        if (try read.check(read.arena, spec)) |reason| return refuse(read.failure, here, reason);
+        if (try read.checks.preset(read.arena, spec)) |reason| return refuse(read.failure, here, reason);
     }
     if (entries.count() == 0) {
         dest.deinit();
@@ -1010,11 +1052,11 @@ fn readPresets(dest: *Presets, value: std.json.Value, at: []const u8, read: *con
     dest.* = .{ .specs = retained, .memory = memory };
 }
 
-pub fn assign(settings: *Settings, gpa: std.mem.Allocator, leaf_path: []const u8, value: []const u8, check: PresetCheck, failure: *start_report.Failure) Error!void {
+pub fn assign(settings: *Settings, gpa: std.mem.Allocator, leaf_path: []const u8, value: []const u8, checks: Checks, failure: *start_report.Failure) Error!void {
     var wiping: secret_value.WipingAllocator = .{ .backing = gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer memory.deinit();
-    const read: Read = .{ .arena = memory.allocator(), .gpa = gpa, .origin = .file, .check = check, .failure = failure };
+    const read: Read = .{ .arena = memory.allocator(), .gpa = gpa, .origin = .file, .checks = checks, .failure = failure };
     errdefer settings.wipe();
     if (leaf_path.len == 0) return unknown(failure, leaf_path);
     try assignAt(Settings, settings, leaf_path, value, leaf_path, &read);
@@ -1038,6 +1080,7 @@ fn cliValue(comptime T: type, input: []const u8, at: []const u8, read: *const Re
 }
 fn assignAt(comptime T: type, dest: *T, remaining: []const u8, input: []const u8, full: []const u8, read: *const Read) Error!void {
     if (remaining.len == 0) return readValue(T, dest, try cliValue(T, input, full, read), full, read);
+    if (comptime isList(T)) return unknown(read.failure, full);
     if (@typeInfo(T) == .optional) {
         if (dest.* == null) resetVacant(T, dest, .{});
         return assignAt(@typeInfo(T).optional.child, &dest.*.?, remaining, input, full, read);
@@ -1162,6 +1205,7 @@ fn moveSlot(comptime T: type, dest: *T, source: *T) void {
     resetVacant(T, source, .{});
 }
 fn wipeValue(comptime T: type, value: *T) void {
+    if (comptime isList(T)) return;
     if (@typeInfo(T) == .optional) {
         if (value.*) |*present| wipeValue(@typeInfo(T).optional.child, present);
         return;
@@ -1187,6 +1231,7 @@ fn wipeValue(comptime T: type, value: *T) void {
     }
 }
 fn dispose(comptime T: type, value: *T) void {
+    if (comptime isList(T)) return value.deinit();
     if (@typeInfo(T) == .optional) {
         if (value.*) |*present| dispose(@typeInfo(T).optional.child, present);
         return;
@@ -1219,6 +1264,7 @@ pub fn anchor(settings: *Settings, host_dir: []const u8) error{SettingsInvalid}!
     try anchorValue(Settings, settings, if (trimmed.len == 0) "/" else trimmed);
 }
 fn anchorValue(comptime T: type, value: *T, host_dir: []const u8) error{SettingsInvalid}!void {
+    if (comptime isList(T)) return;
     if (@typeInfo(T) == .optional) {
         if (value.*) |*present| try anchorValue(@typeInfo(T).optional.child, present, host_dir);
         return;
@@ -1262,6 +1308,12 @@ pub fn fixtureEndpoint(settings: *const Settings, endpoint: []const u8) bool {
     return endpoint_value.fixtureEndpoint(endpoint, if (settings.network.ca_file) |*ca| ca.slice() else null);
 }
 
+fn unservedConnection(failure: *start_report.Failure, name: []const u8, field: []const u8) error{SettingsInvalid} {
+    var buffer: [start_report.max_refusal_message_bytes / 2]u8 = undefined;
+    const at = std.fmt.bufPrint(&buffer, "connections.{s}.{s}", .{ name, field }) catch unreachable;
+    return refuse(failure, at, "not served by this Rui version");
+}
+
 pub fn seal(settings: *const Settings, failure: *start_report.Failure) error{SettingsInvalid}!Prepared {
     try validateShape(Settings, settings, "", failure);
     if (!settings.interface.dir.anchored and (settings.interface.dir.slice().len == 0 or std.mem.eql(u8, settings.interface.dir.slice(), "/"))) return refuse(failure, "interface.dir", "must be anchored to a non-root interface directory");
@@ -1298,6 +1350,10 @@ pub fn seal(settings: *const Settings, failure: *start_report.Failure) error{Set
             }
         }
     }
+    // This Rui version serves one shape of connection: a key, one Responses
+    // format, and no extra headers or refusal rules. Each other shape is
+    // parsed and kept in the document, and refused here by name.
+    if (settings.connections.unserved()) |found| return unservedConnection(failure, found.name, found.field);
     for (settings.tools.mcp.names[0..settings.tools.mcp.len], settings.tools.mcp.slice()) |*name, *server| {
         var buffer: [start_report.max_refusal_message_bytes / 2]u8 = undefined;
         if (!secret_value.valid(server.bearer_token.value())) return refuse(failure, std.fmt.bufPrint(&buffer, "tools.mcp.{s}.bearerToken", .{name.slice()}) catch unreachable, "credential source has not been resolved");
@@ -1319,6 +1375,7 @@ fn writeOsBytes(bytes: []const u8, out: *std.Io.Writer) std.Io.Writer.Error!void
     try out.writeAll("\"}");
 }
 fn writeValue(comptime T: type, value: *const T, out: *std.Io.Writer) std.Io.Writer.Error!void {
+    if (comptime isList(T)) return value.write(out);
     if (@typeInfo(T) == .optional) {
         if (value.*) |*present| return writeValue(@typeInfo(T).optional.child, present, out);
         return out.writeAll("null");
@@ -1403,9 +1460,13 @@ fn writeValue(comptime T: type, value: *const T, out: *std.Io.Writer) std.Io.Wri
     try out.writeByte('}');
 }
 
-fn checkSample(_: std.mem.Allocator, _: std.json.ObjectMap) error{OutOfMemory}!?[]const u8 {
+fn checkSamplePreset(_: std.mem.Allocator, _: std.json.ObjectMap) error{OutOfMemory}!?[]const u8 {
     return null;
 }
+fn noHostField(_: []const u8) bool {
+    return false;
+}
+const checkSample: Checks = .{ .preset = checkSamplePreset, .host_field = noHostField };
 fn concrete(gpa: std.mem.Allocator, pattern: []const u8) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -1438,6 +1499,15 @@ fn sampleDocument(gpa: std.mem.Allocator, leaf_path: []const u8, value: []const 
     return out.toOwnedSlice();
 }
 fn expectSame(comptime T: type, a: *const T, b: *const T) !void {
+    if (comptime isList(T)) {
+        try std.testing.expectEqual(a.entries.len, b.entries.len);
+        for (a.entries, b.entries) |av, bv| {
+            try std.testing.expect(av.value.name.eql(bv.value.name));
+            try std.testing.expectEqual(av.value.formats.len, bv.value.formats.len);
+            try std.testing.expectEqualStrings(av.value.base_url, bv.value.base_url);
+        }
+        return;
+    }
     if (@typeInfo(T) == .optional) {
         try std.testing.expectEqual(a.* == null, b.* == null);
         if (a.*) |*present| try expectSame(@typeInfo(T).optional.child, present, &b.*.?);
@@ -1565,7 +1635,8 @@ test "Host settings every derived leaf refuses duplicates wrong kinds and litera
         try std.testing.expectError(error.SettingsInvalid, apply(settings, gpa, duplicate, .pipe, checkSample, &failure));
         try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), at) != null);
         try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
-        const wrong = try sampleDocument(gpa, at, "[]", false);
+        // An array-valued leaf takes an object as its wrong kind; the others take an array.
+        const wrong = try sampleDocument(gpa, at, if (std.mem.eql(u8, leaf.pattern, "connections")) "{}" else "[]", false);
         defer gpa.free(wrong);
         try std.testing.expectError(error.SettingsInvalid, apply(settings, gpa, wrong, .pipe, checkSample, &failure));
         try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), at) != null);
@@ -1609,6 +1680,10 @@ fn checkedPath(buffer: *[max_leaf_path_bytes]u8, prefix: []const u8, name: []con
     return std.fmt.bufPrint(buffer, "{s}{s}{s}", .{ prefix, if (prefix.len == 0) "" else ".", name }) catch unreachable;
 }
 fn validateShape(comptime T: type, value: *const T, at: []const u8, failure: *start_report.Failure) error{SettingsInvalid}!void {
+    if (comptime isList(T)) {
+        if (connection.Connections.checkNames(value.entries)) |found| return refuse(failure, at, found.reason);
+        return;
+    }
     if (@typeInfo(T) == .optional) {
         if (value.*) |*present| try validateShape(@typeInfo(T).optional.child, present, at, failure);
         return;
@@ -1941,8 +2016,9 @@ test "Host settings schema derives container constraints and every leaf parent" 
         }
         pub fn leaf(self: *@This(), row: Leaf) !void {
             self.leaf_count += 1;
-            const dot = std.mem.lastIndexOfScalar(u8, row.pattern, '.') orelse return error.MissingParent;
-            for (groups) |parent| if (std.mem.eql(u8, row.pattern[0..dot], parent.pattern)) return;
+            // A top-level leaf's parent is the root group, whose pattern is empty.
+            const parent_pattern = if (std.mem.lastIndexOfScalar(u8, row.pattern, '.')) |dot| row.pattern[0..dot] else "";
+            for (groups) |parent| if (std.mem.eql(u8, parent_pattern, parent.pattern)) return;
             return error.MissingParent;
         }
     };
@@ -2110,6 +2186,8 @@ const VacancyWitness = struct {
     fn markTails(comptime T: type, value: *T) void {
         if (@typeInfo(T) == .optional) {
             if (value.*) |*present| markTails(@typeInfo(T).optional.child, present);
+        } else if (comptime isList(T)) {
+            // A connection list holds source descriptions, never secret bytes.
         } else if (comptime isKind(T)) {
             switch (T.kind) {
                 .secret => if (T.default_source == .mysql) {
@@ -2233,7 +2311,7 @@ const VacancyWitness = struct {
             var failure: start_report.Failure = undefined;
             var memory: std.heap.ArenaAllocator = .init(gpa);
             defer memory.deinit();
-            const read: Read = .{ .arena = memory.allocator(), .gpa = gpa, .origin = .pipe, .check = checkSample, .failure = &failure };
+            const read: Read = .{ .arena = memory.allocator(), .gpa = gpa, .origin = .pipe, .checks = checkSample, .failure = &failure };
             for (0..population) |i| {
                 var name: [32]u8 = undefined;
                 try values.names[i].set(try std.fmt.bufPrint(&name, "entry{d}", .{i}));
@@ -2504,6 +2582,7 @@ test "Host settings composed decoder covers normalized tokens and root preset ne
 
 const UnresolvedWitness = struct {
     fn visit(comptime T: type, value: *T, root: *const Settings, gpa: std.mem.Allocator) !usize {
+        if (comptime isList(T)) return 0;
         if (@typeInfo(T) == .optional) {
             if (value.*) |*present| return visit(@typeInfo(T).optional.child, present, root, gpa);
             return 0;

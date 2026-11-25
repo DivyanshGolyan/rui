@@ -1,5 +1,6 @@
 const credential_location = @import("credential_location.zig");
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const host_endpoint = @import("host_endpoint.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const model_catalog = @import("model_catalog.zig");
@@ -372,7 +373,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     };
     var edit: preferences.Edit = .{};
     if (parsed.get("store")) |store| edit.store = .{ .set = store };
-    if (parsed.get("provider")) |name| edit.provider = .{ .set = name };
+    if (parsed.get("connection")) |name| edit.provider = .{ .set = name };
     if (parsed.get("model")) |model| edit.model = .{ .set = model };
     if (parsed.has("clear-model")) edit.model = .clear;
     if (parsed.get("notifications")) |choice| edit.notifications = if (std.mem.eql(u8, choice, "on")) true else if (std.mem.eql(u8, choice, "off")) false else return error.InvalidArguments;
@@ -408,7 +409,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         .access_failure => .access_failure,
     } else .store_unavailable;
     var shown: codex_auth.Shown = undefined;
-    const account = if (reader != .command_line and readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
+    const account = if (reader != .command_line and readiness.get(provider_route.nameOf(.chatgpt)).usable()) accountDetails(init, &shown) else null;
     const facts: defaults_report.Facts = .{
         .changed = changed,
         .values = values,
@@ -464,7 +465,7 @@ fn signInNames() defaults_report.Names {
 
 fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Readinesses) !void {
     var shown: codex_auth.Shown = undefined;
-    const account = if (readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
+    const account = if (readiness.get(provider_route.nameOf(.chatgpt)).usable()) accountDetails(init, &shown) else null;
     var buffer: [1024]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const names = signInNames();
@@ -1424,14 +1425,14 @@ fn loginDefaultReceipt(buffer: []u8, provider: protocol.Provider, outcome: prefe
         .filled => "Rui: New Sessions will use this sign-in.\n",
         .replaced => "Rui: New Sessions will use this sign-in; Sessions already open keep theirs.\n",
         .already => "Rui: Your default provider for new Sessions is unchanged.\n",
-        .kept => try std.fmt.bufPrint(buffer, "Rui: Your default provider for new Sessions is unchanged. To use {s} instead: rui defaults configure --provider {s}\n", .{ provider.shown(), @tagName(provider) }),
+        .kept => try std.fmt.bufPrint(buffer, "Rui: Your default provider for new Sessions is unchanged. To use {s} instead: rui defaults configure --connection {s}\n", .{ provider.shown(), @tagName(provider) }),
     };
 }
 
 fn conversationStart(comptime provider: protocol.Provider, outcome: preferences.LoginDefault) []const u8 {
     return switch (outcome) {
         .filled, .replaced, .already => "Start a conversation with: rui\n",
-        .kept => "Start a conversation with: rui --provider " ++ @tagName(provider) ++ "\n",
+        .kept => "Start a conversation with: rui --connection " ++ @tagName(provider) ++ "\n",
     };
 }
 
@@ -1442,13 +1443,13 @@ test "a login's default receipt says what changed and, when nothing did, how to 
         try std.testing.expectEqualStrings("Rui: New Sessions will use this sign-in; Sessions already open keep theirs.\n", try loginDefaultReceipt(&buffer, provider, .replaced));
         try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged.\n", try loginDefaultReceipt(&buffer, provider, .already));
     }
-    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use ChatGPT instead: rui defaults configure --provider chatgpt\n", try loginDefaultReceipt(&buffer, .chatgpt, .kept));
-    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use ChatGPT (device code) instead: rui defaults configure --provider codex\n", try loginDefaultReceipt(&buffer, .codex, .kept));
-    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use OpenAI instead: rui defaults configure --provider openai\n", try loginDefaultReceipt(&buffer, .openai, .kept));
+    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use ChatGPT instead: rui defaults configure --connection chatgpt\n", try loginDefaultReceipt(&buffer, .chatgpt, .kept));
+    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use ChatGPT (device code) instead: rui defaults configure --connection codex\n", try loginDefaultReceipt(&buffer, .codex, .kept));
+    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use OpenAI instead: rui defaults configure --connection openai\n", try loginDefaultReceipt(&buffer, .openai, .kept));
     for (std.enums.values(preferences.LoginDefault)) |outcome| {
-        const expected = if (outcome == .kept) "Start a conversation with: rui --provider chatgpt\n" else "Start a conversation with: rui\n";
+        const expected = if (outcome == .kept) "Start a conversation with: rui --connection chatgpt\n" else "Start a conversation with: rui\n";
         try std.testing.expectEqualStrings(expected, conversationStart(.chatgpt, outcome));
-        try std.testing.expectEqualStrings(if (outcome == .kept) "Start a conversation with: rui --provider codex\n" else "Start a conversation with: rui\n", conversationStart(.codex, outcome));
+        try std.testing.expectEqualStrings(if (outcome == .kept) "Start a conversation with: rui --connection codex\n" else "Start a conversation with: rui\n", conversationStart(.codex, outcome));
     }
 }
 
@@ -1621,7 +1622,7 @@ test "login owner preserves interruption, publication and independent defaults" 
         login_state.store(.cancelled, .release);
         const lock = try directory.createFile(io, ".codex.json.lock", .{ .read = true, .permissions = .fromMode(0o600) });
         lock.close(io);
-        const prior_defaults = "version=1\nstore=\nprovider=legacy\nmodel=legacy-model\n";
+        const prior_defaults = "version=1\nstore=\nconnection=legacy\nmodel=legacy-model\n";
         var prior_bytes: [4096]u8 = undefined;
         defer std.crypto.secureZero(u8, &prior_bytes);
         var prior_auth: []const u8 = &.{};
@@ -1775,7 +1776,7 @@ const NewSessionOptions = struct {
             return error.InvalidInvocation;
         };
         if (parsed.help) return null;
-        return .{ .store = parsed.get("store"), .provider = parsed.get("provider"), .model = parsed.get("model") };
+        return .{ .store = parsed.get("store"), .provider = parsed.get("connection"), .model = parsed.get("model") };
     }
 };
 
@@ -1864,9 +1865,9 @@ fn relaunchArguments(executable: []const u8, store: []const u8, selectors: new_s
     buffer[1] = "--store";
     buffer[2] = store;
     var count: usize = 3;
-    inline for (.{ "provider", "model" }) |name| {
-        if (@field(selectors, name)) |value| {
-            buffer[count] = "--" ++ name;
+    inline for (.{ .{ "provider", "connection" }, .{ "model", "model" } }) |pair| {
+        if (@field(selectors, pair[0])) |value| {
+            buffer[count] = "--" ++ pair[1];
             buffer[count + 1] = value;
             count += 2;
         }
@@ -1896,7 +1897,7 @@ test "relaunch argv pins the actual Store with every explicit selector subset" {
     for (0..8) |mask| {
         const selectors: new_session_selection.Intent = .{
             .store = if (mask & 1 != 0) "./store as given" else null,
-            .provider = if (mask & 2 != 0) "provider" else null,
+            .provider = if (mask & 2 != 0) "connection" else null,
             .model = if (mask & 4 != 0) "model pin" else null,
         };
         var buffer: [7][]const u8 = undefined;
@@ -1905,8 +1906,8 @@ test "relaunch argv pins the actual Store with every explicit selector subset" {
         try std.testing.expectEqualStrings("--store", args[1]);
         try std.testing.expectEqualStrings("/canonical/original-store", args[2]);
         var at: usize = 3;
-        inline for (.{ "provider", "model" }) |name| if (@field(selectors, name)) |value| {
-            try std.testing.expectEqualStrings("--" ++ name, args[at]);
+        inline for (.{ .{ "provider", "connection" }, .{ "model", "model" } }) |pair| if (@field(selectors, pair[0])) |value| {
+            try std.testing.expectEqualStrings("--" ++ pair[1], args[at]);
             try std.testing.expectEqualStrings(value, args[at + 1]);
             at += 2;
         };
@@ -2006,16 +2007,16 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const destination = try snapshot.destination(home, &fallback);
     try preflightNewSession(init.io, destination.path, destination.saved);
-    const usable: provider_selection.Readinesses = .initFill(.configured);
+    const served = storeReadiness(init, destination.path, localReadiness(init)).readiness;
+    var usable = served;
+    for (served.names()) |name| usable.set(name, .configured);
     const selected = try snapshot.resolve(&usable);
-    var readiness = localReadiness(init);
+    var readiness = served;
     entry.binding = try snapshot.resolve(&readiness);
     if (selected != null and entry.binding != null) {
         if (intent.model == null and std.mem.eql(u8, entry.binding.?.provider.slice(), "openai")) entry.binding = null;
     } else {
         const connection_info = try host_start.inspectConnection(init, destination.path);
-        readiness.set(.openai, connection_info.readiness);
-        entry.binding = try snapshot.resolve(&readiness);
         if (connection_info.custom() and intent.model == null) {
             if (entry.binding) |*binding| if (std.mem.eql(u8, binding.provider.slice(), "openai")) {
                 entry.binding = null;
@@ -2030,7 +2031,7 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
         var wiping: @import("secret_value.zig").WipingAllocator = .{ .backing = init.gpa };
         var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
         defer memory.deinit();
-        const assignments: []const []const u8 = if (connection) |value| &.{try host_start.connectionAssignment(init, memory.allocator(), value)} else &.{};
+        const assignments: []const []const u8 = if (connection) |value| &.{try host_start.connectionAssignment(init, memory.allocator(), destination.path, value)} else &.{};
         startSelectedOverviewHost(init, destination.path, binding, &readiness, assignments, ops, &entry.launch.?);
         // Keep the Host directory selector: Store identity alone loses saved placement.
         if (entry.launch.?.outcome == .ready) {
@@ -2059,8 +2060,15 @@ fn activateOverviewConnectionUsing(init: std.process.Init, intent: new_session_s
 /// The Store's readiness as its Host reads the OpenAI key, over the local readiness of every other provider.
 /// A failed inspect, or a Store whose Host names no key source, leaves the local readiness standing.
 fn storeReadiness(init: std.process.Init, store: []const u8, local: provider_selection.Readinesses) defaults_report.Overlay {
-    const info = host_start.inspectConnection(init, store) catch return defaults_report.overlayStore(local, null);
-    return defaults_report.overlayStore(local, .{ .readiness = info.readiness, .key_source = copiedKeySource(init, info.servedKey()) });
+    const info = host_start.inspectConnection(init, store) catch return overlayConnections(init, store, defaults_report.overlayStore(local, null));
+    return overlayConnections(init, store, defaults_report.overlayStore(local, .{ .readiness = info.readiness, .key_source = copiedKeySource(init, info.servedKey()) }));
+}
+
+/// Adds the readiness of each key connection the Store names to the overlay's readiness, by name.
+fn overlayConnections(init: std.process.Init, store: []const u8, overlay: defaults_report.Overlay) defaults_report.Overlay {
+    var result = overlay;
+    host_start.inspectConnections(init, store, &result.readiness) catch {};
+    return result;
 }
 
 /// The key source copied into the arena, so it outlives the inspect result; null when none or when the copy fails.
@@ -2074,6 +2082,13 @@ fn copiedKeySource(init: std.process.Init, source: @FieldType(host_start.Connect
     };
 }
 
+/// The served names an unprompted door may select: the Store's local readiness, every served name usable.
+fn selectableReadiness(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
+    var usable = storeReadiness(init, store, localReadiness(init)).readiness;
+    for (usable.names()) |name| usable.set(name, .configured);
+    return usable;
+}
+
 fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
     return storeReadiness(init, store, localReadiness(init)).readiness;
 }
@@ -2081,8 +2096,7 @@ fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_sel
 fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding: new_session_selection.Binding, readiness: *const provider_selection.Readinesses, assignments: []const []const u8, ops: host_start.Ops, result: *HostLaunchResult) void {
     startHost(init, store, assignments, readiness, ops, null, result);
     if (result.outcome == .failed) return;
-    const provider = std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?;
-    if (protocol.routeOf(result.outcome.ready.facts.capabilities.providers, provider) == .unserved) {
+    if (result.outcome.ready.facts.capabilities.connections.route(binding.provider.slice()) == .unserved) {
         const selector = result.outcome.ready.selector;
         launchFailure(result, .provider_unserved, error.HostModelUnavailable, selector.slice());
     }
@@ -2106,9 +2120,9 @@ fn joinedProviders(comptime separator: []const u8) []const u8 {
 }
 
 fn localReadiness(init: std.process.Init) provider_selection.Readinesses {
-    var readiness: provider_selection.Readinesses = undefined;
+    var readiness: provider_selection.Readinesses = .{};
     for (std.enums.values(protocol.Provider)) |provider|
-        readiness.set(provider, providerReadiness(init, provider) catch .credential_error);
+        readiness.set(provider_route.nameOf(provider), providerReadiness(init, provider) catch .credential_error);
     return readiness;
 }
 
@@ -2154,8 +2168,13 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         tuning.settings_digest = settings_handoff.digest(frozen.bytes);
         break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &preparation_failure, .detached, .start);
     } else try admitHost(init, .{ .layered = parsed }, selected, settings, &preparation_failure, .foreground, .start);
+    var connected: providers.Connected = .{};
     var failure: ?start_report.Failure = null;
-    return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
+    host_start.resolveConnections(init, settings, &connected, &preparation_failure) catch |err| {
+        failure = preparation_failure;
+        return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, err);
+    };
+    return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, &connected, tuning, &failure));
 }
 
 /// Shared by serve and settings --check: intake, then the proxy precondition,
@@ -2175,7 +2194,9 @@ fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []co
 }
 
 fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, attempt: host_start.Attempt) !host_settings.Prepared {
-    const served = providers.fromSettings(settings);
+    var connected: providers.Connected = .{};
+    host_start.resolveConnections(init, settings, &connected, failure) catch |err| return writeAttemptRefusal(init.io, attempt, failure, caller_exit.knownError(err));
+    const served = providers.fromSettings(settings, &connected);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
         var text: [start_report.max_refusal_message_bytes]u8 = undefined;
         failure.* = .init(.proxy_unusable, std.fmt.bufPrint(&text, "https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy", .{reason}) catch unreachable);
@@ -2378,7 +2399,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (named != null and named.?.len == 0) return usage();
     if (parsed.get("parent")) |reference| input.parent = .{ .present = true, .value = reference };
     if (parsed.get("preset")) |name| input.preset = .{ .present = true, .value = name };
-    if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
+    if (parsed.get("connection")) |name| input.provider = .{ .present = true, .value = name };
     if (parsed.get("model")) |model| {
         try admitModel(model);
         input.model = .{ .present = true, .value = model };
@@ -2409,7 +2430,10 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         } else .{} };
         saved_effort = if (reads.saved_effort) snapshot.defaults.reasoning_effort else null;
         if (reads.binding) {
-            binding = try snapshot.resolveUnprompted();
+            var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &store_buffer);
+            var usable = selectableReadiness(init, store);
+            binding = try snapshot.resolveUnprompted(&usable);
             input.model = .{ .present = true, .value = binding.model.slice() };
             if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
         }
@@ -2553,7 +2577,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     const admitted = (try reply.answer).result.accepted.message.configuration orelse return error.InvalidResponse;
     const receipt = configuration.?.receipt.observed(
-        @tagName(admitted.provider),
+        admitted.connection.slice(),
         admitted.model.slice(),
         if (admitted.reasoning_effort) |effort| @tagName(effort) else null,
     );
@@ -2662,7 +2686,7 @@ test "chat info inspection takes Session facts from Current and detects changes"
     defer file.close(io);
     const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
     defer listed.close(io);
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\",\"find_tools\",\"lookup\",\"none\"],\"loaded_tools\":[\"find_tools\",\"none\"],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":{\"kind\":\"finished\",\"turn\":\"0\",\"step\":\"18446744073709551615\"},\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"connection\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\",\"find_tools\",\"lookup\",\"none\"],\"loaded_tools\":[\"find_tools\",\"none\"],\"app_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":{\"kind\":\"finished\",\"turn\":\"0\",\"step\":\"18446744073709551615\"},\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     var reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     const taken = try std.testing.allocator.create([2]status_page.Session);
@@ -2702,7 +2726,7 @@ fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Curren
     taken.label.len = 0;
     if (settings.label) |label| try taken.label.set(label.slice());
     try taken.workspace.set(settings.workspace.slice());
-    taken.provider = settings.provider.value;
+    taken.provider = @import("connection.zig").Name.parse(settings.connection.value.slice()) orelse return error.InvalidSession;
     try taken.model.set(settings.model.slice());
     taken.effort = if (settings.reasoning_effort) |effort| effort.value else null;
     taken.effort_override = settings.reasoning_effort_override != null;
@@ -2787,7 +2811,8 @@ fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?
     const home = init.environ_map.get("HOME");
     const binding: ?new_session_selection.Binding = blk: {
         const snapshot: new_session_selection.Snapshot = .{ .intent = selectors, .defaults = if (selectors.needsPreferences()) preferences.load(home orelse break :blk null) catch break :blk null else .{} };
-        break :blk snapshot.resolveUnprompted() catch null;
+        var usable = selectableReadiness(init, destination);
+        break :blk snapshot.resolveUnprompted(&usable) catch null;
     };
     return openOverview(init, .{
         .store = destination,
@@ -2857,7 +2882,7 @@ pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destinat
     const live: LiveAddress = .{ .store = destination, .session = reference };
     switch (command.name) {
         .setup => {
-            const setup_usage = "Usage: /setup [--store PATH] [--provider chatgpt] [--model ID | --clear-model] [--notifications on|off] [--reasoning-effort LEVEL|default]; no changes saved. See rui session configure --help for model IDs.\n";
+            const setup_usage = "Usage: /setup [--store PATH] [--connection chatgpt] [--model ID | --clear-model] [--notifications on|off] [--reasoning-effort LEVEL|default]; no changes saved. See rui session configure --help for model IDs.\n";
             var setup_args: [setup_capacity][]const u8 = undefined;
             const count = interactiveTokens(argument, &setup_args) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
@@ -3060,7 +3085,7 @@ const setup_capacity = cli_args.live_setup.tokenCapacity();
 const live_capacity = 1 + cli_args.live_configure.tokenCapacity();
 
 test "/setup takes every option in one line" {
-    var line = "--store /path/to/store --provider codex --model gpt-6-luna --notifications off --reasoning-effort high".*;
+    var line = "--store /path/to/store --connection codex --model gpt-6-luna --notifications off --reasoning-effort high".*;
     var tokens: [setup_capacity][]const u8 = undefined;
     const count = try interactiveTokens(&line, &tokens);
     try std.testing.expectEqual(@as(usize, 10), count);
@@ -3951,8 +3976,8 @@ const StartConfiguration = struct {
 };
 
 fn writeCreationConfiguration(writer: *std.Io.Writer, config: @import("creation_receipt.zig").Configuration) !void {
-    try writer.writeAll(",\"configuration\":{\"provider\":");
-    try std.json.Stringify.value(@tagName(config.provider), .{}, writer);
+    try writer.writeAll(",\"configuration\":{\"connection\":");
+    try std.json.Stringify.value(config.connection.slice(), .{}, writer);
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(config.model.slice(), .{}, writer);
     try writer.writeAll(",\"reasoning_effort\":");
@@ -3980,10 +4005,10 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         std.debug.assert(reply.isAccepted() and reply.target == .message and reply.target.message.creates_session);
         try writer.writeAll(",\"configuration\":");
         if (value.parent != null) {
-            try std.json.Stringify.value(.{ .provider = value.provider, .parent = value.parent, .model = value.model, .reasoning_effort = value.reasoning_effort, .effort_source = value.effort_source }, .{}, writer);
+            try std.json.Stringify.value(.{ .connection = value.provider, .parent = value.parent, .model = value.model, .reasoning_effort = value.reasoning_effort, .effort_source = value.effort_source }, .{}, writer);
         } else {
             try std.json.Stringify.value(.{
-                .provider = value.provider,
+                .connection = value.provider,
                 .model = value.model,
                 .reasoning_effort = value.reasoning_effort,
                 .effort_source = value.effort_source,
@@ -4139,7 +4164,7 @@ test "CLI-6 start_receipt_configuration" {
     try checkStartEffortSources();
     try checkStartHostSettings();
 
-    const config = ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"reasoning_effort\":\"high\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"100\"}";
+    const config = ",\"configuration\":{\"connection\":\"codex\",\"model\":\"gpt-5.5\",\"reasoning_effort\":\"high\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"100\"}";
     const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"" ++ config ++ "},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
     const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = 3, .digest = @splat(0), .creates_session = true } };
     const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "", target);
@@ -4151,7 +4176,7 @@ test "CLI-6 start_receipt_configuration" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
     defer parsed.deinit();
     const receipt = parsed.value.object.get("configuration").?.object;
-    try std.testing.expectEqualStrings("codex", receipt.get("provider").?.string);
+    try std.testing.expectEqualStrings("codex", receipt.get("connection").?.string);
     try std.testing.expectEqualStrings("gpt-5.5", receipt.get("model").?.string);
     try std.testing.expectEqualStrings("high", receipt.get("reasoning_effort").?.string);
     try std.testing.expectEqualStrings("saved", receipt.get("effort_source").?.string);
@@ -4569,7 +4594,7 @@ const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /s
 
 const usage_text =
     \\usage:
-    \\  rui [--store PATH] [--provider chatgpt] [--model MODEL]
+    \\  rui [--store PATH] [--connection chatgpt] [--model MODEL]
     \\    Create a fresh live terminal conversation in the current directory. Bash runs
     \\    without asking by default. Enter Message text in the terminal editor.
     \\    Open Settings > Keys for the key list.
@@ -4716,7 +4741,7 @@ const LaunchFixture = struct {
         if (!ready) return if (self.scenario == .competitor_died and self.launches != 0 and self.reads == 1) .owned_unavailable else .unavailable;
         var store = paths.store_identity;
         if (self.store_identity) |value| store.set(value) catch unreachable;
-        return .{ .ready = .{ .store = store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = if (self.openai and (self.launches != 0 or self.scenario == .already_ready)) .key_file else .unserved, .chatgpt = if (self.chatgpt) .chatgpt_plan else .unserved } } } };
+        return .{ .ready = .{ .store = store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .connections = protocol.connectionsOfRoutes(.{ .codex = .chatgpt_device, .openai = if (self.openai and (self.launches != 0 or self.scenario == .already_ready)) .key_file else .unserved, .chatgpt = if (self.chatgpt) .chatgpt_plan else .unserved }) } } };
     }
     fn verify(raw: ?*anyopaque, _: std.Io, _: *const platform.Paths, pid: c_int, started: u64, _: []const u8, _: ?i128, _: *protocol_reply.HostInfoFacts) bool {
         return cast(raw).exact_identity and cast(raw).scenario != .competitor and pid == 42 and started == 12;
@@ -5033,7 +5058,7 @@ test "native promotion saved refusals keep their catalog code and refused exit" 
 test "saved CLI rejection goldens preserve JSON and explain permission and missing settings" {
     const cases = [_]struct { code: []const u8, session: []const u8, missing: []const u8 = "null", json_missing: []const u8 = "", line: []const u8 }{
         .{ .code = "unsupported_permission_mode", .session = "k7m2qx", .line = "rui session configure: --permission-mode: Rui has no such permission mode. Accepted: ask, bypass. Next: Use one of the accepted values. This rejection was saved and replays as saved; a resend needs a new key. [unsupported_permission_mode]\n" },
-        .{ .code = "missing_settings", .session = "", .missing = "[\"workspace\",\"provider\"]", .json_missing = ",\"missing\":[\"workspace\",\"provider\"]", .line = "rui session configure: --workspace, --provider: A new Session is missing a Workspace and a provider. Accepted: a model, a Workspace or parent, and a provider when the Host serves several. Next: Supply each missing setting with its option, a preset or a parent. This rejection was saved and replays as saved; a resend needs a new key. [missing_settings]\n" },
+        .{ .code = "missing_settings", .session = "", .missing = "[\"workspace\",\"connection\"]", .json_missing = ",\"missing\":[\"workspace\",\"connection\"]", .line = "rui session configure: --workspace, --connection: A new Session is missing a Workspace and a connection. Accepted: a model, a Workspace or parent, and a connection when the Host serves several. Next: Supply each missing setting with its option, a preset or a parent. This rejection was saved and replays as saved; a resend needs a new key. [missing_settings]\n" },
     };
     for (cases) |case| {
         var wire: [1024]u8 = undefined;
@@ -5127,7 +5152,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.StoreUnavailable, .code = .store_unavailable, .exit = 6, .phrase = "permissions to 0700" },
         .{ .err = error.InvalidRuiAddress, .code = .peer_context_invalid, .exit = 2, .phrase = "unset RUI_STORE RUI_ADDRESS RUI_SENDER_HANDLE" },
         .{ .err = error.InvalidSenderHandle, .code = .invalid_sender_handle, .exit = 2, .phrase = "Send from a live Rui Session" },
-        .{ .err = error.UnsupportedSelectionProvider, .code = .selection_provider_unsupported, .exit = 6, .phrase = "Accepted: codex, openai, chatgpt." },
+        .{ .err = error.UnsupportedSelectionProvider, .code = .selection_provider_unsupported, .exit = 6, .phrase = "Accepted: a connection name the selected Store serves." },
         .{ .err = error.UnsupportedSelectionModel, .code = .selection_model_unsupported, .exit = 6, .phrase = "rui defaults configure --clear-model" },
         .{ .err = error.SavedPreferenceStoreInvalid, .code = .preferences_invalid, .exit = 6, .phrase = "HOME/.config/rui/preferences" },
         .{ .err = error.SavedPreferenceProviderInvalid, .code = .preferences_invalid, .exit = 6, .phrase = "repair or remove that file" },
@@ -5138,7 +5163,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.PreferencesUnavailable, .code = .preferences_unavailable, .exit = 6, .phrase = "preferences file (0600)" },
         .{ .err = error.InsecurePreferenceDirectory, .code = .preferences_unavailable, .exit = 6, .phrase = "HOME/.config/rui (0700)" },
         .{ .err = error.InvalidPreferenceStore, .code = .preference_store_invalid, .exit = 2, .phrase = "rui defaults configure --store PATH" },
-        .{ .err = error.UnsupportedPreferenceProvider, .code = .preference_provider_invalid, .exit = 2, .phrase = "--provider chatgpt or --provider openai." },
+        .{ .err = error.UnsupportedPreferenceProvider, .code = .preference_provider_invalid, .exit = 2, .phrase = "--connection chatgpt or --connection openai." },
         .{ .err = error.InvalidPreferenceModel, .code = .preference_model_invalid, .exit = 2, .phrase = "1-256 printable non-space ASCII bytes" },
         .{ .err = error.PreferenceProviderRequired, .code = .preference_provider_required, .exit = 2, .phrase = "Saving a default model requires a provider." },
         .{ .err = error.HomeUnavailable, .code = .home_unavailable, .exit = 6, .phrase = "Set HOME to your absolute home directory" },
@@ -5606,7 +5631,7 @@ test "Host launch guided activation requires frozen pair and exact fresh identit
         const store = try std.fs.path.join(arena.allocator(), &.{ home, "store" });
         const saved = try host_start.saveConnection(init, store, .{ .base = "https://first.example/v1" }, .{ .provided = "fixture-first-key" }, "custom-model", Gate.yes);
         _ = try host_start.saveConnection(init, store, .{ .base = "https://second.example/v2" }, .{ .provided = "fixture-second-key" }, "another-model", Gate.yes);
-        const frozen_assignment = try host_start.connectionAssignment(init, arena.allocator(), &saved.saved);
+        const frozen_assignment = try host_start.connectionAssignment(init, arena.allocator(), store, &saved.saved);
         var fixture: LaunchFixture = .{ .scenario = case.scenario, .exact_identity = case.exact, .delay_refusal = case.delayed, .openai = case.openai, .expected_assignment = frozen_assignment };
         const activation = try activateOverviewConnectionUsing(init, .{ .store = store, .provider = "openai", .model = "custom-model" }, &saved.saved, fixture.ops());
         try std.testing.expectEqual(case.pending, activation.pending);

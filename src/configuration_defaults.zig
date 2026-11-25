@@ -37,10 +37,10 @@ pub fn compactionTrigger(facts: []const catalog.Entry, provider: connection.Name
     const provider_trigger = for (product.provider_compaction_triggers) |entry| {
         if (std.mem.eql(u8, entry.provider, provider.slice())) break entry.tokens;
     } else model_trigger;
-    const trigger = for (product.model_compaction_triggers) |entry| {
-        if (std.mem.eql(u8, entry.provider, provider.slice()) and std.mem.eql(u8, entry.model, model)) break entry.tokens;
-    } else provider_trigger;
-    return @min(trigger, model_trigger);
+    const step_trigger = for (product.price_steps) |entry| {
+        if (std.mem.eql(u8, entry.model, model)) break entry.tokens * product.compaction_trigger_percent / 100;
+    } else model_trigger;
+    return @min(provider_trigger, @min(model_trigger, step_trigger));
 }
 
 pub fn startEffort(facts: []const catalog.Entry, model: []const u8) ?catalog.ReasoningEffort {
@@ -128,6 +128,8 @@ pub fn resolve(facts: []const catalog.Entry, request: Request) Resolved {
 
 pub const Parent = struct {
     tools: []const u8,
+    /// The app tool names the parent offers, comma-separated (the lane's app names it may use).
+    apps: []const u8 = "",
     permission_mode: @import("cli_value.zig").PermissionMode,
 };
 
@@ -141,14 +143,17 @@ pub const ParentRefusal = union(enum) {
 fn checkParent(parent: Parent, tools: *const input.ToolsField, permission: *const Choice) ?ParentRefusal {
     var requested = tools.iterator();
     while (requested.next()) |name| {
-        var allowed = std.mem.splitScalar(u8, parent.tools, ',');
-        while (allowed.next()) |member| {
-            if (std.mem.eql(u8, name, member)) break;
-        } else return .{ .tools_not_in_parent = name };
+        if (!listsName(parent.tools, name) and !listsName(parent.apps, name)) return .{ .tools_not_in_parent = name };
     }
     const mode = creationPermission(permission);
     if (parent.permission_mode == .ask and mode.state == .value and !mode.value.eql("ask")) return .permission_mode_wider_than_parent;
     return null;
+}
+
+fn listsName(list: []const u8, name: []const u8) bool {
+    var members = std.mem.splitScalar(u8, list, ',');
+    while (members.next()) |member| if (std.mem.eql(u8, name, member)) return true;
+    return false;
 }
 
 // Golden values below come from 3ebdd8b's completeCreation/client_defaults,
@@ -173,9 +178,9 @@ fn testName(comptime text: []const u8) connection.Name {
 
 test "CM-39 default compaction trigger" {
     const cases = [_]struct { provider: connection.Name, model: []const u8, tokens: u64 }{
-        .{ .provider = testName("codex"), .model = "gpt-6.1-sol", .tokens = 450000 },
-        .{ .provider = testName("codex"), .model = "gpt-6.1-terra", .tokens = 450000 },
-        .{ .provider = testName("codex"), .model = "gpt-6.2-sol", .tokens = 450000 },
+        .{ .provider = testName("codex"), .model = "gpt-6.1-sol", .tokens = 244800 },
+        .{ .provider = testName("codex"), .model = "gpt-6.1-terra", .tokens = 244800 },
+        .{ .provider = testName("codex"), .model = "gpt-6.2-sol", .tokens = 244800 },
         .{ .provider = testName("codex"), .model = "gpt-6.2-astra", .tokens = 244800 },
         .{ .provider = testName("codex"), .model = "gpt-6-sol", .tokens = 244800 },
         .{ .provider = testName("codex"), .model = "gpt-6.1-terra@eu", .tokens = 244800 },
@@ -183,8 +188,12 @@ test "CM-39 default compaction trigger" {
         .{ .provider = testName("codex"), .model = "gpt-6.1-terra-extra", .tokens = 115200 },
         .{ .provider = testName("codex"), .model = "gpt-5.3-codex-spark", .tokens = 115200 },
         .{ .provider = testName("codex"), .model = "unlisted-model", .tokens = 115200 },
-        .{ .provider = testName("openai"), .model = "gpt-6.1-terra", .tokens = 945000 },
-        .{ .provider = testName("openai"), .model = "gpt-6.2-sol", .tokens = 945000 },
+        .{ .provider = testName("chatgpt"), .model = "gpt-6.1-terra", .tokens = 244800 },
+        .{ .provider = testName("chatgpt"), .model = "gpt-6.2-sol", .tokens = 244800 },
+        .{ .provider = testName("chatgpt"), .model = "gpt-5.3-codex-spark", .tokens = 115200 },
+        .{ .provider = testName("chatgpt"), .model = "unlisted-model", .tokens = 115200 },
+        .{ .provider = testName("openai"), .model = "gpt-6.1-terra", .tokens = 244800 },
+        .{ .provider = testName("openai"), .model = "gpt-6.2-sol", .tokens = 244800 },
         .{ .provider = testName("openai"), .model = "gpt-5.3-codex-spark", .tokens = 115200 },
         .{ .provider = testName("openai"), .model = "unlisted-model", .tokens = 115200 },
     };
@@ -195,7 +204,7 @@ test "CM-39 default compaction trigger" {
 
 fn creationFieldCases() !void {
     const models = [_]struct { id: []const u8, effort: ?[]const u8, compact: [3][]const u8 }{
-        .{ .id = "gpt-6.1-sol", .effort = "low", .compact = .{ "450000", "945000", "945000" } },
+        .{ .id = "gpt-6.1-sol", .effort = "low", .compact = .{ "244800", "244800", "244800" } },
         .{ .id = "kimi-k2.6", .effort = null, .compact = .{ "235929", "235929", "235929" } },
         .{ .id = "unlisted-model", .effort = "low", .compact = .{ "115200", "115200", "115200" } },
     };
@@ -281,7 +290,7 @@ fn updateFieldCases() !void {
         try std.testing.expectEqual(if (effort_state == .explicit_null) input.FieldState.value else effort_state, resolved.reasoning_effort.state);
         try std.testing.expectEqualStrings(if (effort_state == .explicit_null) "low" else "max", resolved.reasoning_effort.value.slice());
         try std.testing.expectEqual(if (compact_state == .explicit_null) input.FieldState.value else compact_state, resolved.compaction_trigger.state);
-        try std.testing.expectEqualStrings(if (compact_state == .explicit_null) "450000" else "00042", resolved.compaction_trigger.value.slice());
+        try std.testing.expectEqualStrings(if (compact_state == .explicit_null) "244800" else "00042", resolved.compaction_trigger.value.slice());
     };
 }
 
@@ -378,18 +387,18 @@ test "ADM-29 configuration field wire grammar" {
 test "parent creation uses inherited provider for omitted compaction regardless of saved provider binding" {
     const bindings = [_]struct { saved_provider: connection.Name, saved_compact_at: u64 }{
         .{ .saved_provider = testName("openai"), .saved_compact_at = 945000 },
-        .{ .saved_provider = testName("codex"), .saved_compact_at = 450000 },
+        .{ .saved_provider = testName("codex"), .saved_compact_at = 244800 },
     };
     const omitted_tools: input.ToolsField = .{};
     const omitted_choice = choice(.omitted, "");
     const omitted_tokens = tokenField(.omitted, "");
     for (bindings) |binding| {
-        try std.testing.expectEqual(binding.saved_compact_at, compactionTrigger(catalog.shipped, binding.saved_provider, "gpt-6.1-sol"));
+        try std.testing.expectEqual(binding.saved_compact_at, compactionTrigger(catalog.shipped, binding.saved_provider, "gpt-6.2-astra"));
         const resolved = resolve(catalog.shipped, .{
             .creating = true,
             .parent = .{ .tools = "bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search", .permission_mode = .bypass },
             .provider = testName("codex"),
-            .model = "gpt-6.1-sol",
+            .model = "gpt-6.2-astra",
             .can_read_images = false,
             .tools = &omitted_tools,
             .loaded_tools = &omitted_tools,
@@ -398,7 +407,7 @@ test "parent creation uses inherited provider for omitted compaction regardless 
             .compaction_trigger = &omitted_tokens,
         });
         try std.testing.expect(resolved.parent_refusal == null);
-        try std.testing.expectEqualStrings("450000", resolved.compaction_trigger.value.slice());
+        try std.testing.expectEqualStrings("244800", resolved.compaction_trigger.value.slice());
     }
 }
 

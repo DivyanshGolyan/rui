@@ -173,12 +173,19 @@ pub const Requests = struct {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
         const paths = try resolveClientPaths(self.io, store_path);
+        return self.inspectSessionAt(&paths, session, profile, sink, reply_buffer);
+    }
+
+    pub fn inspectSessionAt(self: Requests, paths: *const platform.Paths, session: []const u8, profile: protocol.ReportProfile, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+        reply_buffer.len = 0;
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
         var body: protocol.RequestBuffer = .{};
         switch (profile) {
             .current => try body.appendShape(protocol.inspect_session_request.head ++ protocol.inspect_session_request.tail, .{ paths.store_identity.slice(), session }),
             .full => try body.appendShape((protocol.inspect_session_request.head ++ protocol.inspect_session_request.profile ++ protocol.inspect_session_request.tail), .{ paths.store_identity.slice(), session }),
         }
-        const fd = try openRead(self, &paths, "/v1/inspect-session", body.slice());
+        const fd = try openRead(self, paths, "/v1/inspect-session", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
     }
@@ -265,11 +272,24 @@ pub const Requests = struct {
     }
 
     pub fn readActionArguments(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, destination: std.Io.File, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReply {
-        return readActionContent(self, store_path, session, action_id, protocol.read_action_arguments_request, "/v1/read-action-arguments", destination, reply_buffer);
+        const paths = try self.actionContentPaths(store_path, session, action_id);
+        return readActionContent(self, &paths, session, action_id, protocol.read_action_arguments_request, "/v1/read-action-arguments", destination, reply_buffer);
+    }
+
+    pub fn readActionArgumentsAt(self: Requests, paths: *const platform.Paths, session: []const u8, action_id: u64, destination: std.Io.File, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReply {
+        return readActionContent(self, paths, session, action_id, protocol.read_action_arguments_request, "/v1/read-action-arguments", destination, reply_buffer);
     }
 
     pub fn readActionCallId(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, destination: std.Io.File, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReply {
-        return readActionContent(self, store_path, session, action_id, protocol.read_action_call_id_request, "/v1/read-action-call-id", destination, reply_buffer);
+        const paths = try self.actionContentPaths(store_path, session, action_id);
+        return readActionContent(self, &paths, session, action_id, protocol.read_action_call_id_request, "/v1/read-action-call-id", destination, reply_buffer);
+    }
+
+    /// Refuses an invalid target before resolving the Store selector, so a bad target never touches the Store.
+    fn actionContentPaths(self: Requests, store_path: []const u8, session: []const u8, action_id: u64) !platform.Paths {
+        try self.check();
+        if (!protocol.validSessionId(session) or action_id == 0) return error.InvalidTarget;
+        return resolveClientPaths(self.io, store_path);
     }
 
     pub fn conversationPage(self: Requests, store_path: []const u8, session: []const u8, cursor: protocol_reply.ConversationCursor) !protocol_reply.ConversationPageReply {
@@ -307,14 +327,29 @@ pub const Requests = struct {
         return readPublicContentResponse(self, fd, expected, sink);
     }
 
+    /// Validates the Activity request before resolving its worker-owned route.
+    pub fn resolveActivityRoute(self: Requests, store_path: []const u8, session: []const u8, cursor: protocol_reply.ActivityCursor) !platform.Paths {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        try cursor.validate();
+        return resolveClientPaths(self.io, store_path);
+    }
+
     pub fn activityPage(self: Requests, store_path: []const u8, session: []const u8, cursor: protocol_reply.ActivityCursor) !protocol_reply.ActivityPageReply {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
         try cursor.validate();
         const paths = try resolveClientPaths(self.io, store_path);
+        return self.activityPageAt(&paths, session, cursor);
+    }
+
+    pub fn activityPageAt(self: Requests, paths: *const platform.Paths, session: []const u8, cursor: protocol_reply.ActivityCursor) !protocol_reply.ActivityPageReply {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        try cursor.validate();
         var body: protocol.RequestBuffer = .{};
         try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ paths.store_identity.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
-        const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
+        const fd = try openRead(self, paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
             buffer: protocol.FixedJsonBuffer(activity_reply.max_page_bytes) = .{},
@@ -418,9 +453,17 @@ pub const Requests = struct {
         try protocol_reply.validateIdentityInputs("", session);
         if (owner.id() == 0 or owner.id() > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
+        return self.readPublicPartsAt(&paths, session, owner, sink, reply_buffer);
+    }
+
+    pub fn readPublicPartsAt(self: Requests, paths: *const platform.Paths, session: []const u8, owner: content_value.Owner, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+        reply_buffer.len = 0;
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        if (owner.id() == 0 or owner.id() > std.math.maxInt(i64)) return error.InvalidTarget;
         var body: protocol.RequestBuffer = .{};
         try body.appendShape(protocol.public_parts_request, .{ paths.store_identity.slice(), session, protocol.OwnerJson{ .owner = owner } });
-        const fd = try openRead(self, &paths, "/v1/public-parts", body.slice());
+        const fd = try openRead(self, paths, "/v1/public-parts", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
     }
@@ -432,9 +475,21 @@ pub const Requests = struct {
         return readPublicContentResponse(self, fd, .{ .bytes = part.reference.length, .digest = part.reference.digest }, sink);
     }
 
+    pub fn readPublicPartContentAt(self: Requests, paths: *const platform.Paths, session: []const u8, owner: content_value.Owner, part: content_value.Part, sink: anytype) !?protocol_reply.ReadFailure {
+        const fd = try self.openPublicPartAt(paths, session, owner, part);
+        defer closeSocket(self.io, fd);
+        return readPublicContentResponse(self, fd, .{ .bytes = part.reference.length, .digest = part.reference.digest }, sink);
+    }
+
     /// The first line of one Text part; the stream's length must match the certified `part`.
     pub fn readPublicPartPrefix(self: Requests, store_path: []const u8, session: []const u8, owner: content_value.Owner, part: content_value.Part, buffer: []u8) !protocol_reply.ActivityPrefixReply {
         const fd = try self.openPublicPart(store_path, session, owner, part);
+        defer closeSocket(self.io, fd);
+        return readFirstLine(self, fd, part.reference.length, buffer);
+    }
+
+    pub fn readPublicPartPrefixAt(self: Requests, paths: *const platform.Paths, session: []const u8, owner: content_value.Owner, part: content_value.Part, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+        const fd = try self.openPublicPartAt(paths, session, owner, part);
         defer closeSocket(self.io, fd);
         return readFirstLine(self, fd, part.reference.length, buffer);
     }
@@ -444,9 +499,16 @@ pub const Requests = struct {
         try protocol_reply.validateIdentityInputs("", session);
         if (owner.id() == 0 or owner.id() > std.math.maxInt(i64) or part.ordinal >= @import("input_parts.zig").max_parts) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
+        return self.openPublicPartAt(&paths, session, owner, part);
+    }
+
+    fn openPublicPartAt(self: Requests, paths: *const platform.Paths, session: []const u8, owner: content_value.Owner, part: content_value.Part) !std.posix.fd_t {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        if (owner.id() == 0 or owner.id() > std.math.maxInt(i64) or part.ordinal >= @import("input_parts.zig").max_parts) return error.InvalidTarget;
         var body: protocol.RequestBuffer = .{};
         try body.appendShape(protocol.public_part_content_request.all, .{ paths.store_identity.slice(), session, protocol.OwnerJson{ .owner = owner }, part.ordinal, 0 });
-        return openRead(self, &paths, "/v1/public-part-content", body.slice());
+        return openRead(self, paths, "/v1/public-part-content", body.slice());
     }
 
     pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
@@ -454,9 +516,16 @@ pub const Requests = struct {
         try protocol_reply.validateIdentityInputs("", session);
         if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
+        return self.readActivityContentAt(&paths, session, position, ordinal, expected, sink);
+    }
+
+    pub fn readActivityContentAt(self: Requests, paths: *const platform.Paths, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
         var body: protocol.RequestBuffer = .{};
         try body.appendShape(protocol.activity_content_request, .{ paths.store_identity.slice(), session, position, ordinal });
-        const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
+        const fd = try openRead(self, paths, "/v1/activity-content", body.slice());
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
     }
@@ -466,11 +535,110 @@ pub const Requests = struct {
         try protocol_reply.validateIdentityInputs("", session);
         if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
+        return self.readActivityPrefixAt(&paths, session, position, buffer);
+    }
+
+    pub fn readActivityPrefixAt(self: Requests, paths: *const platform.Paths, session: []const u8, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidTarget;
         var body: protocol.RequestBuffer = .{};
         try body.appendShape(protocol.activity_content_request, .{ paths.store_identity.slice(), session, position, 0 });
-        const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
+        const fd = try openRead(self, paths, "/v1/activity-content", body.slice());
         defer closeSocket(self.io, fd);
         return readFirstLine(self, fd, null, buffer);
+    }
+};
+
+/// A Session read capability. A bound route borrows Paths for the worker's lifetime;
+/// it exposes only the read operations used by Session presentation.
+pub const SessionReads = struct {
+    requests: Requests,
+    session: []const u8,
+    route: union(enum) { selected: []const u8, bound: *const platform.Paths },
+
+    pub fn selected(requests: Requests, store: []const u8, session: []const u8) SessionReads {
+        return .{ .requests = requests, .session = session, .route = .{ .selected = store } };
+    }
+
+    pub fn bound(requests: Requests, paths: *const platform.Paths, session: []const u8) SessionReads {
+        return .{ .requests = requests, .session = session, .route = .{ .bound = paths } };
+    }
+
+    pub fn io(self: SessionReads) std.Io {
+        return self.requests.io;
+    }
+
+    pub fn sessionId(self: SessionReads) []const u8 {
+        return self.session;
+    }
+
+    pub fn isBound(self: SessionReads) bool {
+        return self.route == .bound;
+    }
+
+    /// Standalone Displays retain their caller-provided context; a bound worker
+    /// keeps its original route and read context through the whole stream.
+    pub fn withStandaloneRequests(self: SessionReads, requests: Requests) SessionReads {
+        return switch (self.route) {
+            .selected => .{ .requests = requests, .session = self.session, .route = self.route },
+            .bound => self,
+        };
+    }
+    pub fn failRead(self: SessionReads, failure: protocol_reply.ReadFailure) error{ CanonicalStoreFailure, HostInvocationFailed } {
+        return self.requests.failRead(failure);
+    }
+    pub fn captureReadFailure(self: SessionReads, reply: protocol_reply.CommandReply) !protocol_reply.ReadFailure {
+        return self.requests.captureReadFailure(reply);
+    }
+
+    pub fn activityPage(self: SessionReads, cursor: protocol_reply.ActivityCursor) !protocol_reply.ActivityPageReply {
+        return switch (self.route) {
+            .selected => |store| self.requests.activityPage(store, self.session, cursor),
+            .bound => |paths| self.requests.activityPageAt(paths, self.session, cursor),
+        };
+    }
+    pub fn inspectCurrent(self: SessionReads, sink: anytype, reply: *ReplyBuffer) !protocol_reply.ReportReply {
+        return switch (self.route) {
+            .selected => |store| self.requests.inspectSession(store, self.session, .current, sink, reply),
+            .bound => |paths| self.requests.inspectSessionAt(paths, self.session, .current, sink, reply),
+        };
+    }
+    pub fn readActionArguments(self: SessionReads, action: u64, file: std.Io.File, reply: *ReplyBuffer) !protocol_reply.ResultReply {
+        return switch (self.route) {
+            .selected => |store| self.requests.readActionArguments(store, self.session, action, file, reply),
+            .bound => |paths| self.requests.readActionArgumentsAt(paths, self.session, action, file, reply),
+        };
+    }
+    pub fn readActivityContent(self: SessionReads, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
+        return switch (self.route) {
+            .selected => |store| self.requests.readActivityContent(store, self.session, position, ordinal, expected, sink),
+            .bound => |paths| self.requests.readActivityContentAt(paths, self.session, position, ordinal, expected, sink),
+        };
+    }
+    pub fn readActivityPrefix(self: SessionReads, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+        return switch (self.route) {
+            .selected => |store| self.requests.readActivityPrefix(store, self.session, position, buffer),
+            .bound => |paths| self.requests.readActivityPrefixAt(paths, self.session, position, buffer),
+        };
+    }
+    pub fn readPublicParts(self: SessionReads, owner: content_value.Owner, sink: anytype, reply: *ReplyBuffer) !protocol_reply.ReportReply {
+        return switch (self.route) {
+            .selected => |store| self.requests.readPublicParts(store, self.session, owner, sink, reply),
+            .bound => |paths| self.requests.readPublicPartsAt(paths, self.session, owner, sink, reply),
+        };
+    }
+    pub fn readPublicPartContent(self: SessionReads, owner: content_value.Owner, part: content_value.Part, sink: anytype) !?protocol_reply.ReadFailure {
+        return switch (self.route) {
+            .selected => |store| self.requests.readPublicPartContent(store, self.session, owner, part, sink),
+            .bound => |paths| self.requests.readPublicPartContentAt(paths, self.session, owner, part, sink),
+        };
+    }
+    pub fn readPublicPartPrefix(self: SessionReads, owner: content_value.Owner, part: content_value.Part, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+        return switch (self.route) {
+            .selected => |store| self.requests.readPublicPartPrefix(store, self.session, owner, part, buffer),
+            .bound => |paths| self.requests.readPublicPartPrefixAt(paths, self.session, owner, part, buffer),
+        };
     }
 };
 
@@ -1400,7 +1568,7 @@ test "SH-99 upgrade Host observation reads the current wire in one exchange and 
             const response_wire = responseWire(self.mode);
             const body_wire = if (self.mode == .body_mismatch or self.mode == .activation_body_version) protocol.wire_version else response_wire;
             var body_buffer: [1024]u8 = undefined;
-            const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store });
+            const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"connections\":[{{\"name\":\"codex\",\"label\":\"ChatGPT (device code)\",\"route\":\"endpoint\"}}]}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store });
             var error_buffer: [256]u8 = undefined;
             const body: []const u8 = switch (self.mode) {
                 .activation_400, .activation_bad_rejection, .activation_500, .activation_503, .strict_503 => try std.fmt.bufPrint(&error_buffer, "{{\"version\":\"{s}\",\"type\":\"invocation_error\",\"code\":\"{s}\"}}", .{ response_wire, if (self.mode == .activation_bad_rejection) "SomeOtherFailure" else "WrongWireVersion" }),
@@ -2011,24 +2179,14 @@ pub fn readActionCallId(
     return (Requests{ .io = io }).readActionCallId(store_path, session, action_id, destination, reply_buffer);
 }
 
-fn readActionContent(
-    requests: Requests,
-    store_path: []const u8,
-    session: []const u8,
-    action_id: u64,
-    comptime shape: anytype,
-    comptime route: []const u8,
-    destination: std.Io.File,
-    reply_buffer: *ReplyBuffer,
-) !protocol_reply.ResultReply {
+fn readActionContent(requests: Requests, paths: *const platform.Paths, session: []const u8, action_id: u64, comptime shape: anytype, comptime route: []const u8, destination: std.Io.File, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReply {
     const io = requests.io;
     reply_buffer.len = 0;
     try requests.check();
     if (!protocol.validSessionId(session) or action_id == 0) return error.InvalidTarget;
-    const paths = try resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
     try body.appendShape(shape, .{ paths.store_identity.slice(), session, action_id });
-    const fd = try openRead(requests, &paths, route, body.slice());
+    const fd = try openRead(requests, paths, route, body.slice());
     defer closeSocket(io, fd);
     return readResultResponseSink(requests, fd, destination, reply_buffer);
 }
@@ -2847,6 +3005,8 @@ const Capture = struct {
         try self.write("{");
         var separator: []const u8 = "";
         inline for (@import("session_settings.zig").spec_entries) |entry| {
+            // ConfigureInput has no appTools field: the Zig CLI has no option for it, and only the TypeScript client sends it.
+            if (comptime entry.kind == .app_tools) continue;
             const value = @field(input, entry.field);
             const present = switch (entry.kind) {
                 .content => value.state != .omitted,
@@ -2870,6 +3030,7 @@ const Capture = struct {
                         .value => if (entry.json_object) try self.writeInputFile(value.path, protocol.max_sqlite_content_bytes, false, true) else try self.writeJsonFile(value.path),
                     },
                     .tools => try self.writeTools(value.?),
+                    .app_tools => unreachable,
                     .decimal_policy => if (value.value) |text| {
                         const tokens = try std.fmt.parseInt(u64, text, 10);
                         var digits: [20]u8 = undefined;
@@ -5713,7 +5874,7 @@ test "runtime catalog model list client accepts a reply larger than its shipped 
     var body: std.Io.Writer.Allocating = .init(allocator);
     defer body.deinit();
     try body.writer.writeAll(protocol.model_list_reply.head);
-    try body.writer.writeAll("[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[");
+    try body.writer.writeAll("[{\"connection\":\"codex\",\"source\":\"catalog\",\"models\":[");
     for (0..count) |index| {
         var digits_buffer: [20]u8 = undefined;
         const digits = try std.fmt.bufPrint(&digits_buffer, "{d}", .{index});
@@ -6555,6 +6716,7 @@ test "Session settings client writes every setting and the Host parser preserves
     var missing_buffer: [4096]u8 = undefined;
     var missing: std.Io.Writer = .fixed(&missing_buffer);
     inline for (session_settings.entries) |entry| {
+        if (comptime entry.kind == .app_tools) continue;
         if (@field(configuration, entry.field).state != .value)
             try missing.print("{s}: ConfigureInput fixture / client.Capture.writeConfiguration / Host Parser\n", .{entry.field});
     }
@@ -6907,7 +7069,7 @@ test "capture routing round trips six placements without conflating selector and
                 }
                 try std.testing.expectEqualStrings(expected, request[0..body_used]);
                 var body: protocol.ResponseBuffer = .{};
-                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null, .settings_digest = null };
+                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .connections = &.{}, .doublewrite = null, .settings_digest = null };
                 try body.render(@import("host_reply.zig").renderHostInfo, .{info});
                 var head_buffer: [512]u8 = undefined;
                 const head = try std.fmt.bufPrint(&head_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nConnection: close\r\n\r\n", .{body.len});

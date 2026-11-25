@@ -3,7 +3,7 @@ const Bounded = @import("bounded.zig").Bounded;
 const built_in_tool = @import("built_in_tool.zig");
 const model_capability = @import("model_capability.zig");
 const product_defaults = @import("product_defaults.zig");
-const Provider = @import("provider_name.zig").Provider;
+const Provider = @import("connection.zig").Name;
 const ReasoningEffort = model_capability.ReasoningEffort;
 const WorkKind = @import("session_work.zig").Kind;
 const ArchiveState = @import("session_archive.zig").State;
@@ -51,7 +51,7 @@ pub const Session = struct {
             const a = &@field(self, name);
             const b = &@field(other, name);
             const Field = @TypeOf(a.*);
-            const same = if (Field == Work or Field == @import("command_input.zig").ToolsField) a.eql(b) else if (comptime @typeInfo(Field) == .@"struct" and @hasDecl(Field, "slice")) b.eql(a.slice()) else std.meta.eql(a.*, b.*);
+            const same = if (Field == Work or Field == @import("command_input.zig").ToolsField) a.eql(b) else if (Field == @import("connection.zig").Name) a.eql(b.*) else if (comptime @typeInfo(Field) == .@"struct" and @hasDecl(Field, "slice")) b.eql(a.slice()) else std.meta.eql(a.*, b.*);
             if (!same) return false;
         }
         return true;
@@ -108,7 +108,7 @@ pub fn sample(session: *Session) void {
         .session = .{ .len = 0 },
         .label = .{ .len = 0 },
         .workspace = .{ .len = 0 },
-        .provider = .codex,
+        .provider = @import("connection.zig").Name.parse("codex").?,
         .model = .{ .len = 0 },
         .effort = .high,
         .effort_override = false,

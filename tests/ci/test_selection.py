@@ -704,6 +704,13 @@ class SelectionTest(unittest.TestCase):
                         self.assertIn("upgrade-integration", result["native_targets"])
                         self.assertEqual(result["upgrade_required"], upgrade_required)
 
+    def test_host_endpoint_and_census_owners_run_the_previous_release_upgrade(self):
+        # #2120 moved the endpoint layout and only Promote's running-upgrade check saw the break.
+        for path in ("src/host_endpoint.zig", "src/host_restart_all.zig"):
+            with self.subTest(path=path):
+                self.assertTrue(select([path], "review", AVAILABLE)["upgrade_required"])
+                self.assertFalse(select([path], "development", AVAILABLE)["upgrade_required"])
+
     def test_installer_owners_select_standalone_fixture_in_both_phases(self):
         paths = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
                  "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py", "tests/ci/release.py", "tests/ci/git_command.py",
@@ -1954,7 +1961,8 @@ class FullCheckPartitionTest(unittest.TestCase):
                  ready=lambda live: not live, clock=clock)
 
     def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error="",
-                 timeout=300, python_delay=0, fail_at="", native=True, timeout_after_held=False, clock=time):
+                 timeout=300, python_delay=0, fail_at="", native=True, timeout_after_held=False, clock=time,
+                 stop_driver=None):
         with ExitStack() as owner:
             root = Path(tempfile.mkdtemp())
             process = None
@@ -2188,7 +2196,10 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
                         failure.add_note(f"driver_pid={process.pid}")
                         disposal_deadline = clock.monotonic() + 30
                         try:
-                            os.killpg(process.pid, signal.SIGKILL)
+                            if stop_driver is None:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            else:
+                                stop_driver(process, root)
                         except ProcessLookupError:
                             pass
                         except BaseException as cleanup:
@@ -2328,13 +2339,17 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
                                 shutil.rmtree(note.removeprefix("retained driver root: "))
 
     def test_root_disposal_requires_the_whole_group_to_retire(self):
-        run, killpg, rmtree = subprocess.run, os.killpg, shutil.rmtree
+        # CI-99: a fixture root stays until its held process group retires.
+        run, rmtree = subprocess.run, shutil.rmtree
         mkdtemp = tempfile.mkdtemp
         for delivery in ("delayed", "lost"):
             with self.subTest(delivery=delivery):
                 group = None
                 root = None
                 observed_live = False
+                held_writer = None
+                held_pid = None
+                stop_ready = False
 
                 def make_root(*args, **kwargs):
                     nonlocal root
@@ -2343,40 +2358,42 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
                     return directory
 
                 def live_members():
-                    census = run(["ps", "-axo", "pgid=,stat="], capture_output=True,
+                    census = run(["ps", "-axo", "pid=,pgid=,stat="], capture_output=True,
                                  text=True, check=True, timeout=30)
-                    return [row for row in census.stdout.splitlines()
-                            if int(row.split()[0]) == group and not row.split()[1].startswith("Z")]
+                    return [int(pid) for pid, pgid, state in (row.split() for row in census.stdout.splitlines())
+                            if int(pgid) == group and not state.startswith("Z")]
 
-                def leader_only(pgid, sig):
-                    nonlocal group
-                    group = pgid
-                    peers = dict(line.split() for line in (root / "peer-pids").read_text().splitlines())
-                    held = int(peers["dispatch_integration.py.release"])
+                def release_held():
+                    nonlocal held_writer
+                    if held_writer is not None:
+                        os.write(held_writer, b"r\n")
+                        os.close(held_writer)
+                        held_writer = None
 
-                    def signal_others():
-                        census = run(["ps", "-axo", "pid=,pgid=,stat="], capture_output=True,
-                                     text=True, check=True, timeout=30)
-                        others = [int(pid) for pid, member_group, state in
-                                  (row.split() for row in census.stdout.splitlines())
-                                  if int(member_group) == group and int(pid) != held
-                                  and not state.startswith("Z")]
-                        for pid in others:
-                            try:
-                                os.kill(pid, sig)
-                            except ProcessLookupError:
-                                pass
-                        return others
-                    wait_for(signal_others, f"driver group {group} to keep only its held descendant",
-                             interval=.005, timeout=30, ready=lambda others: not others)
+                def leader_only(process, fixture_root):
+                    nonlocal group, held_writer, held_pid, stop_ready
+                    group = process.pid
+                    try:
+                        peers = dict(line.split() for line in (fixture_root / "peer-pids").read_text().splitlines())
+                        held_pid = int(peers["dispatch_integration.py.release"])
+                        self.assertIn(held_pid, live_members())
+                        held_writer = os.open(fixture_root / "hold.dispatch_integration.py", os.O_WRONLY | os.O_NONBLOCK)
+                        wait_for(lambda: (fixture_root / "wait.native").exists(),
+                                 "driver to finish launching its batch", interval=.005, timeout=20)
+                    except BaseException:
+                        # Release peers that may have started before the activity fixture did.
+                        (fixture_root / "activity_integration.py.release.started").touch()
+                        raise
+                    process.kill()
+                    stop_ready = True
 
                 def census_then_deliver(*args, **kwargs):
                     nonlocal observed_live
                     result = run(*args, **kwargs)
-                    if group is not None and live_members():
+                    if held_pid is not None and held_pid in live_members():
                         observed_live = True
                         if delivery == "delayed":
-                            killpg(group, signal.SIGKILL)
+                            release_held()
                     return result
 
                 def delete_after_retirement(path, *args, **kwargs):
@@ -2387,12 +2404,12 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
 
                 try:
                     with patch("tempfile.mkdtemp", side_effect=make_root), patch(
-                            "os.killpg", side_effect=leader_only), patch(
                             "subprocess.run", side_effect=census_then_deliver), patch(
                             "shutil.rmtree", side_effect=delete_after_retirement):
                         with self.assertRaisesRegex(AssertionError, "^injected failure at held_ready$") as rejected:
                             self.run_part("parallel", overlap=True, hold="dispatch_integration.py",
-                                          fail_at="held_ready", clock=FakeClock())
+                                          fail_at="held_ready", clock=FakeClock(), stop_driver=leader_only)
+                    self.assertTrue(stop_ready, "the batch must be launched before stopping the owned driver")
                     self.assertTrue(observed_live, "the counterexample must contain a live descendant")
                     notes = rejected.exception.__notes__
                     self.assertTrue(any(note.startswith("stdout:") for note in notes), notes)
@@ -2408,11 +2425,8 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
                         self.assertIsNotNone(root)
                         self.assertFalse(root.exists())
                 finally:
+                    release_held()
                     if group is not None:
-                        try:
-                            killpg(group, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
                         self.wait_for_group_retirement(group, time.monotonic() + 30)
                     if root is not None and root.exists():
                         rmtree(root)

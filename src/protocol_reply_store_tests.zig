@@ -65,6 +65,12 @@ test "a Session with message_agent keeps it through its list row and report, as 
     try std.testing.expectEqual(@as(usize, 1), sink.core_calls);
 }
 
+/// The Zig field of protocol_reply.Current.Settings that carries an entry. The
+/// connection entry is named for its wire key there; every other entry keeps its field name.
+fn settingsField(comptime entry: anytype) []const u8 {
+    return if (comptime std.mem.eql(u8, entry.field, "provider")) "connection" else entry.field;
+}
+
 test "Session settings Current report and typed Settings round trip every setting" {
     const settings = @import("session_settings.zig");
     const reply = protocol_reply;
@@ -82,6 +88,8 @@ test "Session settings Current report and typed Settings round trip every settin
     defer command.removeTemporaryContent(io) catch unreachable;
     command.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
     command.configuration.loaded_tools = try .of(&.{ "bash", "find_tools" });
+    const app_declaration = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+    command.configuration.app_tools = .{ .state = .value, .borrowed = app_declaration.ptr, .length = app_declaration.len, .digest = protocol.contentDigest(app_declaration) };
     try command.configuration.permission_mode.value.set("ask");
     try command.configuration.compaction_trigger.value.set("1000");
     command.configuration.output_reservation.state = .value;
@@ -101,9 +109,9 @@ test "Session settings Current report and typed Settings round trip every settin
     inline for (settings.entries) |entry| {
         if (comptime !@hasField(@import("session_report.zig").Current, entry.field))
             try missing.print("{s}: session_report.Current / Store session_report_read current producer\n", .{entry.field});
-        if (comptime !@hasField(reply.Current.Settings, entry.field))
+        if (comptime !@hasField(reply.Current.Settings, settingsField(entry)))
             try missing.print("{s}: protocol_reply.Current.Settings\n", .{entry.field});
-        if (original.get(entry.field)) |value| {
+        if (original.get(settingsField(entry))) |value| {
             if (value == .null) try missing.print("{s}: all-settings configure fixture / Store report read\n", .{entry.field});
         } else try missing.print("{s}: Store report current producer / session_report_reply.CurrentJson.Settings\n", .{entry.field});
     }
@@ -119,11 +127,11 @@ test "Session settings Current report and typed Settings round trip every settin
     var round = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, round_writer.buffered(), .{});
     defer round.deinit();
     inline for (settings.entries) |entry| {
-        const value = round.value.object.get(entry.field);
+        const value = round.value.object.get(settingsField(entry));
         if (value == null) {
             try missing.print("{s}: protocol_reply.Current.Settings round trip\n", .{entry.field});
         } else {
-            const before = try std.json.Stringify.valueAlloc(std.testing.allocator, original.get(entry.field).?, .{});
+            const before = try std.json.Stringify.valueAlloc(std.testing.allocator, original.get(settingsField(entry)).?, .{});
             defer std.testing.allocator.free(before);
             const after = try std.json.Stringify.valueAlloc(std.testing.allocator, value.?, .{});
             defer std.testing.allocator.free(after);
@@ -134,7 +142,7 @@ test "Session settings Current report and typed Settings round trip every settin
     try std.testing.expectEqualStrings("", missing.buffered());
     const current = &decoded.current.settings;
     try std.testing.expectEqualStrings(workspace, current.workspace.slice());
-    try std.testing.expectEqualStrings("codex", @tagName(current.provider.value));
+    try std.testing.expectEqualStrings("codex", current.connection.value.slice());
     try std.testing.expectEqualStrings("gpt-5.5", current.model.slice());
     try std.testing.expectEqualStrings("bash find_tools web_search", current.tools.names.names.slice());
     try std.testing.expectEqualStrings("bash find_tools", current.loaded_tools.names.names.slice());

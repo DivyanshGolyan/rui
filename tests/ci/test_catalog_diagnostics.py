@@ -22,7 +22,7 @@ REQUIRED_RECEIPT = catalog.REQUIRED_PROXY_RECEIPT
 
 
 class CatalogDiagnosticsTest(unittest.TestCase):
-    def run_fixture(self, case, *, early=b"", late=b"", providers=None, capacity=None,
+    def run_fixture(self, case, *, early=b"", late=b"", connections=None, capacity=None,
                     exited=False, required_code=1, required_stdout=REQUIRED_RECEIPT, required_stderr=REQUIRED_FAILURE,
                     configured="accepted", completed="completed", answer=b"HTTP still works",
                     requests=1):
@@ -48,8 +48,8 @@ class CatalogDiagnosticsTest(unittest.TestCase):
 
         def request(socket, store, kind):
             if kind == "model_list":
-                return {"providers": providers if providers is not None else
-                        ([] if case == "proxy" else [{"provider": "codex"}])}
+                return {"connections": connections if connections is not None else
+                        ([] if case == "proxy" else [{"connection": "codex"}])}
             return {"active_capacity": capacity if capacity is not None else store.name[-1]}
 
         endpoint = Mock(server_port=1234, requests=[{}] * requests)
@@ -124,8 +124,8 @@ class CatalogDiagnosticsTest(unittest.TestCase):
 
     def test_broken_canonical_behavior_still_fails_with_silent_stderr(self):
         mutations = {
-            "proxy": ({"providers": [{"provider": "unexpected"}]}, {"capacity": "99"}, {"exited": True}),
-            "trust": ({"providers": []}, {"providers": [{"provider": "unexpected"}]},
+            "proxy": ({"connections": [{"connection": "unexpected"}]}, {"capacity": "99"}, {"exited": True}),
+            "trust": ({"connections": []}, {"connections": [{"connection": "unexpected"}]},
                       {"configured": "rejected"}, {"completed": "failed"},
                       {"answer": b"wrong answer"}, {"requests": 0}, {"exited": True}),
         }

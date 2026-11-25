@@ -40,16 +40,16 @@ Renaming introduces no new runtime entity or authority, deeper command hierarchy
 
 #### Configuration and input
 
-Ordinary fresh `session configure` without a Session selector or preset captures creation intent and the selected Workspace, provider and model before transmission; clients retain their existing binding selection and the Host resolves omitted settings; the Store allocates the ID at commit and the accepted reply returns it.
+Ordinary fresh `session configure` without a Session selector or preset captures creation intent and the selected Workspace, connection and model before transmission; clients retain their existing binding selection and the Host resolves omitted settings; the Store allocates the ID at commit and the accepted reply returns it.
 Fully explicit settings bypass unused preferences.
 `session configure --preset NAME` captures the named Host Settings preset and only explicitly supplied overrides, without filling fresh defaults. The shared resolver applies the preset first, then the Host fills remaining omitted settings. Presets are not supported on `session start`; they cannot be used to update an addressed Session. On preset creation, `default` sends null for policy overrides: a null output reservation clears it, while null effort and compactAt request the Host defaults. Empty instructions, empty tool lists, `--label ""` and `--text-output` remain explicit overrides.
 The CLI checks every supplied model's syntax before capture, input reads or Session mutation.
 A refused model diagnostic names the ID and lists the [IDs Rui lists](#supported-model-ids).
 A typed ID with valid syntax that Rui does not list is admitted with one line, `Rui does not list ID; it uses default limits`, and runs with [default limits](model-io.md#choosing-and-validating-compacted-context).
 `session configure --parent ID` without a Session selector and `session start --parent ID` capture the existing create-only parent relation.
-They send the creation spec through the native inherit-and-narrow owner: provider, Workspace and saved Bash environment come from the parent, configured allowed tool names and Permission Mode may only narrow, and explicit provider or Workspace overrides remain present for canonical refusal even when equal.
-The CLI adds neither its default provider nor its current directory to an attached spec.
-For attached creation without a preset, the CLI sends the selected model and explicit choices, with saved effort and Permission Mode separately as creation preferences; the Host resolves omitted settings at admission. An omitted compaction trigger uses the inherited provider: with a Codex parent and `gpt-6.1-sol` it is 450,000 tokens whether the saved provider is OpenAI or Codex. In the earlier baseline the saved OpenAI case sent 945,000 while the saved Codex case sent 244,800; main later raised the Codex model default to 450,000. An explicit `--compaction-trigger TOKENS` fixes the threshold and is preserved.
+They send the creation spec through the native inherit-and-narrow owner: connection, Workspace and saved Bash environment come from the parent, configured allowed tool names and Permission Mode may only narrow, and explicit connection or Workspace overrides remain present for canonical refusal even when equal.
+The CLI adds neither its default connection nor its current directory to an attached spec.
+For attached creation without a preset, the CLI sends the selected model and explicit choices, with saved effort and Permission Mode separately as creation preferences; the Host resolves omitted settings at admission. An omitted compaction trigger uses the inherited provider: with a Codex parent and `gpt-6.2-astra` it is 244,800 tokens whether the saved provider is OpenAI or Codex. A saved OpenAI binding alone would give 945,000, 90% of this model's 1,050,000-token window. An explicit `--compaction-trigger TOKENS` fixes the threshold and is preserved.
 An attached spec with explicit model, effort, Permission Mode and concrete compactAt bypasses unused binding preferences, so an absent HOME or stale saved provider cannot prevent its canonical parent refusal.
 Missing or archived parents and parent on an addressed update reach the saved native refusals.
 Addressed configuration preserves the exact canonical ID and sparse update inputs.
@@ -61,12 +61,12 @@ A later send failure does not undo accepted configuration.
 Initial configuration accepts the same agent spec and streamed instruction and schema content as Configure; with Message text, one request carries at most three sealed content values.
 Inside one Store transaction, it validates the sender and configuration, allocates an ID through the same collision-safe allocator as configure, and admits the first Message to that new ID.
 Its successful stdout is the same JSON mutation receipt as `session send`, with the allocated six-character ID in `.context.session` and the request handle in `.context.key`, followed by newline: admission rather than execution or completion.
-Only the accepted `session start` receipt adds `configuration` immediately after `context`, containing `provider`, `model`, effective `reasoning_effort` and `effort_source`.
-For an unattached start, `provider` is the concrete resolved provider.
-For an attached start, `provider` is null and `parent` is the captured parent ID: the receipt reports the omitted inherited binding without guessing its value.
+Only the accepted `session start` receipt adds `configuration` immediately after `context`, containing `connection`, `model`, effective `reasoning_effort` and `effort_source`.
+For an unattached start, `connection` is the concrete resolved connection.
+For an attached start, `connection` is null and `parent` is the captured parent ID: the receipt reports the omitted inherited binding without guessing its value.
 The effort source is `flag` whenever `--reasoning-effort` was given (including `default`); otherwise it is `saved` when the captured saved preference is non-null and equals the Host-returned effective effort, and `model_default` otherwise. This label compares the captured preference with the answer and does not infer support from a client catalog.
 Without an override, the effective effort is the Host product choice: `low` when supported (also for an unlisted model), otherwise the lowest listed effort, otherwise null.
-The provider, model and effective effort come from the saved creation answer for the immutable first revision, including on replay. Retrieving that answer is bounded independently of Session history; it does not scan a Full report. Rejection output and `session send` receipts are unchanged.
+The connection, model and effective effort come from the saved creation answer for the immutable first revision, including on replay. Retrieving that answer is bounded independently of Session history; it does not scan a Full report. Rejection output and `session send` receipts are unchanged.
 Replay returns the original allocated ID, Message admission and result even after cancellation or restart; changed creation settings or Message bytes conflict with the original request key.
 Rejection creates no Session.
 Any canonical failure rolls back allocation, revision and Message together.
@@ -133,7 +133,7 @@ The public client `listSessions` streams one complete JSON page to caller-owned 
 Request fields are `version`, `kind`, canonical `store`, `workspace` (exact canonical stored path or `null` for all), string-valued `after`/`ceiling` (both `"0"` initially), and optional `archive` (`active`, `archived`, or `all`, default `active`).
 A first page may also carry `since`, an opaque token from an earlier reply.
 Response `session_list` has up to eight `sessions`, then `delta`, a new `since` token, and `next` as either `null` or a continuation.
-Each row has exact `reference`, `workspace`, `provider`, `model`, `tools`, `permission_mode`, and `archive_state`; nullable decimal-string `pin_order`, derived from the current pin Command; nullable `parent` (the lifecycle attachment reference, otherwise `null`); required nullable `creator` (the creation-provenance reference, set once from parent input at creation or from the first admitted Message's Session sender and never changed afterwards, including detached children); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](inspection.md#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
+Each row has exact `reference`, `workspace`, `connection`, `model`, `tools`, `permission_mode`, and `archive_state`; nullable decimal-string `pin_order`, derived from the current pin Command; nullable `parent` (the lifecycle attachment reference, otherwise `null`); required nullable `creator` (the creation-provenance reference, set once from parent input at creation or from the first admitted Message's Session sender and never changed afterwards, including detached children); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](inspection.md#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
 A non-null `creator` is a canonical six-character Session reference; malformed IDs reject during decoding rather than becoming null.
 Listing reads `creator` from the Store's [Session provenance](sessions.md#session-provenance), independently of the lifecycle `parent` field.
 Each row also has four required decimal strings: `state_change_at`, `subtree_state_change_at`, `descendant_count`, and `descendant_needs_you_count`.
@@ -218,10 +218,10 @@ Existing Stores use the private canonical validator, including supported aliases
 A missing or invalid saved Store fails rather than selecting another.
 Captured requests retain their recorded Store across preference edits.
 
-`rui defaults inspect` reads defaults without writing; `rui defaults configure` saves explicit Store/provider/model, notification, effort and permission edits.
+`rui defaults inspect` reads defaults without writing; `rui defaults configure` saves explicit Store/connection/model, notification, effort and permission edits.
 A saved Store is the global default for commands without `--store` (captured requests keep their recorded Store), so `defaults configure --store` names it on stderr; stdout and exit status are unchanged.
 Interactive `/setup` keeps the same future-default capability.
-After a successful change in a conversation it prints one line, `Saved defaults for future Sessions. Active Session unchanged.`, and follows it with the Store, provider and sign-in report only when the next Session cannot start as saved; app settings shows the saved defaults themselves.
+After a successful change in a conversation it prints one line, `Saved defaults for future Sessions. Active Session unchanged.`, and follows it with the Store, connection and sign-in report only when the next Session cannot start as saved; app settings shows the saved defaults themselves.
 The overview’s `/setup` keeps the full report.
 `--notifications on|off` on either saves whether an open overview or conversation sends [desktop notifications](session-ui.md#desktop-notifications); it is on by default and changes no Session.
 `--reasoning-effort LEVEL` on either saves the effort new Sessions start at, and `default` clears it.
@@ -230,13 +230,13 @@ Every fresh Session may use saved effort and Permission Mode independently of ex
 The defaults report includes the saved `permission_mode` (null when absent); the app settings Permissions row between Effort and Notifications shows `run without asking` for bypass and `ask first` for ask.
 Enter opens those two choices, and picking publishes through the same preferences writer as the other settings rows.
 `rui session configure` creating a Session and each overview start read it at that moment, so a choice made since an overview opened applies.
-When saved defaults change, the overview resolves its prospective provider/model through `new_session_selection`, retaining explicit launch selectors; fully explicit launch bindings do not follow unused saved defaults.
+When saved defaults change, the overview resolves its prospective connection/model through `new_session_selection`, retaining explicit launch selectors; fully explicit launch bindings do not follow unused saved defaults.
 `/setup` remains chat-local and has no overview command path or held per-start override.
 `/effort LEVEL` in a conversation saves LEVEL the same way once the Session accepts it, because the effort a person picks is the one they want next time; chat info’s Effort field changes only its Session.
 These edits never change an existing Session's saved binding or permission mode.
 An explicitly edited Store is validated and canonicalized before publication, allowing replacement of a deleted saved Store.
 An unchanged saved Store retains syntax validation but its availability is checked only when selected for work.
-Independent provider/model inspection or publication does not require an unused Store to exist or fit.
+Independent connection/model inspection or publication does not require an unused Store to exist or fit.
 Inspection reports unavailable prospective destinations without selecting an alternate.
 HOME and the private preference path must still be valid.
 Interactive defaults output escapes dynamic fields without changing stored bytes.
@@ -244,8 +244,8 @@ The chat’s `/setup` accepts double-quoted values and escaped quotes, backslash
 
 The versioned private file under `$HOME/.config/rui/preferences` contains only these three optional values, the notification choice, the new-Session effort and permission mode, not credentials, Session lists or work status.
 Versions 1–3 have no saved permission mode; a version 1 file reads as notifications on.
-Rui reads versions 1–3 and saves every update as version 4: `version=4`, the store, provider and model lines, `notifications=on|off`, `reasoning_effort=LEVEL` and `permission_mode=ask|bypass`, where an empty value means absent.
-Only `codex` is selectable as a provider in this slice.
+Rui reads versions 1–3 and saves every update as version 4: `version=4`, the store, connection and model lines, `notifications=on|off`, `reasoning_effort=LEVEL` and `permission_mode=ask|bypass`, where an empty value means absent.
+Only `codex` is selectable as a connection in this slice. There is no compatibility read of an older `provider=` line: `connection=` is the only connection line.
 The CLI owns the bounded file of at most 1,024 bytes, validates private ownership/access and format on read, and serializes updates under a private lock.
 Publication writes/syncs a same-directory temporary file before atomic rename and directory sync, including HOME and `.config` parent entries on first creation.
 A failed pre-rename save retains the previous complete value; post-rename sync failure reports uncertainty.
@@ -333,8 +333,8 @@ Missing or unreadable future defaults do not prevent a Host from serving existin
 A pin with invalid syntax rejects fresh CLI creation before capture rather than falling back to the recommendation.
 
 The Host resolves omitted fresh effort using an applicable saved creation preference, then the product effort `low` if accepted, otherwise the lowest listed effort, otherwise no effort. An explicit effort or reset takes precedence over the saved preference.
-For Codex, the Host uses a model-specific product trigger when available, otherwise the provider fallback of 244,800 tokens; either is capped at 90% of the selected catalog window. A missing or null window uses the unlisted context estimate.
-For example, `gpt-6.1-sol` defaults to 450,000 tokens with its shipped window, while `gpt-5.3-codex-spark` defaults to 115,200. Other providers default to 90% of the selected window. The same rule applies when resetting compactAt.
+The `codex` and `chatgpt` connections use a 244,800-token provider trigger. Every connection is also capped at 90% of the selected catalog window and at 90% of the model's listed price step (272,000 tokens for `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-6.2-sol`, so 244,800). A missing or null window uses the unlisted context estimate.
+For example, `gpt-6.1-sol` defaults to 244,800 tokens with its shipped window, while `gpt-5.3-codex-spark` defaults to 115,200. The same rule applies when resetting compactAt.
 Omitted updates preserve existing settings; explicit default requests use the Host rule. Frozen Operations do not change.
 
 The fetched live lists are a Host's OpenAI key list and its ChatGPT plan list behind [`/v1/model-list`](inspection.md#public-session-activity); the ChatGPT device sign-in uses the selected catalog's OpenAI IDs because its backend publishes no list.

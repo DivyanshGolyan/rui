@@ -19,7 +19,7 @@ test("connect presets seed creation, overrides win and edited presets replay by 
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
 	const spec: AgentSpec = {
 		model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["start_agent"], permissionMode: "ask",
-		provider: "openai", workspace: root, instructions: "Preset instructions", label: "Review",
+		connection: "openai", workspace: root, instructions: "Preset instructions", label: "Review",
 		outputSchema: { type: "object" },
 	};
 	const options = {
@@ -47,7 +47,7 @@ test("connect presets seed creation, overrides win and edited presets replay by 
 		const child = await rui.sessions.create(overrides, { idempotencyKey: "preset:override" });
 		const changed = await inspect(rui, child.id);
 		assert.equal(changed.model, "override-model");
-		assert.equal(changed.provider, "openai");
+		assert.equal(changed.connection, "openai");
 		assert.equal(changed.workspace, root);
 		assert.equal(changed.reasoning_effort, "low");
 		assert.equal(changed.reasoning_effort_override, "low");
@@ -110,13 +110,13 @@ test("the Host resolves omitted preset settings at creation and preserves explic
 		const fromPreset = await rui.sessions.create({ preset: "review" }, { idempotencyKey: "preset:sparse" });
 		const saved = await inspect(rui, fromPreset.id);
 		const directSettings = await inspect(rui, direct.id);
-		for (const field of ["model", "provider", "workspace", "tools", "loaded_tools", "permission_mode", "reasoning_effort", "compaction_trigger_override"]) {
+		for (const field of ["model", "connection", "workspace", "tools", "loaded_tools", "permission_mode", "reasoning_effort", "compaction_trigger_override"]) {
 			assert.deepEqual(saved[field], directSettings[field], field);
 		}
 		assert.equal(saved.model, "gpt-6.1-sol");
 		assert.equal(saved.reasoning_effort, "low");
 		assert.equal(saved.permission_mode, "bypass");
-		assert.equal(saved.compaction_trigger_override, "945000");
+		assert.equal(saved.compaction_trigger_override, "244800");
 		const imageTools = process.platform === "linux" || process.platform === "darwin" ? ["read_image"] : [];
 		assert.deepEqual(saved.tools, ["bash", "find_tools", "message_agent", "read_action", ...imageTools, "read_transcript", "skill", "start_agent", "stop_action", "web_search"]);
 		assert.deepEqual(saved.loaded_tools, saved.tools);

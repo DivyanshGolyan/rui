@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_route = @import("provider_route.zig");
 const session_list = @import("session_list.zig");
 const model_catalog = @import("model_catalog.zig");
 const vaxis = @import("vaxis");
@@ -27,8 +28,11 @@ const stderr = @import("stderr.zig");
 const test_poll = @import("test_poll");
 const app_events = @import("testing/app_events.zig");
 const view = @import("overview_view.zig");
+const provider_selection = @import("provider_selection.zig");
+const connection_names = @import("connection_names.zig");
 const ClientTask = @import("ClientTask.zig");
 const UpgradeJob = @import("UpgradeJob.zig");
+const ReleaseWatch = @import("ReleaseWatch.zig");
 const session_upgrade = @import("session_upgrade.zig");
 const upgrade_status = @import("upgrade_status.zig");
 const session_chrome = @import("session_chrome.zig");
@@ -368,6 +372,7 @@ retired: std.ArrayList(struct { left: Left, frame: u64 }) = .empty,
 interrupted: *client.Cancellation,
 worker: ClientTask = .{},
 upgrade_job: UpgradeJob = .{},
+release_watch: ReleaseWatch = .{},
 host_process: ?struct { started_at: u64, pid: i32 } = null,
 memory_override: ?view.Memory,
 host_observation: HostObservation = .unread,
@@ -577,7 +582,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 .host_unavailable = hostHeld(self),
             } });
             ctx.redraw = ctx.redraw or presentation.redraw;
-            if (!self.state.upgrading()) try self.appDiscoverUpgrade(ctx);
+            try self.appReleaseWatch(ctx);
             const launch = try self.eventResult(.launch_poll);
             try self.appNext(ctx, launch.next);
             ctx.redraw = ctx.redraw or launch.redraw;
@@ -790,27 +795,16 @@ fn appCopy(raw: *anyopaque, file: std.Io.File, start: u64, length: u64) !void {
     try app.vx.copyToSystemClipboard(app.tty.writer(), bytes, self.init.gpa);
 }
 
-fn appDiscoverUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
-    const job = &self.upgrade_job;
-    if (!job.started and !job.discovery_attempted) job.discover(self.init) catch {};
-    if (!job.discovering() or !job.started) return;
-    if (try job.advance()) {
-        const available = job.availability();
-        if (!std.meta.eql(available, self.state.upgrade.available)) {
-            _ = try self.event(.{ .available_upgrade = available });
-            ctx.redraw = true;
-        }
+fn appReleaseWatch(self: *Self, ctx: *vxfw.EventContext) !void {
+    const available = self.release_watch.poll(self.init, self.animationMs());
+    if (!std.meta.eql(available, self.state.upgrade.available)) {
+        _ = try self.event(.{ .available_upgrade = available });
+        ctx.redraw = true;
     }
 }
 
 fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
     const job = &self.upgrade_job;
-    if (job.discovering()) {
-        const cancelled = self.state.upgrade.run.? == .cancelling;
-        if (!try job.retireDiscovery()) return;
-        if (cancelled) job.cancel();
-        _ = try self.event(.{ .available_upgrade = null });
-    }
     if (!job.started and try self.quiesceUpgrade() and self.conversationSettled()) job.begin(self.init, self.options.store) catch {};
     const done = job.started and try job.advance();
     const stands = job.status();
@@ -853,10 +847,6 @@ fn conversationSettled(self: *const Self) bool {
 fn keepUpgrade(self: *Self) !void {
     const job = &self.upgrade_job;
     if (!job.started) return;
-    if (job.discovering()) {
-        job.deinit();
-        return;
-    }
     self.upgrade_guidance = self.upgrade_guidance or job.hasGuidance();
     if (self.relaunch_build) |build| self.init.gpa.free(build);
     self.relaunch_build = null;
@@ -893,6 +883,7 @@ fn finishApp(self: *Self, ended: anyerror!void) !?Relaunch {
         self.retired.deinit(self.init.gpa);
     }
     self.upgrade_job.settle();
+    self.release_watch.settle();
     const kept = self.keepUpgrade();
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
@@ -1319,6 +1310,9 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
         fn run(raw: *anyopaque) ?upgrade_status.Run {
             return owner(raw).state.upgrade.run;
         }
+        fn available(raw: *anyopaque) ?upgrade_status.Version {
+            return owner(raw).state.upgrade.available;
+        }
         fn signIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
             try owner(raw).openSignIn(ctx);
         }
@@ -1326,7 +1320,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
             return owner(raw).caps;
         }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .available = Callbacks.available, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue };
 }
 
 fn destroy(self: *Self) void {
@@ -1335,6 +1329,7 @@ fn destroy(self: *Self) void {
     self.session_drafts.deinit(self.init.gpa);
     std.debug.assert(self.worker.thread == null);
     self.upgrade_job.deinit();
+    self.release_watch.deinit();
     if (self.relaunch_build) |build| self.init.gpa.free(build);
     if (self.upgrade_report) |*report| report.deinit();
     self.job.deinit(self.init.gpa);
@@ -1382,7 +1377,6 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .stop => |reference| self.queue(.{ .stop = reference }),
         .cancel_upgrade => {
             self.upgrade_job.cancel();
-            if (self.upgrade_job.discovering()) _ = try self.event(.{ .upgrade = .cancelling });
         },
         .archive => |request| self.queue(.{ .archive = request }),
         .pin => |request| self.queue(.{ .pin = request }),
@@ -1608,19 +1602,33 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
     return null;
 }
 
-fn savedDefault(self: *const Self) ?view.Default {
-    if (!self.options.selectors.needsPreferences() or self.options.home.len == 0) return null;
-    return resolveDefault(&self.state, .{
-        .intent = self.options.selectors,
-        .defaults = preferences.load(self.options.home) catch return null,
-    });
+/// The connection names a Host's capabilities serve, at the route they are served on.
+fn servedNames(connections: protocol.Connections) connection_names.NameSet {
+    var served: connection_names.NameSet = .{};
+    for (connections.slice()) |fact| {
+        if (fact.route != .unserved) served.insert(fact.name) catch break;
+    }
+    return served;
 }
 
-fn resolveDefault(state: *const view.State, saved: new_session_selection.Snapshot) ?view.Default {
+/// The default from facts the view already holds: the names the Host serves once its facts arrive,
+/// and the built-in providers before then. It does no I/O.
+fn savedDefault(self: *const Self) ?view.Default {
+    if (!self.options.selectors.needsPreferences() or self.options.home.len == 0) return null;
+    const snapshot: new_session_selection.Snapshot = .{
+        .intent = self.options.selectors,
+        .defaults = preferences.load(self.options.home) catch return null,
+    };
+    var usable: provider_selection.Readinesses = if (self.state.host == null) .initFill(.configured) else .{};
+    if (self.state.host) |host| for (host.served.slice()) |name| usable.set(name, .configured);
+    return resolveDefault(&self.state, snapshot, &usable);
+}
+
+fn resolveDefault(state: *const view.State, saved: new_session_selection.Snapshot, usable: *const provider_selection.Readinesses) ?view.Default {
     if (!saved.intent.needsPreferences()) return null;
     var snapshot = saved;
     snapshot.intent.provider = state.savedProvider(snapshot.intent.provider, if (snapshot.defaults.provider.len != 0) snapshot.defaults.provider.slice() else null);
-    const binding = (snapshot.resolve(&.initFill(.configured)) catch return null) orelse return null;
+    const binding = (snapshot.resolve(usable) catch return null) orelse return null;
     return view.Default.of(binding.provider.slice(), binding.model.slice());
 }
 
@@ -1636,7 +1644,7 @@ fn creationInput(self: *const Self, snapshot: *const CreationSnapshot) !configur
         .session = .create,
         .require_model = true,
         .workspace = .{ .present = true, .value = self.options.workspace },
-        .provider = if (binding.*) |value| .{ .present = true, .value = @tagName(value.provider) } else .{},
+        .provider = if (binding.*) |*value| .{ .present = true, .value = value.provider.slice() } else .{},
         .model = if (binding.*) |*value| .{ .present = true, .value = value.model.slice() } else .{},
     };
     configuration.applySavedCreation(saved.effort, saved.permission);
@@ -1944,7 +1952,7 @@ fn startHost(self: *Self) HostLaunch {
 fn hostFacts(self: *Self) HostRead {
     const observation: HostObservation = switch (client.hostStatus(self.init.io, self.options.store)) {
         .ready => |host| .{ .ready = .{
-            .facts = .{ .instance = host.instance, .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied },
+            .facts = .{ .instance = host.instance, .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied, .served = servedNames(host.capabilities.connections) },
             .paused = host.paused,
         } },
         .unavailable => .{ .stopped = platform.StoreLease.lastStop(self.init.io, self.options.store) },
@@ -2147,7 +2155,7 @@ const fake_operations: Operations = .{
     }.host,
     .window = struct {
         fn window(_: *Self, _: client.Requests, _: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
-            page.* = .{};
+            page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists } };
             return null;
         }
     }.window,
@@ -2230,8 +2238,8 @@ const fake_operations: Operations = .{
             errdefer reply.deinit();
             try reply.writer.writeAll(protocol.model_list_reply.head);
             try model_list.writeProviders(&reply.writer, model_catalog.shipped, &.{
-                .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\n" } } },
-                .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
+                .{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\n" } } },
+                .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
             });
             try reply.writer.writeAll(protocol.model_list_reply.tail);
             return reply.toOwnedSlice();
@@ -4569,7 +4577,7 @@ test "a wheel over the Archived list reports one viewport, after the draw that a
             try wire.writeJson(&out);
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
             page.rows[0] = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
             return null;
         }
@@ -4621,7 +4629,7 @@ test "overview Archived window effect runs one job and its reply becomes the win
             try wire.writeJson(&out);
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
             page.rows[0] = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
             return null;
         }
@@ -4667,9 +4675,9 @@ test "overview archive effects preserve server filter, pending visibility, and r
     // The Archived window answers the one archived Session the listing names, as the Host's window would.
     const Windowing = struct {
         fn window(_: *Self, _: client.Requests, _: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
-            page.* = .{ .count = 0 };
+            page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .count = 0 };
             if (Listing.archive_state != .archived) return null;
-            page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.* = .{ .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
             page.rows[0] = .{ .reference = .{ .value = protocol.Bounded(protocol.max_session_bytes).from("k7m2qx") catch unreachable }, .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 4, .content = .{ .text = .{ .length = 1, .digest = @splat(0x1) } }, .line = null } };
             return null;
         }
@@ -6462,7 +6470,7 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         const rig = try openOverview();
         defer rig.close();
         const overview = rig.overview;
-        try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "future-chat\ngpt-5.5\n" } } }}) } }) == null);
+        try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "future-chat\ngpt-5.5\n" } } }}) } }) == null);
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try overview.root.openSettings(&ctx);
@@ -6475,7 +6483,7 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         if (release) {
             try std.testing.expect(try overview.event(.leave) == null);
         } else {
-            try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }}) } }) == null);
+            try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }}) } }) == null);
         }
         try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
         try std.testing.expect(!page.hasChoice());
@@ -6545,8 +6553,8 @@ fn sui4ModelFilter() !void {
         try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
         _ = try overview.event(.{ .input = .{ .key = .{ .action = .first } } });
         try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{
-            .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
-            .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
+            .{ .provider = provider_route.nameOf(.codex), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
+            .{ .provider = provider_route.nameOf(.openai), .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
         }) } }) == null);
         try std.testing.expect(try rig.press("kept draft") == null);
         var ctx = rig.context();
@@ -6966,7 +6974,7 @@ test "Sign-in completion applies the core default and restores only a visible fo
             try std.testing.expect(std.mem.indexOf(u8, text, "couldn't save default") != null);
             try std.testing.expect(std.mem.indexOfAny(u8, text, "\r\n\x1b") == null);
         }
-        try std.testing.expectEqual(protocol.Provider.openai, overview.state.default.?.provider);
+        try std.testing.expectEqualStrings("openai", overview.state.default.?.provider.slice());
         try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
         const next_creation = overview.creationSnapshot(overview.state.default);
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), (try next_creation.settings).effort);
@@ -7580,7 +7588,7 @@ const EmptySessionOwner = struct {
             .result = .{
                 .status = true,
                 .work = .{ .read_version = .{ .instance = @splat(1), .generation = generation }, .work = row.work.core() },
-                .line = .{ .read = .{ .revision = row.revision, .end = row.end }, .model = row.model, .provider = .codex, .folder = row.workspace, .effort = effort },
+                .line = .{ .read = .{ .revision = row.revision, .end = row.end }, .model = row.model, .provider = view.pn(.codex), .folder = row.workspace, .effort = effort },
                 .hint = .absent,
                 .cursor = .{ .position = row.end },
                 .at_start = true,
@@ -8140,7 +8148,7 @@ fn checkCreationPreferenceFailure() !void {
             defer file.close(std.testing.io);
             try file.writePositionalAll(std.testing.io, bytes, 0);
         }
-        const valid = "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=high\npermission_mode=bypass\n";
+        const valid = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=high\npermission_mode=bypass\n";
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -8588,7 +8596,7 @@ test "overview redraw deadline includes quota header with failed row off screen"
             row.work.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = test_now_s + 200 } };
             try row.work.state.failed.code.set("provider_quota");
             row.work = fixtureSessionWork(row.work.core());
-            row.provider = .codex;
+            row.provider = view.pn(.codex);
             return failure;
         }
     };
@@ -8624,75 +8632,6 @@ test "overview redraw deadline includes quota header with failed row off screen"
     var changed = try rig.shown(140, 8);
     defer changed.deinit();
     try std.testing.expect(std.mem.indexOf(u8, try changed.text(), "Quota used up. Resets in 2m.") != null);
-}
-
-test "background discovery reaches the production version widget without requesting an upgrade" {
-    for (0..3) |case| {
-        const discovery_failed = case == 1;
-        const running_version = @import("release_candidate.zig").Version.parse(@import("transport_options").version) catch null;
-        const newer_candidate = if (running_version) |running| running.schema < 999 or (running.schema == 999 and running.patch < 2) else false;
-        const offers_update = !discovery_failed and newer_candidate;
-        const rig = try openOverview();
-        defer rig.close();
-        const overview = rig.overview;
-        const job = &overview.upgrade_job;
-        job.* = .{ .init = rig.init, .allocator = std.testing.allocator, .started = true, .discovery_attempted = true, .operation = .discover };
-        const Worker = struct {
-            var release: std.atomic.Value(bool) = .init(true);
-            fn run(raw: *anyopaque, _: *ClientTask) !void {
-                const owner: *UpgradeJob = @ptrCast(@alignCast(raw));
-                try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &release, test_poll.isSet);
-                owner.candidate = try @import("release_candidate.zig").fromEffectiveUrl(owner.allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64");
-            }
-        };
-        Worker.release.store(case != 2, .release);
-        defer Worker.release.store(true, .release);
-        try job.task.start(rig.init.io, job, Worker.run);
-        if (case == 2) {
-            var waiting_ctx = rig.context();
-            defer waiting_ctx.cmds.deinit(std.testing.allocator);
-            try overview.startUpgrade();
-            _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .idle, .input = .cancel_upgrade } });
-            try overview.appUpgrade(&waiting_ctx);
-            try std.testing.expect(job.discovering() and job.task.thread != null);
-            try std.testing.expectEqual(upgrade_status.Run.cancelling, overview.state.upgrade.run.?);
-            Worker.release.store(true, .release);
-            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
-            try overview.appUpgrade(&waiting_ctx);
-            try std.testing.expectEqual(upgrade_status.Ended.cancelled, overview.state.upgrade.run.?.ended.how);
-            try std.testing.expect(job.discovery_attempted and !job.started and !job.cancelling and !job.discovering());
-            continue;
-        }
-        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
-        if (discovery_failed) job.failure = error.ConnectionRefused;
-        var ctx = rig.context();
-        defer ctx.cmds.deinit(std.testing.allocator);
-        try overview.appDiscoverUpgrade(&ctx);
-        try std.testing.expect(!overview.state.upgrading());
-        try std.testing.expect(overview.state.upgrade.run == null);
-        try std.testing.expectEqual(offers_update, overview.state.upgrade.available != null);
-        try std.testing.expect(job.finished and job.task.thread == null and job.result == null and job.checked == null);
-        var shown = try rig.shown(80, 24);
-        defer shown.deinit();
-        try std.testing.expectEqualDeep(overview.state.upgrade.available, overview.app_settings_line.available);
-        const settings_row: u16 = for (0..24) |row| {
-            if (std.mem.startsWith(u8, try shown.line(@intCast(row)), "     Settings")) break @intCast(row);
-        } else return error.TestExpectedSettingsRow;
-        const bottom = try shown.line(settings_row);
-        try std.testing.expectEqual(offers_update, std.mem.indexOf(u8, bottom, "Update to 0.999.2") != null);
-        if (!offers_update) try std.testing.expect(std.mem.indexOf(u8, bottom, @import("transport_options").version) == null);
-        try std.testing.expect(std.mem.indexOf(u8, bottom, "Update failed") == null);
-        try overview.appDiscoverUpgrade(&ctx);
-        try std.testing.expect(job.task.thread == null);
-        try overview.startUpgrade();
-        _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .idle, .input = .cancel_upgrade } });
-        try std.testing.expectEqual(upgrade_status.Run.cancelling, overview.state.upgrade.run.?);
-        try overview.appUpgrade(&ctx);
-        try std.testing.expectEqual(upgrade_status.Ended.cancelled, overview.state.upgrade.run.?.ended.how);
-        try std.testing.expect(job.discovery_attempted and !job.started and !job.cancelling and !job.discovering());
-        try overview.appDiscoverUpgrade(&ctx);
-        try std.testing.expect(!job.started);
-    }
 }
 
 test "upgrade attempt presentation domain ends synthetic pause and publishing without lifting recovery holds" {
@@ -8875,7 +8814,7 @@ test "named launch waits for sign-in before choosing its binding" {
             row.* = .{ .created_at = 10, .read_version = page.since, .work = .{ .state = .{ .idle = .{ .since = test_now_s } } } };
             row.reference.set(listed_references[0]) catch unreachable;
             row.workspace.set("/work") catch unreachable;
-            row.provider = .codex;
+            row.provider = view.pn(.codex);
             row.model.set("gpt-6-luna") catch unreachable;
             return null;
         }
@@ -9273,4 +9212,259 @@ test "SUI-108 App overview keyboard and pointer precedence" {
     try std.testing.expectEqual(36, @import("widgets/RowInset.zig").contentWidth(40));
     try keyboardSelectionCase();
     try keyboardOriginCase();
+}
+
+fn archivedLaterWindowCase() !void {
+    const Script = struct {
+        const host: [16]u8 = @splat(1);
+        const old: protocol.SinceToken = .{ .instance = host, .generation = 1 };
+        const through: protocol.SinceToken = .{ .instance = host, .generation = 10 };
+        const archived: protocol.SinceToken = .{ .instance = host, .generation = 11 };
+        const target = "b4n8wd".*;
+
+        fn row(page: *protocol_reply.SessionListPage, index: usize, reference: []const u8) !void {
+            const r = &page.rows[index];
+            const target_row = std.mem.eql(u8, reference, &target);
+            const staged_work: view.WorkState = if (target_row) .{ .approval = .{ .since = test_now_s - 1800 } } else .{ .idle = .{ .since = test_now_s } };
+            r.* = .{ .read_version = if (std.mem.eql(u8, reference, "z00000")) archived else through, .work = fixtureSessionWork(.{ .state = staged_work, .turn = if (target_row) 7 else null, .first_action = if (target_row) 42 else null }) };
+            try r.reference.set(reference);
+            try r.workspace.set("/work");
+            try r.model.set("gpt-5.5");
+            r.end = 1;
+            const admission: u64 = if (target_row) 4 else @as(u64, reference[0]) + 100;
+            r.first_message = .{ .position = 1, .admission = admission, .admitted_at = test_now_s, .sender = null, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } } };
+            r.peers.from_person_at = test_now_s;
+        }
+
+        fn bootstrap(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, filter: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            const failure = try fake_operations.list(self, requests, cursor, filter, page);
+            if (page.count != 0) {
+                if (page.rows[0].first_message) |*first| first.admission = 1000;
+            }
+            return failure;
+        }
+
+        fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, filter: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            try std.testing.expectEqual(protocol.SessionArchiveFilter.active, filter);
+            try std.testing.expectEqualDeep(old, cursor.since.?);
+            if (cursor.changed == null) {
+                page.* = .{ .count = 8, .delta = .changed, .since = through, .next = .{ .since = old, .changed = .{ .through = 10, .after_reference = "h00000".* } } };
+                for ([_][]const u8{ "a00000", "b4n8wd", "c00000", "d00000", "e00000", "f00000", "g00000", "h00000" }, 0..) |ref, i| try row(page, i, ref);
+            } else {
+                try std.testing.expectEqual(@as(u64, 10), cursor.changed.?.through);
+                try std.testing.expectEqualStrings("h00000", &cursor.changed.?.after_reference);
+                page.* = .{ .count = 1, .delta = .changed, .since = through, .next = null };
+                try row(page, 0, "z00000");
+            }
+            return null;
+        }
+
+        fn window(_: *Self, _: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            try std.testing.expect(cursor == .head);
+            const wire: protocol.ArchivedRow.Fields = .{ .reference = &target, .archive_seq = 42, .stopped_at = test_now_s, .label = "Archive target", .first = .{ .position = 1, .admission = 4, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } }, .line = "A" } };
+            var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
+            var out = std.Io.Writer.fixed(&json);
+            try wire.writeJson(&out);
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            page.* = .{ .count = 1, .since = archived, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.rows[0] = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
+            return null;
+        }
+    };
+
+    var cancellation: client.Cancellation = .{};
+    var ops = fake_operations;
+    ops.list = Script.bootstrap;
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+
+    // Bootstrap with a real listed working status at token 1.
+    Seen.now.listed = 2;
+    Seen.now.working = 2;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualDeep(Script.old, overview.state.token.?);
+    try std.testing.expectEqualDeep(Script.host, overview.state.read_instance.?);
+    overview.ops.list = Script.list;
+    overview.ops.window = Script.window;
+
+    // The periodic walk queues Host then list. Finish the Host observation.
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .host);
+    try rig.answered();
+    try std.testing.expect(try overview.complete() == null);
+
+    // Finish page 1's worker but hold delivery; the Archived tab input queues
+    // the head window while the one worker is still owned by page 1.
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .list);
+    try rig.answered();
+    try std.testing.expect(try overview.event(.{ .clicked = .{ .target = .archived } }) == null);
+    try std.testing.expectEqual(@as(usize, 1), overview.job_count);
+    try std.testing.expect(overview.jobs[0] == .archived);
+    try std.testing.expect(try overview.complete() == null);
+    try std.testing.expectEqual(@as(usize, 8), overview.state.pending.items.len);
+    try std.testing.expect(overview.jobs[0] == .archived);
+    try std.testing.expect(overview.jobs[1] == .list);
+
+    // Scripted Host revision 11 reflects A's archive after the old page-1
+    // revision 10. Observe the production window converter and placement.
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .archived);
+    try rig.answered();
+    try std.testing.expectEqualDeep(Script.archived, overview.answer.archived.since);
+    try std.testing.expect(try overview.complete() == null);
+    try std.testing.expectEqual(view.ArchiveState.archived, overview.state.find(Script.target).?.archive_state);
+    try std.testing.expectEqual(@as(?u64, 42), overview.state.find(Script.target).?.archive_seq);
+    try std.testing.expectEqual(@as(usize, 1), overview.state.order.items.len);
+
+    // The older continuation must not replace generation-11 membership.
+    // Other jobs, e.g. first-line reads, may be queued *after* this continuation.
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .list);
+    try rig.answered();
+    try std.testing.expectEqualDeep(Script.archived, overview.answer.page.rows[0].read_version);
+    try std.testing.expect(try overview.complete() == null);
+    try std.testing.expectEqualDeep(Script.through, overview.state.token.?);
+    try std.testing.expectEqual(view.ArchiveState.archived, overview.state.find(Script.target).?.archive_state);
+    try std.testing.expectEqual(@as(?u64, 42), overview.state.find(Script.target).?.archive_seq);
+    try std.testing.expectEqualDeep(Script.through, overview.state.find(Script.target).?.read_version.?);
+    try std.testing.expectEqual(view.Kind.approval, std.meta.activeTag(overview.state.find(Script.target).?.state));
+    try std.testing.expectEqual(@as(usize, 1), overview.state.order.items.len);
+    try std.testing.expect(!overview.state.archived.reanchor);
+    try std.testing.expectEqual(@as(usize, 0), view.edgeAttention(&overview.state, .below, 0, 0));
+    overview.state.selected = .{ .session = Script.target };
+    const stopped = try view.step(&overview.state, .{ .input = .{ .key = .{ .action = .stop } } });
+    for (stopped.slice()) |effect| try std.testing.expect(effect != .stop);
+    const question = try view.step(&overview.state, .{ .input = .{ .key = .{ .action = .next_question } } });
+    for (question.slice()) |effect| try std.testing.expect(effect != .open);
+    var frame = try rig.shown(80, 24);
+    defer frame.deinit();
+    const text = try frame.text();
+    const name = std.mem.indexOf(u8, text, "Archive target") orelse return error.TestExpectedEqual;
+    const start = if (std.mem.lastIndexOfScalar(u8, text[0..name], '\n')) |at| at + 1 else 0;
+    const end = name + (std.mem.indexOfScalar(u8, text[name..], '\n') orelse text.len - name);
+    try std.testing.expect(std.mem.indexOf(u8, text[start..end], "now") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text[start..end], "30m") == null);
+}
+
+fn archivedLaterRestoreCase() !void {
+    const Script = struct {
+        const host: [16]u8 = @splat(1);
+        const old: protocol.SinceToken = .{ .instance = host, .generation = 1 };
+        const through: protocol.SinceToken = .{ .instance = host, .generation = 10 };
+        const newer: protocol.SinceToken = .{ .instance = host, .generation = 11 };
+        const target = "z00000".*;
+        const other = "x00000".*;
+
+        fn row(page: *protocol_reply.SessionListPage, index: usize, reference: []const u8, version: protocol.SinceToken) !void {
+            const r = &page.rows[index];
+            r.* = .{ .read_version = version, .work = fixtureSessionWork(.{ .state = .{ .idle = .{ .since = test_now_s } } }) };
+            try r.reference.set(reference);
+            try r.workspace.set("/work");
+            try r.model.set("gpt-5.5");
+            r.end = 1;
+            const admission: u64 = if (std.mem.eql(u8, reference, &target)) 200 else @as(u64, @intCast(index)) + 100;
+            r.first_message = .{ .position = 1, .admission = admission, .admitted_at = test_now_s, .sender = null, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } } };
+            r.peers.from_person_at = test_now_s;
+        }
+
+        fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, filter: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            try std.testing.expectEqual(protocol.SessionArchiveFilter.active, filter);
+            try std.testing.expectEqualDeep(old, cursor.since.?);
+            if (cursor.changed == null) {
+                page.* = .{ .count = 8, .delta = .changed, .since = through, .next = .{ .since = old, .changed = .{ .through = 10, .after_reference = "h00000".* } } };
+                for ([_][]const u8{ "a00000", "b00000", "c00000", "d00000", "e00000", "f00000", "g00000", "h00000" }, 0..) |ref, i| try row(page, i, ref, through);
+            } else {
+                try std.testing.expectEqual(@as(u64, 10), cursor.changed.?.through);
+                try std.testing.expectEqualStrings("h00000", &cursor.changed.?.after_reference);
+                // z was already a changed seed at through 10, but was restored
+                // after the window read. Rows use actual read version 11;
+                // the walk's resume boundary remains through 10.
+                page.* = .{ .count = 1, .delta = .changed, .since = through, .next = null };
+                try row(page, 0, &target, newer);
+            }
+            return null;
+        }
+
+        fn window(_: *Self, _: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            try std.testing.expect(cursor == .head);
+            page.* = .{ .count = 2, .since = through, .first = 42, .last = 41, .more_above = false, .more_below = false };
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            for ([_][]const u8{ &target, &other }, [_]u64{ 42, 41 }, 0..) |ref, seq, i| {
+                const wire: protocol.ArchivedRow.Fields = .{ .reference = ref, .archive_seq = seq, .stopped_at = test_now_s, .label = null, .first = .{ .position = 1, .admission = if (i == 0) 200 else 500, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } }, .line = "A" } };
+                var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
+                var out = std.Io.Writer.fixed(&json);
+                try wire.writeJson(&out);
+                page.rows[i] = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
+            }
+            return null;
+        }
+    };
+
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    Seen.now.listed = 0;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualDeep(Script.old, overview.state.token.?);
+    try std.testing.expectEqualDeep(Script.host, overview.state.read_instance.?);
+    overview.ops.list = Script.list;
+    overview.ops.window = Script.window;
+
+    // Periodic refresh queues Host then list. Leave page 1 completed but not
+    // delivered while tab input queues the Archived read ahead of continuation.
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .host);
+    try rig.answered();
+    try std.testing.expect(try overview.complete() == null);
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .list);
+    try rig.answered();
+    try std.testing.expect(try overview.event(.{ .clicked = .{ .target = .archived } }) == null);
+    try std.testing.expectEqual(@as(usize, 1), overview.job_count);
+    try std.testing.expect(overview.jobs[0] == .archived);
+    try std.testing.expect(try overview.complete() == null);
+    try std.testing.expectEqual(@as(usize, 8), overview.state.pending.items.len);
+    try std.testing.expect(overview.jobs[0] == .archived);
+    try std.testing.expect(overview.jobs[1] == .list);
+
+    // Both exact references are visibly archived at generation 10.
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .archived);
+    try rig.answered();
+    try std.testing.expectEqualDeep(Script.through, overview.answer.archived.since);
+    try std.testing.expect(try overview.complete() == null);
+    try std.testing.expectEqual(view.ArchiveState.archived, overview.state.find(Script.target).?.archive_state);
+    try std.testing.expectEqual(view.ArchiveState.archived, overview.state.find(Script.other).?.archive_state);
+    try std.testing.expectEqual(@as(usize, 2), overview.state.order.items.len);
+
+    // Continuation has an actual newer read for z only. Its changed-walk
+    // cursor still commits through 10; x must retain its archived membership.
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.job == .list);
+    try rig.answered();
+    try std.testing.expectEqualDeep(Script.through, overview.answer.page.since);
+    try std.testing.expectEqualDeep(Script.newer, overview.answer.page.rows[0].read_version);
+    try std.testing.expectEqualStrings(&Script.target, overview.answer.page.rows[0].reference.slice());
+    try std.testing.expect(try overview.complete() == null);
+    try std.testing.expectEqualDeep(Script.through, overview.state.token.?);
+    try std.testing.expectEqual(view.ArchiveState.active, overview.state.find(Script.target).?.archive_state);
+    try std.testing.expectEqual(@as(?u64, null), overview.state.find(Script.target).?.archive_seq);
+    try std.testing.expectEqual(view.ArchiveState.archived, overview.state.find(Script.other).?.archive_state);
+    try std.testing.expectEqual(@as(?u64, 41), overview.state.find(Script.other).?.archive_seq);
+    try std.testing.expectEqual(@as(usize, 1), overview.state.order.items.len);
+    try std.testing.expect(!overview.state.archived.reanchor);
+}
+
+test "SUI-138 Archived membership respects observed Host order" {
+    try archivedLaterWindowCase();
+    try archivedLaterRestoreCase();
 }

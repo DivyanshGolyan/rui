@@ -1,4 +1,6 @@
 const std = @import("std");
+const connection_names = @import("connection_names.zig");
+const provider_route = @import("provider_route.zig");
 const host_endpoint = @import("host_endpoint.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const session_list = @import("session_list.zig");
@@ -687,6 +689,12 @@ fn selectionContextActive(self: *const Self) bool {
 
 fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (event == .focus_out) {
+        cancelPointerSelection(raw);
+        if (self.app_document.cancelSelection()) self.dirty = true;
+        if (self.dirty) ctx.redraw = true;
+        return;
+    }
     const mouse = if (event == .mouse) event.mouse else return;
     if (self.app_content.capturePointerLifecycle(ctx, mouse)) return;
     if (mouse.type == .press or mouse.type == .motion) return;
@@ -3612,6 +3620,8 @@ const HeldFrontend = struct {
     tmp: std.testing.TmpDir,
     directory: [std.Io.Dir.max_path_bytes]u8 = undefined,
     interrupted: client.Cancellation = .{},
+    peer_opened: usize = 0,
+    peer_id: [session_id.bytes]u8 = @splat(0),
     root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() },
     arena: std.heap.ArenaAllocator,
     left: ?Outcome = null,
@@ -3680,6 +3690,12 @@ const HeldFrontend = struct {
 
     fn onOpen(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {
         return error.UnexpectedOpen;
+    }
+
+    fn recordPeerOpen(raw: *anyopaque, _: *vxfw.EventContext, id: *const [session_id.bytes]u8) !void {
+        const held: *HeldFrontend = @ptrCast(@alignCast(raw));
+        held.peer_opened += 1;
+        held.peer_id = id.*;
     }
 
     fn context(held: *HeldFrontend) vxfw.EventContext {
@@ -3974,6 +3990,26 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
             return .{ .userdata = self, .on_external = external, .on_notice = notice, .on_scroll = scrollNoop, .quote = .{ .begin = quoteBegin, .insert = quoteInsert } };
         }
     };
+    const FocusPath = struct {
+        fn deliver(held: *HeldFrontend, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+            // Mirror vxfw FocusHandler's capture-to-focused-composer route.
+            const field = held.root.input.field;
+            ctx.consume_event = false;
+            ctx.phase = .capturing;
+            try held.root.widget().captureEvent(ctx, event);
+            try std.testing.expect(!ctx.consume_event);
+            try std.testing.expectEqual(field, held.root.input.field);
+            try std.testing.expect(held.root.input.mainFocused());
+            try held.self.widget().captureEvent(ctx, event);
+            try std.testing.expect(!ctx.consume_event);
+            try std.testing.expectEqual(field, held.root.input.field);
+            try std.testing.expect(held.root.input.mainFocused());
+            ctx.phase = .at_target;
+            try held.self.app_input.composer.widget().handleEvent(ctx, event);
+            try std.testing.expectEqual(field, held.root.input.field);
+            try std.testing.expect(held.root.input.mainFocused());
+        }
+    };
 
     const held = try HeldFrontend.create();
     defer held.destroy();
@@ -3988,6 +4024,8 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
     const frame = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
     const user = screenTextPoint(frame, "UserAlpha", 0, 0) orelse return error.MissingUserCell;
     const web = screenTextPoint(frame, "LinkText", 0, 0) orelse return error.MissingLinkCell;
+    try std.testing.expectEqual(@import("app_input.zig").Field.input, held.root.input.field);
+    try std.testing.expect(held.root.input.mainFocused());
     var ctx = held.context();
 
     try Pointer.mouse(&ctx, frame, .{ .col = user.col + 4, .row = user.row, .button = .left, .type = .press, .mods = .{} });
@@ -4004,18 +4042,42 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
     try std.testing.expectEqualStrings(url, actions.uri[0..actions.uri_len]);
     try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
 
-    // A link release after focus leaves the feed is still captured, not
-    // delivered as a second activation to the newly focused target.
+    // Focus events with no held selection pass through to the composer.
+    try FocusPath.deliver(held, &ctx, .focus_out);
+    try FocusPath.deliver(held, &ctx, .focus_in);
+    try std.testing.expect(!held.self.app_content.selectionHeld());
+
+    // Terminal focus loss is captured by Root and SessionFrontend before the
+    // focused composer receives it; focus-in alone must not cancel a gesture.
+    try FocusPath.deliver(held, &ctx, .focus_out);
+    try FocusPath.deliver(held, &ctx, .focus_in);
+    try std.testing.expect(!held.self.app_content.selectionHeld());
+    for ([_]bool{ false, true }) |dragging| {
+        try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .press, .mods = .{} });
+        try FocusPath.deliver(held, &ctx, .focus_in);
+        try std.testing.expect(held.self.app_content.selectionHeld());
+        try std.testing.expect(!held.self.app_content.dragging());
+        var release_col = web.col;
+        if (dragging) {
+            try Pointer.mouse(&ctx, frame, .{ .col = web.col + 1, .row = web.row, .button = .left, .type = .drag, .mods = .{} });
+            release_col += 1;
+            try std.testing.expect(held.self.app_content.dragging());
+        }
+        try FocusPath.deliver(held, &ctx, .focus_out);
+        try std.testing.expect(!held.self.app_content.selectionHeld());
+        try FocusPath.deliver(held, &ctx, .focus_in);
+        try Pointer.mouse(&ctx, frame, .{ .col = release_col, .row = web.row, .button = .left, .type = .release, .mods = .{} });
+        try std.testing.expectEqual(@as(usize, 1), actions.opened);
+        try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+    }
     try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .press, .mods = .{} });
-    try held.self.app_content.widget().handleEvent(&ctx, .focus_out);
     try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .release, .mods = .{} });
-    try std.testing.expectEqual(@as(usize, 1), actions.opened);
-    try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+    try std.testing.expectEqual(@as(usize, 2), actions.opened);
 
     try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .press, .mods = .{} });
     try held.self.app_content.widget().handleEvent(&ctx, .mouse_leave);
     try Pointer.mouse(&ctx, frame, .{ .col = 40, .row = web.row, .button = .left, .type = .release, .mods = .{} });
-    try std.testing.expectEqual(@as(usize, 1), actions.opened);
+    try std.testing.expectEqual(@as(usize, 2), actions.opened);
     try std.testing.expectEqual(@as(usize, 1), clipboardCount(&ctx));
     try std.testing.expect(lastClipboard(&ctx).?.len < url.len);
 
@@ -4031,6 +4093,43 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
     try Pointer.mouse(&ctx, frame, .{ .col = 40, .row = user.row, .button = .left, .type = .release, .mods = .{} });
     try std.testing.expectEqual(@as(usize, 1), actions.quotes);
     try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+
+    const peer = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "Plan" ++ TerminalText.link_close;
+    for ([_][]const u8{ peer, TerminalText.body_on ++ peer ++ TerminalText.body_off }) |content| {
+        const document = try HeldFrontend.create();
+        defer document.destroy();
+        document.size = .{ .width = 140, .height = 25 };
+        document.self.app_hooks.on_open = HeldFrontend.recordPeerOpen;
+        try document.screen.staging.append(content);
+        try document.screen.staging.prepare();
+        document.screen.view = .message;
+        const document_frame = try document.root.widget().draw(.{ .arena = document.arena.allocator(), .cell_arena = document.arena.allocator(), .min = .{}, .max = document.size, .cell_size = .{} });
+        const document_link = screenTextPoint(document_frame, "Plan", 0, 0) orelse return error.MissingDocumentLink;
+        var document_ctx = document.context();
+        try FocusPath.deliver(document, &document_ctx, .focus_out);
+        try FocusPath.deliver(document, &document_ctx, .focus_in);
+        try std.testing.expect(!document.self.app_document.dragging());
+        for ([_]bool{ false, true }) |dragging| {
+            try Pointer.mouse(&document_ctx, document_frame, .{ .col = document_link.col, .row = document_link.row, .button = .left, .type = .press, .mods = .{} });
+            try FocusPath.deliver(document, &document_ctx, .focus_in);
+            try std.testing.expect(document.self.app_document.dragging());
+            var release_col = document_link.col;
+            if (dragging) {
+                try Pointer.mouse(&document_ctx, document_frame, .{ .col = document_link.col + 1, .row = document_link.row, .button = .left, .type = .drag, .mods = .{} });
+                release_col += 1;
+                try std.testing.expect(document.self.app_document.dragging());
+            }
+            try FocusPath.deliver(document, &document_ctx, .focus_out);
+            try std.testing.expect(!document.self.app_document.dragging());
+            try FocusPath.deliver(document, &document_ctx, .focus_in);
+            try Pointer.mouse(&document_ctx, document_frame, .{ .col = release_col, .row = document_link.row, .button = .left, .type = .release, .mods = .{} });
+            try std.testing.expectEqual(@as(usize, 0), document.peer_opened);
+        }
+        try Pointer.mouse(&document_ctx, document_frame, .{ .col = document_link.col, .row = document_link.row, .button = .left, .type = .press, .mods = .{} });
+        try Pointer.mouse(&document_ctx, document_frame, .{ .col = document_link.col, .row = document_link.row, .button = .left, .type = .release, .mods = .{} });
+        try std.testing.expectEqual(@as(usize, 1), document.peer_opened);
+        try std.testing.expectEqualStrings("k7m2qx", &document.peer_id);
+    }
 }
 
 test "SUI-144 SessionFrontend cancels copy selection when its feed context is covered" {
@@ -4968,7 +5067,7 @@ test "permission resolved between the activity scan and Current keeps the fronte
     try activity_reply.writePage(&page, &facts);
     try Host.respond(&listener, "/v1/activity-page", page.buffered());
     const resolved =
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"context_estimate\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"archive_state\":\"active\",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"connection\":\"codex\",\"model\":\"gpt-5.5\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"app_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"context_estimate\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"archive_state\":\"active\",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try Host.respond(&listener, "/v1/inspect-session", resolved);
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), self, struct {
         fn completed(frontend: *Self) !bool {
@@ -5176,7 +5275,7 @@ test "chat footer background click and Alt-I share natural panel opening and Esc
             .id = if (index < 2) std.fmt.comptimePrint("luna-{d}", .{index}) else std.fmt.comptimePrint("model-{d}", .{index}),
             .known = false,
             .catalogued = false,
-            .providers = .initOne(.codex),
+            .providers = connection_names.NameSet.of(&.{provider_route.nameOf(.codex)}),
         };
         break :blk result;
     };
@@ -5220,7 +5319,7 @@ test "chat footer background click and Alt-I share natural panel opening and Esc
         try std.testing.expectEqual(panel.origin, keyed_panel.origin);
         try std.testing.expectEqual(panel.surface.size, keyed_panel.surface.size);
         held.self.app_info.panel.selected = 4;
-        held.self.app_info.model_choice.open(&menu, .codex, "model-2");
+        held.self.app_info.model_choice.open(&menu, provider_route.nameOf(.codex), "model-2");
         const expanded_frame = try held.draw();
         const expanded_input = try held.drawnInput(expanded_frame.children[0].surface);
         const expanded_panel = try held.drawnPanel(expanded_frame.children[0].surface);
@@ -5684,7 +5783,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7, .served_group = .done };
     _ = try overview_view.step(&overview.state, .{ .tick = 1000 });
     _ = try overview_view.step(&overview.state, .{ .list = .{ .page = .{
-        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = .codex, .label = "Stop the slow job", .state = stopping, .state_change_at = 1, .subtree_state_change_at = 1, .descendant_count = 0, .descendant_needs_you_count = 0, .group = .working, .turn = 7, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
+        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = @import("connection.zig").Name.parse("codex").?, .label = "Stop the slow job", .state = stopping, .state_change_at = 1, .subtree_state_change_at = 1, .descendant_count = 0, .descendant_needs_you_count = 0, .group = .working, .turn = 7, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
         .answer = .{ .delta = .full, .since = .{ .instance = @splat(0xab), .generation = 1 } },
     } } });
     _ = try overview_view.step(&overview.state, .{ .conversation = ref });
@@ -7001,7 +7100,7 @@ test "SessionFrontend names the unserved provider when the Host refuses a chat M
     const original = self.input.submitText("original model input");
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .rejected, .key = @splat('K') };
     defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
-    self.line.provider = .openai;
+    self.line.provider = @import("connection.zig").Name.parse("openai");
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
     try code.set("model_capability_unavailable");
     try self.presentAdmission(.{ .rejected = .{ .kind = .message, .code = code } });

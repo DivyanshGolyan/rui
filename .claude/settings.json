@@ -2,6 +2,11 @@
   "env": {
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "40"
   },
+  "modelSettings": {
+    "claude-haiku-5-5": {
+      "autoCompactWindow": 100000
+    }
+  },
   "hooks": {
     "PreToolUse": [
       {

@@ -95,6 +95,8 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
     pr_job = ready_pr and kind == ChangeKind.NORMAL
     outputs = dict(
         pr_job=pr_job,
+        # The ready PR runs the live MySQL migration check on a MySQL 8.4 server it starts itself (check.yml pr_linux).
+        pr_mysql_migration=pr_job and bool(p.get('mysql_migration', False)),
         pr_setup_targets=sorted(set(p['targets']) | set(compile_targets)) if pr_job else [],
         change_kind=kind.value,
         draft_run=draft_run,
@@ -103,7 +105,8 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         native_targets=p['native_targets'],
         linux_matrix=shards([] if pr_job else p['targets'], mysql_suites=p['mysql_suites']),
         linux_split=not pr_job and split_build(compile_targets),
-        macos_matrix=shards(p['native_targets'], 'macos', mysql_suites=p['mysql_suites']),
+        macos_matrix=shards(p['native_targets'], 'macos', mysql_suites=p['mysql_suites'],
+                            split_native_full=promotion or native_targets is not _UNSET),
         native=p['native_required'],
         retry=p['retry'],
         quarantine=quarantine,

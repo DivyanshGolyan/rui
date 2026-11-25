@@ -24,7 +24,7 @@ async function connect(settings: Partial<HostSettings> = {}): Promise<Rui> {
 	}, { binary: binary ?? "rui" });
 }
 
-const spec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" } satisfies AgentSpec;
+const spec = { workspace: tmpdir(), connection: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" } satisfies AgentSpec;
 
 test("create, list, send, update, interrupt and stop a Session", { skip }, async () => {
 	const rui = await connect();
@@ -78,7 +78,7 @@ test("models lists each provider's models", { skip }, async () => {
 	const rui = await connect();
 	try {
 		const models = await rui.models();
-		assert.ok(models.some((model) => model.provider === "openai" && model.id === "gpt-6.1-sol" && model.known), JSON.stringify(models));
+		assert.ok(models.some((model) => model.connection === "openai" && model.id === "gpt-6.1-sol" && model.known), JSON.stringify(models));
 	} finally {
 		await rui.close();
 	}
@@ -93,7 +93,7 @@ test("status reflects an idle Session and paused queued work", { skip }, async (
 		assert.deepEqual(idle, {
 			archiveState: "active", state: "idle", since: idle.since, turn: null, operation: null, interruptTarget: null, pendingMessages: "0",
 			attention: null, group: "done", canStop: false, decide: null,
-			parent: null, label: "first", model: spec.model, effort: "low", tools: ["bash"], loadedTools: ["bash"], permissionMode: "ask", latestOutcome: null,
+			parent: null, label: "first", model: spec.model, effort: "low", tools: ["bash"], loadedTools: ["bash"], appTools: [], permissionMode: "ask", latestOutcome: null,
 		});
 		assert.match(idle.since, /^[1-9][0-9]*$/);
 		await session.send("queued", { idempotencyKey: "status:message" });
@@ -281,7 +281,7 @@ test("create parent inherits binding and refuses widening as field-specific requ
 		for (const [overrides, code] of [
 			[{ tools: ["web_search"] }, "tools_not_in_parent"],
 			[{ permissionMode: "bypass" as const }, "permission_mode_wider_than_parent"],
-			[{ provider: "openai" as const }, "parent_provider_forbidden"],
+			[{ connection: "openai" as const }, "parent_provider_forbidden"],
 			[{ workspace: tmpdir() }, "parent_workspace_forbidden"],
 			[{ parent: "zzzzzz" }, "unknown_session"],
 		] as const) {
@@ -321,7 +321,7 @@ test("replaying an interruption cannot cut a later model call", { skip, timeout:
 		rui = await Rui.connect({ store: { sqlite: { dir: join(root, "store") } },
 			providers: { codex: { endpoint: `http://127.0.0.1:${address.port}/responses`, unauthenticated: true } },
 		}, { binary: binary ?? "rui" });
-		const session = await rui.sessions.create({ provider: "codex", model: "gpt-6-sol", effort: "low", compactAt: 100000,
+		const session = await rui.sessions.create({ connection: "codex", model: "gpt-6-sol", effort: "low", compactAt: 100000,
 			workspace: root, tools: [], permissionMode: "ask" }, { idempotencyKey: "session" });
 		await session.send("first", { idempotencyKey: "first" });
 		await until(async () => responses.length >= 1 && (await session.status()).interruptTarget !== null);

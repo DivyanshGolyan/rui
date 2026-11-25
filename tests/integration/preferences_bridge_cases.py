@@ -23,7 +23,7 @@ def preferences_bridge(binary, root, store_settings, env):
     config = home / ".config/rui"
     config.mkdir(parents=True, mode=0o700)
     preferences = config / "preferences"
-    preferences.write_text("version=4\nstore=\nprovider=openai\nmodel=\nnotifications=on\n"
+    preferences.write_text("version=4\nstore=\nconnection=openai\nmodel=\nnotifications=on\n"
                            "reasoning_effort=max\npermission_mode=bypass\n")
     preferences.chmod(0o600)
     key_file = config / "openai.key"
@@ -93,7 +93,7 @@ def preferences_bridge(binary, root, store_settings, env):
                     reply = settings_fixture.post(sock, "model-list", {"version": settings_fixture.WIRE,
                                                    "kind": "model_list", "store": store})
                     return any({row["id"] for row in provider["models"]} == {"gpt-5.5", "gpt-6.1-sol"}
-                               for provider in reply["providers"] if provider["provider"] == "openai")
+                               for provider in reply["connections"] if provider["connection"] == "openai")
                 host_process.wait_for(catalog_ready, "changed Host catalog", timeout=30)
             finally:
                 close(seed)
@@ -132,7 +132,7 @@ def preferences_bridge(binary, root, store_settings, env):
                     if index == 0:
                         parent = receipt["context"]["session"]
                     request = json.loads(record.read_text())
-                    assert request["configuration"]["provider"] == "openai", request
+                    assert request["configuration"]["connection"] == "openai", request
                     assert request["configuration"]["model"] == model, request
                     captured_preferences = {"permission_mode": "bypass"}
                     if not flags:
@@ -149,7 +149,7 @@ def preferences_bridge(binary, root, store_settings, env):
                 # A saved provider must not replace an attached parent's provider.
                 # The selected model still uses the Host catalog for preferences.
                 original = preferences.read_bytes()
-                preferences.write_text(original.decode().replace("provider=openai", "provider=codex"))
+                preferences.write_text(original.decode().replace("connection=openai", "connection=codex"))
                 try:
                     for index, (model, effort, flags, field) in enumerate([
                         ("gpt-5.5", "max", (), "omitted"),
@@ -163,7 +163,7 @@ def preferences_bridge(binary, root, store_settings, env):
                                          "--model", model, *flags)
                         captured = json.loads(record.read_text())["configuration"]
                         assert captured["parent"] == parent and captured["model"] == model, captured
-                        assert "provider" not in captured and "workspace" not in captured, captured
+                        assert "connection" not in captured and "workspace" not in captured, captured
                         expected_preferences = {"permission_mode": "bypass"}
                         if not flags:
                             expected_preferences["reasoning_effort"] = "max"
@@ -174,7 +174,7 @@ def preferences_bridge(binary, root, store_settings, env):
                             assert "effort" in captured and captured["effort"] == field, captured
                         child = receipt["context"]["session"]
                         saved = inspect(child)
-                        assert (saved["parent"], saved["provider"], saved["workspace"]) == (parent, "openai", str(workspace)), saved
+                        assert (saved["parent"], saved["connection"], saved["workspace"]) == (parent, "openai", str(workspace)), saved
                         check(saved, model, effort, "bypass")
                         changed = preferences.read_bytes()
                         preferences.write_text(changed.decode().replace("reasoning_effort=max", "reasoning_effort=low")
@@ -192,14 +192,14 @@ def preferences_bridge(binary, root, store_settings, env):
                     master, slave = open_pty()
                     caller = None
                     try:
-                        caller = spawn([str(binary), "--store", store, "--provider", "openai", "--model", model],
+                        caller = spawn([str(binary), "--store", store, "--connection", "openai", "--model", model],
                                        cwd=workspace, env=clean, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                         overview_frame(master, overview_title)
                         open_new_chat(master)
                         captured = set(records.glob("*.json")) - before
                         assert len(captured) == 1, captured
                         request = json.loads(captured.pop().read_text())
-                        assert request["configuration"]["provider"] == "openai", request
+                        assert request["configuration"]["connection"] == "openai", request
                         assert request["configuration"]["model"] == model, request
                         assert request["configuration"]["preferences"] == {"reasoning_effort": "max", "permission_mode": "bypass"}, request
                         receipt = invoke("request", "recover", request["key"])

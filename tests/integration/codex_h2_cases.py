@@ -17,7 +17,7 @@ import model_fixture as fixture
 import os_semantics
 
 
-ORDINARY_EXCHANGE_DESCRIPTORS = 5
+ORDINARY_EXCHANGE_DESCRIPTORS = os_semantics.ORDINARY_EXCHANGE_DESCRIPTORS
 DEFAULT_CLIENT_DESCRIPTORS = 100 * ORDINARY_EXCHANGE_DESCRIPTORS + 3
 # Open lines: src/line.zig capacity, outside intake's exchange population.
 LINE_DESCRIPTORS = 16
@@ -90,7 +90,7 @@ def run(*, observed=False, intake=100):
         diagnostics = HostDiagnostics(host)
         configuration = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
-            "--workspace", fixture.ROOT, "--provider", "codex",
+            "--workspace", fixture.ROOT, "--connection", "codex",
             "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configuration["answer"]["status"] == "accepted"
@@ -220,7 +220,7 @@ def openai_base_url_run(*, catalog_available=False):
             **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), **os_semantics.system_trust(root / "cert.pem"),
                     })
         def model_list():
-            return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
+            return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["connections"]
         assert model_list()[0]["source"] == "pending", model_list()
         def models_received():
             with endpoint.lock:
@@ -229,7 +229,7 @@ def openai_base_url_run(*, catalog_available=False):
         fixture.wait_for(models_received, "the initial OpenAI models GET", timeout=20)
         configuration = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
-            "--workspace", fixture.ROOT, "--provider", "openai", "--model", "gpt-6-sol", "--tools", "none",
+            "--workspace", fixture.ROOT, "--connection", "openai", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configuration["answer"]["status"] == "accepted", configuration
         session = configuration["answer"]["session"]
@@ -243,7 +243,7 @@ def openai_base_url_run(*, catalog_available=False):
         listed = fixture.wait_for(
             lambda: (value if (value := model_list())[0]["source"] != "pending" else None),
             "the OpenAI model list", timeout=20)
-        assert listed == [{"provider": "openai", "source": "live", "models": [
+        assert listed == [{"connection": "openai", "source": "live", "models": [
             {"id": "gpt-6-sol", "known": True}, {"id": "custom-model", "known": False}]}], listed
         def provider_headers():
             return [headers for headers in endpoint.request_headers if headers[b":path"] != b"/api.json"]
@@ -283,7 +283,7 @@ def openai_base_url_run(*, catalog_available=False):
         assert fallback[0]["source"] == "catalog_fallback", fallback
         assert fallback[0]["models"] and all(model["known"] for model in fallback[0]["models"]), fallback
         if catalog_available:
-            assert fallback == [{"provider": "openai", "source": "catalog_fallback", "models": [
+            assert fallback == [{"connection": "openai", "source": "catalog_fallback", "models": [
                 {"id": "catalog-only", "known": True}, {"id": "gpt-6-sol", "known": True}]}], fallback
         print("openai catalog fallback passed: failed live list exposes catalog_fallback with known catalog models")
         complete = True
@@ -301,6 +301,95 @@ def openai_base_url_run(*, catalog_available=False):
                 shutil.rmtree(root)
             else:
                 retain_failure_state("OpenAI base URL failure state", root)
+
+
+def named_key_connections_run():
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-named-key.")).resolve()
+    private = root / "private"
+    private.mkdir(mode=0o700)
+    alpha_key = private / "alpha.key"
+    alpha_key.write_text(codex.OPENAI_KEY + "\n")
+    alpha_key.chmod(0o600)
+    beta_value = "sk-synthetic-beta-fixture-key"
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(root / "key.pem"), "-out", str(root / "cert.pem"),
+        "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(root / "cert.pem", root / "key.pem")
+    tls.set_alpn_protocols(["h2"])
+    endpoint = h2_fixture.Endpoint(tls, 1, sse=True, eager_sse=True, named_answers=True)
+    endpoint.max_streams = 1
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    port = endpoint.server_address[1]
+
+    def connection(name, label, path, source):
+        return {"name": name, "label": label, "base_url": f"https://localhost:{port}/{path}/v1",
+                "credential": {"kind": "key", "source": source, "placement": "bearer"},
+                "headers": [], "refusals": [], "formats": [{"family": "responses", "dialect": "openai-responses/2", "web_search": True}],
+                "assign": [], "models": {"list": "openai"}}
+    settings_file = private / "host.json"
+    settings_file.write_text(json.dumps({"connections": [
+        connection("alpha", "Alpha", "alpha", {"kind": "file", "path": str(alpha_key)}),
+        connection("beta", "Beta", "beta", {"kind": "env", "name": "RUI_NAMED_BETA_KEY"}),
+    ]}))
+    settings_file.chmod(0o600)
+    store = root / "store"
+    host = None
+    complete = False
+    try:
+        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--settings", str(settings_file), "--set", "execution.activeCapacity=1", "--set", "models.catalogUrl=https://127.0.0.1:1/api.json"], env={
+            **os.environ, "RUI_NAMED_BETA_KEY": beta_value, **os_semantics.system_trust(root / "cert.pem"),
+                    })
+
+        def configure(name, connection_name, model):
+            configuration = fixture.command(
+                "session", "configure", "--store", store, "--record", root / f"{name}-config.json", "--key", f"{name}-config",
+                "--workspace", fixture.ROOT, "--connection", connection_name, "--model", model, "--tools", "none",
+            )
+            assert configuration["answer"]["status"] == "accepted", configuration
+            return configuration["answer"]["session"]
+
+        def answer_for(name, session):
+            fixture.message(root, store, name, session, name)
+            observation, answer, _ = fixture.wait_for_result_release(store, name, session, time.monotonic() + 20)
+            assert observation["result"]["status"] == "completed", observation
+            assert answer == f"answer-{name}".encode(), answer
+
+        alpha_session = configure("alpha", "alpha", "custom-model")
+        answer_for("named-alpha", alpha_session)
+        beta_session = configure("beta", "beta", "custom-model")
+        answer_for("named-beta", beta_session)
+
+        def provider_requests():
+            return [headers for headers in endpoint.request_headers if headers[b":path"].startswith((b"/alpha/", b"/beta/"))]
+        fixture.wait_for(lambda: sum(1 for headers in provider_requests() if headers[b":method"] == b"POST") >= 2,
+                         "the alpha and beta message requests", timeout=20)
+        posts = {headers[b":path"]: headers for headers in provider_requests() if headers[b":method"] == b"POST"}
+        assert set(posts) == {b"/alpha/v1/responses", b"/beta/v1/responses"}, sorted(posts)
+        assert posts[b"/alpha/v1/responses"][b"authorization"] == ("Bearer " + codex.OPENAI_KEY).encode(), posts[b"/alpha/v1/responses"]
+        assert posts[b"/beta/v1/responses"][b"authorization"] == ("Bearer " + beta_value).encode(), posts[b"/beta/v1/responses"]
+        for headers in posts.values():
+            assert headers[b":authority"].startswith(b"localhost:"), headers
+            assert b"chatgpt-account-id" not in headers, headers
+        print("named key connections passed: alpha and beta each answer a session on their own endpoint with their own key")
+        complete = True
+    finally:
+        def retire():
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "named key connection endpoint thread did not retire"
+        cleaned = False
+        try:
+            dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, retire)
+            cleaned = True
+        finally:
+            if complete and cleaned:
+                shutil.rmtree(root)
+            else:
+                retain_failure_state("named key connections failure state", root)
 
 
 def saved_catalog_run():
@@ -352,10 +441,10 @@ def saved_catalog_run():
                  f"models.catalogUrl=https://localhost:{endpoint.server_address[1]}/api.json"]
 
     def listed():
-        return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
+        return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["connections"]
 
     def expected(source, ids, known=None):
-        return [{"provider": "openai", "source": source,
+        return [{"connection": "openai", "source": source,
                  "models": [{"id": model, "known": True if known is None else model in known} for model in ids]}]
 
     def await_list(wanted, description):
@@ -403,7 +492,7 @@ def saved_catalog_run():
 
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", root / "changed.json", "--key", "changed",
-            "--workspace", fixture.ROOT, "--provider", "openai", "--model", shipped, "--tools", "none",
+            "--workspace", fixture.ROOT, "--connection", "openai", "--model", shipped, "--tools", "none",
             "--reasoning-effort", changed_effort, "--compaction-trigger", str(window),
         )
         assert configured["answer"]["status"] == "accepted", configured
@@ -487,8 +576,8 @@ def saved_catalog_run():
         endpoint_index = next(i for i, value in enumerate(codex_arguments) if str(value).startswith('providers.openai.endpoint='))
         del codex_arguments[endpoint_index - 1:endpoint_index + 1]
         host, ready = start_ready_process(codex_arguments, env={**env, "RUI_CODEX_CREDENTIAL_FILE": str(credential)})
-        codex_list = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
-        assert codex_list == [{"provider": "codex", "source": "catalog",
+        codex_list = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["connections"]
+        assert codex_list == [{"connection": "codex", "source": "catalog",
                                "models": [{"id": model, "known": True} for model in large_ids]}], codex_list
         for headers in catalog_requests():
             assert b"authorization" not in headers and b"chatgpt-account-id" not in headers, headers

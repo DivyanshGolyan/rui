@@ -8,6 +8,7 @@ const command_input = @import("../../command_input.zig");
 const tool_offer_domain = @import("../domain/tool_offer.zig");
 const tool_set_domain = @import("../domain/tool_set.zig");
 const store_core = @import("../Store.zig");
+const app_tools = @import("../../tool_record.zig").app_tools;
 const Store = store_core.Store;
 const command_domain = @import("../domain/command.zig");
 const historical_domain = @import("../domain/historical.zig");
@@ -22,6 +23,8 @@ const expectToolSetNames = shared_fixtures.expectToolSetNames;
 const membershipToolSet = shared_fixtures.membershipToolSet;
 const membership_records = shared_fixtures.membership_records;
 const settleCallsForTesting = shared_fixtures.settleCallsForTesting;
+const settleItemsForTesting = store_testing.settleItemsForTesting;
+const AttemptBinding = store_core.AttemptBinding;
 const testingAgentSpec = shared_fixtures.testingAgentSpec;
 const testingHostToolRecords = shared_fixtures.testingHostToolRecords;
 
@@ -993,7 +996,7 @@ test "stop_action effective offer preserves the historical settings limit" {
                                 }
                                 try std.testing.expect(!try page.nextTool(&tool));
                                 if (count == protocol.max_tools and !explicit and loaded_read) {
-                                    try std.testing.expectEqual(@import("../../tool_name.zig").max_offered_list_name_bytes, name_bytes);
+                                    try std.testing.expectEqual(@import("../../tool_name.zig").max_list_name_bytes + "stop_action".len, name_bytes);
                                 }
                             }
                         }
@@ -1090,49 +1093,37 @@ test "creation receipts retain maximum configured and loaded tools" {
     }.run);
 }
 
-// SH-118: a tool record read back from the Store through the offer, the saved selection and readHostToolSet has the
-// digest it was saved with, on both engines.
+// SH-118: an app record a lane root declares reads back through the offer and the saved selection with the digest it
+// was saved with, on both engines.
 test "SH-118 a tool record read back from the Store through the offer, the selection and readHostToolSet has the digest it was saved with" {
     try store_testing.forEachEngine(struct {
         fn run(engine: *store_testing.Case) !void {
-            const app: tool_defs.Record = .{
-                .name = "ask",
-                .owner = .app,
-                .description = "Ask the app.",
-                .input_schema = "{\"type\":\"object\"}",
-                .app = .{ .replay = .safe, .restart_limit = 2, .wait_ms = 5_000 },
-            };
-            const saved_digest = tool_defs.recordDigest(&app);
-            const records = store_testing.hostToolRecordsWith(&.{app});
-            var digests: [records.len][32]u8 = undefined;
-            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
-            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
-            try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var create = try store_testing.completeConfiguration("app-policy-config", "", try store_testing.canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            const declaration = "[{\"name\":\"ask\",\"description\":\"Ask the app.\",\"input_schema\":{\"type\":\"object\"},\"replay\":\"safe\",\"restart_limit\":2,\"wait_ms\":5000}]";
+            declareAppTools(&create.configuration, declaration);
+            const reply = try storage.configure(&create, .{});
+            try std.testing.expect(reply == .accepted);
+            const app_set = try store_testing.queryU64(&storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{reply.accepted.session.slice()});
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE owner='app' AND name='ask' AND replay='safe' AND restart_limit=2 AND wait_ms=5000", .{}));
 
-            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-            var command = try store_testing.completeConfiguration("app-policy-config", "", try store_testing.canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
-            command.configuration.tools = try .of(&.{"ask"});
-            const reply = try storage.configure(&command, .{});
-            try std.testing.expect(reply == .accepted);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='ask' AND t.replay='safe' AND t.restart_limit=2 AND t.wait_ms=5000", .{reply.accepted.session.slice()}));
-
-            // readHostToolSet rebuilds the digest from the stored row.
-            var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
-            defer saved.deinit(std.testing.allocator);
-            const index = saved.toolSet().find("ask") orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqualSlices(u8, &saved_digest, &saved.digests[index]);
+            // The declared record's digest, rebuilt by the same owner the offer and the selection use.
+            const decl_arena = try std.testing.allocator.alloc(u8, app_tools.arena_bytes);
+            defer std.testing.allocator.free(decl_arena);
+            var decl_fixed: std.heap.FixedBufferAllocator = .init(decl_arena);
+            const declared = app_tools.parse(decl_fixed.allocator(), declaration).declared;
+            const saved_digest = tool_record.recordDigest(&declared.records[0]);
 
             // The offer and the saved selection rebuild it from the same rows.
-            const head = (try storage.readHostToolSetSet()).?;
             const names = try command_input.ToolsField.of(&.{"ask"});
             var offer: tool_offer_domain.Freeze = .{};
             var selection: tool_set_domain.SavedSelection = .{ .names = &names };
-            try storage.readToolDigestsForTesting(head.tool_set_id.get(), &names, &offer, &selection);
+            try storage.readToolDigestsForTesting(app_set, &names, &offer, &selection);
             var offered: ?[32]u8 = null;
             for (offer.projection.members[0..offer.projection.count]) |member| {
                 if (std.mem.eql(u8, member.name.slice(), "ask")) offered = member.digest;
@@ -1142,6 +1133,1000 @@ test "SH-118 a tool record read back from the Store through the offer, the selec
             expected_set.add(&saved_digest);
             const expected_selection = expected_set.final();
             try std.testing.expectEqualSlices(u8, &expected_selection, &(try selection.selection()).digest);
+        }
+    }.run);
+}
+
+// SH-144: a lane root's configure saves its declared app tools as one tool set that the Session names; replacing the
+// declaration changes that set, an empty list clears it, a child refuses a declaration by name, and a replayed
+// create keeps one set. Both engines run the same Store API calls.
+fn declareAppTools(configuration: *wire_request.Configuration, bytes: []const u8) void {
+    configuration.app_tools = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
+}
+
+test "SH-144 a lane root saves its app tools as one set; replacing, clearing and a child's refusal hold on both engines" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const first = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"},\"replay\":\"safe\",\"restart_limit\":2,\"wait_ms\":5000}]";
+            const second = "[{\"name\":\"other\",\"description\":\"Other.\",\"input_schema\":{\"type\":\"object\"}}]";
+            var create = try store_testing.completeConfiguration("app-root", "", workspace, "model-a");
+            declareAppTools(&create.configuration, first);
+            const root_reply = try storage.configure(&create, .{});
+            try std.testing.expect(root_reply == .accepted);
+            const root = root_reply.accepted.session.slice();
+            const first_set = try store_testing.queryU64(&storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root});
+            try std.testing.expect(first_set > 0);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM tool_set WHERE tool_set_id=?1", .{first_set}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE owner='app' AND name='ask' AND replay='safe' AND restart_limit=2 AND wait_ms=5000", .{}));
+            // The saved set's digest is the set digest of the declared record, as the offer and selection rebuild it.
+            const decl_arena = try std.testing.allocator.alloc(u8, app_tools.arena_bytes);
+            defer std.testing.allocator.free(decl_arena);
+            var decl_fixed: std.heap.FixedBufferAllocator = .init(decl_arena);
+            const declared = app_tools.parse(decl_fixed.allocator(), first).declared;
+            var expected_set: tool_record.SetDigest = .init();
+            expected_set.add(&tool_record.recordDigest(&declared.records[0]));
+            const set_names = try command_input.ToolsField.of(&.{"ask"});
+            var offer: tool_offer_domain.Freeze = .{};
+            var selection: tool_set_domain.SavedSelection = .{ .names = &set_names };
+            try storage.readToolDigestsForTesting(first_set, &set_names, &offer, &selection);
+            try std.testing.expectEqualSlices(u8, &expected_set.final(), &(try selection.selection()).digest);
+            // A replayed create answers the same Session and keeps its set.
+            const replay = try storage.configure(&create, .{});
+            try std.testing.expect(replay.accepted.replayed);
+            try std.testing.expectEqual(first_set, try store_testing.queryU64(&storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root}));
+
+            // A configure with a new declaration replaces the set and records the change once.
+            var replace: wire_request.ConfigureCommand = .{};
+            try replace.key.set("app-root-replace");
+            try replace.session.set(root);
+            declareAppTools(&replace.configuration, second);
+            try std.testing.expect((try storage.configure(&replace, .{})) == .accepted);
+            const second_set = try store_testing.queryU64(&storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root});
+            try std.testing.expect(second_set != first_set);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND field='app_tools'", .{root}));
+
+            // An empty list clears the declaration: the Session names no set.
+            var clear: wire_request.ConfigureCommand = .{};
+            try clear.key.set("app-root-clear");
+            try clear.session.set(root);
+            declareAppTools(&clear.configuration, "[]");
+            try std.testing.expect((try storage.configure(&clear, .{})) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND app_tool_set_id IS NULL", .{root}));
+
+            // A child, attached to the root, may not declare app tools.
+            var child: wire_request.ConfigureCommand = .{};
+            try child.key.set("app-child");
+            child.configuration = try shared_fixtures.testingAgentSpec(&.{}, "bypass");
+            child.configuration.parent.state = .value;
+            try child.configuration.parent.value.set(root);
+            child.configuration.model.state = .value;
+            try child.configuration.model.value.set("model-a");
+            declareAppTools(&child.configuration, second);
+            const refused = try storage.configure(&child, .{});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.app_tools_on_child, refused.rejected.code);
+            // An empty list is a declaration too: a child refuses it as well.
+            try child.key.set("app-child-empty");
+            declareAppTools(&child.configuration, "[]");
+            const refused_empty = try storage.configure(&child, .{});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.app_tools_on_child, refused_empty.rejected.code);
+        }
+    }.run);
+}
+
+// SH-145: a lane root's configure or create saves a declared app tool set of any supported size in one transaction,
+// whether its texts are fresh or already stored, and the set reads back with every declared record.
+const declared_counts = [_]usize{ 1, 8, app_tools.max_records };
+
+/// One declaration of `count` tools whose texts carry `tag`; `wait_ms` changes each record's digest without changing its texts.
+fn writeAppDeclaration(buffer: []u8, count: usize, tag: []const u8, wait_ms: u32) ![]const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    try writer.writeByte('[');
+    for (0..count) |index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print(
+            "{{\"name\":\"tool-{d:0>2}\",\"description\":\"Tool {s} {d}.\",\"input_schema\":{{\"type\":\"object\"}},\"wait_ms\":{d}}}",
+            .{ index, tag, index, wait_ms },
+        );
+    }
+    try writer.writeByte(']');
+    return writer.buffered();
+}
+
+fn expectAppSetReadsBack(storage: *Store, root: []const u8, document: []const u8, count: usize) !void {
+    const set = try store_testing.queryU64(storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root});
+    try std.testing.expect(set > 0);
+    try std.testing.expectEqual(@as(u64, count), try store_testing.queryU64(storage, "SELECT member_count FROM tool_set WHERE tool_set_id=?1", .{set}));
+    const decl_arena = try std.testing.allocator.alloc(u8, app_tools.arena_bytes);
+    defer std.testing.allocator.free(decl_arena);
+    var decl_fixed: std.heap.FixedBufferAllocator = .init(decl_arena);
+    const declared = app_tools.parse(decl_fixed.allocator(), document).declared;
+    var expected_set: tool_record.SetDigest = .init();
+    var names: [app_tools.max_records][]const u8 = undefined;
+    for (declared.records, 0..) |*record, index| {
+        expected_set.add(&tool_record.recordDigest(record));
+        names[index] = record.name;
+    }
+    const set_names = try command_input.ToolsField.of(names[0..count]);
+    var offer: tool_offer_domain.Freeze = .{};
+    var selection: tool_set_domain.SavedSelection = .{ .names = &set_names };
+    try storage.readToolDigestsForTesting(set, &set_names, &offer, &selection);
+    try std.testing.expectEqualSlices(u8, &expected_set.final(), &(try selection.selection()).digest);
+}
+
+test "SH-145 a lane root saves a declared app tool set of every supported size on create and configure, fresh or with stored texts" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var document: [app_tools.max_document_bytes]u8 = undefined;
+            var tag_buffer: [32]u8 = undefined;
+            var key_buffer: [64]u8 = undefined;
+            for (declared_counts) |count| {
+                // Fresh texts are tagged per count and operation, so no earlier declaration has stored them. The
+                // stored-texts declaration repeats the tag with another wait_ms: its records differ, its texts do not.
+                const fresh_create = try writeAppDeclaration(&document, count, try std.fmt.bufPrint(&tag_buffer, "c{d}-create", .{count}), 1000);
+                var create = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh125-create-fresh-{d}", .{count}), "", workspace, "model-a");
+                declareAppTools(&create.configuration, fresh_create);
+                const created = try storage.configure(&create, .{});
+                try std.testing.expect(created == .accepted);
+                try expectAppSetReadsBack(&storage, created.accepted.session.slice(), fresh_create, count);
+
+                const stored_create = try writeAppDeclaration(&document, count, try std.fmt.bufPrint(&tag_buffer, "c{d}-create", .{count}), 2000);
+                var repeat = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh125-create-stored-{d}", .{count}), "", workspace, "model-a");
+                declareAppTools(&repeat.configuration, stored_create);
+                const repeated = try storage.configure(&repeat, .{});
+                try std.testing.expect(repeated == .accepted);
+                try expectAppSetReadsBack(&storage, repeated.accepted.session.slice(), stored_create, count);
+
+                const fresh_configure = try writeAppDeclaration(&document, count, try std.fmt.bufPrint(&tag_buffer, "c{d}-configure", .{count}), 1000);
+                var plain = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh125-plain-fresh-{d}", .{count}), "", workspace, "model-a");
+                const plain_root = try storage.configure(&plain, .{});
+                try std.testing.expect(plain_root == .accepted);
+                const fresh_root = plain_root.accepted.session.slice();
+                var configure: wire_request.ConfigureCommand = .{};
+                try configure.key.set(try std.fmt.bufPrint(&key_buffer, "sh125-configure-fresh-{d}", .{count}));
+                try configure.session.set(fresh_root);
+                declareAppTools(&configure.configuration, fresh_configure);
+                try std.testing.expect((try storage.configure(&configure, .{})) == .accepted);
+                try expectAppSetReadsBack(&storage, fresh_root, fresh_configure, count);
+
+                const stored_configure = try writeAppDeclaration(&document, count, try std.fmt.bufPrint(&tag_buffer, "c{d}-configure", .{count}), 2000);
+                var plain_again = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh125-plain-stored-{d}", .{count}), "", workspace, "model-a");
+                const stored_plain_root = try storage.configure(&plain_again, .{});
+                try std.testing.expect(stored_plain_root == .accepted);
+                const stored_root = stored_plain_root.accepted.session.slice();
+                var stored: wire_request.ConfigureCommand = .{};
+                try stored.key.set(try std.fmt.bufPrint(&key_buffer, "sh125-configure-stored-{d}", .{count}));
+                try stored.session.set(stored_root);
+                declareAppTools(&stored.configuration, stored_configure);
+                try std.testing.expect((try storage.configure(&stored, .{})) == .accepted);
+                try expectAppSetReadsBack(&storage, stored_root, stored_configure, count);
+            }
+        }
+    }.run);
+}
+
+// SH-161..SH-172: the tools a model request carries from its lane's declared app tools, read through the request page
+// the provider reads (admission freezes the offer; the page walks its tool set).
+const two_app_tools = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}},{\"name\":\"other\",\"description\":\"Other.\",\"input_schema\":{\"type\":\"object\"}}]";
+const ask_app_tool = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+const unserved_answer = "No app is serving this tool yet.";
+
+/// The tools one model request carries, by name and owner, in the order its request page lists them.
+const Offered = struct {
+    count: usize = 0,
+    names: [@import("../../tool_name.zig").max_offered_tools]@FieldType(historical_domain.HistoricalTool, "name") = undefined,
+    owners: [@import("../../tool_name.zig").max_offered_tools]@FieldType(historical_domain.HistoricalTool, "owner") = undefined,
+
+    fn owner(self: *const Offered, name: []const u8) ?@FieldType(historical_domain.HistoricalTool, "owner") {
+        for (self.names[0..self.count], self.owners[0..self.count]) |*candidate, kind| {
+            if (std.mem.eql(u8, candidate.slice(), name)) return kind;
+        }
+        return null;
+    }
+};
+
+/// Admits the Session's next model request after a Message, and returns its binding.
+fn admitMessage(storage: *Store, tmp: *std.testing.TmpDir, key: []const u8, session: []const u8) !AttemptBinding {
+    try submitTestMessage(storage, tmp, key, key, session, "question");
+    return (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+}
+
+/// Reads the tools the request `binding` carries, as its request page walks them.
+fn offerOf(storage: *Store, binding: AttemptBinding, out: *Offered) !void {
+    var view: TestingPage = undefined;
+    view.open(storage, binding);
+    defer view.close();
+    var settings: historical_domain.HistoricalSettings = undefined;
+    try view.settings(&settings);
+    try std.testing.expect(try view.validateOutputsStep());
+    _ = try view.coverage();
+    view.expectTools(.all);
+    out.* = .{};
+    var tool: historical_domain.HistoricalTool = .{};
+    while (try view.nextTool(&tool)) : (out.count += 1) {
+        out.names[out.count] = tool.name;
+        out.owners[out.count] = tool.owner;
+    }
+    try std.testing.expectEqual(settings.tool_count, out.count);
+}
+
+fn createRoot(storage: *Store, key: []const u8, declaration: ?[]const u8, buffer: []u8) ![]const u8 {
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var create = try store_testing.completeConfiguration(key, "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    // The creation profile, so a child that names no tools is within its parent's tools (as a Host's own roots are).
+    create.configuration.tools = .{};
+    if (declaration) |document| declareAppTools(&create.configuration, document);
+    const reply = try storage.configure(&create, .{});
+    try std.testing.expect(reply == .accepted);
+    return copyRef(buffer, reply.accepted.session.slice());
+}
+
+fn copyRef(buffer: []u8, ref: []const u8) []const u8 {
+    @memcpy(buffer[0..ref.len], ref);
+    return buffer[0..ref.len];
+}
+
+const ChildReply = union(enum) { accepted: []const u8, rejected: protocol.ConfigurationRejection };
+
+/// A child attached to `parent`: it names `tools`, or none when `tools` is null.
+fn configureChild(storage: *Store, key: []const u8, parent: []const u8, tools: ?[]const []const u8, buffer: []u8) !ChildReply {
+    var child: wire_request.ConfigureCommand = .{};
+    try child.key.set(key);
+    child.configuration = try shared_fixtures.testingAgentSpec(&.{}, "ask");
+    child.configuration.tools = if (tools) |names| try .of(names) else .{};
+    child.configuration.parent.state = .value;
+    try child.configuration.parent.value.set(parent);
+    child.configuration.model.state = .value;
+    try child.configuration.model.value.set("model-a");
+    const reply = try storage.configure(&child, .{});
+    return switch (reply) {
+        .accepted => |accepted| .{ .accepted = copyRef(buffer, accepted.session.slice()) },
+        .rejected => |refused| .{ .rejected = refused.code },
+        .conflict, .infrastructure_failure => error.TestUnexpectedResult,
+    };
+}
+
+test "SH-161 a lane root's model request carries every app tool its lane declares, beside the Host tools" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh148-root", two_app_tools, &buffer);
+            var offer: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh148-message", root), &offer);
+            try std.testing.expectEqual(tool_record.Owner.app, offer.owner("ask").?);
+            try std.testing.expectEqual(tool_record.Owner.app, offer.owner("other").?);
+            try std.testing.expect(offer.owner("bash") != null);
+        }
+    }.run);
+}
+
+test "SH-162 a lane root that declares no app tools offers none, as a Host without app tools does" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh149-root", null, &buffer);
+            var offer: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh149-message", root), &offer);
+            try std.testing.expect(offer.owner("ask") == null);
+            try std.testing.expect(offer.owner("bash") != null);
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND app_tool_set_id IS NOT NULL", .{root}));
+        }
+    }.run);
+}
+
+test "SH-163 a re-declare changes the next request's tools, and the admitted request keeps the records it was made with" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh150-root", two_app_tools, &buffer);
+            const first = try admitMessage(&storage, &tmp, "sh150-first", root);
+            var before: Offered = undefined;
+            try offerOf(&storage, first, &before);
+            var replace: wire_request.ConfigureCommand = .{};
+            try replace.key.set("sh150-replace");
+            try replace.session.set(root);
+            declareAppTools(&replace.configuration, ask_app_tool);
+            try std.testing.expect((try storage.configure(&replace, .{})) == .accepted);
+            var still: Offered = undefined;
+            try offerOf(&storage, first, &still);
+            try std.testing.expect(still.owner("other") != null);
+            const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"};
+            try settleItemsForTesting(&storage, &tmp, first, &items, "answer");
+            var after: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh150-second", root), &after);
+            try std.testing.expect(after.owner("ask") != null);
+            try std.testing.expect(after.owner("other") == null);
+            try std.testing.expect(before.owner("other") != null);
+        }
+    }.run);
+}
+
+test "SH-164 an attached child that names no tools offers every app tool its lane declares" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var root_buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh151-root", two_app_tools, &root_buffer);
+            var child_buffer: [128]u8 = undefined;
+            const child = (try configureChild(&storage, "sh151-child", root, null, &child_buffer)).accepted;
+            var offer: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh151-message", child), &offer);
+            try std.testing.expect(offer.owner("ask") != null);
+            try std.testing.expect(offer.owner("other") != null);
+        }
+    }.run);
+}
+
+test "SH-165 a child that names an app tool offers that tool alone; a child that names only Host tools offers every app tool" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var root_buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh152-root", two_app_tools, &root_buffer);
+            var named_buffer: [128]u8 = undefined;
+            const named = (try configureChild(&storage, "sh152-named", root, &.{ "ask", "bash" }, &named_buffer)).accepted;
+            var host_buffer: [128]u8 = undefined;
+            const host = (try configureChild(&storage, "sh152-host", root, &.{"bash"}, &host_buffer)).accepted;
+            var named_offer: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh152-named-message", named), &named_offer);
+            try std.testing.expect(named_offer.owner("ask") != null);
+            try std.testing.expect(named_offer.owner("other") == null);
+            var host_offer: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh152-host-message", host), &host_offer);
+            try std.testing.expect(host_offer.owner("ask") != null);
+            try std.testing.expect(host_offer.owner("other") != null);
+        }
+    }.run);
+}
+
+test "SH-166 a child that names an app tool its lane lacks is refused by name" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var root_buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh153-root", two_app_tools, &root_buffer);
+            var child_buffer: [128]u8 = undefined;
+            const reply = try configureChild(&storage, "sh153-child", root, &.{ "bash", "missing_tool" }, &child_buffer);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, reply.rejected);
+        }
+    }.run);
+}
+
+test "SH-167 a child names only the app tools its parent offers; a parent that narrows to one refuses the other" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var root_buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh154-root", two_app_tools, &root_buffer);
+            var narrow: wire_request.ConfigureCommand = .{};
+            try narrow.key.set("sh154-narrow");
+            try narrow.session.set(root);
+            narrow.configuration.tools = try .of(&.{ "ask", "bash" });
+            try std.testing.expect((try storage.configure(&narrow, .{})) == .accepted);
+            var offer: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh154-root-message", root), &offer);
+            try std.testing.expect(offer.owner("ask") != null);
+            try std.testing.expect(offer.owner("other") == null);
+            var other_buffer: [128]u8 = undefined;
+            const reply = try configureChild(&storage, "sh154-child-other", root, &.{ "bash", "other" }, &other_buffer);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.tools_not_in_parent, reply.rejected);
+            var ask_buffer: [128]u8 = undefined;
+            _ = try configureChild(&storage, "sh154-child-ask", root, &.{ "ask", "bash" }, &ask_buffer);
+        }
+    }.run);
+}
+
+test "SH-168 a grandchild's request carries the app tools its root's lane declares" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var root_buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh155-root", two_app_tools, &root_buffer);
+            var child_buffer: [128]u8 = undefined;
+            const child = (try configureChild(&storage, "sh155-child", root, null, &child_buffer)).accepted;
+            var grandchild_buffer: [128]u8 = undefined;
+            const grandchild = (try configureChild(&storage, "sh155-grandchild", child, null, &grandchild_buffer)).accepted;
+            var offer: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh155-message", grandchild), &offer);
+            try std.testing.expect(offer.owner("ask") != null);
+            try std.testing.expect(offer.owner("other") != null);
+        }
+    }.run);
+}
+
+test "SH-169 a Session whose lane declares no app set is never stale for its app offer" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh156-root", null, &buffer);
+            const stale = try store_testing.queryU64(&storage, "SELECT CASE WHEN (" ++ tool_offer_domain.stale_sql ++ ") THEN 1 ELSE 0 END FROM session s WHERE s.session_ref=?1", .{root});
+            try std.testing.expectEqual(@as(u64, 0), stale);
+        }
+    }.run);
+}
+
+test "SH-171 a detached child shares its lane's app tools, as an attached child does" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var root_buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh158-root", two_app_tools, &root_buffer);
+            try submitTestMessage(&storage, &tmp, "sh158-message", "sh158-key", root, "start a child");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const arguments = "{\"task\":\"read\",\"attached\":false,\"spec\":{\"model\":\"model-a\",\"effort\":null,\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\"}}";
+            const encoded = try std.json.Stringify.valueAlloc(arena.allocator(), arguments, .{});
+            var calls = [_]TestingCall{.{ .item_id = "sh158-item", .name = "start_agent", .encoded_call_id = "sh158-call", .decoded_call_id = "sh158-call", .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments }};
+            try settleCallsForTesting(&storage, &tmp, model, "sh158-calls", &calls);
+            const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+            const core_tools = @import("../../core_tools.zig");
+            const start = try arena.allocator().create(core_tools.StartAgent);
+            try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
+            const Capture = struct {
+                child: protocol.Bounded(protocol.session_id_bytes) = .{},
+                fn call(context: *anyopaque, admission: Store.MessageAdmission) void {
+                    const self: *@This() = @ptrCast(@alignCast(context));
+                    self.child.set(admission.session) catch unreachable;
+                }
+            };
+            var capture: Capture = .{};
+            try std.testing.expect(try storage.startAgent(action.binding, root, start.task, start.attached, &start.configuration, .{ .context = &capture, .call = Capture.call }, .{}) == .started);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND creator_ref=?2 AND parent_ref IS NULL AND app_lane=?2", .{ capture.child.slice(), root }));
+            var offer: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh158-child-message", capture.child.slice()), &offer);
+            try std.testing.expect(offer.owner("ask") != null);
+            try std.testing.expect(offer.owner("other") != null);
+        }
+    }.run);
+}
+
+test "SH-172 after an unserved app call settles, the next model request carries the text the model reads" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh159-root", two_app_tools, &buffer);
+            const first = try admitMessage(&storage, &tmp, "sh159-message", root);
+            var calls = [_]TestingCall{.{ .item_id = "sh159-item", .name = "ask", .encoded_call_id = "sh159-call", .decoded_call_id = "sh159-call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+            try settleCallsForTesting(&storage, &tmp, first, "sh159-calls", &calls);
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var view: TestingPage = undefined;
+            view.open(&storage, next);
+            defer view.close();
+            var found = false;
+            var position: u64 = 0;
+            var out_buffer: [256]u8 = undefined;
+            while (try view.nextEntry(position)) |entry| : (position = entry.position) {
+                if (entry.kind != .tool_results) continue;
+                while (try view.nextToolResult()) |result| {
+                    const output = result.output orelse continue;
+                    var out = std.Io.Writer.fixed(&out_buffer);
+                    try shared_fixtures.readTestingContent(&view, output, &out);
+                    if (std.mem.eql(u8, out.buffered(), unserved_answer)) found = true;
+                }
+            }
+            try std.testing.expect(found);
+        }
+    }.run);
+}
+
+// SH-170: a model call to an app tool that no app serves yet resolves its Action once, as failed, with the text the
+// model reads; the Action's answer is one content row, and no app call waits on a runner.
+test "SH-170 a model call to an app tool no app serves yet resolves once as failed with the text the model reads" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh136-root", two_app_tools, &buffer);
+            try submitTestMessage(&storage, &tmp, "sh136-input", "sh136-message", root, "ask");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTesting(&storage, &tmp, binding, "sh136-calls", &.{.{
+                .item_id = "item-1",
+                .name = "ask",
+                .encoded_call_id = "call-1",
+                .decoded_call_id = "call-1",
+                .encoded_arguments = "{}",
+                .decoded_arguments = "{}",
+            }});
+            const answer = "No app is serving this tool yet.";
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code='failed'", .{binding.operation_id}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.parent_operation_id=?1 AND c.byte_length=?2", .{ binding.operation_id, answer.len }));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NULL", .{binding.operation_id}));
+        }
+    }.run);
+}
+
+// SH-160: configure and start_agent resolve a lane's names alike. A Host tool and a lane app tool are accepted and an
+// unknown name is refused by name. The app tool reaches a child through its parent's own tools, so the lane round,
+// not an earlier Host-only check, decides on both paths.
+const lane_declaration = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+const LaneCase = struct { name: []const u8, refused: bool };
+const lane_cases = [_]LaneCase{
+    .{ .name = "start_agent", .refused = false },
+    .{ .name = "ask", .refused = false },
+    .{ .name = "nope", .refused = true },
+};
+
+test "SH-160 configure and start_agent resolve a lane's names alike: a Host tool and a lane app tool are accepted, an unknown name is refused" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var key_buffer: [96]u8 = undefined;
+            var text_buffer: [256]u8 = undefined;
+            for (lane_cases, 0..) |lane_case, index| {
+                // The root declares the app tool, then names it once the lane holds it: configure reads the lane on update.
+                var create = try completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh160-root-{d}", .{index}), "", workspace, "model-a");
+                declareAppTools(&create.configuration, lane_declaration);
+                create.configuration.tools = try .of(&.{ "find_tools", "start_agent" });
+                const root_reply = try storage.configure(&create, .{});
+                try std.testing.expect(root_reply == .accepted);
+                const root = root_reply.accepted.session.slice();
+                var names: wire_request.ConfigureCommand = .{};
+                try names.key.set(try std.fmt.bufPrint(&key_buffer, "sh160-names-{d}", .{index}));
+                try names.session.set(root);
+                names.configuration.tools = try .of(&.{ "ask", "find_tools", "start_agent" });
+                try std.testing.expect((try storage.configure(&names, .{})) == .accepted);
+
+                // configure: a child of the root names the case's tool on create.
+                var child: wire_request.ConfigureCommand = .{};
+                try child.key.set(try std.fmt.bufPrint(&key_buffer, "sh160-child-{d}", .{index}));
+                child.configuration = try testingAgentSpec(&.{lane_case.name}, "ask");
+                child.configuration.parent.state = .value;
+                try child.configuration.parent.value.set(root);
+                const configured = try storage.configure(&child, .{});
+                if (lane_case.refused) {
+                    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, configured.rejected.code);
+                } else try std.testing.expect(configured == .accepted);
+
+                // start_agent refuses an unknown name by name. Its acceptance of a Host or lane name is covered elsewhere (the MCP
+                // missing-tool test starts a child). An app-only name reaches the model's offer, which this branch does not project
+                // yet (pr-b2b does), so this check runs only for the unknown name.
+                if (!lane_case.refused) continue;
+                var start_root_command = try completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh160-start-root-{d}", .{index}), "", workspace, "model-a");
+                declareAppTools(&start_root_command.configuration, lane_declaration);
+                start_root_command.configuration.tools = try .of(&.{"start_agent"});
+                const start_root_reply = try storage.configure(&start_root_command, .{});
+                try std.testing.expect(start_root_reply == .accepted);
+                const start_root = start_root_reply.accepted.session.slice();
+                var file_buffer: [48]u8 = undefined;
+                try submitTestMessage(&storage, &tmp, try std.fmt.bufPrint(&file_buffer, "sh160-file-{d}", .{index}), try std.fmt.bufPrint(&key_buffer, "sh160-message-{d}", .{index}), start_root, "start a child");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const call: TestingCall = .{ .item_id = "lane-call", .name = "start_agent", .encoded_call_id = "lane-call", .decoded_call_id = "lane-call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
+                try settleCallsForTesting(&storage, &tmp, model, try std.fmt.bufPrint(&key_buffer, "sh160-calls-{d}", .{index}), &.{call});
+                const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+                var spec = try testingAgentSpec(&.{lane_case.name}, "ask");
+                const started = try storage.startAgent(action.binding, start_root, "read", true, &spec, null, .{});
+                if (lane_case.refused) {
+                    try std.testing.expectEqual(command_domain.AgentStart.failed, started);
+                    const text = try std.fmt.bufPrint(&text_buffer, "spec.tools: {s} is not a known tool (unknown_tool). Nothing was started.", .{lane_case.name});
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ action.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+                } else try std.testing.expectEqual(command_domain.AgentStart.started, started);
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
+// SH-173: an app tool never shares a name with a Host tool. A declaration that names a Host tool, an MCP tool included, is
+// refused by name on configure. An app tool that a Host tool of its name arrives beside is not offered on the next request,
+// narrowed or not, and the Host tool takes the name in the offer.
+test "SH-173 an app tool never shares a name with a Host tool: a clashing declaration is refused by name, and a later Host tool takes the name in the offer" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+
+            // An MCP tool named like the declared app tool is in the Host set: the declaration is refused by name.
+            const clash = comptime testingHostToolRecords(&.{.{ .name = "ask", .owner = .mcp, .server = "notes", .description = "Saved tool", .input_schema = "{\"type\":\"object\"}" }});
+            var clash_digests: [clash.len][32]u8 = undefined;
+            for (&clash, &clash_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            try storage.saveHostToolSet(&.{ .records = &clash, .digests = &clash_digests });
+            var refused_create = try store_testing.completeConfiguration("sh173-clash", "", workspace, "model-a");
+            declareAppTools(&refused_create.configuration, ask_app_tool);
+            const refused = try storage.configure(&refused_create, .{});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.app_tool_host_clash, refused.rejected.code);
+
+            // With no clash, an unnarrowed root offers both its app tools, and a root that names one offers that one alone.
+            try storage.saveHostToolSet(&tool_defs.built_in_tool_set);
+            var buffer: [128]u8 = undefined;
+            const root = try createRoot(&storage, "sh173-root", two_app_tools, &buffer);
+            const first = try admitMessage(&storage, &tmp, "sh173-first", root);
+            var before: Offered = undefined;
+            try offerOf(&storage, first, &before);
+            try std.testing.expectEqual(tool_record.Owner.app, before.owner("ask").?);
+            try std.testing.expectEqual(tool_record.Owner.app, before.owner("other").?);
+
+            var narrow_buffer: [128]u8 = undefined;
+            const narrowed = try createRoot(&storage, "sh173-narrow", two_app_tools, &narrow_buffer);
+            var names: wire_request.ConfigureCommand = .{};
+            try names.key.set("sh173-narrow-names");
+            try names.session.set(narrowed);
+            names.configuration.tools = try .of(&.{ "ask", "find_tools" });
+            try std.testing.expect((try storage.configure(&names, .{})) == .accepted);
+            var narrow: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh173-narrow-first", narrowed), &narrow);
+            try std.testing.expectEqual(tool_record.Owner.app, narrow.owner("ask").?);
+            try std.testing.expect(narrow.owner("other") == null);
+
+            // A Host tool named `other` arrives: the root's next request offers the Host tool, not the app tool, and keeps `ask`.
+            const shadow = comptime testingHostToolRecords(&.{.{ .name = "other", .owner = .mcp, .server = "notes", .description = "Later tool", .input_schema = "{\"type\":\"object\"}" }});
+            var shadow_digests: [shadow.len][32]u8 = undefined;
+            for (&shadow, &shadow_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            try storage.saveHostToolSet(&.{ .records = &shadow, .digests = &shadow_digests });
+            // The Host tool joins the root's selection by name: a profile does not offer every Host tool, only the ones named.
+            var takes_name: wire_request.ConfigureCommand = .{};
+            try takes_name.key.set("sh173-takes-name");
+            try takes_name.session.set(root);
+            takes_name.configuration.tools = try .of(&.{ "ask", "find_tools", "other" });
+            try expectAccepted("takes_name", try storage.configure(&takes_name, .{}));
+            const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"};
+            try settleItemsForTesting(&storage, &tmp, first, &items, "answer");
+            var after: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh173-second", root), &after);
+            try std.testing.expectEqual(tool_record.Owner.mcp, after.owner("other").?);
+            try std.testing.expectEqual(tool_record.Owner.app, after.owner("ask").?);
+        }
+    }.run);
+}
+
+// SH-174: a request's offer holds the Host's whole tool set beside every app tool a lane declares, with each app name at
+// the full 64 bytes. The offer is sized from max_offered_tools, which counts the Host tools (stop_action among them) and
+// the app records, so this is the largest offer the owner admits.
+test "SH-174 a request offers the Host's full tool set beside every app tool a lane declares, at the largest name sizes" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const tool_name = @import("../../tool_name.zig");
+            const host_extras = comptime blk: {
+                @setEvalBranchQuota(10_000_000);
+                const count = tool_name.max_offered_tools - app_tools.max_records - tool_defs.built_in_tool_set.records.len;
+                var records: [count]tool_defs.Record = undefined;
+                // The root names every Host tool but stop_action, which the offer adds itself: those names and the stubs fill
+                // the configurable list's bytes (its separators counted once).
+                var builtin_bytes: usize = 0;
+                var builtin_count: usize = 0;
+                for (tool_defs.built_in_tool_set.records) |record| {
+                    if (std.mem.eql(u8, record.name, "stop_action")) continue;
+                    builtin_bytes += record.name.len;
+                    builtin_count += 1;
+                }
+                const bytes = protocol.max_tool_list_name_bytes - builtin_bytes - (builtin_count + count - 1);
+                for (&records, 0..) |*record, index| {
+                    const prefix = std.fmt.comptimePrint("stub{d:0>3}", .{index});
+                    const length = bytes / records.len + @intFromBool(index < bytes % records.len);
+                    const name = prefix ++ @as([length - prefix.len]u8, @splat('x'));
+                    record.* = .{
+                        .name = name,
+                        .remote_name = name,
+                        .owner = .mcp,
+                        .server = "docs",
+                        .description = "Read a page.",
+                        .input_schema = "{\"type\":\"object\"}",
+                    };
+                }
+                break :blk records;
+            };
+            const records = comptime testingHostToolRecords(&host_extras);
+            // The names the root configures: the Host's built-ins but stop_action, then every stub.
+            const configured_names = comptime blk: {
+                var names: [tool_defs.built_in_tool_set.records.len - 1 + host_extras.len][]const u8 = undefined;
+                var at: usize = 0;
+                for (tool_defs.built_in_tool_set.records) |record| {
+                    if (std.mem.eql(u8, record.name, "stop_action")) continue;
+                    names[at] = record.name;
+                    at += 1;
+                }
+                for (host_extras) |record| {
+                    names[at] = record.name;
+                    at += 1;
+                }
+                break :blk names;
+            };
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try storage.saveHostToolSet(&.{ .records = &records, .digests = &digests });
+
+            // Every app name is 64 bytes, so the app names take the whole app-name budget.
+            var document: [app_tools.max_document_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&document);
+            try writer.writeByte('[');
+            for (0..app_tools.max_records) |index| {
+                var name: [tool_name.max_bytes]u8 = @splat('x');
+                _ = try std.fmt.bufPrint(&name, "app{d:0>2}", .{index});
+                if (index != 0) try writer.writeByte(',');
+                try writer.print("{{\"name\":\"{s}\",\"description\":\"App {d}.\",\"input_schema\":{{\"type\":\"object\"}}}}", .{ name[0..], index });
+            }
+            try writer.writeByte(']');
+
+            var configured: protocol.ToolsField = .{ .state = .value };
+            for (configured_names) |name| try configured.insert(name);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var root_create = try completeConfiguration("sh174-root", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            declareAppTools(&root_create.configuration, writer.buffered());
+            root_create.configuration.tools = configured;
+            const root_reply = try storage.configure(&root_create, .{});
+            try expectAccepted("root", root_reply);
+            var root_buffer: [128]u8 = undefined;
+            const root = keepRef(&root_buffer, root_reply.accepted.session.slice());
+            var offered: Offered = undefined;
+            try offerOf(&storage, try admitMessage(&storage, &tmp, "sh174-first", root), &offered);
+            try std.testing.expectEqual(@as(usize, tool_name.max_offered_tools), offered.count);
+            var app_count: usize = 0;
+            for (offered.owners[0..offered.count]) |kind| {
+                if (kind == .app) app_count += 1;
+            }
+            try std.testing.expectEqual(@as(usize, app_tools.max_records), app_count);
+            for (0..app_tools.max_records) |index| {
+                var name: [tool_name.max_bytes]u8 = @splat('x');
+                _ = try std.fmt.bufPrint(&name, "app{d:0>2}", .{index});
+                try std.testing.expectEqual(tool_record.Owner.app, offered.owner(name[0..]).?);
+            }
+            try std.testing.expectEqual(tool_record.Owner.mcp, offered.owner(host_extras[host_extras.len - 1].name).?);
+        }
+    }.run);
+}
+
+const ask_and_other_declaration = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}},{\"name\":\"other\",\"description\":\"Other.\",\"input_schema\":{\"type\":\"object\"}}]";
+const lookup_and_ask_declaration = "[{\"name\":\"lookup\",\"description\":\"App lookup.\",\"input_schema\":{\"type\":\"object\"}},{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+
+/// The Session reference a configure returned, copied out of the reply so a later configure cannot overwrite it.
+fn keepRef(buffer: []u8, ref: []const u8) []const u8 {
+    @memcpy(buffer[0..ref.len], ref);
+    return buffer[0..ref.len];
+}
+
+/// A configure that must be accepted: a refusal fails the test by naming the step and the code it returned.
+fn expectAccepted(step: []const u8, reply: anytype) !void {
+    switch (reply) {
+        .accepted => {},
+        .rejected => |refused| try std.testing.expectEqualStrings(step, @tagName(refused.code)),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// SH-175: one lane resolver decides a configure's names: the declaration the request carries (create, replace or clear),
+// else the saved lane, with Host precedence. A parent narrows its children's app tools only by naming app tools the Host
+// does not shadow. start_agent resolves the same names through the same lane round; its acceptance of an app-only
+// name needs the model offer projecting app tools, which pr-b2b adds, so it is not checked on this branch.
+test "SH-175 configure resolves names through the lane's effective declaration, and a Host-shadowed app tool narrows no parent" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try storage.saveHostToolSet(&tool_defs.built_in_tool_set);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var refs: [4][128]u8 = undefined;
+
+            // Create: the declaration and a selection of its name in one request.
+            var created = try completeConfiguration("sh175-create", "", workspace, "model-a");
+            declareAppTools(&created.configuration, ask_and_other_declaration);
+            created.configuration.tools = try .of(&.{ "ask", "find_tools" });
+            const created_reply = try storage.configure(&created, .{});
+            try expectAccepted("created", created_reply);
+            const root = keepRef(&refs[0], created_reply.accepted.session.slice());
+
+            // Replace: the new declaration drops `other`, so naming it is refused; naming the kept `ask` is accepted.
+            var replace_other: wire_request.ConfigureCommand = .{};
+            try replace_other.key.set("sh175-replace-other");
+            try replace_other.session.set(root);
+            declareAppTools(&replace_other.configuration, ask_only_declaration);
+            replace_other.configuration.tools = try .of(&.{"other"});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, (try storage.configure(&replace_other, .{})).rejected.code);
+            var replace_ask: wire_request.ConfigureCommand = .{};
+            try replace_ask.key.set("sh175-replace-ask");
+            try replace_ask.session.set(root);
+            declareAppTools(&replace_ask.configuration, ask_only_declaration);
+            replace_ask.configuration.tools = try .of(&.{ "ask", "find_tools" });
+            try expectAccepted("replace_ask", try storage.configure(&replace_ask, .{}));
+
+            // Clear: an empty declaration leaves the lane no app tools, so naming `ask` is refused.
+            var clear: wire_request.ConfigureCommand = .{};
+            try clear.key.set("sh175-clear");
+            try clear.session.set(root);
+            declareAppTools(&clear.configuration, "[]");
+            clear.configuration.tools = try .of(&.{"ask"});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, (try storage.configure(&clear, .{})).rejected.code);
+
+            // Omitted: an update without appTools keeps the saved declaration, so the name resolves.
+            var omitted: wire_request.ConfigureCommand = .{};
+            try omitted.key.set("sh175-omitted");
+            try omitted.session.set(root);
+            omitted.configuration.tools = try .of(&.{ "ask", "find_tools" });
+            try expectAccepted("omitted", try storage.configure(&omitted, .{}));
+
+            // A root declares `lookup` while the Host has none, and names it. Then an MCP `lookup` arrives in the Host set:
+            // it shadows the app tool, so a declaration that names it is refused by name (app_tool_host_clash).
+            var shadowed = try completeConfiguration("sh175-shadowed", "", workspace, "model-a");
+            declareAppTools(&shadowed.configuration, lookup_and_ask_declaration);
+            shadowed.configuration.tools = try .of(&.{"lookup"});
+            const shadowed_reply = try storage.configure(&shadowed, .{});
+            try expectAccepted("shadowed", shadowed_reply);
+            const shadow_root = keepRef(&refs[1], shadowed_reply.accepted.session.slice());
+            const shadow = comptime testingHostToolRecords(&.{.{ .name = "lookup", .owner = .mcp, .server = "notes", .description = "Lookup.", .input_schema = "{\"type\":\"object\"}" }});
+            var shadow_digests: [shadow.len][32]u8 = undefined;
+            for (&shadow, &shadow_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            try storage.saveHostToolSet(&.{ .records = &shadow, .digests = &shadow_digests });
+            var clashing = try completeConfiguration("sh175-clash", "", workspace, "model-a");
+            declareAppTools(&clashing.configuration, lookup_and_ask_declaration);
+            clashing.configuration.tools = try .of(&.{"ask"});
+            try std.testing.expectEqual(protocol.ConfigurationRejection.app_tool_host_clash, (try storage.configure(&clashing, .{})).rejected.code);
+
+            // A child of that root names `ask`: the shadowed `lookup` narrows nothing, so `ask` is offered to it.
+            // A child inherits its parent's workspace, so its spec names none.
+            var child_ask: wire_request.ConfigureCommand = .{};
+            try child_ask.key.set("sh175-child-ask");
+            child_ask.configuration = try testingAgentSpec(&.{"ask"}, "ask");
+            child_ask.configuration.parent.state = .value;
+            try child_ask.configuration.parent.value.set(shadow_root);
+            try expectAccepted("child_ask", try storage.configure(&child_ask, .{}));
+
+            // A real subset: the root names `ask` alone of its two app tools, so its child may not name `other`.
+            var subset_root_command = try completeConfiguration("sh175-subset-root", "", workspace, "model-a");
+            declareAppTools(&subset_root_command.configuration, ask_and_other_declaration);
+            subset_root_command.configuration.tools = try .of(&.{ "ask", "find_tools" });
+            const subset_reply = try storage.configure(&subset_root_command, .{});
+            try expectAccepted("subset", subset_reply);
+            const subset_root = keepRef(&refs[2], subset_reply.accepted.session.slice());
+            var child_other: wire_request.ConfigureCommand = .{};
+            try child_other.key.set("sh175-child-other");
+            child_other.configuration = try testingAgentSpec(&.{"other"}, "ask");
+            child_other.configuration.parent.state = .value;
+            try child_other.configuration.parent.value.set(subset_root);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.tools_not_in_parent, (try storage.configure(&child_other, .{})).rejected.code);
+        }
+    }.run);
+}
+
+const ask_only_declaration = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+
+// SH-176: settlement classifies a call by the owner its frozen offer gives the name. A Host tool that takes an app tool's
+// name while the request is in flight does not reclassify the call the model was offered as the app's. A Host tool
+// already present at admission is what the projection offers, and the app tool it shadows is not offered.
+test "SH-176 settlement classifies a call by its frozen offer's owner, and a Host tool present at admission shadows the app tool" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const mcp_ask = comptime testingHostToolRecords(&.{.{ .name = "ask", .owner = .mcp, .server = "notes", .description = "Ask.", .input_schema = "{\"type\":\"object\"}" }});
+            var mcp_digests: [mcp_ask.len][32]u8 = undefined;
+            for (&mcp_ask, &mcp_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            var key_buffer: [96]u8 = undefined;
+            var root_buffer: [128]u8 = undefined;
+            for ([_]bool{ false, true }) |narrowed| {
+                const tag = if (narrowed) "narrow" else "wide";
+                // In flight: the Host tool takes the app tool's name after the request is admitted, before it settles.
+                try storage.saveHostToolSet(&tool_defs.built_in_tool_set);
+                var create = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh176-root-{s}", .{tag}), "", workspace, "model-a");
+                declareAppTools(&create.configuration, two_app_tools);
+                if (narrowed) create.configuration.tools = try .of(&.{ "ask", "find_tools" });
+                const root_reply = try storage.configure(&create, .{});
+                try expectAccepted("root", root_reply);
+                const root = copyRef(&root_buffer, root_reply.accepted.session.slice());
+                const binding = try admitMessage(&storage, &tmp, try std.fmt.bufPrint(&key_buffer, "sh176-in-flight-{s}", .{tag}), root);
+                var admitted: Offered = undefined;
+                try offerOf(&storage, binding, &admitted);
+                try std.testing.expectEqual(tool_record.Owner.app, admitted.owner("ask").?);
+                try storage.saveHostToolSet(&.{ .records = &mcp_ask, .digests = &mcp_digests });
+                try settleCallsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&key_buffer, "sh176-calls-{s}", .{tag}), &.{.{
+                    .item_id = "item-1",
+                    .name = "ask",
+                    .encoded_call_id = "call-1",
+                    .decoded_call_id = "call-1",
+                    .encoded_arguments = "{}",
+                    .decoded_arguments = "{}",
+                }});
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code='failed'", .{binding.operation_id}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NULL", .{binding.operation_id}));
+
+                // At admission: the root was declared before the Host tool came, and now the Host tool is in the set, so the next request
+                // offers the Host tool for the name and no app tool of that name.
+                // A selection saved before the Host tool came holds the app member; the narrowed root names the tool again to hold the Host one.
+                if (narrowed) {
+                    var refresh: wire_request.ConfigureCommand = .{};
+                    try refresh.key.set(try std.fmt.bufPrint(&key_buffer, "sh176-refresh-{s}", .{tag}));
+                    try refresh.session.set(root);
+                    refresh.configuration.tools = try .of(&.{ "ask", "find_tools" });
+                    try expectAccepted("refresh", try storage.configure(&refresh, .{}));
+                }
+                const second = try admitMessage(&storage, &tmp, try std.fmt.bufPrint(&key_buffer, "sh176-second-{s}", .{tag}), root);
+                var offered: Offered = undefined;
+                try offerOf(&storage, second, &offered);
+                if (narrowed) {
+                    try std.testing.expectEqual(tool_record.Owner.mcp, offered.owner("ask").?);
+                } else {
+                    try std.testing.expect(offered.owner("ask") == null);
+                }
+            }
         }
     }.run);
 }

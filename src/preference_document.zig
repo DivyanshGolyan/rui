@@ -1,6 +1,7 @@
 const std = @import("std");
 const model_capability = @import("model_capability.zig");
 const protocol = @import("protocol.zig");
+const connection = @import("connection.zig");
 const provider_selection = @import("provider_selection.zig");
 pub const Readinesses = provider_selection.Readinesses;
 pub const max_file_bytes = 1024;
@@ -62,7 +63,7 @@ pub fn decode(bytes: []const u8) !Values {
         if (std.mem.eql(u8, version_line, name)) break at;
     } else return error.UnsupportedPreferencesVersion;
     var result: Values = .{};
-    const fields = .{ .{ "store=", &result.store }, .{ "provider=", &result.provider }, .{ "model=", &result.model } };
+    const fields = .{ .{ "store=", &result.store }, .{ "connection=", &result.provider }, .{ "model=", &result.model } };
     inline for (fields) |field| {
         const line = lines.next() orelse return error.InvalidPreferences;
         if (!std.mem.startsWith(u8, line, field[0])) return error.InvalidPreferences;
@@ -111,13 +112,14 @@ const provider_names = blk: {
     break :blk text;
 };
 
-pub fn otherWayIn(saved: []const u8, provider: protocol.Provider) bool {
+pub fn otherWayIn(saved: []const u8, chosen: []const u8) bool {
+    const provider = std.meta.stringToEnum(protocol.Provider, chosen) orelse return false;
     const other = provider.sameAccount() orelse return false;
     return std.mem.eql(u8, saved, @tagName(other));
 }
 
 pub fn validateEdit(edit: Edit) !void {
-    if (edit.provider == .set and std.meta.stringToEnum(protocol.Provider, edit.provider.set) == null) return error.UnsupportedPreferenceProvider;
+    if (edit.provider == .set and connection.Name.parse(edit.provider.set) == null) return error.UnsupportedPreferenceProvider;
     if (edit.model == .set and !model_capability.validModelSyntax(edit.model.set)) return error.InvalidPreferenceModel;
     if (edit.store == .set) {
         const value = edit.store.set;
@@ -126,15 +128,22 @@ pub fn validateEdit(edit: Edit) !void {
     }
 }
 
+/// Whether the Host serves this name: a built-in or a key connection in the readiness list.
+fn served(readiness: *const Readinesses, text: []const u8) bool {
+    const name = connection.Name.parse(text) orelse return false;
+    for (readiness.names()) |*one| if (one.eql(name)) return true;
+    return false;
+}
+
 pub fn apply(saved: Values, edit: Edit, store: ?[]const u8, readiness: *const Readinesses) !Values {
     try validateEdit(edit);
+    if (edit.provider == .set and !served(readiness, edit.provider.set)) return error.UnsupportedPreferenceProvider;
     var values = saved;
     if (edit.store == .set) {
         values.store.set(store.?) catch return error.InvalidPreferenceStore;
     }
     if (edit.provider == .set) {
-        const chosen = std.meta.stringToEnum(protocol.Provider, edit.provider.set).?;
-        if (!saved.provider.eql(edit.provider.set) and !otherWayIn(saved.provider.slice(), chosen)) values.model = .{};
+        if (!saved.provider.eql(edit.provider.set) and !otherWayIn(saved.provider.slice(), edit.provider.set)) values.model = .{};
         values.provider.set(edit.provider.set) catch unreachable;
     }
     if (edit.notifications) |on| values.notifications = on;
@@ -152,7 +161,7 @@ pub fn apply(saved: Values, edit: Edit, store: ?[]const u8, readiness: *const Re
         .keep => {},
         .clear => values.model = .{},
         .set => |model| {
-            const choice = provider_selection.resolve(&model_capability.capabilities(readiness), null, model, if (values.provider.len != 0) values.provider.slice() else null, null) catch |err| switch (err) {
+            const choice = provider_selection.resolve(model_capability.capabilities(readiness).slice(), null, model, if (values.provider.len != 0) values.provider.slice() else null, null) catch |err| switch (err) {
                 error.UnsupportedSelectionProvider => return error.UnsupportedPreferenceProvider,
                 error.UnsupportedSelectionModel => return error.UnsupportedPreferenceModel,
             };
@@ -166,7 +175,7 @@ pub fn apply(saved: Values, edit: Edit, store: ?[]const u8, readiness: *const Re
 
 pub fn encode(values: *const Values, buffer: *[max_file_bytes]u8) ![]const u8 {
     const fields = .{ values.store.slice(), values.provider.slice(), values.model.slice() };
-    return std.fmt.bufPrint(buffer, "version=4\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n" ++ effort_key ++ "{s}\n" ++ permission_key ++ "{s}\n", fields ++ .{
+    return std.fmt.bufPrint(buffer, "version=4\nstore={s}\nconnection={s}\nmodel={s}\nnotifications={s}\n" ++ effort_key ++ "{s}\n" ++ permission_key ++ "{s}\n", fields ++ .{
         if (values.notifications) "on" else "off",
         if (values.reasoning_effort) |effort| @tagName(effort) else "",
         if (values.permission_mode) |mode| @tagName(mode) else "",
@@ -175,10 +184,10 @@ pub fn encode(values: *const Values, buffer: *[max_file_bytes]u8) ![]const u8 {
 
 test "CLI-22 a defaults file reads versions 1 through 4 and always writes version 4" {
     const literals = [_]struct { text: []const u8, encoded: []const u8 }{
-        .{ .text = "version=1\nstore=\nprovider=codex\nmodel=gpt-6-luna\n", .encoded = "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\n" },
-        .{ .text = "version=2\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\n", .encoded = "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=\npermission_mode=\n" },
-        .{ .text = "version=3\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\n", .encoded = "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=\n" },
-        .{ .text = "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=ask\n", .encoded = "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=ask\n" },
+        .{ .text = "version=1\nstore=\nconnection=codex\nmodel=gpt-6-luna\n", .encoded = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\n" },
+        .{ .text = "version=2\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\n", .encoded = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=\npermission_mode=\n" },
+        .{ .text = "version=3\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\n", .encoded = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=\n" },
+        .{ .text = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=ask\n", .encoded = "version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=ask\n" },
     };
     for (literals) |case| {
         const values = try decode(case.text);
@@ -186,10 +195,10 @@ test "CLI-22 a defaults file reads versions 1 through 4 and always writes versio
         try std.testing.expectEqualStrings(case.encoded, try encode(&values, &buffer));
     }
     const refusals = [_][]const u8{
-        "version=1\nstore=\nprovider=\n",                                                                    "version=1\nprovider=\nstore=\nmodel=\n",
-        "version=1\nstore=\nprovider=\nmodel=",                                                              "version=1\nstore=\nprovider=\nmodel=\nextra\n",
-        "version=2\nstore=\nprovider=\nmodel=\nnotifications=maybe\n",                                       "version=3\nstore=\nprovider=\nmodel=\nnotifications=on\nreasoning_effort=\n",
-        "version=4\nstore=\nprovider=\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=plan\n", "version=4\nstore=\nprovider=\nmodel=\nnotifications=on\nreasoning_effort=\npermission\n",
+        "version=1\nstore=\nconnection=\n",                                                                    "version=1\nconnection=\nstore=\nmodel=\n",
+        "version=1\nstore=\nconnection=\nmodel=",                                                              "version=1\nstore=\nconnection=\nmodel=\nextra\n",
+        "version=2\nstore=\nconnection=\nmodel=\nnotifications=maybe\n",                                       "version=3\nstore=\nconnection=\nmodel=\nnotifications=on\nreasoning_effort=\n",
+        "version=4\nstore=\nconnection=\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=plan\n", "version=4\nstore=\nconnection=\nmodel=\nnotifications=on\nreasoning_effort=\npermission\n",
     };
     for (refusals) |text| try std.testing.expectError(error.InvalidPreferences, decode(text));
     try std.testing.expectError(error.UnsupportedPreferencesVersion, decode("version=9\n"));

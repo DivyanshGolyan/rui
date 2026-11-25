@@ -279,7 +279,7 @@ The Permissions row, between Effort and Notifications, offers **run without aski
 Press Enter to open the choices, then Enter to save one.
 
 From the shell, use `rui defaults configure`; in a chat’s composer, use `/setup`.
-Both accept `--store PATH`, `--provider PROVIDER`, `--model ID`, `--clear-model`,
+Both accept `--store PATH`, `--connection NAME`, `--model ID`, `--clear-model`,
 `--reasoning-effort LEVEL|default`, `--permission-mode ask|bypass`, and `--notifications on|off`.
 `--clear-model` cannot be combined with `--model`.
 For example, `/setup --permission-mode ask` makes new Sessions ask before running Bash.
@@ -288,7 +288,7 @@ An explicit `--permission-mode` on a new Session wins over the saved choice; wit
 
 Signing in with `rui auth login PROVIDER` saves that provider as the default when none is saved.
 Either ChatGPT sign-in, in the browser or with `--device-code`, also replaces a saved default of the other and keeps the model saved with it, since both sign in to the same ChatGPT account: new Sessions use the one logged in last, and Sessions already open keep theirs.
-Any other saved provider stays; the sign-in says so and names the command that changes it, such as `rui defaults configure --provider chatgpt`.
+Any other saved provider stays; the sign-in says so and names the command that changes it, such as `rui defaults configure --connection chatgpt`.
 Existing Sessions keep their provider.
 
 ## Notifications
@@ -303,7 +303,7 @@ To turn them off, run `rui defaults configure --notifications off`, or enter `/s
 
 When model context grows too large, Rui compacts it.
 Compaction never deletes saved conversation history.
-The release-supported Codex model IDs start compaction at an estimated 244,800 tokens, except `gpt-6.1-terra`, which starts at 450,000.
+Codex and ChatGPT models start compaction at an estimated 244,800 tokens or 90% of the context window if smaller. `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-6.2-sol` also stay under OpenAI's 272K-token long-context price line, where OpenAI doubles the input price, so they start at 244,800 tokens on any connection.
 A model Rui does not list is assumed to have a 128,000-token context, so it starts compaction at an estimated 115,200 tokens unless you set a threshold.
 A context-overflow error from the provider can still start compaction.
 
