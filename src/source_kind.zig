@@ -21,6 +21,8 @@ pub const SourceKind = enum(u8) {
 
     /// The Activity row kind that admits input from this source (the Activity kind of the same name): a person's
     /// words as `admission` (their applied `user` entry speaks later), every other source as `received`.
+    /// A published Action value is a `received` row once the Activity feed lists values (#2286), and nothing writes
+    /// `server_event` yet, so its row shape (no sender, no action) is not exercised by any reader.
     /// This module is a leaf so the Store and Activity can both import it without joining a cycle.
     pub fn admitsAs(self: SourceKind) Admission {
         return switch (self) {
@@ -40,7 +42,8 @@ test "ADM-34 a source kind says whether its input has a person-facing row and wh
         .{ .kind = .server_event, .person_facing = true, .admits = .received },
     };
     try std.testing.expectEqual(cases.len, std.enums.values(SourceKind).len);
-    for (cases) |case| {
+    for (cases, 0..) |case, at| {
+        try std.testing.expectEqual(@as(u8, @intCast(at + 1)), @backingInt(case.kind));
         try std.testing.expectEqual(case.person_facing, case.kind.personFacing());
         try std.testing.expectEqual(case.admits, case.kind.admitsAs());
     }
