@@ -2565,7 +2565,7 @@ fn pendingRow(state: *State, input: Listed) error{OutOfMemory}!Row {
         .subtree_state_change_at = listed.subtree_state_change_at,
         .descendant_count = listed.descendant_count,
         .descendant_needs_you_count = listed.descendant_needs_you_count,
-        .list_needs_you = session_class.standing(listed.state) == .needs_you,
+        .list_needs_you = session_work.standing(listed.state) == .needs_you,
         .workspace = try state.intern(listed.workspace),
         .provider = listed.provider,
         .model = bounded(model_capability.max_model_bytes, listed.model),
