@@ -317,6 +317,13 @@ pub const migrations = [_]Migration{
             (['src/store/migration_expected_rows.sql'], {}, True),
             (['src/store/migration_expected_rows.sql', 'README.md'], {}, True),
             (['README.md'], {}, False),
+            # Test code with a MySQL leg starts MySQL too (#2179 changed only history.zig, a MySQL user).
+            (['src/store/history.zig'], {'src/store/history.zig': ('', 'const mysql_testing = @import("mysql_testing.zig");')}, True),
+            (['src/store/tests/agent.zig'], {'src/store/tests/agent.zig': ('', 'try store_testing.forEachEngine(run);')}, True),
+            (['src/store/tests/agent.zig'], {'src/store/tests/agent.zig': ('', 'test "sqlite only" {}')}, False),
+            # A production file's inline engine test is a MySQL leg; a comment naming the loop is not.
+            (['src/read_transcript.zig'], {'src/read_transcript.zig': ('', 'try storage.testing.forEachEngine(run);')}, True),
+            (['src/store/Store.zig'], {'src/store/Store.zig': ('', '// forEachEngine runs both')}, False),
         )
         for paths, contents, expected in cases:
             with self.subTest(paths=paths, changed=bool(contents)):

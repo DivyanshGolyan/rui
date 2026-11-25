@@ -1,5 +1,4 @@
 from pathlib import Path
-import hashlib
 import re
 import subprocess
 import textwrap
@@ -17,19 +16,6 @@ TAG = re.compile(r"v0\.(\d+)\.\d+")
 STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 LITERALS = r'(?:"(?:,")*,?)?'
 LITERAL_STEP = re.compile(r"\{\.from=\d+,\.sqlite=&\.\{" + LITERALS + r"\},\.mysql=&\.\{" + LITERALS + r"\},?\}")
-# Steps main may carry in a repaired form. Each entry pins the exact repaired text by SHA-256, so any further
-# edit is refused again. Format 92's MySQL step (from 91) never ran: its owner-CHECK SET lacked a closing
-# parenthesis, so MySQL refused it with error 1064 and no MySQL Store took it. Owner approved 2026-11-24. The repair
-# also matches the owner CHECK by LOCATE('provider'), because information_schema's CHECK_CLAUSE text did not equal the
-# normalised literal on MySQL 8.4.
-# Format 94's MySQL step (from 93) found the session_change field CHECK by the quoted literal 'provider', which MySQL
-# 8.4's CHECK_CLAUSE stores with a charset introducer, so its SET was NULL and PREPARE refused it (1064); no MySQL Store
-# took it and no release carries it. Owner approved 2026-11-25. The repair matches the bare 'loaded_tools', which only
-# the field CHECK names.
-REPAIRED_STEPS = {91: "9f9e6210d1278947bcb8a8d51868fe62d31dc1ed16e9ef06f1ce26672f876bfa",
-                  93: "7064e3c27f815b0f201e5ea9ce673a94e09bc843afb2373ca2088135a1c71e47"}
-
-
 # Format 94's MySQL step as main carries it (from 93), and as this revision repairs it.
 MAIN_94_FIELD_DDL = """SET @rui_field_ddl=(SELECT CONCAT('ALTER TABLE session_change DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK((field=''provider'' OR field=''model'' OR field=''instructions'' OR field=''tools'' OR field=''loaded_tools'' OR field=''permission_mode'' OR field=''output_schema'' OR field=''compaction_trigger'' OR field=''output_reservation'' OR field=''reasoning_effort'' OR field=''label'' OR field=''reasoning_effort_refused'' OR field=''app_tools''))') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session_change' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('''provider''',cc.CHECK_CLAUSE)>0 AND LOCATE('provider_text',cc.CHECK_CLAUSE)=0)"""
 REPAIRED_94_FIELD_DDL = """SET @rui_field_ddl=(SELECT CONCAT('ALTER TABLE session_change DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK((field=''provider'' OR field=''model'' OR field=''instructions'' OR field=''tools'' OR field=''loaded_tools'' OR field=''permission_mode'' OR field=''output_schema'' OR field=''compaction_trigger'' OR field=''output_reservation'' OR field=''reasoning_effort'' OR field=''label'' OR field=''reasoning_effort_refused'' OR field=''app_tools''))') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session_change' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('loaded_tools',cc.CHECK_CLAUSE)>0)"""
@@ -55,10 +41,11 @@ def edited_shipped_steps(candidate, shipped, released):
                   if start < released and candidate.get(start) != shipped.get(start))
 
 
-def unrepaired(edited, candidate_steps, repaired=REPAIRED_STEPS):
-    return [start for start in edited
-            if candidate_steps.get(start) is None
-            or hashlib.sha256(candidate_steps[start].encode()).hexdigest() != repaired.get(start)]
+def locked_main_steps(edited, released):
+    """The edited main steps a PR may not change: each one a release shipped (its start is below the newest
+    release's format). A step no release carries may be repaired in place without asking (owner, 2026-11-25), as
+    format 92's and 94's MySQL steps were. With no release tag to tell them apart, every main step stays locked."""
+    return list(edited) if released is None else [start for start in edited if start < released]
 
 
 def edited_released_rows(candidate, released_rows, released):
@@ -145,17 +132,14 @@ class StoreSchemaVersionTest(unittest.TestCase):
         self.assertEqual(edited_shipped_steps(released, {}, 52), [51], "a step added below the release")
         self.assertEqual(migration_steps("pub const schema_version: u32 = 50;\n"), {})
 
-    def test_a_pinned_repair_is_the_only_allowed_edit_to_a_main_step(self):
-        repaired = "ALTER TABLE t ADD CHECK((owner='app'))"
-        pins = {91: hashlib.sha256(repaired.encode()).hexdigest()}
-        base = {91: "ALTER TABLE t ADD CHECK(owner='app'"}
-        def edited(text):
-            return edited_shipped_steps({91: text}, base, 92)
-        self.assertEqual(unrepaired(edited(repaired), {91: repaired}, pins), [])
-        self.assertEqual(unrepaired(edited(repaired + "!"), {91: repaired + "!"}, pins), [91],
-                         "one more character is a new edit and is refused")
-        self.assertEqual(unrepaired(edited("changed"), {91: "changed"}, pins), [91])
-        self.assertEqual(unrepaired([91], {}, pins), [91], "a dropped pinned step is refused")
+    def test_only_released_main_steps_are_locked(self):
+        main = {90: "released", 91: "released", 93: "unreleased step on main"}
+        candidate = {90: "released", 91: "edited", 93: "repaired"}
+        edited = edited_shipped_steps(candidate, main, 94)
+        self.assertEqual(edited, [91, 93])
+        self.assertEqual(locked_main_steps(edited, 93), [91], "v0.93 shipped the step from 91, not the one from 93")
+        self.assertEqual(locked_main_steps(edited, 94), [91, 93], "v0.94 shipped both")
+        self.assertEqual(locked_main_steps(edited, None), [91, 93], "no tag: every main step stays locked")
 
     def test_steps_are_literals_only(self):
         steps = migration_steps(textwrap.dedent("""\
@@ -195,13 +179,13 @@ class StoreSchemaVersionTest(unittest.TestCase):
         self.assertIsNone(error, f"{error} (main at {base_commit[:12]}); each format PR appends its own step (D226)")
         rows = edited_released_rows(digest_rows(source), digest_rows(base_source), base)
         self.assertEqual(rows, [], f"main's bootstrap_digests rows {rows} are immutable, even unreleased: append a new version")
-        candidate_steps = migration_steps(source)
-        steps = unrepaired(edited_shipped_steps(candidate_steps, migration_steps(base_source), base), candidate_steps)
-        self.assertEqual(steps, [], f"main's migration steps from {steps} are immutable, even unreleased: append a new step")
         tag = released_tag(ROOT)
+        released = int(TAG.fullmatch(tag)[1]) if tag is not None and TAG.fullmatch(tag) else None
+        steps = locked_main_steps(edited_shipped_steps(migration_steps(source), migration_steps(base_source), base), released)
+        self.assertEqual(steps, [], f"main's migration steps from {steps} shipped in a release and are immutable: "
+                         "append a new step (an unreleased step may be repaired in place)")
         if tag is None or not TAG.fullmatch(tag):
             self.skipTest("no v0.S.N release tags in this checkout; the policy job checks out with fetch-depth 0")
-        released = int(TAG.fullmatch(tag)[1])
         if git(ROOT, "ls-tree", "--name-only", tag, "--", SCHEMA):
             shipped, rows = digest_rows(git(ROOT, "show", f"{tag}:{SCHEMA}")), digest_rows(source)
             edited = edited_released_rows(rows, shipped, released)
