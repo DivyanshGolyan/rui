@@ -10,6 +10,8 @@ Rerun, retry and assertion rules live in [Landing](../../../docs/agents/landing.
 
 ## 1. Find the failure record
 
+- For a Promote or other qualification run, read its `qualify / report` job's annotations first (`get_check_run` or the check run's annotations): each `Promotion verdict` notice is one filed cause as `job | failed steps | signature | escape class | #issue`.
+  Open logs only for what a verdict leaves unexplained; a run's job list alone is about 80K characters.
 - Fetch failed-job logs through the GitHub MCP: `get_job_logs` with `run_id` and `failed_only: true` (or one `job_id`) and `return_content: true`.
   Large logs land in a file; search the file.
   Fetch logs yourself rather than asking the user.
