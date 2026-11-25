@@ -273,8 +273,8 @@ fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cl
 
 noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed) !void {
     switch (command) {
-        .session_start => _ = try configure(init, .{ .io = init.io }, parsed, null, true),
-        .session_configure => _ = try configure(init, .{ .io = init.io }, parsed, null, false),
+        .session_start => _ = try configure(init, .{ .io = init.io }, parsed, null, true, null),
+        .session_configure => _ = try configure(init, .{ .io = init.io }, parsed, null, false, null),
         .session_send => try message(init, parsed, null),
         .session_inspect => try inspect(init, parsed),
         .session_list => try sessions(init, parsed),
@@ -2388,7 +2388,7 @@ fn admitModel(model: []const u8) error{InvalidModel}!void {
     return error.InvalidModel;
 }
 
-fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, start: bool) !bool {
+fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, start: bool, observed: ?*@import("configure_outcome.zig").Outcome) !bool {
     const io = init.io;
     const named = if (live) |address| address.session else parsed.get("session");
     var input = configure_input.ConfigureInput{
@@ -2454,12 +2454,12 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         return false;
     }
     var step: ?client.Step = .store;
-    return configureCaptured(init, requester, parsed, live, input, &step) catch |err| {
+    return configureCaptured(init, requester, parsed, live, input, &step, observed) catch |err| {
         return if (step == .store) storeFailure(err) else err;
     };
 }
 
-fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, configuration: configure_input.ConfigureInput, step: *?client.Step) !bool {
+fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, configuration: configure_input.ConfigureInput, step: *?client.Step, observed: ?*@import("configure_outcome.zig").Outcome) !bool {
     const io = init.io;
     const interactive = live != null;
     var input = configuration;
@@ -2481,9 +2481,21 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
         if (!interactive) try announceCapture(io, &captured);
         break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), &captured);
     } catch |err| {
+        if (observed) |outcome| {
+            const key: [36]u8 = saved.key.slice()[0..36].*;
+            outcome.* = @import("configure_outcome.zig").failed(.{ .key = key, .store = saved.store }, if (step.*) |where| where.mayHaveReachedHost() else false);
+        }
         if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
+    if (observed) |outcome| {
+        const key: [36]u8 = saved.key.slice()[0..36].*;
+        outcome.* = if (reply.answer) |answer| switch (answer.result) {
+            .accepted => .accepted,
+            .rejected => .rejected,
+            .conflict => .{ .unconfirmed = .{ .key = key, .store = saved.store } },
+        } else |_| .{ .unconfirmed = .{ .key = key, .store = saved.store } };
+    }
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
     writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .json, replay) catch |err| {
         if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
@@ -2833,16 +2845,31 @@ fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?
     });
 }
 
-pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, edit: ChatInfo.Edit) !bool {
-    var tools_buffer: InfoTools = undefined;
-    const input = try infoConfiguration(destination, reference, &edit, &tools_buffer);
-    const parsed: cli_args.Parsed = .{ .definition = cli_args.live_configure };
-    var step: ?client.Step = .store;
-    return configureCaptured(init, read.requests(), &parsed, .{ .store = destination, .session = reference }, input, &step) catch |err| {
-        if (err == error.CanonicalStoreFailure) return err;
-        stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@tagName(caller_error.of(err))});
-        return false;
-    };
+pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, attempt: session_reads.ConfigureAttempt) !@import("configure_outcome.zig").Outcome {
+    const Outcome = @import("configure_outcome.zig").Outcome;
+    switch (attempt) {
+        .edit => |edit| {
+            var tools_buffer: InfoTools = undefined;
+            const input = try infoConfiguration(destination, reference, &edit, &tools_buffer);
+            const parsed: cli_args.Parsed = .{ .definition = cli_args.live_configure };
+            var step: ?client.Step = .store;
+            var outcome: Outcome = .not_sent;
+            _ = configureCaptured(init, read.requests(), &parsed, .{ .store = destination, .session = reference }, input, &step, &outcome) catch |err| {
+                if (err == error.CanonicalStoreFailure) return err;
+                stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@tagName(caller_error.of(err))});
+                return outcome;
+            };
+            return outcome;
+        },
+        .slash => |line| {
+            var outcome: Outcome = .not_sent;
+            sessionCommandWithOutcome(init, read, destination, reference, line, &outcome) catch |err| {
+                if (err == error.CanonicalStoreFailure) return err;
+                return outcome;
+            };
+            return outcome;
+        },
+    }
 }
 
 const InfoTools = struct {
@@ -2879,6 +2906,10 @@ fn infoConfiguration(store: []const u8, session: []const u8, edit: *const ChatIn
 }
 
 pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
+    return sessionCommandWithOutcome(init, read, destination, reference, input_buffer, null);
+}
+
+fn sessionCommandWithOutcome(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, input_buffer: []u8, observed: ?*@import("configure_outcome.zig").Outcome) !void {
     const requests_context = read.requests();
     const command = switch (slash_commands.parse(input_buffer)) {
         .command => |command| command,
@@ -2916,7 +2947,7 @@ pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destinat
             };
         },
         .@"reload-skills" => {
-            _ = try liveConfigure(init, requests_context, live, &.{"--reload-skills"}, "Usage: /reload-skills\n");
+            _ = try liveConfigure(init, requests_context, live, &.{"--reload-skills"}, "Usage: /reload-skills\n", observed);
         },
         .@"reload-tools" => try reloadToolsNotice(init, requests_context, destination),
         .effort, .rename => {
@@ -2924,7 +2955,7 @@ pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destinat
             var arguments: [live_capacity][]const u8 = undefined;
             const spelled = liveArguments(command.name, argument, &arguments) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
-            const accepted = try liveConfigure(init, requests_context, live, spelled, typed_usage);
+            const accepted = try liveConfigure(init, requests_context, live, spelled, typed_usage, observed);
             if (accepted and command.name == .effort and spelled.len == 2) try saveEffortDefault(init, spelled[1]);
         },
         else => return error.UnknownArgument,
@@ -3041,7 +3072,7 @@ test "the CLI refuses a line the table does not admit, which the frontend never 
     }
 }
 
-fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8, typed_usage: []const u8) !bool {
+fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8, typed_usage: []const u8, observed: ?*@import("configure_outcome.zig").Outcome) !bool {
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
     var problem: cli_args.Refusal = undefined;
     const parsed = cli_args.live_configure.parse(arguments, nothing.allocator(), &problem) catch {
@@ -3057,7 +3088,7 @@ fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
         return false;
     };
-    return configure(init, requests_context, &parsed, live, false) catch |err| {
+    return configure(init, requests_context, &parsed, live, false, observed) catch |err| {
         if (err == error.InvalidModel or err == error.InvalidLabel) return false; // The pre-capture diagnostic already gives the repair.
         stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@tagName(caller_error.of(err))});
         if (err == error.CanonicalStoreFailure) return err;

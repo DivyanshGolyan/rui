@@ -50,6 +50,7 @@ const cores = .{
     .{ "configuration_admission.zig", @import("configuration_admission.zig") },
     .{ "configuration_defaults.zig", @import("configuration_defaults.zig") },
     .{ "configure_input.zig", @import("configure_input.zig") },
+    .{ "configure_outcome.zig", @import("configure_outcome.zig") },
     .{ "connection.zig", @import("connection.zig") },
     .{ "connection_names.zig", @import("connection_names.zig") },
     .{ "content_string.zig", @import("content_string.zig") },

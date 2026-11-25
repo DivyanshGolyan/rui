@@ -11,6 +11,7 @@ The description lists every behavior change in the diff, small ones included, so
 PRs changing `src/` follow [Shape before code](../../CODING_STANDARDS.md#shape-before-code); the plan checks the description, and review checks the shape.
 Every PR commit states its actual test commands and results.
 Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which reports overlapping work, opens it as a draft and requests `@codex review`.
+It refuses a body admission would reject, so a PR that changes UI files opens with its screens captured (`verify-rui frames`, then `--frames DIR`) or with a `No screen change:` line; publish the frames with `verify-rui publish DIR --pr N` as soon as it prints the number.
 A draft runs only the plan job, so Codex rounds do not start, then cancel, the selected suite.
 Codex reviews a draft only on request: after each fix push, comment `@codex review` again.
 Once Codex is clean on the published head, run `python3 tests/ci/open_pr.py ready`; selected CI then runs once on that head, and the PR merges when it is green.
