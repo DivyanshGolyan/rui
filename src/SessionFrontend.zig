@@ -5913,7 +5913,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7 };
     _ = try overview_view.step(&overview.state, .{ .tick = 1000 });
     _ = try overview_view.step(&overview.state, .{ .list = .{ .page = .{
-        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = @import("connection.zig").Name.parse("codex").?, .label = "Stop the slow job", .state = stopping, .state_change_at = 1, .subtree_state_change_at = 1, .descendant_count = 0, .descendant_needs_you_count = 0, .group = .working, .turn = 7 }},
+        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = @import("connection.zig").Name.parse("codex").?, .label = "Stop the slow job", .state = stopping, .state_change_at = 1, .subtree_state_change_at = 1, .descendant_count = 0, .descendant_needs_you_count = 0, .turn = 7 }},
         .answer = .{ .delta = .full, .since = .{ .instance = @splat(0xab), .generation = 1 } },
     } } });
     _ = try overview_view.step(&overview.state, .{ .conversation = ref });

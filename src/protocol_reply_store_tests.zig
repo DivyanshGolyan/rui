@@ -377,7 +377,7 @@ test "client Message decoder retains automatic denial wait after a new Message" 
         try std.testing.expectEqual(observation.kind.message.?.work.?.first_action, decoded.work.?.first_action);
         try std.testing.expect(decoded.work.?.first_action == null and decoded.work.?.actions.decide == null);
         try std.testing.expect(decoded.work.?.actions.stop);
-        try std.testing.expectEqual(.needs_you, decoded.work.?.group);
+        try std.testing.expectEqual(.needs_you, protocol.session_work.standing(decoded.work.?.state));
     }
 }
 
