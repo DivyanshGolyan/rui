@@ -721,7 +721,7 @@ const SubtreeFold = struct {
         const total = &self.totals[index];
         total.subtree_state_change_at = @max(total.subtree_state_change_at, try stateChangeAt(.of(row), &self.work, work));
         total.descendant_count = std.math.add(u64, total.descendant_count, 1) catch return error.CorruptStore;
-        if (session_work.group(work) == .needs_you) total.descendant_needs_you_count = std.math.add(u64, total.descendant_needs_you_count, 1) catch return error.CorruptStore;
+        if (session_work.standing(work.state) == .needs_you) total.descendant_needs_you_count = std.math.add(u64, total.descendant_needs_you_count, 1) catch return error.CorruptStore;
     }
 };
 
