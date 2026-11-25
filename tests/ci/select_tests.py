@@ -371,6 +371,8 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
 
 UPGRADE_CHECK_PATHS = (UPGRADE, "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
                        "src/HostLifecycle.zig", "src/host_activation.zig", "src/host_identity.*", "src/host_launch.c",
+                       # Where a running Host listens and how a census finds it: an upgrade crosses both (#2120, #1878).
+                       "src/host_endpoint.zig", "src/host_restart_all.zig",
                        "src/store/migration_*", "install.sh", "release/*", "build.zig", "build.zig.zon",
                        "tests/integration/previous_release_upgrade.py", ".github/workflows/previous-release-upgrade.yml")
 

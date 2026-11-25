@@ -190,6 +190,14 @@ def supported_range(checkout):
 
 
 class Dialect(HostServeDialect):
+    """The CLI spelling of one Rui build, read from its help text so one check can drive the pinned
+    release and the candidate. Each attribute is a spelling some release used; NEWEST is what this
+    checkout's build must read as. A CLI rename that changes help text this class reads makes the
+    candidate look like an older release and the check then fails far from the cause (#2022 -> #2107),
+    so main asserts the candidate reads as NEWEST before it drives anything."""
+
+    NEWEST = {"resource_first": True, "host_settings": True, "address_send": False, "send_flag": "--session",
+              "short_ids": True, "stdin_message": True, "pause": ("host", "pause"), "binding_name": "connection"}
 
     def __init__(self, binary):
         super().__init__(binary)
@@ -205,6 +213,17 @@ class Dialect(HostServeDialect):
         # #1862 renamed the binding from provider to connection on the CLI and the wire.
         configure_help = help_text(binary, "session", "configure") if self.resource_first else send_help
         self.binding_name = "connection" if "--connection NAME" in (configure_help or "") else "provider"
+
+    def stale_spellings(self):
+        """Each spelling this build reads as that differs from NEWEST; empty for this checkout's build."""
+        return {name: getattr(self, name) for name, newest in self.NEWEST.items() if getattr(self, name) != newest}
+
+    def assert_newest(self):
+        stale = self.stale_spellings()
+        assert not stale, (
+            f"tests/integration/previous_release_upgrade.py Dialect reads {self.binary} as an older release: {stale}. "
+            "A CLI change altered help text Dialect sniffs; teach Dialect the new spelling, keep the old one for the "
+            "pinned release, and update Dialect.NEWEST.")
 
     def host_status(self, binary, store, timeout):
         status = subprocess.run([binary, "host", "status", "--store", store],
@@ -334,6 +353,7 @@ def main():
         else:
             publisher = build_candidate_release(candidate, root)
         candidate_cli = Dialect(publisher)
+        candidate_cli.assert_newest()
         binary = install(previous, publisher, released=args.running_host)
         previous_artifact = binary.resolve()
         previous_hash = hashlib.sha256(previous_artifact.read_bytes()).digest()
