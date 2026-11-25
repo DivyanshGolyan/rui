@@ -2150,6 +2150,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     defer settings.deinit();
     var tuning = try server.Tuning.fromOptions(parsed);
     tuning.home = init.environ_map.get("HOME");
+    tuning.github_environment = init.environ_map;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var preparation_failure: start_report.Failure = undefined;
