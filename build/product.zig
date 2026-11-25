@@ -502,7 +502,7 @@ fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
     });
     module.addImport("terminal_unicode", dependency.module("unicode"));
     module.addImport("terminal_width", dependency.module("gwidth"));
-    module.addImport("vaxis", @import("vaxis_overlay.zig").add(b, dependency));
+    module.addImport("vaxis", dependency.module("vaxis"));
 }
 
 fn addBindings(b: *std.Build, module: *std.Build.Module, name: []const u8, header: []const u8) Translator {

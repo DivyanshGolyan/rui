@@ -590,7 +590,7 @@ def fixture_rows(before, after):
     return {match[1] for match in FIXTURE_ROW.finditer(after) if rows.get(match[1]) != match[0]}
 
 
-VAXIS_OVERLAY_TARGETS = ("test-native", "human-cli-integration", "terminal-restoration-integration")
+VAXIS_CLIPBOARD_TARGETS = ("test-native", "test-vaxis-clipboard", "human-cli-integration", "terminal-restoration-integration")
 
 BUILD_MODULES = {
     "build/product.zig": BUILD_HUB,
@@ -603,7 +603,7 @@ BUILD_MODULES = {
     "build/link_table.zig": BUILD_HUB,
     "build/darwin.zig": ("test", "host-launch-integration"),
     "build/deep_modules.zig": ("deep-modules", "deep-modules-test"),
-    "build/vaxis_overlay.zig": VAXIS_OVERLAY_TARGETS,
+    "build/vaxis_clipboard.zig": VAXIS_CLIPBOARD_TARGETS,
     ".github/actions/setup/caches/action.yml": ("test-logic",),
     ".github/actions/setup/caches/save-keys.cjs": ("test-logic",),
     ".github/actions/setup/fixtures/action.yml":
@@ -612,8 +612,9 @@ BUILD_MODULES = {
 RULES += tuple(((module,), targets, tuple(target for target in targets if target not in LINUX_ONLY),
                 "Build module: the targets it defines or builds for")
                for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
-RULES += ((('build/vaxis_overlay.patch',), VAXIS_OVERLAY_TARGETS, VAXIS_OVERLAY_TARGETS,
-           "Vaxis overlay input: the native terminal and its integration fixtures"),)
+RULES += ((("tests/ci/vaxis_test_owners.json", "tests/ci/verify_vaxis_test_owners.py"),
+           VAXIS_CLIPBOARD_TARGETS, VAXIS_CLIPBOARD_TARGETS,
+           "Pinned Vaxis invariant owners: verify the external source and reader tests"),)
 
 
 # The module lint reads every production src/ file (from src/cli.zig) and its allow file; build/deep_modules.zig
@@ -760,10 +761,10 @@ def normalize(targets: set) -> set:
 WHOLE_SUITE_GATES = frozenset({"check", "check-full", "test", "test-full"})
 PR_UNIT_ROOTS = frozenset({"test-native", "test-store", "test-logic", "test-h2", "test-pg"})
 
-# The targets a changed dependency may add: the PR unit roots and the targets the whole-suite gates run
-# (CHECK_COVERS, FIXTURE_COVERS). A link to any other target (measurement, cross, typecheck, upgrade ...) is not added.
+# A changed dependency adds PR unit roots, whole-suite targets, and the Vaxis clipboard owner tests.
+# Links to other targets (measurement, cross, typecheck, upgrade ...) are not added.
 CI_RUNNABLE = frozenset(PR_UNIT_ROOTS | CHECK_COVERS | {covered for cases in FIXTURE_COVERS.values() for covered in cases}
-                        | set(FIXTURE_COVERS))
+                        | set(FIXTURE_COVERS) | {"test-vaxis-clipboard"})
 # Store unit tests run on a PR only for a change to the Store itself.
 STORE_PATHS = ("src/store.zig", "src/store/*")
 
@@ -775,7 +776,7 @@ PR_OWN_FILE_TARGETS = frozenset({"mysql-wire-integration", "measurement-check"})
 # Targets the PR tier runs whenever the selector picks them. deep-modules (DEEP_MODULES) and its tool's tests
 # (DEEP_MODULES_TEST) are cheap Debug builds of the host tool and run beside the policy checks, so they are
 # selected the same way.
-PR_SELECTED_TARGETS = frozenset({"deep-modules", "deep-modules-test"})
+PR_SELECTED_TARGETS = frozenset({"deep-modules", "deep-modules-test", "test-vaxis-clipboard"})
 # Promotion's own targets: the PR tier never runs these whatever the diff touches. ci_plan.py adds
 # them to every promotion, and the issue filer names a red's target as promotion-only with them.
 PROMOTION_CORE_TARGETS = frozenset({"check-full", "test-logic", "admission-debug-integration"})

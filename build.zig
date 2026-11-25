@@ -52,6 +52,9 @@ pub fn build(b: *std.Build) void {
     if (ci.directory != null and test_filters.len != 0) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
     const units = unit_module.add(b, ci, target, pinned_transport, test_filters, pr_ci);
+    const ci_names = ci_module.nameTests(b, ci, target, optimize);
+    if (test_filters.len == 0) b.top_level_steps.get("test-logic").?.step.dependOn(ci_names);
+    @import("build/vaxis_clipboard.zig").add(b, ci, target, optimize, ci_names);
     var unit_runs = units.runs;
 
     const openapi_emitter = b.addExecutable(.{
