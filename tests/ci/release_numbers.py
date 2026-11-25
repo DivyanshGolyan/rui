@@ -7,8 +7,8 @@ VERSION = re.compile(r"^pub const schema_version: u32 = (\d+);$", re.MULTILINE)
 ROW = re.compile(r"\.\{ \.schema_version = (\d+), \.digest = 0x([0-9a-fA-F]+) \}")
 MIGRATIONS = re.compile(r"^pub const migrations = \[_\]Migration\{", re.MULTILINE)
 FROM = re.compile(r"\.from\s*=\s*(\d+)")
-# The Store migration inputs a MySQL 8.4 migration check reads beyond the step table.
-MIGRATION_INPUTS = "src/store/migration_*"
+# The inputs a MySQL 8.4 migration check reads beyond schema.zig's code: the migration fixtures and the check's own sources.
+MIGRATION_INPUTS = ("src/store/migration_*", "src/store/mysql_dialect_check.zig", "src/store/testing.zig")
 
 
 def bump_error(name, candidate, base, released):
@@ -93,34 +93,46 @@ def migration_steps(source):
         position += 1
 
 
-def migration_text_changed(before, after):
-    """Whether the migration step table's entries differ between two revisions of schema.zig.
+ZIG_TOKEN = re.compile(r"""
+    (?P<multi>^[ \t]*\\\\[^\n]*)
+  | (?P<gap>[^\S\n]+|\n)
+  | (?P<comment>//[^\n]*)
+  | (?P<str>"(?:[^"\\\n]|\\.)*")
+  | (?P<chr>'(?:[^'\\\n]|\\.)*')
+  | (?P<word>[A-Za-z0-9_]+)
+  | (?P<other>.)
+""", re.VERBOSE | re.MULTILINE)
 
-    Entries are compared as parsed {from: text}, so an edit outside the table is no change. A table that
-    cannot be parsed counts as changed.
-    """
+
+def zig_code(source):
+    """The tokens of Zig source with comments and layout removed. Multiline string lines are kept whole."""
+    return [match[0] for match in ZIG_TOKEN.finditer(source) if match.lastgroup not in ("gap", "comment")]
+
+
+def code_changed(before, after):
+    """Whether two revisions of schema.zig differ in code, so not only in comments or layout."""
     if before == after:
         return False
-    try:
-        old, new = (migration_steps(source) if source is not None else {} for source in (before, after))
-    except (AttributeError, IndexError, TypeError, ValueError):
+    if before is None or after is None:
         return True
-    return old != new
+    return zig_code(before) != zig_code(after)
 
 
 def touches_mysql_migration(paths, contents):
-    """Whether a change touches a Store migration step, so a ready PR must run the live MySQL migration check.
+    """Whether a change touches what the live MySQL 8.4 migration check reads, so a ready PR must run it.
 
-    True when a migration input (MIGRATION_INPUTS) changed, or when schema.zig changed and an entry of its step
-    table did. `contents` maps each changed schema.zig to its (base, head) text, as select_tests.revision_contents does.
+    True when a migration input (MIGRATION_INPUTS) changed, or when schema.zig changed in code. schema.zig's MySQL
+    DDL is generated from the same tables, indexes and helpers as its SQLite DDL, and its step table is one part of
+    that code, so a comment or layout edit is the only schema.zig change that does not trigger. `contents` maps each
+    changed schema.zig to its (base, head) text, as select_tests.revision_contents does.
     """
-    if any(fnmatch.fnmatchcase(path, MIGRATION_INPUTS) for path in paths):
+    if any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in MIGRATION_INPUTS):
         return True
     if SCHEMA not in paths:
         return False
     if SCHEMA not in contents:
         return True
-    return migration_text_changed(*contents[SCHEMA])
+    return code_changed(*contents[SCHEMA])
 
 
 # MySQL migration SQL, not the SQLite text beside it. A search of CHECK_CLAUSE by a needle with a quote character
@@ -135,9 +147,12 @@ SQL_TOKEN = re.compile(r"""
   | (?P<punct>[(),])
   | (?P<other>\S)
 """, re.VERBOSE | re.DOTALL)
-CHECK_SEARCH_CALLS = {"LOCATE", "INSTR", "POSITION"}
+# The search functions, each with the argument index of the haystack; the other argument is the needle.
+SEARCH_HAYSTACK = {"LOCATE": 1, "INSTR": 0, "POSITION": 1}
+CHECK_SEARCH_CALLS = set(SEARCH_HAYSTACK)
 CHECK_SEARCH_OPERATORS = {"LIKE", "REGEXP", "RLIKE", "="}
-QUOTES = set("'\"`")
+# A backtick is a legitimate identifier quote: MySQL 8.4 writes column names in CHECK_CLAUSE with backticks.
+QUOTES = set("'\"")
 
 
 def zig_string_value(literal):
@@ -159,38 +174,105 @@ def is_check_clause(token):
     return token[0] == "ident" and token[1].rsplit(".", 1)[-1].strip("`").upper() == "CHECK_CLAUSE"
 
 
-def search_needles(tokens, index):
-    """The literal needles a CHECK_CLAUSE token at index is searched with, by its nearest call or direct operator."""
-    needles = []
-    depth, start = 0, None
-    for position in range(index - 1, -1, -1):
-        kind, text = tokens[position]
-        if (kind, text) == ("punct", ")"):
+def is_word(token, words):
+    return token[0] == "ident" and token[1].upper() in words
+
+
+def is_operator(token):
+    return token[0] in ("ident", "op") and token[1].upper() in CHECK_SEARCH_OPERATORS
+
+
+def open_of(tokens, position):
+    """The index of the '(' that directly encloses the token at position, or None at the top level."""
+    depth = 0
+    for index in range(position - 1, -1, -1):
+        if tokens[index] == ("punct", ")"):
             depth += 1
-        elif (kind, text) == ("punct", "("):
+        elif tokens[index] == ("punct", "("):
             if depth == 0:
-                start = position
-                break
+                return index
             depth -= 1
-    if start is not None and start > 0 and tokens[start - 1][0] == "ident" \
-            and tokens[start - 1][1].upper() in CHECK_SEARCH_CALLS:
-        depth = 0
-        for kind, text in tokens[start + 1:]:
-            if (kind, text) == ("punct", "("):
-                depth += 1
-            elif (kind, text) == ("punct", ")"):
-                if depth == 0:
-                    break
-                depth -= 1
-            elif kind == "str" and depth == 0:
-                needles.append(text)
-    if index + 2 < len(tokens) and tokens[index + 1][0] in ("ident", "op") \
-            and tokens[index + 1][1].upper() in CHECK_SEARCH_OPERATORS and tokens[index + 2][0] == "str":
-        needles.append(tokens[index + 2][1])
-    if index >= 2 and tokens[index - 1][0] in ("ident", "op") and tokens[index - 1][1].upper() in CHECK_SEARCH_OPERATORS \
-            and tokens[index - 2][0] == "str":
-        needles.append(tokens[index - 2][1])
+    return None
+
+
+def close_of(tokens, open_):
+    depth = 0
+    for index in range(open_, len(tokens)):
+        if tokens[index] == ("punct", "("):
+            depth += 1
+        elif tokens[index] == ("punct", ")"):
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def operator_needles(tokens, first, last):
+    """The string literal a search operator compares the expression tokens[first..last] with, on either side."""
+    needles = []
+    after = last + 1
+    if after < len(tokens) and is_word(tokens[after], {"NOT"}):
+        after += 1
+    if after + 1 < len(tokens) and is_operator(tokens[after]) and tokens[after + 1][0] == "str":
+        needles.append(tokens[after + 1][1])
+    before = first - 1
+    if before >= 0 and is_operator(tokens[before]):
+        operand = before - 1
+        if operand >= 0 and is_word(tokens[operand], {"NOT"}):
+            operand -= 1
+        if operand >= 0 and tokens[operand][0] == "str":
+            needles.append(tokens[operand][1])
     return needles
+
+
+def search_call_needles(tokens, open_):
+    """The needles of a search call whose haystack argument holds CHECK_CLAUSE; literal arguments elsewhere are needles."""
+    name = tokens[open_ - 1][1].upper()
+    close = close_of(tokens, open_)
+    parts, current, depth = [], [], 0
+    for index in range(open_ + 1, close):
+        token = tokens[index]
+        if token == ("punct", "("):
+            depth += 1
+        elif token == ("punct", ")"):
+            depth -= 1
+        separator = token == ("punct", ",") or (name == "POSITION" and is_word(token, {"IN"}))
+        if depth == 0 and separator:
+            parts.append(current)
+            current = []
+        else:
+            current.append(index)
+    parts.append(current)
+    haystack = SEARCH_HAYSTACK[name]
+    holding = [number for number, part in enumerate(parts)
+               if any(is_check_clause(tokens[index]) for index in part)]
+    if len(parts) <= haystack or holding != [haystack]:
+        return []  # CHECK_CLAUSE is the needle, searched for inside a literal: no quoted needle is searched
+    return [tokens[part[0]][1] for number, part in enumerate(parts)
+            if number != haystack and len(part) == 1 and tokens[part[0]][0] == "str"]
+
+
+def search_needles(tokens, index):
+    """The literal needles a CHECK_CLAUSE token at index is searched with.
+
+    The searched expression is the token itself, widened through each enclosing call that takes it as a whole
+    argument (LOWER, REPLACE, ...). At each width the neighbouring search operator (LIKE, NOT LIKE, REGEXP, NOT REGEXP,
+    =) gives the needle; a search function that takes the expression as its haystack gives its literal arguments.
+    """
+    needles = []
+    first = last = index
+    while True:
+        needles += operator_needles(tokens, first, last)
+        open_ = open_of(tokens, first)
+        before, after = tokens[first - 1] if first > 0 else None, tokens[last + 1] if last + 1 < len(tokens) else None
+        whole_argument = before is not None and (before == ("punct", "(") or before == ("punct", ",")
+                                                 or is_word(before, {"IN"})) \
+            and after is not None and (after == ("punct", ")") or after == ("punct", ","))
+        if open_ is None or not whole_argument or open_ == 0 or tokens[open_ - 1][0] != "ident":
+            return needles
+        if tokens[open_ - 1][1].upper() in CHECK_SEARCH_CALLS:
+            return needles + search_call_needles(tokens, open_)
+        first, last = open_ - 1, close_of(tokens, open_)
 
 
 def quoted_check_needles(sql):
@@ -215,7 +297,7 @@ def check_clause_lint(steps):
 
 
 def check_clause_message(start, needle):
-    return (f"the MySQL step from {start} searches CHECK_CLAUSE for {needle!r}, which contains a quote: MySQL 8.4 stores "
-            "a CHECK literal with a charset introducer (_utf8mb4'...') and escapes its quotes, so this search never matches, "
-            "the generated DDL is NULL and PREPARE fails with 1064. Fix: search a needle without quote characters, a bare "
-            "identifier token only the target CHECK contains, e.g. LOCATE('loaded_tools',cc.CHECK_CLAUSE)")
+    return (f"the MySQL step from {start} searches CHECK_CLAUSE for {needle!r}, which contains a ' or \" quote: MySQL 8.4 "
+            "stores a CHECK literal with a charset introducer (_utf8mb4'...') and escapes its quotes, so this search never "
+            "matches, the generated DDL is NULL and PREPARE fails with 1064. Fix: search a needle without ' or \" characters, "
+            "a bare identifier token only the target CHECK contains, e.g. LOCATE('loaded_tools',cc.CHECK_CLAUSE)")

@@ -232,8 +232,14 @@ class MySqlMigrationOwnerTest(unittest.TestCase):
             ('a step removed', [SCHEMA], base.replace('    .{ .from = 92, .sqlite = &.{"C"}, .mysql = &.{"D"} },\n', ''), True),
             ('schema.zig whitespace only', [SCHEMA],
              base.replace('.sqlite = &.{"C"}', '.sqlite = &.{ "C" }'), False),
-            ('schema.zig outside the step table', [SCHEMA], base.replace('u32 = 92;', 'u32 = 92;\n// a note'), False),
+            ('schema.zig comment only', [SCHEMA], base.replace('u32 = 92;', 'u32 = 92;\n// a note'), False),
+            ('schema.zig comment inside the step table', [SCHEMA],
+             base.replace('    .{ .from = 92', '    // a note\n    .{ .from = 92'), False),
             ('schema.zig unchanged text', [SCHEMA], base, False),
+            ('schema.zig code outside the step table', [SCHEMA],
+             base.replace('pub const migrations', 'pub const other: u32 = 1;\npub const migrations'), True),
+            ('schema.zig MySQL helper appended', [SCHEMA], base + 'pub fn mysqlKeyPart() void {}\n', True),
+            ('schema.zig multiline string changed', [SCHEMA], base + '\\\\SELECT 1\n', True),
         )
         for name, paths, after, expected in cases:
             with self.subTest(case=name):
@@ -245,9 +251,20 @@ class MySqlMigrationOwnerTest(unittest.TestCase):
                      'src/store/migration_future_input.sql'):
             with self.subTest(path=path):
                 self.assertTrue(touches_mysql_migration([path], {}))
-        for paths in (['README.md'], ['src/store/store_helpers.zig'], ['src/store/mysql_dialect_check.zig'], []):
+        for paths in (['README.md'], ['src/store/store_helpers.zig'], []):
             with self.subTest(paths=paths):
                 self.assertFalse(touches_mysql_migration(paths, {}))
+        # The live check's own sources trigger whatever schema.zig did.
+        for path in ('src/store/mysql_dialect_check.zig', 'src/store/testing.zig'):
+            with self.subTest(path=path):
+                self.assertTrue(touches_mysql_migration([path], {}))
+                self.assertTrue(touches_mysql_migration([path, SCHEMA], {SCHEMA: (self.STEPS, self.STEPS)}))
+
+    def test_a_multiline_string_line_is_code_not_a_comment(self):
+        # A line of a Zig multiline string (\\) holds its text, so a change to a "comment" inside one still counts.
+        before = self.STEPS + '\\\\// a\n'
+        self.assertTrue(touches_mysql_migration([SCHEMA], {SCHEMA: (before, self.STEPS + '\\\\// b\n')}))
+        self.assertFalse(touches_mysql_migration([SCHEMA], {SCHEMA: (before, before)}))
 
     def test_a_step_table_that_cannot_be_read_counts_as_changed(self):
         self.assertTrue(touches_mysql_migration([SCHEMA], {SCHEMA: (self.STEPS, 'pub const migrations = [_]Migration{ .{ .from = 9')}))
@@ -272,6 +289,22 @@ class CheckClauseLintTest(unittest.TestCase):
              "WHERE LOWER(REPLACE(cc.CHECK_CLAUSE,'`',''))='x'", []),
             ("a quoted literal beside an unrelated search",
              "SELECT 1 WHERE LOCATE('''x''',t.name)>0 AND cc.CHECK_CLAUSE IS NOT NULL", []),
+            ("LOWER wrapped, then LIKE with a quoted needle",
+             "SELECT 1 WHERE LOWER(cc.CHECK_CLAUSE) LIKE '%''x''%'", ["%'x'%"]),
+            ("REPLACE wrapped, then LIKE with a quoted needle",
+             "SELECT 1 WHERE REPLACE(cc.CHECK_CLAUSE,'a','b') LIKE '%''x''%'", ["%'x'%"]),
+            ("REPLACE with quoted arguments and a bare needle",
+             "SELECT 1 WHERE REPLACE(cc.CHECK_CLAUSE,'''a''','b') LIKE '%loaded_tools%'", []),
+            ("LOCATE over LOWER with a quoted needle", "SELECT 1 WHERE LOCATE('''x''',LOWER(cc.CHECK_CLAUSE))>0", ["'x'"]),
+            ("LOCATE with CHECK_CLAUSE as the needle", "SELECT 1 WHERE LOCATE(cc.CHECK_CLAUSE,'''x''')>0", []),
+            ("NOT LIKE with a quoted needle", "SELECT 1 WHERE cc.CHECK_CLAUSE NOT LIKE '%''x''%'", ["%'x'%"]),
+            ("NOT REGEXP with a quoted needle", "SELECT 1 WHERE cc.CHECK_CLAUSE NOT REGEXP '''x'''", ["'x'"]),
+            ("reversed NOT LIKE with a quoted needle", "SELECT 1 WHERE '''x''' NOT LIKE cc.CHECK_CLAUSE", ["'x'"]),
+            ("a backtick needle", "SELECT 1 WHERE LOCATE('`provider_text`',cc.CHECK_CLAUSE)>0", []),
+            ("a backtick needle over LOWER", "SELECT 1 WHERE LOCATE('`provider_text`',LOWER(cc.CHECK_CLAUSE))>0", []),
+            ("a double-quoted needle", "SELECT 1 WHERE LOCATE('\"x\"',cc.CHECK_CLAUSE)>0", ['"x"']),
+            ("a quoted needle inside a wrapper that is not a search",
+             "SELECT 1 WHERE CONCAT(cc.CHECK_CLAUSE,'''x''')", []),
         ]
         for label, sql, expected in cases:
             with self.subTest(case=label):
