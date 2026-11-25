@@ -134,7 +134,7 @@ The Host serves whether Ctrl-X may stop this work; the client also suppresses an
 Ctrl-X on such a row opens a confirm prompt in the core's state; a second Ctrl-X returns the `stop` effect, Esc only cancels, and any other input cancels before it acts.
 Every creation and stop is an entry in the core's request ledger (`State.requests`) until a definite answer removes it; a full ledger refuses new requests and evicts nothing, and departure prints every entry still left.
 A stop's answer asks for a listing at once, so `▪ stopped` follows within one refresh.
-While a stop of a row is in flight or unconfirmed, the row reads `Stopping…` and takes no other stop; Ctrl-X then names the stop's recovery.
+While a stop is in flight or unconfirmed, the row reads `Stopping…` until a later accepted observation shows changed Host work; it then shows that work, including any approval. A current replacement Host can supply that observation after its handshake. Without a versioned work reading at the time of the stop, the overlay remains until the reply. The original request remains open and recoverable, and the row takes no other stop; Ctrl-X names an unconfirmed stop's recovery.
 A retry that has fallen due reads as the pending work it became in its words, mark and colour alike.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 One Ctrl-X stops the open Session from the conversation at once, exactly as on the overview; nothing asks, because stopping loses nothing (Divyansh, 2026-11-09).

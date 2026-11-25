@@ -2,7 +2,6 @@ const std = @import("std");
 const required_settings = @import("required_settings.zig");
 const session_settings = @import("session_settings.zig");
 const TerminalText = @import("TerminalText.zig");
-const provider_name = @import("provider_name.zig");
 const cli_value = @import("cli_value.zig");
 const utf8_validation = @import("utf8_validation.zig");
 
@@ -78,6 +77,7 @@ pub const Code = enum {
     unsupported_permission_mode,
     unknown_connection,
     connection_unserved,
+    connection_model_required,
     invalid_model,
     model_capability_unavailable,
     invalid_output_schema,
@@ -102,6 +102,7 @@ pub const Code = enum {
     invalid_app_tool_name,
     duplicate_app_tool_name,
     app_tool_built_in_clash,
+    app_tool_host_clash,
     invalid_app_tool_policy,
     app_tools_on_child,
     parent_provider_forbidden,
@@ -305,6 +306,7 @@ fn mapped(err: anyerror) ?Code {
         error.SignInReportingUnavailable => .sign_in_report_unavailable,
         error.ApiKeyMissing => .sign_in_required,
         error.ConnectionUnserved => .connection_unserved,
+        error.ConnectionModelRequired => .connection_model_required,
         error.HostStopped => .host_stopped,
         error.StoreAlreadyOwned => .store_locked,
         error.UnknownMcpServer => .unknown_mcp_server,
@@ -433,14 +435,14 @@ pub fn facts(code: Code) Facts {
         .store_path_malformed => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "a nonempty UTF-8 filesystem path without controls, whose canonical form is at most 492 bytes" }, .says = "The Store path is malformed.", .next = "Supply --store PATH naming a private Store directory." },
         .store_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Store directory is missing, inaccessible or not private.", .next = "Create the directory if missing, give your user access, and restrict its permissions to 0700; then retry unchanged." },
         .peer_context_invalid => .{ .act = .fix, .input = .sender_handle, .accepted = .{ .grammar = "RUI_STORE, RUI_ADDRESS (six lowercase Crockford characters) and nonempty RUI_SENDER_HANDLE together, or none" }, .says = "The inherited peer context is incomplete or malformed.", .next = "Restore all three variables from the Session Bash, or unset RUI_STORE RUI_ADDRESS RUI_SENDER_HANDLE to make an operator call." },
-        .selection_provider_unsupported => .{ .act = .operate, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "The selected provider, possibly from saved preferences, is unsupported.", .next = "Run rui defaults inspect, then rui defaults configure --connection chatgpt --clear-model, or supply --connection explicitly." },
+        .selection_provider_unsupported => .{ .act = .operate, .input = .provider, .accepted = .{ .grammar = "a connection name the selected Store serves" }, .says = "The selected provider, possibly from saved preferences, is unsupported.", .next = "Run rui defaults inspect, then rui defaults configure --connection chatgpt --clear-model, or supply --connection explicitly." },
         .selection_model_unsupported => .{ .act = .operate, .input = .model, .accepted = .{ .grammar = "a model supported by the selected provider" }, .says = "The selected model, possibly from saved preferences, is unsupported.", .next = "Run rui defaults inspect; select a supported --connection and --model, or run rui defaults configure --clear-model." },
         .preferences_invalid => .{ .act = .operate, .input = null, .accepted = .none, .says = "The saved preferences are malformed or use an unsupported version.", .next = "Inspect HOME/.config/rui/preferences; repair or remove that file, then run rui defaults configure." },
         .preferences_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "Rui cannot read or save private preferences.", .next = "Check ownership and access to HOME/.config/rui (0700) and its preferences file (0600), then run rui defaults inspect." },
         .preference_store_invalid => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "an existing private absolute Store directory" }, .says = "The default Store path is invalid.", .next = "Run rui defaults configure --store PATH with an existing private absolute directory." },
-        .preference_provider_invalid => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "The default provider is unsupported.", .next = "Run rui defaults configure --connection chatgpt or --connection openai." },
+        .preference_provider_invalid => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a connection name the selected Store serves" }, .says = "The default provider is unsupported.", .next = "Run rui defaults configure --connection chatgpt or --connection openai." },
         .preference_model_invalid => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a supported model ID of 1-256 printable non-space ASCII bytes" }, .says = "The default model is invalid or unsupported.", .next = "Run rui defaults configure --clear-model, or set --connection and a supported --model." },
-        .preference_provider_required => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "Saving a default model requires a provider.", .next = "Run rui defaults configure --connection chatgpt --model MODEL, or --connection openai --model MODEL." },
+        .preference_provider_required => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a connection name the selected Store serves" }, .says = "Saving a default model requires a provider.", .next = "Run rui defaults configure --connection chatgpt --model MODEL, or --connection openai --model MODEL." },
         .home_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "HOME is missing or is not an absolute directory.", .next = "Set HOME to your absolute home directory, or supply --store PATH when only a Store is needed." },
         .session_id_needs_session => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "--session ID" }, .says = "A positional Session ID is not a Session selector for this command.", .next = "Move the Session ID to --session ID." },
         .host_settings_modes_conflict => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--paths or --check, not both" }, .says = "Listing paths and checking settings are different operations.", .next = "Keep one mode." },
@@ -476,6 +478,7 @@ pub fn facts(code: Code) Facts {
         .invalid_sender_handle => .{ .act = .fix, .input = .sender_handle, .accepted = .{ .grammar = "the live peer context supplied by Rui" }, .says = "The peer sender handle is invalid or no longer live.", .next = "Send from a live Rui Session; do not fabricate or reuse peer environment variables." },
         .unsupported_permission_mode => .{ .act = .fix, .input = .permission_mode, .accepted = .{ .closed = names(cli_value.PermissionMode) }, .says = "Rui has no such permission mode.", .next = "Use one of the accepted values." },
         .unknown_connection => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a connection named in the Host settings; see rui host status" }, .says = "Rui has no connection with that name.", .next = "Use a connection this Host serves, or add it to the Host settings." },
+        .connection_model_required => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "--model MODEL for a connection this client does not know" }, .says = "This connection's default model is not known to this client.", .next = "Pass --model MODEL with --connection NAME, naming the connection you mean." },
         .connection_unserved => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a connection this Host serves; see rui host status" }, .says = "This Host does not serve that connection.", .next = "Use a connection this Host serves, or add it to the Host's settings and restart the Host." },
         .invalid_model => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a nonempty model ID; see rui session configure --help for syntax and suggested IDs" }, .says = "The model ID is empty.", .next = "Supply a nonempty --model; unlisted IDs are allowed and use default limits." },
         .model_capability_unavailable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a provider served by this Host; see rui host status" }, .says = "This Host does not serve the Session's required provider.", .next = "Use a Host serving the required provider, or create a Session with a provider listed by rui host status." },
@@ -484,6 +487,7 @@ pub fn facts(code: Code) Facts {
         .invalid_app_tool_name => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "a name of 1 to 64 ASCII letters, digits, '_' or '-'" }, .says = "An app tool name is not a valid tool name.", .next = "Rename the app tool." },
         .duplicate_app_tool_name => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "distinct names across the declaration" }, .says = "Two app tools share a name.", .next = "Give each app tool a distinct name." },
         .app_tool_built_in_clash => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "a name that is not a built-in tool's name" }, .says = "An app tool has the name of a built-in tool.", .next = "Rename the app tool." },
+        .app_tool_host_clash => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "a name that no tool the Host offers has" }, .says = "An app tool has the name of a tool this Host offers.", .next = "Rename the app tool, or remove the MCP server that offers it." },
         .invalid_app_tool_policy => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "replay safe or unsafe, restart_limit 0 to 16, wait_ms 1000 to 3600000" }, .says = "An app tool's replay, restart limit or wait is out of range.", .next = "Use an accepted replay, restart limit and wait." },
         .app_tools_on_child => .{ .act = .fix, .input = .app_tools, .accepted = .{ .grammar = "appTools only on a Session that is its own lane root" }, .says = "A child Session cannot declare app tools; its lane root declares them.", .next = "Declare the app tools on the lane root." },
         .invalid_output_schema => .{ .act = .fix, .input = .output_schema, .accepted = .{ .grammar = "a file containing valid JSON for the provider's output schema" }, .says = "The output schema is not valid JSON.", .next = "Fix the JSON in --output-schema FILE, or omit the schema." },

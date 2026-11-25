@@ -12,10 +12,9 @@ import time
 
 
 import model_fixture as dispatch
-from product_defaults import compaction_trigger
 from host_process import HostDiagnostics, PauseGate, READY_TRANSPORT, ReleaseGate, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
 import os_semantics
-from h2_fixture import Endpoint, closed_host_request
+from h2_fixture import Endpoint, closed_host_request, codex_wait_configuration
 
 
 class HeldEndpoint(TestHTTPServer):
@@ -164,11 +163,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                 if round_number == 0:
                     configured = requests.call(
                         "configure", key=f"config-{capacity}-{index}",
-                        session="", configuration={
-                            "workspace": str(dispatch.ROOT), "connection": "codex", "model": "gpt-6-sol",
-                            "tools": ["bash"], "permissionMode": "ask",
-                            "compactAt": compaction_trigger("codex", "gpt-6-sol"), "effort": "medium",
-                        },
+                        session="", configuration=codex_wait_configuration(dispatch.ROOT),
                     )
                     assert configured["answer"]["status"] == "accepted", configured
                     sessions.append(configured["answer"]["session"])
@@ -312,11 +307,7 @@ def held_population(root):
                 if round_number == 0:
                     configured = requests.call(
                         "configure", key=f"held-config-{index}",
-                        session="", configuration={
-                            "workspace": str(dispatch.ROOT), "connection": "codex", "model": "gpt-6-sol",
-                            "tools": ["bash"], "permissionMode": "ask",
-                            "compactAt": compaction_trigger("codex", "gpt-6-sol"), "effort": "medium",
-                        },
+                        session="", configuration=codex_wait_configuration(dispatch.ROOT),
                     )
                     assert configured["answer"]["status"] == "accepted", configured
                     sessions.append(configured["answer"]["session"])

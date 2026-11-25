@@ -23,7 +23,7 @@ from import_architecture import scoped_imports
 from platform_boundary import mac_path
 from qualification import RESOURCES
 from strict_paths import strict
-from release_numbers import SCHEMA as STORE_SCHEMA, digest_rows, migration_steps, schema_version
+from release_numbers import SCHEMA as STORE_SCHEMA, digest_rows, migration_steps, schema_version, touches_mysql_migration
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1097,6 +1097,12 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
         product and select(product, phase, available, graph, contents, fixture_literals)["whole_suite_gates"])
     fast_targets = fast_tier(targets, paths, bootstrap_only, linked or set(), unclassified,
                              shared_helper_importers(paths, graph))
+    # A Store migration step or migration input runs the live MySQL migration check on the PR (ci_plan's
+    # pr_mysql_migration), which lives in test-store.
+    mysql_migration = touches_mysql_migration(changed, contents)
+    if mysql_migration:
+        fast_targets = sorted(set(fast_targets) | {"test-store"})
+        reasons.add("Store migration step or migration input: the PR runs test-store against a live MySQL 8.4 migration check")
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)
@@ -1120,6 +1126,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
             "mac_required": mac_required, "upgrade_required": upgrade_required,
             "unit_compile_required": "src/store/schema.zig" in paths,
+            "mysql_migration": mysql_migration,
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,
             "typecheck_macos": typecheck_macos,

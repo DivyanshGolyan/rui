@@ -1133,7 +1133,7 @@ test "https: a name that does not resolve fails the setup" {
     }, .resolve_failed);
 }
 
-test "six independent endpoint URLs register before the bounded refusal" {
+test "every endpoint up to max_endpoints registers before the bounded refusal" {
     var client: h2.Client = undefined;
     try client.init(std.testing.allocator, std.testing.io, .{
         .stream_capacity = 1,
@@ -1141,19 +1141,14 @@ test "six independent endpoint URLs register before the bounded refusal" {
         .connect_timeout_ns = std.time.ns_per_s,
     });
     defer client.deinit();
-    var registered: [6]h2.Endpoint = undefined;
-    for ([_][]const u8{
-        "http://127.0.0.1:1/one",
-        "http://127.0.0.1:2/two",
-        "http://127.0.0.1:3/three",
-        "http://127.0.0.1:4/four",
-        "http://127.0.0.1:5/five",
-        "http://127.0.0.1:6/six",
-    }, 0..) |url, index| {
-        registered[index] = try client.addEndpoint(url);
-        for (registered[0..index]) |earlier| try std.testing.expect(earlier != registered[index]);
+    var registered: [h2.max_endpoints]h2.Endpoint = undefined;
+    var text: [h2.max_endpoints][48]u8 = undefined;
+    for (&registered, 0..) |*endpoint, index| {
+        const url = try std.fmt.bufPrint(&text[index], "http://127.0.0.1:{d}/endpoint-{d}", .{ index + 1, index });
+        endpoint.* = try client.addEndpoint(url);
+        for (registered[0..index]) |earlier| try std.testing.expect(earlier != endpoint.*);
     }
-    try std.testing.expectError(error.TooManyEndpoints, client.addEndpoint("http://127.0.0.1:7/seven"));
+    try std.testing.expectError(error.TooManyEndpoints, client.addEndpoint("http://127.0.0.1:99/refused"));
 }
 
 test "https: trust is loaded by the first https endpoint, and a missing CA file fails it" {

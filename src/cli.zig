@@ -2007,16 +2007,16 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const destination = try snapshot.destination(home, &fallback);
     try preflightNewSession(init.io, destination.path, destination.saved);
-    const usable: provider_selection.Readinesses = .initFill(.configured);
+    const served = storeReadiness(init, destination.path, localReadiness(init)).readiness;
+    var usable = served;
+    for (served.names()) |name| usable.set(name, .configured);
     const selected = try snapshot.resolve(&usable);
-    var readiness = localReadiness(init);
+    var readiness = served;
     entry.binding = try snapshot.resolve(&readiness);
     if (selected != null and entry.binding != null) {
         if (intent.model == null and std.mem.eql(u8, entry.binding.?.provider.slice(), "openai")) entry.binding = null;
     } else {
         const connection_info = try host_start.inspectConnection(init, destination.path);
-        readiness.set(provider_route.nameOf(.openai), connection_info.readiness);
-        entry.binding = try snapshot.resolve(&readiness);
         if (connection_info.custom() and intent.model == null) {
             if (entry.binding) |*binding| if (std.mem.eql(u8, binding.provider.slice(), "openai")) {
                 entry.binding = null;
@@ -2060,8 +2060,15 @@ fn activateOverviewConnectionUsing(init: std.process.Init, intent: new_session_s
 /// The Store's readiness as its Host reads the OpenAI key, over the local readiness of every other provider.
 /// A failed inspect, or a Store whose Host names no key source, leaves the local readiness standing.
 fn storeReadiness(init: std.process.Init, store: []const u8, local: provider_selection.Readinesses) defaults_report.Overlay {
-    const info = host_start.inspectConnection(init, store) catch return defaults_report.overlayStore(local, null);
-    return defaults_report.overlayStore(local, .{ .readiness = info.readiness, .key_source = copiedKeySource(init, info.servedKey()) });
+    const info = host_start.inspectConnection(init, store) catch return overlayConnections(init, store, defaults_report.overlayStore(local, null));
+    return overlayConnections(init, store, defaults_report.overlayStore(local, .{ .readiness = info.readiness, .key_source = copiedKeySource(init, info.servedKey()) }));
+}
+
+/// Adds the readiness of each key connection the Store names to the overlay's readiness, by name.
+fn overlayConnections(init: std.process.Init, store: []const u8, overlay: defaults_report.Overlay) defaults_report.Overlay {
+    var result = overlay;
+    host_start.inspectConnections(init, store, &result.readiness) catch {};
+    return result;
 }
 
 /// The key source copied into the arena, so it outlives the inspect result; null when none or when the copy fails.
@@ -2075,6 +2082,13 @@ fn copiedKeySource(init: std.process.Init, source: @FieldType(host_start.Connect
     };
 }
 
+/// The served names an unprompted door may select: the Store's local readiness, every served name usable.
+fn selectableReadiness(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
+    var usable = storeReadiness(init, store, localReadiness(init)).readiness;
+    for (usable.names()) |name| usable.set(name, .configured);
+    return usable;
+}
+
 fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
     return storeReadiness(init, store, localReadiness(init)).readiness;
 }
@@ -2082,8 +2096,7 @@ fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_sel
 fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding: new_session_selection.Binding, readiness: *const provider_selection.Readinesses, assignments: []const []const u8, ops: host_start.Ops, result: *HostLaunchResult) void {
     startHost(init, store, assignments, readiness, ops, null, result);
     if (result.outcome == .failed) return;
-    const provider = std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?;
-    if (result.outcome.ready.facts.capabilities.connections.route(@tagName(provider)) == .unserved) {
+    if (result.outcome.ready.facts.capabilities.connections.route(binding.provider.slice()) == .unserved) {
         const selector = result.outcome.ready.selector;
         launchFailure(result, .provider_unserved, error.HostModelUnavailable, selector.slice());
     }
@@ -2107,7 +2120,7 @@ fn joinedProviders(comptime separator: []const u8) []const u8 {
 }
 
 fn localReadiness(init: std.process.Init) provider_selection.Readinesses {
-    var readiness: provider_selection.Readinesses = undefined;
+    var readiness: provider_selection.Readinesses = .{};
     for (std.enums.values(protocol.Provider)) |provider|
         readiness.set(provider_route.nameOf(provider), providerReadiness(init, provider) catch .credential_error);
     return readiness;
@@ -2417,7 +2430,10 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         } else .{} };
         saved_effort = if (reads.saved_effort) snapshot.defaults.reasoning_effort else null;
         if (reads.binding) {
-            binding = try snapshot.resolveUnprompted();
+            var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &store_buffer);
+            var usable = selectableReadiness(init, store);
+            binding = try snapshot.resolveUnprompted(&usable);
             input.model = .{ .present = true, .value = binding.model.slice() };
             if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
         }
@@ -2795,7 +2811,8 @@ fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?
     const home = init.environ_map.get("HOME");
     const binding: ?new_session_selection.Binding = blk: {
         const snapshot: new_session_selection.Snapshot = .{ .intent = selectors, .defaults = if (selectors.needsPreferences()) preferences.load(home orelse break :blk null) catch break :blk null else .{} };
-        break :blk snapshot.resolveUnprompted() catch null;
+        var usable = selectableReadiness(init, destination);
+        break :blk snapshot.resolveUnprompted(&usable) catch null;
     };
     return openOverview(init, .{
         .store = destination,
@@ -5135,7 +5152,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.StoreUnavailable, .code = .store_unavailable, .exit = 6, .phrase = "permissions to 0700" },
         .{ .err = error.InvalidRuiAddress, .code = .peer_context_invalid, .exit = 2, .phrase = "unset RUI_STORE RUI_ADDRESS RUI_SENDER_HANDLE" },
         .{ .err = error.InvalidSenderHandle, .code = .invalid_sender_handle, .exit = 2, .phrase = "Send from a live Rui Session" },
-        .{ .err = error.UnsupportedSelectionProvider, .code = .selection_provider_unsupported, .exit = 6, .phrase = "Accepted: codex, openai, chatgpt." },
+        .{ .err = error.UnsupportedSelectionProvider, .code = .selection_provider_unsupported, .exit = 6, .phrase = "Accepted: a connection name the selected Store serves." },
         .{ .err = error.UnsupportedSelectionModel, .code = .selection_model_unsupported, .exit = 6, .phrase = "rui defaults configure --clear-model" },
         .{ .err = error.SavedPreferenceStoreInvalid, .code = .preferences_invalid, .exit = 6, .phrase = "HOME/.config/rui/preferences" },
         .{ .err = error.SavedPreferenceProviderInvalid, .code = .preferences_invalid, .exit = 6, .phrase = "repair or remove that file" },

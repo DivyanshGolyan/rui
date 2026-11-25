@@ -95,6 +95,8 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
     pr_job = ready_pr and kind == ChangeKind.NORMAL
     outputs = dict(
         pr_job=pr_job,
+        # The ready PR runs the live MySQL migration check on a MySQL 8.4 server it starts itself (check.yml pr_linux).
+        pr_mysql_migration=pr_job and bool(p.get('mysql_migration', False)),
         pr_setup_targets=sorted(set(p['targets']) | set(compile_targets)) if pr_job else [],
         change_kind=kind.value,
         draft_run=draft_run,

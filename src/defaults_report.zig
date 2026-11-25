@@ -114,7 +114,7 @@ pub fn nextSession(facts: *const Facts) NextSession {
     const values = &facts.values;
     const provider: ?[]const u8 = if (values.provider.len != 0) values.provider.slice() else null;
     const model: ?[]const u8 = if (values.model.len != 0) values.model.slice() else null;
-    const selection = provider_selection.resolve(&model_capability.capabilities(facts.readiness), null, null, provider, model) catch |err| return switch (err) {
+    const selection = provider_selection.resolve(model_capability.capabilities(facts.readiness).slice(), null, null, provider, model) catch |err| return switch (err) {
         error.UnsupportedSelectionProvider => .unsupported_provider,
         error.UnsupportedSelectionModel => .unsupported_model,
     };
