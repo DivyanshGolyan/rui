@@ -15,6 +15,7 @@ const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
 const action_domain = @import("action.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
+const saved_label = @import("../../saved_label.zig");
 const tool_line = @import("../../tool_line.zig");
 const hosted_action = @import("../../hosted_action.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
@@ -830,7 +831,7 @@ pub const StoredOutcome = struct {
         const at = std.math.cast(usize, self.link_at orelse return error.CorruptStore) orelse return error.CorruptStore;
         if (at > text.len) return error.CorruptStore;
         var peer: tool_presentation.NamedPeer = .{ .session = session };
-        if (self.label) |label| peer.label = label;
+        if (saved_label.labelWords(self.label)) |label| peer.label = label;
         return tool_presentation.Line.fromParts(text.slice()[0..at], peer, text.slice()[at..]) catch return error.CorruptStore;
     }
 };
@@ -1548,10 +1549,7 @@ const LabelRead = struct {
     }
 
     fn keep(read: *LabelRead, row: *const peer_label.Row) error{CorruptStore}!void {
-        if (row.label) |*label| {
-            try configuration_domain.checkLabel(label.slice());
-            read.peer.label = label.*;
-        }
+        if (saved_label.labelWords(row.label)) |shown| read.peer.label = shown;
     }
 
     fn found(read: *const LabelRead) !void {
@@ -1810,6 +1808,7 @@ const ItemRead = struct {
                 }
                 if (!call.found.get()) return error.CorruptStore;
                 try checkCallDetails(&call.resolved, &item.value.call);
+                if (call.resolved.description.*) |*text| text.* = saved_label.callWords(text.slice());
                 item.at = call.resolved.resolved_at.get();
             },
             10 => {
@@ -1855,6 +1854,7 @@ const ItemRead = struct {
                 }
                 if (!approval.found.get()) return error.CorruptStore;
                 try checkCallDetails(&approval.details, &approval.metadata);
+                if (approval.details.description.*) |*text| text.* = saved_label.callWords(text.slice());
             },
             13 => {
                 const change = &read.state.change;

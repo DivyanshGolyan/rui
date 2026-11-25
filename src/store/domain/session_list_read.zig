@@ -12,6 +12,7 @@ const session_list = @import("../../session_list.zig");
 const session_work = @import("../../session_work.zig");
 const tool_name = @import("../../tool_name.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
+const saved_label = @import("../../saved_label.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
@@ -414,7 +415,7 @@ fn readArchivedWindow(a: *ReadAccess, window: session_list.ArchivedWindow, gener
     }
     try visitor.head();
     for (page.held()) |*row| {
-        if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
+        row.label = saved_label.labelWords(row.label);
         var values: session_list.ArchivedRow = .{
             .reference = row.session_ref.slice(),
             .archive_seq = row.archive_seq.get(),
@@ -854,7 +855,7 @@ noinline fn readRows(a: *ReadAccess, request: *const session_list.ListSessions, 
 const ShownRow = struct { reference: *const change_ring.Id, work: *const WorkRead };
 
 /// Shapes each row from its settings read. No round runs here: every statement was queued and run before.
-noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, settings: []const ListRow, rollups: []const Rollup, now_ms: u64, visitor: anytype) !void {
+noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, settings: []ListRow, rollups: []const Rollup, now_ms: u64, visitor: anytype) !void {
     const read_version: change_ring.Token = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
     for (settings[0..rows.len], 0..) |*row, index| {
         var sorted: [tool_name.max_tools][]const u8 = undefined;
@@ -898,10 +899,10 @@ fn stateChangeAt(facts: ClockFacts, read: *const WorkRead, work: @import("../../
     return clock;
 }
 
-fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_ms: u64, row: *const ListRow, sorted: *[tool_name.max_tools][]const u8) !session_list.Row {
+fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_ms: u64, row: *ListRow, sorted: *[tool_name.max_tools][]const u8) !session_list.Row {
     if (index == rows.len or !std.mem.eql(u8, row.session_ref.slice(), rows[index].reference)) return error.CorruptStore;
     const names = try report_domain.sortedToolNames(if (row.tools) |*tools| tools.slice() else null, sorted);
-    if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
+    row.label = saved_label.labelWords(row.label);
     const work = try rows[index].work.work(row.created_at.get(), now_ms);
     // The settings join and the work row's first_action read one fact, the oldest approval awaiting a decision. Both
     // reads run in one round over one snapshot, so a disagreement means the Store is corrupt. U3 put both in one round;

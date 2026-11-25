@@ -236,7 +236,7 @@ test "a person's Message next to a position is a one-row page of admission rows,
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,sender_position=1000000,source_kind=2 WHERE command_key='from-peer'", .{peer.slice()});
+        try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,source_kind=2 WHERE command_key='from-peer'", .{peer.slice()});
         try touchForTesting(&storage, session.slice());
         try touchForTesting(&storage, peer.slice());
     }
@@ -345,25 +345,33 @@ test "a list row whose settings read fails answers SessionReadFailed" {
 }
 
 test "a list page whose settings read fails reports SessionReadFailed before any row renders" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const first = try configureTestSession(&storage, "render-order-first");
-    const second = try configureTestSession(&storage, "render-order-second");
-    try submitTestMessage(&storage, &tmp, "render-order-input", "render-order-message", second.slice(), "q");
-    var update: [160]u8 = undefined;
-    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
-    try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='two'||char(10)||'lines' WHERE session_ref='{s}'", .{first.slice()}, 0));
-    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
-    var used = std.atomic.Value(u64).init(0);
-    var fault: TestingStatementFault = .{ .sql = listStatementForTesting(error.SessionReadFailed, "SELECT session.session_ref,session.archive_seq,session.parent_ref") };
-    fault.arm(storage.sqliteDatabase());
-    defer fault.disarm(storage.sqliteDatabase());
-    // The settings rows are read in the page's first round, so a failed read there wins over a later row's render error.
-    try std.testing.expectError(error.SessionReadFailed, testingSessionList(&storage, &tmp, .{}, &used, 5));
-    try std.testing.expect(fault.failed > 0);
+    // Each run owns its Store: the control run's CorruptStore fences it, so the armed run starts fresh.
+    for ([_]bool{ false, true }) |armed| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        _ = try configureTestSession(&storage, "render-order-first");
+        const second = try configureTestSession(&storage, "render-order-second");
+        try submitTestMessage(&storage, &tmp, "render-order-input", "render-order-message", second.slice(), "q");
+        _ = (try storage.admitNextModelAttempt(.{})).?;
+        // A row whose first Message is missing fails its render with CorruptStore.
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        try store_testing.sqlite_only.exec(&storage, "DELETE FROM content WHERE content_id IN (SELECT content_id FROM message_admission WHERE session_ref=?1)", .{second.slice()});
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
+        var used = std.atomic.Value(u64).init(0);
+        if (!armed) {
+            try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 4));
+            continue;
+        }
+        var fault: TestingStatementFault = .{ .sql = listStatementForTesting(error.SessionReadFailed, "SELECT session.session_ref,session.archive_seq,session.parent_ref") };
+        fault.arm(storage.sqliteDatabase());
+        defer fault.disarm(storage.sqliteDatabase());
+        // The settings rows are read in the page's first round, so a failed read there wins over a later row's render error.
+        try std.testing.expectError(error.SessionReadFailed, testingSessionList(&storage, &tmp, .{}, &used, 5));
+        try std.testing.expect(fault.failed > 0);
+    }
 }
 
 test "a list row whose first Message is missing is CorruptStore" {

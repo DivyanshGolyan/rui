@@ -3348,22 +3348,21 @@ test "a write names its Session with @session on its table's own session_ref" {
 }
 
 test "a Message's write names its two Sessions, each on its own column" {
-    const Sent = struct { id: u64, session: SessionHead, key: []const u8, content_id: u64, position: u64, sender: SessionHead, sender_position: u64 };
+    const Sent = struct { id: u64, session: SessionHead, key: []const u8, content_id: u64, position: u64, sender: SessionHead };
     const Person = struct { id: u64, session: SessionHead, key: []const u8, content_id: u64, position: u64 };
-    const columns = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) ";
-    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6),?7)", Sent, void));
-    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,NULL,NULL)", Person, void));
+    const columns = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref) ";
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6))", Sent, void));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,NULL)", Person, void));
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) VALUES(?1,@session(?2),?3,?4,?5,@now)", Person, void));
-    try std.testing.expectEqual(2, Write(.{ .sql = columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6),?7)", .Args = Sent, .expect = .{ .at_most = 1 } }).session_fields.len);
+    try std.testing.expectEqual(2, Write(.{ .sql = columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6))", .Args = Sent, .expect = .{ .at_most = 1 } }).session_fields.len);
 
     const sender = "rsql: an INSERT names its Session as the sender_session_ref value of its VALUES row";
-    try std.testing.expectEqualStrings("rsql: every SessionHead of Args is bound by its own @session(?k)", comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,?6,?7)", Sent, void).?);
-    try std.testing.expectEqualStrings(sender, comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,?7,@session(?6))", Sent, void).?);
-    try std.testing.expectEqualStrings(sender, comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,coalesce(@session(?6),NULL),?7)", Sent, void).?);
-    try std.testing.expectEqualStrings("rsql: an INSERT names its Session as the session_ref value of its VALUES row", comptime statementError(.write, columns ++ "VALUES(?1,NULL,?3,?4,?5,@now,@session(?2),NULL)", Person, void).?);
-    try std.testing.expectEqualStrings("rsql: an INSERT names each of its Sessions with its own SessionHead", comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?2),?5)", Person, void).?);
-    try std.testing.expectEqualStrings("rsql: an INSERT gives each SessionHead as a Session column's value", comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,@session(?4),?5,@now,NULL,NULL)", struct { id: u64, session: SessionHead, key: []const u8, sender: SessionHead, position: u64 }, void).?);
-    try std.testing.expectEqualStrings("rsql: a write to message_admission names each of its Sessions at most once, and one at least, as @session(?k)", comptime statementError(.write, columns ++ "VALUES(?1,?2,?3,?4,?5,@now,NULL,NULL)", struct { id: u64, session: []const u8, key: []const u8, content_id: u64, position: u64 }, void).?);
+    try std.testing.expectEqualStrings("rsql: every SessionHead of Args is bound by its own @session(?k)", comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,?6)", Sent, void).?);
+    try std.testing.expectEqualStrings(sender, comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,coalesce(@session(?6),NULL))", Sent, void).?);
+    try std.testing.expectEqualStrings("rsql: an INSERT names its Session as the session_ref value of its VALUES row", comptime statementError(.write, columns ++ "VALUES(?1,NULL,?3,?4,?5,@now,@session(?2))", Person, void).?);
+    try std.testing.expectEqualStrings("rsql: an INSERT names each of its Sessions with its own SessionHead", comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?2))", Person, void).?);
+    try std.testing.expectEqualStrings("rsql: an INSERT gives each SessionHead as a Session column's value", comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,@session(?4),?5,@now,NULL)", struct { id: u64, session: SessionHead, key: []const u8, sender: SessionHead, position: u64 }, void).?);
+    try std.testing.expectEqualStrings("rsql: a write to message_admission names each of its Sessions at most once, and one at least, as @session(?k)", comptime statementError(.write, columns ++ "VALUES(?1,?2,?3,?4,?5,@now,NULL)", struct { id: u64, session: []const u8, key: []const u8, content_id: u64, position: u64 }, void).?);
     try std.testing.expectEqualStrings("rsql: an INSERT ... SELECT copies one Session's row; message_admission names its Sessions otherwise", comptime statementError(.write, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) SELECT ?1,session_ref,?3,?4,@now FROM session WHERE session_ref=@session(?2)", struct { id: u64, session: SessionHead, key: []const u8, content_id: u64 }, void).?);
 
     const Update = struct { turn_id: u64, session: SessionHead };
@@ -3384,16 +3383,10 @@ test "a Message's write names its two Sessions, each on its own column" {
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "UPDATE message_admission SET admitted_at=@now WHERE session_ref=@session(?1) AND sender_session_ref IS NULL", struct { session: SessionHead }, void));
     try std.testing.expectEqualStrings("rsql: an UPDATE of message_admission names its second Session as the conjunct sender_session_ref=@session(?j) of its WHERE", comptime statementError(.write, "UPDATE message_admission SET turn_id=?1 WHERE session_ref=@session(?2) AND turn_id IN (SELECT turn_id FROM turn WHERE session_ref=@session(?3))", struct { turn_id: u64, session: SessionHead, sender: SessionHead }, void).?);
     try std.testing.expectEqualStrings("rsql: an UPDATE or DELETE names its Session as the conjunct session_ref=@session(?k) of its WHERE", comptime statementError(.write, "UPDATE turn SET session_ref=(SELECT session_ref FROM session) WHERE turn_id=?1 AND session_ref=@session(?2)", Update, void).?);
-
-    const Rejected = struct { key: []const u8, sender: SessionHead, position: u64 };
-    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,@session(?2),?3,@now)", Rejected, void));
-    try std.testing.expectEqualStrings("rsql: an INSERT names its Session as the sender_session_ref value of its VALUES row", comptime statementError(.write, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,NULL,?3,@session(?2))", Rejected, void).?);
-    try std.testing.expectEqualStrings("rsql: an INSERT names its Session as the sender_session_ref value of its VALUES row", comptime statementError(.write, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,?3,@session(?2),@now)", Rejected, void).?);
 }
 
 test "a write to a table that carries no Sessions names no Session" {
     try std.testing.expectEqualStrings("rsql: content carries no Sessions; bind no SessionHead", comptime statementError(.write, "DELETE FROM content WHERE content_id=?1 AND ?2 IS NOT NULL", struct { id: u64, session: SessionHead }, void).?);
-    try std.testing.expectEqualStrings("rsql: a write to sent_rejection names its Session exactly once, as @session(?k)", comptime statementError(.write, "DELETE FROM sent_rejection WHERE sender_session_ref=?1", struct { ref: []const u8 }, void).?);
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO content(content_id) VALUES(?1)", struct { turn_id: u64 }, void));
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "DELETE FROM model_interruption_command WHERE session_ref=?1", struct { target: []const u8 }, void));
 }
@@ -3876,7 +3869,7 @@ test "@index forces only named real-column MySQL indexes, after the table or ali
     inline for (.{
         .{ "SELECT revision FROM session_revision @index(session_revision_instructions) WHERE session_ref=?1 AND instructions_content_id=?2", "SELECT revision FROM session_revision FORCE INDEX (session_revision_instructions) WHERE session_ref=? AND instructions_content_id=?" },
         .{ "SELECT r.revision FROM session_revision r @index(session_revision_output_schema) WHERE r.session_ref=?1 AND r.output_schema_content_id=?2", "SELECT r.revision FROM session_revision r FORCE INDEX (session_revision_output_schema) WHERE r.session_ref=? AND r.output_schema_content_id=?" },
-        .{ "SELECT m.admission_id FROM message_admission AS m @index(message_admission_sent) WHERE m.sender_session_ref=?1 AND m.sender_position>?2", "SELECT m.admission_id FROM message_admission AS m FORCE INDEX (message_admission_sent) WHERE m.sender_session_ref=? AND m.sender_position>?" },
+        .{ "SELECT m.admission_id FROM message_admission AS m @index(message_admission_session_order) WHERE m.session_ref=?1 AND m.turn_id>?2", "SELECT m.admission_id FROM message_admission AS m FORCE INDEX (message_admission_session_order) WHERE m.session_ref=? AND m.turn_id>?" },
         .{ "SELECT a.action_id FROM action_operation a @index(action_operation_executable) WHERE a.action_id>?1 AND a.attempt_at<=?2", "SELECT a.action_id FROM action_operation a  WHERE a.action_id>? AND a.attempt_at<=?" },
         .{ "SELECT t.turn_id FROM turn t @index(turn_one_active_per_session) WHERE t.session_ref=?1 AND t.turn_id>?2 AND t.outcome_code IS NULL", "SELECT t.turn_id FROM turn t  WHERE t.session_ref=? AND t.turn_id>? AND t.outcome_code IS NULL" },
     }) |case| {

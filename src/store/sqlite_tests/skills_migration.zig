@@ -104,18 +104,20 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
             try store_testing.sqliteExec(raw, "INSERT INTO session_archive_command(command_key,archived) VALUES(?1,1)", .{archive.key.slice()});
             try sqlite.exec(raw, "UPDATE session SET next_position=3 WHERE session_ref='rhvzwc'");
             try store_testing.sqliteExec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,'absent',?2,0,'unknown_session',0,0,1001)", .{ refused.key.slice(), store_testing.Blob{ .bytes = &refusal_digest } });
-            try store_testing.sqliteExec(raw, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,'brhkcj',6,1793781801)", .{refused.key.slice()});
+            if (!archive_column) try store_testing.sqliteExec(raw, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,'brhkcj',6,1793781801)", .{refused.key.slice()});
             try sqlite.exec(raw, "UPDATE session SET next_position=7 WHERE session_ref='brhkcj'");
         }
 
         const archive_saved_before_85 = "SELECT count(*) FROM session_archive a JOIN session_stop s ON s.command_key=a.command_key JOIN session_archive_command requested ON requested.command_key=a.command_key JOIN core_command c ON c.command_key=a.command_key WHERE a.session_ref='rhvzwc' AND c.command_key=?1 AND c.kind=6 AND c.target='rhvzwc' AND c.input_digest=?2 AND c.accepted=1 AND c.command_seq=1000 AND requested.archived=1 AND s.session_ref='rhvzwc' AND s.position=2 AND s.admission_cutoff=0 AND s.stopped_at=1793781800 AND s.parent_caused=0";
         const archive_saved_after_85 = "SELECT count(*) FROM session a JOIN core_command c ON c.command_seq=a.archive_seq JOIN session_stop s ON s.command_key=c.command_key JOIN session_archive_command requested ON requested.command_key=c.command_key WHERE a.session_ref='rhvzwc' AND c.command_key=?1 AND c.kind=6 AND c.target='rhvzwc' AND c.input_digest=?2 AND c.accepted=1 AND c.command_seq=1000 AND requested.archived=1 AND s.session_ref='rhvzwc' AND s.position=2 AND s.admission_cutoff=0 AND s.stopped_at=1793781800 AND s.parent_caused=0";
 
-        fn expectSaved(raw: *c.sqlite3, archive: *const protocol.SessionArchiveCommand, refused: *const wire_request.MessageCommand, sql: [:0]const u8) !void {
+        fn expectSaved(raw: *c.sqlite3, archive: *const protocol.SessionArchiveCommand, refused: *const wire_request.MessageCommand, sql: [:0]const u8, legacy: bool) !void {
             const archive_digest = archive.semanticDigest();
             const refusal_digest = refused.semanticDigest();
             try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, sql, .{ archive.key.slice(), store_testing.Blob{ .bytes = &archive_digest } }));
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM core_command c JOIN sent_rejection r ON r.command_key=c.command_key WHERE c.command_key=?1 AND c.kind=2 AND c.target='absent' AND c.input_digest=?2 AND c.accepted=0 AND c.code='unknown_session' AND c.command_seq=1001 AND c.primary_content_id IS NULL AND r.sender_session_ref='brhkcj' AND r.sender_position=6 AND r.rejected_at=1793781801", .{ refused.key.slice(), store_testing.Blob{ .bytes = &refusal_digest } }));
+            const refusal = "SELECT count(*) FROM core_command c WHERE c.command_key=?1 AND c.kind=2 AND c.target='absent' AND c.input_digest=?2 AND c.accepted=0 AND c.code='unknown_session' AND c.command_seq=1001 AND c.primary_content_id IS NULL";
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, refusal, .{ refused.key.slice(), store_testing.Blob{ .bytes = &refusal_digest } }));
+            if (legacy) try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM sent_rejection r WHERE r.command_key=?1 AND r.sender_session_ref='brhkcj' AND r.sender_position=6 AND r.rejected_at=1793781801", .{refused.key.slice()}));
             try std.testing.expectEqual(@as(u64, 3), try store_testing.sqliteQueryU64(raw, "SELECT next_position FROM session WHERE session_ref='rhvzwc'", .{}));
             try std.testing.expectEqual(@as(u64, 7), try store_testing.sqliteQueryU64(raw, "SELECT next_position FROM session WHERE session_ref='brhkcj'", .{}));
         }
@@ -151,7 +153,7 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
         try sqlite.bindText(meta, 1, root);
         try sqlite.expectDone(meta);
         try Extra.seed(raw, &archive, &refused, false);
-        try Extra.expectSaved(raw, &archive, &refused, Extra.archive_saved_before_85);
+        try Extra.expectSaved(raw, &archive, &refused, Extra.archive_saved_before_85, true);
         try std.testing.expectEqual(@as(u32, 58), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='10'", .{}));
         try std.testing.expectEqual(@as(u64, 3), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM conversation_entry", .{}));
@@ -161,13 +163,13 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
         var storage: Store = undefined;
         try storage.open(std.testing.io, migrated, root);
         defer storage.close() catch unreachable;
-        try Extra.expectSaved(storage.sqliteDatabase(), &archive, &refused, Extra.archive_saved_after_85);
+        try Extra.expectSaved(storage.sqliteDatabase(), &archive, &refused, Extra.archive_saved_after_85, false);
         const archive_replay = storage.archiveSession(&archive, .{});
         try std.testing.expect(archive_replay == .accepted and archive_replay.accepted.replayed and archive_replay.accepted.archived);
         const refusal_replay = storage.submitMessageWithModel(&refused, null, .{});
         try std.testing.expect(refusal_replay == .rejected and refusal_replay.rejected.replayed);
         try std.testing.expectEqual(protocol.MessageRejection.unknown_session, refusal_replay.rejected.code);
-        try Extra.expectSaved(storage.sqliteDatabase(), &archive, &refused, Extra.archive_saved_after_85);
+        try Extra.expectSaved(storage.sqliteDatabase(), &archive, &refused, Extra.archive_saved_after_85, false);
         try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u64, store_schema.schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));

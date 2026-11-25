@@ -978,9 +978,9 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
             try submitTestMessage(&storage, &tmp, "recall-first", "first", session.slice(), "first");
             const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position,source_kind) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,source_kind) " ++
                 sequence_to_first_argument ++
-                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1,?5,value,2 FROM sequence", .{ history, session.slice(), start, content, peer.slice() });
+                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1,?5,2 FROM sequence", .{ history, session.slice(), start, content, peer.slice() });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+?1 WHERE session_ref=?2", .{ history, session.slice() });
             try store_core.reloadIdentitiesForTesting(&storage);
             var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };

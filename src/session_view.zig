@@ -14,6 +14,7 @@ const tools = @import("tools.zig");
 const failure_class = @import("failure_class.zig");
 const marks = @import("marks.zig");
 const tool_presentation = @import("tool_presentation.zig");
+const saved_label = @import("saved_label.zig");
 const work_line = @import("work_line.zig");
 const unicode = @import("terminal_unicode");
 
@@ -423,19 +424,11 @@ test "a long user Message shows two non-blank lines and what it hides" {
     try std.testing.expectError(error.ContentLengthMismatch, body.feed("abcd"));
 }
 
-/// The mark comes from the row's Sign, which the Store already decided; the words after it are this
-/// surface's own copy, so no other reader repeats them.
+/// The mark comes from the row's Sign and the words after it from its Code; the Store and `tool_presentation`
+/// decided both, so this surface only joins them.
 fn toolState(presentation: protocol.ToolPresentation) struct { mark: marks.Mark, glyph: []const u8, suffix: []const u8, style: Style } {
     const suffix: []const u8 = switch (presentation.code) {
-        .unresolved, .succeeded, .failed, .cancelled => "",
-        .background => " · background",
-        .pending_permission => "",
-        .denied => " · denied",
-        .unknown_tool, .invalid_arguments => " · rejected",
-        .timed_out => " · timed out",
-        .indeterminate, .infrastructure_shutdown => " · may have run",
-        .storage_failed => " · output lost",
-        .spawn_failed => " · could not start",
+        inline else => |code| if (comptime code.words()) |words| " · " ++ words else "",
     };
     const mark = markOf(presentation.sign);
     const shown = marks.marks.get(mark);
@@ -552,7 +545,7 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
 fn writeLine(sink: anytype, line: ?protocol.ToolLine, resume_style: []const u8) !void {
     const shown = line orelse {
         var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
-        try escaped.feed("Tool call");
+        try escaped.feed(saved_label.fallback_words);
         try escaped.finish();
         return;
     };
@@ -594,7 +587,7 @@ pub const Live = struct {
                 .words => |words| words,
                 .peer => |peer| peer.name(),
             });
-        } else try text.feed(&writer, "Tool call");
+        } else try text.feed(&writer, saved_label.fallback_words);
         try text.finish(&writer);
         try writer.writeAll(state.suffix);
         try writer.writeAll(running);
@@ -1486,8 +1479,8 @@ pub const Fold = union(enum) { none, closed, open: *tool_fold.Output };
 
 pub fn tight(value: protocol.ActivityItem.Value) bool {
     return switch (value) {
-        .tool_result => |result| result.presentation.code == .succeeded,
-        .hosted_call => |hosted| hosted.presentation.code == .succeeded,
+        .tool_result => |result| result.presentation.code.packs(),
+        .hosted_call => |hosted| hosted.presentation.code.packs(),
         .admission, .received, .user => |message_| message_.sender != null,
         .assistant, .call, .turn_ended, .stop, .approval_requested, .session_changed, .compacted, .model_call, .instruction, .skill => false,
     };

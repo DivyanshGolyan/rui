@@ -15,7 +15,7 @@
 | Reference | Complete value used to address an object. A Session reference is its exact six-character ID, such as `k7m2qx`, not a live handle or lookup operation. |
 | ID | Host-assigned identity of a durable object, such as an Operation ID. Representation and allocation belong to the object's owner. |
 | Idempotency key | Identifies a submission across retries so its original committed answer can be recovered. Callers supply a core idempotency key. This does not promise exactly-once external effects. |
-| Label | Non-identifying descriptive text. A Session has one optional Label, set through configuration: one non-blank line of 1–100 UTF-8 bytes, validated like a saved Bash description. It is freely editable, never an address, never model input and selects no work. It is distinct from a Name. |
+| Label | Non-identifying descriptive text. A Session has one optional Label, set through configuration: one non-blank line of 1–100 UTF-8 bytes, validated at the door; a read shows a stored Label as one tidy line and never refuses it. It is freely editable, never an address, never model input and selects no work. It is distinct from a Name. |
 
 Use these qualified terms consistently; do not use a tracing request ID as an idempotency key or confuse a name with its full reference.
 

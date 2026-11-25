@@ -8,6 +8,7 @@ const session_report = @import("../../session_report.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
+const saved_label = @import("../../saved_label.zig");
 const tool_name = @import("../../tool_name.zig");
 const app_tools = @import("../../tool_record.zig").app_tools;
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -1051,7 +1052,7 @@ pub const WorkRead = struct {
                 .latest_decision_at = optional(row.latest_decision_at),
             };
         } else if (Row == WorkOldestRow) {
-            w.description = row.description;
+            w.description = if (row.description) |saved| saved_label.callWords(saved.slice()) else null;
             w.inputs.latest.?.actions.oldest_running = .{ .at = row.attempt_at.get(), .call = row.call_ordinal, .description = null };
         } else if (Row == command_domain.stop_cutoff.Row) {
             w.cutoff = row.admission_cutoff;
@@ -1736,6 +1737,7 @@ fn RevisionChunk(comptime Watcher: type) type {
         tools: [tool_defs.max_tools][]const u8 = undefined,
         loaded_tools: [tool_defs.max_tools][]const u8 = undefined,
         app_tools: [app_tools.max_records][]const u8 = undefined,
+        label: ?Bounded(tool_presentation.max_label_bytes) = null,
 
         const Failure = error{CorruptStore} || RowError(Watcher);
 
@@ -1787,7 +1789,7 @@ fn RevisionChunk(comptime Watcher: type) type {
         }
 
         fn settings(chunk: *@This(), row: *const RevisionRow) error{CorruptStore}!session_report.Revision {
-            if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
+            chunk.label = saved_label.labelWords(row.label);
             return .{
                 .revision = row.revision.get(),
                 .command_key = row.command_key.slice(),
@@ -1797,7 +1799,7 @@ fn RevisionChunk(comptime Watcher: type) type {
                 .compaction_trigger = optional(row.compaction_trigger),
                 .output_reservation = row.output_reservation,
                 .reasoning_effort = row.reasoning_effort,
-                .label = if (row.label) |*label| label.slice() else null,
+                .label = if (chunk.label) |*label| label.slice() else null,
                 .tools = try sortedToolNames(if (row.tools) |*names| names.slice() else null, &chunk.tools),
                 .loaded_tools = try sortedToolNames(if (row.loaded_tools) |*names| names.slice() else null, &chunk.loaded_tools),
                 .app_tools = try sortedToolNames(if (row.app_tools) |*names| names.slice() else null, &chunk.app_tools),
