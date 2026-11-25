@@ -2854,7 +2854,7 @@ pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destin
             var step: ?client.Step = .store;
             var outcome: Outcome = .not_sent;
             _ = configureCaptured(init, read.requests(), &parsed, .{ .store = destination, .session = reference }, input, &step, &outcome) catch |err| {
-                if (err == error.CanonicalStoreFailure and outcome == .not_sent) return err;
+                if (err == error.CanonicalStoreFailure) return err;
                 stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@tagName(caller_error.of(err))});
                 return outcome;
             };
@@ -2863,7 +2863,7 @@ pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destin
         .slash => |line| {
             var outcome: Outcome = .not_sent;
             sessionCommandWithOutcome(init, read, destination, reference, line, &outcome) catch |err| {
-                if (err == error.CanonicalStoreFailure and outcome == .not_sent) return err;
+                if (err == error.CanonicalStoreFailure) return err;
                 return outcome;
             };
             return outcome;
