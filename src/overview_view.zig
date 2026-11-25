@@ -65,8 +65,6 @@ pub const Colour = overview_style.Colour;
 pub const Background = overview_style.Background;
 
 pub const Rule = struct {
-    mark: Mark,
-
     colour: Colour,
     word: ?[]const u8 = null,
 
@@ -81,22 +79,22 @@ pub const Rule = struct {
 };
 
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
-    .idle = .{ .mark = .waiting, .colour = .normal, .word = "idle" },
-    .pending = .{ .mark = .queued, .colour = .quiet },
-    .working = .{ .mark = .active, .colour = .ink, .spins = true, .held = "working" },
-    .retrying = .{ .mark = .active, .colour = .ink, .says = true, .held = "retrying" },
-    .bash = .{ .mark = .active, .colour = .ink, .says = true, .spins = true, .held = "working" },
-    .approval = .{ .mark = .needs_you, .colour = .attention },
-    .stopping = .{ .mark = .active, .colour = .ink, .says = true, .held = "stopping" },
-    .finished = .{ .mark = .none, .colour = .mark, .word = "finished" },
-    .failed = .{ .mark = .failed, .colour = .failure, .word = "failed", .cause = true },
-    .stopped = .{ .mark = .stopped, .colour = .normal, .word = "stopped" },
+    .idle = .{ .colour = .normal, .word = "idle" },
+    .pending = .{ .colour = .quiet },
+    .working = .{ .colour = .ink, .spins = true, .held = "working" },
+    .retrying = .{ .colour = .ink, .says = true, .held = "retrying" },
+    .bash = .{ .colour = .ink, .says = true, .spins = true, .held = "working" },
+    .approval = .{ .colour = .attention },
+    .stopping = .{ .colour = .ink, .says = true, .held = "stopping" },
+    .finished = .{ .colour = .mark, .word = "finished" },
+    .failed = .{ .colour = .failure, .word = "failed", .cause = true },
+    .stopped = .{ .colour = .normal, .word = "stopped" },
 });
 
 comptime {
     for (std.enums.values(Kind)) |kind| {
         const rule = rules.get(kind);
-        if ((rule.mark == .active) != (rule.held != null)) @compileError("an active row's rule must name its held word, and only active rules may");
+        if ((kind.sign() == .active) != (rule.held != null)) @compileError("an active row's rule must name its held word, and only active rules may");
     }
 }
 
@@ -3320,11 +3318,7 @@ fn reachedSince(state: *const State, failed: *const Row, since: u64) bool {
     for (state.rows.items) |*row| {
         if (!visible(state, row) or row.archive_state == .archived or !sameProvider(row.provider, failed.provider) or !std.mem.eql(u8, row.model.slice(), failed.model.slice())) continue;
         const work = (&row.state).asOf(state.now_ms);
-        const answered = switch (work) {
-            .idle, .pending, .working, .retrying, .stopping, .failed, .stopped => false,
-            .bash, .approval, .finished => true,
-        };
-        if (answered and work.since() >= since) return true;
+        if (std.meta.activeTag(work).answered() and work.since() >= since) return true;
     }
     return false;
 }
@@ -3877,7 +3871,13 @@ fn rowSelected(state: *const State, row: *const Row) bool {
 pub const Activity = union(enum) { none, spin, held: []const u8 };
 
 /// The rule that draws a row's mark. An Archived window row has no work state, so it has no mark.
-const no_work_rule: Rule = .{ .mark = .none, .colour = .normal };
+const no_work_rule: Rule = .{ .colour = .normal };
+
+/// The mark a row wears: its shown work kind's sign; an Archived window row has no work state, so no mark.
+fn rowMark(state: *const State, row: *const Row) Mark {
+    if (row.archive_state == .archived) return .none;
+    return shownKind(state, row).sign();
+}
 
 fn markRule(state: *const State, row: *const Row) Rule {
     if (row.archive_state == .archived) return no_work_rule;
@@ -3887,7 +3887,7 @@ fn markRule(state: *const State, row: *const Row) Rule {
 fn rowActivity(state: *const State, at: usize, caps: Caps) Activity {
     const row = &state.rows.items[state.order.items[at]];
     const rule = markRule(state, row);
-    if (rule.mark != .active) return .none;
+    if (rowMark(state, row) != .active) return .none;
     if (rule.spins and !state.list_stale and caps.unicode and caps.depth != .none) return .spin;
     return .{ .held = rule.held.? };
 }
@@ -3961,7 +3961,7 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
         _ = try built.put(origin, guides[0..used], depth * 2, .{ .colour = .quiet, .background = background, .dim = quiet });
     }
     const mark_at = origin + depth * 2;
-    const mark = marks.get(rule.mark);
+    const mark = marks.get(rowMark(state, row));
     const glyph = switch (activity) {
         .spin => spinner[frame % spinner.len],
         .held, .none => if (caps.unicode) mark.unicode else mark.ascii,
@@ -5131,7 +5131,7 @@ test "OVM-5 a working row spins while live, and every other active row holds its
         defer arena.deinit();
         const row = (try Lines.at(arena.allocator(), &state, 0, 80, caps, frame)).?;
         const text = try segmentText(arena.allocator(), row.segments);
-        const mark = marks.get(rules.get(kind).mark);
+        const mark = marks.get(kind.sign());
         const glyph: []const u8 = switch (want) {
             .spin => spinner[frame % spinner.len],
             .held, .none => if (caps.unicode) mark.unicode else mark.ascii,
