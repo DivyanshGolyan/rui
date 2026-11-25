@@ -12260,7 +12260,7 @@ test "consent and full panels compose across adoption, nested choices, and draft
                 .settings => {
                     _ = try held.shownThroughRoot();
                     held.root.settings_page.select(.permissions);
-                    held.root.settings_page.panel.openChoice(&.{ "run without asking", "ask first" }, 0);
+                    held.root.settings_page.panel.openChoice(&@import("setting_words.zig").permission_labels, 0);
                     try std.testing.expect(held.root.settings_page.hasChoice());
                 },
                 .info => {

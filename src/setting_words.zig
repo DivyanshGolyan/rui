@@ -41,6 +41,7 @@ test "SUI-170 both settings surfaces name Permissions and Effort from one owner"
         try std.testing.expectEqualStrings(permission(mode), permission_labels[permissionChoice(mode)]);
     }
     try std.testing.expectEqual(std.enums.values(PermissionMode).len, permission_labels.len);
+    try std.testing.expectEqualSlices(PermissionMode, &.{ .bypass, .ask }, &permission_choices);
     try std.testing.expectEqualStrings("run without asking", permission_labels[0]);
     try std.testing.expectEqualStrings("ask first", permission_labels[1]);
     try std.testing.expectEqualStrings("model default", effort(null));
