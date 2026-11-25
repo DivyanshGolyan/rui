@@ -82,7 +82,7 @@ A red whose failing file or fixture is outside the PR's diff is first reproduced
 
 `main` is red while an open `main-red` issue says so.
 While `main` is red, a PR selects nothing, as a documentation change does: `plan` lists the open `main-red` issues with [main_red.py](../../tests/ci/main_red.py), and `admission` fails first, naming them, to save runner minutes.
-A PR whose body names one of those issues as `#N`, usually its fix with `Fixes #N`, runs as usual.
+A PR whose body names one of those issues as `#N`, usually its fix with `Fixes #N`, runs as usual; a revert names it too.
 PRs run a fast tier, so a break can reach `main`; [scheduled promotion](../verification/release.md#scheduled-promotion) finds it within one three-hour tick, names each failed step's suspect commits, most direct first, and files one `main-red` issue per cause, listing them.
 The thread that authored the named commit's PR owns the fix and starts it promptly, as its next work: a fix-forward PR with `Fixes #N`, or a pure revert of that one PR, which merges on green `admission` without another Codex review.
 When that thread has ended, the coordinating agent hands the issue to the thread that owns the failing fixture.

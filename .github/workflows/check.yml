@@ -241,12 +241,12 @@ jobs:
           from docs_only import ChangeKind, classify
           from ci_plan import plan
           selection = json.load(open('selection.json'))
-          # While main is red, a PR selects nothing, as a documentation change does; admission fails it.
-          kind = ChangeKind.DOCUMENTATION if os.environ.get('MAIN_RED') else classify(selection['base'], selection['head'])
+          kind = classify(selection['base'], selection['head'])
           native = {'native_targets': json.loads(os.environ['NATIVE_TARGETS'])} if os.environ.get('NATIVE_TARGETS') else {}
           result = plan(selection, event_name=os.environ['EVENT_NAME'],
                         draft=os.environ['DRAFT'] == 'true', promotion=os.environ['PROMOTION'] == 'true',
-                        change_kind=kind, compile_only=os.environ['COMPILE_ONLY'] == 'true', **native)
+                        change_kind=kind, compile_only=os.environ['COMPILE_ONLY'] == 'true',
+                        main_red=bool(os.environ.get('MAIN_RED')), **native)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               print('candidate_ref=' + os.environ['CANDIDATE_REF'], file=f)
               for key, value in result.outputs.items():
@@ -946,7 +946,7 @@ jobs:
         env:
           MAIN_RED: ${{ needs.plan.outputs.main_red }}
         run: |
-          echo "::error::main is red (#${MAIN_RED// /, #}); this PR's build and tests were skipped to save runner minutes. Push again or rerun once it is closed."
+          echo "::error::main is red (#${MAIN_RED// /, #}); this PR's build and tests were skipped to save runner minutes. Push again or reopen the PR once it is closed; a rerun reuses the old PR body."
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1042,7 +1042,7 @@ jobs:
             *) echo 'Missing or invalid cache selection' >&2; exit 1 ;;
           esac
       - name: Require every selected Linux part
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.plan.outputs.main_red == '' }}
         env:
           DRAFT_RUN: ${{ needs.plan.outputs.draft_run }}
           CHANGE_KIND: ${{ needs.plan.outputs.change_kind }}
@@ -1061,7 +1061,7 @@ jobs:
           COMPILE_ONLY: ${{ needs.plan.outputs.compile_only }}
         run: bash tests/ci/require_linux_parts.sh
       - name: Name each failed job and its cause
-        if: ${{ failure() }}
+        if: ${{ failure() && needs.plan.outputs.main_red == '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/failure_cause.py explain
