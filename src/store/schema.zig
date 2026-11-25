@@ -3959,11 +3959,13 @@ test "schema 82 backfills input sources and preserves admissions" {
     }
 }
 
-test "schema 83 migration rebuilds canonical input tables" {
+test "schema 83 and 96 migrations rebuild canonical input tables" {
     for (comptime objects(.sqlite)) |object| {
         if (!std.mem.eql(u8, object.name, "message_admission") and !std.mem.eql(u8, object.name, "conversation_entry")) continue;
         var found = false;
-        for (migrations[82 - migration_baseline].sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
+        // message_admission last took its canonical form at 96, when it dropped sender_position.
+        const step = if (std.mem.eql(u8, object.name, "message_admission")) migrations[95 - migration_baseline] else migrations[82 - migration_baseline];
+        for (step.sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
         try std.testing.expect(found);
     }
 }
