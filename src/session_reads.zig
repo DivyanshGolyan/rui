@@ -615,8 +615,8 @@ fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: [
     if (latest.*) |old| if (key.order(old.key) != .gt) return;
     const marks = @import("marks.zig");
     const cause: marks.Cause = switch (item.value) {
-        .turn_ended => |ended| if (!std.mem.eql(u8, ended.session.slice(), session)) return else if (ended.ending == .done) .{ .words = "Finished" } else marks.cause(ended.code.slice(), provider),
-        .stop => |stop| if (stop.turn == null) marks.cause("cancelled", provider) else return,
+        .turn_ended => |ended| if (!std.mem.eql(u8, ended.session.slice(), session)) return else if (ended.ending.words()) |words| .{ .words = words } else marks.cause(ended.code.slice(), provider),
+        .stop => |stop| if (stop.turn == null) .{ .words = protocol.TurnEnding.stopped.words().? } else return,
         else => return,
     };
     latest.* = .{ .key = key, .cause = cause };

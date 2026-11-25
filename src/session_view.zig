@@ -1412,13 +1412,13 @@ fn ending(sink: anytype, end: Ending, colour: bool) !void {
     try sink.feed("\n");
 }
 
-fn workEnded(sink: anytype, code: []const u8, provider: ?@import("connection.zig").Name, colour: bool) !void {
+fn workEnded(sink: anytype, ended: protocol.TurnEnding, code: []const u8, provider: ?@import("connection.zig").Name, colour: bool) !void {
     const cause = marks.cause(code, provider);
-    try ending(sink, .{ .mark = if (failure_class.of(code) == .interrupted) .stopped else .failed, .words = cause.words, .place = cause.place }, colour);
+    try ending(sink, .{ .mark = if (ended.sign() == .stopped) .stopped else .failed, .words = ended.words() orelse cause.words, .place = cause.place }, colour);
 }
 
-fn agentEnded(sink: anytype, agent: []const u8, code: []const u8, colour: bool) !void {
-    const stopped = failure_class.of(code) == .interrupted;
+fn agentEnded(sink: anytype, agent: []const u8, ended: protocol.TurnEnding, code: []const u8, colour: bool) !void {
+    const stopped = ended.sign() == .stopped;
     try ending(sink, .{ .mark = if (stopped) .stopped else .failed, .words = if (stopped) "stopped" else marks.cause(code, null).words, .agent = agent }, colour);
 }
 
@@ -1432,9 +1432,9 @@ test "a descendant's ending names the agent without codes or advice" {
     var buffer: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    try agentEnded(&sink, "9f8e7d", "provider_http_401", false);
-    try agentEnded(&sink, "9f8e7d", "cancelled", false);
-    try agentEnded(&sink, "bad\x1b[2J", "malformed_provider_output", false);
+    try agentEnded(&sink, "9f8e7d", .provider_refused, "provider_http_401", false);
+    try agentEnded(&sink, "9f8e7d", .interrupted, "cancelled", false);
+    try agentEnded(&sink, "bad\x1b[2J", .failed, "malformed_provider_output", false);
     try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n▪ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · The model's reply didn't come through\n", out.buffered());
 }
 
@@ -1471,7 +1471,7 @@ test "an ended Turn shows one plain cause line for every failure class, and its 
         var buffer: [512]u8 = undefined;
         var out = std.Io.Writer.fixed(&buffer);
         var sink: Sink = .{ .out = &out };
-        try workEnded(&sink, case[0], case[1], false);
+        try workEnded(&sink, if (comptime std.mem.eql(u8, case[0], "cancelled")) .interrupted else .failed, case[0], case[1], false);
         try std.testing.expectEqualStrings(case[2] ++ "\n", out.buffered());
     }
     try std.testing.expect(seen.eql(.full));
@@ -1487,10 +1487,10 @@ test "turn and agent ending marks use their table tones" {
     var buffer: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    try workEnded(&sink, "malformed_provider_output", null, true);
-    try workEnded(&sink, "cancelled", null, true);
-    try agentEnded(&sink, "9f8e7d", "malformed_provider_output", true);
-    try agentEnded(&sink, "9f8e7d", "cancelled", true);
+    try workEnded(&sink, .failed, "malformed_provider_output", null, true);
+    try workEnded(&sink, .interrupted, "cancelled", null, true);
+    try agentEnded(&sink, "9f8e7d", .failed, "malformed_provider_output", true);
+    try agentEnded(&sink, "9f8e7d", .interrupted, "cancelled", true);
     try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m The model's reply didn't come through\n" ++
         "\x1b[39m▪\x1b[39m Stopped\n" ++
         "\x1b[91m×\x1b[39m Agent 9f8e7d · The model's reply didn't come through\n" ++
@@ -1507,7 +1507,7 @@ test "ending tails are quiet and joined in destination then key order" {
     var buffer: [256]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    try workEnded(&sink, "provider_http_401", null, true);
+    try workEnded(&sink, .provider_refused, "provider_http_401", null, true);
     try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Sign-in expired\x1b[90m · Settings\x1b[39m\n", out.buffered());
     out.end = 0;
     try ending(&sink, .{ .mark = .failed, .words = "Cause", .place = "Place", .key = "Key" }, false);
@@ -1586,16 +1586,16 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
         },
         .call => {},
         .turn_ended => |ended| {
-            if (ended.ending == .done) return false;
+            if (ended.ending.sign() == .finished) return false;
             if (!std.mem.eql(u8, ended.session.slice(), reads.sessionId())) {
-                try agentEnded(sink, ended.session.slice(), ended.code.slice(), colour);
-            } else try workEnded(sink, ended.code.slice(), provider, colour);
+                try agentEnded(sink, ended.session.slice(), ended.ending, ended.code.slice(), colour);
+            } else try workEnded(sink, ended.ending, ended.code.slice(), provider, colour);
         },
         .stop => |stop| {
             const excluded = try excludedAtStop(reads, scratch, item, sink, colour);
             if (stop.turn == null) {
                 if (excluded) try sink.feed("\n");
-                try ending(sink, .{ .mark = .stopped, .words = "Stopped" }, colour);
+                try ending(sink, .{ .mark = .stopped, .words = protocol.TurnEnding.stopped.words().? }, colour);
             }
         },
         .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at),
