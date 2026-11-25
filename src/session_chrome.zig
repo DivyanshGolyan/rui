@@ -170,7 +170,7 @@ test "opening and decision progress share the footer while unresolved decisions 
     try same(.{}, send("", false));
     for ([_]bool{ false, true }) |in_flight| try same(.{}, send(null, in_flight));
     try std.testing.expectEqualStrings("! Unknown command /x", bar(.{ .progress = "Opening…", .notice = "! Unknown command /x", .width = 80 }).notice.?);
-    const opening = bar(.{ .progress = "Opening…", .overview = "! Other Session failed", .width = 80 });
+    const opening = bar(.{ .progress = "Opening…", .width = 80 });
     try std.testing.expectEqualStrings("", opening.left);
     try std.testing.expectEqualStrings("Opening…", opening.notice.?);
     try std.testing.expectEqual(Tone.quiet, opening.tone);
@@ -303,7 +303,6 @@ pub const Facts = struct {
     needs: ?[]const u8 = null,
     progress: ?[]const u8 = null,
     notice: ?[]const u8 = null,
-    overview: ?[]const u8 = null,
     stoppable: bool = false,
     width: u16,
     method: Method = .unicode,
@@ -325,9 +324,6 @@ pub fn bar(facts: Facts) Bar {
     if (facts.needs) |needs| {
         result.left = needs;
         result.tone = .attention;
-    } else if (if (facts.progress == null) facts.overview else null) |left| {
-        result.left = left;
-        result.tone = if (std.mem.startsWith(u8, left, "!")) .attention else .quiet;
     }
     if (!facts.stoppable) return result;
     const stop_cells = session_line.cells(stop_key, facts.method);

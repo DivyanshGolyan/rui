@@ -1828,7 +1828,7 @@ fn openOverview(init: std.process.Init, options: Overview.Options) !void {
     defer init.gpa.destroy(directory_buffer);
     var with_directory = options;
     with_directory.directory = requestDirectory(init, directory_buffer) catch |err| return Overview.printFailure(err, options.store, options.open, null);
-    if (try Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .configure = sessionConfigure, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate, .activate = activateOverview, .ready = overviewProviderReady, .start_host = startOverviewHost })) |request| {
+    if (try Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .configure = sessionConfigure, .requests = sessionRequests, .status = sessionStatus, .confirm = sessionConfirm, .captured = captureGate, .activate = activateOverview, .ready = overviewProviderReady, .start_host = startOverviewHost })) |request| {
         defer request.deinit(init.gpa);
         finishRelaunch(init, with_directory, request, .{});
     }
@@ -2638,6 +2638,11 @@ fn takeReply(step: *?client.Step, stepped: anytype, captured: *const client.Capt
 fn captureTarget(init: std.process.Init, parsed: *const cli_args.Parsed, directory_buffer: []u8) !client.CaptureTarget {
     if (parsed.get("record")) |record| return .{ .explicit = .{ .record = record, .key = parsed.get("key").? } };
     return .{ .generated = try requestDirectory(init, directory_buffer) };
+}
+
+/// The Overview's check that a followed Session link still names a Session; the same rule `rui session resume` applies before opening.
+fn sessionConfirm(init: std.process.Init, read: client.ReadContext, store: []const u8, session: []const u8) !void {
+    return confirmSessionConfigured(init, read.requests(), store, session);
 }
 
 fn confirmSessionConfigured(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8) !void {

@@ -151,8 +151,15 @@ pub const Requests = struct {
     }
 
     pub fn observeMessage(self: Requests, address: *const protocol_reply.MessageAddress) !protocol_reply.ObservationReply {
+        try self.check();
+        const paths = try resolveClientPaths(self.io, address.store.slice());
+        return self.observeMessageAt(&paths, address);
+    }
+
+    /// The same answer on a route the caller already resolved, so a worker's reads share one Store.
+    pub fn observeMessageAt(self: Requests, paths: *const platform.Paths, address: *const protocol_reply.MessageAddress) !protocol_reply.ObservationReply {
         var buffer: ObservationBuffer = .{};
-        const reply = try self.observeCommand(address.store.slice(), address.key.slice(), null, &buffer);
+        const reply = try self.observeCommandAt(paths, address.key.slice(), null, &buffer, null);
         return switch (reply) {
             .observation => |observation| .{ .observation = .{ .facts = try observation.facts.forMessage(address), .since = observation.since } },
             .not_modified => error.InvalidObservation,

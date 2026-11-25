@@ -4,6 +4,7 @@ const fake_host = @import("testing/fake_host.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
+const activity_facts = @import("activity_facts.zig");
 const content_value = @import("content_value.zig");
 const value_reads = @import("value_reads.zig");
 const activity_reply = @import("activity_reply.zig");
@@ -41,6 +42,8 @@ pub const RenderedRow = struct {
     collapsed_count: usize = 0,
     message_key: ?[36]u8 = null,
     excluded_key: ?[36]u8 = null,
+    /// An applied person-Message or a Stop: the rows after which an older queue aggregate is stale.
+    queue_terminal: bool = false,
 };
 
 pub const ConfigureAttempt = union(enum) { edit: ChatInfo.Edit, slash: []u8 };
@@ -191,6 +194,7 @@ pub const Job = struct {
     retry: ?Key = null,
     queued_line: u64 = 0,
     local_message_key: ?[36]u8 = null,
+    accepted: ?Submission.Probe = null,
     inspection_kind: Inspection = .requests,
     interrupted: *client.Cancellation = undefined,
     command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
@@ -218,8 +222,10 @@ pub const Job = struct {
         at_end: bool = false,
         new_rows: usize = 0,
         queued: protocol.Queued = .{},
+        queue_cutoff: ?u64 = null,
         attached_pending: ?struct { key: [36]u8, row: Key } = null,
         queued_line: ?queued_line.Shown = null,
+        accepted: ?Submission.Verdict = null,
         live: View.Live = .{},
         latest_ending: ?LatestEnding = null,
         cursor: protocol_reply.ActivityCursor = .{},
@@ -492,12 +498,32 @@ fn scanWorker(raw: *anyopaque, task: *Task, prepare_permission: bool) !void {
     };
     const paths = try requests.resolveActivityRoute(job.store, job.session, pageCursor(job, plan));
     const reads = client.SessionReads.bound(requests, &paths, job.session);
+    // Asked before the page, so a Turn that takes the Message after this answer still finds its row in the page.
+    if (job.accepted) |probe| job.result.accepted = try readAccepted(requests, &paths, job.session, probe);
     try scanAt(job, task, reads, plan);
     if (prepare_permission) if (job.result.work.work.first_action) |action| {
         try job.files.action.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
         if (!try View.permissionWith(reads, action, job.files.scratch, &output, job.colour, job.unicode_script)) return;
         job.result.action = action;
+    };
+}
+
+/// The one Store read that settles a held accepted Message, whether or not its row lies on the loaded
+/// page: the Host's answer for its key, asked of the route the Activity read resolved, and only when
+/// that route is the canonical Store whose receipt took the Message. A transport or Host failure is the
+/// read's failure, as for the page; only an answer that is not this Message's leaves it unverified.
+fn readAccepted(requests: client.Requests, paths: *const @import("platform.zig").Paths, session: []const u8, probe: Submission.Probe) !Submission.Verdict {
+    if (!paths.store_identity.eql(probe.store.slice())) return .elsewhere;
+    const address = protocol_reply.MessageAddress.init(probe.store.slice(), session, &probe.key) catch return .unverified;
+    const reply = requests.observeMessageAt(paths, &address) catch |err| switch (@as(anyerror, err)) {
+        error.RequestNotAdmitted, error.RequestBindingMismatch => return .unverified,
+        else => return err,
+    };
+    return switch (reply) {
+        .observation => |observed| Submission.verdict(observed.facts),
+        .failure => |failure| requests.failRead(failure),
+        .not_modified => .unverified,
     };
 }
 
@@ -526,6 +552,7 @@ fn scanAt(job: *Job, task: *Task, reads: client.SessionReads, plan: FeedPolicy.P
         };
         job.result.live = View.Live.init(page.facts.call_activity);
         job.result.queued = page.facts.queued;
+        job.result.queue_cutoff = activity_facts.queueCutoff(page.facts.end, plan.direction == .forward, page.facts.more, if (page.facts.count == 0) null else page.facts.items[page.facts.count - 1].position);
         const queued = page.facts.queued;
         if (queued.count != 0 and queued.newest_admission != job.queued_line) {
             job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(reads, job, queued.newest_position, queued.newest_content orelse return error.InvalidActivityPage, .fails)).? };
@@ -546,7 +573,18 @@ fn scanAt(job: *Job, task: *Task, reads: client.SessionReads, plan: FeedPolicy.P
             else => {},
         }
         const pending = item.value == .admission and item.value.admission.state == .queued;
-        var row: RenderedRow = .{ .key = key, .offset = offset, .length = 0, .tight = false, .provisional = pending };
+        var row: RenderedRow = .{
+            .key = key,
+            .offset = offset,
+            .length = 0,
+            .tight = false,
+            .provisional = pending,
+            .queue_terminal = switch (item.value) {
+                .user => |message| message.sender == null and message.source_action == null and message.state == .applied,
+                .stop => true,
+                else => false,
+            },
+        };
         if (toggled != null and toggled.?.key.order(key) != .eq) continue;
         const open = if (toggled) |one| one.open else job.opened.has(key);
         var capture: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .watch_key = job.local_message_key, .cap_target = switch (item.value) {
@@ -1248,6 +1286,9 @@ const FakeHost = struct {
     pages: usize = 0,
     contents: usize = 0,
     others: usize = 0,
+    /// The body served for a keyed observation; unset closes the connection unanswered.
+    observation: ?[]const u8 = null,
+    observed: usize = 0,
     output: [4096]u8 = undefined,
     shown: []const u8 = "",
 
@@ -1345,6 +1386,11 @@ const FakeHost = struct {
             self.others += 1;
             return;
         }
+        if (request.is("/v1/observe-command")) {
+            self.observed += 1;
+            const body = self.observation orelse return;
+            return fake_host.respond(fd, "200 OK", "application/json", "", body);
+        }
         var storage: [4096]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const Cursor = struct { end: ?[]const u8 = null, position: []const u8, ordinal: ?[]const u8 = null, direction: []const u8 = "forward", kinds: []const protocol.ActivityItem.Kind = &.{}, limit: []const u8 = "16" };
@@ -1396,6 +1442,44 @@ const FakeHost = struct {
         try self.withHost(&action);
     }
 };
+
+test "SUI-164 one observation read settles an accepted Message on the Store that took it" {
+    const key = "01234567-89ab-4cde-8012-0123456789ab";
+    const head = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"" ++ key ++ "\",\"delta\":\"full\",\"since\":null,\"observation\":";
+    const accepted = "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"state\":\"";
+    const input = "\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"admission\":\"23\",\"admitted_at\":\"1762329000\"}";
+    const binding = ",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
+    const work = ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}";
+    const Case = struct { body: ?[]const u8, store: enum { took, other }, verdict: ?Submission.Verdict, asked: bool = true };
+    const cases = [_]Case{
+        .{ .body = head ++ accepted ++ "processing" ++ input ++ binding ++ work ++ "}}", .store = .took, .verdict = .taken },
+        .{ .body = head ++ accepted ++ "queued" ++ input ++ work ++ "}}", .store = .took, .verdict = .queued },
+        .{ .body = head ++ accepted ++ "cancelled" ++ input ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}}}", .store = .took, .verdict = .stopped },
+        .{ .body = head ++ "{\"status\":\"absent\"}}", .store = .took, .verdict = .unverified },
+        .{ .body = head ++ "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"a1b2c3\",\"state\":\"processing" ++ input ++ binding ++ work ++ "}}", .store = .took, .verdict = .unverified },
+        .{ .body = null, .store = .took, .verdict = null },
+        .{ .body = head ++ accepted ++ "processing" ++ input ++ binding ++ work ++ "}}", .store = .other, .verdict = .elsewhere, .asked = false },
+    };
+    const Action = struct {
+        case: Case,
+        pub fn run(action: *@This(), host: *FakeHost, _: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            const paths = try client.resolveClientPaths(io, root);
+            var probe: Submission.Probe = .{ .store = paths.store_identity, .key = key.* };
+            if (action.case.store == .other) try probe.store.set("/another-store");
+            const settled = readAccepted(.{ .io = io }, &paths, "k7m2qx", probe);
+            // No answer is the read's failure, as for the page; it never reads as a verdict.
+            if (action.case.verdict) |verdict| try std.testing.expectEqual(verdict, try settled) else try std.testing.expect(std.meta.isError(settled));
+            try std.testing.expectEqual(@as(usize, @intFromBool(action.case.asked)), host.observed);
+            try std.testing.expectEqual(@as(usize, 0), host.pages + host.others);
+        }
+    };
+    for (cases) |case| {
+        var host: FakeHost = .{ .history = 0, .tail = &.{}, .end = 0, .observation = case.body };
+        var action: Action = .{ .case = case };
+        try host.withHost(&action);
+    }
+}
 
 test "SUI-49 Message placement preserves provenance across pages" {
     const Domain = struct {
@@ -1589,7 +1673,7 @@ test "CLI-35 an Activity read keeps its resolved Store across alias retarget" {
 
 test "CLI-36 one Session scan and permission retain their resolved Store route" {
     const current = "{\"version\":\"" ++ protocol.wire_version ++ "\"," ++
-        \\"type":"session_report","delta":"full","since":null,"profile":"current","session":{"reference":"k7m2qx","parent":null,"workspace":"/w","connection":"codex","model":"model-a","compaction_trigger":"115200","context_estimate":"56","output_reservation":"0","compaction_trigger_override":"115200","output_reservation_override":null,"reasoning_effort":"low","reasoning_effort_override":"low","revision":"1","tools":["bash","web_search"],"loaded_tools":["bash","web_search"],"app_tools":[],"permission_mode":"ask","instructions":{"type":"text","bytes":"0","sha256":"11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"},"output_schema":null,"label":null,"created_at":"1"},"archive_state":"active","pending_messages":"0","work":{"state":{"kind":"approval","since":"1"},"turn":"2","operation":"2","first_action":"2","attention":{"kind":"approval","turn":"2","step":"2"},"group":"needs_you","actions":{"stop":true,"interrupt":null,"decide":"2"},"latest_outcome":null},"peers":{"from_person_at":"1"},"first_message":{"position":"1","admission":"1","admitted_at":"1","sender":null,"content":{"type":"text","bytes":"5","sha256":"295e577a7a0c2608c470cb327496d5b7f60b8f53b5ebf48f6878d2cdd614e333"}},"selected_message":"golden-mixed-key","recent_messages":[{"turn":"1","message":"golden-answer-key","outcome":"completed"}],"actions":{"count":"2","unresolved":[{"action":"2","parent_operation":"2","call_ordinal":"1","tool":"bash","permission_revision":"1","authorization":"pending","call_id":{"type":"text","bytes":"3","sha256":"8e86e6644aa2b109430eaa8ca07939190490ac61a33862f788b398d49d2e35a5"},"arguments":{"type":"text","bytes":"52","sha256":"7ef3f0e0b68ea2d333b93093dbe1261a18c901ad73ef684361bf94d12056045c"},"presentation":{"description":"Run","code":"pending_permission","publication_position":null}}],"resolved":[{"action":"1","parent_operation":"2","call_ordinal":"0","code":"denied","acceptance_position":"13","result":{"type":"text","bytes":"18","sha256":"a251e0c566a1f73bb2338367bf1cd6e75d2ebc1e0b6d0657a7debe776a3bd881"},"presentation":{"description":"Run","code":"denied","publication_position":null}}]},"rejected_calls":{"count":"1","items":[{"parent_operation":"2","call_ordinal":"2","code":"unknown_tool","acceptance_position":"12","result":{"type":"text","bytes":"20","sha256":"e64dbe3bb67e66a800ef3ea2b21801b5f5d5025f4ba2d7a088788e6b4e0d23a7"},"name":{"type":"text","bytes":"5","sha256":"f23807757d15c3493a5f622898047eee4f2949fc3ae4d5d05afa1185dcbd240b"},"call_id":{"type":"text","bytes":"5","sha256":"3decf9438cc4009dec87c0e881fc714a1ad6abdd7fb6f231e1b5996e7aa26932"},"arguments":{"type":"text","bytes":"2","sha256":"de16d1a68a8e3c9eea4e69185cb547810c9ac3a2999dec7e76dbf073dac34663"},"presentation":{"description":null,"code":"unknown_tool","publication_position":null}}]},"actionable_permissions":[{"action":"2","permission_revision":"1"}],"execution":{"status":"partial","dispatch_fenced":false,"custody_occupied":"0","scratch_used_bytes":"0","unavailable":["structured_output"]}}
+        \\"type":"session_report","delta":"full","since":null,"profile":"current","session":{"reference":"k7m2qx","parent":null,"workspace":"/w","connection":"codex","model":"model-a","compaction_trigger":"115200","context_estimate":"56","output_reservation":"0","compaction_trigger_override":"115200","output_reservation_override":null,"reasoning_effort":"low","reasoning_effort_override":"low","revision":"1","tools":["bash","web_search"],"loaded_tools":["bash","web_search"],"app_tools":[],"permission_mode":"ask","instructions":{"type":"text","bytes":"0","sha256":"11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"},"output_schema":null,"label":null,"created_at":"1"},"archive_state":"active","pending_messages":"0","work":{"state":{"kind":"approval","since":"1"},"turn":"2","operation":"2","first_action":"2","attention":{"kind":"approval","turn":"2","step":"2"},"group":"needs_you","actions":{"stop":true,"interrupt":null,"decide":"2"},"latest_outcome":null},"peers":{"from_person_at":"1"},"first_message":{"position":"1","admission":"1","admitted_at":"1","sender":null,"content":{"type":"text","bytes":"5","sha256":"295e577a7a0c2608c470cb327496d5b7f60b8f53b5ebf48f6878d2cdd614e333"}},"selected_message":"golden-mixed-key","recent_messages":[{"turn":"1","message":"golden-answer-key","outcome":"completed"}],"actions":{"count":"2","unresolved":[{"action":"2","parent_operation":"2","call_ordinal":"1","tool":"bash","permission_revision":"1","authorization":"pending","call_id":{"type":"text","bytes":"3","sha256":"8e86e6644aa2b109430eaa8ca07939190490ac61a33862f788b398d49d2e35a5"},"arguments":{"type":"text","bytes":"52","sha256":"7ef3f0e0b68ea2d333b93093dbe1261a18c901ad73ef684361bf94d12056045c"},"presentation":{"line":{"before":"Run","peer":null,"after":null},"code":"pending_permission","sign":"needs_you","publication_position":null}}],"resolved":[{"action":"1","parent_operation":"2","call_ordinal":"0","code":"denied","acceptance_position":"13","result":{"type":"text","bytes":"18","sha256":"a251e0c566a1f73bb2338367bf1cd6e75d2ebc1e0b6d0657a7debe776a3bd881"},"presentation":{"line":{"before":"Run","peer":null,"after":null},"code":"denied","sign":"stopped","publication_position":null}}]},"rejected_calls":{"count":"1","items":[{"parent_operation":"2","call_ordinal":"2","code":"unknown_tool","acceptance_position":"12","result":{"type":"text","bytes":"20","sha256":"e64dbe3bb67e66a800ef3ea2b21801b5f5d5025f4ba2d7a088788e6b4e0d23a7"},"name":{"type":"text","bytes":"5","sha256":"f23807757d15c3493a5f622898047eee4f2949fc3ae4d5d05afa1185dcbd240b"},"call_id":{"type":"text","bytes":"5","sha256":"3decf9438cc4009dec87c0e881fc714a1ad6abdd7fb6f231e1b5996e7aa26932"},"arguments":{"type":"text","bytes":"2","sha256":"de16d1a68a8e3c9eea4e69185cb547810c9ac3a2999dec7e76dbf073dac34663"},"presentation":{"line":null,"code":"unknown_tool","sign":"failed","publication_position":null}}]},"actionable_permissions":[{"action":"2","permission_revision":"1"}],"execution":{"status":"partial","dispatch_fenced":false,"custody_occupied":"0","scratch_used_bytes":"0","unavailable":["structured_output"]}}
     ;
     const Mode = enum { queued, stop, permission };
     const Host = struct {
@@ -1900,17 +1984,15 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
     };
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
-    var search: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
-    try search.set("Search");
-    var find: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
-    try find.set("Find");
+    const search = try protocol.ToolLine.plain("Search");
+    const find = try protocol.ToolLine.plain("Find");
     const content: content_value.Value = .{ .text = .{ .length = 3, .digest = @splat(0xab) } };
     const Kind = struct { value: protocol.ActivityItem.Value, line: []const u8, packed_: bool };
     const kinds = [_]Kind{
         .{ .value = .{ .sent = .{ .admission = 4, .target = peer, .content = content, .admitted_at = std.math.maxInt(u64) } }, .line = "→ Messaged 9f8e7d", .packed_ = true },
         .{ .value = .{ .received = .{ .admission = 5, .key = .{}, .turn = 3, .state = .applied, .content = content, .admitted_at = std.math.maxInt(u64), .sender = peer } }, .line = "← Received message from 9f8e7d", .packed_ = true },
-        .{ .value = .{ .hosted_call = .{ .description = search, .code = .succeeded, .publication_position = null } }, .line = "✓ Search", .packed_ = true },
-        .{ .value = .{ .hosted_call = .{ .description = find, .code = .failed, .publication_position = null } }, .line = "× Find", .packed_ = false },
+        .{ .value = .{ .hosted_call = .{ .line = search, .code = .succeeded, .sign = .finished, .publication_position = null } }, .line = "✓ Search", .packed_ = true },
+        .{ .value = .{ .hosted_call = .{ .line = find, .code = .failed, .sign = .failed, .publication_position = null } }, .line = "× Find", .packed_ = false },
         .{ .value = .{ .send_failed = .{ .key = .{}, .target = null, .code = .{} } }, .line = "× Message not delivered", .packed_ = false },
         .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 0, .completion = .completed } }, .line = "▪ Stopped", .packed_ = false },
     };

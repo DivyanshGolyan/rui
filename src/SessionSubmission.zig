@@ -67,7 +67,7 @@ accepted: ?Accepted = null,
 retry: ?[36]u8 = null,
 retain_message: bool = false,
 queue: queue_lifecycle.State = .{},
-settled_message: ?struct { ticket: Input.Ticket, key: [36]u8 } = null,
+settled_message: ?struct { ticket: Input.Ticket, key: [36]u8, store: protocol.Bounded(protocol.max_store_bytes) = .{} } = null,
 
 pub fn view(self: *const Self) ?View {
     const intent = self.intent orelse return null;
@@ -319,7 +319,7 @@ fn apply(self: *Self, result: anyerror!void) !End {
         const denies: ?u64 = if (intent == .message_then_deny) intent.message_then_deny.action else null;
         if (intent.ticket() != null) self.queue = queue_lifecycle.step(self.queue, .{ .receipt = .{ .key = self.key, .admission = admission } }).state;
         if (self.retain_message and intent.ticket() != null and !queue_lifecycle.accounted(self.queue, self.key)) {
-            self.holdAccepted(intent.ticket().?, self.key);
+            self.holdAccepted(intent.ticket().?, self.key, self.reply.?.context.store);
             return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission, .denies = denies } };
         }
         self.release();
@@ -347,11 +347,59 @@ pub fn messageHasImage(self: *const Self) bool {
 }
 
 /// Holds the accepted Message `ticket` under `key` until the queue shows it, and retires the
-/// original. Reached from `apply` once the queue has taken the Message's receipt.
-pub fn holdAccepted(self: *Self, ticket: Input.Ticket, key: [36]u8) void {
+/// original. Reached from `apply` once the queue has taken the Message's receipt, which names the
+/// canonical `store` that took it.
+pub fn holdAccepted(self: *Self, ticket: Input.Ticket, key: [36]u8, store: protocol.Bounded(protocol.max_store_bytes)) void {
     std.debug.assert(self.settled_message == null);
-    self.settled_message = .{ .ticket = ticket, .key = key };
+    self.settled_message = .{ .ticket = ticket, .key = key, .store = store };
     self.retire();
+}
+
+/// What the Host's one answer for a held accepted Message's key says about it.
+pub const Verdict = enum {
+    /// A Turn took the Message, so its row belongs to the conversation whether or not the loaded page holds it.
+    taken,
+    queued,
+    /// Cancelled before any Turn took it.
+    stopped,
+    /// An answer that is not this Message's.
+    unverified,
+    /// The selector now names a Store other than the one that took the Message, so no read here can settle it.
+    elsewhere,
+};
+
+/// The route and key of the one read that settles the held accepted Message. The receipt's canonical
+/// Store travels with it: the read is made only on that Store, never on whatever a selector names now.
+pub const Probe = struct { store: protocol.Bounded(protocol.max_store_bytes), key: [36]u8 };
+
+pub fn acceptedProbe(self: *const Self) ?Probe {
+    const held = self.settled_message orelse return null;
+    return if (held.store.len == 0) null else .{ .store = held.store, .key = held.key };
+}
+
+/// `observed` is the Host's validated answer for the key and Session: queued ahead of any Turn, taken
+/// into one, or cancelled without one.
+pub fn verdict(observed: protocol_reply.CommandObservation) Verdict {
+    if (observed.status != .accepted or observed.kind != .message) return .unverified;
+    return switch (observed.state orelse return .unverified) {
+        .queued => .queued,
+        .cancelled => if (observed.binding == null) .stopped else .taken,
+        .processing, .waiting_for_permission, .completed, .failed => .taken,
+        .rejected => .unverified,
+    };
+}
+
+/// Settles the held Message `key` on `answer` through the one local transition.
+/// False when the loaded page already accounted for it, so the answer adds nothing.
+pub fn settleAccepted(self: *Self, key: [36]u8, answer: Verdict) bool {
+    const held = self.settled_message orelse return false;
+    if (!std.mem.eql(u8, &held.key, &key)) return false;
+    switch (answer) {
+        .taken => _ = self.observe(.{ .applied = key }),
+        .stopped => _ = self.observe(.{ .excluded = key }),
+        .queued, .unverified, .elsewhere => {},
+    }
+    return true;
 }
 
 /// Applies the single local presentation transition and releases only a matching settled loan.
@@ -879,6 +927,61 @@ test "accepted native Message keeps its exact input loan until canonical inserti
     try std.testing.expectEqualStrings("next draft", self.messageText().?);
     self.state = .rejected;
     try self.discardRejected();
+}
+
+test "SUI-163 the Host's answer for an accepted key settles its loan only through the keyed transition" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const Case = struct { state: protocol.MessageRequestState, bound: bool, verdict: Verdict };
+    const cases = [_]Case{
+        .{ .state = .queued, .bound = false, .verdict = .queued },
+        .{ .state = .processing, .bound = true, .verdict = .taken },
+        .{ .state = .waiting_for_permission, .bound = true, .verdict = .taken },
+        .{ .state = .completed, .bound = true, .verdict = .taken },
+        .{ .state = .failed, .bound = true, .verdict = .taken },
+        .{ .state = .cancelled, .bound = true, .verdict = .taken },
+        .{ .state = .cancelled, .bound = false, .verdict = .stopped },
+        .{ .state = .rejected, .bound = false, .verdict = .unverified },
+    };
+    for (cases) |case| {
+        var observed: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = .message, .target = .{}, .state = case.state, .binding = if (case.bound) .{ .turn = 2, .operation = 3, .attempt = 1 } else null };
+        try observed.key.set(&key);
+        try std.testing.expectEqual(case.verdict, verdict(observed));
+        for ([_]@TypeOf(observed.status){ .absent, .rejected }) |status| {
+            observed.status = status;
+            try std.testing.expectEqual(Verdict.unverified, verdict(observed));
+        }
+        observed.status = .accepted;
+        observed.kind = .configure;
+        try std.testing.expectEqual(Verdict.unverified, verdict(observed));
+        observed.kind = .message;
+        observed.state = null;
+        try std.testing.expectEqual(Verdict.unverified, verdict(observed));
+
+        var input: Input = undefined;
+        input.init();
+        defer input.deinit();
+        const ticket = input.submitText("original text");
+        var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty };
+        self.queue = queue_lifecycle.step(self.queue, .{ .begin = .{ .key = key, .before = null } }).state;
+        self.holdAccepted(ticket, key, try .from("/canonical-store"));
+        _ = input.append("next draft");
+        defer self.disposeMessage();
+        try std.testing.expectEqualStrings("/canonical-store", self.acceptedProbe().?.store.slice());
+        try std.testing.expect(!self.settleAccepted(@splat('X'), case.verdict));
+        try std.testing.expect(self.messageHeld());
+        try std.testing.expect(self.settleAccepted(key, case.verdict));
+        const released = case.verdict == .taken or case.verdict == .stopped;
+        try std.testing.expectEqual(!released, self.messageHeld());
+        try std.testing.expectEqual(released, !self.settleAccepted(key, case.verdict));
+        try std.testing.expectEqualStrings("next draft", input.composition().bytes);
+    }
+    var input: Input = undefined;
+    input.init();
+    defer input.deinit();
+    var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty };
+    self.holdAccepted(input.submitText("no receipt Store"), key, .{});
+    defer self.disposeMessage();
+    try std.testing.expect(self.acceptedProbe() == null);
 }
 
 test "uncertain canonical observation hides only the echo and retains original recovery" {

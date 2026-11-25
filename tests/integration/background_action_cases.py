@@ -99,7 +99,7 @@ def prove_native_background(state, *, deadline=None):
                 outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
                 assert len(outputs) == 1 and outputs[0]["call_id"] == f"{name}-call", outputs
                 receipt = outputs[0]["output"]
-                assert json.loads(receipt) == {"action": identity, "execution": "background", "accepted": True}, outputs
+                assert json.loads(receipt) == {"action": identity, "execution": "background", "accepted": True, "note": fixture.BACKGROUND_RECEIPT_NOTE}, outputs
                 assert "native-final-" not in receipt
                 if name == "approval":
                     assert not (workspace / "launches").exists()
@@ -357,7 +357,7 @@ def prove_automatic_background(state, *, deadline=None):
             assert fixture.read_result(store, "message") == b"model continued"
             assert process_exists(pid) and len(endpoint.requests) == 2
             outputs = [item for item in json.loads(endpoint.requests[1])["input"] if item.get("type") == "function_call_output"]
-            assert len(outputs) == 1 and json.loads(outputs[0]["output"]) == {"action": identity, "execution": "background", "accepted": True}, outputs
+            assert len(outputs) == 1 and json.loads(outputs[0]["output"]) == {"action": identity, "execution": "background", "accepted": True, "note": fixture.BACKGROUND_RECEIPT_NOTE}, outputs
             if name != "deadline":
                 gate.release()
             final = wait_for(lambda: value if (value := command("action", "read", "--store", store, "--session", session, "--action", identity))["state"] == "resolved" else None, "sole final Resolution")
@@ -429,7 +429,7 @@ def prove_message_background_and_stop(state, *, deadline=None):
         assert fixture.read_result(store, "interrupt") == b"message acknowledged"
         continuation = json.loads(endpoint.requests[1])
         outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output" and item.get("call_id") == "message-target-call"]
-        assert len(outputs) == 1 and json.loads(outputs[0]["output"]) == {"action": identity, "execution": "background", "accepted": True}, outputs
+        assert len(outputs) == 1 and json.loads(outputs[0]["output"]) == {"action": identity, "execution": "background", "accepted": True, "note": fixture.BACKGROUND_RECEIPT_NOTE}, outputs
         assert any("Please answer this message" in json.dumps(item) for item in continuation["input"] if item.get("role") == "user"), continuation
         assert process_exists(pid)
         with endpoint.lock:

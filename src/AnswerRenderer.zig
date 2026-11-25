@@ -1,5 +1,7 @@
 const std = @import("std");
 const TerminalText = @import("TerminalText.zig");
+const citation_marker = @import("citation_marker.zig");
+const session_id = @import("session_id.zig");
 const gwidth = @import("terminal_width");
 const display_text = @import("display_text.zig");
 const Renderer = @This();
@@ -65,8 +67,24 @@ active_style: Style = .{},
 line_start: bool = true,
 literal_line: bool = false,
 terminal_text: TerminalText = .{ .mode = .multiline },
+citations: citation_marker.Filter = .{},
 
+/// Draws answer bytes. The transcript keeps the provider's citation markers; the view leaves them out.
 pub fn feed(self: *Renderer, bytes: []const u8) !void {
+    var drawn: Drawn = .{ .renderer = self };
+    for (bytes) |byte| try self.citations.feed(byte, &drawn);
+}
+
+/// What the citation filter lets through, drawn one byte at a time.
+const Drawn = struct {
+    renderer: *Renderer,
+
+    pub fn put(self: *Drawn, byte: u8) !void {
+        try self.renderer.drawBytes(&.{byte});
+    }
+};
+
+fn drawBytes(self: *Renderer, bytes: []const u8) !void {
     for (bytes) |byte| {
         if (self.table_len != 0) {
             if (self.held[self.table_len - 1] == '\n' and byte != '|') {
@@ -138,6 +156,8 @@ fn markdownByte(self: *Renderer, byte: u8) !void {
 }
 
 pub fn finish(self: *Renderer) !void {
+    var drawn: Drawn = .{ .renderer = self };
+    try self.citations.finish(&drawn);
     if ((self.table_literal or self.fence_literal) and self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
     if (self.table_len != 0) try self.flushTable();
     if (self.line_start and self.prefix_len != 0) {
@@ -731,7 +751,8 @@ fn linkByte(self: *Renderer, byte: u8) !void {
             '(' => self.link_depth += 1,
             ')' => if (self.link_depth == 0) {
                 const target = self.held[self.link_text_end + 2 .. self.link_len];
-                if (!TerminalText.linkTarget(target) and self.markdownLocalParts(target) == null) return self.dropLink(byte);
+                if (!TerminalText.linkTarget(target) and self.markdownLocalParts(target) == null and
+                    !(self.destination == .viewport and session_id.fromLink(target) != null)) return self.dropLink(byte);
                 return self.showText();
             } else {
                 self.link_depth -= 1;
@@ -1711,7 +1732,70 @@ fn visible(output: []const u8, shown: *std.Io.Writer) !void {
     }
 }
 
+test "SUI-167 an answer is drawn without the provider's citation markers" {
+    const marker = "\u{e200}cite\u{e202}turn0search0\u{e202}turn0search1\u{e201}";
+    // Whatever the surrounding Markdown, the marker draws as nothing: prose, emphasis, links, code and tables.
+    const surrounds = [_][]const u8{
+        "Zig is fast.{} Rust too.",
+        "**Bold{}** and [a link{}](https://example.test/a)",
+        "`code{}` text",
+        "```\nfenced{}\n```\n",
+        "| A |\n| --- |\n| b{} |\n",
+    };
+    for (surrounds) |template| {
+        var with: [256]u8 = undefined;
+        var without: [256]u8 = undefined;
+        const marked = try replaceAll(&with, template, marker);
+        const bare = try replaceAll(&without, template, "");
+        var expected = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer expected.deinit();
+        var plain: Renderer = .{ .out = &expected.writer, .destination = .{ .viewport = .wcwidth } };
+        try plain.feed(bare);
+        try plain.finish();
+        try expectRendered(marked, expected.written());
+    }
+    // Anything short of a complete marker is drawn as it came.
+    try expectRendered("a\u{e200}cite and \u{e200}cite\u{e202}turn0", "a\u{e200}cite and \u{e200}cite\u{e202}turn0");
+}
+
+fn replaceAll(buffer: []u8, template: []const u8, with: []const u8) ![]const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    var rest = template;
+    while (std.mem.find(u8, rest, "{}")) |at| {
+        try writer.writeAll(rest[0..at]);
+        try writer.writeAll(with);
+        rest = rest[at + 2 ..];
+    }
+    try writer.writeAll(rest);
+    return writer.buffered();
+}
+
 test "content_link_render SUI-26 link targets and labels" {
+    {
+        try expectRendered("See [review](rui-session:k7m2qx).", "See " ++ comptime linked("rui-session:k7m2qx", "review") ++ ".");
+        for ([_][]const u8{
+            "[x](rui-session:k7m2q)",                          "[x](rui-session:k7m2qxx)",
+            "[x](rui-session:K7M2QX)",                         "[x](rui-session:k7m2qx?x)",
+            "[x](rui-session:k7m2qx#x)",                       "[x](rui-session:%6b7m2qx)",
+            "[x](rui-session://k7m2qx)",                       "[x](rui-session:k7m2qi)",
+            "`[x](rui-session:k7m2qx)`",                       "```\n[x](rui-session:k7m2qx)\n```",
+            "\x1b]8;;rui-session:k7m2qx\x1b\\x\x1b]8;;\x1b\\", "rui-session:k7m2qx",
+            "k7m2qx",
+        }) |input| {
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            var renderer: Renderer = .{ .out = &output.writer, .destination = .{ .viewport = .wcwidth } };
+            for (input) |byte| try renderer.feed(&.{byte});
+            try renderer.finish();
+            try std.testing.expect(std.mem.indexOf(u8, output.written(), TerminalText.link_open ++ TerminalText.session_link) == null);
+        }
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: Renderer = .{ .out = &output.writer, .destination = .terminal };
+        try renderer.feed("[review](rui-session:k7m2qx)");
+        try renderer.finish();
+        try std.testing.expectEqualStrings("[review](rui-session:k7m2qx)", output.written());
+    }
     {
         try expectRendered("See [github.com](https://github.com/a/b).", "See " ++ comptime linked("https://github.com/a/b", "github.com") ++ ".");
         try expectRendered("Zig 0.17 ([ziglang.org](https://ziglang.org/download/))\n", "Zig 0.17 (" ++ comptime linked("https://ziglang.org/download/", "ziglang.org") ++ ")\n");

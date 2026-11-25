@@ -396,7 +396,7 @@ test "tool label observation trusts admission over damaged call field bytes" {
                 const after = try store_core.activityPageForTesting(&storage, request);
                 try std.testing.expectEqual(before.call_activity.total, after.call_activity.total);
                 for (before.call_activity.entries[0..before.call_activity.count], after.call_activity.entries[0..after.call_activity.count]) |original, observed| {
-                    try std.testing.expectEqualStrings(original.presentation.description.?.slice(), observed.presentation.description.?.slice());
+                    try std.testing.expectEqualStrings(original.presentation.line.?.words.slice(), observed.presentation.line.?.words.slice());
                     try std.testing.expectEqual(original.presentation.code, observed.presentation.code);
                 }
                 try std.testing.expect(!storage.isFenced());
@@ -429,7 +429,7 @@ test "completed tool labels trust admission while model replay authenticates pay
             for (before.items[0..before.count], after.items[0..after.count]) |original, observed| {
                 if (original.presentation) |presentation| {
                     results += 1;
-                    try std.testing.expectEqualStrings(presentation.description.?.slice(), observed.presentation.?.description.?.slice());
+                    try std.testing.expectEqualStrings(presentation.line.?.words.slice(), observed.presentation.?.line.?.words.slice());
                     try std.testing.expectEqual(presentation.code, observed.presentation.?.code);
                 }
             }
@@ -636,7 +636,7 @@ test "a web search call shows as its line, in the conversation and the activity,
                 try std.testing.expect(item.kind == .hosted_call);
                 try std.testing.expectEqual(@as(u64, 0), item.ordinal);
                 try std.testing.expectEqual(page.items[0].position - 1 - index, item.position);
-                try std.testing.expectEqualStrings(want[0], item.presentation.?.description.?.slice());
+                try std.testing.expectEqualStrings(want[0], item.presentation.?.line.?.words.slice());
                 try std.testing.expectEqual(want[1], item.presentation.?.code);
                 try std.testing.expectEqual(item.position, item.presentation.?.publication_position.?);
             }
@@ -645,7 +645,7 @@ test "a web search call shows as its line, in the conversation and the activity,
             request.before_position = page.items[2].position;
             const older = try store_core.publicConversationPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 2), older.count);
-            try std.testing.expectEqualStrings(expected[2][0], older.items[0].presentation.?.description.?.slice());
+            try std.testing.expectEqualStrings(expected[2][0], older.items[0].presentation.?.line.?.words.slice());
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = request.session, .position = page.items[1].position, .ordinal = 0 }));
 
             const activity = try store_core.activityPageForTesting(&storage, .{ .session = request.session, .direction = .backward });
@@ -653,7 +653,7 @@ test "a web search call shows as its line, in the conversation and the activity,
             for (activity.items[0..activity.count]) |item| if (item.value == .hosted_call) {
                 const want = expected[calls];
                 try std.testing.expectEqual(page.items[1 + calls].position, item.position);
-                try std.testing.expectEqualStrings(want[0], item.value.hosted_call.description.?.slice());
+                try std.testing.expectEqualStrings(want[0], item.value.hosted_call.line.?.words.slice());
                 try std.testing.expectEqual(want[1], item.value.hosted_call.code);
                 calls += 1;
             };

@@ -27,7 +27,7 @@ on:
         required: false
         default: ''
       bisect-step:
-        description: Manual bisect, promotes nothing; the failed step's name, its space-separated targets (such as rsql-table)
+        description: Manual bisect, promotes nothing; the failed step's name, its space-separated targets (such as mysql-wire-integration)
         type: string
         required: false
         default: ''
@@ -194,8 +194,8 @@ jobs:
       issues: write
     uses: ./.github/workflows/dependency-lag.yml
   race_sweep:
-    # Starts the daily race sweep as its own run, so its result, issues and duration
-    # stay apart from Promote's; a skipped job uses no runner.
+    # Starts the daily race sweep and the statement table regeneration as their own runs, so their
+    # results, issues and duration stay apart from Promote's; a skipped job uses no runner.
     # Runs when batch chose a daily sweep even if batch then failed on a red HEAD.
     needs: batch
     if: ${{ !cancelled() && needs.batch.outputs.daily == 'true' }}
@@ -208,6 +208,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run race-sweep.yml --repo "$GITHUB_REPOSITORY" --ref main
+      - name: Start the statement table regeneration on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run statement-table.yml --repo "$GITHUB_REPOSITORY" --ref main
   bisect:
     # A manual replay of one failed step across a range of main commits. It qualifies,
     # records and publishes nothing, and the 90-minute replay cap is promotion.py's.

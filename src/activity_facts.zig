@@ -17,14 +17,8 @@ const content_value = @import("content_value.zig");
 
 const ToolPresentation = tool_presentation.ToolPresentation;
 
-pub const NamedPeer = struct {
-    session: Bounded(session_id.max_reference_bytes),
-    label: Bounded(tool_presentation.max_label_bytes) = .{},
-
-    pub fn name(self: *const NamedPeer) []const u8 {
-        return if (self.label.len == 0) self.session.slice() else self.label.slice();
-    }
-};
+/// A Session a row points at, owned by `tool_presentation` so a tool row and a peer row name one type.
+pub const NamedPeer = tool_presentation.NamedPeer;
 
 pub const Item = struct {
     position: u64,
@@ -84,6 +78,19 @@ pub const Queued = struct {
     /// The newest queued Message's value, for its first-line hint; null when none is queued.
     newest_content: ?content_value.Value = null,
 };
+
+/// The position a page's queued aggregate (and call activity) is taken at: the last row of a
+/// forward page that has more, otherwise the page's end. The Store and the client both use it.
+pub fn queueCutoff(end: u64, forward: bool, more: bool, last: ?u64) u64 {
+    return if (forward and more) last.? else end;
+}
+
+test "queueCutoff takes a forward page's aggregate at its last row only while more follows" {
+    try std.testing.expectEqual(@as(u64, 7), queueCutoff(40, true, true, 7));
+    try std.testing.expectEqual(@as(u64, 40), queueCutoff(40, true, false, 7));
+    try std.testing.expectEqual(@as(u64, 40), queueCutoff(40, false, true, 7));
+    try std.testing.expectEqual(@as(u64, 40), queueCutoff(40, false, false, null));
+}
 
 pub const PageWork = struct {
     creator: ?Bounded(session_id.bytes) = null,

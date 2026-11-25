@@ -818,13 +818,12 @@ pub const Effects = struct {
 };
 
 pub const Said = struct {
-    text: ?[]const u8,
     notice: ?[]const u8 = null,
     stoppable: bool,
 };
 
 pub fn conversation(state: *const State, ref: Reference, can_stop: bool) Said {
-    return .{ .text = null, .notice = footerNotice(state), .stoppable = can_stop and state.openStop(ref) == null };
+    return .{ .notice = footerNotice(state), .stoppable = can_stop and state.openStop(ref) == null };
 }
 
 fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line_bytes]u8) ?StatusLine {
@@ -5274,9 +5273,9 @@ test "OVM-4 stop gestures follow the work state" {
     };
 }
 
-fn expectSaid(text: ?[]const u8, stoppable_: bool, said: Said) !void {
-    try std.testing.expectEqualStrings(text orelse "", said.notice orelse said.text orelse "");
-    try std.testing.expectEqual(text == null, (said.notice orelse said.text) == null);
+fn expectSaid(notice: ?[]const u8, stoppable_: bool, said: Said) !void {
+    try std.testing.expectEqualStrings(notice orelse "", said.notice orelse "");
+    try std.testing.expectEqual(notice == null, said.notice == null);
     try std.testing.expectEqual(stoppable_, said.stoppable);
 }
 
@@ -5299,7 +5298,6 @@ test "conversation footer domain carries chat notices but never upgrade status" 
         state.notice = null;
         if (notice) state.say(.normal, "Copied 3 lines", .{});
         const said = conversation(&state, "k7m2qx".*, true);
-        try std.testing.expect(said.text == null);
         try std.testing.expectEqualStrings(if (notice) "Copied 3 lines" else "", said.notice orelse "");
     };
     for (endings) |how| for (std.enums.values(upgrade_status.Outcome)) |outcome| {
@@ -5307,7 +5305,6 @@ test "conversation footer domain carries chat notices but never upgrade status" 
         state.upgrade.run = .checking;
         _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = how, .outcome = outcome } } });
         const said = conversation(&state, "k7m2qx".*, false);
-        try std.testing.expect(said.text == null);
         try std.testing.expect(said.notice == null);
         try std.testing.expect(!said.stoppable);
     };
@@ -5325,7 +5322,6 @@ fn stopCase1() !void {
     try expectNotice(&state, "k7m2qx: Stopping");
     try expectSaid("k7m2qx: Stopping", false, conversation(&state, ref, true));
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .other } }));
-    try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, true).text);
     try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .failed = "session_not_found" } } }));
     try expectNotice(&state, "! k7m2qx not stopped: session_not_found");
     try std.testing.expect(conversation(&state, ref, true).stoppable and !conversation(&state, ref, false).stoppable);

@@ -3,7 +3,7 @@ const failure_class = @import("failure_class.zig");
 const connection = @import("connection.zig");
 const provider_route = @import("provider_route.zig");
 
-pub const Mark = enum { needs_you, active, queued, waiting, finished, failed, stopped, newer, none };
+pub const Mark = enum { needs_you, active, queued, waiting, finished, sent, failed, stopped, newer, none };
 pub const Tone = enum { ink, normal, quiet, attention, failure };
 
 pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii: []const u8, tone: Tone }).init(.{
@@ -12,6 +12,7 @@ pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii:
     .queued = .{ .unicode = "◌", .ascii = ":", .tone = .quiet },
     .waiting = .{ .unicode = "○", .ascii = "o", .tone = .quiet },
     .finished = .{ .unicode = "✓", .ascii = "+", .tone = .quiet },
+    .sent = .{ .unicode = "→", .ascii = ">", .tone = .quiet },
     .failed = .{ .unicode = "×", .ascii = "x", .tone = .failure },
     .stopped = .{ .unicode = "▪", .ascii = "#", .tone = .normal },
     .none = .{ .unicode = " ", .ascii = " ", .tone = .quiet },
@@ -54,6 +55,7 @@ test "MRK-1 status marks and spinner represent their states" {
         .{ .mark = .queued, .unicode = "◌", .ascii = ":", .tone = .quiet },
         .{ .mark = .waiting, .unicode = "○", .ascii = "o", .tone = .quiet },
         .{ .mark = .finished, .unicode = "✓", .ascii = "+", .tone = .quiet },
+        .{ .mark = .sent, .unicode = "→", .ascii = ">", .tone = .quiet },
         .{ .mark = .failed, .unicode = "×", .ascii = "x", .tone = .failure },
         .{ .mark = .stopped, .unicode = "▪", .ascii = "#", .tone = .normal },
         .{ .mark = .none, .unicode = " ", .ascii = " ", .tone = .quiet },

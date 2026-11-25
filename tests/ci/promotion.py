@@ -234,7 +234,7 @@ def attribute_paths(paths, root, names, read, contents):
     graph = select_tests.Graph(names, read)
     available = set(build_files.steps(root))
     literals = select_tests.fixture_literals_of(graph, read)
-    return {path: select_tests.attribute(path, graph, available, read, contents=contents, fixture_literals=literals)
+    return {path: select_tests.attribute(path, graph, available, contents=contents, fixture_literals=literals)
             for path in paths}
 
 

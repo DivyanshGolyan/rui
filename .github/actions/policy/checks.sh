@@ -62,7 +62,7 @@ workflows() (
     ignores=()
     # 1.7.7 predates GitHub's server-enforced cache policy key.
     case "$workflow" in
-      .github/workflows/qualify-macos.yml|.github/workflows/previous-release-upgrade.yml|.github/workflows/release.yml|.github/workflows/release-build.yml|.github/workflows/race-sweep.yml)
+      .github/workflows/qualify-macos.yml|.github/workflows/previous-release-upgrade.yml|.github/workflows/release.yml|.github/workflows/release-build.yml|.github/workflows/race-sweep.yml|.github/workflows/statement-table.yml)
         ignores+=(-ignore '^unexpected key "cache-mode" for "workflow" section\.') ;;
     esac
     # 1.7.7 predates GitHub's bounded concurrency queue option.
