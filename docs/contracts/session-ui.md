@@ -821,7 +821,7 @@ An observed empty chat shows a centred `rui` and a quiet `cotton · light enough
 The chat footer shows `ctrl+x stop` only while there is work to stop (Divyansh approved this on 2026-10-31, front-end plan PR 5).
 It shows while Ctrl-X would ask to stop the work the conversation shows, so not while a stop of that work is open.
 The name is the Label, else the first line of the first Message, else the reference, as in overview rows.
-Context appears only from half used, including exactly half, and reads `N% context left`. The percentage is how far Current's `context_estimate` is from the compaction trigger, rounded up, so `0% context left` means the next model call compacts; below half used or without a trigger it is omitted.
+Context appears only from half used, including exactly half, and reads `N% context left`. The percentage is how far Current's `context_estimate` is from the compaction trigger, rounded up, so `0% context left` means the next model call compacts; below half used or without a trigger it is omitted. A chat has a context reading only when both numbers are known and the trigger is not zero; chat info's `Context` row (`N of M`) and the footer both ask `session_line.Context.of`, so the row shows exactly when a reading exists.
 The chat footer reserves its one-space input gutter even beside the list; the hidden-list variant adds `‹ ` after that gutter.
 The facts fit whole items before the right-aligned keys and drop an item that does not fit; only an oversized model is cut with `…`.
 The overview keeps its own line-fitting policy.

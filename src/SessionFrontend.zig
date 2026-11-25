@@ -6905,7 +6905,7 @@ test "SUI-33 App Session shell gutter and back control follow list visibility th
     try fixture.init();
     defer fixture.deinit();
     const self = fixture.self;
-    self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .low, .left = 100, .label = .{} };
+    self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .low, .context = session_line.Context.atLeft(100), .label = .{} };
     try self.line.label.?.set("demo");
     try self.line.model.set("gpt-5.5");
     _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
@@ -7220,7 +7220,7 @@ test "App Session Footer never shows the chat name and clips its facts in termin
     try fixture.init();
     defer fixture.deinit();
     const self = fixture.self;
-    self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .low, .left = 100, .label = .{} };
+    self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .low, .context = session_line.Context.atLeft(100), .label = .{} };
     try self.line.label.?.set("Port the overview to vxfw and keep its key table");
     try self.line.model.set("gpt-6-sol");
     const shown = try fixture.rows();
@@ -11420,7 +11420,7 @@ test "chat footer facts use current Session permission and applied default or ex
         self.line.label = .{ .len = 0 };
         try self.line.label.?.set("Chat");
         self.line.effort = inspected.effort;
-        self.line.left = 62;
+        self.line.context = session_line.Context.atLeft(62);
         var buffer: [session_chrome.facts_bytes]u8 = undefined;
         const text = session_chrome.factsRow(&buffer, self.line.facts(self.home), null, width, .unicode);
         const want = if (explicit) "model · low" else "model · high";
@@ -11626,7 +11626,7 @@ test "chat footer permission transitions follow the current line with absent cur
         try self.line.label.?.set("Chat");
         try self.line.model.set("model");
         self.line.effort = .low;
-        self.line.left = 62;
+        self.line.context = session_line.Context.atLeft(62);
         for ([_]bool{ before, !before }) |ask| {
             self.line.read.?.revision += 1;
             if (inspection == .current) self.inspection.sessions[self.inspection.status.?].permission = if (ask) .ask else .bypass;
@@ -11634,7 +11634,7 @@ test "chat footer permission transitions follow the current line with absent cur
             try std.testing.expectEqualStrings("Chat", self.titleName());
             try std.testing.expectEqualStrings("model", facts.model);
             try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), facts.effort);
-            try std.testing.expectEqual(@as(?u8, 62), facts.left);
+            try std.testing.expectEqual(@as(?u8, 62), if (facts.context) |reading| reading.left() else null);
             for ([_]u16{ 140, 46 }) |width| {
                 var buffer: [session_chrome.facts_bytes]u8 = undefined;
                 const text = session_chrome.factsRow(&buffer, facts, null, width, .unicode);
