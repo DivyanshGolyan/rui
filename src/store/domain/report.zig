@@ -1920,9 +1920,7 @@ const full_conversation = rsql.Page(.{
         .alias = "e",
         .columns = "e.session_position,e.entry_kind,e.turn_id,coalesce(e.source_admission_id,e.source_skill_admission_id) AS source_admission_id,e.source_revision,e.source_catalog_position,e.source_skill_position,e.source_operation_id," ++
             "c.byte_length AS content_length,c.digest AS content_digest,c.form AS content_form," ++ reads_domain.publicEntryColumns("(e.entry_kind=2 AND (e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ")) OR " ++
-            "(e.entry_kind=4 AND t.session_ref=e.session_ref AND EXISTS(SELECT 1 FROM message_skill skill JOIN message_admission owner ON owner.admission_id=skill.admission_id " ++
-            "WHERE skill.admission_id=e.source_skill_admission_id AND skill.position=e.source_skill_position AND skill.content_id=e.content_id " ++
-            "AND owner.session_ref=e.session_ref AND owner.turn_id=e.turn_id)) OR "),
+            reads_domain.skill_entry_consistent),
         .joins = reads_domain.public_entry_joins,
     }},
     .Row = struct {

@@ -1354,6 +1354,25 @@ pub fn submitTestMessage(
     try std.testing.expect(storage.submitMessageWithModel(&command, null, .{}) == .accepted);
 }
 
+/// Submits a Message that binds `bound`, in order, as its skills.
+pub fn submitTestMessageWithSkills(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    file_name: []const u8,
+    key: []const u8,
+    session_ref: []const u8,
+    text: []const u8,
+    bound: []const @import("domain/skills.zig").BoundSkill,
+) !void {
+    const file = try tmp.dir.createFile(std.testing.io, file_name, .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, text);
+    try file.sync(std.testing.io);
+    var command = try completeMessage(key, session_ref, file, text);
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+    const capture: @import("domain/skills.zig").MessageCapture = .{ .bound = bound };
+    try std.testing.expect(storage.submitMessageCapturedSkills(&command, null, null, &capture, .{}) == .accepted);
+}
+
 pub const TestingAnswerPart = struct { encoded: []const u8, decoded: []const u8 };
 
 pub const MessagePart = struct {

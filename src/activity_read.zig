@@ -5,7 +5,7 @@ const session_id = @import("session_id.zig");
 const tool_proposal = @import("tool_proposal.zig");
 const change_ring = @import("change_ring.zig");
 
-pub const Kind = enum { admission, user, assistant, call, tool_result, hosted_call, turn_ended, stop, sent, send_failed, received, approval_requested, session_changed, compacted, model_call, instruction };
+pub const Kind = enum { admission, user, assistant, call, tool_result, hosted_call, turn_ended, stop, sent, send_failed, received, approval_requested, session_changed, compacted, model_call, instruction, skill };
 
 pub const Role = enum { conversation, detail };
 
@@ -15,7 +15,7 @@ pub const Role = enum { conversation, detail };
 pub fn roleOf(kind: Kind) Role {
     return switch (kind) {
         .admission, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed, .received => .conversation,
-        .call, .approval_requested, .session_changed, .compacted, .model_call, .instruction => .detail,
+        .call, .approval_requested, .session_changed, .compacted, .model_call, .instruction, .skill => .detail,
     };
 }
 

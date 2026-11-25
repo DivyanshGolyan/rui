@@ -3,6 +3,7 @@ const protocol = @import("protocol.zig");
 const activity_facts = @import("activity_facts.zig");
 const activity_read = @import("activity_read.zig");
 const change_ring = @import("change_ring.zig");
+const skill_reference = @import("skill_reference.zig");
 const wire_version = @import("wire_version.zig").wire_version;
 
 const H = protocol.Hole;
@@ -49,6 +50,7 @@ pub const ItemJson = struct {
         pub const approval_requested = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"action\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\"" } ++ call_details ++ .{"}"};
         pub const session_changed = .{ "{\"revision\":\"", H.decimal, "\",\"field\":\"", H{ .tag = protocol.SessionField }, "\",\"provider_text\":", H{ .optional_string = protocol.max_report_bytes }, "}" };
         pub const instruction = .{ "{\"turn\":", H.optional_id, ",\"revision\":", H.optional_id, ",\"content\":", H{ .json = ContentValueJson }, "}" };
+        pub const skill = .{ "{\"admission\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"ordinal\":\"", H.decimal, "\",\"name\":", H{ .string = skill_reference.max_name_bytes }, ",\"content\":", H{ .json = ContentValueJson }, "}" };
         pub const compacted = .{ "{\"operation\":\"", H.decimal, "\",\"dropped\":\"", H.decimal, "\"}" };
         pub const model_call = .{ "{\"model\":", H{ .string = protocol.max_model_bytes }, ",\"served_model\":", H{ .optional_string = protocol.max_model_bytes }, ",\"input_tokens\":", H.optional_id, ",\"output_tokens\":", H.optional_id, ",\"cached_tokens\":", H.optional_id, ",\"latency_ms\":", H.optional_id, ",\"first_event_ms\":", H.optional_id, ",\"status\":", H{ .string = protocol.max_code_bytes }, ",\"attempts\":\"", H.decimal, "\"}" };
     };
@@ -80,6 +82,7 @@ pub const ItemJson = struct {
             .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal, optionalText(&request.description), optionalText(&request.tool), optionalText(&request.server) }),
             .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field, if (change.provider_text) |text| text.slice() else null }),
             .instruction => |instruction| try writeShape(out, value_shapes.instruction, .{ instruction.turn, instruction.revision, ContentValueJson.text(instruction.content) }),
+            .skill => |skill| try writeShape(out, value_shapes.skill, .{ skill.admission, skill.turn, skill.ordinal, skill.name.slice(), ContentValueJson.text(skill.content) }),
             .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),
             .model_call => |call| try writeShape(out, value_shapes.model_call, .{ call.model.slice(), if (call.served_model) |model| model.slice() else null, call.input_tokens, call.output_tokens, call.cached_tokens, call.latency_ms, call.first_event_ms, call.status.slice(), call.attempts }),
             .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ ContentValueJson.text(assistant.content), assistant.final }),
