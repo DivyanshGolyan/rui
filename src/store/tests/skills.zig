@@ -406,8 +406,6 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
             const captured: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = diagnostic } };
             const sender_position = (try store_core.readSessionForTesting(&storage, sender.slice())).?.next_position;
             const receiver_position = (try store_core.readSessionForTesting(&storage, receiver.slice())).?.next_position;
-            var activity_request: protocol.ActivityPage = .{ .session = sender };
-            activity_request.position = (try store_core.activityPageForTesting(&storage, activity_request)).end;
             const rejected = storage.submitMessageCapturedSkills(&command, null, null, &captured, .{});
             try std.testing.expect(rejected == .rejected and !rejected.rejected.replayed);
             try std.testing.expectEqual(protocol.MessageRejection.skill_file_unavailable, rejected.rejected.code);
@@ -426,11 +424,6 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
                 try std.testing.expectEqual(sender_position + 1, (try store_core.readSessionForTesting(&storage, sender.slice())).?.next_position);
                 try std.testing.expectEqual(receiver_position, (try store_core.readSessionForTesting(&storage, receiver.slice())).?.next_position);
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM sent_rejection WHERE command_key=?1 AND sender_session_ref=?2 AND sender_position=?3", .{ command.key.slice(), sender.slice(), sender_position }));
-                const activity = try store_core.activityPageForTesting(&storage, activity_request);
-                try std.testing.expectEqual(@as(usize, 1), activity.count);
-                try std.testing.expectEqual(sender_position, activity.items[0].position);
-                try std.testing.expectEqualStrings("skill_file_unavailable", activity.items[0].value.send_failed.code.slice());
-                try std.testing.expectEqualStrings(receiver.slice(), activity.items[0].value.send_failed.target.?.session.slice());
                 const diagnostic_id = try store_testing.queryU64(&storage, "SELECT secondary_content_id FROM core_command WHERE command_key=?1 AND accepted=0 AND code='skill_file_unavailable'", .{command.key.slice()});
                 const reference = try testingContentReference(&storage, diagnostic_id);
                 var reader: ContentReader = undefined;

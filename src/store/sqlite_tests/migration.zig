@@ -427,9 +427,6 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='9'", .{}));
         try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_foreign_key_check"));
     }
-    var sender: protocol.Bounded(protocol.max_session_bytes) = .{};
-    try sender.set("brhkcj");
-    const facts = try arena.create(protocol.ActivityFacts);
     for (0..2) |_| {
         var storage: Store = undefined;
         try storage.open(std.testing.io, path, root);
@@ -439,27 +436,6 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
         try Legacy.expectSaved(storage.sqliteDatabase(), commands);
-        inline for (.{ .forward, .backward }) |direction| {
-            const request: protocol.ActivityPage = .{ .session = sender, .direction = direction, .kinds = .initOne(.send_failed) };
-            try storage.activityPage(&request, facts);
-            try std.testing.expectEqual(@as(usize, Legacy.cases.len), facts.count);
-            try std.testing.expect(!facts.more);
-            for (facts.items[0..facts.count], 0..) |item, ordinal| {
-                const index = if (direction == .forward) ordinal else Legacy.cases.len - ordinal - 1;
-                const failed = item.value.send_failed;
-                try std.testing.expectEqual(@as(u64, 6 + index), item.position);
-                try std.testing.expectEqual(@as(u64, 0), item.ordinal);
-                try std.testing.expectEqual(@as(u64, 1793781800 + index), item.at);
-                try std.testing.expectEqualStrings(Legacy.cases[index].key, failed.key.slice());
-                try std.testing.expectEqualStrings(@tagName(Legacy.cases[index].code), failed.code.slice());
-                if (index < 2) {
-                    try std.testing.expect(failed.target == null);
-                } else {
-                    try std.testing.expectEqualStrings("absent", failed.target.?.session.slice());
-                    try std.testing.expectEqual(@as(usize, 0), failed.target.?.label.len);
-                }
-            }
-        }
         for (commands, Legacy.cases) |*command, case| {
             const replay = storage.submitMessageWithModel(command, null, .{});
             try std.testing.expect(replay == .rejected);

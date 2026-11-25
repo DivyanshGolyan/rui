@@ -391,9 +391,6 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             var input: ActionExecutionInput = undefined;
             try storage.readActionExecutionInput(.bash, action, &input);
             const handle = input.sender_handle;
-            var own_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
-            try own_ref.set(sender);
-            const sender_end = (try store_core.activityPageForTesting(&storage, .{ .session = own_ref })).end;
             const Send = struct {
                 fn make(dir: std.Io.Dir, store_id: []const u8, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !wire_request.MessageCommand {
                     const file = try dir.createFile(std.testing.io, key, .{ .read = true });
@@ -477,44 +474,14 @@ test "a peer sender is resolved from its Action handle and exact replays survive
                 try std.testing.expect(listed.get(&.{ "peers", "from_person_at" }) == .null);
             }
 
-            try session.set(sender);
-            try store_testing.exec(&storage, "UPDATE sent_rejection SET rejected_at=200+sender_position", .{});
-            const own = try store_core.activityPageForTesting(&storage, .{ .session = session, .position = sender_end });
-            try std.testing.expectEqual(@as(usize, 3), own.count);
-            try std.testing.expectEqualStrings("invalid_session_reference", own.items[2].value.send_failed.code.slice());
-            try std.testing.expect(own.items[2].value.send_failed.target == null);
-            const out = own.items[0].value.sent;
-            try std.testing.expectEqual(accepted.accepted.admission_id, out.admission);
-            try std.testing.expectEqual(out.admitted_at, own.items[0].at);
-            try std.testing.expectEqual(received.items[0].at, own.items[0].at);
-            for (own.items[1..3]) |failure| try std.testing.expectEqual(200 + failure.position, failure.at);
-            try std.testing.expectEqualStrings(allocated_session_1.slice(), out.target.session.slice());
-            const failed = own.items[1].value.send_failed;
-            try std.testing.expectEqualStrings("absent", failed.target.?.session.slice());
-            try std.testing.expectEqualStrings("unknown_session", failed.code.slice());
-            try std.testing.expect(own.items[0].position < own.items[1].position);
-            {
-                try std.testing.expectEqual(@as(usize, 0), out.target.label.len);
-                try std.testing.expectEqual(@as(usize, 0), failed.target.?.label.len);
-                try store_testing.exec(&storage, "UPDATE session SET label='Review the WAL' WHERE session_ref=?1", .{allocated_session_1.slice()});
-                const renamed = try store_core.activityPageForTesting(&storage, .{ .session = session, .position = sender_end });
-                try std.testing.expectEqualStrings("Review the WAL", renamed.items[0].value.sent.target.label.slice());
-                try std.testing.expectEqual(@as(usize, 0), renamed.items[1].value.send_failed.target.?.label.len);
-                try store_testing.exec(&storage, "UPDATE session SET label='Lead' WHERE session_ref=?1", .{sender});
-                var receiver: protocol.Bounded(protocol.max_session_bytes) = .{};
-                try receiver.set(allocated_session_1.slice());
-                const named = try store_core.activityPageForTesting(&storage, .{ .session = receiver });
-                try std.testing.expectEqualStrings("Lead", named.items[0].value.received.sender.?.label.slice());
-            }
+            try store_testing.exec(&storage, "UPDATE session SET label='Lead' WHERE session_ref=?1", .{sender});
+            const named = try store_core.activityPageForTesting(&storage, .{ .session = session });
+            try std.testing.expectEqualStrings("Lead", named.items[0].value.received.sender.?.label.slice());
             try storage.revokeActionSender(action);
             try std.testing.expect(storage.submitMessageWithModel(&sent, null, .{}).accepted.replayed);
             var stale = sent;
             try stale.key.set("stale-handle");
             try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&stale, null, .{}).rejected.code);
-            var reader: ContentReader = undefined;
-            reader.open(try storage.openActivityContent(&.{ .session = session, .position = own.items[0].position }));
-            reader.close();
-
             var admitted = (try storage.admitNextModelAttempt(.{})).?;
             var view: TestingPage = undefined;
             view.open(&storage, try admitted.permit.consume());
@@ -548,8 +515,6 @@ test "refused peer creation activity keeps invalid targets absent" {
             const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
             var input: ActionExecutionInput = undefined;
             try storage.readActionExecutionInput(.bash, action, &input);
-            const before = try store_core.activityPageForTesting(&storage, .{ .session = sender });
-
             const text = "work that must not be admitted";
             const file = try tmp.dir.createFile(std.testing.io, "creation-refusal-message", .{ .read = true });
             try file.writeStreamingAll(std.testing.io, text);
@@ -585,44 +550,8 @@ test "refused peer creation activity keeps invalid targets absent" {
             try std.testing.expect(observed.status == .rejected);
             try std.testing.expect(observed.kind.message == null);
 
-            const page = try store_core.activityPageForTesting(&storage, .{ .session = sender, .position = before.end });
-            try std.testing.expectEqual(before.end + 1, page.end);
-            try std.testing.expectEqual(@as(usize, 1), page.count);
-            try std.testing.expect(page.items[0].value == .send_failed);
-            const item = page.items[0];
-            try std.testing.expectEqual(before.end + 1, item.position);
-            try std.testing.expectEqual(@as(u64, 0), item.ordinal);
-            try std.testing.expectEqual(page.items[0].at, item.at);
-            try std.testing.expectEqualStrings(message.key.slice(), item.value.send_failed.key.slice());
-            try std.testing.expectEqualStrings("unsupported_reasoning_effort", item.value.send_failed.code.slice());
-            try std.testing.expect(item.value.send_failed.target == null);
-
-            const PageRead = struct {
-                const Page = struct {
-                    facts: protocol.ActivityFacts,
-                    request: protocol.ActivityPage,
-
-                    fn continuation(self: *const @This()) ?protocol.ActivityPage {
-                        if (!self.facts.more) return null;
-                        const last = self.facts.items[self.facts.count - 1];
-                        var next = self.request;
-                        next.end = self.facts.end;
-                        next.position = last.position;
-                        next.ordinal = last.ordinal;
-                        return next;
-                    }
-                };
-
-                fn read(store: *Store, session: protocol.Bounded(protocol.max_session_bytes), cursor: protocol.ActivityPage) !Page {
-                    var request = cursor;
-                    request.session = session;
-                    return .{ .facts = try store_core.activityPageForTesting(store, request), .request = request };
-                }
-            };
             const malformed = [_][]const u8{ "", "short", "k7m2qi", "K7m2qx", "k7\x00mqx", "雪雪", "1234567" };
             const invalid_count = malformed.len + protocol.max_session_bytes + 1;
-            var times: [invalid_count + 3]u64 = undefined;
-            times[0] = item.at;
             const wide: [protocol.max_session_bytes]u8 = @splat('X');
             for (0..invalid_count) |index| {
                 const attempted = if (index < malformed.len) malformed[index] else wide[0 .. index - malformed.len];
@@ -637,18 +566,6 @@ test "refused peer creation activity keeps invalid targets absent" {
                 try std.testing.expect(!answer.rejected.replayed);
                 try std.testing.expectEqual(protocol.MessageRejection.invalid_session_reference, answer.rejected.code);
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1 AND target=?2 AND input_digest=?3 AND kind=2 AND accepted=0 AND code='invalid_session_reference' AND created=0 AND revision=0", .{ invalid.key.slice(), attempted, store_testing.Blob{ .bytes = &digest } }));
-                const position = before.end + 1 + index;
-                const result = try PageRead.read(&storage, sender, .{ .position = position });
-                try std.testing.expectEqual(position + 1, result.facts.end);
-                try std.testing.expectEqual(@as(usize, 1), result.facts.count);
-                const failure = result.facts.items[0];
-                try std.testing.expectEqual(position + 1, failure.position);
-                try std.testing.expectEqual(@as(u64, 0), failure.ordinal);
-                try std.testing.expect(failure.at > 0);
-                try std.testing.expectEqualStrings(invalid.key.slice(), failure.value.send_failed.key.slice());
-                try std.testing.expectEqualStrings("invalid_session_reference", failure.value.send_failed.code.slice());
-                try std.testing.expect(failure.value.send_failed.target == null);
-                times[index + 1] = failure.at;
             }
             try std.testing.expectEqual(@as(usize, 0), commits.count);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
@@ -662,15 +579,6 @@ test "refused peer creation activity keeps invalid targets absent" {
             const unknown_answer = storage.submitMessageWithModel(&unknown, commits.callback(), .{});
             try std.testing.expect(unknown_answer == .rejected);
             try std.testing.expectEqual(protocol.MessageRejection.unknown_session, unknown_answer.rejected.code);
-            const unknown_page = try PageRead.read(&storage, sender, .{ .position = before.end + 1 + invalid_count });
-            try std.testing.expectEqual(@as(usize, 1), unknown_page.facts.count);
-            const unknown_failure = unknown_page.facts.items[0];
-            try std.testing.expectEqualStrings(unknown.key.slice(), unknown_failure.value.send_failed.key.slice());
-            try std.testing.expectEqualStrings("unknown_session", unknown_failure.value.send_failed.code.slice());
-            try std.testing.expectEqualStrings("absent", unknown_failure.value.send_failed.target.?.session.slice());
-            try std.testing.expectEqual(@as(usize, 0), unknown_failure.value.send_failed.target.?.label.len);
-            times[invalid_count + 1] = unknown_failure.at;
-
             var accepted = message;
             try accepted.key.set("accepted-peer-creation");
             try accepted.configuration.?.reasoning_effort.value.set("low");
@@ -680,17 +588,10 @@ test "refused peer creation activity keeps invalid targets absent" {
             try std.testing.expect(!admitted.accepted.session.eql(sender.slice()));
             try std.testing.expectEqual(@as(usize, 1), commits.count);
             try std.testing.expect(commits.calls[0].from_peer);
-            const sent_page = try PageRead.read(&storage, sender, .{ .position = unknown_page.facts.end });
-            try std.testing.expectEqual(@as(usize, 1), sent_page.facts.count);
-            const sent = sent_page.facts.items[0];
-            try std.testing.expectEqualStrings(admitted.accepted.session.slice(), sent.value.sent.target.session.slice());
-            try std.testing.expectEqual(admitted.accepted.admission_id, sent.value.sent.admission);
-            times[invalid_count + 2] = sent.at;
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
 
-            const end = sent_page.facts.end;
             try storage.revokeActionSender(action);
             const revoked_replay = storage.submitMessageWithModel(&message, commits.callback(), .{});
             try std.testing.expect(revoked_replay == .rejected);
@@ -703,55 +604,7 @@ test "refused peer creation activity keeps invalid targets absent" {
             const original_digest = message.semanticDigest();
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1 AND target='' AND input_digest=?2 AND kind=2 AND accepted=0 AND code='unsupported_reasoning_effort' AND created=0 AND revision=0", .{ message.key.slice(), store_testing.Blob{ .bytes = &original_digest } }));
             try std.testing.expectEqual(@as(u64, invalid_count + 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM sent_rejection", .{}));
-            const unchanged = try PageRead.read(&storage, sender, .{ .position = end });
-            try std.testing.expectEqual(end, unchanged.facts.end);
-            try std.testing.expectEqual(@as(usize, 0), unchanged.facts.count);
             try std.testing.expectEqual(@as(usize, 1), commits.count);
-
-            const filtered = try PageRead.read(&storage, sender, .{ .end = end, .position = before.end, .kinds = .initMany(&.{.send_failed}), .limit = 1 });
-            try std.testing.expectEqual(end, filtered.facts.end);
-            try std.testing.expectEqual(@as(usize, 1), filtered.facts.count);
-            try std.testing.expectEqualStrings(message.key.slice(), filtered.facts.items[0].value.send_failed.key.slice());
-            try std.testing.expect(filtered.facts.items[0].value.send_failed.target == null);
-            try std.testing.expect(filtered.continuation() != null);
-            const filtered_last = try PageRead.read(&storage, sender, .{ .end = end, .position = end - 2, .kinds = .initMany(&.{.send_failed}), .limit = 1 });
-            try std.testing.expectEqual(@as(usize, 1), filtered_last.facts.count);
-            try std.testing.expectEqualStrings(unknown.key.slice(), filtered_last.facts.items[0].value.send_failed.key.slice());
-            try std.testing.expectEqualStrings("absent", filtered_last.facts.items[0].value.send_failed.target.?.session.slice());
-            try std.testing.expect(!filtered_last.facts.more);
-
-            for ([_]@FieldType(protocol.ActivityPage, "direction"){ .forward, .backward }) |direction| {
-                var cursor: protocol.ActivityPage = .{ .end = end, .position = if (direction == .forward) before.end else 0, .direction = direction };
-                var seen: usize = 0;
-                while (seen < times.len) {
-                    cursor.limit = @intCast(@min(3, times.len - seen));
-                    const traversal = try PageRead.read(&storage, sender, cursor);
-                    try std.testing.expectEqual(end, traversal.facts.end);
-                    try std.testing.expectEqual(@as(usize, cursor.limit), traversal.facts.count);
-                    for (traversal.facts.items[0..traversal.facts.count], 0..) |entry, offset| {
-                        const index = if (direction == .forward) seen + offset else times.len - 1 - seen - offset;
-                        try std.testing.expectEqual(before.end + 1 + index, entry.position);
-                        try std.testing.expectEqual(@as(u64, 0), entry.ordinal);
-                        try std.testing.expectEqual(times[index], entry.at);
-                        if (index == times.len - 1) {
-                            try std.testing.expectEqualStrings(admitted.accepted.session.slice(), entry.value.sent.target.session.slice());
-                        } else if (index == times.len - 2) {
-                            try std.testing.expectEqualStrings(unknown.key.slice(), entry.value.send_failed.key.slice());
-                            try std.testing.expectEqualStrings("unknown_session", entry.value.send_failed.code.slice());
-                            try std.testing.expectEqualStrings("absent", entry.value.send_failed.target.?.session.slice());
-                        } else {
-                            var key: [40]u8 = undefined;
-                            const expected_key = if (index == 0) message.key.slice() else try std.fmt.bufPrint(&key, "refused-address-{d}", .{index - 1});
-                            try std.testing.expectEqualStrings(expected_key, entry.value.send_failed.key.slice());
-                            try std.testing.expectEqualStrings(if (index == 0) "unsupported_reasoning_effort" else "invalid_session_reference", entry.value.send_failed.code.slice());
-                            try std.testing.expect(entry.value.send_failed.target == null);
-                        }
-                    }
-                    seen += traversal.facts.count;
-                    if (seen < times.len) cursor = traversal.continuation().?;
-                }
-                try std.testing.expectEqual(times.len, seen);
-            }
         }
     }.run);
 }

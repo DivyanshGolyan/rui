@@ -5,7 +5,7 @@ const session_id = @import("session_id.zig");
 const tool_proposal = @import("tool_proposal.zig");
 const change_ring = @import("change_ring.zig");
 
-pub const Kind = enum { admission, user, assistant, call, tool_result, hosted_call, turn_ended, stop, sent, send_failed, received, approval_requested, session_changed, compacted, model_call, instruction };
+pub const Kind = enum { admission, user, assistant, call, tool_result, hosted_call, turn_ended, stop, received, approval_requested, session_changed, compacted, model_call, instruction };
 
 pub const Role = enum { conversation, detail };
 
@@ -14,7 +14,7 @@ pub const Role = enum { conversation, detail };
 /// surface decides what to draw); `detail` kinds are stored and served but only an `.all` read fetches them.
 pub fn roleOf(kind: Kind) Role {
     return switch (kind) {
-        .admission, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed, .received => .conversation,
+        .admission, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .received => .conversation,
         .call, .approval_requested, .session_changed, .compacted, .model_call, .instruction => .detail,
     };
 }
@@ -30,7 +30,7 @@ pub const conversation: ActivityPage.Kinds = blk: {
 
 test "SUI-180 a conversation asks the feed for exactly the kinds whose role is conversation" {
     // The literal is a deliberate pin of what the conversation requested before the table existed: reclassifying a kind edits both.
-    const listed = ActivityPage.Kinds.initMany(&.{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed });
+    const listed = ActivityPage.Kinds.initMany(&.{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop });
     try std.testing.expect(conversation.eql(listed));
     for (std.enums.values(Kind)) |kind| {
         try std.testing.expectEqual(roleOf(kind) == .conversation, conversation.contains(kind));

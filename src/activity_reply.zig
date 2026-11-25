@@ -44,8 +44,6 @@ pub const ItemJson = struct {
         pub const hosted_call = .{ "{\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
         pub const turn_ended = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"turn\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"ending\":\"", H{ .tag = protocol.TurnEnding }, "\",\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = ContentValueJson }, "}" };
         pub const stop = .{ "{\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"cutoff\":\"", H.decimal, "\",\"completion\":\"", H{ .tag = protocol.SessionStopCompletion }, "\"}" };
-        pub const sent = .{ "{\"admission\":\"", H.decimal, "\",\"admitted_at\":\"", H.decimal, "\",\"target\":", H{ .json = NamedPeerJson }, ",\"content\":", H{ .json = ContentValueJson }, "}" };
-        pub const send_failed = .{ "{\"key\":", H{ .string = protocol.max_key_bytes }, ",\"target\":", H{ .optional_json = NamedPeerJson }, ",\"code\":", H{ .string = protocol.max_code_bytes }, "}" };
         pub const approval_requested = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"action\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\"" } ++ call_details ++ .{"}"};
         pub const session_changed = .{ "{\"revision\":\"", H.decimal, "\",\"field\":\"", H{ .tag = protocol.SessionField }, "\",\"provider_text\":", H{ .optional_string = protocol.max_report_bytes }, "}" };
         pub const instruction = .{ "{\"turn\":", H.optional_id, ",\"revision\":", H.optional_id, ",\"content\":", H{ .json = ContentValueJson }, "}" };
@@ -75,8 +73,6 @@ pub const ItemJson = struct {
                     message.admitted_at, NamedPeerJson.optional(message.sender), message.source_action, ContentValueJson{ .value = message.content },
                 });
             },
-            .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, NamedPeerJson{ .value = sent.target }, ContentValueJson{ .value = sent.content } }),
-            .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), NamedPeerJson.optional(failed.target), failed.code.slice() }),
             .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal, optionalText(&request.description), optionalText(&request.tool), optionalText(&request.server) }),
             .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field, if (change.provider_text) |text| text.slice() else null }),
             .instruction => |instruction| try writeShape(out, value_shapes.instruction, .{ instruction.turn, instruction.revision, ContentValueJson.text(instruction.content) }),

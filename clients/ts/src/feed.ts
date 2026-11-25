@@ -36,8 +36,6 @@ export const FEED_KINDS = [
 	"hosted_call",
 	"turn_ended",
 	"stop",
-	"sent",
-	"send_failed",
 	"received",
 	"approval_requested",
 	"session_changed",

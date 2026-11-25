@@ -81,7 +81,7 @@ Exact committed replays return their saved answer before live-handle validation.
 The full sender address and handle are part of the Message's semantic digest, so reusing a key with a different sender or handle conflicts.
 An accepted Message saves its nullable sender on the admission, and the send takes a position in the sender's sequence.
 A rejected send from an authenticated sender saves its position there too.
-Each Session's Activity therefore orders the Messages it sent and their refusals among its other facts.
+Each Session's Activity therefore orders the Messages it received among its other facts; a Message it sent is the result of the tool call that sent it.
 
 The model adapter renders a peer Message's sender as a separate leading input part.
 It contains only the sender's bare ID, marked as not instructions, the fact that the answer is stored as this request's result and is not delivered to the sender, and how to reply (`message_agent`, or `rui session send` for a Session without it).

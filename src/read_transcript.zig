@@ -1,7 +1,6 @@
 const std = @import("std");
 const tool_delivery = @import("tool_delivery.zig");
 const protocol = @import("protocol.zig");
-const wire_request = @import("wire_request.zig");
 const core = @import("core_tools.zig");
 const storage = @import("store.zig");
 const utf8_validation = @import("utf8_validation.zig");
@@ -310,7 +309,7 @@ noinline fn outlineHeader(store: *storage.Store, arena: std.mem.Allocator, sessi
         .hosted_call => |*presentation| if (presentation.line) |*line| {
             note = try arena.dupe(u8, (line.description() orelse return error.CorruptStore).slice());
         },
-        .assistant, .instruction, .turn_ended, .stop, .sent, .send_failed, .approval_requested, .session_changed, .compacted, .model_call => {},
+        .assistant, .instruction, .turn_ended, .stop, .approval_requested, .session_changed, .compacted, .model_call => {},
     }
     return note;
 }
@@ -585,10 +584,8 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     const submitTestMessage = storage.testingSubmitMessage;
     const TestingCall = storage.TestingCall;
     const settleCallsForTesting = storage.settleCallsForTesting;
-    const ActionExecutionInput = storage.ActionExecutionInput;
     const ActionSettlement = storage.ActionSettlement;
     const ContentReader = storage.ContentReader;
-    const testingBytesContent = storage.testingBytesContent;
     const testingContentReference = storage.testingContentReference;
     const completeConfiguration = storage.testingCompleteConfiguration;
     var tmp = std.testing.tmpDir(.{});
@@ -621,67 +618,21 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     const work = (try database.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try std.testing.expect(try database.deliverAgentMessage(work.binding, "zzzzzz", "hello", .{}) == .failed);
     const sender_action = (try database.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
-    var sender_input: ActionExecutionInput = undefined;
-    try database.readActionExecutionInput(.bash, sender_action, &sender_input);
-    var rename: wire_request.ConfigureCommand = .{};
-    try rename.key.set("transcript-source-label");
-    rename.session = source;
-    rename.configuration.label.state = .value;
-    try rename.configuration.label.value.set("Never expose this target label");
-    try std.testing.expect(try database.configure(&rename, .{}) == .accepted);
-    const refusals = [_]struct { key: []const u8, target: []const u8, code: protocol.MessageRejection }{
-        .{ .key = "transcript-invalid-target", .target = "BAD/attempt", .code = .invalid_session_reference },
-        .{ .key = "transcript-unknown-target", .target = "absent", .code = .unknown_session },
-        .{ .key = "transcript-named-target", .target = source.slice(), .code = .invalid_session_reference },
-    };
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    for (refusals, 0..) |refusal, index| {
-        var refused: wire_request.MessageCommand = .{
-            .text = try testingBytesContent(&tmp, refusal.key, "Rejected text is never transcript content."),
-            .sender = .{},
-            .sender_handle = sender_input.sender_handle,
-            .configuration = if (index == 2) .{} else null,
-        };
-        defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
-        try refused.key.set(refusal.key);
-        try refused.session.set(refusal.target);
-        try refused.sender.?.store.set(root);
-        refused.sender.?.session = source;
-        const reply = database.submitMessageWithModel(&refused, null, .{});
-        try std.testing.expect(reply == .rejected);
-        try std.testing.expectEqual(refusal.code, reply.rejected.code);
-    }
     var stop = try completeSessionStop("transcript-source-stop", source.slice());
     try std.testing.expect(database.stopSession(&stop, .{}) == .accepted);
     try std.testing.expectEqual(ActionSettlement.Outcome.session_stop, (try database.settleActionAttempt(sender_action, .cancelled, "Sender stopped.", .{})).outcome);
     const page = try arena.create(protocol.ActivityFacts);
-    try database.activityPage(&.{ .session = source, .direction = .backward, .kinds = .initMany(&.{ .call, .stop, .send_failed }) }, page);
+    try database.activityPage(&.{ .session = source, .direction = .backward, .kinds = .initMany(&.{ .call, .stop }) }, page);
     var call_address: u64 = 0;
     var stop_address: u64 = 0;
-    var refusal_addresses: [refusals.len]u64 = @splat(0);
     for (page.items[0..page.count]) |*item| switch (item.value) {
         .call => |call| if (call.call_ordinal == 1) {
             call_address = item.position;
         },
         .stop => stop_address = item.position,
-        .send_failed => |failed| {
-            for (refusals, 0..) |refusal, index| {
-                if (std.mem.eql(u8, refusal.key, failed.key.slice())) {
-                    refusal_addresses[index] = item.position;
-                    if (index == 0) {
-                        try std.testing.expect(failed.target == null);
-                    } else {
-                        try std.testing.expectEqualStrings(refusal.target, failed.target.?.session.slice());
-                        try std.testing.expectEqualStrings(if (index == 1) "" else "Never expose this target label", failed.target.?.label.slice());
-                    }
-                }
-            }
-        },
         else => {},
     };
     try std.testing.expect(call_address != 0 and stop_address != 0);
-    for (refusal_addresses) |address| try std.testing.expect(address != 0);
     var command = try completeConfiguration("transcript-reader", "", workspace, "model-a");
     command.configuration.tools = try .of(&.{"read_transcript"});
     const reader_reply = try database.configure(&command, .{});
@@ -699,10 +650,6 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":{d}}}", .{ source.slice(), call_address, full_text.len + 1 }),
         "{" ++ @as([4096]u8, @splat(' ')),
         "{",
-        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"kinds\":[\"send_failed\"]}}", .{source.slice()}),
-        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ source.slice(), refusal_addresses[0] }),
-        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ source.slice(), refusal_addresses[1] }),
-        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ source.slice(), refusal_addresses[2] }),
     };
     var calls: [arguments.len]TestingCall = undefined;
     for (&calls, arguments, 0..) |*call, args, index| {
@@ -721,7 +668,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
         defer reader.close();
         const bytes = try arena.alloc(u8, @intCast(reference.length));
         try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
-        try std.testing.expectEqual(@as(u64, 1), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ input.binding.action_id, if (index < 5 or index >= 8) "succeeded" else "failed" }));
+        try std.testing.expectEqual(@as(u64, 1), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ input.binding.action_id, if (index < 5) "succeeded" else "failed" }));
         switch (index) {
             0 => {
                 try std.testing.expect(std.mem.indexOf(u8, bytes, ".2 tool_result message_agent at=") != null);
@@ -743,20 +690,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
             5 => try std.testing.expect(std.mem.indexOf(u8, bytes, "offset must be within") != null),
             6 => try std.testing.expect(std.mem.indexOf(u8, bytes, "more than 4096 bytes") != null),
             7 => try std.testing.expect(std.mem.indexOf(u8, bytes, "not one well-formed JSON object") != null),
-            8 => {
-                for (refusal_addresses, 0..) |address, refusal| try expectRefusalLine(arena, bytes, address, refusal == 0, refusals[refusal].target);
-            },
-            9, 10, 11 => {
-                const refusal = index - 9;
-                try expectRefusalLine(arena, bytes, refusal_addresses[refusal], refusal == 0, refusals[refusal].target);
-            },
             else => unreachable,
-        }
-        if (index >= 8) {
-            try std.testing.expect(std.mem.indexOf(u8, bytes, "Never expose this target label") == null);
-            try std.testing.expect(std.mem.indexOf(u8, bytes, "BAD/attempt") == null);
-            try std.testing.expect(std.mem.indexOf(u8, bytes, "invalid_session_reference") == null);
-            try std.testing.expect(std.mem.indexOf(u8, bytes, "Rejected text is never transcript content.") == null);
         }
     }
 }
@@ -770,17 +704,6 @@ fn outlineLine(arena: std.mem.Allocator, bytes: []const u8, prefix: []const u8) 
     };
     const rest = bytes[start..];
     return rest[0 .. std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len];
-}
-
-/// A refused send's outline prints its facts: the key, and the target Session only when the reference was valid.
-fn expectRefusalLine(arena: std.mem.Allocator, bytes: []const u8, address: u64, no_target: bool, target: []const u8) !void {
-    const line = try outlineLine(arena, bytes, try std.fmt.allocPrint(arena, "{d}.0 send_failed at=", .{address}));
-    try std.testing.expect(std.mem.indexOf(u8, line, " key=") != null);
-    if (no_target) {
-        try std.testing.expect(std.mem.indexOf(u8, line, " target=") == null);
-    } else {
-        try std.testing.expect(std.mem.endsWith(u8, line, try std.fmt.allocPrint(arena, " target=\"{s}\"", .{target})));
-    }
 }
 
 test "searchActivity finds start_agent call names and stored JSON arguments not call IDs" {

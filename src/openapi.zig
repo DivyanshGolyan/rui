@@ -2292,7 +2292,7 @@ test "Activity schema distinguishes full pages and token-only repeats" {
     }
 }
 
-test "Activity schema requires a nullable failed-send target without weakening other peers" {
+test "Activity schema requires a canonical sender on a received Message" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2300,17 +2300,15 @@ test "Activity schema requires a nullable failed-send target without weakening o
     const built = try document.build();
     const schemas = built.object.get("components").?.object.get("schemas").?.object;
     const schema = schemas.get("ActivityItem").?;
-    const prefix = "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused\",\"code\":\"invalid_session_reference\"";
+    const prefix = "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"received\":{\"admission\":\"1\",\"key\":\"k\",\"turn\":null,\"state\":\"queued\",\"admitted_at\":\"1\",\"source_action\":null,\"content\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"abababababababababababababababababababababababababababababababab\"}";
     const cases = .{
-        .{ prefix ++ ",\"target\":null}}}", true },
-        .{ prefix ++ ",\"target\":{\"session\":\"absent\",\"label\":null}}}}", true },
-        .{ prefix ++ ",\"target\":{\"session\":\"\",\"label\":null}}}}", true },
+        .{ prefix ++ ",\"sender\":{\"session\":\"absent\",\"label\":null}}}}", true },
+        .{ prefix ++ ",\"sender\":null}}}", true },
         .{ prefix ++ "}}}", false },
-        .{ prefix ++ ",\"target\":{}}}}", false },
-        .{ prefix ++ ",\"target\":\"\"}}}", false },
-        .{ prefix ++ ",\"target\":{\"session\":\"absent\"}}}}", false },
-        .{ prefix ++ ",\"target\":{\"session\":null,\"label\":null}}}}", false },
-        .{ "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"sent\":{\"admission\":\"1\",\"admitted_at\":\"1\",\"target\":null,\"content\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ "abababababababababababababababababababababababababababababababab" ++ "\"}}}}", false },
+        .{ prefix ++ ",\"sender\":{}}}}", false },
+        .{ prefix ++ ",\"sender\":\"\"}}}", false },
+        .{ prefix ++ ",\"sender\":{\"session\":\"absent\"}}}}", false },
+        .{ prefix ++ ",\"sender\":{\"session\":null,\"label\":null}}}}", false },
     };
     inline for (cases) |case| {
         const value = try std.json.parseFromSliceLeaky(Value, allocator, case[0], .{});

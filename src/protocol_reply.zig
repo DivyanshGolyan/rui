@@ -145,8 +145,6 @@ pub const ActivityPage = struct {
         const Ref = JsonContentValue;
         const Fact = protocol.ActivityItem;
         const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, source_action: ?JsonString(20) = null, content: Ref };
-        const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
-        const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: ?JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref, description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
         const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
@@ -155,7 +153,7 @@ pub const ActivityPage = struct {
         const Instruction = struct { turn: ?JsonString(20), revision: ?JsonString(20), content: Ref };
         const ModelCall = struct { model: JsonString(protocol.max_model_bytes), served_model: ?JsonString(protocol.max_model_bytes), input_tokens: ?JsonString(20), output_tokens: ?JsonString(20), cached_tokens: ?JsonString(20), latency_ms: ?JsonString(20), first_event_ms: ?JsonString(20), status: JsonString(protocol.max_code_bytes), attempts: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction } };
         const Items = JsonArray(Item, 16);
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
         const Calls = JsonArray(CallEntry, 3);
@@ -202,10 +200,6 @@ pub const ActivityPage = struct {
                     if ((value.sender != null and value.source_action != null) or (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.sender != null or value.source_action != null)))) return error.InvalidActivityPage;
                     fact.value = @unionInit(Fact.Value, @tagName(kind), value);
                 },
-                .sent => |sent| {
-                    fact.value = .{ .sent = .{ .admission = try id(sent.admission, false), .admitted_at = try id(sent.admitted_at, false), .target = try sent.target.peer(), .content = sent.content.value } };
-                    if (fact.at != fact.value.sent.admitted_at) return error.InvalidActivityPage;
-                },
                 .approval_requested => |request| {
                     if (!protocol.validSessionId(request.session.slice())) return error.InvalidActivityPage;
                     fact.value = .{ .approval_requested = .{ .action = try id(request.action, false), .operation = try id(request.operation, false), .session = request.session.value, .call_ordinal = try id(request.call_ordinal, true), .description = if (request.description) |text| text.value else null, .tool = if (request.tool) |text| text.value else null, .server = if (request.server) |text| text.value else null } };
@@ -234,10 +228,6 @@ pub const ActivityPage = struct {
                         .status = call.status.value,
                         .attempts = try id(call.attempts, false),
                     } };
-                },
-                .send_failed => |failed| {
-                    if (failed.code.slice().len == 0) return error.InvalidActivityPage;
-                    fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = if (failed.target) |peer| try peer.peer() else null, .code = failed.code.value } };
                 },
                 .assistant => |assistant| fact.value = .{ .assistant = .{ .content = try textOf(assistant.content), .final = assistant.final } },
                 .tool_result => |result| {
@@ -2642,14 +2632,9 @@ test "a turn_ended row's ending agrees with its saved code and content, and a fi
 test "an activity row carries its time, and a Message's rows carry its admission time" {
     const content: content_value.Value = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } };
     const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1792925000 };
-    var peer: protocol.NamedPeer = .{ .session = .{} };
-    try peer.session.set("k7m2qx");
-    const sent: protocol.ActivityItem.Sent = .{ .admission = 2, .target = peer, .content = content, .admitted_at = 1792925000 };
     for ([_]struct { value: protocol.ActivityItem.Value, at: u64, failure: ?anyerror = null }{
         .{ .value = .{ .admission = message }, .at = 1792925000 },
         .{ .value = .{ .admission = message }, .at = 1792925001, .failure = error.InvalidActivityPage },
-        .{ .value = .{ .sent = sent }, .at = 1792925000 },
-        .{ .value = .{ .sent = sent }, .at = 1, .failure = error.InvalidActivityPage },
         .{ .value = .{ .assistant = .{ .content = content.text } }, .at = 0, .failure = error.InvalidResponse },
     }) |case| {
         var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
@@ -2662,19 +2647,6 @@ test "an activity row carries its time, and a Message's rows carry its admission
             try std.testing.expectError(failure, ActivityPage.parse(writer.buffered(), .{}));
         } else try std.testing.expectEqual(case.at, (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].at);
     }
-    for ([_][]const u8{ "Review the WAL", "" }) |label| {
-        var named = sent;
-        try named.target.label.set(label);
-        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
-        facts.items[0] = .{ .position = 1, .at = 1792925000, .value = .{ .sent = named } };
-        try facts.work.workspace.set("/w");
-        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        try activity_reply.writePage(&writer, &facts);
-        const target = (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].value.sent.target;
-        try std.testing.expectEqualStrings(label, target.label.slice());
-        try std.testing.expectEqualStrings(if (label.len == 0) "k7m2qx" else label, target.name());
-    }
     var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
     facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .assistant = .{ .content = content.text } } };
     try facts.work.workspace.set("/w");
@@ -2686,28 +2658,6 @@ test "an activity row carries its time, and a Message's rows carry its admission
     var missing: [activity_reply.max_page_bytes]u8 = undefined;
     const bytes = try std.fmt.bufPrint(&missing, "{s}{s}", .{ writer.buffered()[0..at], writer.buffered()[at + field.len ..] });
     try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(bytes, .{}));
-}
-
-test "refused peer activity retains absent and canonical targets" {
-    for ([_]bool{ false, true }) |has_target| {
-        var target: protocol.NamedPeer = .{ .session = .{} };
-        try target.session.set("absent");
-        var failure: protocol.ActivityItem.SendFailed = .{ .key = .{}, .target = if (has_target) target else null, .code = .{} };
-        try failure.key.set("refused");
-        try failure.code.set(if (has_target) "unknown_session" else "invalid_session_reference");
-        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
-        facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .send_failed = failure } };
-        try facts.work.workspace.set("/w");
-        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        try activity_reply.writePage(&writer, &facts);
-        const decoded = (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].value.send_failed;
-        try std.testing.expectEqualStrings(failure.key.slice(), decoded.key.slice());
-        try std.testing.expectEqualStrings(failure.code.slice(), decoded.code.slice());
-        if (has_target) {
-            try std.testing.expectEqualStrings("absent", decoded.target.?.session.slice());
-        } else try std.testing.expect(decoded.target == null);
-    }
 }
 
 test "SUI-47 work state wire preserves owned facts" {

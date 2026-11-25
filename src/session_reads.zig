@@ -1536,7 +1536,6 @@ test "SUI-49 Message placement preserves provenance across pages" {
             var peer: protocol.NamedPeer = .{ .session = .{} };
             try peer.session.set("9f8e7d");
             try peer.label.set("Peer");
-            const outbound: protocol.ActivityItem.Value = .{ .sent = .{ .admission = 99, .target = peer, .content = FakeHost.textValue(), .admitted_at = std.math.maxInt(u64) } };
             var incoming = FakeHost.message(90).admission;
             incoming.sender = peer;
             incoming.admitted_at = std.math.maxInt(u64);
@@ -1552,13 +1551,11 @@ test "SUI-49 Message placement preserves provenance across pages" {
                         const rows = [_]protocol.ActivityItem{
                             .{ .position = 2, .at = 1, .value = if (source == .session) .{ .received = value } else .{ .admission = value } },
                             .{ .position = 3, .at = 1, .value = .{ .received = incoming } },
-                            .{ .position = 4, .at = 1, .value = outbound },
-                            .{ .position = 5, .at = 1, .value = if (state == .applied) .{ .user = value } else .{ .session_changed = .{ .revision = 2, .field = .label } } },
+                            .{ .position = 4, .at = 1, .value = if (state == .applied) .{ .user = value } else .{ .session_changed = .{ .revision = 2, .field = .label } } },
                         };
                         const expected = [_]Expected{
                             .{ .text = if (source == .session) received else "" },
                             .{ .text = received },
-                            .{ .text = "" },
                             .{ .text = if (state == .applied and source != .session) user else "" },
                         };
                         const queued: protocol.Queued = if (state == .queued and source != .session) .{ .count = if (oldest) 1 else 2, .oldest_position = if (oldest) 2 else 1, .newest_admission = 1, .newest_position = 2 } else .{};
@@ -2091,20 +2088,6 @@ test "session_reads policy cursor is inclusive only for a fresh provisional repl
     try std.testing.expect(!above.kinds.contains(.session_changed));
     try std.testing.expect(!above.kinds.contains(.compacted));
     try std.testing.expect(above.kinds.eql(activity_read.conversation));
-}
-
-test "SUI-51 a stored send entry draws nothing, so a peer send shows only on its tool row" {
-    var peer: protocol.NamedPeer = .{ .session = .{} };
-    try peer.session.set("9f8e7d");
-    const tail = [_]FakeHost.Tail{
-        .{ .value = .{ .sent = .{ .admission = 1, .target = peer, .content = FakeHost.textValue(), .admitted_at = 1 } } },
-        .{ .value = .{ .received = FakeHost.received(2, peer) } },
-    };
-    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 2 };
-    var job: Job = .{ .opening = true, .session = "k7m2qx", .line_read = .{ .revision = 1, .end = 2 } };
-    try host.read(&job);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Received message"));
-    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "Messaged"));
 }
 
 test "SUI-51 opening reads expose ordered rows and scan boundaries" {
