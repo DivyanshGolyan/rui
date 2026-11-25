@@ -365,7 +365,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
                 const wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
                 defer wire.deinit();
                 const presentation = wire.value.object.get("actions").?.object.get("unresolved").?.array.items[0].object.get("presentation").?.object;
-                try std.testing.expectEqualStrings("Run first command", presentation.get("description").?.string);
+                try std.testing.expectEqualStrings("Run first command", presentation.get("line").?.object.get("before").?.string);
                 try std.testing.expectEqualStrings("pending_permission", presentation.get("code").?.string);
                 try std.testing.expect(presentation.get("publication_position").? == .null);
                 const first = parsed.value.actions.unresolved[0];
@@ -406,7 +406,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
                 const resolved = wire.value.object.get("actions").?.object.get("resolved").?.array.items[0].object;
                 try std.testing.expectEqualStrings("0", resolved.get("call_ordinal").?.string);
                 const presentation = resolved.get("presentation").?.object;
-                try std.testing.expectEqualStrings("Run first command", presentation.get("description").?.string);
+                try std.testing.expectEqualStrings("Run first command", presentation.get("line").?.object.get("before").?.string);
                 try std.testing.expectEqualStrings("denied", presentation.get("code").?.string);
                 try std.testing.expectEqual(std.json.Value.null, std.meta.activeTag(presentation.get("publication_position").?));
                 const second = parsed.value.actions.unresolved[0];

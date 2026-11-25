@@ -94,7 +94,7 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
                     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
                     defer parsed.deinit();
                     const unresolved = parsed.value.object.get("actions").?.object.get("unresolved").?.array.items;
-                    try std.testing.expectEqualStrings(line.expected, unresolved[0].object.get("presentation").?.object.get("description").?.string);
+                    try std.testing.expectEqualStrings(line.expected, unresolved[0].object.get("presentation").?.object.get("line").?.object.get("before").?.string);
                 }
             }
         }
