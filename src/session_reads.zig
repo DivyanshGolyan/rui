@@ -2411,7 +2411,7 @@ test "session_reads latest ending follows scan cursor, survives empty scans, ign
     var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
     try host.read(&job);
     try std.testing.expectEqual(@as(u64, 1), job.result.latest_ending.?.key.position);
-    try std.testing.expectEqualStrings("ctrl+r retries", job.result.latest_ending.?.cause.key.?);
+    try std.testing.expect(job.result.latest_ending.?.cause.retry);
     for ([_]u64{ 1, 2, 3, 4, 5 }) |end| {
         job.latest_ending = job.result.latest_ending;
         job.cursor = job.result.cursor;
@@ -2421,7 +2421,7 @@ test "session_reads latest ending follows scan cursor, survives empty scans, ign
         job.line_read = .{ .revision = 1, .end = end };
         try host.read(&job);
         try std.testing.expectEqual(if (end <= 2) @as(u64, 1) else end, job.result.latest_ending.?.key.position);
-        try std.testing.expectEqual(end <= 2, job.result.latest_ending.?.cause.key != null);
+        try std.testing.expectEqual(end <= 2, job.result.latest_ending.?.cause.retry);
         try std.testing.expect(std.mem.indexOf(u8, host.shown, "ctrl+r") == null);
     }
     job.latest_ending = job.result.latest_ending;
@@ -2439,7 +2439,7 @@ test "session_reads opening finds own newest ending outside resident rows and ac
     var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = tail.len } };
     try host.read(&job);
     try std.testing.expectEqual(@as(u64, 1), job.result.latest_ending.?.key.position);
-    try std.testing.expect(job.result.latest_ending.?.cause.key != null);
+    try std.testing.expect(job.result.latest_ending.?.cause.retry);
     try std.testing.expectEqual(@as(usize, 4), host.pages);
     try std.testing.expectEqual(@as(usize, 0), host.contents);
     try std.testing.expectEqual(@as(usize, 0), job.result.row_count);

@@ -834,7 +834,7 @@ test "FeedView retry tail is frame-local, latest-key-only and gated by cause and
         for (1..141) |width| {
             const surface = try testFrame(&view, arena.allocator(), @intCast(width), 180);
             for (window.entries[0..window.count], 0..) |entry, index| {
-                const expected_hint = actionable and latest != null and latest.?.cause.key != null and std.meta.eql(entry.key, latest.?.key);
+                const expected_hint = actionable and latest != null and latest.?.cause.retry and std.meta.eql(entry.key, latest.?.key);
                 var expected: viewport.Sized(128, true) = .{ .sidenotes = true, .quotes = true };
                 try expected.append(if (expected_hint) "× Provider unreachable · ctrl+r retries\n" else words);
                 try expected.prepare();

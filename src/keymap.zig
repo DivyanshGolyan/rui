@@ -157,6 +157,14 @@ pub const list = [_]Reference{
     .{ .key = "ctrl+c", .meaning = "leave", .keys = &.{.{ .key = .ctrl_c }}, .aliases = &.{.ctrl_d} },
 };
 
+/// What a surface shows to name the retry key: the key a person presses and what it does, spelled from `list` alone.
+pub const retry_hint = hint("ctrl+r", "retries");
+
+fn hint(comptime key: []const u8, comptime does: []const u8) []const u8 {
+    for (list) |row| if (std.mem.eql(u8, row.key, key)) return key ++ " " ++ does;
+    @compileError("no key " ++ key);
+}
+
 pub const ListError = enum { empty_row, missing_bound_key, unbound_row, duplicate_key };
 
 /// Check the union: every bound key is listed or explicitly aliased exactly
@@ -279,4 +287,10 @@ test "every keys reference row names its input including non-table input" {
     } else return error.MissingReferenceRow;
     try std.testing.expectEqualStrings("fold / expand tree", option.meaning);
     try std.testing.expectEqualSlices(ReferenceInput, &.{ .{ .key = .alt_left }, .{ .key = .alt_right } }, option.keys);
+}
+
+test "the retry hint names the listed retry key and what it does" {
+    try std.testing.expectEqualStrings("ctrl+r retries", retry_hint);
+    for (list) |row| if (std.mem.eql(u8, row.key, "ctrl+r")) return try std.testing.expectEqualStrings("retry", row.meaning);
+    return error.RetryKeyNotListed;
 }

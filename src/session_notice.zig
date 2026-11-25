@@ -3,6 +3,9 @@ const submission = @import("submission_state.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const Text = @import("TerminalText.zig");
 const protocol = @import("protocol.zig");
+const keymap = @import("keymap.zig");
+
+const retry_original = keymap.retry_hint ++ " original";
 
 pub const Held = struct { kind: submission.Kind, state: submission.State, failure: ?Failure = null };
 
@@ -42,9 +45,9 @@ pub fn presentation(opening: bool, waiting: bool, held: ?Held) Presentation {
         const shown: struct { line: ?[]const u8, action: ?Key } = if (original.failure) |failure|
             .{ .line = failure.line, .action = failure.key }
         else switch (original.state) {
-            .not_started => .{ .line = "Not sent · ctrl+r retries original", .action = .retry },
+            .not_started => .{ .line = "Not sent · " ++ retry_original, .action = .retry },
             .submitting => .{ .line = if (original.kind == .decision) "Sending…" else null, .action = null },
-            .unconfirmed => .{ .line = if (original.kind == .decision) "! Decision not confirmed · ctrl+r retries original" else "Not confirmed · ctrl+r retries original", .action = .retry },
+            .unconfirmed => .{ .line = if (original.kind == .decision) "! Decision not confirmed · " ++ retry_original else "Not confirmed · " ++ retry_original, .action = .retry },
             .rejected => .{ .line = "Rejected · /discard", .action = .discard },
         };
         if (original.kind == .message) result.note = shown.line else result.status = shown.line;
