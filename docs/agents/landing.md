@@ -38,6 +38,7 @@ A local path or CI artifact pointer alone does not meet the evidence requirement
 Keep published commits unchanged so their CI evidence retains its SHA.
 
 Green means the required `admission` check completed successfully for the PR's current head; it need not be rerun after `main` moves.
+When `admission` fails, [Admission notice](../../.github/workflows/admission-notice.yml) comments its errors on the PR; when only `plan` and `admission` failed, editing the PR body reruns them against the new body.
 [The main ruleset](../../.github/main-ruleset.json) records the required GitHub enforcement; the live ruleset must keep matching it.
 Pending, skipped, cancelled or earlier-head success is not green.
 A green PR squash-merges without waiting for review signoff or a promotion.
