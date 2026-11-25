@@ -1,3 +1,4 @@
+import fnmatch
 import re
 import subprocess
 
@@ -6,6 +7,8 @@ VERSION = re.compile(r"^pub const schema_version: u32 = (\d+);$", re.MULTILINE)
 ROW = re.compile(r"\.\{ \.schema_version = (\d+), \.digest = 0x([0-9a-fA-F]+) \}")
 MIGRATIONS = re.compile(r"^pub const migrations = \[_\]Migration\{", re.MULTILINE)
 FROM = re.compile(r"\.from\s*=\s*(\d+)")
+# The Store migration inputs a MySQL 8.4 migration check reads beyond the step table.
+MIGRATION_INPUTS = "src/store/migration_*"
 
 
 def bump_error(name, candidate, base, released):
@@ -88,6 +91,36 @@ def migration_steps(source):
             steps[int(FROM.search(text)[1])] = text
             entry = []
         position += 1
+
+
+def migration_text_changed(before, after):
+    """Whether the migration step table's entries differ between two revisions of schema.zig.
+
+    Entries are compared as parsed {from: text}, so an edit outside the table is no change. A table that
+    cannot be parsed counts as changed.
+    """
+    if before == after:
+        return False
+    try:
+        old, new = (migration_steps(source) if source is not None else {} for source in (before, after))
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return True
+    return old != new
+
+
+def touches_mysql_migration(paths, contents):
+    """Whether a change touches a Store migration step, so a ready PR must run the live MySQL migration check.
+
+    True when a migration input (MIGRATION_INPUTS) changed, or when schema.zig changed and an entry of its step
+    table did. `contents` maps each changed schema.zig to its (base, head) text, as select_tests.revision_contents does.
+    """
+    if any(fnmatch.fnmatchcase(path, MIGRATION_INPUTS) for path in paths):
+        return True
+    if SCHEMA not in paths:
+        return False
+    if SCHEMA not in contents:
+        return True
+    return migration_text_changed(*contents[SCHEMA])
 
 
 # MySQL migration SQL, not the SQLite text beside it. A search of CHECK_CLAUSE by a needle with a quote character
