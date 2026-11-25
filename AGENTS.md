@@ -72,6 +72,20 @@ This section owns only how Codex reports what it finds:
 - **Design before cases.** Report a departure from those sections (duplicated authority, policy mixed with I/O in a shell, public surface that exposes representation) ahead of any single edge case it causes.
 - **Domain tests.** For an edge case in a combination of states, report once the missing test over the owner's whole domain and name the cases it must include.
 
+## Rules from Promote reds
+
+Each rule here came from a mistake that reached `main` and first failed in Promote more than once.
+Fix a repeat at the enforcing owner, not here; drop a row once its mistake can no longer be written.
+
+| Rule | Enforced by |
+| --- | --- |
+| A MySQL migration step never searches `CHECK_CLAUSE` for a quoted needle. | `check_clause_lint` in [release_numbers.py](tests/ci/release_numbers.py), policy suite. |
+| A change to a migration step, migration input or test code with a MySQL leg proves it on live MySQL 8.4 before merge. | `touches_mysql_migration` and `mysql_leg_tests` set `pr_mysql_migration` ([gates](docs/verification/gates.md)). |
+| An old-format Store in a test is built forward from frozen formats, never rewound from today's. | `src/store/history.zig` is the only builder; the rewind helpers are deleted. |
+| A change to where a Host listens or how the restart census finds it runs the previous-release upgrade on the PR. | `UPGRADE_CHECK_PATHS` in [select_tests.py](tests/ci/select_tests.py) and its selection test. |
+| A CLI rename that changes help text keeps the upgrade check's `Dialect` reading this build as the newest release. | `Dialect.assert_newest` in [previous_release_upgrade.py](tests/integration/previous_release_upgrade.py); Promote only, so a judgment call on CLI PRs. |
+| A fake Host that serves a derived endpoint holds its interface directory's lock. | `host_process.claimed_endpoint` is the shared owner; nothing fails a hand-rolled bind, so a judgment call. |
+
 ## Status updates and reports
 
 Report progress, blockers and verification results relevant to the requested task.
