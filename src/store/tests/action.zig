@@ -1698,6 +1698,7 @@ test "background owed stop excludes person peer and previously admitted final in
                     configure.configuration.parent.state = .value;
                     try configure.configuration.parent.value.set(parent.slice());
                     const child = (try storage.configure(&configure, .{})).accepted.session;
+                    const peer_send = if (source == .peer) try shared_fixtures.proposeMessageAgent(&storage, &tmp, parent.slice(), child.slice(), "") else null;
                     _ = try NativePromotion.promoted(&storage, &tmp, child.slice());
                     const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
                     if (idle) {
@@ -1707,7 +1708,7 @@ test "background owed stop excludes person peer and previously admitted final in
                     switch (source) {
                         .person => try submitTestMessage(&storage, &tmp, "late-person", "late-person-key", child.slice(), "Pending person input"),
                         .peer => {
-                            _ = try NativePromotion.sendPeer(&storage, &tmp, parent.slice(), child.slice(), "Pending peer input");
+                            try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(peer_send.?, child.slice(), "Pending peer input", .{}));
                             const continuation = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
                             try NativePromotion.finishModel(&storage, &tmp, continuation);
                         },
@@ -2393,6 +2394,8 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try shared_fixtures.configureTestSessionWithMode(&storage, "value-provenance", "bypass");
+            const peer = try shared_fixtures.configurePeerSender(&storage, "value-provenance-peer");
+            const peer_send = try shared_fixtures.proposeMessageAgent(&storage, &tmp, peer.slice(), session.slice(), "");
             const action_id = try NativePromotion.promoted(&storage, &tmp, session.slice());
             const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
             var input: action_domain.ActionExecutionInput = undefined;
@@ -2407,7 +2410,7 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
                 const key = try std.fmt.bufPrint(&key_buffer, "visible-person-{d}", .{index});
                 try submitTestMessage(&storage, &tmp, key, key, session.slice(), "visible person");
             }
-            try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(binding, session.slice(), "visible peer", .{}));
+            try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(peer_send, session.slice(), "visible peer", .{}));
             _ = try storage.settleActionAttempt(binding, .succeeded, "visible final", .{});
 
             var queued_request: protocol.ActivityPage = .{ .session = session, .direction = .forward, .kinds = .initOne(.received) };

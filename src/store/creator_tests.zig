@@ -190,8 +190,8 @@ test "session creator names the Session that sent a creatorless Session's first 
 
             const configured = try testing.configureTestSession(&storage, "creator-configured");
             const personal = try testing.configureTestSession(&storage, "creator-personal");
-            try testing.submitTestMessage(&storage, &tmp, "creator-personal-first", "creator-personal-first", personal.slice(), "work on this");
             const first = try fixtures.proposeMessageAgentCalls(&storage, &tmp, sender, &.{ configured.slice(), personal.slice() });
+            try testing.submitTestMessage(&storage, &tmp, "creator-personal-first", "creator-personal-first", personal.slice(), "work on this");
 
             // Created by configure (no creator), then first messaged by the sender: the sender is its creator.
             try std.testing.expectEqual(@import("domain/command.zig").AgentDelivery.delivered, try storage.deliverAgentMessage(first, configured.slice(), "work on this", .{}));
