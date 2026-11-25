@@ -10293,7 +10293,8 @@ const LinesDomainBase = struct {
         archive_seq: u64,
         stopped_at: u64,
         label: ?WireText,
-        first: ?struct { position: u64, admission: u64, content: @FieldType(First, "content"), line: ?WireText },
+        first: ?struct { position: u64, admission: u64, sender: ?struct { session: WireText }, content: @FieldType(First, "content") },
+        first_prefix: ?WireText,
     };
 
     fn throughWindow(listed: Listed, seq: u64) Listed {
@@ -10303,7 +10304,8 @@ const LinesDomainBase = struct {
             .stopped_at = test_now_s - seq,
             .label = if (listed.label) |label| WireText{ .text = label } else null,
             // A window row a Session is listed by carries its first Message, which makes it visible.
-            .first = .{ .position = 0, .admission = seq, .content = null, .line = .{ .text = "archived line" } },
+            .first = .{ .position = 0, .admission = seq, .sender = null, .content = null },
+            .first_prefix = .{ .text = "archived line" },
         };
         return Listed.archived(wire);
     }
