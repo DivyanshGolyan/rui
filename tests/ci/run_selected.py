@@ -20,7 +20,7 @@ TEST_TIMEOUT = "5m"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("targets", help="JSON array from the selector")
-    parser.add_argument("--check-part", choices=("all", "execution", "callers"), default="all")
+    parser.add_argument("--check-part", choices=("all", "execution", "callers", "both"), default="all")
     parser.add_argument("--ci-artifacts", help="Verified emitted executables from this run's producer")
     parser.add_argument("--retry", action="store_true",
                         help="Rerun a failed batch once; the selector allows it only without strict paths")
