@@ -170,6 +170,7 @@ const cores = .{
     .{ "session_settings.zig", @import("session_settings.zig") },
     .{ "session_upgrade.zig", @import("session_upgrade.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
+    .{ "setting_words.zig", @import("setting_words.zig") },
     .{ "sign_in.zig", @import("sign_in.zig") },
     .{ "skill_completion.zig", @import("skill_completion.zig") },
     .{ "skill_reference.zig", @import("skill_reference.zig") },

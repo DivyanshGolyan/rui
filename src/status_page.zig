@@ -34,7 +34,7 @@ pub const Session = struct {
     model: Bounded(max_model_bytes),
     effort: ?ReasoningEffort,
     effort_override: bool,
-    permission: enum { ask, bypass },
+    permission: @import("cli_value.zig").PermissionMode,
     tools: @import("command_input.zig").ToolsField,
     loaded_tools: @import("command_input.zig").ToolsField = .{ .state = .value },
     instructions: bool,

@@ -9,6 +9,7 @@ const status = @import("status_page.zig");
 const catalog = @import("model_catalog.zig");
 const capability = @import("model_capability.zig");
 const tools = @import("built_in_tool.zig");
+const setting_words = @import("setting_words.zig");
 const ModelChoice = @import("model_choice.zig");
 const keymap = @import("keymap.zig");
 const keypress = @import("keypress.zig");
@@ -178,8 +179,8 @@ fn bind(self: *Self) void {
     self.panel.on_pick = pick;
     self.panel.title = self.title();
     self.fields = .{
-        .{ .label = "Effort", .value = if (!self.ready) "unavailable" else if (self.session.effort_override) if (self.session.effort) |effort| @tagName(effort) else "model default" else "model default", .tail = self.failures[0] },
-        .{ .label = "Permissions", .value = if (!self.ready) "unavailable" else if (self.session.permission == .bypass) "run without asking" else "ask first", .tail = self.failures[1] },
+        .{ .label = "Effort", .value = if (!self.ready) "unavailable" else setting_words.effort(if (self.session.effort_override) self.session.effort else null), .tail = self.failures[0] },
+        .{ .label = "Permissions", .value = if (!self.ready) "unavailable" else setting_words.permission(self.session.permission), .tail = self.failures[1] },
         .{ .label = "Allowed tools", .value = "", .tail = self.failures[2] },
         .{ .label = "Folder", .value = if (self.ready) self.session.workspace.slice() else "unavailable", .selectable = false },
         .{ .label = "Model", .value = if (self.ready) self.session.model.slice() else "unavailable", .tail = self.failures[4] },
@@ -224,19 +225,19 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
     self.failures[row] = null;
     switch (row) {
         0 => {
-            self.effort_labels[0] = "model default";
+            self.effort_labels[0] = setting_words.effort_default;
             self.effort_count = 1;
             const shown = if (self.standalone != null or self.session.effort_override) self.session.effort else null;
             var current: ?usize = if (shown == null) 0 else null;
             for (std.enums.values(catalog.ReasoningEffort)) |effort| {
                 if (!capability.supportsReasoningEffort(catalog.shipped, self.session.model.slice(), effort)) continue;
                 if (shown == effort) current = self.effort_count;
-                self.effort_labels[self.effort_count] = @tagName(effort);
+                self.effort_labels[self.effort_count] = setting_words.effort(effort);
                 self.effort_count += 1;
             }
             self.panel.openChoice(self.effort_labels[0..self.effort_count], current);
         },
-        1 => self.panel.openChoice(&.{ "run without asking", "ask first" }, if (self.session.permission == .bypass) 0 else 1),
+        1 => self.panel.openChoice(&setting_words.permission_labels, setting_words.permissionChoice(self.session.permission)),
         2 => {
             self.tool_draft = self.session.builtInTools();
             self.updateTools();
@@ -291,7 +292,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize, choice: usize) !vo
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (row) {
         0 => try self.save(ctx, row, .{ .effort = if (choice == 0) null else std.meta.stringToEnum(catalog.ReasoningEffort, self.effort_labels[choice]).? }),
-        1 => try self.save(ctx, row, .{ .permission = if (choice == 0) .bypass else .ask }),
+        1 => try self.save(ctx, row, .{ .permission = setting_words.permissionAt(choice) }),
         2 => {
             self.tool_draft.?.toggle(std.enums.values(tools.BuiltInTool)[choice]);
             self.updateTools();
