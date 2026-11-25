@@ -95,6 +95,8 @@ Fix a repeat at the enforcing owner, not here; drop a row once its mistake can n
 | Rule | Enforced by |
 | --- | --- |
 | A PR opens, and turns ready, only with a body admission accepts: Goal line, Summary sketch for `src/` changes, and for UI files either `No screen change: <reason>` or screens already captured (`open_pr.py open --frames DIR`). | `open_pr.py open` and `open_pr.py ready` call `pr_shape.ready_refusal`; `.claude/hooks/ready_pr_shape.py` asks it for MCP create and ready calls; `gh pr create` and `gh pr ready` typed by hand are not covered. |
+| A message or checklist says the work waits on the person only while a question is open. | `.claude/hooks/person_messages.py` refuses it unless the message asks (`?`, a card) or `request_decision` was called this turn. |
+| A decision card is in everyday words: no backticks, quoted symbols, identifiers or flags. | `.claude/hooks/person_messages.py` (`CODE_WORDS`); extend it each time a card draws "didn't understand". |
 | A PR merges only after its latest completed review is clean (Codex's, or while Codex is out the `pr-reviewer` agent's). | `.claude/hooks/review_before_merge.py` refuses the merge; it reads reviews through `tests/ci/merge_review.py`; [Review evidence](docs/agents/landing.md#review-evidence). |
 
 ## Status updates and reports
