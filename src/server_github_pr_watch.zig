@@ -33,24 +33,17 @@ const labels: action_attempt.Labels = .{
     .failure = "pull request watch failure",
 };
 
-/// The timing a Host gives its watches. Production waits are the defaults; a loopback test origin
-/// scales every wait down so a fixture sees a poll in milliseconds, never a different decision.
+/// The timing a Host gives its watches. A loopback test origin scales every wait down.
 pub const Limits = struct {
     /// The longest a watch runs; the Action's own execution deadline.
     deadline_ms: u64 = 3_600_000,
-    poll_ms: u64 = 60_000,
-    poll_jitter_ms: u64 = 5000,
-    /// One second of failure backoff and rate-limit waiting.
-    second_ms: u64 = 1000,
-    budget_wait_ms: u64 = 40_000,
+    pacing: watch.Pacing = .{},
     /// How often the Host-wide request budget refills one request.
     request_interval_ms: u64 = 1000,
 
-    pub const loopback: Limits = .{ .poll_ms = 100, .poll_jitter_ms = 10, .second_ms = 10, .budget_wait_ms = 300, .request_interval_ms = 5 };
+    pub const loopback: Limits = .{ .pacing = .loopback, .request_interval_ms = 5 };
 };
 
-/// Consecutive failed polls that end a watch; one good poll resets the count.
-const max_failures = 5;
 /// One poll's requests and a gh helper run must each finish within this bound or the poll fails.
 const step_ms = 30_000;
 
@@ -65,25 +58,31 @@ const Worker = struct {
     account: ?Bounded(descriptor.max_login_bytes),
     /// Spreads the polls of watches that started together.
     seed: u64,
-    limits: Limits,
+    pacing: watch.Pacing,
     deadline: std.Io.Clock.Timestamp,
     origin: if (test_hooks) ?[]const u8 else void,
     budget: fetch.Budget,
     cache: pressure.Cache = .{},
     cancel: std.atomic.Value(bool) = .init(false),
-    /// Release-stored last, after `code` and `text` are final.
+    /// Release-stored last, after `code`, `text` and `cancelled` are final.
     done: std.atomic.Value(bool) = .init(false),
+    /// The worker stopped because it was cancelled, so `code` and `text` hold no Resolution.
+    cancelled: bool = false,
     code: store.ActionResolutionCode = .failed,
     text: [watch.max_resolution_bytes]u8 = undefined,
     text_len: usize = 0,
 
     fn run(self: *Worker) void {
-        self.work() catch |err| switch (err) {
-            // A Stop or shutdown cancelled the worker; its caller settles, so there is no Resolution to write.
-            error.Cancelled => {},
-        };
+        self.execute();
         self.done.store(true, .release);
         self.wake.wakeDispatch();
+    }
+
+    fn execute(self: *Worker) void {
+        self.work() catch |err| switch (err) {
+            // A Stop, a fence or shutdown cancelled the worker; its caller decides what the Action becomes.
+            error.Cancelled => self.cancelled = true,
+        };
     }
 
     /// Asks the worker to stop at its next wait or request; it still sets `done`.
@@ -91,12 +90,17 @@ const Worker = struct {
         self.cancel.store(true, .release);
     }
 
-    const Ending = struct { code: store.ActionResolutionCode, text: []const u8 };
+    const State = union(enum) {
+        running,
+        /// Cancelled before it could write a Resolution; only a Stop or shutdown disposes of it.
+        cancelled,
+        finished: struct { code: store.ActionResolutionCode, text: []const u8 },
+    };
 
-    /// The worker's Resolution once it has ended, else null. A cancelled worker's text is empty.
-    fn ending(self: *const Worker) ?Ending {
-        if (!self.done.load(.acquire)) return null;
-        return .{ .code = self.code, .text = self.text[0..self.text_len] };
+    fn state(self: *const Worker) State {
+        if (!self.done.load(.acquire)) return .running;
+        if (self.cancelled) return .cancelled;
+        return .{ .finished = .{ .code = self.code, .text = self.text[0..self.text_len] } };
     }
 
     /// Frees what the worker kept between polls; call only after it has ended.
@@ -141,53 +145,43 @@ const Worker = struct {
         return null;
     }
 
+    /// Fetches, sleeps and applies `watch.Watch`'s decisions; what each poll means is decided there.
     fn poll(self: *Worker, login: []const u8, secret: *const transport.Secret) error{Cancelled}!void {
         const pr = watch.parseUrl(self.url.slice()) catch return self.end(.pr_inaccessible, null, null);
-        var baseline: ?watch.Snapshot = null;
-        var latest: ?watch.Latest = null;
-        var failures: u8 = 0;
+        var state_machine: watch.Watch = .{ .pacing = self.pacing, .seed = self.seed };
         while (true) {
             if (self.cancel.load(.acquire)) return error.Cancelled;
-            if (self.expired()) return self.end(.no_change, latest, null);
-            var hint: ?i64 = null;
-            const failure: anyerror = failed: {
-                var observed = self.fetchOnce(secret, login, pr, &hint) catch |err| switch (err) {
-                    error.Cancelled => return error.Cancelled,
-                    error.AuthenticationFailed, error.IdentityMismatch => return self.end(.revoked, latest, null),
-                    error.AccessDenied => return self.end(.pr_inaccessible, null, null),
-                    // The Host's shared request budget is spent; this is pacing, not a failure of this watch.
-                    error.RequestBudgetExhausted => {
-                        try self.wait(self.limits.budget_wait_ms + self.seed % self.limits.budget_wait_ms);
-                        continue;
-                    },
-                    else => break :failed err,
-                };
-                defer observed.deinit(self.allocator);
-                const reduced = watch.reduce(null, observed.observation) catch |err| break :failed err;
-                const first = baseline orelse reduced.snapshot;
-                baseline = first;
-                latest = .{ .snapshot = reduced.snapshot, .changed = watch.changesBetween(first, reduced.snapshot), .coverage = reduced.coverage };
-                if (watch.endingOutcome(first, reduced.snapshot)) |outcome| return self.end(outcome, latest, null);
-                failures = 0;
-                try self.wait(self.limits.poll_ms + self.seed % self.limits.poll_jitter_ms);
-                continue;
-            };
-            failures +|= 1;
-            const limited = failure == error.RateLimited;
-            const hold_ms = self.backoffMs(failures, hint);
-            if (limited and hint != null and hold_ms >= self.remainingMs()) return self.end(.rate_limited, latest, hint);
-            if (failures >= max_failures) return self.end(if (limited) .rate_limited else .network_failure, latest, hint);
-            try self.wait(hold_ms);
+            switch (state_machine.step(try self.observe(secret, login, pr))) {
+                .wait_ms => |milliseconds| try self.wait(milliseconds),
+                .end => |ending| return self.end(ending.outcome, ending.latest, ending.retry_at),
+            }
         }
     }
 
-    /// A rate-limit time the response named, clamped by the fetch layer, else exponential seconds.
-    fn backoffMs(self: *const Worker, failures: u8, retry_at: ?i64) u64 {
-        const seconds: u64 = if (retry_at) |when| blk: {
-            const now: i64 = @intCast(std.Io.Clock.real.now(self.io).toSeconds());
-            break :blk @intCast(@max(1, @min(fetch.max_retry_seconds, when - now)));
-        } else @as(u64, 1) << @intCast(@min(failures, 6));
-        return seconds * self.limits.second_ms + self.seed % self.limits.second_ms;
+    /// One poll as the event the decision table reads.
+    fn observe(self: *Worker, secret: *const transport.Secret, login: []const u8, pr: watch.PrKey) error{Cancelled}!watch.Watch.Event {
+        if (self.expired()) return .expired;
+        var hint: ?i64 = null;
+        var observed = self.fetchOnce(secret, login, pr, &hint) catch |err| return .{ .failed = .{
+            .fault = switch (err) {
+                error.Cancelled => return error.Cancelled,
+                error.AuthenticationFailed, error.IdentityMismatch => .revoked,
+                error.AccessDenied => .inaccessible,
+                error.RequestBudgetExhausted => .budget_exhausted,
+                error.RateLimited => .rate_limited,
+                else => .transient,
+            },
+            .retry_at = hint,
+            .seen_at = @intCast(std.Io.Clock.real.now(self.io).toSeconds()),
+            .remaining_ms = self.remainingMs(),
+        } };
+        defer observed.deinit(self.allocator);
+        const reduced = watch.reduce(null, observed.observation) catch return .{ .failed = .{
+            .fault = .transient,
+            .seen_at = @intCast(std.Io.Clock.real.now(self.io).toSeconds()),
+            .remaining_ms = self.remainingMs(),
+        } };
+        return .{ .observed = .{ .snapshot = reduced.snapshot, .coverage = reduced.coverage } };
     }
 
     fn fetchOnce(self: *Worker, secret: *const transport.Secret, login: []const u8, pr: watch.PrKey, retry_at: *?i64) !fetch.Result {
@@ -229,12 +223,7 @@ const Worker = struct {
     /// Settles this watch with `outcome`; `latest` and `retry_at` appear only where the outcome carries them.
     fn end(self: *Worker, outcome: watch.Outcome, latest: ?watch.Latest, retry_at: ?i64) void {
         const text = watch.encodeOutcome(&self.text, outcome, latest, retry_at) catch unreachable;
-        // A delivered snapshot is a success even at the deadline; the model reads the outcome. The rest are
-        // failures the model can act on: pick another account, fix access, or call again later.
-        self.finish(switch (outcome) {
-            .changed, .closed, .merged, .no_change => .succeeded,
-            else => .failed,
-        }, text.len);
+        self.finish(if (outcome.succeeds()) .succeeded else .failed, text.len);
     }
 
     fn finish(self: *Worker, code: store.ActionResolutionCode, length: usize) void {
@@ -307,7 +296,7 @@ const Active = struct {
             .url = arguments.url,
             .account = arguments.account,
             .seed = self.action(),
-            .limits = setup.limits,
+            .pacing = setup.limits.pacing,
             .deadline = now.addDuration(.{ .raw = .fromMilliseconds(@intCast(limit_ms)), .clock = .awake }),
             .origin = setup.origin,
             .budget = .{ .context = setup.budget, .acquire = pressure.Budget.acquireOpaque },
@@ -376,13 +365,22 @@ const Active = struct {
             },
             .running => {},
         };
-        const ending = self.worker.ending() orelse return .running;
+        const ended = self.worker.state();
+        if (ended == .running) return .running;
         if (self.stopping) {
             self.settleText(.cancelled, tool_record.Runner.github_pr_watch.stoppedText(false, ""));
-        } else {
-            self.settleText(ending.code, ending.text);
+            return .settled;
         }
-        return .settled;
+        switch (ended) {
+            .running => unreachable,
+            // A worker cancelled by a fence wrote no Resolution, and no Stop owns the Action: it stays
+            // for shutdown, which disposes of it, and recovery resolves the Action.
+            .cancelled => return .running,
+            .finished => |finished| {
+                self.settleText(finished.code, finished.text);
+                return .settled;
+            },
+        }
     }
 
     fn cancel(self: *Active) void {
@@ -491,6 +489,8 @@ pub const Calls = struct {
 
 const TestParts = if (@import("builtin").is_test) @import("server_host_testing.zig").TestParts else void;
 const h2 = @import("h2");
+/// The fake `gh` is a POSIX shell script, so tests that run one need a Host platform.
+const os = @import("os");
 
 /// A loopback stand-in for api.github.com. Its pull request shows `first` until `switch_after`
 /// pull request reads have been served, then `later`; each poll reads the pull request twice.
@@ -502,7 +502,7 @@ const Github = struct {
     first: View = .{},
     later: View = .{},
 
-    const View = struct { head: u8 = 1, state: []const u8 = "open", merged: bool = false, passing: bool = false };
+    const View = struct { head: u8 = 1, state: []const u8 = "open", merged: bool = false, passing: bool = false, draft: bool = false, requested: bool = false };
 
     fn view(self: *const Github) View {
         return if (self.pull_reads > self.switch_after) self.later else self.first;
@@ -520,10 +520,12 @@ const Github = struct {
             self.pull_reads += 1;
             if (self.pull_status != 200) return peer.respond(stream, self.pull_status, "{}");
             const current = self.view();
-            peer.respond(stream, 200, std.fmt.allocPrint(allocator, "{{\"state\":\"{s}\",\"draft\":false,\"merged_at\":{s},\"head\":{{\"sha\":\"{s}\"}},\"requested_reviewers\":[],\"requested_teams\":[]}}", .{
+            peer.respond(stream, 200, std.fmt.allocPrint(allocator, "{{\"state\":\"{s}\",\"draft\":{s},\"merged_at\":{s},\"head\":{{\"sha\":\"{s}\"}},\"requested_reviewers\":[{s}],\"requested_teams\":[]}}", .{
                 current.state,
+                if (current.draft) "true" else "false",
                 if (current.merged) "\"2026-01-01T00:00:00Z\"" else "null",
                 sha(allocator, current.head),
+                if (current.requested) "{\"login\":\"carol\"}" else "",
             }) catch unreachable);
         } else if (std.mem.startsWith(u8, path, "/repos/org/repo/pulls/42/reviews")) {
             peer.respond(stream, 200, "[]");
@@ -549,8 +551,13 @@ const Case = struct {
     arguments: []const u8 = "{\"url\":\"https://github.com/org/repo/pull/42\",\"account\":\"alice\"}",
     accounts: []const []const u8 = &.{"alice"},
     limits: Limits = .loopback,
+    /// Each account is `login` or `login:state`; the state defaults to `success`.
     gh: enum { installed, missing } = .installed,
-    ending: enum { natural, stop, shutdown } = .natural,
+    /// How `gh auth status` fails, when it does.
+    discovery: enum { listed, exits, garbage } = .listed,
+    /// `gh` blocks until it is killed, as a keyring prompt that never answers.
+    gh_blocks: bool = false,
+    ending: enum { natural, stop, stop_while_binding, shutdown } = .natural,
     github: *Github,
 };
 
@@ -613,18 +620,27 @@ fn runWatch(arena: std.mem.Allocator, case: Case) !Finished {
         \\#!/bin/sh
         \\dir=$(dirname "$0")
         \\echo "$*" >> "$dir/calls.log"
+        \\[ -e "$dir/blocks" ] && exec sleep 30
         \\if [ "$1 $2" = "auth status" ]; then
+        \\  [ -e "$dir/status-exits" ] && exit 1
+        \\  [ -e "$dir/status-garbage" ] && { echo 'not json'; exit 0; }
         \\  printf '{"hosts":{"github.com":['
         \\  separator=''
-        \\  while read -r name; do printf '%s{"login":"%s","state":"success"}' "$separator" "$name"; separator=','; done < "$dir/accounts"
+        \\  while IFS=: read -r name state; do printf '%s{"login":"%s","state":"%s"}' "$separator" "$name" "${state:-success}"; separator=','; done < "$dir/accounts"
         \\  printf ']}}\n'
         \\elif [ "$1 $2" = "auth token" ]; then
-        \\  grep -qx "$6" "$dir/accounts" || exit 1
+        \\  cut -d: -f1 "$dir/accounts" | grep -qx "$6" || exit 1
         \\  printf 'token-%s\n' "$6"
         \\else
         \\  exit 2
         \\fi
     });
+    switch (case.discovery) {
+        .listed => {},
+        .exits => try tmp.dir.writeFile(io, .{ .sub_path = "bin/status-exits", .data = "" }),
+        .garbage => try tmp.dir.writeFile(io, .{ .sub_path = "bin/status-garbage", .data = "" }),
+    }
+    if (case.gh_blocks) try tmp.dir.writeFile(io, .{ .sub_path = "bin/blocks", .data = "" });
     // A missing gh is a path nothing can execute; the Host's own PATH never stands in for the fake.
     const gh_path = try std.fmt.allocPrint(arena, "{s}/{s}/gh", .{ root, if (case.gh == .installed) "bin" else "empty" });
     var environment: std.process.Environ.Map = .init(std.testing.allocator);
@@ -654,25 +670,37 @@ fn runWatch(arena: std.mem.Allocator, case: Case) !Finished {
     try std.testing.expect(calls.any() and calls.contains(selected.action_id));
     try std.testing.expectEqual(@as(usize, 1), parts.custody.occupied());
 
+    // The one credit is held, so another admission of any Action waits for it rather than starting beside it.
+    try std.testing.expectEqual(Admission.retry_later, calls.admit(parts, results, selected));
+    try std.testing.expectEqual(@as(usize, 1), parts.custody.occupied());
+
     var acted = false;
     var spins: usize = 0;
     while (calls.any()) : (spins += 1) {
         // Twenty seconds bounds a hung watch; every case here finishes in well under two.
         if (spins > 4000) return error.WatchDidNotFinish;
         try peer.pump();
-        if (!acted and case.github.pull_reads >= 2) switch (case.ending) {
-            .natural => {},
-            .stop => {
-                acted = true;
-                var stop = try store.testingCompleteSessionStop("watch-stop", session.slice());
-                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            },
-            .shutdown => {
-                _ = parts.lifecycle.advance(.stopping);
-                calls.shutdown(results);
-                break;
-            },
-        };
+        if (!acted) {
+            const ready = switch (case.ending) {
+                .natural => false,
+                .stop, .shutdown => case.github.pull_reads >= 2,
+                // The blocked gh has logged its call and is waiting; no request has reached GitHub.
+                .stop_while_binding => if (tmp.dir.access(io, "bin/calls.log", .{})) true else |_| false,
+            };
+            if (ready) switch (case.ending) {
+                .natural => unreachable,
+                .stop, .stop_while_binding => {
+                    acted = true;
+                    var stop = try store.testingCompleteSessionStop("watch-stop", session.slice());
+                    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                },
+                .shutdown => {
+                    _ = parts.lifecycle.advance(.stopping);
+                    calls.shutdown(results);
+                    break;
+                },
+            };
+        }
         _ = calls.service(results);
         try std.Io.sleep(io, .fromMilliseconds(5), .awake);
     }
@@ -733,7 +761,7 @@ fn newGithub() Github {
 }
 
 test "PRW-64 a watch baselines then ends with the typed snapshot of the change" {
-    if (!@import("os/read_image_file.zig").available) return error.SkipZigTest;
+    if (!os.supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -759,7 +787,7 @@ test "PRW-64 a watch baselines then ends with the typed snapshot of the change" 
 }
 
 test "PRW-65 only checks settling, not pending, ends a watch and a merge ends it at once" {
-    if (!@import("os/read_image_file.zig").available) return error.SkipZigTest;
+    if (!os.supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -785,8 +813,8 @@ test "PRW-65 only checks settling, not pending, ends a watch and a merge ends it
     for (done.authorizations) |authorization| try std.testing.expectEqualStrings("Bearer token-alice", authorization);
 }
 
-test "PRW-66 a watch with no change ends at its deadline with the latest snapshot" {
-    if (!@import("os/read_image_file.zig").available) return error.SkipZigTest;
+test "PRW-66 a watch with no change ends at its deadline with the latest snapshot, or none if it never saw one" {
+    if (!os.supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -804,7 +832,7 @@ test "PRW-66 a watch with no change ends at its deadline with the latest snapsho
 }
 
 test "PRW-67 the account is bound when the watch starts and never replaced" {
-    if (!@import("os/read_image_file.zig").available) return error.SkipZigTest;
+    if (!os.supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -843,7 +871,7 @@ test "PRW-67 the account is bound when the watch starts and never replaced" {
 }
 
 test "PRW-68 an inaccessible pull request under the bound account is never tried with another" {
-    if (!@import("os/read_image_file.zig").available) return error.SkipZigTest;
+    if (!os.supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -867,7 +895,7 @@ test "PRW-68 an inaccessible pull request under the bound account is never tried
 }
 
 test "PRW-69 repeated rate limits end the watch as rate_limited" {
-    if (!@import("os/read_image_file.zig").available) return error.SkipZigTest;
+    if (!os.supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -883,7 +911,7 @@ test "PRW-69 repeated rate limits end the watch as rate_limited" {
 }
 
 test "PRW-70 a Stop cancels the watch and settles it cancelled" {
-    if (!@import("os/read_image_file.zig").available) return error.SkipZigTest;
+    if (!os.supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -895,7 +923,7 @@ test "PRW-70 a Stop cancels the watch and settles it cancelled" {
 }
 
 test "PRW-71 a Host that stops mid-watch releases custody and leaves the Action to recovery" {
-    if (!@import("os/read_image_file.zig").available) return error.SkipZigTest;
+    if (!os.supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -904,4 +932,118 @@ test "PRW-71 a Host that stops mid-watch releases custody and leaves the Action 
     const finished = try runWatch(arena, .{ .github = &github, .ending = .shutdown });
     // runWatch checked that recovery resolved the Action indeterminate exactly once.
     try std.testing.expect(finished.code == null);
+}
+
+test "PRW-78 a closed pull request, a draft made ready and a reviews change each end a watch" {
+    if (!os.supported) return error.SkipZigTest;
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Closed without merging is its own outcome, found at the baseline.
+    var closed = newGithub();
+    defer closed.arena.deinit();
+    closed.first = .{ .state = "closed" };
+    const closed_run = try runWatch(arena, .{ .github = &closed });
+    const closed_parsed = try expectOutcome(closed_run, "succeeded", "closed");
+    defer closed_parsed.deinit();
+    try std.testing.expectEqualStrings("closed", closed_parsed.value.object.get("snapshot").?.object.get("lifecycle").?.string);
+
+    var ready = newGithub();
+    defer ready.arena.deinit();
+    ready.first = .{ .draft = true };
+    ready.switch_after = 4;
+    ready.later = .{};
+    const ready_run = try runWatch(arena, .{ .github = &ready });
+    const ready_parsed = try expectOutcome(ready_run, "succeeded", "changed");
+    defer ready_parsed.deinit();
+    try expectChanged(ready_parsed.value, &.{"lifecycle"});
+    try std.testing.expectEqualStrings("open", ready_parsed.value.object.get("snapshot").?.object.get("lifecycle").?.string);
+
+    // A review requested of someone is a reviews change, not only a submitted decision.
+    var requested = newGithub();
+    defer requested.arena.deinit();
+    requested.switch_after = 4;
+    requested.later = .{ .requested = true };
+    const requested_run = try runWatch(arena, .{ .github = &requested });
+    const requested_parsed = try expectOutcome(requested_run, "succeeded", "changed");
+    defer requested_parsed.deinit();
+    try expectChanged(requested_parsed.value, &.{"reviews"});
+    try std.testing.expectEqualStrings("pending", requested_parsed.value.object.get("snapshot").?.object.get("reviews").?.string);
+}
+
+test "PRW-79 an account that cannot be listed or is not signed in ends the watch before any request" {
+    if (!os.supported) return error.SkipZigTest;
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const without_account = "{\"url\":\"https://github.com/org/repo/pull/42\"}";
+    var github = newGithub();
+    defer github.arena.deinit();
+
+    for ([_]@TypeOf(@as(Case, undefined).discovery){ .exits, .garbage }) |discovery| {
+        const failed = try runWatch(arena, .{ .github = &github, .arguments = without_account, .discovery = discovery });
+        const parsed = try expectOutcome(failed, "failed", "account_discovery_failed");
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("{\"outcome\":\"account_discovery_failed\"}", failed.text);
+        try std.testing.expectEqual(@as(usize, 0), failed.requests);
+    }
+    // An account whose sign-in is not a success is not offered, so the model is told to authenticate.
+    const signed_out = try runWatch(arena, .{ .github = &github, .arguments = without_account, .accounts = &.{"alice:error"} });
+    const signed_out_parsed = try expectOutcome(signed_out, "succeeded", "auth_required");
+    defer signed_out_parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), signed_out.requests);
+}
+
+test "PRW-80 a Stop while the account is still being bound settles the watch cancelled" {
+    if (!os.supported) return error.SkipZigTest;
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var github = newGithub();
+    defer github.arena.deinit();
+    // The credential read blocks for the named account; the account listing blocks for a discovered one.
+    for ([_][]const u8{ "{\"url\":\"https://github.com/org/repo/pull/42\",\"account\":\"alice\"}", "{\"url\":\"https://github.com/org/repo/pull/42\"}" }) |arguments| {
+        const finished = try runWatch(arena, .{ .github = &github, .arguments = arguments, .gh_blocks = true, .ending = .stop_while_binding });
+        try std.testing.expectEqualStrings("cancelled", finished.code.?);
+        try std.testing.expectEqualStrings("Stopped before this pull request watch completed.", finished.text);
+        try std.testing.expectEqual(@as(usize, 0), finished.requests);
+    }
+}
+
+test "PRW-81 a cancelled worker holds no Resolution and a finished one always does" {
+    if (!os.supported) return error.SkipZigTest;
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    var worker: Worker = .{
+        .io = std.testing.io,
+        .wake = undefined,
+        .environment = &environment,
+        .gh = "/nonexistent/gh",
+        .url = try .from("https://github.com/org/repo/pull/42"),
+        .account = try .from("alice"),
+        .seed = 0,
+        .pacing = .loopback,
+        .deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).addDuration(.{ .raw = .fromSeconds(60), .clock = .awake }),
+        .origin = if (test_hooks) null else {},
+        .budget = undefined,
+    };
+    try std.testing.expect(worker.state() == .running);
+    // A worker cancelled by a fence ends with the default code and no text; settling that would resolve
+    // the Action failed with nothing to read, so `state` reports it as cancelled instead.
+    worker.requestCancel();
+    worker.execute();
+    worker.done.store(true, .release);
+    try std.testing.expect(worker.state() == .cancelled);
+
+    var finished: Worker = worker;
+    finished.cancel = .init(false);
+    finished.cancelled = false;
+    finished.done = .init(false);
+    finished.environment = null;
+    finished.execute();
+    finished.done.store(true, .release);
+    try std.testing.expect(finished.state() == .finished);
+    try std.testing.expectEqualStrings("{\"outcome\":\"gh_unavailable\"}", finished.state().finished.text);
+    try std.testing.expectEqual(store.ActionResolutionCode.failed, finished.state().finished.code);
 }

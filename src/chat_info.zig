@@ -777,7 +777,8 @@ test "Chat info effort permissions and tools choices pick and cancel typed edits
     page.panel.selected = 2;
     try press(&page, &ctx, vaxis.Key.enter);
     for (page.panel.choice.?.labels) |label| try std.testing.expect(std.mem.indexOf(u8, label, "web_search") == null);
-    try std.testing.expect(std.mem.indexOf(u8, page.panel.choice.?.labels[9], "web search") != null);
+    const labels = page.panel.choice.?.labels;
+    try std.testing.expect(std.mem.indexOf(u8, labels[labels.len - 1], "web search") != null);
     try press(&page, &ctx, ' ');
     try std.testing.expect(!page.tool_draft.?.contains(.bash));
     try std.testing.expect(page.session.tools.contains("bash"));
