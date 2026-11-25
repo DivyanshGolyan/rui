@@ -53,6 +53,8 @@ jobs:
       pull-requests: read
       actions: read
       checks: read
+      # check.yml's plan lists open main-red issues.
+      issues: read
     uses: ./.github/workflows/check.yml
     with:
       base: ${{ inputs.base }}

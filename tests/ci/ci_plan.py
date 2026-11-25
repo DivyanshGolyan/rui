@@ -17,7 +17,7 @@ class Plan:
 
 
 def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
-         change_kind: ChangeKind, compile_only: bool = False, native_targets=_UNSET) -> Plan:
+         change_kind: ChangeKind, compile_only: bool = False, native_targets=_UNSET, main_red: bool = False) -> Plan:
     if promotion and compile_only:
         raise ValueError('A promotion runs its suites; a compile-only build runs none')
     p = dict(selection)
@@ -26,6 +26,12 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
                               'server_targets', 'cache_execution_checks', 'typecheck_macos', 'linux_memory_checks',
                               'manual_checks')) or p.get('unit_compile_required', False):
         kind = ChangeKind.NORMAL
+    if main_red and event_name == 'pull_request':
+        # While main is red a PR selects nothing; admission fails it without spending runner minutes.
+        kind = ChangeKind.DOCUMENTATION
+        for key in ('native_required', 'mac_required', 'upgrade_required', 'manual_checks', 'unit_compile_required'):
+            if key in p:
+                p[key] = [] if isinstance(p[key], list) else False
     p['change_kind'] = kind.value
     draft_run = event_name == 'pull_request' and draft
     p['draft_run'] = draft_run
