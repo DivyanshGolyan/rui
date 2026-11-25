@@ -83,33 +83,22 @@ test "find_tools arguments: words, reload, or both, and nothing else" {
     }
 }
 
-pub const read_action_max_argument_bytes = 4096;
-pub const ReadAction = struct { action: u64, offset: u64 = 0, after: u64 = 0 };
+pub const stop_action_max_argument_bytes = 4096;
+pub const StopAction = struct { action: u64 };
 
-pub fn checkReadAction(arena: std.mem.Allocator, bytes: []const u8, out: *ReadAction) error{OutOfMemory}!StartAgentCheck {
-    if (bytes.len > read_action_max_argument_bytes) return refused("the arguments take more than 4096 bytes");
+pub fn checkStopAction(arena: std.mem.Allocator, bytes: []const u8, out: *StopAction) error{OutOfMemory}!StartAgentCheck {
+    if (bytes.len > stop_action_max_argument_bytes) return refused("the arguments take more than 4096 bytes");
     const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return refused("the arguments must be one well-formed JSON object without duplicate fields"),
     };
     if (root != .object) return refused("the arguments must be one JSON object");
-    if (unknownField(root.object, &.{ "action", "offset", "after" })) |name| return refusedField(arena, name, "is not a read_action field");
+    if (unknownField(root.object, &.{"action"})) |name| return refusedField(arena, name, "is not a stop_action field");
     const action = root.object.get("action") orelse return refused("action is required");
     if (action != .string) return refused("action must be a positive decimal string");
     const id = canonicalActionNumber(action.string) orelse return refused("action must be a canonical decimal string at most 9223372036854775807");
     if (id == 0) return refused("action must be positive");
-    var offset: u64 = 0;
-    if (root.object.get("offset")) |cursor| {
-        if (cursor != .string) return refused("offset must be a nonnegative decimal string");
-        offset = canonicalActionNumber(cursor.string) orelse return refused("offset must be a canonical decimal string");
-        if (offset > @import("content_string.zig").max_bytes) return refused("offset exceeds the Content byte bound");
-    }
-    var after: u64 = 0;
-    if (root.object.get("after")) |cursor| {
-        if (cursor != .string) return refused("after must be a nonnegative decimal string");
-        after = canonicalActionNumber(cursor.string) orelse return refused("after must be a canonical decimal string at most 9223372036854775807");
-    }
-    out.* = .{ .action = id, .offset = offset, .after = after };
+    out.* = .{ .action = id };
     return .accepted;
 }
 
@@ -992,35 +981,31 @@ test "start_agent spec schema covers every noninherited Session setting" {
     try std.testing.expectEqual(@import("session_settings.zig").entries.len - 2, properties.count());
 }
 
-test "read_action accepts only own-Session bounded canonical decimal arguments" {
+test "stop_action accepts only an own-Session canonical decimal action" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    var read: ReadAction = undefined;
-    try std.testing.expect(try checkReadAction(allocator, "{\"action\":\"42\"}", &read) == .accepted);
-    try std.testing.expectEqual(ReadAction{ .action = 42 }, read);
-    try std.testing.expect(try checkReadAction(allocator, "{\"action\":\"9223372036854775807\",\"offset\":\"1073737728\"}", &read) == .accepted);
-    try std.testing.expectEqual(ReadAction{ .action = std.math.maxInt(i64), .offset = @import("content_string.zig").max_bytes }, read);
-    try std.testing.expect(try checkReadAction(allocator, "{\"action\":\"1\",\"after\":\"16\"}", &read) == .accepted);
-    try std.testing.expectEqual(@as(u64, 16), read.after);
+    var stop: StopAction = undefined;
+    try std.testing.expect(try checkStopAction(allocator, "{\"action\":\"42\"}", &stop) == .accepted);
+    try std.testing.expectEqual(StopAction{ .action = 42 }, stop);
+    try std.testing.expect(try checkStopAction(allocator, "{\"action\":\"9223372036854775807\"}", &stop) == .accepted);
+    try std.testing.expectEqual(StopAction{ .action = std.math.maxInt(i64) }, stop);
     for ([_][]const u8{
-        "{\"action\":\"1\",\"after\":\"01\"}",   "{\"action\":\"1\",\"after\":\"9223372036854775808\"}", "{\"action\":\"1\",\"after\":0}",
-        "not JSON",                              "null",                                                 "[]",
-        "{}",                                    "{\"action\":0}",                                       "{\"action\":null}",
-        "{\"action\":\"0\"}",                    "{\"action\":\"01\"}",                                  "{\"action\":\"\"}",
-        "{\"action\":\"+1\"}",                   "{\"action\":\"-1\"}",                                  "{\"action\":\"1.0\"}",
-        "{\"action\":\" 1\"}",                   "{\"action\":\"1a\"}",                                  "{\"action\":\"9223372036854775808\"}",
-        "{\"action\":\"18446744073709551616\"}", "{\"action\":\"1\",\"offset\":0}",                      "{\"action\":\"1\",\"offset\":\"00\"}",
-        "{\"action\":\"1\",\"offset\":\"-1\"}",  "{\"action\":\"1\",\"offset\":\"1073737729\"}",         "{\"action\":\"1\",\"session\":\"k7m2qx\"}",
-        "{\"action\":\"1\",\"action\":\"2\"}",   "{\"action\":\"1\",\"offset\":\"0\",\"offset\":\"0\"}",
-    }) |arguments| try std.testing.expect(try checkReadAction(allocator, arguments, &read) == .rejected);
-    const maximum = try allocator.alloc(u8, read_action_max_argument_bytes);
+        "not JSON",                              "null",                                "[]",
+        "{}",                                    "{\"action\":0}",                      "{\"action\":null}",
+        "{\"action\":\"0\"}",                    "{\"action\":\"01\"}",                 "{\"action\":\"\"}",
+        "{\"action\":\"+1\"}",                   "{\"action\":\"-1\"}",                 "{\"action\":\"1.0\"}",
+        "{\"action\":\" 1\"}",                   "{\"action\":\"1a\"}",                 "{\"action\":\"9223372036854775808\"}",
+        "{\"action\":\"18446744073709551616\"}", "{\"action\":\"1\",\"offset\":\"0\"}", "{\"action\":\"1\",\"session\":\"k7m2qx\"}",
+        "{\"action\":\"1\",\"action\":\"2\"}",
+    }) |arguments| try std.testing.expect(try checkStopAction(allocator, arguments, &stop) == .rejected);
+    const maximum = try allocator.alloc(u8, stop_action_max_argument_bytes);
     @memset(maximum, ' ');
-    const valid = "{\"action\":\"1\",\"offset\":\"0\"}";
+    const valid = "{\"action\":\"1\"}";
     @memcpy(maximum[0..valid.len], valid);
-    try std.testing.expect(try checkReadAction(allocator, maximum, &read) == .accepted);
-    const oversized = try allocator.alloc(u8, read_action_max_argument_bytes + 1);
+    try std.testing.expect(try checkStopAction(allocator, maximum, &stop) == .accepted);
+    const oversized = try allocator.alloc(u8, stop_action_max_argument_bytes + 1);
     @memset(oversized, ' ');
     @memcpy(oversized[0..valid.len], valid);
-    try std.testing.expect(try checkReadAction(allocator, oversized, &read) == .rejected);
+    try std.testing.expect(try checkStopAction(allocator, oversized, &stop) == .rejected);
 }

@@ -194,11 +194,11 @@ def prove_native_background(state, *, deadline=None):
 
 
 
-def prove_model_action_read(state, *, deadline=None):
+def prove_model_transcript_read(state, *, deadline=None):
     from bash_fixture import dispose_owner_case
 
     deadline = time.monotonic() + 180 if deadline is None else deadline
-    case = state / "model-action-read"
+    case = state / "model-transcript-read"
     case.mkdir(mode=0o700)
     workspace = case / "workspace"
     workspace.mkdir()
@@ -223,27 +223,27 @@ def prove_model_action_read(state, *, deadline=None):
     def command(*args, **options):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("model Action read body deadline")
+            raise TimeoutError("model transcript read body deadline")
         return fixture.command(*args, timeout=min(15, remaining), **options)
 
     def wait_for(observe, description):
         return fixture.wait_for(observe, description, deadline=deadline)
 
-    def model_read(label, native):
-        arguments = json.dumps({"action": identity}, separators=(",", ":"))
+    def model_read(label, expected):
+        arguments = json.dumps({"kinds": ["received"]}, separators=(",", ":"))
         with endpoint.lock:
             endpoint.responses.extend([
-                fixture.sse_tool_calls(label + "-calls", [("read_action", label + "-call", arguments)]),
+                fixture.sse_tool_calls(label + "-calls", [("read_transcript", label + "-call", arguments)]),
                 fixture.sse_answer(label + "-answer", label + "-reason", label + "-message", label + " observed")[0],
             ])
-        fixture.message(case, store, label, session, "Inspect your Action with read_action")
+        fixture.message(case, store, label, session, "Read the Action result in your transcript")
         wait_for(lambda: fixture.completed_observation(store, label), label + " model read continuation")
         assert fixture.read_result(store, label) == (label + " observed").encode()
         body = json.loads(endpoint.requests[-1])
         outputs = [item for item in body["input"] if item.get("type") == "function_call_output" and item.get("call_id") == label + "-call"]
         assert len(outputs) == 1, outputs
-        assert json.loads(outputs[0]["output"]) == native, outputs
-        evidence[label] = {"native": native, "provider_output": outputs[0]}
+        assert expected in outputs[0]["output"], outputs
+        evidence[label] = {"expected": expected, "provider_output": outputs[0]}
 
     try:
         thread.start()
@@ -251,7 +251,7 @@ def prove_model_action_read(state, *, deadline=None):
         configured = command(
             "session", "configure", "--store", store, "--key", "configure", "--record", case / "configure.json",
             "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-sol",
-            "--tools", "bash,read_action", "--permission-mode", "ask",
+            "--tools", "bash,read_transcript", "--permission-mode", "ask",
         )
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["context"]["session"]
@@ -266,15 +266,13 @@ def prove_model_action_read(state, *, deadline=None):
         assert len(endpoint.requests) == 2 and not (workspace / "launches").exists()
         first = json.loads(endpoint.requests[0])
         offered = [tool["name"] for item in first["input"] if item.get("type") == "additional_tools" for tool in item["tools"]]
-        assert "read_action" in offered, first
+        assert "read_transcript" in offered and "read_action" not in offered, first
         allow(case, store, "allow", session, identity)
         wait_for(lambda: (workspace / "ready").exists(), "fsynced single producer launch")
         pid = int((workspace / "launches").read_text())
         assert process_exists(pid)
         running = command("action", "read", "--store", store, "--session", session, "--action", identity)
         assert running["state"] == "attempted" and running["final"] is None, running
-        model_read("running-read", running)
-        assert len(endpoint.requests) == 4
         with endpoint.lock:
             endpoint.responses.append(fixture.sse_answer("delivered-answer", "delivered-reason", "delivered-message", "final delivered")[0])
         gate.release()
@@ -285,9 +283,9 @@ def prove_model_action_read(state, *, deadline=None):
         assert final["final"]["code"] == "succeeded", final
         assert final["final"]["window"]["text"].encode() == b"Bash succeeded. Exit code: 0.\nstdout:\n" + (workspace / "expected-final").read_bytes()
         wait_for(lambda: fixture.completed_observation(store, f"rui.core/action-final/{identity}"), "final input before explicit model read")
+        assert len(endpoint.requests) == 3
+        model_read("final-read", "Bash succeeded. Exit code: 0.")
         assert len(endpoint.requests) == 5
-        model_read("final-read", final)
-        assert len(endpoint.requests) == 7
         assert (workspace / "launches").read_text() == f"{pid}\n"
         wait_for(lambda: not process_exists(pid), "exact producer retirement")
         wait_for(lambda: execution_custody_idle(store, session), "model read and producer custody retirement")
@@ -414,7 +412,7 @@ def prove_message_background_and_stop(state, *, deadline=None):
         configured = fixture.command(
             "session", "configure", "--store", store, "--key", "configure", "--record", case / "configure.json",
             "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-sol",
-            "--tools", "bash,read_action,stop_action", "--permission-mode", "ask",
+            "--tools", "bash,stop_action", "--permission-mode", "ask",
         )
         session = configured["context"]["session"]
         fixture.message(case, store, "target", session, "Start a long running command")

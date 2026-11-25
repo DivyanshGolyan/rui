@@ -77,7 +77,6 @@ pub const CallFacts = struct {
         if (self.skill) return tool_line.describe(.skill);
         if (self.read_transcript) return tool_line.describe(.{ .read_transcript = self.transcript_id });
         if (self.tool) |*selected| if (selected.runner() == .core) {
-            if (std.mem.eql(u8, selected.name, "read_action")) return tool_line.describe(.read_action);
             if (std.mem.eql(u8, selected.name, "stop_action")) return tool_line.describe(.stop_action);
             if (std.mem.eql(u8, selected.name, start_agent_record.name)) return tool_line.describe(.start_agent);
         };

@@ -14,7 +14,7 @@ import threading
 import time
 from collections import Counter
 
-from background_action_cases import prove_native_background, prove_model_action_read, prove_automatic_background, prove_background_action_values
+from background_action_cases import prove_native_background, prove_model_transcript_read, prove_automatic_background, prove_background_action_values
 from github_pr_watch_integration import prove_watches
 import model_fixture as fixture
 import host_process
@@ -886,7 +886,7 @@ def main():
     prove_watches(state)
     prove_native_background(state)
     prove_background_action_values(state)
-    prove_model_action_read(state)
+    prove_model_transcript_read(state)
     prove_automatic_background(state)
     prove_spill_delivery_outcomes(state)
     prove_stdin(state)

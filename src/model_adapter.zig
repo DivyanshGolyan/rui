@@ -4708,17 +4708,17 @@ test "find_tools declares a found tool on the next request without losing the me
     try @import("read_transcript.zig").run(&setup.storage, arena.allocator(), &read, .{});
 }
 
-test "read_action uses the frozen configured offer and returns one provider tool output" {
+test "read_transcript uses the frozen configured offer and returns one provider tool output" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
     defer setup.close();
-    const session = try setup.configure("read-action-codec");
+    const session = try setup.configure("read-transcript-codec");
     var configure: wire_request.ConfigureCommand = .{};
     configure.session = session;
-    try configure.key.set("read-action-offer");
-    configure.configuration.tools = try .of(&.{ "read_action", "stop_action" });
+    try configure.key.set("read-transcript-offer");
+    configure.configuration.tools = try .of(&.{ "read_transcript", "stop_action" });
     try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
-    try setup.submit("read-action-input", "read-action-input", session.slice(), "read your Action");
+    try setup.submit("read-transcript-input", "read-transcript-input", session.slice(), "read your transcript");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();
     const first = try prepareMemoForTesting(&setup, binding, null, .{});
@@ -4730,18 +4730,18 @@ test "read_action uses the frozen configured offer and returns one provider tool
     try std.testing.expectEqualStrings("additional_tools", declaration.get("type").?.string);
     const definitions = declaration.get("tools").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), definitions.len);
-    try std.testing.expectEqualStrings("read_action", definitions[0].object.get("name").?.string);
+    try std.testing.expectEqualStrings("read_transcript", definitions[0].object.get("name").?.string);
     try std.testing.expectEqualStrings("stop_action", definitions[1].object.get("name").?.string);
     try std.testing.expectEqual(@as(usize, 0), request.object.get("tools").?.array.items.len);
-    try configure.key.set("withdraw-read-action");
+    try configure.key.set("withdraw-read-transcript");
     configure.configuration.tools = try .of(&.{});
     try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
-    try settleItemsForTesting(&setup, binding, "read-action-call", &.{
-        "{\"type\":\"function_call\",\"id\":\"read-item\",\"call_id\":\"read-call\",\"name\":\"read_action\",\"arguments\":\"{\\\"action\\\":\\\"1\\\"}\"}",
+    try settleItemsForTesting(&setup, binding, "read-transcript-call", &.{
+        "{\"type\":\"function_call\",\"id\":\"read-item\",\"call_id\":\"read-call\",\"name\":\"read_transcript\",\"arguments\":\"{}\"}",
     });
     const read = (try setup.storage.nextCoreWork(.{ .free_credit = .none, .mcp_open = false })).?.action;
-    try std.testing.expect(read.tool == .read_action);
-    try @import("read_action_tool.zig").run(&setup.storage, arena.allocator(), &read, .{});
+    try std.testing.expect(read.tool == .read_transcript);
+    try @import("read_transcript.zig").run(&setup.storage, arena.allocator(), &read, .{});
     admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     binding = try admitted.permit.consume();
     const next = try prepareMemoForTesting(&setup, binding, null, .{});
@@ -4753,16 +4753,11 @@ test "read_action uses the frozen configured offer and returns one provider tool
         const kind = item.object.get("type") orelse continue;
         if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
         try std.testing.expectEqualStrings("read-call", item.object.get("call_id").?.string);
-        const output = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), item.object.get("output").?.string, .{});
-        try std.testing.expectEqualStrings(session.slice(), output.object.get("session").?.string);
-        try std.testing.expectEqualStrings("1", output.object.get("action").?.string);
-        try std.testing.expectEqualStrings("queued", output.object.get("state").?.string);
-        try std.testing.expect(output.object.get("final").? == .null);
         outputs += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), outputs);
-    try settleItemsForTesting(&setup, binding, "read-action-unoffered", &.{
-        "{\"type\":\"function_call\",\"id\":\"excluded-item\",\"call_id\":\"excluded-call\",\"name\":\"read_action\",\"arguments\":\"{}\"}",
+    try settleItemsForTesting(&setup, binding, "read-transcript-unoffered", &.{
+        "{\"type\":\"function_call\",\"id\":\"excluded-item\",\"call_id\":\"excluded-call\",\"name\":\"read_transcript\",\"arguments\":\"{}\"}",
     });
     try std.testing.expect(try setup.storage.nextCoreWork(.{ .free_credit = .none, .mcp_open = false }) == null);
     try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT count(*) FROM model_tool_call WHERE operation_id=?1 AND rejection_code='unknown_tool'", .{binding.operation_id}));
@@ -4776,22 +4771,20 @@ test "core reader failures retain exact bytes in provider continuation" {
     var configure: wire_request.ConfigureCommand = .{};
     configure.session = session;
     try configure.key.set("reader-errors-offer");
-    configure.configuration.tools = try .of(&.{ "read_action", "read_transcript", "stop_action" });
+    configure.configuration.tools = try .of(&.{ "read_transcript", "stop_action" });
     try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
     try setup.submit("reader-errors-input", "reader-errors-input", session.slice(), "inspect");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();
     try settleItemsForTesting(&setup, binding, "reader-errors-calls", &.{
-        "{\"type\":\"function_call\",\"id\":\"read-item\",\"call_id\":\"read-call\",\"name\":\"read_action\",\"arguments\":\"{}\"}",
         "{\"type\":\"function_call\",\"id\":\"transcript-item\",\"call_id\":\"transcript-call\",\"name\":\"read_transcript\",\"arguments\":\"{\\\"offset\\\":1}\"}",
         "{\"type\":\"function_call\",\"id\":\"stop-item\",\"call_id\":\"stop-call\",\"name\":\"stop_action\",\"arguments\":\"{}\"}",
     });
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    for (0..3) |_| {
+    for (0..2) |_| {
         const action = (try setup.storage.nextCoreWork(.{ .free_credit = .none, .mcp_open = false })).?.action;
         switch (action.tool) {
-            .read_action => try @import("read_action_tool.zig").run(&setup.storage, arena.allocator(), &action, .{}),
             .read_transcript => try @import("read_transcript.zig").run(&setup.storage, arena.allocator(), &action, .{}),
             .stop_action => try @import("stop_action_tool.zig").run(&setup.storage, arena.allocator(), &action, .{}),
             else => return error.UnexpectedTool,
@@ -4807,9 +4800,7 @@ test "core reader failures retain exact bytes in provider continuation" {
         const kind = item.object.get("type") orelse continue;
         if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
         const call_id = item.object.get("call_id").?.string;
-        const expected = if (std.mem.eql(u8, call_id, "read-call"))
-            "Rui could not read the Action: action is required."
-        else if (std.mem.eql(u8, call_id, "transcript-call"))
+        const expected = if (std.mem.eql(u8, call_id, "transcript-call"))
             "Rui could not read the transcript: offset is only accepted with full."
         else if (std.mem.eql(u8, call_id, "stop-call"))
             "Rui could not stop the Action: expected an object containing only action."
@@ -4818,7 +4809,7 @@ test "core reader failures retain exact bytes in provider continuation" {
         try std.testing.expectEqualStrings(expected, item.object.get("output").?.string);
         seen += 1;
     }
-    try std.testing.expectEqual(@as(usize, 3), seen);
+    try std.testing.expectEqual(@as(usize, 2), seen);
 }
 
 test "successful reader pages and final stop preserve bytes in provider continuation" {
@@ -4832,7 +4823,7 @@ test "successful reader pages and final stop preserve bytes in provider continua
     var configure: wire_request.ConfigureCommand = .{};
     configure.session = session;
     try configure.key.set("reader-pages-tools");
-    configure.configuration.tools = try .of(&.{ "bash", "read_action", "read_transcript", "stop_action" });
+    configure.configuration.tools = try .of(&.{ "bash", "read_transcript", "stop_action" });
     try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
     try setup.submit("reader-pages-input", "reader-pages-input", session.slice(), "run and read");
     const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -4859,13 +4850,11 @@ test "successful reader pages and final stop preserve bytes in provider continua
     try std.testing.expectEqual(@as(usize, 1), page.count);
     const position = page.items[0].position;
     const args = [_][]const u8{
-        try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\"}}", .{target}),
-        try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\",\"offset\":\"4096\"}}", .{target}),
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), position }),
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":16383}}", .{ other.slice(), position }),
         try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\"}}", .{target}),
     };
-    const names = [_][]const u8{ "read_action", "read_action", "read_transcript", "read_transcript", "stop_action" };
+    const names = [_][]const u8{ "read_transcript", "read_transcript", "stop_action" };
     var calls: [args.len]store.TestingCall = undefined;
     for (&calls, args, names, 0..) |*call, arguments, name, index| {
         const quoted = try std.json.Stringify.valueAlloc(arena, arguments, .{});
@@ -4880,9 +4869,7 @@ test "successful reader pages and final stop preserve bytes in provider continua
         try setup.storage.readCoreArguments(&action, actual_args);
         try std.testing.expectEqualStrings(arguments, actual_args);
         action_ids[index] = action.binding.action_id;
-        if (std.mem.eql(u8, name, "read_action")) {
-            try @import("read_action_tool.zig").run(&setup.storage, arena, &action, .{});
-        } else if (std.mem.eql(u8, name, "read_transcript")) {
+        if (std.mem.eql(u8, name, "read_transcript")) {
             try @import("read_transcript.zig").run(&setup.storage, arena, &action, .{});
         } else {
             try @import("stop_action_tool.zig").run(&setup.storage, arena, &action, .{});
@@ -4893,13 +4880,10 @@ test "successful reader pages and final stop preserve bytes in provider continua
     const final = read.status.resolved.resolution;
     const digest = std.fmt.bytesToHex(protocol.contentDigest(text), .lower);
     const first_text = try std.json.Stringify.valueAlloc(arena, text[0..4096], .{});
-    const second_text = try std.json.Stringify.valueAlloc(arena, text[4096..], .{});
     const action_template = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"succeeded\",\"content\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"{d}\",\"next\":\"{d}\",\"more\":{s},\"text\":{s}}}}},\"values\":{{\"items\":[],\"next\":\"0\",\"more\":false}}}}";
     const expected_first = try std.fmt.allocPrint(arena, action_template, .{ session.slice(), target, final.position, text.len, &digest, @as(usize, 0), @as(usize, 4096), "true", first_text });
     const expected = [_][]const u8{
-        expected_first,
-        try std.fmt.allocPrint(arena, action_template, .{ session.slice(), target, final.position, text.len, &digest, @as(usize, 4096), text.len, "false", second_text }),
-        try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to 16383 of {d}:\n{s}\nMore: call read_transcript with {s}.\n", .{ position, long.len, long[0..16383], args[3] }),
+        try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to 16383 of {d}:\n{s}\nMore: call read_transcript with {s}.\n", .{ position, long.len, long[0..16383], args[1] }),
         try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 16383 to {d} of {d}:\n{s}", .{ position, long.len, long.len, long[16383..] }),
         expected_first,
     };
@@ -4941,7 +4925,7 @@ test "late completion after stop preserves cancelled bytes in provider continuat
     var configure: wire_request.ConfigureCommand = .{};
     configure.session = session;
     try configure.key.set("stop-race-tools");
-    configure.configuration.tools = try .of(&.{ "bash", "read_action", "stop_action" });
+    configure.configuration.tools = try .of(&.{ "bash", "stop_action" });
     try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
     try setup.submit("stop-race-input", "stop-race-input", session.slice(), "run and stop");
     const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;

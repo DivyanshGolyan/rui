@@ -1021,7 +1021,7 @@ test "MCP retained response follows the actual delivery outcome" {
         const configure = try allocator.create(@import("wire_request.zig").ConfigureCommand);
         defer allocator.destroy(configure);
         configure.* = try testing.completeConfiguration("mcp-spill-config", "", try store.testingCanonicalCwd(std.testing.io, workspace_buffer), "model-a");
-        configure.configuration.tools = try .of(&.{ "bash", "fetch_page", "read_action", "stop_action" });
+        configure.configuration.tools = try .of(&.{ "bash", "fetch_page", "stop_action" });
         configure.configuration.permission_mode.state = .value;
         try configure.configuration.permission_mode.value.set("bypass");
         const session = (try storage.configure(configure, .{})).accepted.session;

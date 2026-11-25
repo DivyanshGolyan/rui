@@ -668,7 +668,7 @@ pub noinline fn prepareConfiguration(a: anytype, session: []const u8, configurat
 
 const selected_names = rsql.Read(.{
     .sql = "SELECT tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE member.tool_set_id=?1 ORDER BY tool.name",
+        "WHERE member.tool_set_id=?1 AND NOT " ++ tool_defs.sql.retired("tool.owner", "tool.name") ++ " ORDER BY tool.name",
     .Args = struct { set: u64 },
     .Row = struct { name: Bounded(tool_defs.max_name_bytes) },
     .cardinality = .each,
