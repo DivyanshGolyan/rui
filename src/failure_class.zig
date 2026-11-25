@@ -50,6 +50,60 @@ pub fn rateLimited(cause: []const u8) bool {
     return std.mem.eql(u8, cause, "provider_temporary_http_429");
 }
 
+/// What provider trouble asks of the person across Sessions: the one thing a screen names when a provider and model cannot be reached.
+pub const Trouble = enum {
+    sign_in,
+    api_key,
+    quota,
+    rate_limit,
+
+    /// Signing in again clears an older failure: the credential it named has been replaced.
+    pub fn clearedBySignIn(self: Trouble) bool {
+        return self == .sign_in or self == .api_key;
+    }
+
+    /// The failure ends when the provider's saved reset time has passed.
+    pub fn endsAtReset(self: Trouble) bool {
+        return self == .quota;
+    }
+};
+
+/// The trouble a failed Turn's saved code is, or null when it asks nothing beyond that Session.
+pub fn troubleOfFailure(code: []const u8) ?Trouble {
+    return switch (of(code)) {
+        .sign_in => .sign_in,
+        .api_key => .api_key,
+        .quota, .plan => .quota,
+        else => null,
+    };
+}
+
+/// The trouble a retrying Turn's cause is, or null for a transient error that needs nobody.
+pub fn troubleOfRetry(cause: []const u8) ?Trouble {
+    return if (rateLimited(cause)) .rate_limit else null;
+}
+
+test "provider trouble follows the saved code, and only some troubles clear on sign-in or at a reset" {
+    const failures = .{
+        .{ "provider_http_401", Trouble.sign_in },
+        .{ "provider_sign_in_required", Trouble.sign_in },
+        .{ "provider_sign_in_refresh_token_expired", Trouble.sign_in },
+        .{ api_key_rejected, Trouble.api_key },
+        .{ "provider_quota", Trouble.quota },
+        .{ "provider_plan", Trouble.quota },
+    };
+    inline for (failures) |case| try std.testing.expectEqual(@as(?Trouble, case[1]), troubleOfFailure(case[0]));
+    for ([_][]const u8{ "provider_policy", "provider_authentication_backend_failed", "provider_model_unavailable", "provider_http_500", "retry_exhausted", "cancelled", "provider_temporary_http_429" }) |code| {
+        try std.testing.expectEqual(@as(?Trouble, null), troubleOfFailure(code));
+    }
+    try std.testing.expectEqual(@as(?Trouble, .rate_limit), troubleOfRetry("provider_temporary_http_429"));
+    try std.testing.expectEqual(@as(?Trouble, null), troubleOfRetry("provider_temporary_error"));
+    inline for (comptime std.enums.values(Trouble)) |trouble| {
+        try std.testing.expectEqual(trouble == .sign_in or trouble == .api_key, trouble.clearedBySignIn());
+        try std.testing.expectEqual(trouble == .quota, trouble.endsAtReset());
+    }
+}
+
 test "saved failure codes name what the person can do" {
     const cases = .{
         .{ "provider_policy", Class.policy },

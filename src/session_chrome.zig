@@ -29,16 +29,25 @@ pub const Footer = struct {
 pub const ChoiceAction = enum { pick, close };
 pub const ChoiceKey = struct { text: []const u8, action: ChoiceAction };
 pub const ChoiceKeys = struct { text: []const u8, actions: [2]ChoiceKey };
-pub const ChoiceState = enum { closed, pick, retry };
+pub const ChoiceState = enum { closed, pick, retry, edit };
 
-pub fn choiceKeys(has_choice: bool) ChoiceKeys {
-    const pick = "enter pick";
-    const retry = "enter retry";
+pub fn choiceKeys(choice: ChoiceState) ChoiceKeys {
+    const action = switch (choice) {
+        .pick => "enter pick",
+        .retry => "enter retry",
+        .edit => "enter edit",
+        .closed => unreachable,
+    };
     const close = "esc close";
     return .{
-        .text = if (has_choice) pick ++ " · " ++ close else retry ++ " · " ++ close,
+        .text = switch (choice) {
+            .pick => "enter pick · esc close",
+            .retry => "enter retry · esc close",
+            .edit => "enter edit · esc close",
+            .closed => unreachable,
+        },
         .actions = .{
-            .{ .text = if (has_choice) pick else retry, .action = .pick },
+            .{ .text = action, .action = .pick },
             .{ .text = close, .action = .close },
         },
     };
@@ -53,7 +62,7 @@ pub const FooterKeys = struct {
 
 pub fn footerKeys(choice: ChoiceState) FooterKeys {
     if (choice == .closed) return .{ .text = "", .action = .info, .other_actions = true };
-    const keys = choiceKeys(choice == .pick);
+    const keys = choiceKeys(choice);
     return .{ .text = keys.actions[0].text, .action = .pick, .other_actions = false, .choice = keys };
 }
 
@@ -545,13 +554,20 @@ test "deferred footer effect is superseded by interaction without making invisib
 }
 
 test "footer standalone actions describe pick retry and close from one owner" {
-    for ([_]ChoiceState{ .pick, .retry }) |state| {
+    for ([_]ChoiceState{ .pick, .retry, .edit }) |state| {
         const keys = footerKeys(state);
         try std.testing.expect(!keys.other_actions);
         try std.testing.expectEqual(.pick, keys.action);
         const choice = keys.choice.?;
-        try std.testing.expectEqualStrings(if (state == .pick) "enter pick · esc close" else "enter retry · esc close", choice.text);
-        try std.testing.expectEqualStrings(if (state == .pick) "enter pick" else "enter retry", choice.actions[0].text);
+        const expected = switch (state) {
+            .pick => "enter pick",
+            .retry => "enter retry",
+            .edit => "enter edit",
+            .closed => unreachable,
+        };
+        var buffer: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "{s} · esc close", .{expected}), choice.text);
+        try std.testing.expectEqualStrings(expected, choice.actions[0].text);
         try std.testing.expectEqualStrings("esc close", choice.actions[1].text);
         try std.testing.expectEqual(ChoiceAction.pick, choice.actions[0].action);
         try std.testing.expectEqual(ChoiceAction.close, choice.actions[1].action);

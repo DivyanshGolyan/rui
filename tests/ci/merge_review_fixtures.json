@@ -1,0 +1,43 @@
+{
+ "_source": "Comments GitHub returned on #2302 and #2289 when each merged on 2026-11-25 with no review: Codex's only comments are a failed summary and its usage-limit notice (fields trimmed to those review_outcomes reads).",
+ "2302": [
+  {
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "author_association": "NONE",
+   "created_at": "2026-11-25T09:42:54Z",
+   "html_url": "https://github.com/DivyanshGolyan/rui/pull/2302#issuecomment-7158702870",
+   "body": "<!-- codex-pull-request-review-summary -->\n<!-- codex-review-state:v1 {\"code_review\":{\"commit_sha\":\"11c8540936b5a2b4643070364da113443db36a83\",\"has_any_findings\":true,\"has_unresolved_findings\":true,\"status\":\"failed\"},\"security_review\":{\"commit_sha\":null,\"has_any_findings\":null,\"has_unresolved_findings\":null,\"status\":null}} -->\n\n<details>\n<summary><strong>Codex Review Summary</strong>: \u274c Failed</summary>\n\nThis comment shows the latest Codex review activity on this pull request.\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| \ud83d\udcdd **Code Review** | \u274c **Failed** <relative-time datetime=\"2026-11-25T09:42:51.687001Z\">2026-11-25T09:42:51.687001Z</relative-time><br/>We couldn\u2019t complete this review. Comment `@codex review` to try again. | `11c8540` | PR opened |\n\n\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\" or \"@codex security review\".\n\nCodex reacts with \ud83d\udc40 while any review is running, comments if it has suggestions, and reacts with \ud83d\udc4d once all reviews finish with no findings.\n\n</details>\n\n</details>"
+  },
+  {
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "author_association": "NONE",
+   "created_at": "2026-11-25T09:42:57Z",
+   "html_url": "https://github.com/DivyanshGolyan/rui/pull/2302#issuecomment-7158703625",
+   "body": "You have reached your Codex usage limits for code reviews. You can see your limits in the [Codex usage dashboard](https://chatgpt.com/codex/cloud/settings/usage)."
+  }
+ ],
+ "2289": [
+  {
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "author_association": "NONE",
+   "created_at": "2026-11-25T09:26:55Z",
+   "html_url": "https://github.com/DivyanshGolyan/rui/pull/2289#issuecomment-7158343170",
+   "body": "<!-- codex-pull-request-review-summary -->\n<!-- codex-review-state:v1 {\"code_review\":{\"commit_sha\":\"3039016c38fbdf158f0eabd945f339de5d292d6f\",\"has_any_findings\":true,\"has_unresolved_findings\":true,\"status\":\"failed\"},\"security_review\":{\"commit_sha\":null,\"has_any_findings\":null,\"has_unresolved_findings\":null,\"status\":null}} -->\n\n<details>\n<summary><strong>Codex Review Summary</strong>: \u274c Failed</summary>\n\nThis comment shows the latest Codex review activity on this pull request.\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| \ud83d\udcdd **Code Review** | \u274c **Failed** <relative-time datetime=\"2026-11-25T09:26:49.917061Z\">2026-11-25T09:26:49.917061Z</relative-time><br/>We couldn\u2019t complete this review. Comment `@codex review` to try again. | `3039016` | Draft marked ready |\n\n\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\" or \"@codex security review\".\n\nCodex reacts with \ud83d\udc40 while any review is running, comments if it has suggestions, and reacts with \ud83d\udc4d once all reviews finish with no findings.\n\n</details>\n\n</details>"
+  },
+  {
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "author_association": "NONE",
+   "created_at": "2026-11-25T09:26:58Z",
+   "html_url": "https://github.com/DivyanshGolyan/rui/pull/2289#issuecomment-7158344152",
+   "body": "You have reached your Codex usage limits for code reviews. You can see your limits in the [Codex usage dashboard](https://chatgpt.com/codex/cloud/settings/usage)."
+  }
+ ]
+}

@@ -1932,7 +1932,7 @@ fi
     def test_a_dispatch_selects_from_its_explicit_base(self):
         workflow = Path('.github/workflows/check.yml').read_text()
         prefix = dedent(re.search(
-            r'(?s)        run: \|\n(          set -euo pipefail\n.*?)'
+            r'(?s)- name: Select existing targets\n.*?        run: \|\n(          set -euo pipefail\n.*?)'
             r'          python3 tests/ci/select_tests.py', workflow)[1])
         candidate = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
         with patch.dict(os.environ, BASE='1' * 40, EVENT_NAME='workflow_dispatch', CANDIDATE_REF=candidate):

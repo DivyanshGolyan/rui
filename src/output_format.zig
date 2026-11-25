@@ -19,7 +19,7 @@ pub const OutputRecordTag = enum(u8) {
     pattern = 12,
 };
 
-pub const HostedAction = enum(u8) { none = 0, search = 1, open_page = 2, find_in_page = 3 };
+pub const HostedAction = @import("hosted_action.zig").HostedAction;
 
 pub const PartKind = enum(u8) { opaque_block = 0, output_text = 1, refusal = 2, summary_text = 3, reasoning_text = 4 };
 pub const NeutralPhase = enum(u8) { unphased = 0, commentary = 1, final_answer = 2 };

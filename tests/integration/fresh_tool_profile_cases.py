@@ -158,7 +158,7 @@ def discovery(world, engine):
     with world("tool-profile-discovery") as w:
         w.endpoint.responses_by_input = None
         for name, args, words, initial, final, offered, tools in (
-            ("subset", ["--loaded-tools", ",".join(loaded)], "read_action", loaded, sorted(set(loaded) | {"read_action"}), set(loaded) | {"read_action", "stop_action"}, allowed),
+            ("subset", ["--loaded-tools", ",".join(loaded)], "read_action", loaded, sorted(set(loaded) | {"read_action"}), set(loaded) | {"read_action"}, allowed),
             ("restricted", ["--tools", "find_tools"], "bash", ["find_tools"], ["find_tools"], {"find_tools"}, ["find_tools"]),
         ):
             session = w.session(*args)
@@ -176,7 +176,7 @@ def discovery(world, engine):
                        and item.get("type") == "function_call_output"]
             assert output["output"], output
             profile(w, session, tools, final)
-    print(f"tool profiles ({engine}): discovery loads deferred read_action, projects stop_action, and preserves a restricted Session", flush=True)
+    print(f"tool profiles ({engine}): discovery loads deferred read_action and preserves a restricted Session", flush=True)
 
 
 class ChildReplies(dict):

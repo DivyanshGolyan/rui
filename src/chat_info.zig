@@ -22,7 +22,7 @@ const widget_style = @import("widget_style.zig");
 const Self = @This();
 const focus = @import("chat_info_focus.zig");
 
-pub const SaveState = enum { idle, pending, saved, failed };
+pub const SaveState = enum { idle, pending, saved, failed, unconfirmed };
 pub const Edit = union(enum) {
     effort: ?catalog.ReasoningEffort,
     permission: @FieldType(status.Session, "permission"),
@@ -38,6 +38,7 @@ pub const Backend = struct {
     archive: *const fn (*anyopaque) anyerror!view.IntentAdmission,
     copy_last_answer: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     state: *const fn (*anyopaque) SaveState,
+    unconfirmed_key: ?*const fn (*anyopaque) ?@import("configure_outcome.zig").Original = null,
     models: *const fn (*anyopaque) ModelChoice.Snapshot,
     caps: *const fn (*anyopaque) view.Caps,
     copied: *const fn (*anyopaque) bool,
@@ -45,7 +46,7 @@ pub const Backend = struct {
 
 pub const Row = enum { model, effort };
 
-const Phase = enum { open, pending, failed };
+const Phase = enum { open, pending, failed, unconfirmed };
 const Standalone = struct { row: Row, phase: Phase = .open };
 
 standalone: ?Standalone = null,
@@ -59,6 +60,7 @@ panel: Panel = .{ .title = "Chat", .action_gap = 1, .natural_height = true, .top
 fields: [6]Panel.Field = undefined,
 actions: [3][]const u8 = undefined,
 failures: [9]?[]const u8 = @splat(null),
+unconfirmed_keys: [9]?@import("configure_outcome.zig").Original = @splat(null),
 pending: ?usize = null,
 effort_labels: [std.enums.values(catalog.ReasoningEffort).len + 1][]const u8 = undefined,
 effort_count: usize = 0,
@@ -69,6 +71,24 @@ renaming: bool = false,
 rename_bytes: [status.max_label_bytes]u8 = undefined,
 rename_editor: Editor = .initLocked(&.{}, .line_refusals_release),
 pasting: bool = false,
+
+pub fn clearUnconfirmed(self: *Self, original: @import("configure_outcome.zig").Original) void {
+    for (&self.unconfirmed_keys, &self.failures) |*saved, *failure| {
+        if (saved.*) |value| if (std.mem.eql(u8, &value.key, &original.key) and value.store.eql(original.store.slice())) {
+            saved.* = null;
+            failure.* = null;
+        };
+    }
+}
+
+fn clearUnconfirmedPresentation(self: *Self) void {
+    for (&self.unconfirmed_keys, &self.failures) |*saved, *failure| {
+        if (saved.* != null) {
+            saved.* = null;
+            failure.* = null;
+        }
+    }
+}
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -100,9 +120,14 @@ pub fn standaloneField(self: *const Self) ?Row {
     return if (self.standalone) |shown| shown.row else null;
 }
 
+pub fn standaloneUnconfirmed(self: *const Self) bool {
+    return if (self.standalone) |shown| shown.phase == .unconfirmed else false;
+}
+
 pub fn closeStandaloneChoice(self: *Self) void {
     self.standalone = null;
     self.cancelEdit();
+    self.clearUnconfirmedPresentation();
 }
 
 pub fn standaloneWidget(self: *Self) vxfw.Widget {
@@ -223,6 +248,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
         return;
     }
     self.failures[row] = null;
+    self.unconfirmed_keys[row] = null;
     switch (row) {
         0 => {
             self.effort_labels[0] = setting_words.effort_default;
@@ -283,7 +309,7 @@ fn pickModel(raw: *anyopaque, ctx: *vxfw.EventContext, model: []const u8) !void 
 
 fn updateTools(self: *Self) void {
     inline for (std.enums.values(tools.BuiltInTool), 0..) |tool, at| {
-        const name = if (tool == .web_search) "web search" else @tagName(tool);
+        const name = comptime tools.shown(tool);
         self.tool_labels[at] = if (self.tool_draft.?.contains(tool)) "✓ " ++ name else "  " ++ name;
     }
 }
@@ -305,6 +331,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize, choice: usize) !vo
 
 fn save(self: *Self, ctx: *vxfw.EventContext, row: usize, edit: Edit) !void {
     self.failures[row] = null;
+    self.unconfirmed_keys[row] = null;
     self.backend.configure(self.backend.context, edit) catch {
         self.failures[row] = " · couldn't save";
         if (self.standalone) |*shown| shown.phase = .failed;
@@ -322,12 +349,15 @@ fn poll(self: *Self) void {
     const state = self.backend.state(self.backend.context);
     if (state == .idle or state == .pending) return;
     self.readSession();
-    if (state == .failed or self.read_failed) {
-        if (self.standalone) |*shown| shown.phase = .failed;
+    if (state == .failed or state == .unconfirmed or self.read_failed) {
+        if (self.standalone) |*shown| shown.phase = if (state == .unconfirmed) .unconfirmed else .failed;
     } else {
         self.closeStandaloneChoice();
     }
-    self.failures[row] = if (state == .failed) switch (row) {
+    if (state == .unconfirmed) if (self.backend.unconfirmed_key) |read| {
+        self.unconfirmed_keys[row] = read(self.backend.context);
+    };
+    self.failures[row] = if (state == .unconfirmed) " · not confirmed · /requests" else if (state == .failed) switch (row) {
         7 => " · couldn't archive",
         8 => " · couldn't copy",
         else => " · couldn't save",
@@ -506,7 +536,7 @@ fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.
         var selected = self.session.tools.iterator();
         while (selected.next()) |tool_name| {
             if (tool_text.written().len > 0) try tool_text.writer.writeAll(", ");
-            try tool_text.writer.writeAll(if (std.mem.eql(u8, tool_name, "web_search")) "web search" else tool_name);
+            try tool_text.writer.writeAll(tools.shownName(tool_name));
         }
     }
     self.fields[2].value = if (!self.ready) "unavailable" else if (tool_text.written().len == 0) "no tools" else tool_text.written();
@@ -777,6 +807,10 @@ test "Chat info effort permissions and tools choices pick and cancel typed edits
     try page.widget().handleEvent(&ctx, .tick);
     page.panel.selected = 2;
     try press(&page, &ctx, vaxis.Key.enter);
+    for (page.panel.choice.?.labels) |label| try std.testing.expect(std.mem.indexOf(u8, label, "web_search") == null);
+    var offers_web_search = false;
+    for (page.panel.choice.?.labels) |label| offers_web_search = offers_web_search or std.mem.indexOf(u8, label, "web search") != null;
+    try std.testing.expect(offers_web_search);
     try press(&page, &ctx, ' ');
     try std.testing.expect(!page.tool_draft.?.contains(.bash));
     try std.testing.expect(page.session.tools.contains("bash"));
@@ -1732,6 +1766,49 @@ test "Chat info standalone effort checks the actual Session effort without chang
             for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (actual == row) "✓" else " ", drawn.readCell(3, @intCast(row + 1)).char.grapheme);
         }
     };
+}
+
+test "SUI-136 an unconfirmed choice opens a new edit instead of retrying" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try page.openStandaloneChoice(&ctx, .effort);
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(@as(usize, 1), fixture.save_calls);
+    fixture.state_value = .unconfirmed;
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(page.standaloneUnconfirmed() and !page.hasChoice());
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expect(page.hasChoice());
+    try std.testing.expectEqual(@as(usize, 1), fixture.save_calls);
+}
+
+test "SUI-136 field notices clear only for the observed Configure key" {
+    const a: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const b: [36]u8 = "01234567-89ab-4cde-8012-0123456789ac".*;
+    const store = try @import("bounded.zig").Bounded(@import("store_path.zig").max_bytes).from("/store-a");
+    const original_a: @import("configure_outcome.zig").Original = .{ .key = a, .store = store };
+    const original_b: @import("configure_outcome.zig").Original = .{ .key = b, .store = store };
+    const other_store = try @import("bounded.zig").Bounded(@import("store_path.zig").max_bytes).from("/store-b");
+    const same_key_other_store: @import("configure_outcome.zig").Original = .{ .key = a, .store = other_store };
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    page.unconfirmed_keys[0] = original_a;
+    page.unconfirmed_keys[1] = original_b;
+    page.unconfirmed_keys[2] = same_key_other_store;
+    page.failures[2] = " · not confirmed · /requests";
+    page.failures[0] = " · not confirmed · /requests";
+    page.failures[1] = " · not confirmed · /requests";
+    page.clearUnconfirmed(original_a);
+    try std.testing.expect(page.failures[0] == null and page.unconfirmed_keys[0] == null);
+    try std.testing.expectEqual(b, page.unconfirmed_keys[1].?.key);
+    try std.testing.expectEqualStrings(" · not confirmed · /requests", page.failures[1].?);
+    try std.testing.expectEqual(a, page.unconfirmed_keys[2].?.key);
+    try std.testing.expect(page.unconfirmed_keys[2].?.store.eql("/store-b"));
 }
 
 test "Chat info standalone failure retry preserves field-only presentation and the actual effort check" {

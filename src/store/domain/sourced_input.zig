@@ -3,8 +3,7 @@ const command_domain = @import("command.zig");
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const rsql = @import("../rsql.zig");
-
-pub const SourceKind = enum(u8) { person = 1, peer = 2, action_final = 3, action_value = 4, server_event = 5 };
+const SourceKind = @import("../../source_kind.zig").SourceKind;
 
 pub const Source = union(enum) {
     person: []const u8,

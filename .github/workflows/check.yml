@@ -45,6 +45,8 @@ permissions:
   contents: read
   pull-requests: read
   actions: read
+  # plan lists the open main-red issues (main_red.py).
+  issues: read
   # Aggregates read GitHub's annotations to name a lost or never-acquired runner.
   checks: read
 
@@ -196,6 +198,7 @@ jobs:
       pr_mysql_migration: ${{ steps.select.outputs.pr_mysql_migration }}
       pr_setup_targets: ${{ steps.select.outputs.pr_setup_targets }}
       compile_only: ${{ steps.select.outputs.compile_only }}
+      main_red: ${{ steps.main_red.outputs.main_red }}
     steps:
       - name: PR admission trigger ${{ github.event.pull_request.number }} ${{ github.event.pull_request.draft && 'draft' || 'ready' }}
         if: ${{ github.event_name == 'pull_request' }}
@@ -205,10 +208,33 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           filter: blob:none
+      - name: Pause PR CI while main is red
+        id: main_red
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 -B tests/ci/main_red.py
+      # GitHub rebuilds a PR's merge lazily; check the merge on main as it is now.
+      - name: Merge onto current main
+        id: fresh
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          MERGE=$(python3 -B tests/ci/fresh_candidate.py)
+          git fetch --no-tags --filter=blob:none origin "$MERGE"
+          git checkout --detach "$MERGE"
+          echo "ref=$MERGE" >> "$GITHUB_OUTPUT"
       - name: Select existing targets
         id: select
         env:
-          CANDIDATE_REF: ${{ github.sha }}
+          MAIN_RED: ${{ steps.main_red.outputs.main_red }}
+          CANDIDATE_REF: ${{ steps.fresh.outputs.ref || github.sha }}
           # A PR's base.sha can trail the main its merge commit was built on.
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || inputs.base }}
           DRAFT: ${{ github.event.pull_request.draft || false }}
@@ -226,14 +252,15 @@ jobs:
           python3 - <<'PY'
           import json, os, sys
           sys.path.insert(0, 'tests/ci')
-          from docs_only import classify
+          from docs_only import ChangeKind, classify
           from ci_plan import plan
           selection = json.load(open('selection.json'))
           kind = classify(selection['base'], selection['head'])
           native = {'native_targets': json.loads(os.environ['NATIVE_TARGETS'])} if os.environ.get('NATIVE_TARGETS') else {}
           result = plan(selection, event_name=os.environ['EVENT_NAME'],
                         draft=os.environ['DRAFT'] == 'true', promotion=os.environ['PROMOTION'] == 'true',
-                        change_kind=kind, compile_only=os.environ['COMPILE_ONLY'] == 'true', **native)
+                        change_kind=kind, compile_only=os.environ['COMPILE_ONLY'] == 'true',
+                        main_red=bool(os.environ.get('MAIN_RED')), **native)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               print('candidate_ref=' + os.environ['CANDIDATE_REF'], file=f)
               for key, value in result.outputs.items():
@@ -942,6 +969,13 @@ jobs:
             src/protocol.zig
           sparse-checkout-cone-mode: false
           persist-credentials: false
+      - name: Stop when main is red
+        if: ${{ needs.plan.outputs.main_red != '' }}
+        env:
+          MAIN_RED: ${{ needs.plan.outputs.main_red }}
+        run: |
+          echo "::error::main is red (#${MAIN_RED// /, #}); this PR's build and tests were skipped to save runner minutes. Push again or reopen the PR once it is closed; a rerun reuses the old PR body."
+          exit 1
       - name: Require the wire contract against the newest release
         run: |
           set -euo pipefail

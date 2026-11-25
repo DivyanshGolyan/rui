@@ -254,8 +254,8 @@ pub const ActivityPage = struct {
                 .turn_ended => |ended| {
                     if (!protocol.validSessionId(ended.session.slice())) return error.InvalidActivityPage;
                     const ending = ended.ending.value;
-                    const done = ending == .done;
-                    const cancelled = ending == .stopped or ending == .interrupted;
+                    const done = ending.sign() == .finished;
+                    const cancelled = ending.sign() == .stopped;
                     if (ended.code.slice().len == 0 or done != ended.code.eql("completed") or cancelled != ended.code.eql("cancelled") or
                         (done and ended.content == null) or (cancelled and ended.content != null)) return error.InvalidActivityPage;
                     fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try textOf(reference) else null } };
