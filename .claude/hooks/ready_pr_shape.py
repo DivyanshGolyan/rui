@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Refuse to open or mark ready a Rui PR whose body admission would reject (tests/ci/pr_shape.py ready_refusal).
+"""Refuse to open (draft or ready) or mark ready a Rui PR whose body admission would reject (tests/ci/pr_shape.py ready_refusal).
 
 Admission is the last job of a ready PR's run, so a missing Goal, Summary sketch or screen line surfaces
-20 minutes after the PR is ready, and only to whoever reads the failure. The hook asks the same owner first.
+20 minutes after the PR is ready, and only to whoever reads the failure. The hook asks the same owner first,
+when the PR opens and again when it turns ready. A UI PR cannot open through this route without a screen line:
+`open_pr.py open --frames DIR` is the route that carries captured frames.
 An unreadable PR (no network, no `gh`, no local main) lets the call through with a warning.
 """
 import json
@@ -16,19 +18,20 @@ REPO = "DivyanshGolyan/rui"
 
 
 def ready_call(payload):
-    """(number or None, head, body override) when this call makes a Rui PR ready for review, else None."""
+    """(number or None, head, body override) when this call opens a Rui PR or makes it ready for review, else None."""
     tool, args = payload.get("tool_name", ""), payload.get("tool_input", {})
     if f"{args.get('owner')}/{args.get('repo')}" != REPO:
         return None
-    if tool == "mcp__github__create_pull_request" and args.get("draft") is not True:
+    if tool == "mcp__github__create_pull_request":
         return None, args.get("head"), args.get("body")
     if tool == "mcp__github__update_pull_request" and args.get("draft") is False:
         return args.get("pullNumber"), None, args.get("body")
     return None
 
 
-def refusal(call, api):
+def refusal(call, api, judge=None):
     from pr_shape import ready_refusal
+    judge = judge or ready_refusal
     number, head, body = call
     if number:
         pr = api("GET", f"repos/{REPO}/pulls/{number}")
@@ -37,17 +40,18 @@ def refusal(call, api):
     else:
         files = api("GET", f"repos/{REPO}/compare/main...{head}")["files"]
         body = body or ""
-    reason = ready_refusal([row["filename"] for row in files], body, base="origin/main", repo=REPO, number=number)
+    reason = judge([row["filename"] for row in files], body, base="origin/main", repo=REPO, number=number)
     return f"Refused: this PR would fail admission on its body. {reason}" if reason else None
 
 
-def main():
-    call = ready_call(json.load(sys.stdin))
+def main(stdin=None, api=None):
+    call = ready_call(json.load(stdin or sys.stdin))
     if call is None:
         return 0
-    from conflict_alert import github
+    if api is None:
+        from conflict_alert import github as api
     try:
-        reason = refusal(call, github)
+        reason = refusal(call, api)
     except (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError) as error:
         print(f"warning: could not judge the PR body ({error}); not blocking.", file=sys.stderr)
         return 0

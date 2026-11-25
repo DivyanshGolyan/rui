@@ -1,9 +1,13 @@
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
 import sys
 import unittest
+
+from pr_shape import ready_refusal
 
 HOOK = Path(__file__).resolve().parents[2] / ".claude/hooks/block_full_runs.py"
 MERGE_HOOK = HOOK.with_name("review_before_merge.py")
@@ -118,7 +122,7 @@ class ReadyPrShapeTest(unittest.TestCase):
         update = lambda **a: {"tool_name": "mcp__github__update_pull_request", "tool_input": {**self.rui, "pullNumber": 9, **a}}
         self.assertEqual(self.hook.ready_call(create(body="b")), (None, "x", "b"))
         self.assertEqual(self.hook.ready_call(create(draft=False, body="b")), (None, "x", "b"))
-        self.assertIsNone(self.hook.ready_call(create(draft=True)))
+        self.assertEqual(self.hook.ready_call(create(draft=True, body="b")), (None, "x", "b"))
         self.assertEqual(self.hook.ready_call(update(draft=False)), (9, None, None))
         self.assertIsNone(self.hook.ready_call(update(body="new body")))
         self.assertIsNone(self.hook.ready_call(update(draft=True)))
@@ -130,18 +134,22 @@ class ReadyPrShapeTest(unittest.TestCase):
         body = "No issue: main is red on two tests since #2284 added `watch_github_pr`.\n\n## Summary\n\n```\nx\n```\n"
         api = lambda method, path: ({"body": body} if path.endswith("/pulls/9")
                                     else [{"filename": "src/chat_info.zig"}, {"filename": "tests/integration/product_defaults.py"}])
-        with patch("pr_shape.screens_required", return_value=True), patch("pr_shape.sticky_screen_evidence", return_value=False):
-            reason = self.hook.refusal((9, None, None), api)
-            self.assertIn("No screen change:", reason)
-            fixed = body + "No screen change: one unit-test assertion\n"
-            self.assertIsNone(self.hook.refusal((9, None, fixed), api))
+        ui = lambda paths, base=None: True
+        no_comment = lambda repo, number: False
+        judge = lambda paths, body, **kw: ready_refusal(paths, body, needs=ui, sticky=no_comment, **kw)
+        reason = self.hook.refusal((9, None, None), api, judge)
+        self.assertIn("No screen change:", reason)
+        self.assertIn("open_pr.py open --frames", reason)
+        fixed = body + "No screen change: one unit-test assertion\n"
+        self.assertIsNone(self.hook.refusal((9, None, fixed), api, judge))
 
     def test_an_unreadable_pr_does_not_block(self):
         payload = {"tool_name": "mcp__github__update_pull_request", "tool_input": {**self.rui, "pullNumber": 9, "draft": False}}
+        def unreadable(*args):
+            raise subprocess.CalledProcessError(1, ["gh"])
         stderr = io.StringIO()
-        with patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stderr(stderr), \
-                patch("conflict_alert.github", side_effect=subprocess.CalledProcessError(1, ["gh"])):
-            self.assertEqual(self.hook.main(), 0)
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(self.hook.main(io.StringIO(json.dumps(payload)), unreadable), 0)
         self.assertIn("not blocking", stderr.getvalue())
 
 

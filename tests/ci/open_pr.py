@@ -24,7 +24,7 @@ from urllib.parse import quote
 
 from conflict_alert import gh, github
 from pr_overlap import branch_changes, origin_repo, overlaps, report
-from pr_shape import ready_refusal as shape_ready_refusal, refusal as shape_refusal, screens_required
+from pr_shape import ready_refusal as shape_ready_refusal, screens_required
 
 
 def create_args(repo, title, body, base, branch, draft):
@@ -103,6 +103,7 @@ def main():
     opening.add_argument("--base", default="main")
     opening.add_argument("--ready", action="store_true",
                          help="open ready for review (red-main fixes and PRs others wait on only)")
+    opening.add_argument("--frames", help="the directory verify-rui frames printed; a UI PR opens only with its screens captured")
     commands.add_parser("ready", help="mark this branch's draft ready to run its full selected suite")
     review = commands.add_parser("review", help="post the pr-reviewer agent's verdict on a PR (default: this branch's)")
     review.add_argument("--pr", type=int)
@@ -123,15 +124,18 @@ def main():
                 print(f"Cannot read PR body: {error}", file=sys.stderr)
                 return 1
             paths, removed = branch_changes(f"origin/{args.base}")
-            if refusal := (shape_ready_refusal if args.ready else shape_refusal)(paths, body, base=f"origin/{args.base}"):
+            needs_screens = screens_required(paths, base=f"origin/{args.base}")
+            if refusal := shape_ready_refusal(paths, body, base=f"origin/{args.base}", frames=args.frames,
+                                              needs=lambda *_, **__: needs_screens):
                 print(refusal, file=sys.stderr)
                 return 1
-            needs_screens = screens_required(paths, base=f"origin/{args.base}")
             report(overlaps(github, repo, branch, paths, removed))
             pr = json.loads(gh(*create_args(repo, args.title, body, args.base, branch, draft=not args.ready)))
             print(pr["html_url"])
             if needs_screens:
-                print("UI PR: publish frames with verify-rui publish DIR --pr N; admission stays red until then.")
+                where = args.frames or "DIR"
+                print(f"UI PR: publish its screens now with verify-rui publish {where} --pr {pr['number']}; "
+                      "admission stays red until then.")
             if not args.ready:
                 github("POST", f"repos/{repo}/issues/{pr['number']}/comments", [("body", "@codex review")])
                 print("Opened draft and requested Codex review. "

@@ -8,6 +8,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from unittest.mock import call, patch
 
 import open_pr
+import pr_shape
 from pr_timeline import review_outcomes
 from test_pr_shape import GOAL
 
@@ -119,20 +120,31 @@ class OpenPrTest(unittest.TestCase):
                     gh.assert_not_called()
                     github.assert_not_called()
 
-    def test_ui_without_screens_opens_and_prints_reminder(self):
-        stdout = io.StringIO()
-        with patch("sys.argv", ["open_pr.py", "open", "--title", "Title", "--body-file", "body.md"]), \
-             patch.object(open_pr, "git", side_effect=["fix-x", "a" * 40, "a" * 40, ""]), \
-             patch.object(open_pr, "origin_repo", return_value="example/rui"), \
-             patch.object(open_pr.Path, "read_text", return_value=GOAL + "## Summary\n```text\ninput -> owner\n```"), \
-             patch.object(open_pr, "branch_changes", return_value=({"src/overview_view.zig"}, {})), \
-             patch.object(open_pr, "screens_required", return_value=True), \
-             patch.object(open_pr, "overlaps", return_value=[]), patch.object(open_pr, "report"), \
-             patch.object(open_pr, "gh", return_value='{"number": 9, "html_url": "url"}') as gh, \
-             patch.object(open_pr, "github"), redirect_stdout(stdout):
-            self.assertEqual(open_pr.main(), 0)
-        gh.assert_called_once()
-        self.assertIn("UI PR: publish frames with verify-rui publish DIR --pr N; admission stays red until then.", stdout.getvalue())
+    def test_a_ui_pr_opens_only_with_captured_frames_and_prints_the_publish_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            body, frames = Path(directory, "body.md"), Path(directory, "frames")
+            body.write_text(GOAL + "## Summary\n```text\ninput -> owner\n```", encoding="utf-8")
+            frames.mkdir()
+            for captured in (False, True):
+                if captured:
+                    (frames / "index.html").write_text("<html></html>", encoding="utf-8")
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch("sys.argv", ["open_pr.py", "open", "--title", "Title", "--body-file", str(body),
+                                        "--frames", str(frames)]), \
+                     patch.object(open_pr, "git", side_effect=["fix-x", "a" * 40, "a" * 40, ""]), \
+                     patch.object(open_pr, "origin_repo", return_value="example/rui"), \
+                     patch.object(open_pr, "branch_changes", return_value=({"src/overview_view.zig"}, {})), \
+                     patch.object(open_pr, "screens_required", return_value=True), \
+                     patch.object(open_pr, "overlaps", return_value=[]), patch.object(open_pr, "report"), \
+                     patch.object(open_pr, "gh", return_value='{"number": 9, "html_url": "url"}') as gh, \
+                     patch.object(open_pr, "github"), redirect_stdout(stdout), redirect_stderr(stderr):
+                    self.assertEqual(open_pr.main(), 0 if captured else 1)
+                self.assertEqual(gh.call_count, 1 if captured else 0)
+                if captured:
+                    self.assertIn(f"verify-rui publish {frames} --pr 9", stdout.getvalue())
+                    self.assertIn("subscribe_pr_activity for PR #9", stdout.getvalue())
+                else:
+                    self.assertIn("open_pr.py open --frames", stderr.getvalue())
 
     def test_open_reports_unreadable_body_without_github(self):
         for error in (FileNotFoundError("missing body"), PermissionError("unreadable body"),
@@ -205,27 +217,21 @@ class OpenPrTest(unittest.TestCase):
                 self.assertEqual((code, posted), (1, []))
                 self.assertTrue(message)
 
-    def test_ready_refuses_a_body_admission_would_fail(self):
-        # #2305 was ready for 20 minutes on a UI file with no screen line; only admission, last, said so.
-        head = "c" * 40
-        body = "No issue: fix main's red tests after the watch tool arrived"
-        draft = {"number": 9, "draft": True, "head": {"sha": head}, "body": body}
-        for sticky in (False, True):
-            with self.subTest(screens_comment=sticky):
-                stderr = io.StringIO()
-                with patch("sys.argv", ["open_pr.py", "ready"]), \
-                     patch.object(open_pr, "git", side_effect=["fix/x", head, ""]), \
-                     patch.object(open_pr, "origin_repo", return_value="example/rui"), \
-                     patch.object(open_pr, "branch_changes", return_value=(["src/chat_info.zig"], [])), \
-                     patch("pr_shape.screens_required", return_value=True), \
-                     patch("pr_shape.sticky_screen_evidence", return_value=sticky), \
-                     patch("pr_shape.summary_sketch", return_value=True), \
-                     patch.object(open_pr, "github", return_value=[draft]), \
-                     patch.object(open_pr, "gh", return_value="") as gh, redirect_stderr(stderr):
-                    self.assertEqual(open_pr.main(), 0 if sticky else 1)
-                self.assertEqual(gh.call_count, 1 if sticky else 0)
-                if not sticky:
-                    self.assertIn("No screen change:", stderr.getvalue())
+    def test_a_ui_pr_opens_or_turns_ready_only_with_its_screens_on_hand(self):
+        # #2277, #2297, #2299, #2305 and #2306 changed UI with no screens; only admission, last, said so.
+        body = "No issue: fix main's red tests after the watch tool arrived\n\n## Summary\n\n```\nx\n```\n"
+        ui, no_ui = (lambda paths, base=None: True), (lambda paths, base=None: False)
+        comment, no_comment = (lambda repo, number: True), (lambda repo, number: False)
+        judge = lambda **kw: pr_shape.ready_refusal(["src/chat_info.zig"], body, **kw)
+        with tempfile.TemporaryDirectory() as frames:
+            self.assertIn("open_pr.py open --frames", judge(needs=ui, sticky=no_comment))
+            self.assertIn("open_pr.py open --frames", judge(needs=ui, sticky=no_comment, frames=frames))
+            Path(frames, "index.html").write_text("<html></html>")
+            for screens in ({"frames": frames}, {"number": 9, "sticky": comment}):
+                self.assertIsNone(judge(needs=ui, **{"sticky": no_comment, **screens}))
+        self.assertIsNone(judge(needs=no_ui, sticky=no_comment))
+        self.assertIsNone(pr_shape.ready_refusal(["src/chat_info.zig"], body + "No screen change: one assertion\n",
+                                                 needs=ui, sticky=no_comment))
 
     def test_opens_only_a_pushed_head(self):
         self.assertIsNone(open_pr.open_refusal("a" * 40, "a" * 40))
