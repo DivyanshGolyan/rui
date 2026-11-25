@@ -310,7 +310,7 @@ noinline fn outlineHeader(store: *storage.Store, arena: std.mem.Allocator, sessi
         .hosted_call => |*presentation| if (presentation.line) |*line| {
             note = try arena.dupe(u8, (line.description() orelse return error.CorruptStore).slice());
         },
-        .assistant, .turn_ended, .stop, .sent, .send_failed, .approval_requested, .session_changed, .compacted, .model_call => {},
+        .assistant, .instruction, .turn_ended, .stop, .sent, .send_failed, .approval_requested, .session_changed, .compacted, .model_call => {},
     }
     return note;
 }
