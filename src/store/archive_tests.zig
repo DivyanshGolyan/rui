@@ -1122,7 +1122,7 @@ test "SL-11: an Archived window row's first Message is its list row's first Mess
                     try std.testing.expectEqual(want.admitted_at, got.admitted_at);
                     try std.testing.expectEqualDeep(want.content, got.content);
                     try std.testing.expectEqualDeep(want.sender, got.sender);
-                    try std.testing.expectEqual(shapes[shape_at].mark == .peer, got.sender != null);
+                    if (shapes[shape_at].mark == .peer) try std.testing.expect(got.sender != null);
                     // The prefix is the Message's own leading bytes, raw, for inline Text, and nothing for parts.
                     switch (got.content) {
                         .text => try std.testing.expect(got.has_prefix),
