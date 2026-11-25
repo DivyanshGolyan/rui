@@ -21,9 +21,9 @@ pub const validate = document.validate;
 const validateSaved = document.validateSaved;
 const PermissionMode = @import("cli_value.zig").PermissionMode;
 
-const Read = struct { values: Values = .{}, migrated: bool = false };
+const Loaded = struct { values: Values = .{}, migrated: bool = false };
 
-fn read(dir: std.Io.Dir) !Read {
+fn read(dir: std.Io.Dir) !Loaded {
     const file = openPreferenceFile(dir, "preferences") catch |err| switch (err) {
         error.FileNotFound => return .{},
         else => return err,
@@ -581,7 +581,8 @@ test "CLI-38 reading defaults an earlier release saved returns them and leaves t
         .{ .text = current, .after = current },
         .{ .text = "version=1\nstore=\nprovider=\nmodel=pin\n", .after = "version=1\nstore=\nprovider=\nmodel=pin\n", .outcome = error.SavedPreferenceProviderRequired },
         .{ .text = "version=1\nstore=relative\nprovider=codex\nmodel=\n", .after = "version=1\nstore=relative\nprovider=codex\nmodel=\n", .outcome = error.SavedPreferenceStoreInvalid },
-        .{ .text = "version=3\nstore=\nconnection=codex\nmodel=\nnotifications=on\nreasoning_effort=high\n", .after = "version=3\nstore=\nconnection=codex\nmodel=\nnotifications=on\nreasoning_effort=high\n", .outcome = error.InvalidPreferences },
+        .{ .text = "version=3\nstore=\nconnection=chatgpt\nmodel=gpt-6.2-sol\nnotifications=on\nreasoning_effort=medium\n", .after = current },
+        .{ .text = "version=2\nstore=\nprovider=codex\nmodel=\n", .after = "version=2\nstore=\nprovider=codex\nmodel=\n", .outcome = error.InvalidPreferences },
         .{ .text = "version=9\n", .after = "version=9\n", .outcome = error.UnsupportedPreferencesVersion },
     };
     for (cases) |case| {

@@ -218,7 +218,7 @@ Existing Stores use the private canonical validator, including supported aliases
 A missing or invalid saved Store fails rather than selecting another.
 Captured requests retain their recorded Store across preference edits.
 
-`rui defaults inspect` reads defaults without writing; `rui defaults configure` saves explicit Store/connection/model, notification, effort and permission edits.
+`rui defaults inspect` reads defaults without writing, except the one-time migration of a file an earlier release wrote (below); `rui defaults configure` saves explicit Store/connection/model, notification, effort and permission edits.
 A saved Store is the global default for commands without `--store` (captured requests keep their recorded Store), so `defaults configure --store` names it on stderr; stdout and exit status are unchanged.
 Interactive `/setup` keeps the same future-default capability.
 After a successful change in a conversation it prints one line, `Saved defaults for future Sessions. Active Session unchanged.`, and follows it with the Store, connection and sign-in report only when the next Session cannot start as saved; app settings shows the saved defaults themselves.
@@ -243,9 +243,8 @@ Interactive defaults output escapes dynamic fields without changing stored bytes
 The chat’s `/setup` accepts double-quoted values and escaped quotes, backslashes or spaces without shell expansion; invalid quoting rejects before mutation.
 
 The versioned private file under `$HOME/.config/rui/preferences` contains only these three optional values, the notification choice, the new-Session effort and permission mode, not credentials, Session lists or work status.
-Versions 1–3 have no saved permission mode; a version 1 file reads as notifications on.
 Rui reads and saves only the current document, version 4: `version=4`, the store, connection and model lines, `notifications=on|off`, `reasoning_effort=LEVEL` and `permission_mode=ask|bypass`, where an empty value means absent.
-Releases before 0.94 wrote versions 1–4 with a `provider=` line where the current document has `connection=`. The first read of such a file migrates it: under the private lock Rui saves the current document of the same values, then uses it. A file that fails migration or the saved-value checks stays unchanged and is refused as `preferences_invalid`.
+Releases before 0.94 wrote versions 1–4 with a `provider=` line where the current document has `connection=`, and 0.94.0 also read versions 1–3 with `connection=`. The first read of any of these files migrates it: under the private lock Rui saves the current document of the same values, then uses it. Versions 1–3 migrate with no permission mode, and version 1 with notifications on. A file that fails migration or the saved-value checks stays unchanged and is refused as `preferences_invalid`.
 Only `codex` is selectable as a connection in this slice.
 The CLI owns the bounded file of at most 1,024 bytes, validates private ownership/access and format on read, and serializes updates under a private lock.
 Publication writes/syncs a same-directory temporary file before atomic rename and directory sync, including HOME and `.config` parent entries on first creation.

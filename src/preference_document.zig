@@ -62,11 +62,14 @@ pub fn decode(bytes: []const u8) !Values {
     return decodeLayout(bytes, current_version, "connection=");
 }
 
-/// Rewrites a document an earlier release wrote as the current document of the same values, or returns null for any other document.
-/// Releases before 0.94 wrote versions 1 to 4 with a `provider=` line; 0.94 renamed it in place, so version 4 has both layouts.
+/// Rewrites a document an earlier release wrote or read as the current document of the same values, or returns null for any other document.
+/// Releases before 0.94 wrote versions 1 to 4 with a `provider=` line; 0.94.0 renamed it to `connection=` in place and also read versions 1 to 3 with that spelling.
 pub fn migrate(bytes: []const u8, buffer: *[max_file_bytes]u8) !?[]const u8 {
     const number = try version(bytes);
-    const values = decodeLayout(bytes, number, "provider=") catch |err| return if (number == current_version) null else err;
+    const values = decodeLayout(bytes, number, "provider=") catch |err| renamed: {
+        if (number == current_version) return null;
+        break :renamed decodeLayout(bytes, number, "connection=") catch return err;
+    };
     return try encode(&values, buffer);
 }
 
@@ -239,6 +242,8 @@ test "CLI-37 a document an earlier release wrote migrates to the current documen
         .{ .text = "version=2\nstore=\nprovider=codex\nmodel=\nnotifications=off\n", .migrated = "version=4\nstore=\nconnection=codex\nmodel=\nnotifications=off\nreasoning_effort=\npermission_mode=\n" },
         .{ .text = "version=3\nstore=\nprovider=chatgpt\nmodel=gpt-6.2-sol\nnotifications=on\nreasoning_effort=medium\n", .migrated = "version=4\nstore=\nconnection=chatgpt\nmodel=gpt-6.2-sol\nnotifications=on\nreasoning_effort=medium\npermission_mode=\n" },
         .{ .text = "version=4\nstore=\nprovider=openai\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=bypass\n", .migrated = "version=4\nstore=\nconnection=openai\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=bypass\n" },
+        .{ .text = "version=1\nstore=\nconnection=codex\nmodel=\n", .migrated = "version=4\nstore=\nconnection=codex\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=\n" },
+        .{ .text = "version=3\nstore=\nconnection=chatgpt\nmodel=gpt-6.2-sol\nnotifications=on\nreasoning_effort=medium\n", .migrated = "version=4\nstore=\nconnection=chatgpt\nmodel=gpt-6.2-sol\nnotifications=on\nreasoning_effort=medium\npermission_mode=\n" },
     };
     var buffer: [max_file_bytes]u8 = undefined;
     for (literals) |case| try std.testing.expectEqualStrings(case.migrated, (try migrate(case.text, &buffer)).?);
@@ -249,7 +254,7 @@ test "CLI-37 a document an earlier release wrote migrates to the current documen
     };
     for (unmigrated) |text| try std.testing.expectEqual(@as(?[]const u8, null), try migrate(text, &buffer));
     const refusals = [_][]const u8{
-        "version=1\nstore=\nconnection=codex\nmodel=\n",                                      "version=1\nstore=\nprovider=\n",
+        "version=1\nstore=\nlogin=codex\nmodel=\n",                                           "version=1\nstore=\nprovider=\n",
         "version=2\nstore=\nprovider=\nmodel=\nnotifications=maybe\n",                        "version=3\nstore=\nprovider=\nmodel=\nnotifications=on\nreasoning_effort=\n",
         "version=3\nstore=\nprovider=\nmodel=\nnotifications=on\nreasoning_effort=high\nx\n",
     };
@@ -258,20 +263,24 @@ test "CLI-37 a document an earlier release wrote migrates to the current documen
     for ([_]bool{ false, true }) |notifications| for ([_]?model_capability.ReasoningEffort{ null, .none, .high }) |effort| for ([_]?PermissionMode{ null, .ask }) |mode| for ([_]bool{ false, true }) |with_store| for ([_]bool{ false, true }) |with_provider| {
         var values: Values = .{ .notifications = notifications, .reasoning_effort = effort, .permission_mode = mode };
         if (with_store) try values.store.set("/tmp/store");
-        if (with_provider) try values.provider.set("codex");
-        for (1..5) |number| {
+        if (with_provider) {
+            try values.provider.set("codex");
+            try values.model.set("gpt-6-luna");
+        }
+        for (1..5) |number| for ([_][]const u8{ "provider", "connection" }) |key| {
             if (number == 1 and !notifications) continue;
             if (number < 3 and effort != null) continue;
             if (number == 3 and effort == null) continue;
             if (number < 4 and mode != null) continue;
+            if (number == 4 and std.mem.eql(u8, key, "connection")) continue;
             var legacy: [max_file_bytes]u8 = undefined;
             var writer: std.Io.Writer = .fixed(&legacy);
-            try writer.print("version={d}\nstore={s}\nprovider={s}\nmodel=\n", .{ number, values.store.slice(), values.provider.slice() });
+            try writer.print("version={d}\nstore={s}\n{s}={s}\nmodel={s}\n", .{ number, values.store.slice(), key, values.provider.slice(), values.model.slice() });
             if (number >= 2) try writer.print("notifications={s}\n", .{if (notifications) "on" else "off"});
             if (number >= 3) try writer.print("reasoning_effort={s}\n", .{if (effort) |value| @tagName(value) else ""});
             if (number >= 4) try writer.print("permission_mode={s}\n", .{if (mode) |value| @tagName(value) else ""});
             try std.testing.expectEqualDeep(values, try decode((try migrate(writer.buffered(), &buffer)).?));
-        }
+        };
     };
 }
 
