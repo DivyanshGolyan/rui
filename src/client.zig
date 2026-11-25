@@ -531,7 +531,7 @@ pub const Requests = struct {
         try protocol_reply.validateIdentityInputs("", session);
         if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.activity_content_request, .{ paths.store_identity.slice(), session, position, ordinal });
+        try body.appendShape(protocol.activity_content_request.head ++ protocol.activity_content_request.tail, .{ paths.store_identity.slice(), session, position, ordinal });
         const fd = try openRead(self, paths, "/v1/activity-content", body.slice());
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
@@ -550,7 +550,7 @@ pub const Requests = struct {
         try protocol_reply.validateIdentityInputs("", session);
         if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidTarget;
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.activity_content_request, .{ paths.store_identity.slice(), session, position, 0 });
+        try body.appendShape(protocol.activity_content_request.head ++ protocol.activity_content_request.tail, .{ paths.store_identity.slice(), session, position, 0 });
         const fd = try openRead(self, paths, "/v1/activity-content", body.slice());
         defer closeSocket(self.io, fd);
         return readFirstLine(self, fd, null, buffer);
@@ -5640,7 +5640,8 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ (protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id }, comptime protocol.shapeBytes(protocol.activity_page_request.head ++ protocol.activity_page_request.tail) },
         .{ protocol.activity_page_request.all, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id, @as(?[]const u8, &observation_token) }, protocol.max_activity_page_request_bytes },
         .{ protocol.activity_search_request.all, .{ &store, &session, &search_query, protocol.ActivityPage.Kinds.full, optional_id, optional_id, id }, protocol.max_activity_search_request_bytes },
-        .{ protocol.activity_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
+        .{ protocol.activity_content_request.head ++ protocol.activity_content_request.tail, .{ &store, &session, id, id }, comptime protocol.shapeBytes(protocol.activity_content_request.head ++ protocol.activity_content_request.tail) },
+        .{ protocol.activity_content_request.all, .{ &store, &session, id, id, id }, protocol.max_activity_content_request_bytes },
         .{ protocol.skill_suggestions_session_request, .{ &store, &session, &skill_prefix }, comptime protocol.shapeBytes(protocol.skill_suggestions_session_request) },
         .{ protocol.skill_suggestions_workspace_request, .{ &store, &workspace, &skill_prefix }, comptime protocol.shapeBytes(protocol.skill_suggestions_workspace_request) },
         .{ protocol.model_list_request, .{&store}, protocol.max_model_list_request_bytes },

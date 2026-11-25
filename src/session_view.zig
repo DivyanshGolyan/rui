@@ -1348,7 +1348,7 @@ test "SUI-125 tool headings show each outcome without exit fields" {
             try expected.feed("\n");
             try std.testing.expectEqualStrings(expected.bytes[0..expected.length], row_text.visible(sink.bytes[0..sink.length]));
             try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .tool_result = .{ .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .presentation = presentation } }));
-            try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .hosted_call = presentation }));
+            try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .hosted_call = .{ .presentation = presentation, .action = .{ .kind = .search } } }));
         }
     }
 }
@@ -1493,7 +1493,7 @@ pub const Fold = union(enum) { none, closed, open: *tool_fold.Output };
 pub fn tight(value: protocol.ActivityItem.Value) bool {
     return switch (value) {
         .tool_result => |result| result.presentation.code == .succeeded,
-        .hosted_call => |presentation| presentation.code == .succeeded,
+        .hosted_call => |hosted| hosted.presentation.code == .succeeded,
         .admission, .received, .user => |message_| message_.sender != null,
         .assistant, .call, .turn_ended, .stop, .approval_requested, .session_changed, .compacted, .model_call, .instruction, .skill => false,
     };
@@ -1550,9 +1550,9 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
             try toolHeadingWith(result.presentation, sink, colour, fold != .none);
             if (fold == .open) try fold.open.finish(sink);
         },
-        .hosted_call => |presentation| {
+        .hosted_call => |hosted| {
             try sink.feed(tool_fold.row_marker);
-            try toolResult(presentation, sink, colour);
+            try toolResult(hosted.presentation, sink, colour);
         },
         .turn_ended => |ended| {
             if (ended.ending.sign() == .finished) return false;
@@ -1633,7 +1633,7 @@ test "hosted calls draw as adjacent tool rows across outcomes" {
         var row: Sink = .{};
         try toolResult(presentation, &row, false);
         try std.testing.expectEqualStrings(call[2], row_text.visible(row.bytes[0..row.length]));
-        const below = tight(.{ .hosted_call = presentation });
+        const below = tight(.{ .hosted_call = .{ .presentation = presentation, .action = .{ .kind = .search } } });
         if (above) |value| if (gap(value, below, true)) try joined.feed("\n");
         try joined.feed(row.bytes[0..row.length]);
         above = below;

@@ -16,6 +16,7 @@ const model_capability = @import("model_capability.zig");
 const content_value = @import("content_value.zig");
 const tool_proposal = @import("tool_proposal.zig");
 const skill_reference = @import("skill_reference.zig");
+const hosted_action = @import("hosted_action.zig");
 
 const ToolPresentation = tool_presentation.ToolPresentation;
 
@@ -27,7 +28,7 @@ pub const Item = struct {
     ordinal: u64 = 0,
     at: u64,
     value: Value,
-    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: content_value.Value, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction, skill: Skill };
+    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: content_value.Value, presentation: ToolPresentation }, hosted_call: Hosted, turn_ended: TurnEnded, stop: Stop, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction, skill: Skill };
     pub const Kind = std.meta.Tag(Value);
 
     /// What a row's text is: the one owner of which of its contents a reader can open. A row with no text has `none`.
@@ -36,6 +37,18 @@ pub const Item = struct {
         value: content_value.Value,
         /// A tool call's text is its name, a newline, then its arguments.
         call: struct { name: activity_read.ProposalFieldReference, arguments: activity_read.ProposalFieldReference },
+        /// A hosted call's text is its served targets, then its pattern, joined by newlines.
+        hosted: HostedBody,
+    };
+
+    /// The exact strings of a hosted call in reading order: the field a reader names is an index into `refs()`.
+    pub const HostedBody = struct {
+        list: [HostedAction.Targets.max_served + 1]content_value.Reference = @splat(.{ .length = 0, .digest = @splat(0) }),
+        len: u8 = 0,
+
+        pub fn refs(self: *const HostedBody) []const content_value.Reference {
+            return self.list[0..self.len];
+        }
     };
 
     /// Exhaustive on purpose: a new row kind must say whether it has text.
@@ -48,11 +61,52 @@ pub const Item = struct {
             .call => |call| .{ .call = .{ .name = call.fields[@backingInt(tool_proposal.Field.name)], .arguments = call.fields[@backingInt(tool_proposal.Field.arguments)] } },
             .tool_result => |result| .{ .value = result.content },
             .turn_ended => |ended| if (ended.content) |reference| .{ .value = .{ .text = reference } } else .none,
-            .hosted_call, .stop, .approval_requested, .session_changed, .compacted, .model_call => .none,
+            .hosted_call => |hosted| .{ .hosted = hosted.action.body() },
+            .stop, .approval_requested, .session_changed, .compacted, .model_call => .none,
         };
     }
     pub const Message = struct { admission: u64, key: Bounded(idempotency_key.max_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: content_value.Value, admitted_at: u64, sender: ?NamedPeer = null, source_action: ?u64 = null };
     pub const Call = activity_read.ProposalMetadata;
+    /// A hosted web search: the line a reader shows (derived from the action when it is read, never stored) and the
+    /// action's facts, which the Store holds as exact strings.
+    pub const Hosted = struct { presentation: ToolPresentation, action: HostedAction };
+    pub const HostedAction = struct {
+        kind: hosted_action.HostedAction,
+        /// The first `Targets.max_served` of the targets, in provider order; `targets_total` says how many the Store holds.
+        targets: Targets = .{},
+        targets_total: u64 = 0,
+        pattern: ?content_value.Reference = null,
+
+        pub const Targets = struct {
+            list: [max_served]content_value.Reference = @splat(.{ .length = 0, .digest = @splat(0) }),
+            len: u8 = 0,
+            pub const max_served = 8;
+
+            pub fn served(self: *const Targets) []const content_value.Reference {
+                return self.list[0..self.len];
+            }
+
+            pub fn append(self: *Targets, reference: content_value.Reference) error{TooManyTargets}!void {
+                if (self.len == max_served) return error.TooManyTargets;
+                self.list[self.len] = reference;
+                self.len += 1;
+            }
+        };
+
+        /// The target and pattern strings in reading order.
+        pub fn body(self: *const HostedAction) HostedBody {
+            var out: HostedBody = .{};
+            for (self.targets.served()) |reference| {
+                out.list[out.len] = reference;
+                out.len += 1;
+            }
+            if (self.pattern) |reference| {
+                out.list[out.len] = reference;
+                out.len += 1;
+            }
+            return out;
+        }
+    };
     /// Model text, never parts.
     pub const Assistant = struct { content: content_value.Reference, final: bool = false };
     pub const TurnEnded = struct { session: Bounded(session_id.bytes), turn: u64, operation: u64, ending: turn_ending.TurnEnding, code: Bounded(outcome_code.max_bytes), content: ?content_value.Reference };

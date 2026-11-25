@@ -2105,6 +2105,9 @@
           },
           "ordinal": {
             "$ref": "#/components/schemas/Decimal"
+          },
+          "field": {
+            "$ref": "#/components/schemas/Decimal"
           }
         },
         "required": [
@@ -2552,10 +2555,14 @@
                     "properties": {
                       "presentation": {
                         "$ref": "#/components/schemas/ToolPresentation"
+                      },
+                      "action": {
+                        "$ref": "#/components/schemas/HostedAction"
                       }
                     },
                     "required": [
-                      "presentation"
+                      "presentation",
+                      "action"
                     ],
                     "additionalProperties": false
                   }
@@ -4653,6 +4660,27 @@
         ],
         "additionalProperties": false
       },
+      "ContentText": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "text"
+          },
+          "bytes": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "type",
+          "bytes",
+          "sha256"
+        ],
+        "additionalProperties": false
+      },
       "ContentValue": {
         "anyOf": [
           {
@@ -6419,6 +6447,48 @@
             "additionalProperties": false
           }
         ]
+      },
+      "HostedAction": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "none",
+              "search",
+              "open_page",
+              "find_in_page"
+            ]
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContentText"
+            },
+            "maxItems": 8,
+            "uniqueItems": false
+          },
+          "targets_total": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "pattern": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentText"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "targets",
+          "targets_total",
+          "pattern"
+        ],
+        "additionalProperties": false
       },
       "InputPartSchema": {
         "anyOf": [

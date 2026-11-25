@@ -4,6 +4,7 @@ const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const content_domain = @import("../domain/content.zig");
+const old_format = @import("../history.zig");
 const historical_domain = @import("../domain/historical.zig");
 const skills_domain = @import("../domain/skills.zig");
 const reads_domain = @import("../domain/reads.zig");
@@ -620,7 +621,7 @@ test "a web search call shows as its line, in the conversation and the activity,
             try submitTestMessage(&storage, &tmp, "search-input", "search-key", session.slice(), "what changed?");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleItemsForTesting(&storage, &tmp, binding, &.{
-                "{\"type\":\"web_search_call\",\"id\":\"ws1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"zig\\n0.17 \\\"notes\\\"\"}}",
+                "{\"type\":\"web_search_call\",\"id\":\"ws1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"zig\\n0.17 \\\"notes\\\"\",\"queries\":[\"zig\\n0.17 \\\"notes\\\"\",\"second \\u00e9\"]}}",
                 "{\"type\":\"web_search_call\",\"id\":\"ws2\",\"status\":\"failed\",\"action\":{\"type\":\"open_page\",\"url\":\"https://www.ziglang.org/x\"}}",
                 "{\"type\":\"web_search_call\",\"id\":\"ws3\",\"action\":{\"type\":\"find_in_page\",\"url\":\"ziglang.org\",\"pattern\":\"Io\"}}",
                 "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}",
@@ -651,17 +652,84 @@ test "a web search call shows as its line, in the conversation and the activity,
             try std.testing.expectEqualStrings(expected[2][0], older.items[0].presentation.?.line.?.words.slice());
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = request.session, .position = page.items[1].position, .ordinal = 0 }));
 
+            // The facts each search saved, newest first: its action, every target in provider order, how many, and the pattern.
+            const Facts = struct { kind: @import("../../hosted_action.zig").HostedAction, targets: []const []const u8, pattern: ?[]const u8 = null };
+            const facts = [_]Facts{
+                .{ .kind = .find_in_page, .targets = &.{"ziglang.org"}, .pattern = "Io" },
+                .{ .kind = .open_page, .targets = &.{"https://www.ziglang.org/x"} },
+                .{ .kind = .search, .targets = &.{ "zig\n0.17 \"notes\"", "second é" } },
+            };
             const activity = try store_core.activityPageForTesting(&storage, .{ .session = request.session, .direction = .backward });
             var calls: usize = 0;
             for (activity.items[0..activity.count]) |item| if (item.value == .hosted_call) {
                 const want = expected[calls];
+                const hosted = item.value.hosted_call;
                 try std.testing.expectEqual(page.items[1 + calls].position, item.position);
-                try std.testing.expectEqualStrings(want[0], item.value.hosted_call.line.?.words.slice());
-                try std.testing.expectEqual(want[1], item.value.hosted_call.code);
+                try std.testing.expectEqualStrings(want[0], hosted.presentation.line.?.words.slice());
+                try std.testing.expectEqual(want[1], hosted.presentation.code);
+                try std.testing.expectEqual(facts[calls].kind, hosted.action.kind);
+                try std.testing.expectEqual(@as(u64, facts[calls].targets.len), hosted.action.targets_total);
+                try std.testing.expectEqual(facts[calls].targets.len, hosted.action.targets.served().len);
+                try std.testing.expectEqual(facts[calls].pattern != null, hosted.action.pattern != null);
+                // Each exact string opens by its field, targets first and then the pattern; the field after the last names nothing.
+                var strings: [3][]const u8 = undefined;
+                @memcpy(strings[0..facts[calls].targets.len], facts[calls].targets);
+                var held = facts[calls].targets.len;
+                if (facts[calls].pattern) |pattern| {
+                    strings[held] = pattern;
+                    held += 1;
+                }
+                for (strings[0..held], 0..) |text, field| {
+                    var reader: content_domain.ContentReader = undefined;
+                    reader.open(try storage.openActivityContent(&.{ .session = request.session, .position = item.position, .field = @intCast(field) }));
+                    defer reader.close();
+                    var bytes: [64]u8 = undefined;
+                    const count = try reader.read(0, &bytes);
+                    try std.testing.expectEqualStrings(text, bytes[0..count]);
+                }
+                try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = request.session, .position = item.position, .field = @intCast(held) }));
                 calls += 1;
             };
             try std.testing.expectEqual(@as(usize, 3), calls);
-            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = request.session, .position = page.items[1].position, .ordinal = 0 }));
+            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = request.session, .position = page.items[1].position, .ordinal = 1 }));
+        }
+    }.run);
+}
+
+fn hostedBefore96() old_format.Start {
+    @setEvalBranchQuota(100_000);
+    return .{ .format = 95, .sql = old_format.FormatSql.neutral(
+        "UPDATE session SET next_position=7 WHERE session_ref='d8mv7p';" ++
+            "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) " ++
+            "VALUES(1,1,'d8mv7p',6,5,1,X'0000000000000000000000000000000000000000000000000000000000000001',0,0,4,0,'Search the old sentence',0);",
+    ) };
+}
+
+test "the step to format 96 reads a search saved as a sentence as a search with no facts" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            const start = comptime hostedBefore96();
+            try old_format.openAt(case, &storage, &tmp, std.testing.io, &start);
+            defer storage.close() catch unreachable;
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT hosted_action FROM model_output_item WHERE item_kind=5", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item WHERE (hosted_action IS NOT NULL)<>(item_kind=5)", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM hosted_target", .{}));
+            var request: protocol.ConversationPage = .{};
+            try request.session.set("d8mv7p");
+            const page = try store_core.activityPageForTesting(&storage, .{ .session = request.session, .direction = .backward });
+            var seen: usize = 0;
+            for (page.items[0..page.count]) |item| if (item.value == .hosted_call) {
+                const hosted = item.value.hosted_call;
+                try std.testing.expectEqualStrings("Search the web", hosted.presentation.line.?.words.slice());
+                try std.testing.expect(hosted.action.kind == .none);
+                try std.testing.expectEqual(@as(u64, 0), hosted.action.targets_total);
+                try std.testing.expect(hosted.action.pattern == null);
+                seen += 1;
+            };
+            try std.testing.expectEqual(@as(usize, 1), seen);
         }
     }.run);
 }

@@ -300,7 +300,7 @@ pub const routes = [_]Route{
         .path = "/v1/activity-content",
         .kind = .activity_content,
         .summary = "The content of one activity row.",
-        .variants = &.{variant(protocol.activity_content_request, .{})},
+        .variants = &.{variant(protocol.activity_content_request.head ++ .{Optional(protocol.activity_content_request.field)} ++ protocol.activity_content_request.tail, .{})},
         .reply = .bytes,
     },
     .{
@@ -809,6 +809,7 @@ pub const Document = struct {
             inline for (T.openapi_shapes, 0..) |shape, index| values[index] = try d.shapeSchema(shape);
             return d.anyOf(&values);
         }
+        if (T == protocol.HostedActionJson) return d.shapeSchema(T.head ++ .{BoundedListOf(protocol.ContentTextJson, T.max_served, false)} ++ T.tail);
         if (T == protocol.WorkStateJson) return d.anyOf(&.{
             try d.shapeSchema(T.plain_shape),
             try d.shapeSchema(T.compacting_shape),
