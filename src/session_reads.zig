@@ -486,6 +486,53 @@ fn pageCursor(job: *const Job, plan: FeedPolicy.Page) protocol_reply.ActivityCur
     return cursor;
 }
 
+pub fn scanLink(raw: *anyopaque, task: *Task) !void {
+    return scanLinkWith(raw, task, scan, confirmLinkCurrent);
+}
+
+fn confirmLinkCurrent(raw: *anyopaque, task: *Task) !void {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    _ = try View.current(task.requests(), job.store, job.session, job.files.scratch);
+}
+
+fn scanLinkWith(raw: *anyopaque, task: *Task, run_scan: Task.Run, confirm: Task.Run) !void {
+    run_scan(raw, task) catch |err| {
+        const diagnostic: ?@import("session_follow.zig").ReadFailure = if (task.read_failure) |*failure| .{
+            .status = failure.status,
+            .kind = failure.diagnostic.type.slice(),
+            .code = failure.diagnostic.code.slice(),
+        } else null;
+        switch (@import("session_follow.zig").openingFailure(err, diagnostic)) {
+            .other => return err,
+            .missing => {
+                task.read_failure = null;
+                return error.FollowTargetMissing;
+            },
+            .confirm_current => {},
+        }
+        const failure = task.read_failure.?;
+        const origin = task.result.failure_origin;
+        task.read_failure = null;
+        if (task.cancellation.stopped.load(.acquire)) {
+            task.read_failure = failure;
+            return err;
+        }
+        task.result.failure_origin = .local;
+        confirm(raw, task) catch |current_err| {
+            if (current_err == error.SessionNotConfigured and task.read_failure == null) return error.FollowTargetMissing;
+            if (current_err == error.Cancelled) {
+                task.result.failure_origin = origin;
+                task.read_failure = failure;
+                return err;
+            }
+            return current_err;
+        };
+        task.result.failure_origin = origin;
+        task.read_failure = failure;
+        return err;
+    };
+}
+
 pub fn scan(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
@@ -1101,6 +1148,11 @@ fn firstProvisional(result: *const @FieldType(Job, "result")) ?Key {
     return null;
 }
 
+const CurrentGate = struct {
+    entered: std.atomic.Value(bool) = .init(false),
+    release: std.atomic.Value(bool) = .init(false),
+};
+
 const FakeHost = struct {
     history: u64,
     history_users: bool = false,
@@ -1109,6 +1161,11 @@ const FakeHost = struct {
     held: bool = false,
     work_state: ?protocol.WorkState = null,
     refuse_content: bool = false,
+    missing_page: bool = false,
+    missing_parts: enum { none, list, content } = .none,
+    part_failures: usize = 0,
+    current: enum { unexpected, missing, present, deleted_after_current, held, canonical, refused, malformed, disconnected } = .unexpected,
+    current_gate: ?*CurrentGate = null,
     content_texts: ?[]const []const u8 = null,
     /// Serves the parts routes; a Message whose content is parts reads through it.
     parts: ?*value_reads.PartsHost = null,
@@ -1207,7 +1264,35 @@ const FakeHost = struct {
     pub fn answer(self: *FakeHost, fd: std.posix.fd_t) !void {
         var buffer: [8192]u8 = undefined;
         const request = try fake_host.readRequest(fd, &buffer) orelse return;
+        if (request.is("/v1/inspect-session")) {
+            self.others += 1;
+            const missing = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}";
+            const settings = "{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}";
+            const present = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":" ++ settings ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+            switch (self.current) {
+                .missing => fake_host.respond(fd, "200 OK", "application/json", "", missing),
+                .present => fake_host.respond(fd, "200 OK", "application/json", "", present),
+                .deleted_after_current => fake_host.respond(fd, "200 OK", "application/json", "", if (self.others == 1) present else missing),
+                .held => {
+                    const gate = self.current_gate orelse return error.TestUnexpectedResult;
+                    gate.entered.store(true, .release);
+                    try @import("test_poll").waitUntil(std.testing.io, @import("test_poll").after(std.testing.io, .fromSeconds(10)), &gate.release, @import("test_poll").isSet);
+                    fake_host.respond(fd, "200 OK", "application/json", "", present);
+                },
+                .canonical => fake_host.respond(fd, "500 Internal Server Error", "application/json", "", "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}"),
+                .refused => fake_host.refuse(fd, .busy, "host_busy"),
+                .malformed => fake_host.respond(fd, "200 OK", "application/json", "", "{}"),
+                .disconnected, .unexpected => {},
+            }
+            return;
+        }
         if (request.is("/v1/public-parts") or request.is("/v1/public-part-content")) {
+            if ((self.missing_parts == .list and request.is("/v1/public-parts")) or
+                (self.missing_parts == .content and request.is("/v1/public-part-content")))
+            {
+                self.part_failures += 1;
+                return fake_host.refuse(fd, .parts_unavailable, "ContentNotFound");
+            }
             if (self.parts) |parts| return parts.serve(fd, request);
             self.others += 1;
             return;
@@ -1219,6 +1304,7 @@ const FakeHost = struct {
         const position = try std.fmt.parseInt(u64, cursor.position, 10);
         if (request.is("/v1/activity-page")) {
             self.pages += 1;
+            if (self.missing_page) return fake_host.refuse(fd, .activity_unavailable, "SessionNotFound");
             const end = if (cursor.end) |value| try std.fmt.parseInt(u64, value, 10) else self.end;
             const ordinal = if (cursor.ordinal) |value| try std.fmt.parseInt(u64, value, 10) else null;
             var kinds: protocol.ActivityPage.Kinds = .{};
@@ -2465,4 +2551,182 @@ test "session_reads advances through pages containing only hidden background Act
     try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
     try std.testing.expectEqual(@as(u64, 21), job.result.rows[0].key.position);
     try std.testing.expect(job.result.rows[0].provisional);
+}
+
+test "SUI-152 assistant opening confirms ambiguous content loss without hiding read failures" {
+    const Mode = @FieldType(FakeHost, "current");
+    const Case = struct { mode: Mode, expected: ?anyerror, code: ?[]const u8, transport: bool = false };
+    const cases = [_]Case{
+        .{ .mode = .missing, .expected = error.FollowTargetMissing, .code = null },
+        .{ .mode = .deleted_after_current, .expected = error.FollowTargetMissing, .code = null },
+        .{ .mode = .present, .expected = error.HostInvocationFailed, .code = "ContentNotFound" },
+        .{ .mode = .canonical, .expected = error.CanonicalStoreFailure, .code = "canonical_store_failure" },
+        .{ .mode = .refused, .expected = error.HostInvocationFailed, .code = "host_busy" },
+        .{ .mode = .malformed, .expected = null, .code = null },
+        .{ .mode = .disconnected, .expected = null, .code = null, .transport = true },
+    };
+    for (cases) |case| {
+        const tail = [_]FakeHost.Tail{.{ .value = FakeHost.message(1) }};
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .held = true, .refuse_content = true, .current = case.mode };
+        const Action = struct {
+            case: Case,
+            pub fn run(action: *@This(), _: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+                const io = std.testing.io;
+                const file = try dir.createFile(io, "opening", .{ .read = true });
+                defer file.close(io);
+                var job: Job = .{ .store = root, .session = "k7m2qx", .opening = true, .line_read = if (action.case.mode == .deleted_after_current) null else .{ .revision = 1, .end = 1 }, .files = .{ .scratch = file, .inspection = file, .action = file, .details = file, .actions = .{ file, file }, .parts = file } };
+                var task: Task = .{ .io = io };
+                const outcome = scanLink(&job, &task);
+                if (action.case.expected) |expected| {
+                    try std.testing.expectError(expected, outcome);
+                } else if (outcome) |_| {
+                    return error.TestExpectedError;
+                } else |err| {
+                    try std.testing.expect(err != error.FollowTargetMissing);
+                }
+                if (action.case.code) |code| {
+                    try std.testing.expectEqualStrings(code, task.read_failure.?.diagnostic.code.slice());
+                } else try std.testing.expect(task.read_failure == null);
+                if (action.case.transport) try std.testing.expectEqual(client.FailureOrigin.host_transport, task.result.failure_origin);
+            }
+        };
+        var action: Action = .{ .case = case };
+        try host.withHost(&action);
+        try std.testing.expectEqual(@as(usize, 1), host.pages);
+        try std.testing.expectEqual(@as(usize, 1), host.contents);
+        try std.testing.expectEqual(@as(usize, if (case.mode == .deleted_after_current) 2 else 1), host.others);
+    }
+    const tail = [_]FakeHost.Tail{.{ .value = FakeHost.message(1) }};
+    var missing_page: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .missing_page = true, .current = .missing };
+    var missing_job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
+    try std.testing.expectError(error.FollowTargetMissing, missing_page.readWith(&missing_job, scanLink));
+    try std.testing.expectEqual(@as(usize, 1), missing_page.pages);
+    try std.testing.expectEqual(@as(usize, 0), missing_page.others);
+    var missing_current: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .current = .missing };
+    var current_job: Job = .{ .opening = true };
+    try std.testing.expectError(error.FollowTargetMissing, missing_current.readWith(&current_job, scanLink));
+    try std.testing.expectEqual(@as(usize, 1), missing_current.pages);
+    try std.testing.expectEqual(@as(usize, 1), missing_current.others);
+    try std.testing.expectEqual(@as(usize, 0), missing_current.contents);
+    var legacy: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .held = true, .refuse_content = true, .current = .missing };
+    var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
+    try std.testing.expectError(error.HostInvocationFailed, legacy.read(&job));
+    try std.testing.expectEqual(@as(usize, 0), legacy.others);
+
+    for ([_]@FieldType(FakeHost, "missing_parts"){ .list, .content }) |stage| for ([_]bool{ false, true }) |exists| {
+        const texts = [_][]const u8{"part text"};
+        const parts = [_]content_value.Part{value_reads.PartsHost.textPart(0, texts[0])};
+        var parts_host: value_reads.PartsHost = .{ .parts = &parts, .texts = &texts, .served_owner = .{ .message = 1 } };
+        var queued = FakeHost.message(1).admission;
+        queued.content = value_reads.PartsHost.value;
+        queued.content.parts.owner = .{ .message = 1 };
+        const rows = [_]FakeHost.Tail{.{ .value = .{ .admission = queued } }};
+        var host: FakeHost = .{ .history = 0, .tail = &rows, .end = 1, .held = true, .parts = &parts_host, .missing_parts = stage, .current = if (exists) .present else .deleted_after_current };
+        const PartsAction = struct {
+            exists: bool,
+            pub fn run(action: *@This(), _: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+                const io = std.testing.io;
+                const file = try dir.createFile(io, "parts-opening", .{ .read = true });
+                defer file.close(io);
+                var parts_job: Job = .{ .store = root, .session = "k7m2qx", .opening = true, .files = .{ .scratch = file, .inspection = file, .action = file, .details = file, .actions = .{ file, file }, .parts = file } };
+                var task: Task = .{ .io = io };
+                try std.testing.expectError(if (action.exists) error.HostInvocationFailed else error.FollowTargetMissing, scanLink(&parts_job, &task));
+                if (action.exists) {
+                    const failure = task.read_failure.?;
+                    try std.testing.expectEqual(@as(u16, 409), failure.status);
+                    try std.testing.expectEqualStrings("parts_unavailable", failure.diagnostic.type.slice());
+                    try std.testing.expectEqualStrings("ContentNotFound", failure.diagnostic.code.slice());
+                } else try std.testing.expect(task.read_failure == null);
+            }
+        };
+        var parts_action: PartsAction = .{ .exists = exists };
+        try host.withHost(&parts_action);
+        try std.testing.expectEqual(@as(usize, 2), host.others);
+        try std.testing.expectEqual(@as(usize, 1), host.part_failures);
+        if (stage == .content) try std.testing.expectEqual(@as(usize, 1), parts_host.lists);
+    };
+    {
+        const Cancel = struct {
+            const Poll = @import("test_poll");
+            gate: *CurrentGate,
+            fn completed(task: *Task) bool {
+                return task.completed();
+            }
+            pub fn run(action: *@This(), _: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+                const io = std.testing.io;
+                const file = try dir.createFile(io, "cancel-opening", .{ .read = true });
+                defer file.close(io);
+                var cancel_job: Job = .{ .store = root, .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 1 }, .files = .{ .scratch = file, .inspection = file, .action = file, .details = file, .actions = .{ file, file }, .parts = file } };
+                var task: Task = .{};
+                try task.start(io, &cancel_job, scanLink);
+                defer {
+                    action.gate.release.store(true, .release);
+                    task.cancel();
+                    task.join() catch {};
+                }
+                try Poll.waitUntil(io, Poll.after(io, .fromSeconds(5)), &action.gate.entered, Poll.isSet);
+                task.cancel();
+                try Poll.waitUntil(io, Poll.after(io, .fromSeconds(5)), &task, completed);
+                try std.testing.expectError(error.HostInvocationFailed, task.join());
+                const failure = task.read_failure.?;
+                try std.testing.expectEqual(@as(u16, 409), failure.status);
+                try std.testing.expectEqualStrings("activity_unavailable", failure.diagnostic.type.slice());
+                try std.testing.expectEqualStrings("ContentNotFound", failure.diagnostic.code.slice());
+                try std.testing.expectEqual(client.FailureOrigin.local, task.result.failure_origin);
+            }
+        };
+        const rows = [_]FakeHost.Tail{.{ .value = FakeHost.message(1) }};
+        var gate: CurrentGate = .{};
+        var host: FakeHost = .{ .history = 0, .tail = &rows, .end = 1, .held = true, .refuse_content = true, .current = .held, .current_gate = &gate };
+        var action: Cancel = .{ .gate = &gate };
+        try host.withHost(&action);
+        try std.testing.expectEqual(@as(usize, 1), host.others);
+    }
+    const Race = struct {
+        const RaceMode = enum { before, during, missing, present, canonical };
+        mode: RaceMode,
+        confirms: usize = 0,
+        fn scanFailure(raw: *anyopaque, task: *Task) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            var failure: protocol_reply.ReadFailure = .{ .status = 409, .diagnostic = .{ .type = .{}, .code = .{} } };
+            try failure.diagnostic.type.set("activity_unavailable");
+            try failure.diagnostic.code.set("ContentNotFound");
+            const result = task.requests().failRead(failure);
+            if (self.mode == .before) task.cancellation.requestStop();
+            return result;
+        }
+        fn confirm(raw: *anyopaque, task: *Task) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.confirms += 1;
+            switch (self.mode) {
+                .before => return error.TestUnexpectedResult,
+                .during => return error.Cancelled,
+                .missing => return error.SessionNotConfigured,
+                .present => return,
+                .canonical => {
+                    task.cancellation.requestStop();
+                    var failure: protocol_reply.ReadFailure = .{ .status = 500, .diagnostic = .{ .type = .{}, .code = .{} } };
+                    try failure.diagnostic.type.set("invocation_error");
+                    try failure.diagnostic.code.set("canonical_store_failure");
+                    return task.requests().failRead(failure);
+                },
+            }
+        }
+    };
+    for (std.enums.values(Race.RaceMode)) |mode| {
+        var race: Race = .{ .mode = mode };
+        var task: Task = .{ .io = std.testing.io };
+        const expected: anyerror = switch (mode) {
+            .missing => error.FollowTargetMissing,
+            .canonical => error.CanonicalStoreFailure,
+            .before, .during, .present => error.HostInvocationFailed,
+        };
+        try std.testing.expectError(expected, scanLinkWith(&race, &task, Race.scanFailure, Race.confirm));
+        try std.testing.expectEqual(@as(usize, if (mode == .before) 0 else 1), race.confirms);
+        if (mode == .missing) {
+            try std.testing.expect(task.read_failure == null);
+        } else {
+            try std.testing.expectEqualStrings(if (mode == .canonical) "canonical_store_failure" else "ContentNotFound", task.read_failure.?.diagnostic.code.slice());
+        }
+    }
 }

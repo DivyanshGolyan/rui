@@ -25,7 +25,7 @@ drawn: Drawn = .{},
 
 pub const Handler = struct {
     userdata: *anyopaque,
-    on_open: ?*const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void = null,
+    on_open: ?*const fn (*anyopaque, *vxfw.EventContext, @import("session_follow.zig").Target) anyerror!void = null,
     on_notice: *const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void,
     on_scroll: *const fn (*anyopaque, *vxfw.EventContext, up: bool) anyerror!void,
     on_click: ?*const fn (*anyopaque, *vxfw.EventContext, viewport.Position) anyerror!void = null,
@@ -71,15 +71,19 @@ pub fn dragging(self: *const Self) bool {
     return self.selection != null;
 }
 
+pub fn cancelSelection(self: *Self) bool {
+    if (self.selection == null) return false;
+    self.selection = null;
+    return true;
+}
+
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.hover.handleEvent(ctx, input);
     switch (input) {
         .mouse => |value| try self.mouse(ctx, value),
-        // vxfw sends no release once the pointer has left: a press or drag
-        // ends there, copying nothing, so no highlight stays behind.
-        .mouse_leave => if (self.selection != null) {
-            self.selection = null;
+        // Losing the pointer or focus cancels the held gesture without copying.
+        .mouse_leave, .focus_out => if (self.cancelSelection()) {
             ctx.redraw = true;
         },
         .tick => {
@@ -173,7 +177,7 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!void
                 if (handler.on_click) |clicked| try clicked(handler.userdata, ctx, position);
                 return;
             };
-            if (selecting.opens(self.document, selection.anchor)) |id| return if (handler.on_open) |open| open(handler.userdata, ctx, id);
+            if (selecting.opens(self.document, selection.anchor)) |target| return if (handler.on_open) |open| open(handler.userdata, ctx, target);
             const clicked = handler.on_click orelse return;
             if (at.row >= 0 and at.row < self.drawn.height) if (self.rowPosition(self.laidFirst(), @intCast(at.row))) |position| try clicked(handler.userdata, ctx, position);
         },
@@ -459,9 +463,9 @@ const Harness = struct {
         return buffer[0..length];
     }
 
-    fn open(raw: *anyopaque, _: *vxfw.EventContext, id: []const u8) anyerror!void {
+    fn open(raw: *anyopaque, _: *vxfw.EventContext, target: @import("session_follow.zig").Target) anyerror!void {
         const self: *Harness = @ptrCast(@alignCast(raw));
-        try self.opened.appendSlice(std.testing.allocator, id);
+        try self.opened.appendSlice(std.testing.allocator, &target.reference);
     }
 
     fn notice(raw: *anyopaque, _: *vxfw.EventContext, text: []const u8) anyerror!void {
@@ -779,4 +783,27 @@ test "DocumentView hover and drag highlight measure each visible line a bounded 
         count.* = viewport.measured_lines;
     }
     try std.testing.expect(measured[1] <= 32 * measured[0]);
+}
+
+test "SUI-155 document focus loss cancels a held Session link gesture" {
+    const link = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "Plan" ++ TerminalText.link_close;
+    for ([_][]const u8{ link, TerminalText.body_on ++ link ++ TerminalText.body_off }) |content| {
+        const h = try Harness.init(content, .{ .width = 40, .height = 3 });
+        defer h.deinit();
+        const frame = try h.frame();
+        const cell = for (frame.buffer, 0..) |item, index| {
+            if (std.mem.eql(u8, item.char.grapheme, "P")) break index;
+        } else return error.MissingSessionLink;
+        const column: i16 = @intCast(cell % 40);
+        const row: i16 = @intCast(cell / 40);
+        try h.send(.press, column, row);
+        try std.testing.expect(h.transcript.dragging());
+        try h.transcript.widget().handleEvent(&h.ctx, .focus_out);
+        try std.testing.expect(!h.transcript.dragging());
+        try h.send(.release, column, row);
+        try std.testing.expectEqualStrings("", h.opened.items);
+        try h.send(.press, column, row);
+        try h.send(.release, column, row);
+        try std.testing.expectEqualStrings("k7m2qx", h.opened.items);
+    }
 }

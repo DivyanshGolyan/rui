@@ -117,9 +117,9 @@ fn retained(document: anytype, at: u64) usize {
     return @intCast(@min(at - document.origin, document.text().len));
 }
 
-pub fn opens(document: anytype, spot: Spot) ?[]const u8 {
+pub fn opens(document: anytype, spot: Spot) ?@import("session_follow.zig").Target {
     if (spot.start == spot.end) return null;
-    return document.sessionAt(relative(document, spot.start) orelse return null);
+    return document.sessionLinkAt(relative(document, spot.start) orelse return null);
 }
 
 pub const PeerSpan = struct { start: u16, end: u16 };
@@ -264,9 +264,9 @@ test "only a click on a peer's name opens its Session" {
     document.* = .{};
     try document.append("\x1b[2;8m← Received message from " ++ TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "\x1b[4mPlan" ++ TerminalText.link_close ++ "\x1b[0m\n");
     const at = std.mem.indexOf(u8, document.text(), "Plan").?;
-    try std.testing.expectEqualStrings("k7m2qx", opens(document, .{ .start = at + 3, .end = at + 4 }).?);
-    try std.testing.expectEqual(@as(?[]const u8, null), opens(document, Spot.point(at)));
-    try std.testing.expectEqual(@as(?[]const u8, null), opens(document, .{ .start = at - 1, .end = at }));
+    try std.testing.expectEqualStrings("k7m2qx", &opens(document, .{ .start = at + 3, .end = at + 4 }).?.reference);
+    try std.testing.expectEqual(@as(?@import("session_follow.zig").Target, null), opens(document, Spot.point(at)));
+    try std.testing.expectEqual(@as(?@import("session_follow.zig").Target, null), opens(document, .{ .start = at - 1, .end = at }));
 }
 
 test "copying code across wrapped and blank band rows contains only code text" {

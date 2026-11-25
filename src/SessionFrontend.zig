@@ -41,6 +41,7 @@ const feed_window = @import("feed_window.zig");
 const FeedPolicy = feed_reads.Policy(feed_window.Key);
 const session_notice = @import("session_notice.zig");
 const session_id = @import("session_id.zig");
+const session_follow = @import("session_follow.zig");
 const session_drafts = @import("session_drafts.zig");
 const session_keys = @import("session_keys.zig");
 const stderr = @import("stderr.zig");
@@ -109,6 +110,7 @@ submission: Submission = undefined,
 saved_requests: reads.SavedRequests = .{},
 recover_line: [slash_commands_shared.recover_line_bytes]u8 = undefined,
 reader: Task = .{},
+failed_follow: ?session_follow.Ticket = null,
 retry_fence: ?RetryFence = null,
 skills: skill_completion.Reads = .{},
 menu: slash_menu.Menu = .{},
@@ -359,7 +361,12 @@ pub const AppHooks = struct {
     context: *anyopaque,
     leave: *const fn (*anyopaque, *vxfw.EventContext, Outcome) anyerror!void,
     copy: *const fn (*anyopaque, std.Io.File, u64, u64) anyerror!void,
-    on_open: *const fn (*anyopaque, *vxfw.EventContext, *const [session_id.bytes]u8) anyerror!void,
+    on_open: *const fn (*anyopaque, *vxfw.EventContext, session_follow.Target) anyerror!void,
+    opening_follow: ?struct {
+        ticket: session_follow.Ticket,
+        ready: *const fn (*anyopaque, session_follow.Ticket) session_follow.Ready,
+        current: *const fn (*anyopaque, session_follow.Ticket) bool,
+    } = null,
 };
 
 fn focusChanged(raw: *anyopaque) void {
@@ -708,17 +715,18 @@ fn appExternal(raw: *anyopaque, ctx: *vxfw.EventContext, uri: []const u8) !void 
     };
 }
 
-fn appOpen(raw: *anyopaque, ctx: *vxfw.EventContext, id: []const u8) !void {
+fn appOpen(raw: *anyopaque, ctx: *vxfw.EventContext, target: session_follow.Target) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    try self.openPeer(ctx, id);
-}
-
-pub fn openPeer(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
-    try self.follow(ctx, id);
+    try self.follow(ctx, &target.reference, target.origin);
     try self.depart(ctx);
 }
 
-fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
+pub fn openPeer(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
+    try self.follow(ctx, id, .peer);
+    try self.depart(ctx);
+}
+
+fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8, origin: session_follow.Origin) !void {
     if (self.leaving != null or id.len != session_id.bytes or !session_id.valid(id) or std.mem.eql(u8, id, self.session)) return;
     const screen = self.screen;
     const action = screen.action_view != null or self.live.work.first_action != null or self.reading.prepared_action != null;
@@ -729,7 +737,7 @@ fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
             ctx.redraw = true;
         },
         .leave => {
-            try self.app_hooks.on_open(self.app_hooks.context, ctx, id[0..session_id.bytes]);
+            try self.app_hooks.on_open(self.app_hooks.context, ctx, .{ .reference = id[0..session_id.bytes].*, .origin = origin });
             self.leaving = .returned;
         },
     }
@@ -1010,7 +1018,31 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     switch (event) {
         .init, .focus_in => try ctx.requestFocus(if (self.app_input.permission != null and self.app_consent.row == .selector) self.app_card.widget() else self.app_input.composer.widget()),
         .tick => {
-            _ = try self.update();
+            const opening = self.reading.opening;
+            _ = self.update() catch |err| {
+                if (err == error.FollowTargetMissing) if (self.app_hooks.opening_follow) |link| {
+                    if (!opening or !self.reading.opening or self.reading.feed_read != .opening or
+                        !std.mem.eql(u8, self.session, &link.ticket.reference) or !link.current(self.app_hooks.context, link.ticket))
+                    {
+                        self.app_hooks.opening_follow = null;
+                        return;
+                    }
+                    self.reading.pending_diagnostic = null;
+                    self.failed_follow = link.ticket;
+                    self.leaving = .returned;
+                    try self.depart(ctx);
+                    return;
+                };
+                return err;
+            };
+            if (opening and !self.reading.opening) {
+                if (self.app_hooks.opening_follow) |link| {
+                    self.app_hooks.opening_follow = null;
+                    if (link.ready(self.app_hooks.context, link.ticket) == .restored) {
+                        self.notice = "Session unavailable";
+                    }
+                }
+            }
             const held = self.upgradeHeld() or self.hostHeld();
             if (held and self.reading.prepared_action != null) {
                 self.reading.prepared_action = null;
@@ -1038,7 +1070,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
             try self.app_card.widget().handleEvent(ctx, .tick);
             try self.app_info.widget().handleEvent(ctx, .tick);
             try self.openFooterChoice(ctx);
-            if (self.expansion.queued == .after_frame) if (try self.expand()) |peer| try self.follow(ctx, &peer);
+            if (self.expansion.queued == .after_frame) if (try self.expand()) |target| try self.follow(ctx, &target.reference, target.origin);
             if (self.shown_notice.expire(self.nowMs())) self.dirty = true;
             ctx.redraw = ctx.redraw or self.dirty;
         },
@@ -1265,7 +1297,7 @@ test "App Session retains the draft across a permission card arriving during pas
         fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
             return error.UnexpectedCopy;
         }
-        fn open(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {
+        fn open(_: *anyopaque, _: *vxfw.EventContext, _: session_follow.Target) !void {
             return error.UnexpectedOpen;
         }
     };
@@ -1548,7 +1580,7 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
             fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
                 return error.UnexpectedCopy;
             }
-            fn open(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {
+            fn open(_: *anyopaque, _: *vxfw.EventContext, _: session_follow.Target) !void {
                 return error.UnexpectedOpen;
             }
         };
@@ -1611,8 +1643,8 @@ test "App Session link click leaves for the peer only where Esc would leave" {
         fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
             return error.UnexpectedCopy;
         }
-        fn open(_: *anyopaque, _: *vxfw.EventContext, id: *const [session_id.bytes]u8) !void {
-            opened = id.*;
+        fn open(_: *anyopaque, _: *vxfw.EventContext, target: session_follow.Target) !void {
+            opened = target.reference;
         }
     };
     Hooks.opened = null;
@@ -2409,15 +2441,26 @@ fn startQueuedCommand(self: *Self) !void {
 
 const Updated = enum { active, waiting, retry };
 
+fn scanWorker(self: *const Self) Task.Run {
+    if (self.reading.opening and self.reading.feed_read == .opening) if (self.app_hooks.opening_follow) |link| {
+        if (std.mem.eql(u8, self.session, &link.ticket.reference) and link.current(self.app_hooks.context, link.ticket)) return reads.scanLink;
+    };
+    return reads.scan;
+}
+
 fn update(self: *Self) !Updated {
     if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
     const phase = self.upgradePhase();
     switch (phase) {
         .quiescing => self.quiesceUpgrade() catch |err| {
-            if (err == error.CanonicalStoreFailure) return err;
-            var writer = std.Io.Writer.fixed(&self.notice_buffer);
-            try writer.print("! Update stopped: {s}. Select Version in Settings to retry.", .{@errorName(err)});
-            self.notice = writer.buffered();
+            if (err == error.CanonicalStoreFailure or err == error.FollowTargetMissing) return err;
+            if (self.app_hooks.opening_follow != null and self.reading.opening and self.reading.pending_diagnostic != null) {
+                try self.presentReadDiagnostic();
+            } else {
+                var writer = std.Io.Writer.fixed(&self.notice_buffer);
+                try writer.print("! Update stopped: {s}. Select Version in Settings to retry.", .{@errorName(err)});
+                self.notice = writer.buffered();
+            }
             self.dirty = true;
             _ = try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
             return .retry;
@@ -2428,15 +2471,22 @@ fn update(self: *Self) !Updated {
         .reobserving => {
             if (self.reader.thread != null and self.reader.completed()) {
                 self.settleReader() catch |err| {
-                    if (err == error.CanonicalStoreFailure) return err;
-                    var writer = std.Io.Writer.fixed(&self.notice_buffer);
-                    try writer.print("! Couldn't reopen this chat after the update: {s}. Select Version in Settings to retry, or open rui in a new terminal.", .{@errorName(err)});
-                    self.notice = writer.buffered();
+                    if (err == error.CanonicalStoreFailure or err == error.FollowTargetMissing) return err;
+                    if (self.app_hooks.opening_follow != null and self.reading.opening and self.reading.pending_diagnostic != null) {
+                        try self.presentReadDiagnostic();
+                    } else {
+                        var writer = std.Io.Writer.fixed(&self.notice_buffer);
+                        try writer.print("! Couldn't reopen this chat after the update: {s}. Select Version in Settings to retry, or open rui in a new terminal.", .{@errorName(err)});
+                        self.notice = writer.buffered();
+                    }
                     _ = try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
                 };
                 self.withdrawDecided();
             }
-            if (self.upgradePhase() == .reobserving and self.reader.thread == null) try self.launch(self.freeze(.activity), reads.scan);
+            if (self.upgradePhase() == .reobserving and self.reader.thread == null) {
+                const job = self.freeze(.activity);
+                try self.launch(job, self.scanWorker());
+            }
         },
         .active => {},
     }
@@ -2476,7 +2526,7 @@ fn update(self: *Self) !Updated {
                 const job = self.freeze(if (read == .fill_above or read == .fill_below) .fill else .activity);
                 self.reading.feed_read = read;
                 job.feed_page = FeedPolicy.request(read, self.feedState());
-                try self.launch(job, reads.scan);
+                try self.launch(job, self.scanWorker());
             }
         };
     }
@@ -2822,7 +2872,7 @@ fn dropMessageRequest(self: *Self) void {
     self.expansion.queued = .none;
 }
 
-fn expand(self: *Self) !?[session_id.bytes]u8 {
+fn expand(self: *Self) !?session_follow.Target {
     self.expansion.queued = .none;
     self.dirty = true;
     if (self.app_consent.request != null and self.screen.view == .action) {
@@ -2838,7 +2888,7 @@ fn expand(self: *Self) !?[session_id.bytes]u8 {
         return null;
     }) {
         .message => |target| target,
-        .session => |id| return id,
+        .session => |target| return target,
         .tool => |key| {
             self.toggleTool(key);
             return null;
@@ -3243,6 +3293,14 @@ fn joinReader(self: *Self) ReadEnd {
     if (self.reader.thread == null) return .absent;
     const result = self.reader.join();
     const progress: ReadEnd.Progress = .{ .phase = self.reading.phase, .rendering = self.job.result.rendering };
+    if (result) |_| {} else |err| {
+        if (self.leaving != null and self.reading.opening and self.reading.feed_read == .opening and self.app_hooks.opening_follow != null) {
+            if (err == error.FollowTargetMissing) {
+                self.reader.read_failure = null;
+                return .{ .cancelled = progress };
+            }
+        }
+    }
     const end: ReadEnd = if (result) |_| .complete else |err| if (err == error.Cancelled) .{ .cancelled = progress } else .{ .failed = .{ .err = err, .progress = progress } };
     if (self.reader.read_failure) |failure| {
         std.debug.assert(self.reading.pending_diagnostic == null);
@@ -3577,7 +3635,7 @@ const HeldFrontend = struct {
         return error.UnexpectedCopy;
     }
 
-    fn onOpen(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {
+    fn onOpen(_: *anyopaque, _: *vxfw.EventContext, _: session_follow.Target) !void {
         return error.UnexpectedOpen;
     }
 
@@ -3881,7 +3939,7 @@ test "App Session draft save failure retains the active text and does not leave"
 
 test "App Session draft handoff preserves valid overflow-rejected and malformed-rejected input" {
     const Open = struct {
-        fn peer(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {}
+        fn peer(_: *anyopaque, _: *vxfw.EventContext, _: session_follow.Target) !void {}
     };
     const gpa = std.testing.allocator;
     const full = try gpa.alloc(u8, Input.capacity);
@@ -3946,7 +4004,7 @@ test "App Session draft handoff preserves valid overflow-rejected and malformed-
 
 test "App Session drafts survive switching chats with their caret and sending removes only that chat's draft" {
     const Open = struct {
-        fn peer(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {}
+        fn peer(_: *anyopaque, _: *vxfw.EventContext, _: session_follow.Target) !void {}
     };
     for ([_]enum { back, peer, detached }{ .back, .peer, .detached }) |path| {
         var drafts: session_drafts.Drafts = .{};
@@ -6262,7 +6320,7 @@ const ChromeFixture = struct {
         fn leave(_: *anyopaque, _: *vxfw.EventContext, _: Outcome) !void {}
         fn upgrade(_: *anyopaque, _: *vxfw.EventContext) !void {}
         fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {}
-        fn open(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {}
+        fn open(_: *anyopaque, _: *vxfw.EventContext, _: session_follow.Target) !void {}
     };
 
     fn init(fixture: *ChromeFixture) !void {
@@ -11672,4 +11730,109 @@ test "SUI-19 message and composer layout" {
         optimisticEnteredFrame,
     };
     for (cases) |case| try case();
+}
+
+test "SUI-153 only a current assistant opening rolls back an authoritative missing read" {
+    const Mode = enum { missing_current, missing_activity, unrelated_current, content_cancelled, busy, canonical };
+    const Worker = struct {
+        fn run(raw: *anyopaque, task: *Task) !void {
+            const mode: *const Mode = @ptrCast(@alignCast(raw));
+            if (mode.* == .missing_current or mode.* == .missing_activity) return error.FollowTargetMissing;
+            if (mode.* == .unrelated_current) return error.SessionNotConfigured;
+            var failure: protocol_reply.ReadFailure = .{ .status = if (mode.* == .canonical) 500 else if (mode.* == .busy) 503 else 409, .diagnostic = .{ .type = .{}, .code = .{} } };
+            try failure.diagnostic.type.set(if (mode.* == .canonical) "invocation_error" else if (mode.* == .busy) "busy" else "activity_unavailable");
+            try failure.diagnostic.code.set(if (mode.* == .canonical) "canonical_store_failure" else if (mode.* == .busy) "host_busy" else "ContentNotFound");
+            return task.requests().failRead(failure);
+        }
+        fn completed(task: *Task) bool {
+            return task.completed();
+        }
+        fn step(raw: *anyopaque, _: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.IntentAdmission {
+            const held: *HeldFrontend = @ptrCast(@alignCast(raw));
+            if (input == .upgrade_failed) held.upgrade = .{ .after = .blocked };
+            return .refused;
+        }
+        fn ready(_: *anyopaque, _: session_follow.Ticket) session_follow.Ready {
+            return .opened;
+        }
+        fn current(_: *anyopaque, _: session_follow.Ticket) bool {
+            return true;
+        }
+        fn stale(_: *anyopaque, _: session_follow.Ticket) bool {
+            return false;
+        }
+    };
+    for ([_]Mode{ .missing_current, .missing_activity, .unrelated_current, .content_cancelled, .busy, .canonical }) |mode| for ([_]enum { assistant, peer, stale, wrong_target, superseded, leaving, quiescing, reobserving }{ .assistant, .peer, .stale, .wrong_target, .superseded, .leaving, .quiescing, .reobserving }) |route| {
+        const missing = mode == .missing_current or mode == .missing_activity;
+        const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
+        defer held.destroy();
+        const self = &held.self;
+        self.lender.step = Worker.step;
+        self.reading.opening = true;
+        self.reading.feed_read = .opening;
+        if (route != .peer) self.app_hooks.opening_follow = .{
+            .ticket = .{ .generation = 1, .reference = if (route == .wrong_target) "9f8e7d".* else "k7m2qx".*, .stage = .target },
+            .ready = Worker.ready,
+            .current = if (route == .stale) Worker.stale else Worker.current,
+        };
+        if (route == .superseded) self.reading.opening = false;
+        if (route == .quiescing) held.upgrade = .{ .run = .checking };
+        if (route == .reobserving) held.upgrade = .{ .after = .reobserving };
+        if (route != .peer and route != .stale and route != .wrong_target and route != .superseded) {
+            try std.testing.expect(self.scanWorker() == @as(Task.Run, reads.scanLink));
+            self.reading.feed_read = .scan;
+            try std.testing.expect(self.scanWorker() == @as(Task.Run, reads.scan));
+            self.reading.feed_read = .opening;
+        } else try std.testing.expect(self.scanWorker() == @as(Task.Run, reads.scan));
+        var input = mode;
+        try self.reader.start(std.testing.io, &input, Worker.run);
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(5)), &self.reader, Worker.completed);
+        if (route == .leaving) {
+            self.leaving = .returned;
+            const end = self.joinReader();
+            if (missing) {
+                try std.testing.expect(end == .cancelled);
+                try std.testing.expect(self.reading.pending_diagnostic == null);
+            } else {
+                try std.testing.expect(end == .failed);
+                try std.testing.expectEqual(if (mode == .canonical) error.CanonicalStoreFailure else if (mode == .unrelated_current) error.SessionNotConfigured else error.HostInvocationFailed, end.failed.err);
+            }
+            try std.testing.expect(self.failed_follow == null);
+            continue;
+        }
+        var ctx = held.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        const event = appEvent(self, &ctx, .tick);
+        if ((route == .assistant or route == .quiescing or route == .reobserving) and missing) {
+            try event;
+            try std.testing.expectEqual(@as(?Outcome, .returned), held.left);
+            try std.testing.expectEqualDeep(self.app_hooks.opening_follow.?.ticket, self.failed_follow.?);
+            try std.testing.expect(self.reading.pending_diagnostic == null);
+        } else if ((route == .quiescing or route == .reobserving) and mode != .canonical) {
+            try event;
+            try std.testing.expect(held.left == null and self.failed_follow == null);
+            try std.testing.expect(self.reading.pending_diagnostic == null);
+            const shown = self.shown_notice.current(self.nowMs()).?;
+            if (mode == .busy or mode == .content_cancelled) {
+                try std.testing.expectEqualStrings(if (mode == .busy)
+                    "! Messages unavailable; scroll to retry. HTTP 503; type: busy; code: host_busy"
+                else
+                    "! Messages unavailable; scroll to retry. HTTP 409; type: activity_unavailable; code: ContentNotFound", shown);
+            }
+            if (mode == .content_cancelled) {
+                var next: Mode = .busy;
+                try self.reader.start(std.testing.io, &next, Worker.run);
+                try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(5)), &self.reader, Worker.completed);
+                try std.testing.expectError(error.HostInvocationFailed, self.settleReader());
+                try std.testing.expectEqualStrings("host_busy", self.reading.pending_diagnostic.?.failure.diagnostic.code.slice());
+            }
+        } else if ((route == .stale or route == .wrong_target or route == .superseded) and missing) {
+            try event;
+            try std.testing.expect(held.left == null and self.failed_follow == null);
+            try std.testing.expect(self.app_hooks.opening_follow == null);
+        } else {
+            try std.testing.expectError(if (missing) error.FollowTargetMissing else if (mode == .unrelated_current) error.SessionNotConfigured else if (mode == .canonical) error.CanonicalStoreFailure else error.HostInvocationFailed, event);
+            try std.testing.expect(held.left == null and self.failed_follow == null);
+        }
+    };
 }

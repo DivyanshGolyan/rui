@@ -742,7 +742,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     const frontend = try self.init.gpa.create(SessionFrontend);
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .startable = hostStartable, .start = requestHostStart, .notice = hostNotice } }, self.caps);
+    const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .opening_follow = if (self.follow.ticket(reference)) |ticket| .{ .ticket = ticket, .ready = appFollowReady, .current = appFollowCurrent } else null, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .startable = hostStartable, .start = requestHostStart, .notice = hostNotice } }, self.caps);
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
     count = 0;
     _ = try self.event(.{ .conversation = reference });
@@ -753,6 +753,7 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
     const self: *Self = @ptrCast(@alignCast(raw));
     const left = &self.app_session.?;
     const from = left.session;
+    const failed_follow = left.frontend.?.failed_follow;
     left.ended = outcome;
     if (outcome == .returned or outcome == .new_session) switch (left.frontend.?.back(view.canHoldSend(&self.state))) {
         .ended => |ended| left.ended = ended,
@@ -763,22 +764,45 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
             _ = try self.event(.{ .conversation = null });
             try self.root.closeSession(ctx);
             if (outcome == .new_session) {
-                self.follow = .{};
+                self.follow.clear();
                 return self.appNext(ctx, try self.event(.{ .clicked = .{ .target = .new_session } }));
             }
+            if (failed_follow) |ticket| switch (self.follow.missing(ticket)) {
+                .restore => |source| return self.appNext(ctx, try self.event(.{ .open = source })),
+                .overview => {
+                    var notice: view.Notice = .{ .colour = .failure };
+                    const text = "Session unavailable";
+                    @memcpy(notice.bytes[0..text.len], text);
+                    notice.len = text.len;
+                    self.state.notice = notice;
+                    ctx.redraw = true;
+                    return ctx.requestFocus(self.widget());
+                },
+                .stale => return,
+            };
             return self.followNext(ctx, from);
         },
     };
     ctx.quit = true;
 }
 
-fn appSessionFollow(raw: *anyopaque, _: *vxfw.EventContext, target: *const [session_id.bytes]u8) !void {
+fn appFollowReady(raw: *anyopaque, ticket: @import("session_follow.zig").Ticket) @import("session_follow.zig").Ready {
     const self: *Self = @ptrCast(@alignCast(raw));
-    self.follow.pending = target.*;
+    return self.follow.ready(ticket);
+}
+
+fn appFollowCurrent(raw: *anyopaque, ticket: @import("session_follow.zig").Ticket) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.follow.current(ticket);
+}
+
+fn appSessionFollow(raw: *anyopaque, _: *vxfw.EventContext, target: @import("session_follow.zig").Target) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    self.follow.pending = target;
 }
 
 fn followNext(self: *Self, ctx: *vxfw.EventContext, from: view.Reference) !void {
-    if (self.follow.next(from)) |target| try self.appNext(ctx, try self.event(.{ .open = target }));
+    if (try self.follow.next(from)) |target| try self.appNext(ctx, try self.event(.{ .open = target }));
 }
 
 fn appCopy(raw: *anyopaque, file: std.Io.File, start: u64, length: u64) !void {
@@ -5063,7 +5087,7 @@ test "a followed Session link opens the peer, Esc reopens the Session it left, t
     const overview = rig.overview;
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
-    overview.follow.pending = "m3n4p5".*;
+    overview.follow.pending = .{ .reference = "m3n4p5".*, .origin = .peer };
     try overview.followNext(&ctx, "k7m2qx".*);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
     try std.testing.expectEqualStrings("m3n4p5", &Seen.now.conversed);
@@ -5088,7 +5112,7 @@ test "a Session link that no longer opens ends as any failed open, naming that S
     const overview = rig.overview;
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
-    overview.follow.pending = "m3n4p5".*;
+    overview.follow.pending = .{ .reference = "m3n4p5".*, .origin = .peer };
     try overview.followNext(&ctx, "k7m2qx".*);
     try std.testing.expect(ctx.quit);
     const unopened = overview.app_session.?;
@@ -9256,4 +9280,107 @@ test "SUI-108 App overview keyboard and pointer precedence" {
     try std.testing.expectEqual(36, @import("widgets/RowInset.zig").contentWidth(40));
     try keyboardSelectionCase();
     try keyboardOriginCase();
+}
+
+test "SUI-154 unavailable assistant follow restores draft and falls back if source also disappears" {
+    const Files = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    const Worker = struct {
+        fn missing(_: *anyopaque, _: *ClientTask) !void {
+            return error.FollowTargetMissing;
+        }
+        fn completed(task: *ClientTask) bool {
+            return task.completed();
+        }
+        fn failOpening(frontend: *SessionFrontend, ctx: *vxfw.EventContext) !void {
+            frontend.reading.opening = true;
+            frontend.reading.feed_read = .opening;
+            try frontend.reader.start(std.testing.io, frontend, missing);
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(5)), &frontend.reader, completed);
+            try frontend.widget().handleEvent(ctx, .tick);
+        }
+    };
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |unconfirmed| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        Files.dir = tmp.dir;
+        Files.count = 0;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        overview.ops.open = openSession;
+        overview.hooks.scratch = Files.scratch;
+        _ = try rig.next(.{ .open = .{ .reference = "k7m2qx".* } });
+        defer {
+            if (overview.app_session) |left| {
+                left.frontend.?.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        overview.root.size = .{ .width = width, .height = 30 };
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        var source = overview.app_session.?.frontend.?;
+        source.reading.opening = false;
+        source.poll_at = std.math.maxInt(i96);
+        const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+        if (unconfirmed) {
+            source.submission.intent = .{ .decision = .{ .action = 19, .decision = .allow_once } };
+            source.submission.state = .unconfirmed;
+            source.submission.publication = .published;
+            source.submission.key = key;
+        }
+        const Input = @import("SessionInput.zig");
+        const image = try Input.Image.validate(@embedFile("codecs/fixtures/image-input/pixel.png"));
+        source.input.restoreWithImage(.{ .bytes = "draft α", .cursor = 3, .anchor = .{ .position = 7, .end = 9 }, .rejected = .invalid }, try image.clone());
+        overview.follow.return_to = "p3c6tz".*;
+        try overview.session_drafts.put(std.testing.allocator, "m3n4p5", .{ .bytes = "target draft", .cursor = 4 });
+        const handler = source.app_content.handler.?;
+        try handler.on_open.?(handler.userdata, &ctx, .{ .reference = "m3n4p5".*, .origin = .assistant });
+        const target = overview.app_session.?.frontend.?;
+        try std.testing.expectEqualStrings("m3n4p5", target.session);
+        try std.testing.expectEqualStrings("target draft", target.input.composition().bytes);
+        try Worker.failOpening(target, &ctx);
+        try std.testing.expect(!ctx.quit);
+        source = overview.app_session.?.frontend.?;
+        try std.testing.expectEqualStrings("k7m2qx", source.session);
+        try std.testing.expectEqualStrings("draft α", source.input.composition().bytes);
+        try std.testing.expectEqual(@as(usize, 3), source.input.composition().cursor);
+        try std.testing.expectEqualDeep(@as(?Input.Recalled, .{ .position = 7, .end = 9 }), source.input.snapshot().anchor);
+        try std.testing.expectEqual(@as(?@import("keymap.zig").Refusal, .invalid), source.input.snapshot().rejected);
+        try std.testing.expectEqualDeep(image.identity, source.input.image().?.identity);
+        try std.testing.expectEqual(@as(?view.Reference, "p3c6tz".*), overview.follow.return_to);
+        try std.testing.expect(!overview.root.input.listFocused());
+        const target_draft = overview.session_drafts.take(std.testing.allocator, "m3n4p5") orelse return error.TestExpectedDraft;
+        defer target_draft.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("target draft", target_draft.snapshot.bytes);
+        try std.testing.expectEqual(@as(usize, 4), target_draft.snapshot.cursor);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+        try std.testing.expect(source.submission.intent == null);
+        try std.testing.expectEqual(@as(usize, @intFromBool(unconfirmed)), overview.state.request_count);
+        if (unconfirmed) {
+            const recovery = overview.state.requests[0].sent;
+            try std.testing.expectEqualDeep(@import("submission_state.zig").Recovery{ .saved = .{ .original = .{ .kind = .decision, .key = key }, .rejected = false } }, recovery);
+        }
+        try Worker.failOpening(source, &ctx);
+        try std.testing.expect(!ctx.quit and overview.app_session == null and overview.root.session == null);
+        try std.testing.expectEqualStrings("Session unavailable", overview.state.notice.?.text());
+        const draft = overview.session_drafts.take(std.testing.allocator, "k7m2qx") orelse return error.TestExpectedDraft;
+        defer draft.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("draft α", draft.snapshot.bytes);
+        try std.testing.expectEqual(@as(usize, 3), draft.snapshot.cursor);
+        try std.testing.expectEqualDeep(@as(?Input.Recalled, .{ .position = 7, .end = 9 }), draft.snapshot.anchor);
+        try std.testing.expectEqual(@as(?@import("keymap.zig").Refusal, .invalid), draft.snapshot.rejected);
+        try std.testing.expectEqualDeep(image.identity, draft.image.?.identity);
+    };
 }

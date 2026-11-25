@@ -37,7 +37,7 @@ drawn: Drawn = .{},
 
 pub const Handler = struct {
     userdata: *anyopaque,
-    on_open: ?*const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void = null,
+    on_open: ?*const fn (*anyopaque, *vxfw.EventContext, @import("session_follow.zig").Target) anyerror!void = null,
     on_external: ?*const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void = null,
     on_notice: *const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void,
     on_scroll: *const fn (*anyopaque, *vxfw.EventContext, up: bool) anyerror!void,
@@ -48,7 +48,7 @@ pub const Handler = struct {
         insert: *const fn (*anyopaque, *vxfw.EventContext, SessionInput.Insertion, []const u8) anyerror!void,
     } = null,
 };
-pub const Openable = union(enum) { message: View.Collapsed, session: [6]u8, tool: resident.Key };
+pub const Openable = union(enum) { message: View.Collapsed, session: @import("session_follow.zig").Target, tool: resident.Key };
 const Cell = struct { row: i32, col: i32 };
 const Spot = struct { start: resident.Point, end: resident.Point };
 const QuoteFrame = struct {
@@ -160,9 +160,7 @@ pub fn openable(self: *Self, gpa: std.mem.Allocator) !?Openable {
         while (column > 0) {
             column -= 1;
             const offset = self.window.document.cellOffset(cells[column]) orelse continue;
-            if (self.window.document.sessionAt(offset)) |peer| {
-                if (peer.len == 6) return .{ .session = peer[0..6].* };
-            }
+            if (self.window.document.sessionLinkAt(offset)) |target| return .{ .session = target };
             const mark = self.window.document.collapsed(offset, offset + cells[column].char.grapheme.len).last orelse continue;
             const target = self.window.messageAt(self.window.pointAt(mark) orelse continue) orelse return null;
             return .{ .message = target };
@@ -432,8 +430,8 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
                 return;
             }
             if (!std.meta.eql(at, held.press)) return;
-            if (selecting.opens(&self.window.document, anchor)) |peer| {
-                if (handler.on_open) |open| try open(handler.userdata, ctx, peer);
+            if (selecting.opens(&self.window.document, anchor)) |target| {
+                if (handler.on_open) |open| try open(handler.userdata, ctx, target);
                 return;
             }
             if (handler.on_click) |click| try click(handler.userdata, ctx, held.anchor.start);
@@ -731,7 +729,7 @@ test "FeedView multiple collapsed targets and lowest visible peer use keyed byte
     window.trim(1, 0);
     try window.append(&.{.{ .key = .{ .position = 30 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{.{ .offset = first, .target = a }} }});
     _ = try testFrame(&view, arena.allocator(), 30, 4);
-    try std.testing.expectEqualStrings("k7m2qx", &(try view.openable(arena.allocator())).?.session);
+    try std.testing.expectEqualStrings("k7m2qx", &(try view.openable(arena.allocator())).?.session.reference);
 }
 
 test "FeedView retry tail is frame-local, latest-key-only and gated by cause and actionability at every width" {
@@ -1063,9 +1061,9 @@ test "FeedView Message summaries and wrapped peer links hover without making agg
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.messages += 1;
         }
-        fn open(raw: *anyopaque, _: *vxfw.EventContext, id: []const u8) !void {
+        fn open(raw: *anyopaque, _: *vxfw.EventContext, target: @import("session_follow.zig").Target) !void {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            try std.testing.expectEqualStrings("k7m2qx", id);
+            try std.testing.expectEqualStrings("k7m2qx", &target.reference);
             self.opened += 1;
         }
     };
@@ -1113,7 +1111,7 @@ test "FeedView Message summaries and wrapped peer links hover without making agg
 test "FeedView hover and drag highlight measure each visible line a bounded number of times" {
     const Actions = struct {
         fn click(_: *anyopaque, _: *vxfw.EventContext, _: resident.Point) !void {}
-        fn open(_: *anyopaque, _: *vxfw.EventContext, _: []const u8) !void {}
+        fn open(_: *anyopaque, _: *vxfw.EventContext, _: @import("session_follow.zig").Target) !void {}
     };
     var unused: u8 = 0;
     var measured: [2]usize = undefined;
@@ -1748,4 +1746,63 @@ fn decoratedRows() !void {
     try retryMouse(&view, &ctx, padding, .press);
     try retryMouse(&view, &ctx, padding, .release);
     try std.testing.expectEqual(@as(usize, 0), actions.count);
+}
+
+test "SUI-151 assistant and peer Session links keep origin through click and keyboard opening" {
+    const T = @import("TerminalText.zig");
+    const Actions = struct {
+        assistant: usize = 0,
+        peer: usize = 0,
+        fn open(raw: *anyopaque, _: *vxfw.EventContext, target: @import("session_follow.zig").Target) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqualStrings("k7m2qx", &target.reference);
+            switch (target.origin) {
+                .assistant => self.assistant += 1,
+                .peer => self.peer += 1,
+            }
+        }
+        fn notice(_: *anyopaque, _: *vxfw.EventContext, _: []const u8) !void {}
+        fn scroll(_: *anyopaque, _: *vxfw.EventContext, _: bool) !void {}
+    };
+    const gpa = std.testing.allocator;
+    const window = try testWindow();
+    defer gpa.destroy(window);
+    const link = T.link_open ++ T.session_link ++ "k7m2qx" ++ T.link_end;
+    var document: viewport.Sized(512, true) = .{};
+    try document.append(link ++ "Peer" ++ T.link_close ++ "\n" ++ T.body_on ++ link ++ "Answer" ++ T.link_close ++ T.body_off ++ "\n");
+    try document.prepare();
+    try window.append(&.{.{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&document) }});
+    var anchor: Feed = .{};
+    var actions: Actions = .{};
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = .{ .userdata = &actions, .on_open = Actions.open, .on_notice = Actions.notice, .on_scroll = Actions.scroll } };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
+    defer {
+        for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) gpa.free(command.copy_to_clipboard);
+        ctx.cmds.deinit(gpa);
+    }
+    const frame = try testFrame(&view, arena.allocator(), 40, 4);
+    var peer: ?Cell = null;
+    var assistant: ?Cell = null;
+    for (frame.buffer, 0..) |cell, i| {
+        const at: Cell = .{ .row = @intCast(i / 40), .col = @intCast(i % 40) };
+        if (std.mem.eql(u8, cell.char.grapheme, "P")) peer = at;
+        if (std.mem.eql(u8, cell.char.grapheme, "A")) assistant = at;
+    }
+    const peer_at = peer orelse return error.MissingPeerLink;
+    const answer_at = assistant orelse return error.MissingAssistantLink;
+    try retryMouse(&view, &ctx, peer_at, .press);
+    try retryMouse(&view, &ctx, peer_at, .release);
+    try retryMouse(&view, &ctx, answer_at, .press);
+    try retryMouse(&view, &ctx, answer_at, .release);
+    try std.testing.expectEqual(@as(usize, 1), actions.peer);
+    try std.testing.expectEqual(@as(usize, 1), actions.assistant);
+    try retryMouse(&view, &ctx, answer_at, .press);
+    try retryMouse(&view, &ctx, .{ .row = answer_at.row, .col = answer_at.col + 1 }, .drag);
+    try retryMouse(&view, &ctx, answer_at, .release);
+    try std.testing.expectEqual(@as(usize, 1), actions.assistant);
+    const selected = (try view.openable(arena.allocator())).?.session;
+    try std.testing.expectEqualStrings("k7m2qx", &selected.reference);
+    try std.testing.expectEqual(@import("session_follow.zig").Origin.assistant, selected.origin);
 }

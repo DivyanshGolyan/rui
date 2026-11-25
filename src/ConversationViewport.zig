@@ -279,6 +279,12 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return TerminalText.sessionTarget(uri);
         }
 
+        pub fn sessionLinkAt(self: *const Self, position: usize) ?@import("session_follow.zig").Target {
+            const id = self.sessionAt(position) orelse return null;
+            const assistant = self.bodyAt(position) and self.styles[position] & user_message_bit == 0 and self.selectable(position);
+            return .{ .reference = id[0..@import("session_id.zig").bytes].*, .origin = if (assistant) .assistant else .peer };
+        }
+
         pub fn cellOffset(self: *const Self, cell: vaxis.Cell) ?usize {
             const at = @intFromPtr(cell.char.grapheme.ptr);
             const base = @intFromPtr(&self.bytes);
@@ -2013,4 +2019,24 @@ test "SUI-31 answer prose has a bounded measure while code and tables use the pa
     try cut.prepare();
     const prose = std.mem.indexOf(u8, cut.text(), "xxxxxxxx").?;
     try std.testing.expectEqual(@as(u16, 2), cut.lineRows(.{ .width = 120, .method = .unicode }, prose));
+}
+
+test "SUI-150 assistant Session link origin follows retained answer cells" {
+    const linked = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "Plan" ++ TerminalText.link_close;
+    const cases = [_]struct { text: []const u8, assistant: bool }{
+        .{ .text = linked, .assistant = false },
+        .{ .text = TerminalText.body_on ++ linked ++ TerminalText.body_off, .assistant = true },
+        .{ .text = TerminalText.user_message_on ++ TerminalText.body_on ++ linked ++ TerminalText.body_off ++ TerminalText.user_message_off, .assistant = false },
+    };
+    for (cases) |case| {
+        var view: Sized(512, true) = .{};
+        for (case.text) |byte| try view.append(&.{byte});
+        try view.prepare();
+        const at = std.mem.indexOf(u8, view.text(), "Plan").?;
+        for (at..at + 4) |offset| {
+            try std.testing.expectEqualStrings("k7m2qx", view.sessionAt(offset).?);
+            try std.testing.expectEqual(if (case.assistant) @import("session_follow.zig").Origin.assistant else .peer, view.sessionLinkAt(offset).?.origin);
+        }
+        try std.testing.expect(view.sessionLinkAt(at - 1) == null);
+    }
 }
