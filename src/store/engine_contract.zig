@@ -1667,7 +1667,8 @@ fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void
     try compactedTurn(&storage, &tmp, &meter, &replies);
     try coreTurn(&storage, &tmp, &meter, &replies);
     try mcpTurn(case, &meter, &replies);
-    try imageTurn(case, &meter, &replies);
+    try localRunnerTurn(case, &meter, &replies, .read_image);
+    try localRunnerTurn(case, &meter, &replies, .github_pr_watch);
     try findTurn(&storage, &tmp, &meter, &replies);
     try skillTurn(case, &meter, &replies);
     stopTurn(case, &meter, &replies) catch |err| {
@@ -1907,7 +1908,11 @@ fn plainTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter, repl
     try meter.stop(.pinSession);
 }
 
-fn imageTurn(case: *store_testing.Case, meter: *RoundMeter, replies: *store_testing.ReplyDigest) !void {
+/// One Turn of a built-in Host runner whose Action is selected and read back by `nextAction`.
+fn localRunnerTurn(case: *store_testing.Case, meter: *RoundMeter, replies: *store_testing.ReplyDigest, comptime runner: tool_defs.Runner) !void {
+    const tool = if (runner == .read_image) "read_image" else "watch_github_pr";
+    const decoded = if (runner == .read_image) "{\"path\":\"image.png\"}" else "{\"url\":\"https://github.com/org/repo/pull/42\"}";
+    const encoded = if (runner == .read_image) "{\\\"path\\\":\\\"image.png\\\"}" else "{\\\"url\\\":\\\"https://github.com/org/repo/pull/42\\\"}";
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -1917,22 +1922,22 @@ fn imageTurn(case: *store_testing.Case, meter: *RoundMeter, replies: *store_test
     meter.storage = &storage;
     defer meter.storage = previous;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    var configure = try completeConfiguration("budget-image", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
-    configure.configuration.tools = try .of(&.{"read_image"});
+    var configure = try completeConfiguration("budget-" ++ tool, "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    configure.configuration.tools = try .of(&.{tool});
     const configured = try replies.keep(storage.configure(&configure, .{}));
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
-    try submitTestMessage(&storage, &tmp, "budget-image-input", "budget-image-message", session.slice(), "inspect");
+    try submitTestMessage(&storage, &tmp, "budget-" ++ tool ++ "-input", "budget-" ++ tool ++ "-message", session.slice(), "inspect");
     const model = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
-    try settleCallsForTesting(&storage, &tmp, model, "budget-image-calls", &.{
-        .{ .item_id = "image-item", .name = "read_image", .encoded_call_id = "image-call", .decoded_call_id = "image-call", .encoded_arguments = "{\\\"path\\\":\\\"image.png\\\"}", .decoded_arguments = "{\"path\":\"image.png\"}" },
+    try settleCallsForTesting(&storage, &tmp, model, "budget-" ++ tool ++ "-calls", &.{
+        .{ .item_id = tool ++ "-item", .name = tool, .encoded_call_id = tool ++ "-call", .decoded_call_id = tool ++ "-call", .encoded_arguments = encoded, .decoded_arguments = decoded },
     });
-    const selected = (try replies.keep(storage.nextAction(.read_image, .fromFree(1, false)))).?;
+    const selected = (try replies.keep(storage.nextAction(runner, .fromFree(1, false)))).?;
     const binding = (try replies.keep(storage.admitActionAttempt(selected, 1234, .{}))).?.permit.binding;
     var input: ActionExecutionInput = undefined;
     meter.start();
-    try storage.readActionExecutionInput(.read_image, binding, &input);
-    try meter.stop(.readImageExecutionInput);
+    try storage.readActionExecutionInput(runner, binding, &input);
+    try meter.stop(if (runner == .read_image) .readImageExecutionInput else .readGithubPrWatchExecutionInput);
     _ = replies.keep(&input);
 }
 
