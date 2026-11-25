@@ -614,7 +614,8 @@ RULES += tuple(((module,), targets, tuple(target for target in targets if target
                 "Build module: the targets it defines or builds for")
                for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
 # The generated unit test runner and the shard launcher run every sharded unit root.
-UNIT_HARNESS = ("tests/ci/unit_test_runner.py", "tests/ci/store_shards.py")
+UNIT_HARNESS = ("tests/ci/unit_test_runner.py", "tests/ci/store_shards.py", "tests/ci/unit_test_metadata.py",
+                "tests/ci/unit_test_names.py")
 RULES += ((UNIT_HARNESS, ("test-native", "test-store"), ("test-native", "test-store"),
            "Unit harness: the generated test runner and shard launcher of the sharded unit roots"),)
 RULES += ((("tests/ci/vaxis_test_owners.json", "tests/ci/verify_vaxis_test_owners.py"),
@@ -771,7 +772,7 @@ PR_UNIT_ROOTS = frozenset({"test-native", "test-store", "test-logic", "test-h2",
 # Links to other targets (measurement, cross, typecheck, upgrade ...) are not added.
 CI_RUNNABLE = frozenset(PR_UNIT_ROOTS | CHECK_COVERS | {covered for cases in FIXTURE_COVERS.values() for covered in cases}
                         | set(FIXTURE_COVERS) | {"test-vaxis-clipboard"})
-# Store unit tests run on a PR only for a change to the Store itself.
+# Store unit tests run on a PR only for a change to the Store itself or to the unit harness that runs it.
 STORE_PATHS = ("src/store.zig", "src/store/*", *UNIT_HARNESS)
 
 
@@ -829,7 +830,7 @@ def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassi
 
     It keeps the unit roots the diff reaches (a whole-suite gate becomes
     `test-native` and `test-logic`, or only `test-logic` when bootstrap inputs
-    alone selected it; `test-store` only for Store paths) and the targets whose
+    alone selected it; `test-store` only for Store paths and UNIT_HARNESS) and the targets whose
     own files the diff touches (fixtures, PR_OWN_FILE_TARGETS), and PR_SELECTED_TARGETS
     whenever the selection has them. `importers` are
     the fixtures that import a changed shared helper (`shared_helper_importers`);
