@@ -1,7 +1,6 @@
 import json
 import pathlib
 import re
-import shlex
 import threading
 import time
 
@@ -94,12 +93,11 @@ def queued_in_active():
     with world("groups-queued", replies, active_capacity=1) as w:
         first = w.session("--label", "First peer task")
         second = w.session("--label", "Second peer task")
-        dispatcher = w.session("--label", "Dispatcher")
-        rui = shlex.quote(str(fixture.RUI))
-        command = (f"printf 'first task' | {rui} session send --session {first} && "
-                   f"printf 'second task' | {rui} session send --session {second}")
+        dispatcher = w.session("--label", "Dispatcher", "--tools", "message_agent", "--permission-mode", "bypass")
+        # message_agent is the one way a Session sends another Session a Message that names its sender.
         dict.__getitem__(replies, "dispatch two Messages")[0] = fixture.sse_tool_calls("dispatch", [
-            ("bash", "call-dispatch", json.dumps({"cmd": command, "timeout_ms": 20000, "description": "Dispatch"}))])
+            ("message_agent", "call-first", json.dumps({"id": first, "text": "first task"})),
+            ("message_agent", "call-second", json.dumps({"id": second, "text": "second task"}))])
         try:
             send(w, dispatcher, "dispatch two Messages")
             wait_state(w, dispatcher, "finished")

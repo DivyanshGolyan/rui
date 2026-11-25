@@ -2,7 +2,6 @@ import difflib
 import json
 import pathlib
 import re
-import shlex
 import threading
 
 import model_fixture as fixture
@@ -23,7 +22,7 @@ class FanOutReplies(dict):
 
     def __init__(self):
         super().__init__()
-        self.command = None
+        self.peers = []
         self.lead_requests = 0
 
     def __bool__(self):
@@ -33,8 +32,9 @@ class FanOutReplies(dict):
         if text == "fan out":
             self.lead_requests += 1
             if self.lead_requests == 1:
-                arguments = {"cmd": self.command, "stdin": None, "timeout_ms": 20000, "description": "Message the peers"}
-                return fixture.sse_tool_calls("lead-calls", [("bash", "lead-call", json.dumps(arguments))])
+                return fixture.sse_tool_calls("lead-calls", [
+                    ("message_agent", f"lead-call-{n}", json.dumps({"id": peer, "text": "hi"}))
+                    for n, peer in enumerate(self.peers)])
             return answer("lead", "lead done")
         assert text.startswith(PEER_PREFIX), text
         return answer("peer", "peer done")
@@ -148,9 +148,8 @@ def flat_list():
     with world("clicks-flat", replies) as w:
         for n in range(7):
             peers_by_label[f"peer-{n}"] = w.session("--label", f"peer-{n}")
-        lead = w.session("--label", "lead", "--tools", "bash", "--permission-mode", "bypass")
-        replies.command = "; ".join(f"printf %s hi | {shlex.quote(str(fixture.RUI))} session send --session {peer}"
-                                    for peer in peers_by_label.values())
+        lead = w.session("--label", "lead", "--tools", "message_agent", "--permission-mode", "bypass")
+        replies.peers = list(peers_by_label.values())
         w.run("session", "send", "--store", w.store, "--session", lead, input="fan out")
         wait_for_host(w, [lead, *peers_by_label.values()], finished, "the lead and every peer finish")
         assert replies.lead_requests == 2, replies.lead_requests
