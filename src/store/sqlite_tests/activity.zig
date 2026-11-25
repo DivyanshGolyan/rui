@@ -307,8 +307,8 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position,source_kind) " ++
-                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,'{2s}',value,2 FROM history; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,source_kind) " ++
+                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,'{2s}',2 FROM history; " ++
                 "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
             .{ history, session.slice(), peer.slice() },
             0,

@@ -42,9 +42,9 @@ INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider
 ('brhkcj',1,'fixture-ask-config','/home/user/rui-pr6d','codex','openai-responses/1','model-a',1,1,2,0,NULL,NULL,NULL,NULL,NULL),
 ('d8mv7p',1,'fixture-answer-config','/home/user/rui-pr6d','codex','openai-responses/1','model-a',1,1,4,1,NULL,NULL,NULL,NULL,NULL),
 ('rhvzwc',1,'fixture-stop-config','/home/user/rui-pr6d','codex','openai-responses/1','model-a',1,1,4,1,NULL,NULL,NULL,NULL,NULL);
-INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_kind) VALUES
-(1,'d8mv7p','fixture-answer-key',2,1,1,1793781720,NULL,NULL,1),
-(2,'brhkcj','fixture-ask-message',6,1,2,1793781720,NULL,NULL,1);
+INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,source_kind) VALUES
+(1,'d8mv7p','fixture-answer-key',2,1,1,1793781720,NULL,1),
+(2,'brhkcj','fixture-ask-message',6,1,2,1793781720,NULL,1);
 INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id,outcome_position,outcome_at,continuation_operation_id) VALUES
 (1,'d8mv7p',1,1,1,'completed',5,5,1793781720,NULL),
 (2,'brhkcj',2,2,2,NULL,NULL,NULL,NULL,NULL);

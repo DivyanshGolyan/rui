@@ -637,8 +637,7 @@ test "SL-5: a list row's first Message, first approval are the owners' values, f
                     const peer = try configureTestSession(storage, "sl5-peer");
                     const receiver = try configureTestSession(storage, "sl5-receiver");
                     try submitTestMessage(storage, tmp, "sl5-peer-file", "sl5-peer-message", receiver.slice(), "from a peer");
-                    const peer_position = try store_testing.queryU64(storage, "SELECT next_position FROM session WHERE session_ref=?1", .{peer.slice()});
-                    try store_testing.exec(storage, "UPDATE message_admission SET source_kind=2,sender_session_ref=?1,sender_position=?2 WHERE session_ref=?3", .{ peer.slice(), peer_position, receiver.slice() });
+                    try store_testing.exec(storage, "UPDATE message_admission SET source_kind=2,sender_session_ref=?1 WHERE session_ref=?2", .{ peer.slice(), receiver.slice() });
                     return receiver;
                 },
                 .bare => return configureTestSession(storage, "sl5-bare"),

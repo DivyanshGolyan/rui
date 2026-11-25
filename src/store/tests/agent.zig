@@ -388,7 +388,6 @@ test "session message writer covers message_agent start_agent and ending with wa
                     action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
                     key = try std.fmt.bufPrint(&key_buffer, "rui.core/{s}/{d}", .{ name, action.binding.action_id });
                 }
-                const sender_position = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{sender.slice()});
                 var wake: std.Io.Event = .unset;
                 storage.commitWake().store(&wake, .release);
                 defer storage.commitWake().store(null, .release);
@@ -425,7 +424,7 @@ test "session message writer covers message_agent start_agent and ending with wa
                     try std.testing.expect(commits.calls[0].from_peer);
                     try std.testing.expectEqualStrings(receiver.slice(), commits.calls[0].session.slice());
                 }
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.command_key=?1 AND m.session_ref=?2 AND m.sender_session_ref=?3 AND m.sender_position=?4 AND c.digest=?5", .{ key, receiver.slice(), sender.slice(), sender_position, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.command_key=?1 AND m.session_ref=?2 AND m.sender_session_ref=?3 AND c.digest=?4", .{ key, receiver.slice(), sender.slice(), store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
                 const content_id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{key});
                 try expectContent(&storage, try testingContentReference(&storage, content_id), text);
                 try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT next_position-1 FROM session WHERE session_ref=?1", .{receiver.slice()}), try store_testing.queryU64(&storage, "SELECT admission_position FROM message_admission WHERE command_key=?1", .{key}));
@@ -797,6 +796,43 @@ test "the step to format 95 gives a call that already sent or started the line i
             defer storage.close() catch unreachable;
             try expectOutcomeLine(&storage, 1, "Messaged ", "k7m2qx");
             try expectOutcomeLine(&storage, 2, "Started ", "p4t9vw");
+        }
+    }.run);
+}
+
+/// Format 95 rows for the sender-side record's removal: a peer Message that took a position in its sender's feed, and a refused
+/// send saved beside the sender's next position.
+fn senderRecord95() history.Start {
+    @setEvalBranchQuota(100_000);
+    return .{ .format = 95, .sql = history.FormatSql.neutral(
+        "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
+            "SELECT 'sent-peer',kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,30 FROM core_command WHERE command_key='fixture-answer-key';" ++
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_kind) " ++
+            "VALUES(3,'d8mv7p','sent-peer',2,6,NULL,1793781720,'brhkcj',9,2);" ++
+            "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) " ++
+            "VALUES('sent-refused',2,'absent',X'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,'unknown_session',0,0,31);" ++
+            "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES('sent-refused','brhkcj',10,1793781720);" ++
+            "UPDATE session SET next_position=11 WHERE session_ref='brhkcj'",
+    ) };
+}
+
+test "the step to format 96 drops the sender-side record and keeps the sender of each peer Message" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            const start = comptime senderRecord95();
+            try history.openAt(case, &storage, &tmp, std.testing.io, &start);
+            defer storage.close() catch unreachable;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE command_key='sent-peer' AND session_ref='d8mv7p' AND sender_session_ref='brhkcj' AND source_kind=2 AND admission_position=6", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key='sent-refused' AND accepted=0 AND code='unknown_session'", .{}));
+            try std.testing.expectEqual(@as(u64, 11), try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref='brhkcj'", .{}));
+            if (case.engine == .sqlite) {
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM sqlite_schema WHERE name IN ('sent_rejection','message_admission_sent')", .{}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_table_info('message_admission') WHERE name='sender_position'", .{}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+            }
         }
     }.run);
 }

@@ -212,8 +212,6 @@ pub const TestingStatementFault = store_testing.TestingStatementFault;
 pub fn expectDenseSessionPositions(storage: *Store, session: []const u8) !void {
     const statement = try sqlite.prepare(storage.sqliteDatabase(), "WITH messages(position) AS (" ++
         "SELECT admission_position FROM message_admission WHERE session_ref=?1 AND admission_position IS NOT NULL " ++
-        "UNION ALL SELECT sender_position FROM message_admission WHERE sender_session_ref=?1 " ++
-        "UNION ALL SELECT sender_position FROM sent_rejection WHERE sender_session_ref=?1 " ++
         "UNION ALL SELECT session_position FROM conversation_entry WHERE session_ref=?1 AND entry_kind!=3), " ++
         "model(position) AS (SELECT admission_position FROM model_operation WHERE session_ref=?1 " ++
         "UNION ALL SELECT session_position FROM model_output_item WHERE session_ref=?1 " ++

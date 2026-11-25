@@ -158,8 +158,7 @@ fn build(world: *World, case: *testing.Case, tmp: *std.testing.TmpDir, value: Va
     try testing.submitTestMessageParts(storage, tmp, "public-sent", world.peer.slice(), parts);
     world.received = try testing.queryU64(storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"public-received"});
     world.sent = try testing.queryU64(storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"public-sent"});
-    const sender_position = try testing.queryU64(storage, "SELECT next_position FROM session WHERE session_ref=?1", .{world.own.slice()});
-    try testing.exec(storage, "UPDATE message_admission SET source_kind=2,sender_session_ref=?1,sender_position=?2 WHERE admission_id=?3", .{ world.own.slice(), sender_position, world.sent });
+    try testing.exec(storage, "UPDATE message_admission SET source_kind=2,sender_session_ref=?1 WHERE admission_id=?2", .{ world.own.slice(), world.sent });
     world.content = try testing.queryU64(storage, "SELECT content_id FROM message_admission WHERE admission_id=?1", .{world.received});
     // Deduplication: both Messages and the Resolution hold one content row.
     try std.testing.expectEqual(world.content, try testing.queryU64(storage, "SELECT content_id FROM message_admission WHERE admission_id=?1", .{world.sent}));

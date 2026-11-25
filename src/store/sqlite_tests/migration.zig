@@ -362,7 +362,7 @@ test "the previous Store format preserves change rows and admits bounded effort 
     try std.testing.expectEqualStrings("unsupported_value: high is not supported", page.items[1].value.session_changed.provider_text.?.slice());
 }
 
-test "schema 57 refusal rows migrate to wire 10 without changing command identity or sender positions" {
+test "schema 57 refusal rows migrate to wire 10 without changing command identity" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -379,18 +379,25 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
             .{ .key = "legacy-unknown-addressed", .target = "absent", .code = .unknown_session },
         };
 
-        fn expectSaved(database: *c.sqlite3, commands: []const wire_request.MessageCommand) !void {
+        fn expectCommands(database: *c.sqlite3, commands: []const wire_request.MessageCommand) !void {
             for (commands, cases, 0..) |*command, case, index| {
                 const digest = command.semanticDigest();
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(database, "SELECT count(*) FROM core_command c JOIN sent_rejection s ON s.command_key=c.command_key " ++
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(database, "SELECT count(*) FROM core_command c " ++
                     "WHERE c.command_key=?1 AND c.kind=2 AND c.target=?2 AND c.input_digest=?3 " ++
                     "AND c.accepted=0 AND c.code=?4 AND c.command_seq=?5 AND c.revision=0 AND c.created=0 " ++
-                    "AND c.primary_content_id IS NULL AND c.secondary_content_id IS NULL " ++
-                    "AND s.sender_session_ref='brhkcj' AND s.sender_position=?6 AND s.rejected_at=?7", .{ case.key, case.target, store_testing.Blob{ .bytes = &digest }, @tagName(case.code), 1000 + index, 6 + index, 1793781800 + index }));
+                    "AND c.primary_content_id IS NULL AND c.secondary_content_id IS NULL", .{ case.key, case.target, store_testing.Blob{ .bytes = &digest }, @tagName(case.code), 1000 + index }));
             }
-            try std.testing.expectEqual(@as(u64, 3), try store_testing.sqliteQueryU64(database, "SELECT count(*) FROM sent_rejection", .{}));
             try std.testing.expectEqual(@as(u64, 12), try store_testing.sqliteQueryU64(database, "SELECT count(*) FROM core_command", .{}));
             try std.testing.expectEqual(@as(u64, 9), try store_testing.sqliteQueryU64(database, "SELECT next_position FROM session WHERE session_ref='brhkcj'", .{}));
+        }
+
+        fn expectSaved(database: *c.sqlite3, commands: []const wire_request.MessageCommand) !void {
+            try expectCommands(database, commands);
+            for (cases, 0..) |case, index| {
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(database, "SELECT count(*) FROM sent_rejection s " ++
+                    "WHERE s.command_key=?1 AND s.sender_session_ref='brhkcj' AND s.sender_position=?2 AND s.rejected_at=?3", .{ case.key, 6 + index, 1793781800 + index }));
+            }
+            try std.testing.expectEqual(@as(u64, 3), try store_testing.sqliteQueryU64(database, "SELECT count(*) FROM sent_rejection", .{}));
         }
     };
     var payload: wire_request.MessageCommand = .{ .text = try testingBytesContent(&tmp, "legacy-refused-body", "a saved rejected Message") };
@@ -419,7 +426,7 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
             try store_testing.sqliteExec(raw, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,'brhkcj',?2,?3)", .{ case.key, 6 + index, 1793781800 + index });
         }
         try sqlite.exec(raw, "UPDATE session SET next_position=9 WHERE session_ref='brhkcj'");
-        try Legacy.expectSaved(raw, commands);
+        try Legacy.expectCommands(raw, commands);
         try std.testing.expectEqual(@as(u32, 57), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='9'", .{}));
         try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_foreign_key_check"));
@@ -432,14 +439,14 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
         try std.testing.expectEqual(@as(u64, store_schema.schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
-        try Legacy.expectSaved(storage.sqliteDatabase(), commands);
+        try Legacy.expectCommands(storage.sqliteDatabase(), commands);
         for (commands, Legacy.cases) |*command, case| {
             const replay = storage.submitMessageWithModel(command, null, .{});
             try std.testing.expect(replay == .rejected);
             try std.testing.expect(replay.rejected.replayed);
             try std.testing.expectEqual(case.code, replay.rejected.code);
         }
-        try Legacy.expectSaved(storage.sqliteDatabase(), commands);
+        try Legacy.expectCommands(storage.sqliteDatabase(), commands);
     }
 }
 
@@ -482,7 +489,6 @@ test "schema 53 moves forward with loaded tools defaulting to NULL" {
     // The step to 89 deletes the saved refusals that named no missing setting and keeps every other
     // command; their keys are fresh again and are refused with the settings they lack.
     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key IN ('legacy-configure','legacy-create-message')", .{}));
-    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM sent_rejection WHERE command_key='legacy-create-message'", .{}));
     try std.testing.expect((try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{})) > 0);
     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE missing_settings IS NOT NULL", .{}));
     var configure: wire_request.ConfigureCommand = .{};
