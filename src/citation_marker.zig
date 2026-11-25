@@ -1,60 +1,44 @@
-//! Provider citation markers inside message text.
+//! Provider citation markers inside answer text.
 //!
-//! The ChatGPT route's models write a web citation into the answer as private-use
-//! scalars around ASCII ids: U+E200 `cite` (U+E202 id)+ U+E201, for example
-//! `\u{e200}cite\u{e202}turn0search0\u{e202}turn0search1\u{e201}`. The marker is the provider's
-//! wire encoding of a source reference, not words, so decoding message text removes it once and
-//! every reader of the text (the Conversation, `/copy`, replay, the CLI) sees the answer without it.
-//! Only a complete marker is removed; any other text, including an unfinished marker, stays.
+//! The ChatGPT route's models write a web citation into the answer as private-use scalars around
+//! ASCII ids: U+E200 `cite` (U+E202 id)+ U+E201, for example
+//! `\u{e200}cite\u{e202}turn0search0\u{e202}turn0search1\u{e201}`. The Session transcript keeps
+//! that text exactly as the provider sent it, annotations included; the marker is a reference
+//! the model addressed to a client, so a view that draws the answer leaves it out. Only a complete
+//! marker is removed; any other text, including an unfinished marker, is drawn unchanged.
+//! The filter works on bytes, so it needs no valid UTF-8 and cannot fail.
 
 const std = @import("std");
 
-const open: u21 = 0xe200;
-const close: u21 = 0xe201;
-const separator: u21 = 0xe202;
-const lead = [_]u21{ open, 'c', 'i', 't', 'e', separator };
+const separator = "\xee\x88\x82";
+const close = "\xee\x88\x81";
+const lead = "\xee\x88\x80cite" ++ separator;
 
-/// A marker holds at most this many scalars before its closer; a longer run stays text.
-pub const max_held = 512;
+/// A marker holds at most this many bytes before its closer; a longer run stays text.
+pub const max_held = 256;
 
-const State = enum { idle, lead, id_start, id };
+const State = enum { idle, lead, id_start, id, mark_1, mark_2 };
 const Step = enum { pass, keep, drop, reject };
 
-/// Removes complete markers from a stream of decoded scalars. Create one per text part, `feed`
-/// every scalar in order, then `finish`. `out` has `put(scalar: u21) !void` and receives the
-/// text that remains.
+/// Removes complete markers from a stream of bytes. Create one per answer, `feed` every byte in
+/// order, then `finish`. `out` has `put(byte: u8) !void` and receives the text that remains.
 pub const Filter = struct {
     state: State = .idle,
-    // Unresolved scalars are `buf[anchor..tail]`: the held marker prefix, then any scalars that a
+    // Unresolved bytes are `buf[anchor..tail]`: the held marker prefix, then any bytes that a
     // rejected prefix sends back to be scanned again. `head` is the next one to scan.
-    buf: [max_held + 1]u21 = undefined,
+    buf: [max_held + 1]u8 = undefined,
     anchor: usize = 0,
     head: usize = 0,
     tail: usize = 0,
-    sequence: [4]u8 = undefined,
-    sequence_len: u3 = 0,
 
-    pub fn feed(self: *Filter, scalar: u21, out: anytype) !void {
-        self.buf[self.tail] = scalar;
+    pub fn feed(self: *Filter, byte: u8, out: anytype) !void {
+        self.buf[self.tail] = byte;
         self.tail += 1;
         try self.drain(out);
     }
 
-    /// Feeds one byte of valid UTF-8; the scalar is fed when its last byte arrives.
-    pub fn feedByte(self: *Filter, byte: u8, out: anytype) !void {
-        if (self.sequence_len == 0 and byte < 0x80) return self.feed(byte, out);
-        if (self.sequence_len == 0) _ = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidUtf8;
-        self.sequence[self.sequence_len] = byte;
-        self.sequence_len += 1;
-        const needed = std.unicode.utf8ByteSequenceLength(self.sequence[0]) catch unreachable;
-        if (self.sequence_len < needed) return;
-        self.sequence_len = 0;
-        try self.feed(std.unicode.utf8Decode(self.sequence[0..needed]) catch return error.InvalidUtf8, out);
-    }
-
-    /// Ends the part: whatever is still an unfinished marker is text.
+    /// Ends the answer: whatever is still an unfinished marker is text.
     pub fn finish(self: *Filter, out: anytype) !void {
-        if (self.sequence_len != 0) return error.InvalidUtf8;
         while (self.state != .idle) {
             try self.reject(out);
             try self.drain(out);
@@ -63,10 +47,10 @@ pub const Filter = struct {
 
     fn drain(self: *Filter, out: anytype) !void {
         while (self.head < self.tail) {
-            const scalar = self.buf[self.head];
-            switch (self.step(scalar)) {
+            const byte = self.buf[self.head];
+            switch (self.step(byte)) {
                 .pass => {
-                    try out.put(scalar);
+                    try out.put(byte);
                     self.head += 1;
                     self.anchor = self.head;
                 },
@@ -91,7 +75,7 @@ pub const Filter = struct {
         }
     }
 
-    /// The held prefix is not a marker: its first scalar is text, and the rest are scanned again.
+    /// The held prefix is not a marker: its first byte is text, and the rest are scanned again.
     fn reject(self: *Filter, out: anytype) !void {
         try out.put(self.buf[self.anchor]);
         self.anchor += 1;
@@ -99,33 +83,43 @@ pub const Filter = struct {
         self.state = .idle;
     }
 
-    fn step(self: *Filter, scalar: u21) Step {
+    fn step(self: *Filter, byte: u8) Step {
         const held = self.head - self.anchor;
         if (self.state != .idle and held == max_held) return .reject;
         switch (self.state) {
             .idle => {
-                if (scalar != open) return .pass;
+                if (byte != lead[0]) return .pass;
                 self.anchor = self.head;
                 self.state = .lead;
                 return .keep;
             },
             .lead => {
-                if (scalar != lead[held]) return .reject;
+                if (byte != lead[held]) return .reject;
                 if (held + 1 == lead.len) self.state = .id_start;
                 return .keep;
             },
             .id_start => {
-                if (!idScalar(scalar)) return .reject;
+                if (!idByte(byte)) return .reject;
                 self.state = .id;
                 return .keep;
             },
             .id => {
-                if (idScalar(scalar)) return .keep;
-                if (scalar == separator) {
+                if (idByte(byte)) return .keep;
+                if (byte != separator[0]) return .reject;
+                self.state = .mark_1;
+                return .keep;
+            },
+            .mark_1 => {
+                if (byte != separator[1]) return .reject;
+                self.state = .mark_2;
+                return .keep;
+            },
+            .mark_2 => {
+                if (byte == separator[2]) {
                     self.state = .id_start;
                     return .keep;
                 }
-                if (scalar != close) return .reject;
+                if (byte != close[2]) return .reject;
                 self.state = .idle;
                 return .drop;
             },
@@ -133,65 +127,62 @@ pub const Filter = struct {
     }
 };
 
-fn idScalar(scalar: u21) bool {
-    return scalar < 0x80 and (std.ascii.isAlphanumeric(@intCast(scalar)) or scalar == '_' or scalar == '-');
+fn idByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '-';
 }
 
 const Collect = struct {
-    items: [max_held + 128]u21 = undefined,
+    items: [2 * max_held]u8 = undefined,
     len: usize = 0,
 
-    pub fn put(self: *Collect, scalar: u21) error{}!void {
-        self.items[self.len] = scalar;
+    pub fn put(self: *Collect, byte: u8) error{}!void {
+        self.items[self.len] = byte;
         self.len += 1;
     }
 
-    fn slice(self: *const Collect) []const u21 {
+    fn slice(self: *const Collect) []const u8 {
         return self.items[0..self.len];
     }
 };
 
 /// The independent oracle: the marker grammar matched at each position of the whole text, with no
-/// streaming state; a marker, closer included, is at most `max_held` scalars.
-fn oracle(text: []const u21, out: *Collect) error{}!void {
+/// streaming state; a marker, closer included, is at most `max_held` bytes.
+fn oracle(text: []const u8, out: *Collect) void {
     var at: usize = 0;
     while (at < text.len) {
         if (markerEnd(text, at)) |end| {
             at = end;
             continue;
         }
-        try out.put(text[at]);
+        out.put(text[at]) catch unreachable;
         at += 1;
     }
 }
 
-fn markerEnd(text: []const u21, start: usize) ?usize {
-    if (start + lead.len > text.len) return null;
-    for (lead, 0..) |expected, offset| if (text[start + offset] != expected) return null;
+fn markerEnd(text: []const u8, start: usize) ?usize {
+    if (!std.mem.startsWith(u8, text[start..], lead)) return null;
     var at = start + lead.len;
     while (true) {
         const id_start = at;
-        while (at < text.len and idScalar(text[at])) at += 1;
-        if (at == id_start or at >= text.len) return null;
-        if (at - start >= max_held) return null;
-        switch (text[at]) {
-            close => return at + 1,
-            separator => at += 1,
-            else => return null,
-        }
+        while (at < text.len and idByte(text[at])) at += 1;
+        if (at == id_start) return null;
+        const rest = text[at..];
+        if (std.mem.startsWith(u8, rest, close)) return if (at + close.len - start <= max_held) at + close.len else null;
+        if (!std.mem.startsWith(u8, rest, separator)) return null;
+        at += separator.len;
     }
 }
 
-fn run(text: []const u21, out: *Collect) !void {
+fn run(text: []const u8, out: *Collect) void {
     var filter: Filter = .{};
-    for (text) |scalar| try filter.feed(scalar, out);
-    try filter.finish(out);
+    for (text) |byte| filter.feed(byte, out) catch unreachable;
+    filter.finish(out) catch unreachable;
 }
 
-fn expectFiltered(input: []const u21, expected: []const u21) !void {
+fn expectFiltered(input: []const u8, expected: []const u8) !void {
     var out: Collect = .{};
-    try run(input, &out);
-    try std.testing.expectEqualSlices(u21, expected, out.slice());
+    run(input, &out);
+    try std.testing.expectEqualStrings(expected, out.slice());
 }
 
 /// A fixed-seed splitmix64, so the generated cases are the same on every run.
@@ -207,82 +198,58 @@ const Random = struct {
     }
 };
 
-fn scalars(comptime text: []const u8) []const u21 {
-    const result = comptime blk: {
-        @setEvalBranchQuota(20_000);
-        var buffer: [text.len]u21 = undefined;
-        var count: usize = 0;
-        var view = std.unicode.Utf8View.initComptime(text).iterator();
-        while (view.nextCodepoint()) |scalar| : (count += 1) buffer[count] = scalar;
-        const final: [count]u21 = buffer[0..count].*;
-        break :blk final;
-    };
-    return &result;
-}
-
-test "CM-66 a complete provider citation marker is removed from message text and nothing else is" {
+test "CM-66 a complete provider citation marker is removed from answer text and nothing else is" {
     const marker = "\u{e200}cite\u{e202}turn0search0\u{e202}turn0search1\u{e201}";
-    const cases = [_]struct { input: []const u21, expected: []const u21 }{
-        .{ .input = scalars("Rust is fast." ++ marker ++ " Zig too."), .expected = scalars("Rust is fast. Zig too.") },
-        .{ .input = scalars(marker ++ marker), .expected = scalars("") },
-        .{ .input = scalars("a\u{e200}cite\u{e202}x-y_1\u{e201}b"), .expected = scalars("ab") },
+    const cases = [_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "Rust is fast." ++ marker ++ " Zig too.", .expected = "Rust is fast. Zig too." },
+        .{ .input = marker ++ marker, .expected = "" },
+        .{ .input = "a\u{e200}cite\u{e202}x-y_1\u{e201}b", .expected = "ab" },
         // An unfinished or malformed marker is text.
-        .{ .input = scalars("a\u{e200}cite"), .expected = scalars("a\u{e200}cite") },
-        .{ .input = scalars("a\u{e200}cite\u{e202}turn0"), .expected = scalars("a\u{e200}cite\u{e202}turn0") },
-        .{ .input = scalars("a\u{e200}cite\u{e202}\u{e201}b"), .expected = scalars("a\u{e200}cite\u{e202}\u{e201}b") },
-        .{ .input = scalars("a\u{e200}cite\u{e201}b"), .expected = scalars("a\u{e200}cite\u{e201}b") },
-        .{ .input = scalars("a\u{e200}cite\u{e202}x y\u{e201}b"), .expected = scalars("a\u{e200}cite\u{e202}x y\u{e201}b") },
-        .{ .input = scalars("a\u{e200}cite\u{e202}x\u{e202}\u{e201}b"), .expected = scalars("a\u{e200}cite\u{e202}x\u{e202}\u{e201}b") },
-        .{ .input = scalars("a\u{e200}entity\u{e202}x\u{e201}b"), .expected = scalars("a\u{e200}entity\u{e202}x\u{e201}b") },
-        .{ .input = scalars("a\u{e200}citation\u{e202}x\u{e201}b"), .expected = scalars("a\u{e200}citation\u{e202}x\u{e201}b") },
-        .{ .input = scalars("a\u{e203}cite\u{e202}x\u{e201}b"), .expected = scalars("a\u{e203}cite\u{e202}x\u{e201}b") },
-        .{ .input = scalars("a\u{e200}cite\u{e202}é\u{e201}b"), .expected = scalars("a\u{e200}cite\u{e202}é\u{e201}b") },
+        .{ .input = "a\u{e200}cite", .expected = "a\u{e200}cite" },
+        .{ .input = "a\u{e200}cite\u{e202}turn0", .expected = "a\u{e200}cite\u{e202}turn0" },
+        .{ .input = "a\u{e200}cite\u{e202}\u{e201}b", .expected = "a\u{e200}cite\u{e202}\u{e201}b" },
+        .{ .input = "a\u{e200}cite\u{e201}b", .expected = "a\u{e200}cite\u{e201}b" },
+        .{ .input = "a\u{e200}cite\u{e202}x y\u{e201}b", .expected = "a\u{e200}cite\u{e202}x y\u{e201}b" },
+        .{ .input = "a\u{e200}cite\u{e202}x\u{e202}\u{e201}b", .expected = "a\u{e200}cite\u{e202}x\u{e202}\u{e201}b" },
+        .{ .input = "a\u{e200}entity\u{e202}x\u{e201}b", .expected = "a\u{e200}entity\u{e202}x\u{e201}b" },
+        .{ .input = "a\u{e200}citation\u{e202}x\u{e201}b", .expected = "a\u{e200}citation\u{e202}x\u{e201}b" },
+        .{ .input = "a\u{e203}cite\u{e202}x\u{e201}b", .expected = "a\u{e203}cite\u{e202}x\u{e201}b" },
+        .{ .input = "a\u{e200}cite\u{e202}\u{e9}\u{e201}b", .expected = "a\u{e200}cite\u{e202}\u{e9}\u{e201}b" },
+        // Bytes that are not UTF-8 pass through, even inside a marker's prefix.
+        .{ .input = "a\xff\xee\x88b\xee", .expected = "a\xff\xee\x88b\xee" },
         // A marker that starts inside an unfinished one is still removed.
-        .{ .input = scalars("a\u{e200}cite\u{e202}x" ++ marker ++ "b"), .expected = scalars("a\u{e200}cite\u{e202}xb") },
-        .{ .input = scalars("\u{e200}cite" ++ marker), .expected = scalars("\u{e200}cite") },
+        .{ .input = "a\u{e200}cite\u{e202}x" ++ marker ++ "b", .expected = "a\u{e200}cite\u{e202}xb" },
+        .{ .input = "\u{e200}cite" ++ marker, .expected = "\u{e200}cite" },
     };
     for (cases) |case| try expectFiltered(case.input, case.expected);
 }
 
 test "CM-66 a marker longer than the hold bound stays text" {
-    const ids: [max_held - 1 - lead.len]u8 = @splat('x');
-    const fits = scalars("a\u{e200}cite\u{e202}" ++ ids ++ "\u{e201}b");
-    try expectFiltered(fits, scalars("ab"));
-    const too_long = scalars("a\u{e200}cite\u{e202}" ++ ids ++ "x\u{e201}b");
+    const ids: [max_held - lead.len - close.len]u8 = @splat('x');
+    try expectFiltered("a" ++ lead ++ ids ++ close ++ "b", "ab");
+    const too_long = "a" ++ lead ++ ids ++ "x" ++ close ++ "b";
     try expectFiltered(too_long, too_long);
 }
 
 test "CM-66 the stream filter agrees with the whole-text definition over generated text" {
-    const alphabet = [_]u21{ open, close, separator, 'c', 'i', 't', 'e', 'a', '7', '-', '_', ' ', 0xe203, 0xe9, 0x1f600 };
+    const alphabet = [_]u8{ 'c', 'i', 't', 'e', 'a', '7', '-', '_', ' ', 0xee, 0x88, 0x80, 0x81, 0x82, 0x83, 0xc3, 0xa9 };
     var random: Random = .{ .state = 0x6d61726b };
-    var text: [96]u21 = undefined;
+    var text: [160]u8 = undefined;
     for (0..4000) |_| {
         const length = random.below(text.len + 1);
-        for (text[0..length]) |*scalar| {
+        var at: usize = 0;
+        while (at < length) {
             // Mostly the marker's own pieces, so complete and near-complete markers are common.
             const pick = random.below(10);
-            scalar.* = if (pick < 6) lead[random.below(lead.len)] else if (pick < 8) close else alphabet[random.below(alphabet.len)];
+            const piece: []const u8 = if (pick < 4) lead else if (pick < 6) separator else if (pick < 8) close else &.{alphabet[random.below(alphabet.len)]};
+            const count = @min(piece.len, length - at);
+            @memcpy(text[at..][0..count], piece[0..count]);
+            at += count;
         }
         var expected: Collect = .{};
-        try oracle(text[0..length], &expected);
+        oracle(text[0..length], &expected);
         var actual: Collect = .{};
-        try run(text[0..length], &actual);
-        try std.testing.expectEqualSlices(u21, expected.slice(), actual.slice());
+        run(text[0..length], &actual);
+        try std.testing.expectEqualStrings(expected.slice(), actual.slice());
     }
-}
-
-test "CM-66 bytes of UTF-8 filter as their scalars and an invalid sequence is refused" {
-    const input = "caf\u{e9} \u{1f600}\u{e200}cite\u{e202}t1\u{e201}!";
-    var out: Collect = .{};
-    var filter: Filter = .{};
-    for (input) |byte| try filter.feedByte(byte, &out);
-    try filter.finish(&out);
-    try std.testing.expectEqualSlices(u21, scalars("caf\u{e9} \u{1f600}!"), out.slice());
-
-    var cut: Filter = .{};
-    var ignored: Collect = .{};
-    try cut.feedByte(0xee, &ignored);
-    try std.testing.expectError(error.InvalidUtf8, cut.finish(&ignored));
-    var lone: Filter = .{};
-    try std.testing.expectError(error.InvalidUtf8, lone.feedByte(0xff, &ignored));
 }
