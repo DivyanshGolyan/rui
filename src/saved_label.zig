@@ -115,7 +115,6 @@ fn repeat(comptime unit: []const u8, comptime times: usize) *const [unit.len * t
 }
 
 test "TPR-3 a saved label reads as one tidy line and is never invalid" {
-    const testing = std.testing;
     const cases = comptime [_]struct { saved: []const u8, words: ?[]const u8, short: ?[]const u8 = null }{
         .{ .saved = "read src/main.zig", .words = "read src/main.zig" },
         .{ .saved = "  read   src/main.zig\n", .words = "read src/main.zig" },
@@ -138,28 +137,28 @@ test "TPR-3 a saved label reads as one tidy line and is never invalid" {
     for (cases) |case| {
         const label = SavedLabel.fromColumn(case.saved);
         const stored = label.raw();
-        try testing.expect(std.unicode.utf8ValidateSlice(stored));
-        try testing.expect(stored.len <= max_bytes);
-        try testing.expectEqual(case.words == null, SavedLabel.of(case.saved) == null);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(stored));
+        try std.testing.expect(stored.len <= max_bytes);
+        try std.testing.expectEqual(case.words == null, SavedLabel.of(case.saved) == null);
 
         inline for (.{ max_bytes, 100 }) |max| {
             const expected = if (max == 100) (case.short orelse case.words) else case.words;
             const shown_line = label.words(max);
-            try testing.expectEqual(expected == null, shown_line == null);
+            try std.testing.expectEqual(expected == null, shown_line == null);
             if (shown_line) |line| {
                 const shown = line.slice();
-                try testing.expectEqualStrings(expected.?, shown);
-                try testing.expect(std.unicode.utf8ValidateSlice(shown));
-                try testing.expect(shown.len <= max);
-                try testing.expect(shown[0] != ' ' and shown[shown.len - 1] != ' ');
-                try testing.expect(std.mem.indexOf(u8, shown, "  ") == null);
-                try testing.expect(std.mem.indexOfAny(u8, shown, "\n\r\t\x0b\x0c") == null);
-                try testing.expect(std.mem.indexOf(u8, shown, "\xc2\x85") == null);
-                try testing.expect(std.mem.indexOf(u8, shown, "\xe2\x80\xa8") == null);
-                try testing.expect(std.mem.indexOf(u8, shown, "\xe2\x80\xa9") == null);
+                try std.testing.expectEqualStrings(expected.?, shown);
+                try std.testing.expect(std.unicode.utf8ValidateSlice(shown));
+                try std.testing.expect(shown.len <= max);
+                try std.testing.expect(shown[0] != ' ' and shown[shown.len - 1] != ' ');
+                try std.testing.expect(std.mem.indexOf(u8, shown, "  ") == null);
+                try std.testing.expect(std.mem.indexOfAny(u8, shown, "\n\r\t\x0b\x0c") == null);
+                try std.testing.expect(std.mem.indexOf(u8, shown, "\xc2\x85") == null);
+                try std.testing.expect(std.mem.indexOf(u8, shown, "\xe2\x80\xa8") == null);
+                try std.testing.expect(std.mem.indexOf(u8, shown, "\xe2\x80\xa9") == null);
 
                 const again = readWords(max, shown) orelse return error.TestUnexpectedResult;
-                try testing.expectEqualStrings(shown, again.slice());
+                try std.testing.expectEqualStrings(shown, again.slice());
             }
         }
     }
