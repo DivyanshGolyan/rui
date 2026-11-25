@@ -6432,16 +6432,17 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         }
         fn serve(self: *@This()) !void {
             {
-                const page = try self.request(if (self.mode == .read_disconnect or self.mode == .command_disconnect) "/v1/activity-page" else "/v1/conversation-page");
+                const page = try self.request("/v1/activity-page");
                 defer page.close(std.testing.io);
                 self.pages += 1;
                 if (self.mode == .read_disconnect or self.mode == .command_disconnect) return;
-                var bytes: [1024]u8 = undefined;
+                var facts: protocol.ActivityFacts = .{ .end = 1, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+                try facts.work.workspace.set("/");
+                facts.items[0] = .{ .position = 1, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = .{ .length = answer.len, .digest = protocol.contentDigest(answer) }, .final = true } } };
+                facts.count = 1;
+                var bytes: [4096]u8 = undefined;
                 var body = std.Io.Writer.fixed(&bytes);
-                const shape = protocol.conversation_page_reply;
-                try protocol.writeShape(&body, shape.head, .{1});
-                try protocol.writeShape(&body, shape.item(.assistant), .{ 1, 0, protocol.ContentValueJson.text(.{ .length = answer.len, .digest = protocol.contentDigest(answer) }) });
-                try protocol.writeShape(&body, shape.item_end ++ shape.last, .{});
+                try activity_reply.writePage(&body, &facts);
                 try reply(page, "application/json", body.buffered().len, "", body.buffered());
             }
             if (self.mode == .temporary) return;

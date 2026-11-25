@@ -5,6 +5,7 @@ const wire_request = @import("../../wire_request.zig");
 const tool_defs = @import("../../tools.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
+const command_domain = @import("../domain/command.zig");
 const action_domain = @import("../domain/action.zig");
 const content_domain = @import("../domain/content.zig");
 const store_testing = @import("../testing.zig");
@@ -944,6 +945,12 @@ const NativePromotion = struct {
         return store_testing.queryU64(storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{model.operation_id});
     }
 
+    fn sendPeer(storage: *Store, tmp: *std.testing.TmpDir, sender: []const u8, target: []const u8, text: []const u8) !u64 {
+        const binding = try shared_fixtures.proposeMessageAgent(storage, tmp, sender, target, text);
+        try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(binding, target, text, .{}));
+        return binding.action_id;
+    }
+
     fn command(session: []const u8, key: []const u8, action: u64) !@import("../../command_input.zig").ActionBackgroundCommand {
         var result: @import("../../command_input.zig").ActionBackgroundCommand = .{ .action_id = action };
         try result.session.set(session);
@@ -1630,7 +1637,7 @@ test "queue records source kinds and source predicates for person peer and actio
                 var storage: Store = undefined;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
-                const parent = try shared_fixtures.configureTestSessionWithMode(&storage, "source-parent", "bypass");
+                const parent = try shared_fixtures.configurePeerSender(&storage, "source-parent");
                 var configure: wire_request.ConfigureCommand = .{};
                 try configure.key.set("source-child");
                 configure.configuration = try shared_fixtures.testingAgentSpec(&.{"bash"}, "bypass");
@@ -1639,26 +1646,15 @@ test "queue records source kinds and source predicates for person peer and actio
                 const child = (try storage.configure(&configure, .{})).accepted.session;
                 const action = try NativePromotion.promoted(&storage, &tmp, child.slice());
                 const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                var key_buffer: [64]u8 = undefined;
                 const key: []const u8 = switch (source) {
                     .person => blk: {
                         try submitTestMessage(&storage, &tmp, "source-person", "source-person-key", child.slice(), "Person input");
                         break :blk "source-person-key";
                     },
                     .peer => blk: {
-                        _ = try NativePromotion.propose(&storage, &tmp, parent.slice());
-                        const sender = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
-                        var input: action_domain.ActionExecutionInput = undefined;
-                        try storage.readActionExecutionInput(.bash, sender, &input);
-                        const text = "Peer input";
-                        const file = try tmp.dir.createFile(std.testing.io, "source-peer", .{ .read = true });
-                        try file.writeStreamingAll(std.testing.io, text);
-                        try file.sync(std.testing.io);
-                        var message = try store_testing.completeMessage("source-peer-key", child.slice(), file, text);
-                        defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-                        message.sender = .{ .store = storage.selector, .session = parent };
-                        message.sender_handle = input.sender_handle;
-                        try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
-                        break :blk "source-peer-key";
+                        const sender_action = try NativePromotion.sendPeer(&storage, &tmp, parent.slice(), child.slice(), "Peer input");
+                        break :blk try std.fmt.bufPrint(&key_buffer, "rui.core/message_agent/{d}", .{sender_action});
                     },
                     .action_final => blk: {
                         _ = try storage.settleActionAttempt(binding, .succeeded, "Final input", .{});
@@ -1695,13 +1691,14 @@ test "background owed stop excludes person peer and previously admitted final in
                     var storage: Store = undefined;
                     try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                     defer storage.close() catch unreachable;
-                    const parent = try shared_fixtures.configureTestSessionWithMode(&storage, "parent", "bypass");
+                    const parent = try shared_fixtures.configurePeerSender(&storage, "parent");
                     var configure: wire_request.ConfigureCommand = .{};
                     try configure.key.set("attached-child");
                     configure.configuration = try shared_fixtures.testingAgentSpec(&.{"bash"}, "bypass");
                     configure.configuration.parent.state = .value;
                     try configure.configuration.parent.value.set(parent.slice());
                     const child = (try storage.configure(&configure, .{})).accepted.session;
+                    const peer_send = if (source == .peer) try shared_fixtures.proposeMessageAgent(&storage, &tmp, parent.slice(), child.slice(), "") else null;
                     _ = try NativePromotion.promoted(&storage, &tmp, child.slice());
                     const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
                     if (idle) {
@@ -1711,20 +1708,7 @@ test "background owed stop excludes person peer and previously admitted final in
                     switch (source) {
                         .person => try submitTestMessage(&storage, &tmp, "late-person", "late-person-key", child.slice(), "Pending person input"),
                         .peer => {
-                            _ = try NativePromotion.propose(&storage, &tmp, parent.slice());
-                            const sender = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
-                            var input: action_domain.ActionExecutionInput = undefined;
-                            try storage.readActionExecutionInput(.bash, sender, &input);
-                            const text = "Pending peer input";
-                            const file = try tmp.dir.createFile(std.testing.io, "late-peer", .{ .read = true });
-                            try file.writeStreamingAll(std.testing.io, text);
-                            try file.sync(std.testing.io);
-                            var message = try store_testing.completeMessage("late-peer-key", child.slice(), file, text);
-                            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-                            message.sender = .{ .store = storage.selector, .session = parent };
-                            message.sender_handle = input.sender_handle;
-                            try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
-                            _ = try storage.settleActionAttempt(sender, .succeeded, "Sent", .{});
+                            try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(peer_send.?, child.slice(), "Pending peer input", .{}));
                             const continuation = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
                             try NativePromotion.finishModel(&storage, &tmp, continuation);
                         },
@@ -1891,12 +1875,9 @@ test "interrupt regression: person and peer Messages decline approval alongside 
                 var storage: Store = undefined;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
-                const sender = try shared_fixtures.configureTestSessionWithMode(&storage, "sender", "bypass");
-                _ = try NativePromotion.propose(&storage, &tmp, sender.slice());
-                const sender_action = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
-                var sender_input: action_domain.ActionExecutionInput = undefined;
-                try storage.readActionExecutionInput(.bash, sender_action, &sender_input);
+                const sender = try shared_fixtures.configurePeerSender(&storage, "sender");
                 const target = try configureTestSessionAsk(&storage, "target");
+                const sender_action = try shared_fixtures.proposeMessageAgent(&storage, &tmp, sender.slice(), target.slice(), "new peer message");
                 try submitTestMessage(&storage, &tmp, "seed", "seed", target.slice(), "run both");
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try settleTwoActionsForTesting(&storage, &tmp, model, "mixed-calls");
@@ -1915,15 +1896,7 @@ test "interrupt regression: person and peer Messages decline approval alongside 
                 }.capture);
                 try std.testing.expect(!try storage.messageAfterActionLaunch(running, cutoff));
                 if (peer) {
-                    const text = "new peer message";
-                    const file = try tmp.dir.createFile(std.testing.io, "peer-message", .{ .read = true });
-                    try file.writeStreamingAll(std.testing.io, text);
-                    try file.sync(std.testing.io);
-                    var message = try store_testing.completeMessage("peer-message", target.slice(), file, text);
-                    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-                    message.sender = .{ .store = storage.selector, .session = sender };
-                    message.sender_handle = sender_input.sender_handle;
-                    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
+                    try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(sender_action, target.slice(), "new peer message", .{}));
                 } else {
                     try submitTestMessage(&storage, &tmp, "person-message", "person-message", target.slice(), "new person message");
                 }
@@ -2421,6 +2394,8 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try shared_fixtures.configureTestSessionWithMode(&storage, "value-provenance", "bypass");
+            const peer = try shared_fixtures.configurePeerSender(&storage, "value-provenance-peer");
+            const peer_send = try shared_fixtures.proposeMessageAgent(&storage, &tmp, peer.slice(), session.slice(), "");
             const action_id = try NativePromotion.promoted(&storage, &tmp, session.slice());
             const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
             var input: action_domain.ActionExecutionInput = undefined;
@@ -2435,15 +2410,7 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
                 const key = try std.fmt.bufPrint(&key_buffer, "visible-person-{d}", .{index});
                 try submitTestMessage(&storage, &tmp, key, key, session.slice(), "visible person");
             }
-            const peer_text = "visible peer";
-            const file = try tmp.dir.createFile(std.testing.io, "visible-peer", .{ .read = true });
-            try file.writeStreamingAll(std.testing.io, peer_text);
-            try file.sync(std.testing.io);
-            var peer = try store_testing.completeMessage("visible-peer", session.slice(), file, peer_text);
-            defer peer.removeTemporaryContent(std.testing.io) catch unreachable;
-            peer.sender = .{ .store = storage.selector, .session = session };
-            peer.sender_handle = input.sender_handle;
-            try std.testing.expect(storage.submitMessageWithModel(&peer, null, .{}) == .accepted);
+            try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(peer_send, session.slice(), "visible peer", .{}));
             _ = try storage.settleActionAttempt(binding, .succeeded, "visible final", .{});
 
             var queued_request: protocol.ActivityPage = .{ .session = session, .direction = .forward, .kinds = .initOne(.received) };

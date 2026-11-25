@@ -452,7 +452,7 @@ def fixture_main(args):
       * text containing "long bash": one Bash command that sleeps 8 s
       * text containing "show environment": one Bash call that prints CLIENT_MARK, HOST_SECRET, `command -v brew` and PATH
       * text containing "start a child": one Bash call that starts Session "child" with "show environment"
-      * text containing "relay to ID": one Bash call that sends the text after the first ": " to Session ID as a peer,
+      * text containing "relay to ID": one message_agent call that sends the text after the first ": " to Session ID as a peer,
         or "show environment" when there is none ("show environment" in the text itself wins first)
       * text containing "hold answer": no reply until the fixture closes at run cleanup, so the Turn stays working
       * text containing "parallel bash": two Bash commands that sleep 12 s and 20 s, issued together
@@ -561,9 +561,8 @@ def fixture_main(args):
                     "printf 'PATH=%s\\n' \"$PATH\"", "Show the environment")])
             elif user_text and (relay := re.search(r"relay to ([0-9a-z]{6})", user_text)):
                 kind = "relay"
-                payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
-                    "printf %s " + shlex.quote(user_text.partition(": ")[2] or "show environment") +
-                    f" | rui session send --session {relay.group(1)}", "Relay to a peer")])
+                payload = fixture.sse_tool_calls(f"r{n}", [("message_agent", f"c{n}", json.dumps(
+                    {"id": relay.group(1), "text": user_text.partition(": ")[2] or "show environment"}))])
             elif user_text and "start a child" in user_text:
                 kind = "start-child"
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",

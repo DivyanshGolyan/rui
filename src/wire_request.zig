@@ -739,7 +739,7 @@ test "incremental ingress streams fragmented content and transfers charged custo
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"text\":{\"state\":\"value\",\"value\":\"";
     const encoded = @as([8193]u8, @splat('x')) ++ "\\n\\ud83d\\ude42\\u0000é\\\"\\\\";
     const expected = @as([8193]u8, @splat('x')) ++ "\n🙂\x00é\"\\";
     const suffix = "\"}}";
@@ -789,7 +789,7 @@ test "initial Message ingress streams the plain spec and transfers all three con
         for ([_]bool{ false, true }) |null_schema| {
             var body: std.Io.Writer.Allocating = .init(std.testing.allocator);
             defer body.deinit();
-            try body.writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,");
+            try body.writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",");
             if (text_first) try body.writer.writeAll("\"text\":{\"state\":\"value\",\"value\":\"task\"},");
             try body.writer.writeAll("\"configuration\":{\"model\":\"custom\",\"effort\":null,\"compactAt\":1000,\"tools\":[],\"permissionMode\":\"ask\",\"instructions\":");
             try std.json.Stringify.value(large, .{}, &body.writer);
@@ -853,7 +853,7 @@ test "app tools declared on a create or a configure are captured and taken by th
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
     const tools = "[{\"name\":\"lookup\",\"description\":\"Find.\",\"inputSchema\":{\"type\":\"object\"}}]";
-    const message = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"task\"},\"configuration\":{\"model\":\"custom\",\"effort\":null,\"compactAt\":1000,\"tools\":[],\"permissionMode\":\"ask\",\"appTools\":" ++ tools ++ "}}";
+    const message = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"text\":{\"state\":\"value\",\"value\":\"task\"},\"configuration\":{\"model\":\"custom\",\"effort\":null,\"compactAt\":1000,\"tools\":[],\"permissionMode\":\"ask\",\"appTools\":" ++ tools ++ "}}";
     const configure = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{\"instructions\":\"first\\n\",\"appTools\":" ++ tools ++ "}}";
     const cases = [_]struct { bytes: []const u8, kind: protocol.Kind }{
         .{ .bytes = message, .kind = .message },
@@ -894,8 +894,8 @@ test "a Message carries require_model whether it creates or addresses a Session,
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const creating = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{\"model\":\"model\",\"tools\":[],\"permissionMode\":\"default\",\"compactAt\":1000,\"effort\":null},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
-    const addressed = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
+    const creating = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"configuration\":{\"model\":\"model\",\"tools\":[],\"permissionMode\":\"default\",\"compactAt\":1000,\"effort\":null},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
+    const addressed = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":\"go\"}";
     const cases = [_]struct { bytes: []const u8, require_model: bool = false, failure: ?anyerror = null }{
         .{ .bytes = creating ++ "}" },
         .{ .bytes = creating ++ ",\"require_model\":false}" },
@@ -1055,7 +1055,7 @@ test "an order-free request still names each member once, carries every required
         .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\"," ++ header ++ "}" },
         .{ .json = "{\"archived\":false,\"session\":\"x\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"session_archive\"}" },
         .{ .json = "{\"target\":{\"operation\":\"2\",\"turn\":\"1\",\"session\":\"x\"},\"key\":\"k\"," ++ header ++ ",\"kind\":\"model_interruption\"}" },
-        .{ .json = "{\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":{\"session\":\"k7m2qx\",\"store\":\"/s\"},\"session\":\"x\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}" },
+        .{ .json = "{\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":{\"session\":\"k7m2qx\",\"store\":\"/s\"},\"session\":\"x\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}", .failure = error.UnexpectedField },
         .{ .json = "{\"attempt\":\"1\",\"operation\":\"2\",\"failed_response\":\"body\",\"session\":\"x\",\"kind\":\"inspect_session\"," ++ header ++ "}" },
         .{ .json = "{\"session\":\"x\",\"kind\":\"session_stop\"," ++ header ++ "}", .failure = error.MissingField },
         .{ .json = "{\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.MissingField },
@@ -1066,12 +1066,12 @@ test "an order-free request still names each member once, carries every required
         .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"extra\":{\"a\":[1]}," ++ header ++ "}", .failure = error.UnexpectedField },
         .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"extra\":{\"a\":[true,null]}," ++ header ++ "}", .failure = error.UnexpectedField },
         .{ .json = "{\"kind\":\"session_stop\",\"text\":" ++ value ++ ",\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.UnexpectedField },
-        .{ .json = "{\"kind\":\"message\",\"text\":{\"value\":\"x\"},\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.MissingField },
-        .{ .json = "{\"kind\":\"message\",\"text\":{\"state\":\"value\"},\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.InvalidFieldState },
-        .{ .json = "{\"kind\":\"message\",\"configuration\":" ++ configuration ++ ",\"outputSchema\":null,\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"\",\"key\":\"k\"," ++ header ++ "}" },
-        .{ .json = "{\"configuration\":" ++ configuration ++ ",\"outputSchema\":{},\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}" },
+        .{ .json = "{\"kind\":\"message\",\"text\":{\"value\":\"x\"},\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.MissingField },
+        .{ .json = "{\"kind\":\"message\",\"text\":{\"state\":\"value\"},\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.InvalidFieldState },
+        .{ .json = "{\"kind\":\"message\",\"configuration\":" ++ configuration ++ ",\"outputSchema\":null,\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"session\":\"\",\"key\":\"k\"," ++ header ++ "}" },
+        .{ .json = "{\"configuration\":" ++ configuration ++ ",\"outputSchema\":{},\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"session\":\"\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}" },
         .{ .json = "{\"configuration\":" ++ configuration ++ ",\"outputSchema\":{},\"instructions\":\"x\"},\"text\":" ++ value ++ ",\"key\":\"k\",\"session\":\"x\"," ++ header ++ ",\"kind\":\"configure\"}", .failure = error.UnexpectedField },
-        .{ .json = "{\"configuration\":" ++ configuration ++ "},\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}", .failure = error.UnexpectedField },
+        .{ .json = "{\"configuration\":" ++ configuration ++ "},\"text\":" ++ value ++ ",\"session\":\"x\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}", .failure = error.UnexpectedField },
     };
     var used = std.atomic.Value(u64).init(0);
     var retained: ?named_scratch.Owner = null;
@@ -1347,7 +1347,7 @@ test "SH-64 ordered Message parts stream and reject invalid media" {
             else => "image/jpeg",
         };
         const payload: []const u8 = if (scenario == .malformed_base64) "!!!!" else if (scenario == .valid_png) &encoded_png else &encoded;
-        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"parts\":[{{\"text\":\"before\",\"type\":\"text\"}},{{\"data\":\"{s}\",\"mime\":\"{s}\",\"type\":\"image\"}},{{\"type\":\"text\",\"text\":\"after\"}}]}}", .{ payload, mime });
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"parts\":[{{\"text\":\"before\",\"type\":\"text\"}},{{\"data\":\"{s}\",\"mime\":\"{s}\",\"type\":\"image\"}},{{\"type\":\"text\",\"text\":\"after\"}}]}}", .{ payload, mime });
         defer std.testing.allocator.free(body);
         var ingress: Ingress = undefined;
         ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = body.len, .scratch_path = root[0..root_len], .request_number = 12, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 100000 } });
@@ -1389,7 +1389,7 @@ test "SH-66 part ingress failures release scratch without publishing a loan" {
         const root_len = try tmp.dir.realPath(std.testing.io, &root);
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
-        const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"parts\":[{\"type\":\"text\",\"text\":\"hello\"}]}";
+        const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"parts\":[{\"type\":\"text\",\"text\":\"hello\"}]}";
         var ingress: Ingress = undefined;
         ingress.init(std.testing.allocator, .{
             .io = std.testing.io,
@@ -1425,7 +1425,7 @@ test "SH-67 ordered wire input accepts the part limit and refuses the next part"
         const root_len = try tmp.dir.realPath(std.testing.io, &root);
         var body: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer body.deinit();
-        try body.writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"parts\":[");
+        try body.writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"parts\":[");
         for (0..count) |index| {
             if (index != 0) try body.writer.writeByte(',');
             try body.writer.writeAll("{\"type\":\"text\",\"text\":\"\"}");

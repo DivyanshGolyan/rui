@@ -59,7 +59,7 @@ A later send failure does not undo accepted configuration.
 
 `session start` captures one Message mutation with fresh-Session configuration and an empty requested Session ID.
 Initial configuration accepts the same agent spec and streamed instruction and schema content as Configure; with Message text, one request carries at most three sealed content values.
-Inside one Store transaction, it validates the sender and configuration, allocates an ID through the same collision-safe allocator as configure, and admits the first Message to that new ID.
+Inside one Store transaction, it validates the configuration, allocates an ID through the same collision-safe allocator as configure, and admits the first Message to that new ID.
 Its successful stdout is the same JSON mutation receipt as `session send`, with the allocated six-character ID in `.context.session` and the request handle in `.context.key`, followed by newline: admission rather than execution or completion.
 Only the accepted `session start` receipt adds `configuration` immediately after `context`, containing `connection`, `model`, effective `reasoning_effort` and `effort_source`.
 For an unattached start, `connection` is the concrete resolved connection.

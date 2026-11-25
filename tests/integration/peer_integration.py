@@ -66,6 +66,10 @@ def tool_outputs(request):
     return [item["output"] for item in request["input"] if item.get("type") == "function_call_output"]
 
 
+def call_output(request, call_id):
+    return any(item.get("type") == "function_call_output" and item.get("call_id") == call_id for item in request["input"])
+
+
 def bash_call(name, command, stdin=None):
     arguments = {"cmd": command, "stdin": stdin, "timeout_ms": 20000, "description": f"Run {name} peer command"}
     return fixture.sse_tool_calls(f"{name}-calls", [("bash", f"{name}-call", json.dumps(arguments, separators=(",", ":")))])
@@ -77,12 +81,10 @@ def answer(name, text):
 
 class PeerModel(TestHTTPServer):
 
-    def __init__(self, workspace, report_source, foreign_store, foreign_session, external_session):
+    def __init__(self, workspace, foreign_store, external_session):
         super().__init__(("127.0.0.1", 0), PeerHandler)
         self.workspace = workspace
-        self.report_source = report_source
         self.foreign_store = foreign_store
-        self.foreign_session = foreign_session
         self.external_session = external_session
         self.a = self.b = self.empty = self.missing = self.archived = self.stopped = None
         self.requests = []
@@ -92,6 +94,7 @@ class PeerModel(TestHTTPServer):
         self.a_continued = threading.Event()
         self.a_reply_received = threading.Event()
         self.stop_received = threading.Event()
+        self.b_release = threading.Event()
         self.stop_release = threading.Event()
 
     def respond(self, request):
@@ -104,31 +107,13 @@ class PeerModel(TestHTTPServer):
             return answer("stopped", "unobserved answer")
         if address != self.a:
             self.b = address
-            if text.startswith("self report"):
-                assert sender_of(request) == address, request
-                return answer("b-self", "plain reply stays local")
-            if outputs:
+            if call_output(request, "b-reply-call"):
                 return answer("b-done", "plain reply stays local")
-            self.b_received.set()
             reply_to = text.splitlines()[1].removeprefix("Parent ID: ")
-            assert reply_to == sender_of(request), request
-            send = f"rui session send --session {reply_to} "
-            report = (send + "> b-reply.json 2> b-reply.err"
-                      if self.report_source == "stdin" else
-                      "cat > b-report.txt; " +
-                      send + "< b-report.txt > b-reply.json 2> b-reply.err")
-            return bash_call("b-reply", (
-                'printf "%s\\n" "$HOME"/.config/rui/requests/*.json > b-captures-before; '
-                f'printf %s "self report explicit" | rui session send --store "$RUI_STORE/." --session {address} '
-                f"--record {shlex.quote(str(self.workspace.parent / 'b-self.json'))} --key self-send > b-self.out 2> b-self.err; "
-                "echo $? > b-self.status; "
-                f"printf %s 'self report generated' | rui session send --session {address} "
-                "> b-self-generated.out 2> b-self-generated.err; "
-                "echo $? > b-self-generated.status; "
-                'printf "%s\\n" "$HOME"/.config/rui/requests/*.json > b-captures-after.part && mv b-captures-after.part b-captures-after; '
-                "i=0; while [ ! -e b-release ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; [ -e b-release ] || exit 124; "
-                + report
-            ), stdin=REPORT)
+            self.b_received.set()
+            assert self.b_release.wait(20), "B's provider request was not released"
+            return fixture.sse_tool_calls("b-reply-calls", [("message_agent", "b-reply-call",
+                json.dumps({"id": reply_to, "text": REPORT}, separators=(",", ":")))])
         if text.startswith("from peer/b: "):
             self.a_reply_received.set()
             return answer("a-final", f"peer said 42. [Open worker](rui-session:{self.b})\n"
@@ -140,19 +125,16 @@ class PeerModel(TestHTTPServer):
         assert self.defaults_restored.wait(20), "conflicting HOME preference was not restored"
         message = ("Please compute 6*7.\n"
                    f"Parent ID: {address}\n"
-                   "When done, send findings back to this parent with rui session send.")
+                   "When done, send findings back to this parent with message_agent.")
         return bash_call("a-ask", (
             "env | sed '/^RUI_SENDER_HANDLE=/d' > a-env.txt; command -v rui > a-which.txt; "
             f"printf %s 'plain caller elsewhere' | rui session send --store {shlex.quote(str(self.foreign_store))} --session {self.external_session} "
             f"--record {shlex.quote(str(self.workspace.parent / 'conflicting-store.json'))} --key conflicting-store "
             "> conflicting-store.out 2> conflicting-store.err || exit 91; "
-            f"printf %s 'must not arrive' | RUI_STORE={shlex.quote(str(self.foreign_store))} rui session send --session {self.foreign_session} "
-            f"--record {shlex.quote(str(self.workspace.parent / 'foreign-send.json'))} --key foreign-send > foreign-send.out 2> foreign-send.err; "
-            "[ $? -eq 3 ] || exit 90; "
             f'rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label {shlex.quote(A_LABEL)} '
             "> a-label.out 2> a-label.err || exit 89; "
             f"rui session start --workspace {shlex.quote(str(self.workspace))} --label {shlex.quote(B_LABEL)} "
-            "--connection codex --model gpt-6-sol --tools bash --permission-mode bypass > b-start.json 2> b-send.err; "
+            "--connection codex --model gpt-6-sol --tools bash,message_agent --permission-mode bypass > b-start.json 2> b-send.err; "
             "status=$?; cat b-start.json; exit $status"
         ), stdin=message)
 
@@ -217,7 +199,7 @@ def assistant_session_link_journey(installed, store, home, workspace, session_a,
 
     with terminal_process([str(installed), "session", "resume", "--store", str(store), session_a], env=env) as (_, master):
         read_terminal(master, "✓ Run a-ask peer command")
-        (workspace / "b-release").write_text("")
+        endpoint.b_release.set()
         frame = keyed_frame(master, b"", lambda screen, x, y: showing(screen, x, y) and "Open worker" in screen, chat=A_LABEL)
         assert "rui-session:" not in frame and "[Open worker]" not in frame, frame
         for session in (session_a, session_b):
@@ -302,7 +284,7 @@ def session_link_journey(installed, store, home, session_a):
         keyed_frame(master, b"\x1b", showing, chat=A_LABEL)
         keyed_frame(master, b"\x1b", lambda frame, x, y: overview_title(frame))
 
-def main(report_source):
+def main():
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-peer."))
     host = foreign_host = endpoint = thread = workspace = None
     try:
@@ -342,8 +324,6 @@ def main(report_source):
         foreign_store = state / "foreign-store"
         foreign_host, _ = start_ready_process([installed, "host", "serve", "--store", foreign_store],
             env={"PATH": os.environ["PATH"], "HOME": str(home)}, required_fields={"execution": "unavailable"})
-        foreign_session = allocated(run(installed, "session", "configure", "--store", foreign_store,
-            "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-sol", home=home))
         external_session = allocated(run(installed, "session", "configure", "--store", foreign_store,
             "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-sol", home=home))
         foreign_listing = run(installed, "session", "list", "--store", foreign_store, "--all", home=home)
@@ -363,10 +343,8 @@ def main(report_source):
             input="genuine external send", home=home)
         assert external["answer"]["status"] == "accepted" and external["context"]["session"] == external_session, external
         assert external["context"]["store"] == str(foreign_store), external
-        external_capture = json.loads((home / ".config" / "rui" / "requests" / f'{external["context"]["key"]}.json').read_text())
-        assert external_capture["sender"] is None and external_capture["sender_handle"] is None, external_capture
         assert (home / ".config" / "rui" / "preferences").read_bytes() == saved_defaults
-        endpoint = PeerModel(workspace, report_source, foreign_store, foreign_session, external_session)
+        endpoint = PeerModel(workspace, foreign_store, external_session)
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
@@ -419,23 +397,8 @@ def main(report_source):
                                 if candidate not in (session_a, session_b, endpoint.empty, endpoint.archived, endpoint.stopped))
         missing_report = run(installed, "session", "inspect", "--store", store, "--session", endpoint.missing, home=home)
         assert missing_report["session"] is None and missing_report["execution"]["reason"] == "session_not_found", missing_report
-        wait_for(lambda: (workspace / "b-captures-after").exists(), "B's self-send admissions", timeout=20)
-        self_sends = []
-        for name in ("b-self", "b-self-generated"):
-            assert (workspace / f"{name}.status").read_text() == "0\n", name
-            admitted = json.loads((workspace / f"{name}.out").read_text())
-            assert admitted["answer"]["status"] == "accepted" and admitted["context"]["session"] == session_b, admitted
-            self_sends.append(admitted["context"]["key"])
-        own_sender = {"store": canonical_store, "session": session_b}
-        assert json.loads((state / "b-self.json").read_text())["sender"] == own_sender
-        before = set((workspace / "b-captures-before").read_text().splitlines())
-        after = set((workspace / "b-captures-after").read_text().splitlines())
-        assert len(after - before) == 1, (before, after)
-        generated_self_record = pathlib.Path(next(iter(after - before)))
-        assert pathlib.Path(str(generated_self_record) + ".routing").is_file(), generated_self_record
-        assert json.loads(generated_self_record.read_text())["sender"] == own_sender
         wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)["work"]["state"]["kind"] == "finished", "A's first Turn while B is held", timeout=20)
-        assert endpoint.a_continued.is_set() and not (workspace / "b-reply.json").exists()
+        assert endpoint.a_continued.is_set() and not endpoint.a_reply_received.is_set()
         b_held = run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)
         assert b_held["work"]["state"]["kind"] != "finished", b_held
         settled = run(installed, "session", "inspect", "--store", store, "--session", session_a, "--profile", "full", home=home)["full"]["actions"][0]
@@ -443,14 +406,6 @@ def main(report_source):
         elsewhere = json.loads((workspace / "conflicting-store.out").read_text())
         assert elsewhere["answer"]["status"] == "accepted", elsewhere
         assert elsewhere["context"]["session"] == external_session and elsewhere["context"]["store"] == str(foreign_store), elsewhere
-        elsewhere_capture = json.loads((state / "conflicting-store.json").read_text())
-        assert elsewhere_capture["sender"] is None and elsewhere_capture["sender_handle"] is None, elsewhere_capture
-        foreign = json.loads((workspace / "foreign-send.out").read_text())
-        assert foreign["answer"]["status"] == "rejected" and foreign["answer"]["code"] == "invalid_sender_handle", foreign
-        replay = run(installed, "request", "recover", "--store", foreign_store, "--record", state / "foreign-send.json", "--kind", "message", home=home, expect=3)
-        assert replay["answer"]["code"] == "invalid_sender_handle" and replay["answer"]["replayed"] is True, replay
-        undelivered = run(installed, "session", "inspect", "--store", foreign_store, "--session", foreign_session, home=home)
-        assert undelivered["pending_messages"] == "0" and undelivered["recent_messages"] == [], undelivered
         start_receipt = json.loads((workspace / "b-start.json").read_text())
         assert allocated(start_receipt) == session_b, start_receipt
         assert start_receipt["configuration"] == {"connection": "codex", "model": "gpt-6-sol",
@@ -469,11 +424,11 @@ def main(report_source):
         assert fixture.request_system_prompt(a_requests[0]) == model_instructions(workspace, session_a)
         b_first = next(request for request in endpoint.requests if address_of(request) == session_b)
         assert address_of(b_first) == session_b
-        assert sender_of(b_first) == session_a
+        assert sender_of(b_first) is None
         task = last_user_text(b_first).splitlines()
         assert task[0] == "Please compute 6*7."
         assert task[1] == f"Parent ID: {session_a}"
-        assert task[2] == "When done, send findings back to this parent with rui session send."
+        assert task[2] == "When done, send findings back to this parent with message_agent."
         assert sender_of(a_requests[0]) is None
 
         silent = run(installed, "request", "inspect", handle, home=home)
@@ -489,36 +444,26 @@ def main(report_source):
         assert not any(secret in (workspace / "a-env.txt").read_text() for secret in SECRETS.values())
         assert (workspace / "a-which.txt").read_text() == f"{installed.parent}/rui\n"
 
-        saved_sender = json.loads((home / ".config" / "rui" / "requests" / f"{handle}.json").read_text())["sender"]
-        assert saved_sender == {"store": canonical_store, "session": session_a}, saved_sender
+        assert "sender" not in json.loads((home / ".config" / "rui" / "requests" / f"{handle}.json").read_text())
         recovered = run(installed, "request", "recover", handle, home=home)
         assert recovered["answer"]["status"] == "accepted" and recovered["answer"]["replayed"] is True, recovered
         assert recovered["context"]["key"] == receipt["context"]["key"], recovered
 
-        if report_source == "stdin":
-            assistant_session_link_journey(installed, store, home, workspace, session_a, session_b, endpoint.empty, endpoint.missing, endpoint)
-        else:
-            (workspace / "b-release").write_text("")
+        assistant_session_link_journey(installed, store, home, workspace, session_a, session_b, endpoint.empty, endpoint.missing, endpoint)
         assert endpoint.a_reply_received.wait(20), "A never received B's reply"
         a_continuation = next(request for request in endpoint.requests if address_of(request) == session_a and tool_outputs(request))
         assert tool_outputs(a_continuation) == [settled["result"]["text"]], a_continuation
-        wait_for(lambda: any(address_of(request) == session_b and tool_outputs(request) for request in endpoint.requests),
-                 "B's reply Bash call returned", timeout=20)
-        reply = json.loads((workspace / "b-reply.json").read_text())
-        assert reply["answer"]["status"] == "accepted" and reply["context"]["session"] == session_a, reply
-        domain = b"rui/content/v1"
-        assert reply["input"] == {"type": "text", "bytes": str(len(REPORT.encode())),
-                                  "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + REPORT.encode()).hexdigest()}, reply
+        wait_for(lambda: any(address_of(request) == session_b and call_output(request, "b-reply-call") for request in endpoint.requests),
+                 "B's message_agent call returned", timeout=20)
         a_final = wait_for(lambda: (lambda value: value if value["work"]["state"]["kind"] == "finished" and value["pending_messages"] == "0" else None)(
             run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)), "A's reply Turn", timeout=20)
         a_reply_request = [request for request in endpoint.requests if address_of(request) == session_a][-1]
         assert last_user_text(a_reply_request).encode() == REPORT.encode() and a_final
         assert not (workspace / "backtick-evaluated").exists(), "report backticks ran a command"
         assert not (workspace / "substitution-evaluated").exists(), "report $() ran a command"
-        if report_source == "file":
-            assert (workspace / "b-report.txt").read_bytes() == REPORT.encode()
         assert sender_of(a_reply_request) == session_b
-        assert [row["message"] for row in a_final["recent_messages"]] == [reply["context"]["key"], ask_key], a_final
+        assert [row["message"] for row in a_final["recent_messages"]][1:] == [ask_key], a_final
+        assert a_final["recent_messages"][0]["message"].startswith("rui.core/message_agent/"), a_final
         assert a_final["recent_messages"][0]["outcome"] == "completed", a_final
         a_actions = run(installed, "session", "inspect", "--store", store, "--session", session_a,
                         "--profile", "full", home=home)["full"]["actions"]
@@ -527,37 +472,25 @@ def main(report_source):
         assert len(a_requests) == 3, a_requests
         b_final = wait_for(lambda: (lambda value: value if value["work"]["state"]["kind"] == "finished" and value["pending_messages"] == "0" else None)(
             run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)), "B's Turn", timeout=20)
-        b_messages = {row["message"] for row in b_final["recent_messages"]}
-        expected_messages = {receipt["context"]["key"], *self_sends}
-        final_inputs = b_messages - expected_messages
-        assert len(final_inputs) == 1 and next(iter(final_inputs)).startswith("rui.core/action-final/"), b_final
-        assert expected_messages <= b_messages, b_final
-        for record, key in zip((state / "b-self.json", generated_self_record), self_sends):
-            replay = run(installed, "request", "recover", "--store", store, "--record", record, "--kind", "message", home=home)
-            assert replay["answer"]["status"] == "accepted" and replay["answer"]["replayed"] is True, replay
-            assert replay["context"]["key"] == key and replay["context"]["session"] == session_b, replay
-        b_after = run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)
-        assert {row["message"] for row in b_after["recent_messages"]} == b_messages, b_after
-        for key in (receipt["context"]["key"], *self_sends):
-            local = subprocess.run([str(installed), "request", "read-result", "--store", str(store), "--key", key],
-                                   text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
-            assert local.returncode == 0 and local.stdout == "plain reply stays local", local
+        assert [row["message"] for row in b_final["recent_messages"]] == [receipt["context"]["key"]], b_final
+        local = subprocess.run([str(installed), "request", "read-result", "--store", str(store), "--key", receipt["context"]["key"]],
+                               text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
+        assert local.returncode == 0 and local.stdout == "plain reply stays local", local
         a_after = run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)
-        assert [row["message"] for row in a_after["recent_messages"]] == [reply["context"]["key"], ask_key], a_after
+        assert [row["message"] for row in a_after["recent_messages"]][1:] == [ask_key], a_after
         assert "plain reply stays local" not in json.dumps(a_reply_request), a_reply_request
         b_requests = [request for request in endpoint.requests if address_of(request) == session_b]
         b_receipts = [item for request in b_requests for item in request["input"]
                       if item.get("type") == "function_call_output" and item.get("call_id") == "b-reply-call"]
-        assert b_receipts and all(json.loads(item["output"])["execution"] == "background" for item in b_receipts), b_receipts
+        assert b_receipts, b_requests
         rows = {row["reference"]: row for row in run(installed, "session", "list", "--store", store, "--all", home=home)["sessions"]}
         assert (rows[session_a]["label"], rows[session_b]["label"]) == (A_LABEL, B_LABEL), rows
-        assert rows[session_b]["first_message"]["sender"] == {"session": session_a}, rows[session_b]
+        assert rows[session_b]["first_message"]["sender"] is None, rows[session_b]
         assert rows[session_a]["first_message"]["sender"] is None, rows[session_a]
         assert rows[session_a]["peers"]["from_person_at"] is not None, rows[session_a]
-        assert rows[session_b]["peers"]["from_person_at"] is None, rows[session_b]
+        assert rows[session_b]["peers"]["from_person_at"] is not None, rows[session_b]
         assert B_LABEL not in json.dumps(b_requests), b_requests
-        if report_source == "stdin":
-            session_link_journey(installed, store, home, session_a)
+        session_link_journey(installed, store, home, session_a)
         assert all(fixture.request_system_prompt(request) == model_instructions(workspace, session_b) for request in b_requests)
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
         (state / "leak-home").mkdir()
@@ -577,17 +510,14 @@ def main(report_source):
         assert list(unrelated_store.iterdir()) == [], "peer followed HOME preferences instead of its sender Store"
         assert (home / ".config" / "rui" / "preferences").read_bytes() == saved_defaults
         assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == [".preferences.lock", "preferences", "requests"]
-        print(f"peer round trip passed ({report_source}): explicit/generated self-send admitted with recorded sender; "
-              "anonymous explicit Store beat conflicting HOME defaults; peer canonical Store alias accepted; "
+        print("peer round trip passed: anonymous explicit Store beat conflicting HOME defaults; "
               "peer --store naming another Store sent there as a plain caller; "
-              "plain answers stored as local results without implicit delivery; "
-              "foreign-Store peer rejected by Host and replayed without delivery; omitted Store beat conflicting HOME defaults; "
-              "literal backticks and $() reached the parent byte-exact without shell evaluation; "
-              "installed Bash rui configured B and sent with a durable receipt, "
+              "plain answers stored as local results without implicit delivery; omitted Store beat conflicting HOME defaults; "
+              "installed Bash rui configured B with a durable receipt, "
               "A included its own parent address and explicit report-back instructions, "
-              "B explicitly sent findings and A received the saved incoming report without request polling, result or peer Conversation reads, "
-              "one silent-peer diagnostic inspection, Host-recorded senders both ways, "
-              "original capture recovered its saved sender without duplicate, A finished while B was held, "
+              "B sent findings through message_agent and A received the saved incoming report without request polling, result or peer Conversation reads, "
+              "one silent-peer diagnostic inspection, Host-recorded sender on A's incoming report, "
+              "original capture recovered without duplicate, A finished while B was held, "
               "no idle peer or login, controlled PATH/HOME; scripted provider, not a model-compliance guarantee")
     except BaseException:
         retain_failure_state("peer integration failure state", state)
@@ -596,7 +526,7 @@ def main(report_source):
     finally:
         disposals = []
         if workspace is not None and workspace.exists():
-            disposals.append(lambda: (workspace / "b-release").touch())
+            disposals.append(endpoint.b_release.set)
         if host is not None:
             disposals.append(lambda: stop_process(host))
         if foreign_host is not None:
@@ -619,22 +549,20 @@ class CohortModel(TestHTTPServer):
         self.requests = []
         self.lock = threading.Lock()
         self.reports = {}
+        self.release = threading.Event()
 
     def respond(self, request):
         session = address_of(request)
         assert fixture.request_system_prompt(request) == model_instructions(self.workspace, session), request
         if session != self.parent:
-            assert sender_of(request) == self.parent, request
+            assert sender_of(request) is None, request
             assert last_user_text(request) == f"Report to parent ID {self.parent}", request
-            if tool_outputs(request):
-                assert all(output.startswith("Bash succeeded. Exit code: 0.\n") for output in tool_outputs(request)), request
+            call_id = f"report-call-{session}"
+            if call_output(request, call_id):
                 return answer(session, f"peer original result {session}")
-            return bash_call(session, (
-                "n=0; while [ ! -e cohort-report-release ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done; "
-                "[ -e cohort-report-release ] || exit 124; "
-                f"printf %s 'report from {session}' | rui session send --session {self.parent} --record {shlex.quote(str(self.workspace.parent / f'{session}-report.json'))} "
-                f"--key report-{session} > {session}-report.out 2> {session}-report.err"
-            ))
+            assert self.release.wait(30), "cohort reports were not released"
+            return fixture.sse_tool_calls(f"report-calls-{session}", [("message_agent", call_id,
+                json.dumps({"id": self.parent, "text": f"report from {session}"}, separators=(",", ":")))])
         for item in request["input"]:
             if item.get("role") == "user" and len(item["content"]) == 2:
                 sender = sender_of({"input": [item]})
@@ -653,7 +581,7 @@ class CohortModel(TestHTTPServer):
             "n=0; while [ ! -e cohort-create ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done; "
             "[ -e cohort-create ] || exit 124; "
             f"printf %s 'Report to parent ID {self.parent}' | rui session start --workspace {shlex.quote(str(self.workspace))} "
-            "--connection codex --model gpt-6-sol --tools bash --permission-mode bypass "
+            "--connection codex --model gpt-6-sol --tools bash,message_agent --permission-mode bypass "
             f'--record {shlex.quote(str(self.workspace.parent))}/cohort-$i.json --key cohort-$i '
             '> "cohort-$i-start.json" 2> "cohort-$i-start.err" '
             ') & pids="$pids $!"; done; touch cohort-create; '
@@ -703,10 +631,6 @@ def stdin_start_contract():
             os.close(directory)
         failed(invoke("session", "configure", "--store", store,
             "--output-schema", state / "missing-schema"), "internal_unexpected")
-        for peer in ({"RUI_ADDRESS": "k7m2qx"}, {"RUI_STORE": str(store)},
-                     {"RUI_ADDRESS": "broken", "RUI_STORE": str(store), "RUI_SENDER_HANDLE": "x"}):
-            rejected = invoke("session", "start", "--store", store, extra=peer, input=b"must not run")
-            assert rejected.returncode == 2 and b"[peer_context_invalid]" in rejected.stderr and b"request:" not in rejected.stderr, rejected
         assert fixture.command("session", "list", "--store", store, "--all")["sessions"] == []
 
         text = "initial\x00雪\n`literal` $(data)\r\n\n".encode()
@@ -854,7 +778,7 @@ def concurrent_peers():
         original = fixture.wait_for(lambda: fixture.completed_observation(store, started["context"]["key"], deadline=deadline),
                                     "parent original result before peer reports", deadline=deadline)
         assert fixture.read_result(store, started["context"]["key"], deadline=deadline) == b"parent original result", original
-        (workspace / "cohort-report-release").touch()
+        endpoint.release.set()
         observation, result, _ = fixture.wait_for_result_release(store, started["context"]["key"], parent, deadline)
         assert observation["result"]["status"] == "completed" and result == b"parent original result", (observation, result)
         fixture.wait_for(lambda: len(endpoint.reports) == 10, "all ten recorded report senders", deadline=deadline)
@@ -870,17 +794,12 @@ def concurrent_peers():
             assert admission["answer"]["replayed"] is True, admission
             observation, result, _ = fixture.wait_for_result_release(store, admission["context"]["key"], peer, deadline)
             assert result == f"peer original result {peer}".encode(), (observation, result)
-            capture = json.loads((state / f"{peer}-report.json").read_text())
-            assert capture["sender"] == {"store": str(store), "session": peer}, capture
-            assert re.fullmatch("[0-9a-f]{32}", capture["sender_handle"]), "report lacks Action authority"
-            reply = json.loads((workspace / f"{peer}-report.out").read_text())
-            assert reply["answer"]["status"] == "accepted" and reply["context"]["session"] == parent, reply
-            observation, result, _ = fixture.wait_for_result_release(store, reply["context"]["key"], parent, deadline)
-            assert result == b"parent received reports", (observation, result)
             snapshot = run(installed, "session", "inspect", "--store", store, "--session", peer, "--profile", "full", home=home)
             assert len(snapshot["full"]["actions"]) == 1 and snapshot["full"]["actions"][0]["resolution"] == "succeeded", snapshot
             assert len(snapshot["full"]["messages"]) == 1, snapshot
         assert set(endpoint.reports) == set(peers), endpoint.reports
+        wait_for(lambda: (lambda value: value if value["work"]["state"]["kind"] == "finished" and value["pending_messages"] == "0" else None)(
+            run(installed, "session", "inspect", "--store", store, "--session", parent, home=home)), "parent handled every report", timeout=30)
         assert fixture.read_result(store, started["context"]["key"], deadline=deadline) == b"parent original result"
         parent_snapshot = run(installed, "session", "inspect", "--store", store, "--session", parent, "--profile", "full", home=home)
         assert len(parent_snapshot["full"]["messages"]) == 11, parent_snapshot
@@ -908,7 +827,7 @@ def concurrent_peers():
                     for row in session_values(listing)]
         assert session_values(run(installed, "session", "list", "--store", store, "--all", home=home)) == expected
         assert all(address_of(request) != unknown for request in endpoint.requests), endpoint.requests
-        print("ten concurrent allocated peers passed: each started and reported by bare ID through Rui Bash; "
+        print("ten concurrent allocated peers passed: each started through Rui Bash and reported through message_agent; "
               "all senders, Action outcomes and original results checked; guessed send/configure fail without creation or work")
     except BaseException:
         retain_failure_state("peer cohort failure state", state)
@@ -917,7 +836,7 @@ def concurrent_peers():
     finally:
         disposals = []
         if workspace is not None and workspace.exists():
-            disposals.append(lambda: (workspace / "cohort-report-release").touch())
+            disposals.append(endpoint.release.set)
         if host is not None:
             disposals.append(lambda: stop_process(host))
         if endpoint is not None:
@@ -930,6 +849,5 @@ def concurrent_peers():
 if __name__ == "__main__":
     host_process.enter()
     stdin_start_contract()
-    for report_source in ("stdin", "file"):
-        main(report_source)
+    main()
     concurrent_peers()

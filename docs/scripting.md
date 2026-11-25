@@ -136,7 +136,7 @@ Do not submit a new Message to find out whether the first one arrived.
 Agents use the same commands from their Bash tool.
 Bash runs in the environment of the terminal that last sent the Session a Message, so a tool you install or a venv you activate is found by the agent's next command after your next Message.
 The `rui` installation that runs the Host comes first on `PATH`.
-A Message from another agent never replaces your environment, but fills a Session no person has sent to.
+A Message another agent sends with `message_agent` never replaces your environment. One it sends from its Bash with `rui session send` comes from a plain caller, so it replaces the environment like any other send.
 Rui keeps the environment only in the Host's memory, never in the Store or request records, and never passes on variables whose names start with `RUI_`.
 An ordinary recovered request carries the environment of the terminal that recovers it; an attached creation inherits its parent's saved environment when it is first admitted.
 
@@ -145,9 +145,9 @@ After a Host restart, or when the Host has dropped a long-unused Session's envir
 Bash never gets the Host's own environment, such as credentials.
 
 Each model request tells the agent its own bare ID.
-Bash receives that ID as `RUI_ADDRESS`, its Store as `RUI_STORE`, and private sender authority.
+Bash receives that ID as `RUI_ADDRESS`, its Store as `RUI_STORE`, and private authority for `rui action publish`.
 To get an answer from another Session, an agent puts its own ID in the Message.
-The other Session replies with an ordinary `session send --session ID`.
+The other Session replies with `message_agent`.
 
 An agent can label its own Session: `rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label "Fix the flaky resize test"`.
 `--label ""` clears it.

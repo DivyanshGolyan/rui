@@ -21,7 +21,6 @@ export const REJECTION_SENTENCES: Readonly<Record<string, string>> = {
 	"invalid_model": "The model ID is empty.",
 	"invalid_output_reservation": "The output reservation is not a nonnegative token count.",
 	"invalid_output_schema": "The output schema is not valid JSON.",
-	"invalid_sender_handle": "The peer sender handle is invalid or no longer live.",
 	"invalid_session_reference": "That Session reference is malformed.",
 	"invalid_target": "A target ID is invalid.",
 	"invalid_workspace": "The workspace is not a usable absolute directory.",

@@ -363,7 +363,7 @@ def main():
         assert unchanged["status"] == "accepted" and unchanged["skills"] == "unchanged", unchanged
         assert len(endpoint.decoded()) == count, "idle reload scheduled a model turn"
         native = {"version": host_process.WIRE_VERSION, "kind": "message", "store": str(store),
-                  "key": "native-invoke", "session": parent, "sender": None, "sender_handle": None,
+                  "key": "native-invoke", "session": parent,
                   "text": {"state": "value", "value": "/demo"}}
         expected_invocation = f'Skill file: {json.dumps(demo["path"], ensure_ascii=False, separators=(",", ":"))}\n\n' + raw.decode()
         admitted = post(native)["answer"]
