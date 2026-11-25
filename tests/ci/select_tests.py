@@ -1198,8 +1198,7 @@ STATEMENT_TABLE_TARGETS = ("test-native", "test-store", "session-list-integratio
 
 
 def own_patterns(target):
-    """The files that are a target's own sources, scripts or declared inputs, as the build and selector name them.
-    """
+    """The files that are a target's own sources, scripts or declared inputs, as the build and selector name them."""
     scripts, executables, owners = FIXTURES.get(target, ((), (), ()))
     own = [*scripts, *executables, *owners, *UNIT_ROOTS.get(target, ()), *EXTRA_OWN_FILES.get(target, ())]
     return tuple(own)
