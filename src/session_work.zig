@@ -185,6 +185,35 @@ pub fn attention(work: Work) ?Attention {
     };
 }
 
+/// What a Session's work asks of the person. `failed` is its own standing; `Group` folds it into `done`.
+pub const Standing = enum {
+    /// An Action awaits a decision: an approval, or a Bash proposal with approvals pending.
+    needs_you,
+    /// Thinking, retrying, stopping, or running a command that waits on nobody.
+    working,
+    /// Waiting for a model slot, or a retry that has fallen due.
+    queued,
+    failed,
+    /// Idle, finished or stopped: nothing is running and nothing is asked.
+    done,
+
+    pub fn needsPerson(self: Standing) bool {
+        return self == .needs_you or self == .failed;
+    }
+};
+
+/// What a work state asks of the person, from the state alone.
+pub fn standing(state: WorkState) Standing {
+    return switch (state) {
+        .approval => .needs_you,
+        .bash => |bash| if (bash.approvals != 0) .needs_you else .working,
+        .working, .retrying, .stopping => .working,
+        .pending => .queued,
+        .failed => .failed,
+        .idle, .finished, .stopped => .done,
+    };
+}
+
 pub const Group = enum { needs_you, working, queued, done };
 
 /// Classifies the state as derived at the Host's observation time.

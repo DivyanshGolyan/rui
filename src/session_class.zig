@@ -12,34 +12,7 @@ const failure_class = @import("failure_class.zig");
 pub const Kind = session_work.Kind;
 pub const WorkState = session_work.WorkState;
 
-/// What a Session's work asks of the person. `failed` is its own standing; the served `Group` folded it into `done`.
-pub const Standing = enum {
-    /// An Action awaits a decision: an approval, or a Bash proposal with approvals pending.
-    needs_you,
-    /// Thinking, retrying, stopping, or running a command that waits on nobody.
-    working,
-    /// Waiting for a model slot, or a retry that has fallen due.
-    queued,
-    failed,
-    /// Idle, finished or stopped: nothing is running and nothing is asked.
-    done,
-
-    pub fn needsPerson(self: Standing) bool {
-        return self == .needs_you or self == .failed;
-    }
-};
-
-/// The standing of work as the Host served it.
-pub fn standing(state: WorkState) Standing {
-    return switch (state) {
-        .approval => .needs_you,
-        .bash => |bash| if (bash.approvals != 0) .needs_you else .working,
-        .working, .retrying, .stopping => .working,
-        .pending => .queued,
-        .failed => .failed,
-        .idle, .finished, .stopped => .done,
-    };
-}
+pub const Standing = session_work.Standing;
 
 /// The kind of work a viewer reads: its own unanswered stop already reads as stopping, whatever the Host last served.
 pub fn withStop(work: Kind, stop_pending: bool) Kind {
@@ -103,7 +76,7 @@ pub fn classify(facts: Facts, viewer: Viewer) Class {
         withStop(std.meta.activeTag(state), facts.stop_pending);
     // Standing follows the work as handed in. The overview advances each row's work with its clock on every tick, so a retry that has
     // fallen due arrives here as pending; `kind` also reads it so for a row not yet advanced.
-    const own: Standing = if (archived) .done else standing(facts.state.*);
+    const own: Standing = if (archived) .done else session_work.standing(facts.state.*);
     const yours = !facts.first_message or facts.from_person;
     const visible = facts.in_list and viewer.filter.includes(facts.archive) and (facts.creator or facts.pinned or facts.first_message or facts.open);
     return .{
