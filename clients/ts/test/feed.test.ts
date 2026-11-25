@@ -126,6 +126,14 @@ function narrowed(entry: FeedEntry): void {
 			void [turn, revision];
 			break;
 		}
+		case "skill": {
+			const admission: string = entry.admission;
+			const turn: string = entry.turn;
+			const ordinal: string = entry.ordinal;
+			const name: string = entry.name;
+			void [admission, turn, ordinal, name];
+			break;
+		}
 		default: {
 			const exhaustive: never = entry;
 			void exhaustive;

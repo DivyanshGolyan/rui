@@ -25,6 +25,10 @@ const every_kind = header ++
     \\"type":"activity_page","end":"20","direction":"backward","items":[{"position":"1","ordinal":"0","at":"1000","value":{"admission":{"admission":"1","key":"key \" é","turn":null,"state":"queued","admitted_at":"100","sender":null,"source_action":null,"content":{"type":"text","bytes":"3","sha256":"abababababababababababababababababababababababababababababababab"}}}},{"position":"2","ordinal":"1","at":"1001","value":{"user":{"admission":"1","key":"key \" é","turn":"2","state":"applied","admitted_at":"100","sender":null,"source_action":null,"content":{"type":"text","bytes":"3","sha256":"abababababababababababababababababababababababababababababababab"}}}},{"position":"3","ordinal":"0","at":"1002","value":{"assistant":{"content":{"type":"text","bytes":"3","sha256":"abababababababababababababababababababababababababababababababab"},"final":true}}},{"position":"4","ordinal":"1","at":"1003","value":{"call":{"operation":"3","turn":"2","call_ordinal":"1","action":null,"rejection":"unknown_tool","fields":[{"type":"text","bytes":"2","sha256":"0101010101010101010101010101010101010101010101010101010101010101"},{"type":"text","bytes":"0","sha256":"0202020202020202020202020202020202020202020202020202020202020202"},{"type":"text","bytes":"2","sha256":"0101010101010101010101010101010101010101010101010101010101010101"}],"description":null,"tool":null,"server":null}}},{"position":"5","ordinal":"0","at":"1004","value":{"tool_result":{"content":{"type":"text","bytes":"3","sha256":"abababababababababababababababababababababababababababababababab"},"presentation":{"line":{"before":"Run \"it\"","peer":null,"after":null},"code":"succeeded","sign":"finished","publication_position":"4"}}}},{"position":"6","ordinal":"1","at":"1005","value":{"hosted_call":{"presentation":{"line":null,"code":"succeeded","sign":"finished","publication_position":null}}}},{"position":"7","ordinal":"0","at":"1006","value":{"turn_ended":{"session":"a1b2c3","turn":"2","operation":"3","ending":"done","code":"completed","content":null}}},{"position":"8","ordinal":"1","at":"1007","value":{"stop":{"key":"key \" é","turn":null,"cutoff":"9","completion":"pending"}}},{"position":"9","ordinal":"0","at":"1008","value":{"sent":{"admission":"4","admitted_at":"101","target":{"session":"k7m2qx","label":"peer \\ label"},"content":{"type":"text","bytes":"3","sha256":"abababababababababababababababababababababababababababababababab"}}}},{"position":"10","ordinal":"1","at":"1009","value":{"send_failed":{"key":"key \" é","target":null,"code":"completed"}}},{"position":"11","ordinal":"0","at":"1010","value":{"received":{"admission":"5","key":"key \" é","turn":"3","state":"excluded","admitted_at":"102","sender":{"session":"p3n4rs","label":null},"source_action":null,"content":{"type":"text","bytes":"3","sha256":"abababababababababababababababababababababababababababababababab"}}}},{"position":"12","ordinal":"1","at":"1011","value":{"approval_requested":{"session":"a1b2c3","action":"7","operation":"3","call_ordinal":"0","description":null,"tool":null,"server":null}}},{"position":"13","ordinal":"0","at":"1012","value":{"session_changed":{"revision":"2","field":"label","provider_text":null}}},{"position":"14","ordinal":"1","at":"1013","value":{"compacted":{"operation":"8","dropped":"0"}}},{"position":"15","ordinal":"0","at":"1014","value":{"model_call":{"model":"requested \"雪\"","served_model":"served-model","input_tokens":"100","output_tokens":"7","cached_tokens":"40","latency_ms":"23","first_event_ms":"5","status":"completed","attempts":"2"}}},{"position":"16","ordinal":"0","at":"1015","value":{"instruction":{"turn":"2","revision":"3","content":{"type":"text","bytes":"3","sha256":"abababababababababababababababababababababababababababababababab"}}}}],"more":true,"call_activity":{"total":"5","entries":[{"operation":"3","ordinal":"0","presentation":{"line":{"before":"Run \"it\"","peer":null,"after":null},"code":"succeeded","sign":"finished","publication_position":"4"}},{"operation":"3","ordinal":"1","presentation":{"line":null,"code":"succeeded","sign":"finished","publication_position":null}}]},"queued":{"count":"2","oldest_position":"11","newest_admission":"6","newest_position":"14","newest_content":{"type":"text","bytes":"3","sha256":"abababababababababababababababababababababababababababababababab"}},"work":{"creator":"cr3at0","read_version":"00000000000000000000000000000000.0","state":{"kind":"stopped","since":"50","cause":"stop"},"turn":"2","operation":null,"first_action":null,"actions":{"stop":false,"interrupt":null,"decide":null},"revision":"3","workspace":"/w \"x\""},"delta":"full","since":null}
 ;
 
+const every_kind_rest = header ++
+    \\"type":"activity_page","end":"20","direction":"backward","items":[{"position":"17","ordinal":"0","at":"1016","value":{"skill":{"admission":"4","turn":"2","ordinal":"2","name":"release-notes","content":{"type":"text","bytes":"3","sha256":"abababababababababababababababababababababababababababababababab"}}}}],"more":false,"call_activity":{"total":"5","entries":[{"operation":"3","ordinal":"0","presentation":{"line":{"before":"Run \"it\"","peer":null,"after":null},"code":"succeeded","sign":"finished","publication_position":"4"}},{"operation":"3","ordinal":"1","presentation":{"line":null,"code":"succeeded","sign":"finished","publication_position":null}}]},"queued":{"count":"2","oldest_position":"11","newest_admission":"6","newest_position":"14","newest_content":{"type":"text","bytes":"3","sha256":"abababababababababababababababababababababababababababababababab"}},"work":{"creator":"cr3at0","read_version":"00000000000000000000000000000000.0","state":{"kind":"stopped","since":"50","cause":"stop"},"turn":"2","operation":null,"first_action":null,"attention":null,"group":"done","actions":{"stop":false,"interrupt":null,"decide":null},"revision":"3","workspace":"/w \"x\""},"delta":"full","since":null}
+;
+
 const Scenario = enum { mixed, unchanged, search };
 
 fn run(case: *store.testing.Case, comptime scenario: Scenario) !void {
@@ -194,6 +198,8 @@ test "activity golden every kind" {
     try model.set("requested \"雪\"");
     var served: protocol.Bounded(protocol.max_model_bytes) = .{};
     try served.set("served-model");
+    var skill_name: protocol.Bounded(@import("skill_reference.zig").max_name_bytes) = .{};
+    try skill_name.set("release-notes");
     const values = [_]protocol.ActivityItem.Value{
         .{ .admission = .{ .admission = 1, .key = key, .turn = null, .state = .queued, .content = .{ .text = content }, .admitted_at = 100 } },
         .{ .user = .{ .admission = 1, .key = key, .turn = 2, .state = .applied, .content = .{ .text = content }, .admitted_at = 100 } },
@@ -211,20 +217,27 @@ test "activity golden every kind" {
         .{ .compacted = .{ .operation = 8, .dropped = 0 } },
         .{ .model_call = .{ .model = model, .served_model = served, .input_tokens = 100, .output_tokens = 7, .cached_tokens = 40, .latency_ms = 23, .first_event_ms = 5, .status = code, .attempts = 2 } },
         .{ .instruction = .{ .turn = 2, .revision = 3, .content = content } },
+        .{ .skill = .{ .admission = 4, .turn = 2, .ordinal = 2, .name = skill_name, .content = content } },
     };
     comptime std.debug.assert(values.len == std.meta.tags(protocol.ActivityItem.Kind).len);
-    const facts = try std.testing.allocator.create(protocol.ActivityFacts);
-    defer std.testing.allocator.destroy(facts);
-    facts.* = .{ .end = 20, .direction = .backward, .count = values.len, .more = true, .work = .{ .revision = 3, .work = .{ .state = .{ .stopped = .{ .since = 50, .cause = .stop } }, .turn = 2 } } };
-    for (values, facts.items[0..values.len], 0..) |value, *item, index| item.* = .{ .position = index + 1, .ordinal = if (value == .model_call or value == .instruction) 0 else index % 2, .at = 1000 + index, .value = value };
-    facts.work.creator = try .from("cr3at0");
-    try facts.work.workspace.set("/w \"x\"");
-    facts.call_activity = .{ .total = 5, .count = 2 };
-    facts.call_activity.entries[0] = .{ .operation = 3, .ordinal = 0, .presentation = presentation };
-    facts.call_activity.entries[1] = .{ .operation = 3, .ordinal = 1, .presentation = .{ .line = null, .code = .succeeded, .sign = .finished, .publication_position = null } };
-    facts.queued = .{ .count = 2, .oldest_position = 11, .newest_admission = 6, .newest_position = 14, .newest_content = .{ .text = content } };
-    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer out.deinit();
-    try host_reply.renderActivityPage(.{ .writer = &out.writer }, facts);
-    try std.testing.expectEqualStrings(every_kind, out.written());
+    // A page holds at most `ActivityPage.items` rows, so the kinds beyond the first page are rendered as a second page.
+    const pages = [_]struct { start: usize, expected: []const u8 }{ .{ .start = 0, .expected = every_kind }, .{ .start = protocol.ActivityPage.items, .expected = every_kind_rest } };
+    comptime std.debug.assert(values.len > pages[1].start and values.len <= 2 * protocol.ActivityPage.items);
+    for (pages) |page| {
+        const rows = values[page.start..@min(values.len, page.start + protocol.ActivityPage.items)];
+        const facts = try std.testing.allocator.create(protocol.ActivityFacts);
+        defer std.testing.allocator.destroy(facts);
+        facts.* = .{ .end = 20, .direction = .backward, .count = rows.len, .more = page.start == 0, .work = .{ .revision = 3, .work = .{ .state = .{ .stopped = .{ .since = 50, .cause = .stop } }, .turn = 2 } } };
+        for (rows, facts.items[0..rows.len], page.start..) |value, *item, index| item.* = .{ .position = index + 1, .ordinal = if (value == .model_call or value == .instruction or value == .skill) 0 else index % 2, .at = 1000 + index, .value = value };
+        facts.work.creator = try .from("cr3at0");
+        try facts.work.workspace.set("/w \"x\"");
+        facts.call_activity = .{ .total = 5, .count = 2 };
+        facts.call_activity.entries[0] = .{ .operation = 3, .ordinal = 0, .presentation = presentation };
+        facts.call_activity.entries[1] = .{ .operation = 3, .ordinal = 1, .presentation = .{ .line = null, .code = .succeeded, .sign = .finished, .publication_position = null } };
+        facts.queued = .{ .count = 2, .oldest_position = 11, .newest_admission = 6, .newest_position = 14, .newest_content = .{ .text = content } };
+        var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer out.deinit();
+        try host_reply.renderActivityPage(.{ .writer = &out.writer }, facts);
+        try std.testing.expectEqualStrings(page.expected, out.written());
+    }
 }

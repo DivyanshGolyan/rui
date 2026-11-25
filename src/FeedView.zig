@@ -1,4 +1,5 @@
 const std = @import("std");
+const row_text = @import("testing/row_text.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const viewport = @import("ConversationViewport.zig");
@@ -1455,7 +1456,7 @@ test "FeedView canonical failure annotation is exact-key frame decoration rather
         const window = try testWindow();
         defer std.testing.allocator.destroy(window);
         var prepared: viewport.Sized(256, true) = .{};
-        try prepared.append(PendingText.user_message_on ++ "› original\n" ++ PendingText.user_message_off);
+        try prepared.append(PendingText.user_message_on ++ row_text.user_line ++ "original\n" ++ PendingText.user_message_off);
         try prepared.prepare();
         try window.append(&.{.{ .key = .{ .position = 20 }, .text = resident.Text.fromDocument(&prepared), .message_key = @splat('A') }});
         const original = try std.testing.allocator.dupe(u8, window.document.text());
@@ -1484,10 +1485,10 @@ test "SUI-38 FeedView separates consecutive message bands on the chat ground" {
         const window = try testWindow();
         defer std.testing.allocator.destroy(window);
         var short: viewport.Sized(512, true) = .{};
-        try short.append(PendingText.user_message_on ++ "› short\n" ++ PendingText.user_message_off);
+        try short.append(PendingText.user_message_on ++ row_text.user_line ++ "short\n" ++ PendingText.user_message_off);
         try short.prepare();
         var long: viewport.Sized(512, true) = .{};
-        try long.append(PendingText.user_message_on ++ "› ");
+        try long.append(PendingText.user_message_on ++ row_text.user_line ++ "");
         const count: usize = if (width == 46) 75 else 265;
         for (0..count) |_| try long.append("x");
         try long.append("\n" ++ PendingText.user_message_off);
@@ -1532,7 +1533,7 @@ fn activityGap() !void {
         defer std.testing.allocator.destroy(window);
         if (kind != 3) {
             var document: viewport.Sized(128, true) = .{};
-            try document.append(if (kind == 0 or kind == 2) PendingText.user_message_on ++ "› hello\n" ++ PendingText.user_message_off else "assistant\n");
+            try document.append(if (kind == 0 or kind == 2) PendingText.user_message_on ++ row_text.user_line ++ "hello\n" ++ PendingText.user_message_off else "assistant\n");
             try document.prepare();
             try window.append(&.{.{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&document) }});
         }
@@ -1725,7 +1726,7 @@ fn decoratedRows() !void {
     const window = try testWindow();
     defer gpa.destroy(window);
     var user: viewport.Sized(256, true) = .{};
-    try user.append(T.user_message_on ++ "› original\n" ++ T.user_message_off);
+    try user.append(T.user_message_on ++ row_text.user_line ++ "original\n" ++ T.user_message_off);
     try user.prepare();
     var assistant: viewport.Sized(256, true) = .{};
     try assistant.append(T.body_on ++ T.link_open ++ "https://example.com" ++ T.link_end ++ "linked words" ++ T.link_close ++ T.body_off ++ "\n");

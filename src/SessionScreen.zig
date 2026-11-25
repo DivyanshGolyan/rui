@@ -72,8 +72,7 @@ fn shownAction(self: *const Self) ConsentPolicy.Shown {
 
 pub fn adopt(self: *Self, io: std.Io, file: std.Io.File, action: u64, draft_empty: bool) !void {
     std.debug.assert(self.consent == null);
-    const presentation: ConsentPolicy.Presentation = if ((try file.stat(io)).size <= Viewport.capacity) .complete else .preview;
-    self.consent = .{ .action = action, .presentation = presentation, .row = if (draft_empty) .selector else .draft };
+    self.consent = .{ .action = action, .presentation = .preview, .row = if (draft_empty) .selector else .draft };
     try self.prepareAction(io, file);
 }
 
@@ -120,7 +119,7 @@ fn lineStart(document: *const Document, line: usize) ?usize {
 
 pub fn showMessage(self: *Self, io: std.Io, file: std.Io.File) !void {
     std.debug.assert(self.view == .feed);
-    try self.load(&self.staging, io, file, true);
+    _ = try self.load(&self.staging, io, file);
     self.staging.top = .{};
     self.message_return = self.view;
     self.view = .message;
@@ -149,42 +148,41 @@ pub fn latest(self: *Self) !void {
     } else self.view = .feed;
 }
 
-fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix: bool) !void {
+/// Shows the file's start until `document` is full, and says whether the whole file fits.
+/// The document, not the file's byte size, answers: control codes take bytes but no text, so a file over the capacity can still fit.
+fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File) !bool {
     const length = (try file.stat(io)).size;
-    const end = if (prefix) @min(Viewport.capacity, length) else length;
     document.clear();
     document.sidenotes = false;
     document.quotes = false;
     var buffer: [4096]u8 = undefined;
     var offset: u64 = 0;
-    while (offset < end) {
-        const wanted: usize = @intCast(@min(buffer.len, end - offset));
+    while (offset < length and document.length < Viewport.capacity) {
+        const wanted: usize = @intCast(@min(buffer.len, length - offset, Viewport.capacity - document.length));
         if (try file.readPositionalAll(io, buffer[0..wanted], offset) != wanted) return error.TruncatedDisplayScratch;
         try document.append(buffer[0..wanted]);
         offset += wanted;
     }
     document.width_method = self.vx.caps.unicode;
     try document.prepare();
+    return offset == length;
 }
 
 pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, view: FileView) !void {
-    const length = (try file.stat(io)).size;
     self.view = switch (view) {
         .inspection => .inspection,
         .details => .details,
         .action => .action,
     };
     const action = view == .action;
-    try self.load(&self.browsing, io, file, true);
+    const whole = try self.load(&self.browsing, io, file);
     self.browsing.quotes = action;
     self.browsing.top = .{};
-    self.preview_complete = length <= Viewport.capacity and self.browsing.origin == 0;
+    self.preview_complete = whole;
     if (action) {
         self.action_seen = .{};
         self.action_view = .{ .io = io, .file = file };
-        if (self.consent) |*pending| if (!self.preview_complete) {
-            pending.presentation = .preview;
-        };
+        if (self.consent) |*pending| pending.presentation = if (whole) .complete else .preview;
     }
 }
 
@@ -193,12 +191,11 @@ pub fn refreshFile(self: *Self, io: std.Io, file: std.Io.File) !void {
     const document = &self.browsing;
     const first = document.first(self.textLayout(), self.height).offset;
     const line = std.mem.count(u8, document.bytes[0..@min(first, document.length)], "\n");
-    const length = (try file.stat(io)).size;
-    try self.load(document, io, file, true);
+    const whole = try self.load(document, io, file);
     var offset: usize = 0;
     for (0..line) |_| offset = 1 + (std.mem.indexOfScalarPos(u8, document.bytes[0..document.length], offset, '\n') orelse break);
     document.top = .{ .offset = offset };
-    self.preview_complete = length <= Viewport.capacity and document.origin == 0;
+    self.preview_complete = whole;
 }
 
 fn prepareAction(self: *Self, io: std.Io, file: std.Io.File) !void {
@@ -279,4 +276,37 @@ test "SessionScreen feed scrolling includes tail and latest only changes the vie
     screen.browse(true, false);
     try std.testing.expectEqualDeep(held, screen.anchor.anchor);
     try std.testing.expectEqual(@as(usize, 4), screen.browsing.top.?.offset);
+}
+
+test "SUI-177 an Action is complete when its shown text fits, however many leader tags its raw file carries" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const line = "\x1b[210m│\x1b[209m x\n";
+    const text_per_line = "│ x\n".len;
+    const fitting = Viewport.capacity / text_per_line;
+    const file = try tmp.dir.createFile(std.testing.io, "action", .{ .read = true });
+    defer file.close(std.testing.io);
+    for ([_]struct { lines: usize, presentation: ConsentPolicy.Presentation }{
+        .{ .lines = fitting, .presentation = .complete },
+        .{ .lines = fitting + 1, .presentation = .preview },
+    }) |case| {
+        try file.setLength(std.testing.io, 0);
+        var offset: u64 = 0;
+        for (0..case.lines) |_| {
+            try file.writePositionalAll(std.testing.io, line, offset);
+            offset += line.len;
+        }
+        try std.testing.expect(offset > Viewport.capacity or case.presentation == .preview);
+        screen.consent = null;
+        screen.releaseAction();
+        try screen.adopt(std.testing.io, file, 3, true);
+        try std.testing.expectEqual(case.presentation, screen.consent.?.presentation);
+        try std.testing.expectEqual(case.presentation == .complete, screen.preview_complete);
+    }
 }

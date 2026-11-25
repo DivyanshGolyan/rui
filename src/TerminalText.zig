@@ -27,6 +27,18 @@ pub const full_width_off = "\x1b[205m";
 pub const decoration_on = "\x1b[206m";
 pub const decoration_off = "\x1b[207m";
 
+/// Brackets the glyph that leads a row (a status mark, `$`, `│`, a list marker). The row's wrapped lines
+/// hang under the text after it; the quoted form also draws a bar down the wrapped lines, so command text
+/// cannot pass for Rui's own label. The row says what it is; the viewport never guesses from the glyph.
+pub const leader_on = "\x1b[208m";
+pub const quoted_leader_on = "\x1b[210m";
+pub const leader_off = "\x1b[209m";
+
+/// The user's `›` as `session_view.userMarker` writes it without colour, with and without the decoration that
+/// keeps it out of copies; fixtures spell it here.
+pub const user_leader = leader_on ++ "›" ++ leader_off ++ " ";
+pub const user_marker = decoration_on ++ user_leader ++ decoration_off;
+
 pub const body_on = "\x1b[200m";
 pub const body_off = "\x1b[201m";
 pub fn writeBody(sink: anytype, bytes: []const u8) !void {

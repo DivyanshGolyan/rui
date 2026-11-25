@@ -13,6 +13,7 @@ const transport_policy = @import("transport_policy.zig");
 const wire_field = @import("wire_field.zig");
 const mutation_answer = @import("mutation_answer.zig");
 const content_value = @import("content_value.zig");
+const skill_reference = @import("skill_reference.zig");
 const input_parts = @import("input_parts.zig");
 comptime {
     std.debug.assert(mutation_answer.max_code_bytes == protocol.max_code_bytes);
@@ -153,9 +154,10 @@ pub const ActivityPage = struct {
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
         const Instruction = struct { turn: ?JsonString(20), revision: ?JsonString(20), content: Ref };
+        const Skill = struct { admission: JsonString(20), turn: JsonString(20), ordinal: JsonString(20), name: JsonString(skill_reference.max_name_bytes), content: Ref };
         const ModelCall = struct { model: JsonString(protocol.max_model_bytes), served_model: ?JsonString(protocol.max_model_bytes), input_tokens: ?JsonString(20), output_tokens: ?JsonString(20), cached_tokens: ?JsonString(20), latency_ms: ?JsonString(20), first_event_ms: ?JsonString(20), status: JsonString(protocol.max_code_bytes), attempts: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction, skill: Skill } };
         const Items = JsonArray(Item, 16);
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
         const Calls = JsonArray(CallEntry, 3);
@@ -219,6 +221,12 @@ pub const ActivityPage = struct {
                     // The skill-catalog instruction has neither a Turn nor an authored revision; every other one has both.
                     if ((instruction.turn == null) != (instruction.revision == null)) return error.InvalidActivityPage;
                     fact.value = .{ .instruction = .{ .turn = if (instruction.turn) |turn| try id(turn, false) else null, .revision = if (instruction.revision) |revision| try id(revision, false) else null, .content = try textOf(instruction.content) } };
+                },
+                .skill => |skill| {
+                    // A skill is bound to a Message and its Turn, at a position of its own among the Message's skills; its text is a whole SKILL.md.
+                    const content = try textOf(skill.content);
+                    if (!skill_reference.validName(skill.name.slice()) or content.length > skill_reference.max_skill_bytes) return error.InvalidActivityPage;
+                    fact.value = .{ .skill = .{ .admission = try id(skill.admission, false), .turn = try id(skill.turn, false), .ordinal = try id(skill.ordinal, false), .name = skill.name.value, .content = content } };
                 },
                 .compacted => |compacted| fact.value = .{ .compacted = .{ .operation = try id(compacted.operation, false), .dropped = try id(compacted.dropped, true) } },
                 .model_call => |call| {
@@ -2449,6 +2457,37 @@ test "an instruction row carries a Turn and a revision together, or neither" {
         const instruction = parsed.facts.items[0].value.instruction;
         try std.testing.expectEqual(row.turn, instruction.turn);
         try std.testing.expectEqual(row.revision, instruction.revision);
+    }
+}
+
+test "a skill row carries a valid name and a text no larger than a SKILL.md may be" {
+    var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try facts.work.workspace.set("/work");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    const largest = @import("skill_reference.zig").max_skill_bytes;
+    for ([_]struct { name: []const u8, length: u64, valid: bool }{
+        .{ .name = "release-notes", .length = 3, .valid = true },
+        .{ .name = "a", .length = largest, .valid = true },
+        .{ .name = "release-notes", .length = largest + 1, .valid = false },
+        .{ .name = "Release", .length = 3, .valid = false },
+        .{ .name = "a--b", .length = 3, .valid = false },
+        .{ .name = "", .length = 3, .valid = false },
+    }) |row| {
+        var skill: @import("activity_facts.zig").Item.Skill = .{ .admission = 4, .turn = 2, .ordinal = 1, .name = .{}, .content = .{ .length = row.length, .digest = @splat(0xab) } };
+        try skill.name.set(row.name);
+        facts.items[0] = .{ .position = 1, .ordinal = 0, .at = 5, .value = .{ .skill = skill } };
+        var out = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&out, &facts);
+        if (!row.valid) {
+            try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(out.buffered(), .{}));
+            continue;
+        }
+        const parsed = try ActivityPage.parse(out.buffered(), .{});
+        const read = parsed.facts.items[0].value.skill;
+        try std.testing.expectEqualStrings(row.name, read.name.slice());
+        try std.testing.expectEqual(@as(u64, 4), read.admission);
+        try std.testing.expectEqual(@as(u64, 2), read.turn);
+        try std.testing.expectEqual(row.length, read.content.length);
     }
 }
 
