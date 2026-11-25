@@ -167,12 +167,12 @@ The unsplit serial gate retains its original case order and assertions.
 
 `zig build check-full` runs the native/Store unit group before its serial process integrations, after formatting and production builds.
 Within that group the four native shard processes and the four Store shard processes overlap (eight processes), with the same per-process deadlines and MySQL isolation as `test` and `check`.
-Selected CI runs it on Linux for build or dependency changes; promotion runs it on macOS, and manual qualification runs it on request.
+Selected CI runs it on Linux for build or dependency changes. Promotion and Selected checks native diagnostics run both partitions in one macOS job; manual qualification runs the unsplit gate on request.
 Run the unsplit default locally for release qualification and isolated process-latency claims.
 It is not an every-edit gate.
 Serial execution reduces unrelated load but does not establish scheduler order; use owner-visible outcomes or handshakes for ordering claims.
 
-Linux Selected CI and each platform's qualification run the full gate as `-Dcheck-part=execution` and `-Dcheck-part=callers` on two isolated runners at the same revision.
+Linux Selected CI runs the full gate as `-Dcheck-part=execution` and `-Dcheck-part=callers` on two isolated runners at the same revision. Promotion and Selected checks native diagnostics run those partitions sequentially in one macOS job.
 Both must pass.
 The execution partition overlaps the native/Store unit group with its serial process fixtures; the unsplit gate finishes the group before starting those fixtures.
 Their disjoint fixtures cover the full gate once; callers run Host-process, allocator, launch and Debug smoke cases serially after the parallel batch.
