@@ -5,6 +5,7 @@ const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
 const state_marks = @import("marks.zig");
 const TerminalText = @import("TerminalText.zig");
+const session_id = @import("session_id.zig");
 const tool_fold = @import("tool_fold.zig");
 const display_text = @import("display_text.zig");
 pub const Document = Sized(capacity, true);
@@ -276,7 +277,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             comptime std.debug.assert(styled);
             if (position >= self.text().len) return null;
             const uri = self.address(position);
-            return if (std.mem.startsWith(u8, uri, TerminalText.session_link)) uri[TerminalText.session_link.len..] else null;
+            return session_id.fromLink(uri);
         }
 
         pub fn cellOffset(self: *const Self, cell: vaxis.Cell) ?usize {

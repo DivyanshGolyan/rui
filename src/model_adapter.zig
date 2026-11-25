@@ -6027,7 +6027,7 @@ test "raw image preparation rejects a wrong canonical digest before sealing" {
     try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
 }
 
-test "request preparation streams exact built-in instructions across provider routes" {
+test "CM-66 request preparation streams shared and built-in instructions across provider routes" {
     const models = [_][]const u8{ "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "openai/gpt-6-luna" };
     const baseline = "Caller rules {} \"quoted\"\n雪";
     for (models) |model| for ([_][]const u8{ "codex", "openai", "chatgpt" }) |provider_name| {
@@ -6078,11 +6078,27 @@ test "request preparation streams exact built-in instructions across provider ro
         defer std.testing.allocator.free(expected);
         const instructions = requestSystemPrompt(parsed.value);
         try std.testing.expectEqualStrings(expected, instructions);
+        const guidance = "When useful, link to a Session with `[label](rui-session:EXACT_ID)` using its exact ID known from Rui tools or context in the same Store. Never invent a Session ID.";
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, guidance));
         if (body.len != 0) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, body));
         try std.testing.expectEqual(@as(u64, result.bytes.len), result.length);
         try std.testing.expectEqual(protocol.contentDigest(result.bytes), result.digest);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         try std.testing.expect(retained == null);
+
+        try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+        var compact = (try setup.storage.admitNextModelAttempt(.{})).?;
+        const compact_binding = try compact.permit.consume();
+        var compact_prep: Preparation = undefined;
+        compact_prep.page.open(compact_binding);
+        try compact_prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.servedBuiltIns(.endpoint), null, .{}, &retained);
+        defer if (compact_prep.state.active) compact_prep.cancel();
+        const compact_result = try drainPreparation(&compact_prep, &setup.storage, 7, 1, 1024 * 1024);
+        defer std.testing.allocator.free(compact_result.bytes);
+        const compact_parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, compact_result.bytes, .{});
+        defer compact_parsed.deinit();
+        try std.testing.expectEqualStrings(expected, requestSystemPrompt(compact_parsed.value));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, requestSystemPrompt(compact_parsed.value), guidance));
     };
 }
 
@@ -6108,10 +6124,10 @@ test "CM-47 a prepared request's bytes stay as pinned over pages, tool results, 
     const Scenario = enum { pages, tool_results, bounds, peer };
     const Pinned = struct {
         const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
-            .pages = "1d0119b69cf5107abca8513bdbbb2a342395f4932a3246e0ea131171f557363e",
-            .tool_results = "d3622d7d47b437651a9d97b766ba4bc8fc615c8f42b206cff7c301960040421b",
-            .bounds = "d24163af5090550e6ce97e502a565d565483a6cc1224b6be1c122980f9b9dfc4",
-            .peer = "c79cfa1dcef9ef3f34d3c3d08acbb3a76f5e8cf0c98033f23cf7f74437df4e8d",
+            .pages = "d71f15a07c4d2d407e78f760ad333bf3f2e0d7ab5eb58754f0f72bf9dd852998",
+            .tool_results = "5a5e6586f1cbe72a9af8f6c15b017a12a68dae286106d8ee21f9b98cdb4841e1",
+            .bounds = "e07be40f4153a47b97fb529d5e04437f4d0d456907d3dfb2eb209ab975b99058",
+            .peer = "752103b662b2e1b048dcaddec83cd902169c0dd8cba19b0f01cbacb65a5236c3",
         });
     };
     const testing = store.testing;

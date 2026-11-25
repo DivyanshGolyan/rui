@@ -1,4 +1,4 @@
-from terminal_screen import RULE_GLYPHS
+from terminal_screen import RULE_GLYPHS, chat_footer_shown, names_chat
 from contextlib import contextmanager
 import json
 import os
@@ -101,7 +101,7 @@ def unconfirmed_status():
             frame = screen.contains("   Talk")
             assert "Not confirmed" not in frame, frame
             screen.keys(b"\r")
-            screen.wait(lambda f: "first done" in f and "Talk ·" in f, "the conversation")
+            screen.wait(lambda f: "first done" in f and names_chat(screen.title, "Talk") and chat_footer_shown(f), "the conversation, the terminal title naming it")
             before = requests(w)
             # The reply is lost: the Message never reaches the Host and the
             # connection closes, so the send ends unconfirmed at once instead

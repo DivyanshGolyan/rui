@@ -88,13 +88,13 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
                 if (line.expected.len == 200) {
                     const page = try store_core.activityPageForTesting(&storage, .{ .session = session });
                     try std.testing.expectEqual(@as(usize, 1), page.call_activity.count);
-                    try std.testing.expectEqualStrings(line.expected, page.call_activity.entries[0].presentation.description.?.slice());
+                    try std.testing.expectEqualStrings(line.expected, page.call_activity.entries[0].presentation.line.?.words.slice());
                     const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
                     defer std.testing.allocator.free(report);
                     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
                     defer parsed.deinit();
                     const unresolved = parsed.value.object.get("actions").?.object.get("unresolved").?.array.items;
-                    try std.testing.expectEqualStrings(line.expected, unresolved[0].object.get("presentation").?.object.get("description").?.string);
+                    try std.testing.expectEqualStrings(line.expected, unresolved[0].object.get("presentation").?.object.get("line").?.object.get("before").?.string);
                 }
             }
         }
@@ -153,7 +153,7 @@ test "saved MCP call lines survive all work reads pending, running and completed
             try request.session.set(session);
             const page = try store_core.activityPageForTesting(storage, request);
             for (page.call_activity.entries[0..page.call_activity.count]) |*call|
-                try std.testing.expectEqualStrings(description, call.presentation.description.?.slice());
+                try std.testing.expectEqualStrings(description, call.presentation.line.?.words.slice());
             var listed = try testingListRow(storage, tmp, session);
             defer listed.deinit();
             try std.testing.expectEqualStrings(kind, listed.get(&.{ "work", "state", "kind" }).string);

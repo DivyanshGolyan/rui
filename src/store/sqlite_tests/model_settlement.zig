@@ -99,7 +99,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
         const rejected_rows = full.value.object.get("rejected_calls").?.object.get("items").?.array.items;
         for (rejected_rows) |row| {
             const p = row.object.get("presentation").?.object;
-            try std.testing.expect(p.get("description").? == .null);
+            try std.testing.expect(p.get("line").? == .null);
             try std.testing.expect(p.get("publication_position").? == .null);
             try std.testing.expectEqualStrings(row.object.get("code").?.string, p.get("code").?.string);
         }

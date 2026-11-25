@@ -180,7 +180,7 @@ def prove_case(root, name):
                 assert len(images) == 1, output
                 assert base64.b64decode(images[0]["image_url"].split(",", 1)[1], validate=True) == PNG.read_bytes()
             elif name == "background-pending":
-                assert json.loads(output) == {"action": action, "execution": "background", "accepted": True}, output
+                assert json.loads(output) == {"action": action, "execution": "background", "accepted": True, "note": fixture.BACKGROUND_RECEIPT_NOTE}, output
                 wait(lambda: len(endpoint.requests) == 3, "final background delivery")
                 delivered = json.loads(endpoint.requests[2])
                 assert "data:image/png;base64," in json.dumps(delivered), delivered

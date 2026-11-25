@@ -98,7 +98,7 @@ pub const ConversationPage = struct {
                 (item.kind != .user and (item.sender != null or item.source_action != null)) or
                 (item.sender != null and item.source_action != null) or
                 (item.admitted_at orelse 0) > std.math.maxInt(i64)) return error.InvalidConversationPage;
-            if (item.presentation) |p| if (p.publication_position != item.position or (hosted and p.description == null)) return error.InvalidConversationPage;
+            if (item.presentation) |p| if (p.publication_position != item.position or (hosted and p.line == null)) return error.InvalidConversationPage;
             if (row.content) |value| item.content = if (item.kind == .assistant) .{ .text = value.text() catch return error.InvalidConversationPage } else value.value;
             if (item.position > page.end or item.ordinal > std.math.maxInt(i64) or
                 ((item.kind == .tool_result) != (item.ordinal != 0)) or
@@ -239,7 +239,7 @@ pub const ActivityPage = struct {
                     fact.value = .{ .tool_result = .{ .content = result.content.value, .presentation = result.presentation.value } };
                 },
                 .hosted_call => |call| {
-                    if (call.presentation.value.publication_position != fact.position or call.presentation.value.description == null) return error.InvalidActivityPage;
+                    if (call.presentation.value.publication_position != fact.position or call.presentation.value.line == null) return error.InvalidActivityPage;
                     fact.value = .{ .hosted_call = call.presentation.value };
                 },
                 .call => |call| {
@@ -2270,25 +2270,62 @@ pub const JsonToolPresentation = struct {
     value: protocol.ToolPresentation,
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-        const Wire = struct { description: ?JsonString(protocol.max_tool_description_bytes), code: JsonEnum(protocol.ToolPresentation.Code), publication_position: ?JsonString(20) };
+        const WireLine = struct {
+            before: ?JsonString(protocol.max_tool_description_bytes),
+            peer: ?struct { session: JsonString(protocol.max_session_bytes), label: ?JsonString(protocol.max_label_bytes) },
+            after: ?JsonString(protocol.max_tool_description_bytes),
+        };
+        const Wire = struct { line: ?WireLine, code: JsonEnum(protocol.ToolPresentation.Code), sign: JsonEnum(protocol.ToolPresentation.Sign), publication_position: ?JsonString(20) };
         const wire = try std.json.innerParse(Wire, allocator, source, options);
         const position = if (wire.publication_position) |p| decimalId(p, false) catch return error.InvalidCharacter else null;
         if (position) |p| if (p > std.math.maxInt(i64)) return error.InvalidCharacter;
-        if (wire.description) |d| if (!protocol.ToolPresentation.validDescription(d.slice())) return error.InvalidCharacter;
-        if (wire.description == null) switch (wire.code.value) {
+        const line: ?protocol.ToolLine = if (wire.line) |shown| line: {
+            var peer: ?protocol.NamedPeer = null;
+            if (shown.peer) |named| {
+                peer = .{ .session = named.session.value };
+                if (named.label) |label| peer.?.label = label.value;
+            }
+            break :line protocol.ToolLine.fromParts(
+                if (shown.before) |before| before.slice() else "",
+                peer,
+                if (shown.after) |after| after.slice() else "",
+            ) catch return error.InvalidCharacter;
+        } else null;
+        if (line == null) switch (wire.code.value) {
             .unknown_tool, .invalid_arguments => {},
             else => return error.InvalidCharacter,
         };
         if (position != null and (wire.code.value == .unresolved or wire.code.value == .pending_permission)) return error.InvalidCharacter;
-        return .{ .value = .{ .description = if (wire.description) |d| d.value else null, .code = wire.code.value, .publication_position = position } };
+        const value: protocol.ToolPresentation = .{ .line = line, .code = wire.code.value, .sign = wire.sign.value, .publication_position = position };
+        if (!value.consistent()) return error.InvalidCharacter;
+        return .{ .value = value };
     }
 
     pub fn jsonStringify(self: @This(), jw: anytype) !void {
         try jw.beginObject();
-        try jw.objectField("description");
-        if (self.value.description) |d| try jw.write(d.slice()) else try jw.write(null);
+        try jw.objectField("line");
+        if (self.value.line) |shown| {
+            const at = if (shown.link) |link| link.at else shown.words.len;
+            try jw.beginObject();
+            try jw.objectField("before");
+            if (at == 0) try jw.write(null) else try jw.write(shown.words.bytes[0..at]);
+            try jw.objectField("peer");
+            if (shown.link) |link| {
+                try jw.beginObject();
+                try jw.objectField("session");
+                try jw.write(link.peer.session.slice());
+                try jw.objectField("label");
+                if (link.peer.label.len == 0) try jw.write(null) else try jw.write(link.peer.label.slice());
+                try jw.endObject();
+            } else try jw.write(null);
+            try jw.objectField("after");
+            if (at == shown.words.len) try jw.write(null) else try jw.write(shown.words.slice()[at..]);
+            try jw.endObject();
+        } else try jw.write(null);
         try jw.objectField("code");
         try jw.write(@tagName(self.value.code));
+        try jw.objectField("sign");
+        try jw.write(@tagName(self.value.sign));
         try jw.objectField("publication_position");
         if (self.value.publication_position) |p| {
             var buffer: [20]u8 = undefined;
@@ -2299,37 +2336,37 @@ pub const JsonToolPresentation = struct {
 };
 
 test "canonical presentation typed ingress owns escaped labels and closed facts" {
-    const bytes = "{\"description\":\"Read \\u20ac files\",\"code\":\"denied\",\"publication_position\":null}";
+    const bytes = "{\"line\":{\"before\":\"Read \\u20ac files\",\"peer\":null,\"after\":null},\"code\":\"denied\",\"sign\":\"stopped\",\"publication_position\":null}";
     const parsed = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, bytes, .{});
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("Read € files", parsed.value.value.description.?.slice());
+    try std.testing.expectEqualStrings("Read € files", parsed.value.value.line.?.words.slice());
     try std.testing.expectEqual(protocol.ToolPresentation.Code.denied, parsed.value.value.code);
     try std.testing.expect(parsed.value.value.publication_position == null);
     for ([_][]const u8{
-        "{\"description\":null,\"code\":0,\"publication_position\":null}",
-        "{\"description\":null,\"code\":\"invented\",\"publication_position\":null}",
-        "{\"description\":null,\"code\":\"succeeded\",\"publication_position\":\"1\"}",
-        "{\"description\":\"Read\\nfiles\",\"code\":\"succeeded\",\"publication_position\":\"1\"}",
-        "{\"description\":\" \",\"code\":\"succeeded\",\"publication_position\":\"1\"}",
-        "{\"description\":null,\"code\":\"succeeded\",\"publication_position\":1}",
-        "{\"description\":null,\"code\":\"succeeded\",\"publication_position\":\"0\"}",
-        "{\"description\":null,\"code\":\"succeeded\",\"publication_position\":\"9223372036854775808\"}",
-        "{\"description\":null,\"code\":\"pending_permission\",\"publication_position\":\"1\"}",
-        "{\"description\":null,\"code\":\"pending_permission\",\"publication_position\":null}",
-        "{\"description\":null,\"code\":\"unresolved\",\"publication_position\":null}",
+        "{\"line\":null,\"code\":0,\"sign\":\"finished\",\"publication_position\":null}",
+        "{\"line\":null,\"code\":\"invented\",\"sign\":\"finished\",\"publication_position\":null}",
+        "{\"line\":null,\"code\":\"succeeded\",\"sign\":\"finished\",\"publication_position\":\"1\"}",
+        "{\"line\":{\"before\":\"Read\\nfiles\",\"peer\":null,\"after\":null},\"code\":\"succeeded\",\"sign\":\"finished\",\"publication_position\":\"1\"}",
+        "{\"line\":{\"before\":\" \",\"peer\":null,\"after\":null},\"code\":\"succeeded\",\"sign\":\"finished\",\"publication_position\":\"1\"}",
+        "{\"line\":null,\"code\":\"succeeded\",\"sign\":\"finished\",\"publication_position\":1}",
+        "{\"line\":null,\"code\":\"succeeded\",\"sign\":\"finished\",\"publication_position\":\"0\"}",
+        "{\"line\":null,\"code\":\"succeeded\",\"sign\":\"finished\",\"publication_position\":\"9223372036854775808\"}",
+        "{\"line\":null,\"code\":\"pending_permission\",\"sign\":\"needs_you\",\"publication_position\":\"1\"}",
+        "{\"line\":null,\"code\":\"pending_permission\",\"sign\":\"needs_you\",\"publication_position\":null}",
+        "{\"line\":null,\"code\":\"unresolved\",\"sign\":\"active\",\"publication_position\":null}",
         "{\"code\":\"succeeded\",\"publication_position\":null}",
-        "{\"description\":null,\"code\":\"succeeded\",\"code\":\"failed\",\"publication_position\":null}",
-        "{\"description\":\"" ++ @as([201]u8, @splat('x')) ++ "\",\"code\":\"succeeded\",\"publication_position\":null}",
+        "{\"line\":null,\"code\":\"succeeded\",\"sign\":\"finished\",\"code\":\"failed\",\"publication_position\":null}",
+        "{\"line\":{\"before\":\"" ++ @as([201]u8, @splat('x')) ++ "\",\"peer\":null,\"after\":null},\"code\":\"succeeded\",\"sign\":\"finished\",\"publication_position\":null}",
     }) |invalid| {
         if (std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, invalid, .{})) |unexpected| {
             unexpected.deinit();
             return error.AcceptedInvalidPresentation;
         } else |_| {}
     }
-    const escaped = "{\"description\":\"" ++ @as([200 * 6]u8, @bitCast(@as([200][6]u8, @splat("\\u0001".*)))) ++ "\",\"code\":\"succeeded\",\"publication_position\":\"9223372036854775807\"}";
+    const escaped = "{\"line\":{\"before\":\"" ++ @as([200 * 6]u8, @bitCast(@as([200][6]u8, @splat("\\u0001".*)))) ++ "\",\"peer\":null,\"after\":null},\"code\":\"succeeded\",\"sign\":\"finished\",\"publication_position\":\"9223372036854775807\"}";
     const maximum = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, escaped, .{});
     defer maximum.deinit();
-    try std.testing.expectEqual(@as(usize, 200), maximum.value.value.description.?.slice().len);
+    try std.testing.expectEqual(@as(usize, 200), maximum.value.value.line.?.words.len);
     var buffer: [protocol.ToolPresentationJson.max_json_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try (protocol.ToolPresentationJson{ .value = maximum.value.value }).writeJson(&writer);
@@ -2342,13 +2379,13 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         .position = index + 1,
         .ordinal = 1,
         .at = std.math.maxInt(i64) - index,
-        .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } }, .presentation = .{ .description = maximum.value.value.description, .code = .succeeded, .publication_position = index + 1 } } },
+        .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } }, .presentation = .{ .line = maximum.value.value.line, .sign = .finished, .code = .succeeded, .publication_position = index + 1 } } },
     };
     facts.call_activity = .{ .total = std.math.maxInt(i64), .count = 3 };
     for (&facts.call_activity.entries, 0..) |*entry, index| entry.* = .{
         .operation = std.math.maxInt(i64) - 2 + index,
         .ordinal = std.math.maxInt(i64) - 1,
-        .presentation = .{ .description = maximum.value.value.description, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
+        .presentation = .{ .line = maximum.value.value.line, .sign = .failed, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
     };
     facts.work = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .work = .{ .state = .{ .approval = .{ .since = std.math.maxInt(i64) } }, .turn = std.math.maxInt(i64), .operation = std.math.maxInt(i64) - 1, .first_action = std.math.maxInt(i64) - 2 }, .revision = std.math.maxInt(i64) };
     facts.work.work.served_attention = @import("session_work.zig").attention(facts.work.work);
@@ -2365,7 +2402,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     try std.testing.expectEqualDeep(facts.queued, page.facts.queued);
     try std.testing.expectEqualDeep(facts.work, page.facts.work);
     for (page.facts.items) |item| {
-        try std.testing.expectEqual(@as(usize, 200), item.value.tool_result.presentation.description.?.slice().len);
+        try std.testing.expectEqual(@as(usize, 200), item.value.tool_result.presentation.line.?.words.len);
         try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);
         try std.testing.expectEqual(std.math.maxInt(i64) + 1 - item.position, item.at);
     }
@@ -2772,7 +2809,7 @@ test "shape decoder delegates JSON holes and releases parser allocations" {
 test "canonical presentation releases allocations on acceptance and late rejection" {
     const Check = struct {
         fn run(allocator: std.mem.Allocator, invalid: bool) !void {
-            const bytes = "{\"description\":\"Read \\u20ac files\",\"code\":\"su\\u0063ceeded\",\"publication_position\":";
+            const bytes = "{\"line\":{\"before\":\"Read \\u20ac files\",\"peer\":null,\"after\":null},\"code\":\"su\\u0063ceeded\",\"sign\":\"finished\",\"publication_position\":";
             const result: anyerror!JsonToolPresentation = decode: {
                 var scanner = std.json.Scanner.initCompleteInput(allocator, if (invalid)
                     bytes ++ "\"9223372036854775808\"}"
@@ -2788,7 +2825,7 @@ test "canonical presentation releases allocations on acceptance and late rejecti
                 return;
             }).value;
             try std.testing.expect(!invalid);
-            try std.testing.expectEqualStrings("Read € files", value.description.?.slice());
+            try std.testing.expectEqualStrings("Read € files", value.line.?.words.slice());
             try std.testing.expectEqual(protocol.ToolPresentation.Code.succeeded, value.code);
             try std.testing.expectEqual(@as(?u64, 9223372036854775807), value.publication_position);
         }
@@ -4117,21 +4154,19 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
 }
 
 test "a hosted call travels as its presentation alone, in the conversation and the activity" {
-    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
-    try description.set("Search \"zig\"");
-    const presentation: protocol.ToolPresentation = .{ .description = description, .code = .failed, .publication_position = 7 };
+    const presentation: protocol.ToolPresentation = .{ .line = try protocol.ToolLine.plain("Search \"zig\""), .code = .failed, .sign = .failed, .publication_position = 7 };
     const conversation = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"9\",\"items\":[" ++
-        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"presentation\":{\"description\":\"Search \\\"zig\\\"\",\"code\":\"failed\",\"publication_position\":\"7\"}}],\"more\":false}";
+        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"presentation\":{\"line\":{\"before\":\"Search \\\"zig\\\"\",\"peer\":null,\"after\":null},\"code\":\"failed\",\"sign\":\"failed\",\"publication_position\":\"7\"}}],\"more\":false}";
     const page = try ConversationPage.parse(conversation, .{ .end = 0 });
     try std.testing.expectEqual(@as(usize, 1), page.count);
     try std.testing.expectEqual(protocol.ConversationItemKind.hosted_call, page.items[0].kind);
     try std.testing.expectEqual(@as(u64, 0), page.items[0].content.text.length);
     try std.testing.expectEqualDeep(presentation, page.items[0].presentation.?);
     for ([_][]const u8{
-        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"content\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"},\"presentation\":{\"description\":\"a\",\"code\":\"failed\",\"publication_position\":\"7\"}}",
-        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"presentation\":{\"description\":null,\"code\":\"failed\",\"publication_position\":\"7\"}}",
+        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"content\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"},\"presentation\":{\"line\":{\"before\":\"a\",\"peer\":null,\"after\":null},\"code\":\"failed\",\"sign\":\"failed\",\"publication_position\":\"7\"}}",
+        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"presentation\":{\"line\":null,\"code\":\"failed\",\"sign\":\"failed\",\"publication_position\":\"7\"}}",
         "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\"}",
-        "{\"position\":\"7\",\"ordinal\":\"1\",\"kind\":\"hosted_call\",\"presentation\":{\"description\":\"a\",\"code\":\"failed\",\"publication_position\":\"7\"}}",
+        "{\"position\":\"7\",\"ordinal\":\"1\",\"kind\":\"hosted_call\",\"presentation\":{\"line\":{\"before\":\"a\",\"peer\":null,\"after\":null},\"code\":\"failed\",\"sign\":\"failed\",\"publication_position\":\"7\"}}",
         "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"assistant\"}",
     }) |item| {
         var buffer: [1024]u8 = undefined;

@@ -290,7 +290,7 @@
   "Overview.test.Sign-in captures outside clicks above Settings and retains the current Session": 0.004213202000016736,
   "Overview.test.Sign-in completion applies the core default and restores only a visible focus target": 0.07126762100000406,
   "Overview.test.a Host that stopped unasked starts again once by itself; any other stop waits for a click": 0.05676187800003163,
-  "Overview.test.a Session link that no longer opens ends as any failed open, naming that Session": 0.0012029889999780607,
+  "Overview.test.a Session link that no longer opens returns to the Session it left with a notice": 0.0012029889999780607,
   "Overview.test.a Session's record takes its new name when only its Label changes": 0.011678945000028307,
   "Overview.test.a canonical Store failure ends the overview and names creation recovery": 0.002548641000032603,
   "Overview.test.a canonical Store failure in a listing ends the overview": 0.0023470280000310595,

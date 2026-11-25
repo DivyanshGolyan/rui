@@ -1,4 +1,7 @@
 test {
+    _ = @import("github_observation_fetch.zig");
+    _ = @import("github_transport.zig");
+    _ = @import("github_watch_pressure.zig");
     _ = @import("testing/pause.zig");
     _ = @import("child_exit_wake.zig");
     _ = @import("InputCapture.zig");

@@ -383,7 +383,6 @@ field-leak server.Intake.stdin
 field-leak server.Intake.wake
 field-leak server_mcp_relist.Relist.pending
 field-leak session_chrome.FooterSpans.text
-field-leak session_follow.Follow.pending
 field-leak session_list.ListSessions.after
 field-leak session_list.ListSessions.archive
 field-leak session_list.ListSessions.ceiling

@@ -113,21 +113,21 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"{s}\",{s}\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i, if (i == 0) "fetch_page" else "bash", if (i == 0) "\"server\":\"docs\"," else "" });
-        try writer.writeAll(reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":\"");
+        try writer.writeAll(reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"line\":{\"before\":\"");
         try writer.writeAll(if (i == 0) &@as([200]u8, @splat('a')) else "Run parser tests");
-        try writer.writeAll("\",\"code\":\"pending_permission\",\"publication_position\":null}}");
+        try writer.writeAll("\",\"peer\":null,\"after\":null},\"code\":\"pending_permission\",\"sign\":\"needs_you\",\"publication_position\":null}}");
     }
     try writer.writeAll("],\"resolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"11\",\"call_ordinal\":\"{d}\",\"code\":\"indeterminate\",\"acceptance_position\":\"{d}\",\"result\":", .{ i + 1001, i, i + 71 });
-        try writer.writeAll(reference ++ ",\"presentation\":{\"description\":\"Run parser tests\",\"code\":\"indeterminate\",\"publication_position\":null}}");
+        try writer.writeAll(reference ++ ",\"presentation\":{\"line\":{\"before\":\"Run parser tests\",\"peer\":null,\"after\":null},\"code\":\"indeterminate\",\"sign\":\"failed\",\"publication_position\":null}}");
     }
     try writer.writeAll("]},\"rejected_calls\":{\"count\":\"257\",\"items\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"parent_operation\":\"11\",\"call_ordinal\":\"{d}\",\"code\":\"unknown_tool\",\"acceptance_position\":\"{d}\",\"result\":", .{ i + 1000, i + 5001 });
-        try writer.writeAll(reference ++ ",\"name\":" ++ reference ++ ",\"call_id\":" ++ reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":null,\"code\":\"unknown_tool\",\"publication_position\":null}}");
+        try writer.writeAll(reference ++ ",\"name\":" ++ reference ++ ",\"call_id\":" ++ reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"line\":null,\"code\":\"unknown_tool\",\"sign\":\"failed\",\"publication_position\":null}}");
     }
     try writer.writeAll("]},\"actionable_permissions\":[");
     for (0..257) |i| {
@@ -161,7 +161,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
                     try std.testing.expectEqual(@as(u64, i), row.call_ordinal.value);
                     try std.testing.expectEqual(@as(u64, 13), row.arguments.value.text.length);
                     try std.testing.expectEqualStrings(&@as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))), &std.fmt.bytesToHex(row.call_id.value.text.digest, .lower));
-                    try std.testing.expectEqualStrings(if (i == 0) &@as([200]u8, @splat('a')) else "Run parser tests", row.presentation.value.description.?.slice());
+                    try std.testing.expectEqualStrings(if (i == 0) &@as([200]u8, @splat('a')) else "Run parser tests", row.presentation.value.line.?.words.slice());
                     try std.testing.expectEqual(protocol.ToolPresentation.Code.pending_permission, row.presentation.value.code);
                 },
                 .resolved => |row| {
@@ -175,7 +175,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
                     try std.testing.expectEqual(@as(u64, 5001 + i), row.acceptance_position.value);
                     try std.testing.expectEqualStrings("unknown_tool", row.code.slice());
                     try std.testing.expectEqual(@as(u64, 13), row.name.value.text.length);
-                    try std.testing.expect(row.presentation.value.description == null);
+                    try std.testing.expect(row.presentation.value.line == null);
                 },
                 .actionable => |row| {
                     try std.testing.expectEqual(@as(u64, 31 + i), row.action.value);

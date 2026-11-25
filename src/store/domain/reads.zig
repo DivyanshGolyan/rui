@@ -754,12 +754,13 @@ const PresentationRead = struct {
     out: *tool_presentation.ToolPresentation,
     session: SessionText = undefined,
     proposal: ProposalRead = undefined,
+    description: ?Bounded(tool_presentation.max_description_bytes) = null,
     code: ?tool_presentation.ToolPresentation.Code = null,
     authorized: ?bool = null,
     count: RowCount = .{},
 
     fn init(operation: u64, ordinal: u64, publication_position: ?u64, out: *tool_presentation.ToolPresentation) PresentationRead {
-        out.* = .{ .description = null, .code = .unresolved, .publication_position = publication_position };
+        out.* = .{ .line = null, .code = .unresolved, .sign = .active, .publication_position = publication_position };
         return .{ .operation = operation, .ordinal = ordinal, .out = out };
     }
 
@@ -772,7 +773,7 @@ const PresentationRead = struct {
     }
 
     fn keep(read: *PresentationRead, row: *const stored_presentation.Row) error{CorruptStore}!void {
-        read.out.description = row.description;
+        read.description = row.description;
         read.code = row.code;
         read.authorized = row.authorized;
         read.session = row.session_ref;
@@ -789,28 +790,21 @@ const PresentationRead = struct {
 
     fn finish(read: *PresentationRead) !void {
         try read.proposal.found();
-        try finishPresentation(read.out, read.code, read.authorized);
+        read.out.* = try presentationOf(read.description, read.code, read.authorized, read.out.publication_position);
     }
 };
 
+/// The one place a saved description, a derived code and an authorization become a presentation.
+/// Until a call's resolution carries an outcome line the row shows its call line, plain, finished as `done`.
 pub fn presentationOf(
     description: ?Bounded(tool_presentation.max_description_bytes),
     code: ?tool_presentation.ToolPresentation.Code,
     authorized: ?bool,
     publication_position: ?u64,
 ) error{CorruptStore}!tool_presentation.ToolPresentation {
-    var result: tool_presentation.ToolPresentation = .{ .description = description, .code = .unresolved, .publication_position = publication_position };
-    try finishPresentation(&result, code, authorized);
-    return result;
-}
-
-fn finishPresentation(result: *tool_presentation.ToolPresentation, code: ?tool_presentation.ToolPresentation.Code, authorized: ?bool) error{CorruptStore}!void {
-    if (result.description) |*line| if (!tool_presentation.ToolPresentation.validDescription(line.slice())) return error.CorruptStore;
-    result.code = code orelse if (authorized orelse false) .unresolved else .pending_permission;
-    if (result.description == null) switch (result.code) {
-        .unknown_tool, .invalid_arguments => {},
-        else => return error.CorruptStore,
-    };
+    const line: ?tool_presentation.Line = if (description) |words| tool_presentation.Line.plain(words.slice()) catch return error.CorruptStore else null;
+    const derived: tool_presentation.ToolPresentation.Code = code orelse if (authorized orelse false) .unresolved else .pending_permission;
+    return tool_presentation.ToolPresentation.of(line, derived, .done, publication_position);
 }
 
 const hosted_call = rsql.Read(.{
@@ -844,8 +838,8 @@ const HostedRead = struct {
     }
 
     fn keep(read: *HostedRead, row: *const hosted_call.Row) error{CorruptStore}!void {
-        if (!row.consistent or !tool_presentation.ToolPresentation.validDescription(row.description.slice())) return error.CorruptStore;
-        read.presentation.* = .{ .description = row.description, .code = if (row.call_failed) .failed else .succeeded, .publication_position = read.position };
+        if (!row.consistent) return error.CorruptStore;
+        read.presentation.* = try presentationOf(row.description, if (row.call_failed) .failed else .succeeded, null, read.position);
         read.at = (row.resolved_at orelse return error.CorruptStore).get();
     }
 
@@ -923,7 +917,7 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     const lower = if (forward) request.position + 1 else if (boundary) |item| item.position else 0;
     const upper = if (forward) (if (boundary) |item| item.position else end) else if (request.position == 0) end else @min(end, request.position - @intFromBool((request.ordinal orelse 0) == 0));
     const last = if (forward) boundary else null;
-    const call_position = if (last) |item| item.position else end;
+    const call_position = activity_facts.queueCutoff(end, forward, page.more, if (last) |item| item.position else null);
     var missing: missing_assistant_entry.Result = null;
     var calls: CallRows = .{ .activity = &page.call_activity, .args = .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null } };
     var waiting: QueuedMessages = .{};

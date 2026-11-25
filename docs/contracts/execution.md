@@ -61,6 +61,8 @@ The Host calls the same promotion owner when a live foreground Action has run fo
 
 MCP calls are not ordered against each other: every authorized MCP call of a Session is eligible at once, in the foreground or background and across Turns, limited only by MCP call slots and Active Capacity credits. Rui ignores a tool's `readOnlyHint`; a model that needs one call to follow another makes the second call after the first returns (Divyansh, 2026-11-19, #1913).
 
+Promotion settles the original call at once with a receipt naming the Action, `{"action":"ID","execution":"background","accepted":true,"note":"…"}`. Its `note` (from `action_receipt.zig`) tells the model that the final result arrives as new input and that polling is unneeded, because model history already renders the result and each published value in full (Divyansh, 2026-11-25: models called `read_action` 1,132 times on 2026-11-24, 71% of them polling a running Action).
+
 Promotion keeps an attempted Action's existing custody credit and never needs a free credit or changes how many credits are held. That credit remains occupied until final Resolution and safe cleanup. An unattempted promoted Action waits for an ordinary credit before dispatch.
 When background Actions hold every credit, new foreground work waits for one as usual. Deadlines bound that starvation; no Action waits on its own continuation to finish.
 A repeated matching command preserves the original selection; an existing background or final selection takes precedence over a later stop. A fresh stop refusal leaves the original call and executor unchanged.
