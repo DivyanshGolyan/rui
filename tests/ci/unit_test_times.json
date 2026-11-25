@@ -2408,7 +2408,6 @@
   "session_chrome.test.notice text flattens result lines and escapes terminal controls before Footer draws it": 6.574799999725656e-05,
   "session_chrome.test.opening and decision progress share the footer while unresolved decisions retain their state": 0,
   "session_chrome.test.the facts row ends with the archive badge, which stays when the row is short": 0.00012442700000292461,
-  "session_chrome.test.the key that ends what needs the person is the part after its last separator": 4.907999993974954e-06,
   "session_chrome.test.the marker says how many new entries arrived below": 3.9960000322025735e-06,
   "session_chrome.test.the stop key shows on the right while work can be stopped, and drops first when the row is short": 4.960400002573806e-05,
   "session_chrome.test.the title leads with the Session, says how many need the person, and never carries a control": 3.423099997235113e-05,

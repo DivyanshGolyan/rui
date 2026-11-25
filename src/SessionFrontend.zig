@@ -168,7 +168,7 @@ chrome: SessionChrome = undefined,
 line: reads.Line = .{},
 hint: reads.Hint = .unread,
 
-const rejection_suffix = " · /discard";
+const rejection_suffix = session_notice.rejection_suffix;
 const too_large_advice = "\nUnset or shorten them in another shell, then run rui request recover there.";
 const failure_capacity = @max(
     "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
@@ -1327,7 +1327,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .browsing = browsing,
         .new_entries = self.new_below,
         .needs = send.needs,
-        .needs_key = if (send.needs) |needs| session_chrome.needsKey(needs) else "",
+        .needs_key = original_presentation.action_words,
         .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
         .stoppable = said.stoppable,
         .details = original_presentation.details,
@@ -1361,13 +1361,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.chrome.status.stop.focused = focused == .stop;
     var surface = try self.app_screen.widget().draw(ctx);
     if (held_preview and message_note != null and screen.view == .feed and (!local_preview or !chrome.activity.noteVisible() or browsing)) {
-        if (self.heldOriginal()) |original| if (session_notice.key(original)) |action| {
+        if (self.heldOriginal()) |original| if (session_notice.key(original) != null) {
             chrome_view.notice_priority = .recovery;
-            chrome_view.notice = switch (action) {
-                .retry => keymap.retry_hint,
-                .discard => "/discard",
-                .status => "alt+d details",
-            };
+            chrome_view.notice = session_notice.presentation(false, false, original).recovery_notice;
             chrome.place(&self.app_screen, &self.app_input, chrome_view);
             surface = try self.app_screen.widget().draw(ctx);
         };
@@ -10743,7 +10739,7 @@ test "repair details rewrite from byte zero on first repeated and changed held f
             self.submission.key = @splat(case.key);
             self.submission.state = case.state;
             self.submission.last_error = case.last_error;
-            if (case.replace_failure) self.holdFailure(.{ .line = "! Original needs repair", .key = .status }, case.page);
+            if (case.replace_failure) self.holdFailure(.{ .line = "! Original needs repair · details", .key = .status }, case.page);
             const expected = try std.fmt.allocPrint(std.testing.allocator, "Original reserved request: {s}\n{s}\n{s}", .{ self.submission.key, case.body, case.error_line });
             defer std.testing.allocator.free(expected);
             const bytes = try std.testing.allocator.alloc(u8, expected.len);

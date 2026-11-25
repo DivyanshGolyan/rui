@@ -300,11 +300,6 @@ test "a short facts row preserves editable words before context" {
     }
 }
 
-pub fn needsKey(needs: []const u8) []const u8 {
-    const at = std.mem.lastIndexOf(u8, needs, " · ") orelse return "";
-    return needs[at + " · ".len ..];
-}
-
 pub const Tone = enum { quiet, attention };
 
 pub const Bar = struct {
@@ -439,12 +434,6 @@ test "the stop key shows on the right while work can be stopped, and drops first
     try std.testing.expect(!bar(.{ .stoppable = true, .width = 11 }).stop);
     try std.testing.expect(bar(.{ .stoppable = true, .width = 12 }).stop);
     try std.testing.expect(!bar(.{ .stoppable = false, .width = 80 }).stop);
-}
-
-test "the key that ends what needs the person is the part after its last separator" {
-    try std.testing.expectEqualStrings("ctrl+r retries original", needsKey("! Not confirmed · ctrl+r retries original"));
-    try std.testing.expectEqualStrings("/discard", needsKey("Rejected · /discard"));
-    try std.testing.expectEqualStrings("", needsKey("Sending…"));
 }
 
 test "Shift-Up/Down move half the transcript, at least a row" {
