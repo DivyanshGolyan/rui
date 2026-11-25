@@ -175,7 +175,7 @@ test "a start_agent call fails and starts nothing when its key is taken or its t
             try settleCallsForTesting(&storage, &tmp, model, "unstarted-agent-calls", &calls);
             const core_tools = @import("../../core_tools.zig");
             const start = try arena.allocator().create(core_tools.StartAgent);
-            const failed_sql = "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2";
+            const failed_sql = "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2 AND a.outcome_text IS NULL AND a.outcome_completion IS NULL";
 
             const taken = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             var key_buffer: [64]u8 = undefined;
@@ -326,6 +326,11 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
 }
 
 /// A peer send records its words ("Messaged ", "Started ") on its own action, then the Session it reached, and finishes as `sent`.
+/// A failed send to a Session that exists still names it: "× Messaged X".
+fn expectFailedOutcomeLine(storage: *Store, action_id: u64, words: []const u8, session: []const u8) !void {
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code='failed' AND outcome_text=?2 AND outcome_link_at=?3 AND outcome_link_session=?4 AND outcome_completion=1", .{ action_id, words, @as(u64, words.len), session }));
+}
+
 fn expectOutcomeLine(storage: *Store, action_id: u64, words: []const u8, session: []const u8) !void {
     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL AND outcome_text=?2 AND outcome_link_at=?3 AND outcome_link_session=?4 AND outcome_completion=1", .{ action_id, words, @as(u64, words.len), session }));
 }
@@ -408,6 +413,9 @@ test "session message writer covers peer message_agent start_agent and ending wi
                     .message_agent => {
                         try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action.binding, receiver.slice(), text, .{}));
                         try expectOutcomeLine(&storage, action.binding.action_id, "Messaged ", receiver.slice());
+                        const constraint_error = if (case.engine == .mysql) error.MysqlFixtureFailed else error.StatementFailed;
+                        try std.testing.expectError(constraint_error, store_testing.exec(&storage, "UPDATE action_operation SET outcome_completion=NULL WHERE action_id=?1", .{action.binding.action_id}));
+                        try std.testing.expectError(constraint_error, store_testing.exec(&storage, "UPDATE action_operation SET outcome_completion=2 WHERE action_id=?1", .{action.binding.action_id}));
                         const report_bytes = try testingSessionReportWithProfile(&storage, &tmp, sender.slice(), 256 * 1024, .current);
                         defer std.testing.allocator.free(report_bytes);
                         var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
@@ -543,6 +551,7 @@ test "core call writes roll back on injected faults and save every bound skill" 
             const long_diagnostic = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx雪 trailing";
             const failed_capture: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = long_diagnostic } };
             try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessageBound(detail.binding, receiver.slice(), "hello", &failed_capture, .{}));
+            try expectFailedOutcomeLine(&storage, detail.binding.action_id, "Messaged ", receiver.slice());
             const detail_digest = protocol.contentDigest("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\xe9 Nothing was sent.");
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ detail.binding.action_id, store_testing.Blob{ .bytes = &detail_digest } }));
 
@@ -552,6 +561,7 @@ test "core call writes roll back on injected faults and save every bound skill" 
             try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,?2,?3,1,'',0,0,1000000)", .{ key, receiver.slice(), store_testing.Blob{ .bytes = &protocol.contentDigest("taken") } });
             try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(taken.binding, receiver.slice(), "hello", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{receiver.slice()}));
+            try expectFailedOutcomeLine(&storage, taken.binding.action_id, "Messaged ", receiver.slice());
             const taken_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1 AND resolution_code='failed'", .{taken.binding.action_id});
             try expectContent(&storage, try testingContentReference(&storage, taken_id), "Rui could not send this Message: its command key is already taken. Nothing was sent.");
 

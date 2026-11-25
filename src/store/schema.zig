@@ -74,7 +74,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 92, .digest = 0xdbe10b74e562edbd },
     .{ .schema_version = 93, .digest = 0x0028c239ba46341d },
     .{ .schema_version = 94, .digest = 0x9803d541a1a4945e },
-    .{ .schema_version = 95, .digest = 0x569206da4a94d076 },
+    .{ .schema_version = 95, .digest = 0x09bff41030bad2a0 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -1057,12 +1057,12 @@ pub const migrations = [_]Migration{
             "ALTER TABLE action_operation ADD COLUMN outcome_text TEXT CHECK(outcome_text IS NULL OR length(CAST(outcome_text AS BLOB))<=200)",
             "ALTER TABLE action_operation ADD COLUMN outcome_link_at INTEGER CHECK(outcome_link_at IS NULL OR outcome_link_at>=0)",
             "ALTER TABLE action_operation ADD COLUMN outcome_link_session TEXT CHECK(outcome_link_session IS NULL OR length(CAST(outcome_link_session AS BLOB)) BETWEEN 1 AND 128)",
-            "ALTER TABLE action_operation ADD COLUMN outcome_completion INTEGER CHECK((outcome_text IS NULL AND outcome_link_at IS NULL AND outcome_link_session IS NULL AND outcome_completion IS NULL) OR (resolution_code IS NOT NULL AND outcome_text IS NOT NULL AND outcome_completion IN (0,1) AND (outcome_link_at IS NULL)=(outcome_link_session IS NULL)))",
+            "ALTER TABLE action_operation ADD COLUMN outcome_completion INTEGER CHECK((outcome_text IS NULL AND outcome_link_at IS NULL AND outcome_link_session IS NULL AND outcome_completion IS NULL) OR (resolution_code IS NOT NULL AND outcome_text IS NOT NULL AND outcome_completion IS NOT NULL AND outcome_completion IN (0,1) AND (outcome_link_at IS NULL)=(outcome_link_session IS NULL)))",
             "UPDATE action_operation SET outcome_text='Messaged ',outcome_link_at=9,outcome_link_session=(SELECT c.target FROM core_command c WHERE c.command_key='rui.core/message_agent/'||action_operation.action_id),outcome_completion=1 WHERE resolution_code='succeeded' AND EXISTS(SELECT 1 FROM core_command c WHERE c.command_key='rui.core/message_agent/'||action_operation.action_id)",
             "UPDATE action_operation SET outcome_text='Started ',outcome_link_at=8,outcome_link_session=(SELECT c.target FROM core_command c WHERE c.command_key='rui.core/start_agent/'||action_operation.action_id),outcome_completion=1 WHERE resolution_code='succeeded' AND EXISTS(SELECT 1 FROM core_command c WHERE c.command_key='rui.core/start_agent/'||action_operation.action_id)",
         },
         .mysql = &.{
-            "ALTER TABLE action_operation ADD COLUMN outcome_text TEXT AFTER background_at, ADD COLUMN outcome_link_at BIGINT AFTER outcome_text, ADD COLUMN outcome_link_session TEXT AFTER outcome_link_at, ADD COLUMN outcome_completion BIGINT AFTER outcome_link_session, ADD CHECK(outcome_text IS NULL OR OCTET_LENGTH(outcome_text)<=200), ADD CHECK(outcome_link_at IS NULL OR outcome_link_at>=0), ADD CHECK(outcome_link_session IS NULL OR OCTET_LENGTH(outcome_link_session) BETWEEN 1 AND 128), ADD CHECK((outcome_text IS NULL AND outcome_link_at IS NULL AND outcome_link_session IS NULL AND outcome_completion IS NULL) OR (resolution_code IS NOT NULL AND outcome_text IS NOT NULL AND outcome_completion IN (0,1) AND (outcome_link_at IS NULL)=(outcome_link_session IS NULL)))",
+            "ALTER TABLE action_operation ADD COLUMN outcome_text TEXT AFTER background_at, ADD COLUMN outcome_link_at BIGINT AFTER outcome_text, ADD COLUMN outcome_link_session TEXT AFTER outcome_link_at, ADD COLUMN outcome_completion BIGINT AFTER outcome_link_session, ADD CHECK(outcome_text IS NULL OR OCTET_LENGTH(outcome_text)<=200), ADD CHECK(outcome_link_at IS NULL OR outcome_link_at>=0), ADD CHECK(outcome_link_session IS NULL OR OCTET_LENGTH(outcome_link_session) BETWEEN 1 AND 128), ADD CHECK((outcome_text IS NULL AND outcome_link_at IS NULL AND outcome_link_session IS NULL AND outcome_completion IS NULL) OR (resolution_code IS NOT NULL AND outcome_text IS NOT NULL AND outcome_completion IS NOT NULL AND outcome_completion IN (0,1) AND (outcome_link_at IS NULL)=(outcome_link_session IS NULL)))",
             "UPDATE action_operation SET outcome_text='Messaged ',outcome_link_at=9,outcome_link_session=(SELECT c.target FROM core_command c WHERE c.command_key=CONCAT('rui.core/message_agent/',action_operation.action_id)),outcome_completion=1 WHERE resolution_code='succeeded' AND EXISTS(SELECT 1 FROM core_command c WHERE c.command_key=CONCAT('rui.core/message_agent/',action_operation.action_id))",
             "UPDATE action_operation SET outcome_text='Started ',outcome_link_at=8,outcome_link_session=(SELECT c.target FROM core_command c WHERE c.command_key=CONCAT('rui.core/start_agent/',action_operation.action_id)),outcome_completion=1 WHERE resolution_code='succeeded' AND EXISTS(SELECT 1 FROM core_command c WHERE c.command_key=CONCAT('rui.core/start_agent/',action_operation.action_id))",
         },
@@ -2059,7 +2059,7 @@ pub const tables = [_]Table{
                 .nullable = true,
                 .sqlite_added = true,
                 .check = "(outcome_text IS NULL AND outcome_link_at IS NULL AND outcome_link_session IS NULL AND outcome_completion IS NULL) OR " ++
-                    "(resolution_code IS NOT NULL AND outcome_text IS NOT NULL AND outcome_completion IN (0,1) AND (outcome_link_at IS NULL)=(outcome_link_session IS NULL))",
+                    "(resolution_code IS NOT NULL AND outcome_text IS NOT NULL AND outcome_completion IS NOT NULL AND outcome_completion IN (0,1) AND (outcome_link_at IS NULL)=(outcome_link_session IS NULL))",
             },
         },
         .primary_key = &.{"action_id"},
