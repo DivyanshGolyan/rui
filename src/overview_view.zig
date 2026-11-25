@@ -196,7 +196,7 @@ pub const First = struct {
     /// The Message's value, whose first display line names an unlabelled Session. An Archived window row
     /// carries it too: a parts-form row with no inline line reads its line through this value.
     content: ?content_value.Value,
-    /// The inline first display line of an Archived window row; null otherwise.
+    /// The raw leading bytes of an Archived window row's inline Text first Message; null otherwise.
     line: ?[]const u8 = null,
 };
 
@@ -282,9 +282,9 @@ pub const Listed = struct {
             .first = if (row.first) |*first| .{
                 .position = first.position,
                 .admission = first.admission,
-                .sender = null,
+                .sender = if (first.sender) |*sender| referenceOf(sender.session.slice()) else null,
                 .content = first.content,
-                .line = if (first.line) |*line| line.slice() else null,
+                .line = if (row.first_prefix) |*prefix| prefix.slice() else null,
             } else null,
         };
     }
@@ -2238,8 +2238,8 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     if (stale or count != state.order.items.len or !std.meta.eql(selected, state.selected) or !std.meta.eql(summary, state.summary) or !std.meta.eql(trouble, band(state))) state.presentation_revision +%= 1;
 }
 
-/// The first line a row reads. Inline text is held now; a parts Message reads through the first-line job
-/// when it has content; a window row whose Message is parts has no content to read, so its line is unavailable.
+/// The first line a row reads. Inline text is held now (the raw prefix of a window row, or the live row's text), and
+/// the line rule and cut are applied here; a parts Message reads through the first-line job when it has content.
 fn readableLine(state: *State, first: ?First) error{OutOfMemory}!FirstLineRead {
     const message = first orelse return .unread;
     if (message.line) |text| {
@@ -7041,15 +7041,15 @@ test "archived window reads the line of a window row that has none, once, and dr
 test "archived window names a row by the same line the first-line read gives: control bytes and long lines" {
     const long: [300]u8 = @splat('a');
     for ([_][]const u8{ "x\x1b[31my", &long }) |raw| {
-        // The Host cuts the line it sends to the first-line bound; the window path takes it as sent.
-        const sent = session_line.cut(session_list.max_first_line_bytes, session_line.firstLine(raw));
+        // The Host sends the raw prefix; the window path applies the line rule and cut itself.
+        const sent = raw[0..@min(raw.len, session_list.max_first_prefix_bytes)];
 
         var window = try opened(&.{});
         defer window.deinit();
         window.size = .{ .width = 80, .height = 2 };
         var window_effects: Effects = .{};
         try changeArchiveView(&window, .archived, &window_effects);
-        var window_row = [_]Listed{session("w00009", .{ .stopped = .{ .since = test_now_s - 9, .cause = .stop } }, .{ .archive_state = .archived, .archive_seq = 9, .first = .{ .position = 0, .admission = 9, .sender = null, .content = null, .line = sent.slice() } })};
+        var window_row = [_]Listed{session("w00009", .{ .stopped = .{ .since = test_now_s - 9, .cause = .stop } }, .{ .archive_state = .archived, .archive_seq = 9, .first = .{ .position = 0, .admission = 9, .sender = null, .content = null, .line = sent } })};
         _ = try step(&window, .{ .archived = .{ .read = window_effects.slice()[0].read_archived, .page = .{ .since = testToken(0), .rows = &window_row, .first = 9, .last = 9, .more_above = false, .more_below = false } } });
 
         // The first-line read of the same Message: the worker's raw line, then the overview's own rule.
@@ -10410,7 +10410,8 @@ const LinesDomainBase = struct {
         archive_seq: u64,
         stopped_at: u64,
         label: ?WireText,
-        first: ?struct { position: u64, admission: u64, content: @FieldType(First, "content"), line: ?WireText },
+        first: ?struct { position: u64, admission: u64, sender: ?struct { session: WireText }, content: @FieldType(First, "content") },
+        first_prefix: ?WireText,
     };
 
     fn throughWindow(listed: Listed, seq: u64) Listed {
@@ -10420,7 +10421,8 @@ const LinesDomainBase = struct {
             .stopped_at = test_now_s - seq,
             .label = if (listed.label) |label| WireText{ .text = label } else null,
             // A window row a Session is listed by carries its first Message, which makes it visible.
-            .first = .{ .position = 0, .admission = seq, .content = null, .line = .{ .text = "archived line" } },
+            .first = .{ .position = 0, .admission = seq, .sender = null, .content = null },
+            .first_prefix = .{ .text = "archived line" },
         };
         return Listed.archived(wire);
     }

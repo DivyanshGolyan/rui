@@ -52,7 +52,8 @@ MODULES = {
     "mysql_connection": "src/store/wire/mysql_connection.zig", "preferences": "src/preferences.zig",
     "codex_credentials": "src/codex_credentials.zig", "AnswerRenderer": "src/AnswerRenderer.zig",
     "openapi.json": "openapi.json", "rejections.ts": "clients/ts/src/rejections.ts",
-    "host-environment.ts": "clients/ts/src/host-environment.ts", "transport_environment": "src/tls_client/environment.zig",
+    "host-environment.ts": "clients/ts/src/host-environment.ts", "turn-endings.ts": "clients/ts/src/turn-endings.ts",
+    "transport_environment": "src/tls_client/environment.zig",
 }
 PACKAGES = {"std", "builtin", "vaxis", "terminal_width", "terminal_unicode", "h2_c", "openssl_c", "posix",
             "transport_options", "build_options", "yaml", "sqlite", "unit_test_options", "unit_test_partition"}
@@ -462,8 +463,8 @@ RULES = (
     (("src/model_list.zig",), ("codex-h2-integration",), ("codex-h2-integration",),
      "Provider model lists: the Host's fetch and the wire reply follow"),
     (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the promotion renderer contracts run them"),
-    (("src/openapi*.zig", "openapi.json", "clients/ts/src/rejections.ts", "clients/ts/src/host-environment.ts"), ("test",), ("test",),
-     "WIR-4 published request schemas, generated wire contract and the TS rejection sentences and transport variables generated beside it"),
+    (("src/openapi*.zig", "openapi.json", "clients/ts/src/rejections.ts", "clients/ts/src/host-environment.ts", "clients/ts/src/turn-endings.ts"), ("test",), ("test",),
+     "WIR-4 published request schemas, generated wire contract and the TS rejection sentences, Turn ending signs and transport variables generated beside it"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
     (("clients/ts/test/fixtures/empty-creation.ts", "clients/ts/test/fixtures/preferences-bridge.ts"),
      ("settings-integration",), ("settings-integration",),

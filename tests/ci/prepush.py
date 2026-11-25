@@ -104,7 +104,7 @@ def policy_tests(paths):
     return focused
 
 
-GENERATED = ("openapi.json", "clients/ts/src/wire.ts", "clients/ts/src/settings-kinds.ts", "clients/ts/src/rejections.ts", "clients/ts/src/host-environment.ts")
+GENERATED = ("openapi.json", "clients/ts/src/wire.ts", "clients/ts/src/settings-kinds.ts", "clients/ts/src/rejections.ts", "clients/ts/src/host-environment.ts", "clients/ts/src/turn-endings.ts")
 WHITESPACE_LINES = re.compile(r"^([^\s:][^:\n]*):(\d+): (trailing whitespace|new blank line at EOF)\.$", re.M)
 UNFIXABLE = ("*.patch", "*.diff")
 PUSHED = "RUI_PREPUSH_PUSHED"

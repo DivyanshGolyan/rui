@@ -3805,39 +3805,6 @@
           "model"
         ]
       },
-      "ArchivedFirstFields": {
-        "type": "object",
-        "properties": {
-          "position": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "admission": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "content": {
-            "$ref": "#/components/schemas/ContentValue"
-          },
-          "line": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 256,
-                "x-rui-max-bytes": 256
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "position",
-          "admission",
-          "content",
-          "line"
-        ],
-        "additionalProperties": false
-      },
       "ArchivedRowFields": {
         "type": "object",
         "properties": {
@@ -3867,7 +3834,19 @@
           "first": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ArchivedFirstFields"
+                "$ref": "#/components/schemas/FirstMessage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "first_prefix": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512,
+                "x-rui-max-bytes": 512
               },
               {
                 "type": "null"
@@ -3880,7 +3859,8 @@
           "archive_seq",
           "stopped_at",
           "label",
-          "first"
+          "first",
+          "first_prefix"
         ],
         "additionalProperties": false
       },

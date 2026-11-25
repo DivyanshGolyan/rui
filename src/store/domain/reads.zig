@@ -891,7 +891,7 @@ pub fn presentationOf(
 ) error{CorruptStore}!tool_presentation.ToolPresentation {
     const derived: tool_presentation.ToolPresentation.Code = code orelse if (authorized orelse false) .unresolved else .pending_permission;
     if (try outcome.line()) |shown| return tool_presentation.ToolPresentation.of(shown, derived, std.enums.fromInt(tool_presentation.Completion, outcome.completion orelse return error.CorruptStore) orelse return error.CorruptStore, publication_position);
-    const line: ?tool_presentation.Line = if (description) |words| tool_presentation.Line.plain(words.slice()) catch return error.CorruptStore else null;
+    const line: ?tool_presentation.Line = if (description) |saved| tool_presentation.Line.ofSaved(saved.slice()) else null;
     return tool_presentation.ToolPresentation.of(line, derived, .done, publication_position);
 }
 

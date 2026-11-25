@@ -19,6 +19,7 @@ const core_tools = @import("core_tools.zig");
 const session_list = @import("session_list.zig");
 const caller_error = @import("caller_error.zig");
 const caller_rejection = @import("caller_rejection.zig");
+const turn_ending = @import("turn_ending.zig");
 const Hole = protocol.Hole;
 const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
@@ -1414,6 +1415,22 @@ pub fn renderRejections(gpa: std.mem.Allocator) ![]u8 {
     return out.toOwnedSlice();
 }
 
+/// The TypeScript client's table of what each Turn ending means to a person, so a client decides from
+/// the ending's sign, not from its own list of ending names. It is generated beside openapi.json, not
+/// inside it: the wire already names every ending, and this adds only the sign.
+pub fn renderTurnEndings(gpa: std.mem.Allocator) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    try out.writer.writeAll("// Generated from src/turn_ending.zig by `zig build openapi`. Do not edit.\n" ++
+        "/** What each Turn ending means to a person: it finished, it was stopped, or it failed. */\n" ++
+        "export const ENDING_SIGN = {\n");
+    inline for (comptime std.meta.tags(turn_ending.TurnEnding)) |ending| {
+        try out.writer.print("\t\"{s}\": \"{s}\",\n", .{ @tagName(ending), @tagName(ending.sign()) });
+    }
+    try out.writer.writeAll("} as const;\n");
+    return out.toOwnedSlice();
+}
+
 /// The transport's environment variables, which a TS client passes to the Host it starts.
 pub fn renderHostEnvironment(gpa: std.mem.Allocator) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
@@ -1435,6 +1452,15 @@ test "clients/ts/src/host-environment.ts is what the transport reads" {
     if (!std.mem.eql(u8, emitted, @embedFile("host-environment.ts"))) {
         std.debug.print("clients/ts/src/host-environment.ts is stale: run `zig build openapi` and commit it.\n", .{});
         return error.StaleHostEnvironment;
+    }
+}
+
+test "clients/ts/src/turn-endings.ts is what the Turn endings emit" {
+    const emitted = try renderTurnEndings(std.testing.allocator);
+    defer std.testing.allocator.free(emitted);
+    if (!std.mem.eql(u8, emitted, @embedFile("turn-endings.ts"))) {
+        std.debug.print("clients/ts/src/turn-endings.ts is stale: run `zig build openapi` and commit it.\n", .{});
+        return error.StaleTurnEndings;
     }
 }
 
