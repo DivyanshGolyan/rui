@@ -95,7 +95,7 @@ def migration_steps(source):
 
 
 ZIG_TOKEN = re.compile(r"""
-    (?P<multi>^[ \t]*\\\\[^\n]*)
+    (?P<multi>\\\\[^\n]*)
   | (?P<gap>[^\S\n]+|\n)
   | (?P<comment>//[^\n]*)
   | (?P<str>"(?:[^"\\\n]|\\.)*")

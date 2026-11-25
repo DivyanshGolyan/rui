@@ -265,6 +265,14 @@ class MySqlMigrationOwnerTest(unittest.TestCase):
         before = self.STEPS + '\\\\// a\n'
         self.assertTrue(touches_mysql_migration([SCHEMA], {SCHEMA: (before, self.STEPS + '\\\\// b\n')}))
         self.assertFalse(touches_mysql_migration([SCHEMA], {SCHEMA: (before, before)}))
+        same_line = self.STEPS + 'const q = \\\\SELECT a  b // x\n'
+        for after in (same_line.replace('// x', '// y'), same_line.replace('a  b', 'a b')):
+            self.assertTrue(touches_mysql_migration([SCHEMA], {SCHEMA: (same_line, after)}), after)
+
+    def test_a_string_literal_change_counts_even_when_it_looks_like_a_comment_or_layout(self):
+        before = self.STEPS + 'const q = "a // b  c";\n'
+        for after in (before.replace('// b', '// d'), before.replace('b  c', 'b c')):
+            self.assertTrue(touches_mysql_migration([SCHEMA], {SCHEMA: (before, after)}), after)
 
     def test_a_step_table_that_cannot_be_read_counts_as_changed(self):
         self.assertTrue(touches_mysql_migration([SCHEMA], {SCHEMA: (self.STEPS, 'pub const migrations = [_]Migration{ .{ .from = 9')}))
