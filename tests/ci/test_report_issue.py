@@ -554,7 +554,7 @@ class ReportTest(unittest.TestCase):
 
     def test_a_verdict_escapes_log_text_that_would_end_the_workflow_command(self):
         job = dict(name='j', steps=[dict(name='s', conclusion='failure')])
-        line = report_issue.verdict_line(job, Cause('100%\r::error::x\ny', escape='macos'), 5)
+        line = report_issue.verdict_line(job, report_issue.Cause('100%\r::error::x\ny', escape='macos'), 5)
         self.assertEqual(line, '::notice title=Promotion verdict::j | s | 100%25%0D::error::x%0Ay | macos | #5')
         self.assertNotIn('\r', line)
         self.assertNotIn('\n', line)
