@@ -1780,11 +1780,13 @@ const ImportedNeutral = struct { bag: u64, part_count: u64, text: ?u64, text_len
 noinline fn describeWebSearch(io: std.Io, source: std.Io.File, call: OutputMetadataRecord, pattern: ?OutputMetadataRecord) !tool_record.Description {
     var target: [tool_line.WebSearchCall.excerpt_bytes]u8 = undefined;
     var found: [tool_line.WebSearchCall.excerpt_bytes]u8 = undefined;
-    return tool_line.describe(.{ .web_search = .{
+    const words = tool_line.describe(.{ .web_search = .{
         .action = call.action,
         .target = try excerpt(io, source, call, &target),
         .pattern = if (pattern) |field| try excerpt(io, source, field, &found) else "",
     } });
+    std.debug.assert(tool_presentation.ToolPresentation.validDescription(words.slice()));
+    return words;
 }
 
 fn excerpt(io: std.Io, source: std.Io.File, record: OutputMetadataRecord, buffer: []u8) ![]const u8 {

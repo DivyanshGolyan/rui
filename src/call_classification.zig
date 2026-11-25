@@ -63,6 +63,12 @@ pub const CallFacts = struct {
     }
 
     pub fn description(self: *const CallFacts) ?Description {
+        const words = self.wording() orelse return null;
+        std.debug.assert(tool_presentation.ToolPresentation.validDescription(words.slice()));
+        return words;
+    }
+
+    fn wording(self: *const CallFacts) ?Description {
         if (self.bashArguments()) |arguments| return tool_line.describe(.{ .bash = arguments.description.slice() });
         if (self.messageAgentArguments()) |arguments| return tool_line.describe(.{ .message_agent = arguments.id.slice() });
         if (self.read_image == true) return tool_line.describe(.read_image);
