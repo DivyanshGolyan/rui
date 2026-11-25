@@ -3338,6 +3338,66 @@
               "value"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "position": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "ordinal": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "at": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "value": {
+                "type": "object",
+                "properties": {
+                  "skill": {
+                    "type": "object",
+                    "properties": {
+                      "admission": {
+                        "$ref": "#/components/schemas/Decimal"
+                      },
+                      "turn": {
+                        "$ref": "#/components/schemas/Decimal"
+                      },
+                      "ordinal": {
+                        "$ref": "#/components/schemas/Decimal"
+                      },
+                      "name": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "x-rui-max-bytes": 64
+                      },
+                      "content": {
+                        "$ref": "#/components/schemas/ContentValue"
+                      }
+                    },
+                    "required": [
+                      "admission",
+                      "turn",
+                      "ordinal",
+                      "name",
+                      "content"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "skill"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "position",
+              "ordinal",
+              "at",
+              "value"
+            ],
+            "additionalProperties": false
           }
         ]
       },
@@ -3508,7 +3568,8 @@
                 "session_changed",
                 "compacted",
                 "model_call",
-                "instruction"
+                "instruction",
+                "skill"
               ]
             },
             "uniqueItems": true,
@@ -3620,7 +3681,8 @@
               "session_changed",
               "compacted",
               "model_call",
-              "instruction"
+              "instruction",
+              "skill"
             ]
           },
           "hits": {
@@ -3716,7 +3778,8 @@
                 "session_changed",
                 "compacted",
                 "model_call",
-                "instruction"
+                "instruction",
+                "skill"
               ]
             },
             "uniqueItems": true,
