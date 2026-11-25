@@ -50,13 +50,13 @@ pub fn Reply(comptime Capture: type) type {
         }
 
         pub fn archivedRow(reply: *@This(), values: *const session_list.ArchivedRow) !void {
-            const first: ?protocol.ArchivedFirstFields = if (values.first) |first| .{ .position = first.position, .admission = first.admission, .content = first.content, .line = first.line } else null;
             const fields: protocol.ArchivedRow.Fields = .{
                 .reference = values.reference,
                 .archive_seq = values.archive_seq,
                 .stopped_at = values.stopped_at,
                 .label = values.label,
-                .first = first,
+                .first = if (values.first) |first| .fromCore(first) else null,
+                .first_prefix = values.first_prefix,
             };
             if (reply.rows != 0) try reply.capture.append(",");
             try appendShape(reply.capture, .{protocol.Hole{ .json = protocol.ArchivedRow.Fields }}, .{&fields});

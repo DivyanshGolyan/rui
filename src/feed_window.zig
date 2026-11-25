@@ -4,6 +4,7 @@ const vaxis = @import("vaxis");
 const unicode = @import("terminal_unicode");
 const viewport = @import("ConversationViewport.zig");
 const View = @import("session_view.zig");
+const keymap = @import("keymap.zig");
 
 pub const Key = struct {
     position: u64,
@@ -105,7 +106,8 @@ const EndingLine = struct {
         if (!presentation.retry_actionable) return false;
         const latest = presentation.latest_ending orelse return false;
         if (!latest.matches(entry.key)) return false;
-        const key = latest.cause.key orelse return false;
+        if (!latest.cause.retry) return false;
+        const key = keymap.retry_hint;
         const end = window.document.lineEnd(offset);
         if (end + 1 != entry.offset + entry.length) return false;
         const suffix = " · ";

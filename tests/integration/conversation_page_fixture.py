@@ -112,7 +112,7 @@ def whole_stream_shape(length):
             session = configure(state, store, "stream-config")
             if length == 0:
                 wire = {"version": host_process.WIRE_VERSION, "kind": "message", "store": str(store),
-                    "key": "stream-message", "session": session, "sender": None, "sender_handle": None,
+                    "key": "stream-message", "session": session,
                     "text": {"state": "value", "value": ""}}
                 head, body = raw_request(fields["socket"], "/v1/message", json.dumps(wire, separators=(",", ":")).encode())
                 assert head.startswith(b"HTTP/1.1 200 ") and json.loads(body)["answer"]["status"] == "accepted", (head, body)

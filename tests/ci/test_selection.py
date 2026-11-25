@@ -825,7 +825,7 @@ class SelectionTest(unittest.TestCase):
                                                                         "server-delivery-integration", "peer-integration",
                                                                         "measurement-check"})
                                 for name in ("luna", "terra-astra", "sol")),
-                              ("src/peer_message.txt", {"peer-integration", "sender-identity-integration"})):
+                              ("src/peer_message.txt", {"peer-integration"})):
             with self.subTest(path=path):
                 targets = set(select([path], "review", AVAILABLE)["targets"])
                 self.assertEqual({target for target in request | readers if not covers(target, targets)}, set())
@@ -839,7 +839,7 @@ class SelectionTest(unittest.TestCase):
                     self.assertIn("measurement-check", result[family])
 
     def test_generated_ts_files_select_their_staleness_test(self):
-        for path in ("clients/ts/src/rejections.ts", "clients/ts/src/host-environment.ts"):
+        for path in ("clients/ts/src/rejections.ts", "clients/ts/src/host-environment.ts", "clients/ts/src/turn-endings.ts"):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertIn("test", result["targets"])
@@ -2035,7 +2035,7 @@ if [ "$CHECK_OVERLAP" = 1 ]; then
             if [ "$TEST_PART" = parallel ]; then
                 peers="$peers native. admission_integration.sh.release dispatch_integration.py.release
                     bash_owner_integration.py.release bash_integration.py.release
-                    peer_integration.py.release sender_identity_integration.py.release
+                    peer_integration.py.release
                     bash_lifecycle_integration.py.release bash_recovery_integration.py.release
                     codex_integration.py.release control_integration.py.release
                     descriptor_capacity_integration.py.release"
@@ -2172,7 +2172,6 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
                                     "bash_owner_integration.py": "bash-owner",
                                     "bash_integration.py": "bash",
                                     "peer_integration.py": "peer",
-                                    "sender_identity_integration.py": "sender-identity",
                                     "bash_lifecycle_integration.py": "bash-lifecycle",
                                     "bash_recovery_integration.py": "bash-recovery",
                                     "codex_integration.py": "codex",
@@ -2477,7 +2476,6 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
             "read_image_integration.py release",
             "bash_owner_integration.py release", "bash_integration.py release",
             "peer_integration.py release", "bash_environment_integration.py release",
-            "sender_identity_integration.py release",
             "human_cli_integration.py release", "preference_policy_integration.py preferences",
             "model_picker_integration.py release", "model_picker_signin_integration.py release",
             "model_picker_failure_integration.py release",
@@ -2535,7 +2533,7 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
         # One run holds all twelve peers. Each is released only after the driver waits on it, in driver order.
         peers = ("native", "admission_integration.sh", "dispatch_integration.py",
                  "bash_owner_integration.py", "bash_integration.py", "peer_integration.py",
-                 "sender_identity_integration.py", "bash_lifecycle_integration.py",
+                 "bash_lifecycle_integration.py",
                  "bash_recovery_integration.py", "codex_integration.py", "control_integration.py",
                  "descriptor_capacity_integration.py")
         result, _ = self.run_part("parallel", overlap=True, hold=" ".join(peers))

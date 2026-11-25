@@ -6,6 +6,7 @@ import { decodeCursor, listActivity, type FeedEntry } from "../src/feed.ts";
 import { Session, type Link } from "../src/sessions.ts";
 import { scriptedLink } from "./scripted-line.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
+import { ENDING_SIGN } from "../src/turn-endings.ts";
 import type { components } from "../src/wire.ts";
 
 type Schemas = components["schemas"];
@@ -123,6 +124,29 @@ function narrowed(entry: FeedEntry): void {
 }
 
 test("feed entry types narrow to each generated kind", () => { void narrowed; });
+
+test("TS-17 a failed Turn ending carries its report text inline and no other ending does", async () => {
+	const content = { type: "text", bytes: "6", sha256: "hash" } as const;
+	const endings = Object.keys(ENDING_SIGN) as (keyof typeof ENDING_SIGN)[];
+	const rows = endings.map((ending, index) => ({
+		position: String(index + 1), ordinal: "0", at: "1",
+		value: { turn_ended: { session: "s", turn: "1", operation: "1", ending, code: ending, content } },
+	}));
+	const link: Link = { exchange: async (path) => path === "/v1/activity-content" ? Buffer.from("report") : Buffer.from(JSON.stringify({ work: { actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: rows, more: false, end: String(rows.length) })) };
+	const entries: FeedEntry[] = [];
+	for await (const entry of listActivity(link, "s")) entries.push(entry);
+	assert.equal(entries.length, endings.length);
+	for (const [index, ending] of endings.entries()) {
+		const entry = entries[index];
+		assert.ok(entry?.kind === "turn_ended");
+		const failed = ENDING_SIGN[ending] === "failed";
+		assert.equal(entry.text, failed ? "report" : undefined, ending);
+		assert.equal(entry.contentBytes, failed ? "6" : undefined, ending);
+	}
+	// The failed endings include the two the client once left without text.
+	assert.deepEqual(endings.filter((ending) => ENDING_SIGN[ending] === "failed"),
+		["context_full", "provider_refused", "out_of_quota", "provider_unavailable", "failed"]);
+});
 
 test("feed camelCases only row keys, preserving nested wire values and content references", async () => {
 	const presentation = { line: { before: "tool", peer: null, after: null }, code: "succeeded", sign: "finished", publication_position: "7" };

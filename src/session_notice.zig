@@ -3,6 +3,9 @@ const submission = @import("submission_state.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const Text = @import("TerminalText.zig");
 const protocol = @import("protocol.zig");
+const keymap = @import("keymap.zig");
+
+const retry_words = keymap.retry_hint ++ " original";
 
 pub const Held = struct { kind: submission.Kind, state: submission.State, failure: ?Failure = null };
 
@@ -10,17 +13,32 @@ pub const Failure = struct { line: []const u8, key: Key };
 
 pub const Key = enum { retry, discard, status };
 
+/// The words that end the line offering `action`, and are the part of it a click runs. The only place they are spelled.
+fn keyWords(action: Key) []const u8 {
+    return switch (action) {
+        .retry => retry_words,
+        .discard => "/discard",
+        .status => "details",
+    };
+}
+
 pub const Presentation = struct {
     note: ?[]const u8 = null,
     status: ?[]const u8 = null,
     action: ?Key = null,
+    /// `keyWords(action)`, or empty when nothing offers an action.
+    action_words: []const u8 = "",
+    /// What the notice row names for `action` while the original is held, or empty.
+    recovery_notice: []const u8 = "",
     details: bool = false,
     details_available: bool = false,
     repair_details: bool = false,
     in_flight: bool = false,
 };
 
-pub const too_large = "! Environment too large; nothing sent · details";
+/// What ends a rejected original's line: the key that discards it.
+pub const rejection_suffix = " · " ++ keyWords(.discard);
+pub const too_large = "! Environment too large; nothing sent · " ++ keyWords(.status);
 
 /// The refusal of a chat Message whose Session's provider this Host does not serve; the fix is in the Host's settings.
 pub fn writeUnserved(writer: *std.Io.Writer, provider: ?@import("connection.zig").Name) !void {
@@ -42,13 +60,20 @@ pub fn presentation(opening: bool, waiting: bool, held: ?Held) Presentation {
         const shown: struct { line: ?[]const u8, action: ?Key } = if (original.failure) |failure|
             .{ .line = failure.line, .action = failure.key }
         else switch (original.state) {
-            .not_started => .{ .line = "Not sent · ctrl+r retries original", .action = .retry },
+            .not_started => .{ .line = "Not sent · " ++ comptime keyWords(.retry), .action = .retry },
             .submitting => .{ .line = if (original.kind == .decision) "Sending…" else null, .action = null },
-            .unconfirmed => .{ .line = if (original.kind == .decision) "! Decision not confirmed · ctrl+r retries original" else "Not confirmed · ctrl+r retries original", .action = .retry },
-            .rejected => .{ .line = "Rejected · /discard", .action = .discard },
+            .unconfirmed => .{ .line = if (original.kind == .decision) "! Decision not confirmed · " ++ comptime keyWords(.retry) else "Not confirmed · " ++ comptime keyWords(.retry), .action = .retry },
+            .rejected => .{ .line = "Rejected · " ++ comptime keyWords(.discard), .action = .discard },
         };
         if (original.kind == .message) result.note = shown.line else result.status = shown.line;
         result.action = shown.action;
+        result.action_words = if (shown.action) |action| keyWords(action) else "";
+        result.recovery_notice = if (shown.action) |action| switch (action) {
+            .retry => keymap.retry_hint,
+            .discard => keyWords(.discard),
+            .status => "alt+d details",
+        } else "";
+        if (original.failure) |failure| std.debug.assert(std.mem.endsWith(u8, failure.line, keyWords(failure.key)));
         result.details = original.state != .submitting;
         result.details_available = true;
         result.repair_details = result.details and original.failure != null and shown.action == .status;
@@ -298,6 +323,12 @@ test "SUI-14 message and decision notices retain their placement during opening 
                 try checkText(case.note, shown.note);
                 try checkText(if (opening) "Opening…" else if (waiting) "" else case.status, shown.status);
                 try std.testing.expectEqual(case.action, shown.action);
+                if (!opening and !waiting) if (case.action) |action| {
+                    try std.testing.expectEqualStrings(keyWords(action), shown.action_words);
+                    const line = (shown.note orelse shown.status).?;
+                    try std.testing.expect(std.mem.endsWith(u8, line, keyWords(action)));
+                    try std.testing.expect(std.mem.endsWith(u8, line[0 .. line.len - keyWords(action).len], " · "));
+                } else try std.testing.expectEqualStrings("", shown.action_words);
                 try std.testing.expectEqual(case.details, shown.details);
                 try std.testing.expect(shown.details_available);
                 try std.testing.expect(!shown.repair_details);

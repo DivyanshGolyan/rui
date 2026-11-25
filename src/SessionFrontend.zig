@@ -168,7 +168,7 @@ chrome: SessionChrome = undefined,
 line: reads.Line = .{},
 hint: reads.Hint = .unread,
 
-const rejection_suffix = " · /discard";
+const rejection_suffix = session_notice.rejection_suffix;
 const too_large_advice = "\nUnset or shorten them in another shell, then run rui request recover there.";
 const failure_capacity = @max(
     "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
@@ -1327,7 +1327,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .browsing = browsing,
         .new_entries = self.new_below,
         .needs = send.needs,
-        .needs_key = if (send.needs) |needs| session_chrome.needsKey(needs) else "",
+        .needs_key = original_presentation.action_words,
         .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
         .stoppable = said.stoppable,
         .details = original_presentation.details,
@@ -1361,13 +1361,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.chrome.status.stop.focused = focused == .stop;
     var surface = try self.app_screen.widget().draw(ctx);
     if (held_preview and message_note != null and screen.view == .feed and (!local_preview or !chrome.activity.noteVisible() or browsing)) {
-        if (self.heldOriginal()) |original| if (session_notice.key(original)) |action| {
+        if (self.heldOriginal()) |original| if (session_notice.key(original) != null) {
             chrome_view.notice_priority = .recovery;
-            chrome_view.notice = switch (action) {
-                .retry => "ctrl+r retries",
-                .discard => "/discard",
-                .status => "alt+d details",
-            };
+            chrome_view.notice = session_notice.presentation(false, false, original).recovery_notice;
             chrome.place(&self.app_screen, &self.app_input, chrome_view);
             surface = try self.app_screen.widget().draw(ctx);
         };
@@ -2728,7 +2724,7 @@ fn settleAccepted(self: *Self, key: [36]u8, verdict: Submission.Verdict) void {
 
 fn retryable(self: *const Self) ?RetryFence {
     const ending = self.live.latest_ending orelse return null;
-    if (ending.cause.key == null or self.hostHeld()) return null;
+    if (!ending.cause.retry or self.hostHeld()) return null;
     if (self.live.work.state.progress() != null or self.live.queued.count != 0) return null;
     if (self.submission.intent != null or self.submission.messageHeld() or self.submission.task.thread != null or
         self.waitingAction() != null or self.live.work.first_action != null or
@@ -6436,16 +6432,17 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         }
         fn serve(self: *@This()) !void {
             {
-                const page = try self.request(if (self.mode == .read_disconnect or self.mode == .command_disconnect) "/v1/activity-page" else "/v1/conversation-page");
+                const page = try self.request("/v1/activity-page");
                 defer page.close(std.testing.io);
                 self.pages += 1;
                 if (self.mode == .read_disconnect or self.mode == .command_disconnect) return;
-                var bytes: [1024]u8 = undefined;
+                var facts: protocol.ActivityFacts = .{ .end = 1, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+                try facts.work.workspace.set("/");
+                facts.items[0] = .{ .position = 1, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = .{ .length = answer.len, .digest = protocol.contentDigest(answer) }, .final = true } } };
+                facts.count = 1;
+                var bytes: [4096]u8 = undefined;
                 var body = std.Io.Writer.fixed(&bytes);
-                const shape = protocol.conversation_page_reply;
-                try protocol.writeShape(&body, shape.head, .{1});
-                try protocol.writeShape(&body, shape.item(.assistant), .{ 1, 0, protocol.ContentValueJson.text(.{ .length = answer.len, .digest = protocol.contentDigest(answer) }) });
-                try protocol.writeShape(&body, shape.item_end ++ shape.last, .{});
+                try activity_reply.writePage(&body, &facts);
                 try reply(page, "application/json", body.buffered().len, "", body.buffered());
             }
             if (self.mode == .temporary) return;
@@ -10742,7 +10739,7 @@ test "repair details rewrite from byte zero on first repeated and changed held f
             self.submission.key = @splat(case.key);
             self.submission.state = case.state;
             self.submission.last_error = case.last_error;
-            if (case.replace_failure) self.holdFailure(.{ .line = "! Original needs repair", .key = .status }, case.page);
+            if (case.replace_failure) self.holdFailure(.{ .line = "! Original needs repair · details", .key = .status }, case.page);
             const expected = try std.fmt.allocPrint(std.testing.allocator, "Original reserved request: {s}\n{s}\n{s}", .{ self.submission.key, case.body, case.error_line });
             defer std.testing.allocator.free(expected);
             const bytes = try std.testing.allocator.alloc(u8, expected.len);

@@ -397,12 +397,9 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
     defer payload.removeTemporaryContent(std.testing.io) catch unreachable;
     const commands = try arena.alloc(wire_request.MessageCommand, Legacy.cases.len);
     for (commands, Legacy.cases) |*command, case| {
-        command.* = .{ .text = payload.text, .sender = .{}, .sender_handle = .{} };
+        command.* = .{ .text = payload.text };
         try command.key.set(case.key);
         try command.session.set(case.target);
-        try command.sender.?.store.set(root);
-        try command.sender.?.session.set("brhkcj");
-        try command.sender_handle.?.set("00112233445566778899aabbccddeeff");
     }
     {
         const raw = try openRaw(path);

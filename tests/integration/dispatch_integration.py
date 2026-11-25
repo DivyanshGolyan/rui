@@ -5112,7 +5112,7 @@ def main(mode="all", correlation_case="all"):
             from control_fixture import raw_request
             for index in range(40):
                 wire = {"version": host_process.WIRE_VERSION, "kind": "message", "store": str(store),
-                    "key": f"{prefix}-{index}", "session": session, "sender": None, "sender_handle": None,
+                    "key": f"{prefix}-{index}", "session": session,
                     "text": {"state": "value", "value": ""}}
                 head, body = raw_request(host.rui_ready_fields["socket"], "/v1/message", json.dumps(wire, separators=(",", ":")).encode())
                 assert head.startswith(b"HTTP/1.1 200 ") and json.loads(body)["answer"]["status"] == "accepted", (head, body)

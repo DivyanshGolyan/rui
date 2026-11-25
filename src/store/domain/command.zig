@@ -335,37 +335,15 @@ fn sentDigest(comptime domain: []const u8, content_digest: *const [32]u8) [32]u8
     return digest.finalResult();
 }
 
-const reject_sent = rsql.Write(.{
-    .sql = "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,@session(?2),?3,@now)",
-    .Args = struct { key: []const u8, sender: rsql.SessionHead, position: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
-
 pub const MessageReads = struct {
     digest: [32]u8,
     saved: saved_command.Result = undefined,
-    sender: action_domain.peer_by_handle.Result = null,
     text: content_domain.Import,
     bound: []const skills_domain.BoundSkill = &.{},
 };
 
-fn claimedHandle(command: *const content_custody.MessageCommand, selector: []const u8) ?[]const u8 {
-    const handle = if (command.sender_handle) |*value| value else return null;
-    const claimed = if (command.sender) |*value| value else return null;
-    if (!claimed.store.eql(selector)) return null;
-    return handle.slice();
-}
-
-fn senderValid(command: *const content_custody.MessageCommand, selector: []const u8, found: action_domain.peer_by_handle.Result) bool {
-    if (command.sender_handle == null) return command.sender == null;
-    if (claimedHandle(command, selector) == null) return false;
-    const row = found orelse return false;
-    return command.sender.?.session.eql(&row.session.ref);
-}
-
-fn readMessage(a: anytype, selector: []const u8, command: *const content_custody.MessageCommand, reads: *MessageReads) void {
+fn readMessage(a: anytype, command: *const content_custody.MessageCommand, reads: *MessageReads) void {
     lookupCommand(a, command.key.slice(), &reads.saved);
-    if (claimedHandle(command, selector)) |handle| action_domain.liveByHandle(a, handle, &reads.sender);
 }
 
 pub const SubmitMessage = struct {
@@ -395,7 +373,6 @@ pub const SubmitMessage = struct {
         io: std.Io,
         served: *const provider_route.Served,
         tools: *const store_core.HostTools,
-        selector: []const u8,
         command: *const content_custody.MessageCommand,
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
@@ -413,7 +390,6 @@ pub const SubmitMessage = struct {
     scratch: union { plain: MessageReads, receipt: creation_receipt_read.Row, fresh: fresh_selection_read.Row } = undefined,
     target: target_session.Result = null,
     creation: *configuration_domain.ConfigurationReads = undefined,
-    sender_valid: bool = false,
     rejection: message_admission.Rejection = undefined,
     missing: ?required_settings.Missing = null,
     answer: StoredAnswer = undefined,
@@ -486,7 +462,7 @@ pub const SubmitMessage = struct {
         if (t.input.parts_saving) |saving| {
             if (try saving.step(r, t.input.io, r.faults()) != .round) return error.ContentChanged;
         }
-        readMessage(r, t.input.selector, command, message);
+        readMessage(r, command, message);
         if (command.configuration) |*configuration| {
             configuration_domain.prepareConfiguration(r, "", configuration, t.creation);
         } else {
@@ -518,14 +494,11 @@ pub const SubmitMessage = struct {
                 return .{ .round = .replay };
             },
         }
-        t.sender_valid = senderValid(command, t.input.selector, message.sender);
         if (command.configuration != null) return t.decideCreation(r);
         const session = command.session.slice();
         const target = t.target;
         const rejection: ?message_admission.Rejection = if (!session_id.valid(session))
             .invalid_session_reference
-        else if (!t.sender_valid)
-            .invalid_sender_handle
         else if (target == null)
             .unknown_session
         else if (target.?.archive_state == .archiving)
@@ -599,8 +572,6 @@ pub const SubmitMessage = struct {
         const creation = t.creation;
         const rejection: ?message_admission.Rejection = if (command.session.len != 0)
             .invalid_session_reference
-        else if (!t.sender_valid)
-            .invalid_sender_handle
         else if (command.require_model and !configuration_domain.servesProviderOf(t.input.served, &command.configuration.?, if (creation.inherits_parent and creation.parent_found.get()) creation.inherited.provider else null))
             .model_capability_unavailable
         else
@@ -709,10 +680,6 @@ pub const SubmitMessage = struct {
         t.answer = .{ .accepted = false, .missing = if (t.rejection == .missing_settings) t.missing.? else null };
         try t.answer.code.set(@tagName(t.rejection));
         try queueCommand(r, command.key.slice(), .message, command.session.slice(), &message.digest, content_id, t.refusal_diagnostic, &t.answer);
-        if (command.sender != null and t.sender_valid) {
-            const sender = message.sender.?.session;
-            r.write(reject_sent, .{ .key = command.key.slice(), .sender = sender, .position = try (try r.positions(sender)).take(1) });
-        }
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;
     }
@@ -731,12 +698,8 @@ pub const SubmitMessage = struct {
         const message = t.reads();
         const configured: ?*const configuration_domain.Applied = if (command.configuration != null) &t.creation.applied else null;
         t.answer = .{ .accepted = true };
-        const admission_id = if (command.sender != null)
-            try admitFromSession(r, &message.sender.?.session, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer)
-        else person: {
-            try queueMessageCommand(r, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer);
-            break :person try sourced_input.queue(r, &t.head, .{ .person = command.key.slice() }, text_id);
-        };
+        try queueMessageCommand(r, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer);
+        const admission_id = try sourced_input.queue(r, &t.head, .{ .person = command.key.slice() }, text_id);
         t.later = .{ .skills = .{ .admission_id = admission_id, .bound = message.bound } };
         t.admission_id = admission_id;
         return t.saveSkills(r);
@@ -754,7 +717,7 @@ pub const SubmitMessage = struct {
         return .{ .message = .{ .callback = callback, .admission = .{
             .session = &t.head.ref,
             .admission_id = t.admission_id,
-            .from_peer = t.input.command.sender != null,
+            .from_peer = false,
         } } };
     }
 

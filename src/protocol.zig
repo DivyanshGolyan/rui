@@ -49,7 +49,6 @@ const spec_content_count = count: {
     break :count total;
 };
 pub const max_request_contents = 1 + spec_content_count;
-pub const max_sender_handle_bytes = command_input.max_sender_handle_bytes;
 pub const max_environment_bytes = 64 * 1024;
 pub const max_model_bytes = model_capability.max_model_bytes;
 pub const max_code_bytes = outcome_code.max_bytes;
@@ -731,34 +730,20 @@ pub const SessionRow = struct {
     }
 };
 
-/// The slim Archived row (ArchivedRow in session_list.zig): the Archived tab's name and age only.
-pub const ArchivedFirstFields = struct {
-    position: u64,
-    admission: u64,
-    content: content_value.Value,
-    line: ?[]const u8,
-
-    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"content\":", Hole{ .json = ContentValueJson }, ",\"line\":", Hole{ .optional_string = session_list.max_first_line_bytes }, "}" };
-    pub const max_json_bytes = shapeBytes(json_shape);
-
-    pub fn writeJson(self: *const ArchivedFirstFields, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.position, self.admission, ContentValueJson{ .value = self.content }, self.line });
-    }
-};
-
 pub const ArchivedRow = struct {
     pub const Fields = struct {
         reference: []const u8,
         archive_seq: u64,
         stopped_at: u64,
         label: ?[]const u8,
-        first: ?ArchivedFirstFields,
+        first: ?FirstMessage,
+        first_prefix: ?[]const u8,
 
-        pub const json_shape = .{ "{\"reference\":", Hole{ .string = session_id_bytes }, ",\"archive_seq\":\"", Hole.decimal, "\",\"stopped_at\":\"", Hole.decimal, "\",\"label\":", Hole{ .optional_string = max_label_bytes }, ",\"first\":", Hole{ .optional_json = ArchivedFirstFields }, "}" };
+        pub const json_shape = .{ "{\"reference\":", Hole{ .string = session_id_bytes }, ",\"archive_seq\":\"", Hole.decimal, "\",\"stopped_at\":\"", Hole.decimal, "\",\"label\":", Hole{ .optional_string = max_label_bytes }, ",\"first\":", Hole{ .optional_json = FirstMessage }, ",\"first_prefix\":", Hole{ .optional_string = session_list.max_first_prefix_bytes }, "}" };
         pub const max_json_bytes = shapeBytes(json_shape);
 
         pub fn writeJson(self: *const Fields, out: *std.Io.Writer) !void {
-            try writeShape(out, json_shape, .{ self.reference, self.archive_seq, self.stopped_at, self.label, self.first });
+            try writeShape(out, json_shape, .{ self.reference, self.archive_seq, self.stopped_at, self.label, self.first, self.first_prefix });
         }
     };
     comptime {
@@ -1414,20 +1399,11 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
-            const Field = enum { key, session, sender, sender_handle, configuration, text, parts, require_model };
+            const Field = enum { key, session, configuration, text, parts, require_model };
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
                 .session => try self.readSmallString(&out.session),
-                .sender => if (!try self.readNull()) {
-                    out.sender = .{};
-                    try self.parseAddress(&out.sender.?);
-                    try out.sender.?.validate();
-                },
-                .sender_handle => if (!try self.readNull()) {
-                    out.sender_handle = .{};
-                    try self.readSmallString(&out.sender_handle.?);
-                },
                 .configuration => {
                     out.configuration = .{ .workspace = .{ .value = .{ .len = 0 } } };
                     try self.parseConfiguration(&out.configuration.?);
@@ -1436,7 +1412,7 @@ fn ParserOf(comptime Custody: type) type {
                 .parts => try self.scanParts(),
                 .require_model => out.require_model = try self.readBoolean(),
             };
-            try require(Field, seen, &.{ .key, .session, .sender, .sender_handle });
+            try require(Field, seen, &.{ .key, .session });
             if (seen.contains(.text) == seen.contains(.parts)) return error.InvalidMessage;
             if (out.session.len == 0 and out.configuration == null) return error.MissingField;
             if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
@@ -2523,10 +2499,7 @@ pub const configure_request = struct {
     pub const max_metadata_bytes = shapeBytes(head ++ reload_skills ++ require_model ++ preset ++ tail);
 };
 pub const message_request = struct {
-    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"sender\":" };
-    pub const sender = .{ "{\"store\":", store_hole, ",\"session\":", session_hole, "}" };
-    pub const no_sender = .{"null"};
-    pub const sender_handle = .{ ",\"sender_handle\":", Hole{ .optional_string = max_sender_handle_bytes } };
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole };
     pub const configuration = .{",\"configuration\":"};
     pub const text = .{",\"text\":{\"state\":\"value\",\"value\":"};
     pub const parts = .{",\"parts\":"};
@@ -3384,12 +3357,13 @@ test "Archived window wire: the window and its row limit decode both ways, refus
         .archive_seq = 42,
         .stopped_at = 1700,
         .label = null,
-        .first = .{ .position = 3, .admission = 7, .content = .{ .text = .{ .length = 5, .digest = digest } }, .line = "hello" },
+        .first = .{ .position = 3, .admission = 7, .admitted_at = 90, .sender = null, .content = .{ .text = .{ .length = 5, .digest = digest } } },
+        .first_prefix = "hello",
     };
     try row.writeJson(&row_out);
     try std.testing.expectEqualStrings(
-        "{\"reference\":\"k7m2qx\",\"archive_seq\":\"42\",\"stopped_at\":\"1700\",\"label\":null,\"first\":{\"position\":\"3\",\"admission\":\"7\",\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++
-            @as([64]u8, @splat('0')) ++ "\"},\"line\":\"hello\"}}",
+        "{\"reference\":\"k7m2qx\",\"archive_seq\":\"42\",\"stopped_at\":\"1700\",\"label\":null,\"first\":{\"position\":\"3\",\"admission\":\"7\",\"admitted_at\":\"90\",\"sender\":null,\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++
+            @as([64]u8, @splat('0')) ++ "\"}},\"first_prefix\":\"hello\"}",
         row_out.buffered(),
     );
     comptime std.debug.assert(ArchivedRow.Fields.max_json_bytes <= session_list.ArchivedRow.max_json_bytes);
@@ -3412,60 +3386,12 @@ test "a client command cannot take a key Rui keeps for its own commands" {
     }
 }
 
-test "protocol peer Store address wire parsing accepts opaque ids and preserves SQLite paths" {
-    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"target\",\"sender\":{\"store\":\"";
-    const suffix = "\",\"session\":\"k7m2qx\"},\"sender_handle\":\"handle\",\"text\":{\"state\":\"value\",\"value\":\"\"}}";
-    const cases = [_]struct { store: []const u8, valid: bool }{
-        .{ .store = "0123456789abcdef0123456789abcdef", .valid = true },
-        .{ .store = "/", .valid = true },
-        .{ .store = "/store with spaces/é", .valid = true },
-        .{ .store = "relative", .valid = false },
-        .{ .store = "0123456789abcdef0123456789abcde", .valid = false },
-        .{ .store = "0123456789abcdef0123456789abcdef0", .valid = false },
-        .{ .store = "0123456789ABCDEF0123456789abcdef", .valid = false },
-        .{ .store = "g123456789abcdef0123456789abcdef", .valid = false },
-        .{ .store = "/store/", .valid = false },
-        .{ .store = "/store//child", .valid = false },
-        .{ .store = "/store/./child", .valid = false },
-        .{ .store = "/store/../child", .valid = false },
-        .{ .store = "/store\\n", .valid = false },
-        .{ .store = "/store\\u007f", .valid = false },
-    };
-    for (cases) |case| {
-        var buffer: [512]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ prefix, case.store, suffix });
-        var source: MetadataSource = .{ .input = json };
-        var parser = Tested.Parser{ .source = &source, .captured = &.{.{}} };
-        if (case.valid) {
-            const request = try parseForTest(&parser);
-            try std.testing.expectEqualStrings(case.store, request.message.sender.?.store.slice());
-            try std.testing.expectEqualStrings("k7m2qx", request.message.sender.?.session.slice());
-        } else try std.testing.expectError(error.InvalidRuiAddress, parseForTest(&parser));
-    }
-}
-
-test "peer wire rejects old sender strings, malformed addresses and missing handles" {
-    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"target\",\"sender\":";
-    const text = ",\"text\":{\"state\":\"omitted\"}}";
-    const cases = [_]struct { json: []const u8, failure: anyerror }{
-        .{ .json = prefix ++ "\"peer\",\"sender_handle\":null" ++ text, .failure = error.InvalidJsonShape },
-        .{ .json = prefix ++ "{\"store\":\"/s\"},\"sender_handle\":null" ++ text, .failure = error.MissingField },
-        .{ .json = prefix ++ "{\"store\":\"relative\",\"session\":\"peer\"},\"sender_handle\":null" ++ text, .failure = error.InvalidRuiAddress },
-        .{ .json = prefix ++ "null" ++ text, .failure = error.MissingField },
-    };
-    for (cases) |case| {
-        var source: MetadataSource = .{ .input = case.json };
-        var parser = Tested.Parser{ .source = &source };
-        try std.testing.expectError(case.failure, parseForTest(&parser));
-    }
-}
-
 test "omitted loaded tools preserve pre-T4a Configure and creating Message digests" {
     var configure: Tested.ConfigureCommand = .{};
     try std.testing.expectEqualStrings("e983bd4a7dce4a1ec777d065815928f654ac824dc57a57b397b8f78e7a4ede3a", &std.fmt.bytesToHex(configure.semanticDigest(), .lower));
     var message: Tested.MessageCommand = .{ .configuration = .{} };
     message.text = .{ .state = .value, .length = 2, .digest = contentDigest("go") };
-    try std.testing.expectEqualStrings("29da99db4ed9dcdf55128d1f956d9551106135b126ec23d2e97cc768618b8127", &std.fmt.bytesToHex(message.semanticDigest(), .lower));
+    try std.testing.expectEqualStrings("6a5d7d992947a0b1aa248f637301465737871a6f69a24c3f0d9f027bce889f7d", &std.fmt.bytesToHex(message.semanticDigest(), .lower));
     const previous = configure.semanticDigest();
     configure.configuration.loaded_tools = try .of(&.{});
     try std.testing.expect(!std.mem.eql(u8, &previous, &configure.semanticDigest()));
@@ -3528,7 +3454,7 @@ test "protocol sparse creation preserves all omitted settings independent of fie
                 }
                 try writer.writeAll("},\"session\":\"\"");
                 if (comptime std.mem.eql(u8, kind, "message"))
-                    try writer.writeAll(",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}");
+                    try writer.writeAll(",\"text\":{\"state\":\"value\",\"value\":\"\"}");
                 try writer.writeByte('}');
                 var source: MetadataSource = .{ .input = writer.buffered() };
                 const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
@@ -3573,7 +3499,7 @@ test "activity search wire validates query and paired backward cursor" {
 
 test "WIR-1 wire_object_grammar" {
     const v = "{\"version\":\"" ++ wire_version ++ "\",";
-    const message = v ++ "\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,";
+    const message = v ++ "\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",";
     const inspect = v ++ "\"kind\":\"inspect_session\",\"store\":\"s\",\"session\":\"peer\",";
     const content = v ++ "\"kind\":\"activity_content\",\"store\":\"s\",\"session\":\"peer\",";
     const configure = v ++ "\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{";
@@ -3631,7 +3557,7 @@ test "creation leaves a missing model to the Host and refuses a null model while
             inline for (.{ "", "\"model\":null", "\"model\":\"\"", "\"model\":\"custom\"" }, 0..) |member, model| {
                 const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ kind ++ "\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"require_model\":" ++
                     (if (require_model) "true" else "false") ++ ",\"configuration\":{" ++ member ++ "}" ++
-                    (if (comptime std.mem.eql(u8, kind, "message")) ",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}" else "") ++ "}";
+                    (if (comptime std.mem.eql(u8, kind, "message")) ",\"text\":{\"state\":\"value\",\"value\":\"\"}" else "") ++ "}";
                 var source: MetadataSource = .{ .input = json };
                 const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
                 var parser: Tested.Parser = .{ .source = &source, .captured = &.{captured} };
@@ -3773,7 +3699,7 @@ test "skills native wire preserves explicit reload intent and has no skill reque
     var plain = request.configure;
     plain.reload_skills = false;
     try std.testing.expect(!std.mem.eql(u8, &digest, &plain.semanticDigest()));
-    const message = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
+    const message = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",";
     for ([_][]const u8{ message ++ "\"skill\":\"demo\"}", message ++ "\"skills\":[\"demo\"]}" }) |removed| {
         source = .{ .input = removed };
         parser = .{ .source = &source };
@@ -3787,7 +3713,7 @@ test "inline skills leave every existing canonical mutation digest unchanged" {
     const cases = [_]Case{
         .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{}}", .digest = "db4015965f28197d8bfae4b13f61edb8b1047904643d764a7cc8ce10f9680e30" },
         .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{},\"reload_skills\":true}", .digest = "14764e8bb9e20125961c2b950bac15e919dfc6653fe2cc7359b027faa0ee89b5" },
-        .{ .body = head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}}", .digest = "e8cea677d75e3de98bcb68ccbbfcc6cda23fe42bd180da1c742f741f8c73975f" },
+        .{ .body = head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":\"\"}}", .digest = "8d3fdad56d92ab61dc23c434c660689e1f34c4faef3ce2a7cab6031b25c9b601" },
         .{ .body = head ++ "\"kind\":\"session_stop\",\"session\":\"k7m2qx\"}", .digest = "f8e8c1514a14cc72fe18bad111508cffa2b5b55812f6ba2deaed959740940d48" },
         .{ .body = head ++ "\"kind\":\"session_archive\",\"session\":\"k7m2qx\",\"archived\":true}", .digest = "ab777e65fc2476bbadf1d8eb793e2bf4d7d3bd49334bd79b4ca15a0f0c536d6b" },
         .{ .body = head ++ "\"kind\":\"session_archive\",\"session\":\"k7m2qx\",\"archived\":false}", .digest = "07e24427f9ec75478b887d3d2e5bd3a072bcc57a587c6d0826eb5bf0f6aa86df" },
@@ -3875,7 +3801,7 @@ test "creation parsers leave Workspace completeness to Host admission" {
     inline for (.{
         .{ "configure", "" },
         .{ "configure", ",\"preset\":\"review\"" },
-        .{ "message", ",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}" },
+        .{ "message", ",\"text\":{\"state\":\"value\",\"value\":\"\"}" },
     }) |surface| {
         inline for (.{ "", "\"tools\":[]", "\"tools\":[\"bash\"]" }) |members| {
             const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ surface[0] ++ "\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"require_model\":true,\"configuration\":{\"model\":\"model\"" ++ (if (members.len == 0) "" else ",") ++ members ++ "}" ++ surface[1] ++ "}";

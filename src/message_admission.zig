@@ -2,7 +2,6 @@ pub const Rejection = enum {
     session_archiving,
     invalid_session_reference,
     unknown_session,
-    invalid_sender_handle,
     unsupported_permission_mode,
     unknown_connection,
     connection_unserved,

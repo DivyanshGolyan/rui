@@ -9,7 +9,6 @@ const provider_route = @import("../../provider_route.zig");
 const session_archive = @import("../../session_archive.zig");
 const session_id = @import("../../session_id.zig");
 const session_list = @import("../../session_list.zig");
-const first_line = @import("../../first_line.zig");
 const session_work = @import("../../session_work.zig");
 const tool_name = @import("../../tool_name.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
@@ -281,15 +280,14 @@ pub fn retryCrossings(a: *ReadAccess, from: u64, now: u64, crossings: *RetryCros
 
 // The Archived window: one statement per page, newest archive first. The page is the keyed range of
 // session_tab, bounded by LIMIT N+1, so `more` is exact in the direction read. Each row joins its first
-// Message once (report.zig's first_admission_join: the same rule as FirstCandidates). The line is that
-// Message's first display line (first_line.firstLine, the rule the overview's first-line read uses),
-// read from the first 512 bytes and only when the Message is inline Text. Parts-form first Messages leave
-// the line NULL; their line comes from the overview's parts read.
+// Message once (report.zig's first_admission_join: the same rule as FirstCandidates) and names it as the
+// live row does (report.zig's firstMessage). The prefix is that Message's first 512 bytes, raw, and only when it
+// is inline Text; a parts-form first Message leaves it NULL and its line comes from the overview's parts read.
 const archived_page_capacity = session_list.max_window_rows + 1;
 
 const archived_columns = "session.archive_seq,session.session_ref,ostop.stopped_at,session.label," ++
-    report_domain.first_pick_position_columns ++ "," ++ report_domain.first_pick_content_columns ++ "," ++
-    "CASE WHEN first_content.private=0 AND first_content.form=0 THEN substr(@payload(first_content),1,512) END AS first_line";
+    report_domain.first_pick_columns ++ "," ++
+    "CASE WHEN first_content.private=0 AND first_content.form=0 THEN substr(@payload(first_content),1,512) END AS first_prefix";
 
 const ArchivedWindowRow = struct {
     archive_seq: rsql.Positive,
@@ -298,11 +296,13 @@ const ArchivedWindowRow = struct {
     label: ?Bounded(tool_presentation.max_label_bytes),
     first_admission: ?rsql.Positive,
     first_position: ?rsql.Positive,
+    first_admitted_at: ?rsql.Positive,
+    first_sender: ?SessionText,
     first_length: ?u64,
     first_digest: ?[32]u8,
     first_private: ?bool,
     first_form: ?u8,
-    first_line: ?rsql.Blob(512),
+    first_prefix: ?rsql.Blob(session_list.max_first_prefix_bytes),
 };
 
 const archived_window_join = " FROM session @index(session_tab) LEFT JOIN core_command ocmd ON ocmd.command_seq=session.archive_seq " ++
@@ -332,6 +332,8 @@ pub const archived_oldest_page = rsql.Read(.{
 });
 
 const ArchivedPage = struct {
+    /// One row is over 1 KiB, so it decodes in place here and is copied into `rows`.
+    decoded: ArchivedWindowRow = undefined,
     rows: [archived_page_capacity]ArchivedWindowRow = undefined,
     count: usize = 0,
     failure: ?error{CorruptStore} = null,
@@ -345,24 +347,44 @@ const ArchivedPage = struct {
         page.count += 1;
         return true;
     }
+
+    /// Resets the small fields only: a whole-struct store would write all 37 KB of rows.
+    fn reset(page: *ArchivedPage) void {
+        page.count = 0;
+        page.failure = null;
+    }
+
+    /// Settles a page read with one row beyond `size`: refuses a damaged read, keeps `size` rows and says whether
+    /// the extra row was there.
+    fn settle(page: *ArchivedPage, size: usize) error{CorruptStore}!bool {
+        if (page.failure) |err| return err;
+        const beyond = page.count > size;
+        page.count = @min(page.count, size);
+        return beyond;
+    }
+
+    fn held(page: *ArchivedPage) []ArchivedWindowRow {
+        return page.rows[0..page.count];
+    }
+
+    /// The keys of the newest and the oldest held row, null when none is held.
+    fn edges(page: *const ArchivedPage) struct { first: ?u64, last: ?u64 } {
+        if (page.count == 0) return .{ .first = null, .last = null };
+        return .{ .first = page.rows[0].archive_seq.get(), .last = page.rows[page.count - 1].archive_seq.get() };
+    }
 };
 
-/// The first display line of an inline first Message: first_line.firstLine, cut to the line bound. The client
-/// escapes it for the terminal exactly as it does a line it reads itself.
-fn archivedLine(prefix: ?*const rsql.Blob(512), text: *Bounded(first_line.max_line_bytes)) ?[]const u8 {
-    const bytes = utf8_validation.completePrefix((prefix orelse return null).slice());
-    const line = first_line.firstLine(bytes);
-    if (line.len == 0) return null;
-    text.* = first_line.cut(first_line.max_line_bytes, line);
-    return text.slice();
+/// The raw leading bytes of an inline Text first Message, whole UTF-8 scalars only. A screen's line rule is the
+/// screen's.
+fn firstPrefix(blob: ?*const rsql.Blob(session_list.max_first_prefix_bytes)) ?[]const u8 {
+    const bytes = utf8_validation.completePrefix((blob orelse return null).slice());
+    return if (bytes.len == 0) null else bytes;
 }
 
 /// Reads one Archived window page in one round. `head` and `below` read newest first; `above` and `tail`
 /// read oldest first from their key and are returned newest first.
 fn readArchivedWindow(a: *ReadAccess, window: session_list.ArchivedWindow, generation: u64, page: *ArchivedPage, visitor: anytype) !void {
-    // Resets the small fields only: a whole-struct store would write all 37 KB of rows.
-    page.count = 0;
-    page.failure = null;
+    page.reset();
     const cursor = window.cursor;
     const size: usize = window.rows;
     var more_above = false;
@@ -380,41 +402,26 @@ fn readArchivedWindow(a: *ReadAccess, window: session_list.ArchivedWindow, gener
     if (newest_below) |below| {
         a.readEach(archived_newest_page, .{ .below = below, .limit = size + 1 }, size + 1, page);
         try store_access.runAs(a, error.SessionReadFailed);
-        if (page.failure) |err| return err;
-        more_below = page.count > size;
+        more_below = try page.settle(size);
         more_above = std.meta.activeTag(cursor) == .below;
-        page.count = @min(page.count, size);
     } else if (oldest_above) |above| {
         a.readEach(archived_oldest_page, .{ .above = above, .limit = size + 1 }, size + 1, page);
         try store_access.runAs(a, error.SessionReadFailed);
-        if (page.failure) |err| return err;
         // The oldest-first read keeps the rows nearest the cursor; the extra row is further away.
-        more_above = page.count > size;
+        more_above = try page.settle(size);
         more_below = std.meta.activeTag(cursor) == .above;
-        page.count = @min(page.count, size);
-        std.mem.reverse(ArchivedWindowRow, page.rows[0..page.count]);
+        std.mem.reverse(ArchivedWindowRow, page.held());
     }
     try visitor.head();
-    var text: Bounded(first_line.max_line_bytes) = undefined;
-    for (page.rows[0..page.count]) |*row| {
+    for (page.held()) |*row| {
         if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
-        const first: ?session_list.ArchivedFirst = if (row.first_admission) |admission| .{
-            .admission = admission.get(),
-            .position = (row.first_position orelse return error.CorruptStore).get(),
-            .content = try content_parts.publicValue(&.{
-                .byte_length = row.first_length orelse return error.CorruptStore,
-                .digest = row.first_digest orelse return error.CorruptStore,
-                .private = row.first_private orelse return error.CorruptStore,
-                .form = row.first_form orelse return error.CorruptStore,
-            }, .{ .message = admission.get() }),
-            .line = archivedLine(if (row.first_line) |*prefix| prefix else null, &text),
-        } else null;
         var values: session_list.ArchivedRow = .{
             .reference = row.session_ref.slice(),
             .archive_seq = row.archive_seq.get(),
             .stopped_at = row.stopped_at.get(),
             .label = if (row.label) |*label| label.slice() else null,
-            .first = first,
+            .first = try report_domain.firstMessage(row, if (row.first_admission) |admission| admission.get() else 0),
+            .first_prefix = firstPrefix(if (row.first_prefix) |*prefix| prefix else null),
         };
         try visitor.archivedRow(&values);
     }
@@ -422,8 +429,8 @@ fn readArchivedWindow(a: *ReadAccess, window: session_list.ArchivedWindow, gener
     const since = (change_ring.Token{ .instance = a.store.instance, .generation = generation }).format(&token);
     try visitor.tail(.{ .window = .{
         .since = since,
-        .first = if (page.count != 0) page.rows[0].archive_seq.get() else null,
-        .last = if (page.count != 0) page.rows[page.count - 1].archive_seq.get() else null,
+        .first = page.edges().first,
+        .last = page.edges().last,
         .more_above = more_above,
         .more_below = more_below,
     } });
