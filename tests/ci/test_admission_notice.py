@@ -32,7 +32,8 @@ def comment_api(conclusion="failure", jobs=None, pr=None, comments=()):
         f"repos/{REPO}/check-runs/7/annotations": [
             {"annotation_level": "failure", "message": "UI PRs need screen evidence"},
             {"annotation_level": "failure", "message": "Process completed with exit code 1."},
-            {"annotation_level": "warning", "message": "slow"}],
+            {"annotation_level": "warning", "message": "slow"},
+            {"annotation_level": "failure", "message": "ping @someone"}],
         f"repos/{REPO}/issues/5/comments": list(comments),
     })
 
@@ -46,6 +47,7 @@ class CommentTest(unittest.TestCase):
         self.assertIn("- UI PRs need screen evidence", fields["body"])
         self.assertNotIn("exit code", fields["body"])
         self.assertNotIn("slow", fields["body"])
+        self.assertIn("ping @\u200bsomeone", fields["body"])
         again = comment_api(comments=[{"body": fields["body"]}])
         self.assertIsNone(comment(again, REPO, 1))
         self.assertEqual(again.posts, [])

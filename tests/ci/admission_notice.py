@@ -27,6 +27,8 @@ def reasons(annotations):
     for item in annotations:
         message = (item.get("message") or "").strip()
         if item.get("annotation_level") == "failure" and message and not message.startswith(NOISE):
+            # Annotations come from the PR's own code; keep them from mentioning anyone.
+            message = message.replace("@", "@\u200b")[:500]
             if message not in found:
                 found.append(message)
     return found
@@ -37,7 +39,7 @@ def comment_body(run, job, annotations):
     lines = reasons(annotations) or ["No error annotation; open the job for its log."]
     listed = "\n".join(f"- {line}" for line in lines)
     return (f"{marker}\nAdmission failed for `{run['head_sha'][:12]}` ([job]({job['html_url']})):\n\n{listed}\n\n"
-            "A body fix reruns admission by itself; a code fix needs a push.")
+            "If only `plan` and `admission` failed, editing the PR body reruns them; otherwise push a fix.")
 
 
 def comment(api, repo, run_id):

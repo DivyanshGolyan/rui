@@ -203,7 +203,8 @@ def main():
                 print(f"screens_required={str(required).lower()}", file=f)
         reason = refusal(paths, body, base=base)
     if reason:
-        print(reason, file=sys.stderr)
+        # The annotation is what admission_notice.py comments on the PR.
+        print("::error::" + reason.replace("%", "%25").replace("\n", "%0A"), file=sys.stderr)
         return 1
     return 0
 
