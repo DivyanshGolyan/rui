@@ -8,6 +8,7 @@ const session_report = @import("../../session_report.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
+const saved_label = @import("../../saved_label.zig");
 const tool_name = @import("../../tool_name.zig");
 const app_tools = @import("../../tool_record.zig").app_tools;
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -1788,7 +1789,7 @@ fn RevisionChunk(comptime Watcher: type) type {
         }
 
         fn settings(chunk: *@This(), row: *const RevisionRow) error{CorruptStore}!session_report.Revision {
-            chunk.label = tool_presentation.readStoredLabel(row.label);
+            chunk.label = saved_label.labelWords(row.label);
             return .{
                 .revision = row.revision.get(),
                 .command_key = row.command_key.slice(),

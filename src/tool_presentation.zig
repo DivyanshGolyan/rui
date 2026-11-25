@@ -5,11 +5,11 @@ const saved_label = @import("saved_label.zig");
 
 pub const max_description_bytes = @import("tool_line.zig").max_bytes;
 
+pub const max_label_bytes = saved_label.max_label_bytes;
+
 comptime {
     std.debug.assert(max_description_bytes == saved_label.max_bytes);
 }
-
-pub const max_label_bytes = 100;
 
 pub const max_session_bytes = session_id.max_reference_bytes;
 
@@ -238,34 +238,12 @@ pub fn validLabel(bytes: []const u8) bool {
     return bytes.len <= max_label_bytes and ToolPresentation.validDescription(bytes);
 }
 
-/// A Session Label as a reader gets it: its words as one tidy line of at most max_label_bytes, or null when it has none. Total; the door (`validLabel`) is where a bad Label is refused.
-fn readLabel(stored: []const u8) ?Bounded(max_label_bytes) {
-    return saved_label.readWords(max_label_bytes, stored);
-}
-
-/// A stored Session Label as a reader gets it: `readLabel` over an optional column. Every read of a stored Label goes through here, so a missed reader shows up by search.
-pub fn readStoredLabel(stored: ?Bounded(max_label_bytes)) ?Bounded(max_label_bytes) {
-    const label = stored orelse return null;
-    return readLabel(label.slice());
-}
-
 test "a Label is one non-blank line of at most 100 bytes" {
     const longest: [max_label_bytes]u8 = @splat('x');
     const overlong: [max_label_bytes + 1]u8 = @splat('x');
     try std.testing.expect(validLabel("Review PR 412") and validLabel(&longest) and validLabel("Café"));
     for ([_][]const u8{ "", " \t", "one\ntwo", "one\u{2028}two", "\xff", &overlong }) |invalid|
         try std.testing.expect(!validLabel(invalid));
-}
-
-test "TPR-3 a saved Session Label reads as one line of at most 100 bytes or none" {
-    const exact: [max_label_bytes]u8 = @splat('x');
-    const long: [150]u8 = @splat('x');
-    try std.testing.expectEqualStrings("Review PR 412", readLabel("Review PR 412").?.slice());
-    try std.testing.expectEqualStrings("two lines", readLabel("two\nlines").?.slice());
-    try std.testing.expect(readLabel(" ") == null);
-    try std.testing.expect(readLabel("") == null);
-    try std.testing.expectEqualStrings(&exact, readLabel(&long).?.slice());
-    try std.testing.expectEqualStrings("\u{fffd}", readLabel("\xff").?.slice());
 }
 
 test "saved call descriptions allow 200 bytes without widening Labels" {
