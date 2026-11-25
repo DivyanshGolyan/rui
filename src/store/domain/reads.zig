@@ -879,20 +879,14 @@ const PresentationRead = struct {
 
     fn finish(read: *PresentationRead) !void {
         try read.proposal.found();
-        read.out.* = try presentationOf(try plainLine(read.description), read.outcome, read.code, read.authorized, read.out.publication_position);
+        read.out.* = try presentationOf(read.description, read.outcome, read.code, read.authorized, read.out.publication_position);
     }
 };
-
-/// A saved call line's words as the plain Line a row shows.
-pub fn plainLine(description: ?Bounded(tool_presentation.max_description_bytes)) error{CorruptStore}!?tool_presentation.Line {
-    const words = description orelse return null;
-    return tool_presentation.Line.plain(words.slice()) catch return error.CorruptStore;
-}
 
 /// The one place a call line, a derived code and an authorization become a presentation.
 /// A resolved call that recorded an outcome line shows it, finished as that outcome chose; every other row shows its call line, plain, as `done`.
 pub fn presentationOf(
-    call_line: ?tool_presentation.Line,
+    description: ?Bounded(tool_presentation.max_description_bytes),
     outcome: StoredOutcome,
     code: ?tool_presentation.ToolPresentation.Code,
     authorized: ?bool,
@@ -900,7 +894,8 @@ pub fn presentationOf(
 ) error{CorruptStore}!tool_presentation.ToolPresentation {
     const derived: tool_presentation.ToolPresentation.Code = code orelse if (authorized orelse false) .unresolved else .pending_permission;
     if (try outcome.line()) |shown| return tool_presentation.ToolPresentation.of(shown, derived, std.enums.fromInt(tool_presentation.Completion, outcome.completion orelse return error.CorruptStore) orelse return error.CorruptStore, publication_position);
-    return tool_presentation.ToolPresentation.of(call_line, derived, .done, publication_position);
+    const line: ?tool_presentation.Line = if (description) |saved| tool_presentation.Line.ofSaved(saved.slice()) else null;
+    return tool_presentation.ToolPresentation.of(line, derived, .done, publication_position);
 }
 
 /// A hosted call's row: the action it took, how many targets the Store holds, and the leading bytes of the first target and of
@@ -1001,8 +996,7 @@ const HostedRead = struct {
         if (row.targets_total > hosted_action.max_targets) return error.CorruptStore;
         const target: []const u8 = if (row.target_prefix) |*prefix| prefix.slice() else "";
         const pattern: []const u8 = if (row.pattern_prefix) |*prefix| prefix.slice() else "";
-        const line = try plainLine(tool_line.ofHosted(kind, target, pattern));
-        read.presentation.* = try presentationOf(line, .{}, if (row.call_failed) .failed else .succeeded, null, read.position);
+        read.presentation.* = try presentationOf(tool_line.ofHosted(kind, target, pattern), .{}, if (row.call_failed) .failed else .succeeded, null, read.position);
         read.at = (row.resolved_at orelse return error.CorruptStore).get();
         const action = read.action orelse return;
         action.kind = kind;

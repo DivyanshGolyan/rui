@@ -486,7 +486,7 @@ fn unresolvedRow(row: *const unresolved_actions.Row) ValuesError!session_report.
             .call_id = .{ .length = row.call_id_length, .digest = row.call_id_digest },
             .server = server,
             .arguments = .{ .length = row.arguments_length, .digest = row.arguments_digest },
-            .presentation = try reads_domain.presentationOf(try reads_domain.plainLine(row.description), .{}, null, row.authorized, null),
+            .presentation = try reads_domain.presentationOf(row.description, .{}, null, row.authorized, null),
         },
     };
 }
@@ -508,7 +508,7 @@ fn resolvedRow(row: *const resolved_actions.Row) ValuesError!session_report.Row 
             .code = row.resolution_code.slice(),
             .acceptance_position = row.acceptance_position.get(),
             .result = try @import("content_parts.zig").publicValue(&.{ .byte_length = row.result_length, .digest = row.result_digest, .private = row.result_private, .form = row.result_form }, .{ .action = row.action_id.get() }),
-            .presentation = try reads_domain.presentationOf(try reads_domain.plainLine(row.description), .{ .text = row.outcome_text, .link_at = row.outcome_link_at, .link_session = row.outcome_link_session, .label = row.outcome_label, .completion = row.outcome_completion }, try presentedCode(row.resolution_code.slice()), null, optional(row.publication)),
+            .presentation = try reads_domain.presentationOf(row.description, .{ .text = row.outcome_text, .link_at = row.outcome_link_at, .link_session = row.outcome_link_session, .label = row.outcome_label, .completion = row.outcome_completion }, try presentedCode(row.resolution_code.slice()), null, optional(row.publication)),
         },
     };
 }
@@ -524,7 +524,7 @@ fn rejectedRow(row: *const rejected_calls.Row) ValuesError!session_report.Row {
             .name = .{ .length = row.name_length, .digest = row.name_digest },
             .call_id = .{ .length = row.call_id_length, .digest = row.call_id_digest },
             .arguments = .{ .length = row.arguments_length, .digest = row.arguments_digest },
-            .presentation = try reads_domain.presentationOf(try reads_domain.plainLine(row.description), .{}, try presentedCode(row.rejection_code.slice()), null, optional(row.publication)),
+            .presentation = try reads_domain.presentationOf(row.description, .{}, try presentedCode(row.rejection_code.slice()), null, optional(row.publication)),
         },
     };
 }
