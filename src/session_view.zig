@@ -1465,7 +1465,7 @@ test "turn and agent ending marks use their table tones" {
         "\x1b[39m▪\x1b[39m Agent 9f8e7d stopped\n", row_text.visible(out.buffered()));
 }
 
-test "ending tails are quiet and joined in destination then key order" {
+test "an ending's place is quiet and joined after its words" {
     const Sink = struct {
         out: *std.Io.Writer,
         pub fn feed(self: *@This(), bytes: []const u8) !void {
