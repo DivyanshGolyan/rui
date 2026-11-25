@@ -71,6 +71,16 @@ class Frame(collections.namedtuple("Frame", "columns lines cursor visible cells 
         return (bg, fg) if cell.reverse else (fg, bg)
 
 
+def names_chat(title, label):
+    """Whether the terminal title is the one Rui sets while chat `label` is open: `LABEL · rui`, then ` · N needs you`."""
+    return title == f"{label} · rui" or title.startswith(f"{label} · rui · ")
+
+
+def chat_footer_shown(frame):
+    """Whether the narrow chat's footer, which leads with the back control and never names the chat, is drawn."""
+    return any(line == " ‹" or line.startswith(" ‹ ") for line in frame.split("\n"))
+
+
 def shown(text, screen):
     pattern = "(?:\n *)?".join("(?: |\n *)" if c == " " else re.escape(c) for c in text)
     return re.search(pattern, screen) is not None
@@ -80,7 +90,7 @@ Handle = ctypes.c_void_p
 WRITE_PTY = ctypes.CFUNCTYPE(None, Handle, Handle, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t)
 COLOR_SCHEME = ctypes.CFUNCTYPE(ctypes.c_bool, Handle, Handle, ctypes.POINTER(ctypes.c_int))
 OPT_USERDATA, OPT_WRITE_PTY, OPT_COLOR_SCHEME, OPT_COLOR_FOREGROUND, OPT_COLOR_BACKGROUND = 1, 2, 8, 12, 13
-DATA_CURSOR_X, DATA_CURSOR_Y = 3, 4
+DATA_CURSOR_X, DATA_CURSOR_Y, DATA_TITLE = 3, 4, 12
 STATE_DIRTY, STATE_ROW_ITERATOR = 3, 4
 ROW_DIRTY, ROW_CELLS = 1, 3
 CELL_RAW, CELL_STYLE, CELL_GRAPHEMES_UTF8 = 1, 2, 9
@@ -88,6 +98,10 @@ CELL_WIDE, WIDE_SPACER_TAIL = 3, 2
 COLOR_PALETTE, COLOR_RGB = 1, 2
 STYLE_BOLD, STYLE_INVERSE = 1, 1 << 4
 OUT_OF_SPACE = -3
+
+
+class String(ctypes.Structure):
+    _fields_ = [("ptr", ctypes.c_void_p), ("len", ctypes.c_size_t)]
 
 
 class Rgb(ctypes.Structure):
@@ -230,6 +244,13 @@ class ScreenCapture:
         self.plain_total = 0
         self.clipboard = []
         self.clipboard_pending = b""
+
+    @property
+    def title(self):
+        """The window title the program set with OSC 0 or 2, empty before it sets one."""
+        value = String()
+        assert library().ghostty_terminal_get(self.terminal, DATA_TITLE, ctypes.byref(value)) == 0
+        return ctypes.string_at(value.ptr, value.len).decode("utf-8", "replace") if value.len else ""
 
     @property
     def screen(self):

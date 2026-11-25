@@ -177,13 +177,15 @@ test "opening and decision progress share the footer while unresolved decisions 
     try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Opening…", .width = 80 }).left);
 }
 
-pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.max_name_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + "100% context left".len + 4 * " · ".len + " · ".len + "Stopping and archiving".len;
+pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + "100% context left".len + 4 * " · ".len + "Stopping and archiving".len;
 
-pub fn factsRow(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []const u8, badge: ?[]const u8, width: usize, method: Method) []const u8 {
-    return factsSpans(buffer, facts, name, badge, width, method).text;
+/// The footer's facts row: model, effort and context or folder, then the archive `badge`. The chat's name
+/// is never part of it; the Session list and the terminal title carry the name.
+pub fn factsRow(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, badge: ?[]const u8, width: usize, method: Method) []const u8 {
+    return factsSpans(buffer, facts, badge, width, method).text;
 }
 
-pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []const u8, badge: ?[]const u8, width: usize, method: Method) FooterSpans {
+pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, badge: ?[]const u8, width: usize, method: Method) FooterSpans {
     var result: FooterSpans = .{};
     const separator = session_line.cells(session_line.separator, method);
     const tail = if (badge) |text| separator + session_line.cells(text, method) else 0;
@@ -194,19 +196,17 @@ pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []
         const short = @import("home_path.zig").shortPath(value.home, path);
         break :blk std.fmt.bufPrint(&folder_buffer, "{s}{s}", .{ short.prefix, short.rest }) catch unreachable;
     } else null else null;
-    const parts: [5]?[]const u8 = if (facts) |value| .{
-        if (folder == null) value.name else null,
+    const parts: [4]?[]const u8 = if (facts) |value| .{
         value.model,
         if (value.effort) |effort| @tagName(effort) else null,
         if (if (folder == null and (value.left orelse 101) <= 50) value.left else null) |left| std.fmt.bufPrint(&percent, "{d}% context left", .{left}) catch unreachable else null,
         folder,
-    } else .{ name[0..@min(name.len, session_line.max_name_bytes)], null, null, null, null };
-    var kept: [5]?[]const u8 = @splat(null);
+    } else @splat(null);
+    var kept: [4]?[]const u8 = @splat(null);
     var used: usize = 0;
     var count: usize = 0;
     var model_buffer: [facts_bytes]u8 = undefined;
-    var name_buffer: [facts_bytes]u8 = undefined;
-    for (if (folder != null) [_]usize{ 2, 1, 4, 3, 0 } else [_]usize{ 2, 1, 3, 0, 4 }) |index| {
+    for ([_]usize{ 1, 0, 2, 3 }) |index| {
         const text = parts[index] orelse continue;
         if (text.len == 0) continue;
         const join = if (count != 0) separator else 0;
@@ -214,10 +214,6 @@ pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []
         var shown = text;
         if (session_line.cells(text, method) > available) {
             if (index == 0) {
-                var out = std.Io.Writer.fixed(&name_buffer);
-                words(&out, text, available, method);
-                shown = out.buffered();
-            } else if (index == 1) {
                 const mark = session_line.cells(session_line.ellipsis, method);
                 if (available < mark) continue;
                 const prefix = text[0..session_line.fit(text, available - mark, method).len];
@@ -239,8 +235,8 @@ pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []
         const start = out.end;
         out.writeAll(text) catch unreachable;
         result.append(buffer[start..out.end], switch (index) {
-            1 => .model,
-            2 => .effort,
+            0 => .model,
+            1 => .effort,
             else => null,
         });
     };
@@ -254,41 +250,30 @@ pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []
     return result;
 }
 
-fn words(out: *std.Io.Writer, text: []const u8, room: usize, method: Method) void {
-    if (session_line.cells(text, method) <= room) return out.writeAll(text) catch unreachable;
-    const mark = session_line.cells(session_line.ellipsis, method);
-    if (room <= mark) return;
-    const fits = session_line.fit(text, room - mark, method).len;
-    var end = fits;
-    if (text[fits] != ' ') end = std.mem.lastIndexOfScalar(u8, text[0..fits], ' ') orelse fits;
-    end = std.mem.trimEnd(u8, text[0..end], " ").len;
-    if (end == 0) end = fits;
-    out.print("{s}{s}", .{ text[0..end], session_line.ellipsis }) catch unreachable;
-}
-
 test "the facts row ends with the archive badge, which stays when the row is short" {
     var buffer: [facts_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("k7m2qx", factsRow(&buffer, null, "k7m2qx", null, 78, .unicode));
-    try std.testing.expectEqualStrings("k7m2qx · Archived · /unarchive", factsRow(&buffer, null, "k7m2qx", "Archived · /unarchive", 78, .unicode));
-    const facts: session_line.Facts = .{ .name = "Fix flaky store test", .model = "gpt-6.1-sol" };
-    const wide = factsRow(&buffer, facts, "k7m2qx", "Archived · /unarchive", 78, .unicode);
-    try std.testing.expectEqualStrings("Fix flaky store test · gpt-6.1-sol · Archived · /unarchive", wide);
-    const short = factsRow(&buffer, facts, "k7m2qx", "Archived · /unarchive", 40, .unicode);
+    try std.testing.expectEqualStrings("", factsRow(&buffer, null, null, 78, .unicode));
+    try std.testing.expectEqualStrings("Archived · /unarchive", factsRow(&buffer, null, "Archived · /unarchive", 78, .unicode));
+    const facts: session_line.Facts = .{ .model = "gpt-6.1-sol" };
+    const wide = factsRow(&buffer, facts, "Archived · /unarchive", 78, .unicode);
+    try std.testing.expectEqualStrings("gpt-6.1-sol · Archived · /unarchive", wide);
+    const short = factsRow(&buffer, facts, "Archived · /unarchive", 30, .unicode);
     try std.testing.expect(std.mem.endsWith(u8, short, " · Archived · /unarchive"));
-    try std.testing.expect(session_line.cells(short, .unicode) <= 40);
+    try std.testing.expect(session_line.cells(short, .unicode) <= 30);
 }
 
-test "a short facts row preserves editable words before context and name" {
+test "a short facts row preserves editable words before context" {
     var buffer: [facts_bytes]u8 = undefined;
-    const facts: session_line.Facts = .{ .name = "Fix retry deadline", .model = "gpt-6.1-sol", .effort = .high, .left = 100 };
-    try std.testing.expectEqualStrings("Fix retry deadline · gpt-6.1-sol · high", factsRow(&buffer, facts, "ref", null, 140, .unicode));
-    try std.testing.expectEqualStrings("Fix retry… · gpt-6.1-sol · high", factsRow(&buffer, facts, "ref", null, 36, .unicode));
-    try std.testing.expectEqualStrings("Fix retry… · gpt-6.1-sol · high", factsRow(&buffer, facts, "ref", null, 34, .unicode));
-    try std.testing.expectEqualStrings("gpt-6.1-sol · high", factsRow(&buffer, facts, "ref", null, 19, .unicode));
-    try std.testing.expectEqualStrings("gpt-6.1-… · high", factsRow(&buffer, facts, "ref", null, 16, .unicode));
-    try std.testing.expectEqualStrings("gpt-6.1-sol · high · Archived", factsRow(&buffer, facts, "ref", "Archived", 30, .unicode));
+    const facts: session_line.Facts = .{ .model = "gpt-6.1-sol", .effort = .high, .left = 100 };
+    try std.testing.expectEqualStrings("gpt-6.1-sol · high", factsRow(&buffer, facts, null, 140, .unicode));
+    try std.testing.expectEqualStrings("gpt-6.1-sol · high", factsRow(&buffer, facts, null, 19, .unicode));
+    try std.testing.expectEqualStrings("gpt-6.1-… · high", factsRow(&buffer, facts, null, 16, .unicode));
+    try std.testing.expectEqualStrings("gpt-6.1-sol · high · Archived", factsRow(&buffer, facts, "Archived", 30, .unicode));
+    const pressed: session_line.Facts = .{ .model = "gpt-6.1-sol", .effort = .high, .left = 40 };
+    try std.testing.expectEqualStrings("gpt-6.1-sol · high · 40% context left", factsRow(&buffer, pressed, null, 140, .unicode));
+    try std.testing.expectEqualStrings("gpt-6.1-sol · high", factsRow(&buffer, pressed, null, 30, .unicode));
     for (0..141) |width| {
-        const fitted = factsSpans(&buffer, facts, "ref", null, width, .unicode);
+        const fitted = factsSpans(&buffer, facts, null, width, .unicode);
         try std.testing.expect(session_line.cells(fitted.text, .unicode) <= width);
         if (width >= 16) {
             try std.testing.expect(std.mem.endsWith(u8, fitted.text, "high"));
@@ -517,10 +502,10 @@ test "footer focus domain routes opening escape text and drawn click identity" {
 test "footer spans identify only whole model and effort words across widths efforts and permissions" {
     for ([_]usize{ 140, 46 }) |width| for ([_]?session_line.ReasoningEffort{ null, .low, .xhigh }) |effort| {
         var buffer: [facts_bytes]u8 = undefined;
-        const facts: session_line.Facts = .{ .name = "Chat", .model = "model", .effort = effort, .left = 62 };
-        const fitted = factsSpans(&buffer, facts, "ref", null, width, .unicode);
+        const facts: session_line.Facts = .{ .model = "model", .effort = effort, .left = 62 };
+        const fitted = factsSpans(&buffer, facts, null, width, .unicode);
         var expected: [facts_bytes]u8 = undefined;
-        const want = try std.fmt.bufPrint(&expected, "Chat · model{s}{s}", .{ if (effort != null) " · " else "", if (effort) |value| @tagName(value) else "" });
+        const want = try std.fmt.bufPrint(&expected, "model{s}{s}", .{ if (effort != null) " · " else "", if (effort) |value| @tagName(value) else "" });
         try std.testing.expectEqualStrings(want, fitted.text);
         var offset: usize = 0;
         var model_count: usize = 0;
@@ -545,7 +530,7 @@ test "footer spans identify only whole model and effort words across widths effo
     };
     for (0..40) |width| {
         var buffer: [facts_bytes]u8 = undefined;
-        const fitted = factsSpans(&buffer, .{ .name = "model · low", .model = "model", .effort = .low }, "ref", null, width, .unicode);
+        const fitted = factsSpans(&buffer, .{ .model = "model", .effort = .low }, null, width, .unicode);
         for (fitted.spans[0..fitted.len]) |span| if (span.field) |field| {
             if (field == .effort) try std.testing.expectEqualStrings("low", span.text) else {
                 try std.testing.expect(std.mem.eql(u8, span.text, "model") or std.mem.endsWith(u8, span.text, session_line.ellipsis));
@@ -629,10 +614,10 @@ test "copy success shares short reply next-key replacement and expiry owner" {
 }
 
 test "empty chat facts fit model effort and home folder with semantic fields" {
-    const facts: session_line.Facts = .{ .name = "reference", .model = "gpt-6.1-sol", .effort = .low, .folder = "/home/u/code/rui", .home = "/home/u", .left = 100 };
+    const facts: session_line.Facts = .{ .model = "gpt-6.1-sol", .effort = .low, .folder = "/home/u/code/rui", .home = "/home/u", .left = 100 };
     for ([_]usize{ 33, 46, 140 }) |width| {
         var buffer: [facts_bytes]u8 = undefined;
-        const shown = factsSpans(&buffer, facts, "ref", null, width, .unicode);
+        const shown = factsSpans(&buffer, facts, null, width, .unicode);
         try std.testing.expectEqualStrings("gpt-6.1-sol · low · ~/code/rui", shown.text);
         var model: usize = 0;
         var effort: usize = 0;
@@ -647,23 +632,22 @@ test "empty chat facts fit model effort and home folder with semantic fields" {
     }
     for (0..47) |width| {
         var buffer: [facts_bytes]u8 = undefined;
-        const shown = factsSpans(&buffer, facts, "ref", null, width, .unicode);
+        const shown = factsSpans(&buffer, facts, null, width, .unicode);
         try std.testing.expect(session_line.cells(shown.text, .unicode) <= width);
         if (std.mem.indexOf(u8, shown.text, "~/") != null) try std.testing.expect(std.mem.endsWith(u8, shown.text, "~/code/rui"));
     }
 }
 
-test "footer facts domain fits projected list visibility and context threshold at both widths" {
-    for ([_]bool{ false, true }) |list_visible| for ([_]usize{ 46, 140 }) |width| for ([_]u8{ 49, 50, 51 }) |used| {
+test "footer facts domain fits the context threshold at both widths and never carries a name" {
+    for ([_]usize{ 46, 140 }) |width| for ([_]u8{ 49, 50, 51 }) |used| {
         var buffer: [facts_bytes]u8 = undefined;
-        const facts: session_line.Facts = .{ .name = if (list_visible) "" else "Chat", .model = "model", .effort = .high, .left = 100 - used };
-        const shown = factsSpans(&buffer, facts, "ref", null, width, .unicode);
+        const facts: session_line.Facts = .{ .model = "model", .effort = .high, .left = 100 - used };
+        const shown = factsSpans(&buffer, facts, null, width, .unicode);
         var expected: [facts_bytes]u8 = undefined;
-        const prefix = if (list_visible) "" else "Chat · ";
         const want = if (used < 50)
-            try std.fmt.bufPrint(&expected, "{s}model · high", .{prefix})
+            "model · high"
         else
-            try std.fmt.bufPrint(&expected, "{s}model · high · {d}% context left", .{ prefix, 100 - used });
+            try std.fmt.bufPrint(&expected, "model · high · {d}% context left", .{100 - used});
         try std.testing.expectEqualStrings(want, shown.text);
         try std.testing.expect(session_line.cells(shown.text, .unicode) <= width);
         var fields: usize = 0;

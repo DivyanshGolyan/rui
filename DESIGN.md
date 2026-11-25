@@ -27,7 +27,7 @@ Typed `/` commands stay available for every chat action, even when the action is
 A terminal has few cells, and each word competes with the work.
 No label for the obvious: a number that is plainly memory needs no "rui" in front of it.
 No value at its normal level: context left appears only once half of it is used, and a finished row carries no mark.
-No fact twice on one screen: when the list highlights the open chat, the chat footer does not repeat its name.
+No fact twice on one screen: the chat footer never carries the chat's name, which the Session list and the terminal title already hold.
 A bare code is not a word; "exit 127" says what a lone "127" does not.
 
 ## 4. Nothing moves unless something happened

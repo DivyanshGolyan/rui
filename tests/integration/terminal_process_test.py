@@ -668,6 +668,35 @@ class TerminalProcessTest(unittest.TestCase):
                 self.assertLess(current.index(title), current.index("› " + human.CHOICE))
                 self.assertLess(current.index("$ true"), current.index("› " + human.CHOICE))
 
+    def test_capture_reads_the_window_title_from_osc_0_and_2(self):
+        from terminal_screen import names_chat
+
+        capture = ScreenCapture(80, 24)
+        self.addCleanup(capture.free)
+        self.assertEqual(capture.title, "")
+        capture.feed("\x1b]2;Lead: check · rui\x1b\\".encode())
+        self.assertEqual(capture.title, "Lead: check · rui")
+        capture.feed("\x1b]0;雪 · rui · 2 needs you\x07".encode())
+        self.assertEqual(capture.title, "雪 · rui · 2 needs you")
+        for title, label, named in (("Lead: check · rui", "Lead: check", True), ("Lead: check · rui · 1 needs you", "Lead: check", True),
+                                    ("Lead: check · rui", "Lead", False), ("rui", "Lead: check", False),
+                                    ("Lead: check · rui2", "Lead: check", False), ("", "Lead: check", False)):
+            with self.subTest(title=title, label=label):
+                self.assertEqual(names_chat(title, label), named)
+
+    def test_keyed_frame_waits_for_the_title_that_arrives_after_the_frame(self):
+        import human_cli_fixture as human
+
+        master, slave = open_pty()
+        capture = human.terminal_capture(master)
+        capture.feed("\x1b]2;rui\x1b\\\x1b[?1049h\x1b[?2026h\x1b[H ‹ gpt-6-sol\x1b[?2026l".encode())
+        threading.Timer(.2, lambda: os.write(slave, "\x1b]2;Worker: multiply · rui\x1b\\".encode())).start()
+        frame = human.keyed_frame(master, b"", lambda screen, x, y: " ‹" in screen, chat="Worker: multiply")
+        self.assertIn(" ‹ gpt-6-sol", frame)
+        self.assertEqual(capture.title, "Worker: multiply · rui")
+        with self.assertRaises(AssertionError):
+            human.keyed_frame(master, b"", lambda screen, x, y: True, timeout=.2, chat="Lead: check")
+
     def test_failed_launch_closes_terminal(self):
         with self.assertRaises(FileNotFoundError):
             with terminal_process(["/nonexistent/rui-terminal-test"], env=os.environ):

@@ -496,8 +496,7 @@ fn openFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
 }
 
 fn footerFacts(self: *const Self) ?@import("session_line.zig").Facts {
-    var facts = self.line.facts(&self.hint, self.session) orelse return null;
-    facts.home = self.home;
+    var facts = self.line.facts(self.home) orelse return null;
     if (info_save.currentUnknown(self.info_effect)) {
         facts.model = "Updating…";
         facts.effort = null;
@@ -737,7 +736,7 @@ fn sayBusy(self: *Self, action: ?session_notice.Action, letter: bool) void {
 }
 
 pub fn titleName(self: *const Self) []const u8 {
-    return if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session;
+    return self.line.title(&self.hint, self.session);
 }
 
 fn nowMs(self: *const Self) u64 {
@@ -1327,7 +1326,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .stoppable = said.stoppable,
         .details = original_presentation.details,
         .repair_details = original_presentation.repair_details,
-        .facts = .{ .current = self.footerFacts(), .name = self.session, .archive = self.line.archive_state },
+        .facts = .{ .current = self.footerFacts(), .archive = self.line.archive_state },
         .notice = self.shown_notice.current(now_ms) orelse queued_note orelse said.notice,
         .overview = said.text,
         .info_footer = if (self.info_open) self.app_info.footerWidget() else null,
@@ -6915,7 +6914,7 @@ test "SUI-33 App Session shell gutter and back control follow list visibility th
         try std.testing.expectEqualStrings(if (wide) "g" else "‹", screen.readCell(start + 1, 24).?.char.grapheme);
         var facts: std.Io.Writer.Allocating = .init(arena);
         for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 24).?.char.grapheme);
-        try std.testing.expectEqualStrings(if (wide) " gpt-5.5 · low" else " ‹ demo · gpt-5.5 · low", std.mem.trimEnd(u8, facts.written(), " "));
+        try std.testing.expectEqualStrings(if (wide) " gpt-5.5 · low" else " ‹ gpt-5.5 · low", std.mem.trimEnd(u8, facts.written(), " "));
         try std.testing.expect(fixture.root.session.?.eql(fixture.widget));
         try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
         try std.testing.expectEqualDeep(anchor, fixture.screen.anchor);
@@ -7076,7 +7075,8 @@ test "App Session's status bar never says Sent: an accepted Message's row is its
     try fixture.init();
     defer fixture.deinit();
     const self = fixture.self;
-    try std.testing.expect(std.mem.startsWith(u8, (try fixture.rows())[23], "‹ k7m2qx"));
+    try std.testing.expect(std.mem.startsWith(u8, (try fixture.rows())[23], "‹"));
+    try std.testing.expect(std.mem.indexOf(u8, (try fixture.rows())[23], "k7m2qx") == null);
     try std.testing.expect(std.mem.indexOf(u8, (try fixture.rows())[23], "alt+i info") == null);
     ChromeFixture.overview_says = "Port overview to vxfw finished";
     defer ChromeFixture.overview_says = null;
@@ -7139,20 +7139,21 @@ test "App Session's facts row ends with the archive badge while the Session is a
             return shown[ChromeFixture.find(shown, "‹").?];
         }
     }.row;
-    try std.testing.expect(std.mem.startsWith(u8, facts(&try fixture.rows()), "‹ k7m2qx"));
+    const active = facts(&try fixture.rows());
+    try std.testing.expect(std.mem.indexOf(u8, active, "k7m2qx") == null);
     self.line.archive_state = .archived;
     const archived = facts(&try fixture.rows());
-    try std.testing.expect(std.mem.startsWith(u8, archived, "‹ k7m2qx · Archived"));
+    try std.testing.expect(std.mem.startsWith(u8, archived, "‹ Archived"));
     try std.testing.expect(std.mem.indexOf(u8, archived, "/unarchive") == null);
     self.line.archive_state = .archiving;
-    try std.testing.expect(std.mem.startsWith(u8, facts(&try fixture.rows()), "‹ k7m2qx · Stopping and archiving"));
+    try std.testing.expect(std.mem.startsWith(u8, facts(&try fixture.rows()), "‹ Stopping and archiving"));
     self.shown_notice.show("Copied 3 lines", ChromeFixture.now());
     const shown = try fixture.rows();
-    try std.testing.expect(std.mem.startsWith(u8, facts(&shown), "‹ k7m2qx · Stopping and archiving"));
+    try std.testing.expect(std.mem.startsWith(u8, facts(&shown), "‹ Stopping and archiving"));
     try std.testing.expect(ChromeFixture.findEnding(&shown, "Copied 3 lines") != null);
 }
 
-test "App Session Footer clips identity in terminal cells" {
+test "App Session Footer never shows the chat name and clips its facts in terminal cells" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -7161,8 +7162,9 @@ test "App Session Footer clips identity in terminal cells" {
     try self.line.label.?.set("Port the overview to vxfw and keep its key table");
     try self.line.model.set("gpt-6-sol");
     const shown = try fixture.rows();
-    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ Port the overview to vxfw and keep its key table · gpt-6-sol · low"));
-    try std.testing.expectEqualStrings("Port the overview to vxfw and keep its key table", self.line.label.?.slice());
+    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ gpt-6-sol · low"));
+    try std.testing.expect(std.mem.indexOf(u8, shown[23], "Port the overview") == null);
+    try std.testing.expectEqualStrings("Port the overview to vxfw and keep its key table", self.titleName());
     try std.testing.expect(session_line.cells(shown[23], .unicode) <= 80);
 }
 
@@ -7177,7 +7179,8 @@ test "App Session Footer notice replaces the stop hint without changing stoppabi
     defer ChromeFixture.overview_says = null;
     const shown = try fixture.rows();
     try std.testing.expect(ChromeFixture.findEnding(&shown, "Port overview to vxfw finished") != null);
-    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ k7m2qx"));
+    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹"));
+    try std.testing.expect(std.mem.indexOf(u8, shown[23], "k7m2qx") == null);
     try std.testing.expect(std.mem.endsWith(u8, shown[23], "Port overview to vxfw finished"));
     try std.testing.expect(std.mem.indexOf(u8, shown[23], "ctrl+x stop") == null);
     try std.testing.expect(self.chrome.stoppable);
@@ -7650,7 +7653,7 @@ test "App Session footer takes list visibility from Root across desktop and phon
         var row: std.Io.Writer.Allocating = .init(arena);
         for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 28).?.char.grapheme);
         try std.testing.expectEqual(@as(usize, if (case.list) 0 else 1), std.mem.count(u8, row.written(), "‹"));
-        try std.testing.expectEqual(!case.list, std.mem.indexOf(u8, row.written(), "k7m2qx") != null);
+        try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, row.written(), "k7m2qx"));
         try std.testing.expectEqualStrings("┄", screen.readCell(chat_col, 27).?.char.grapheme);
         try std.testing.expectEqual(!case.list, std.mem.trim(u8, row.written(), " ").len != 0);
     }
@@ -11281,9 +11284,10 @@ test "chat footer facts use current Session permission and applied default or ex
         self.line.effort = inspected.effort;
         self.line.left = 62;
         var buffer: [session_chrome.facts_bytes]u8 = undefined;
-        const text = session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode);
-        const want = if (explicit) "Chat · model · low" else "Chat · model · high";
+        const text = session_chrome.factsRow(&buffer, self.line.facts(self.home), null, width, .unicode);
+        const want = if (explicit) "model · low" else "model · high";
         try std.testing.expectEqualStrings(want, text);
+        try std.testing.expectEqualStrings("Chat", self.titleName());
     };
 }
 
@@ -11488,23 +11492,24 @@ test "chat footer permission transitions follow the current line with absent cur
         for ([_]bool{ before, !before }) |ask| {
             self.line.read.?.revision += 1;
             if (inspection == .current) self.inspection.sessions[self.inspection.status.?].permission = if (ask) .ask else .bypass;
-            const facts = self.footerFacts().?;
-            try std.testing.expectEqualStrings("Chat", facts.name);
+            const facts = self.line.facts(self.home).?;
+            try std.testing.expectEqualStrings("Chat", self.titleName());
             try std.testing.expectEqualStrings("model", facts.model);
             try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), facts.effort);
             try std.testing.expectEqual(@as(?u8, 62), facts.left);
             for ([_]u16{ 140, 46 }) |width| {
                 var buffer: [session_chrome.facts_bytes]u8 = undefined;
-                const text = session_chrome.factsRow(&buffer, facts, "ref", null, width, .unicode);
-                try std.testing.expectEqualStrings("Chat · model · low", text);
+                const text = session_chrome.factsRow(&buffer, facts, null, width, .unicode);
+                try std.testing.expectEqualStrings("model · low", text);
             }
         }
         self.line.read = null;
         if (self.inspection.status) |index| self.inspection.sessions[index].permission = .ask;
-        try std.testing.expect(self.footerFacts() == null);
+        try std.testing.expect(self.line.facts(self.home) == null);
         for ([_]u16{ 140, 46 }) |width| {
             var buffer: [session_chrome.facts_bytes]u8 = undefined;
-            try std.testing.expectEqualStrings("ref", session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode));
+            try std.testing.expectEqualStrings("", session_chrome.factsRow(&buffer, self.line.facts(self.home), null, width, .unicode));
+            try std.testing.expectEqualStrings(self.session, self.titleName());
         }
         var ctx = held.context();
         defer ctx.cmds.deinit(std.testing.allocator);
@@ -11791,12 +11796,12 @@ test "empty chat footer folder comes from current line with frontend home" {
     try self.line.folder.?.set("/home/u/code/rui");
     for ([_]usize{ 46, 140 }) |width| {
         var buffer: [session_chrome.facts_bytes]u8 = undefined;
-        try std.testing.expectEqualStrings("gpt-6.1-sol · low · ~/code/rui", session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode));
+        try std.testing.expectEqualStrings("gpt-6.1-sol · low · ~/code/rui", session_chrome.factsRow(&buffer, self.line.facts(self.home), null, width, .unicode));
     }
     self.line.folder = null;
-    try std.testing.expect(self.footerFacts().?.folder == null);
+    try std.testing.expect(self.line.facts(self.home).?.folder == null);
     self.line.read = null;
-    try std.testing.expect(self.footerFacts() == null);
+    try std.testing.expect(self.line.facts(self.home) == null);
 }
 
 test "empty chat composer placeholder follows current no-message facts" {
