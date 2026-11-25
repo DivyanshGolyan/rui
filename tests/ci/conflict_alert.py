@@ -42,6 +42,13 @@ def judged(api, repo, number, main_sha):
     return None
 
 
+def cancel_checks(api, repo, head):
+    for status in ("queued", "in_progress"):
+        for run in pages(api, f"repos/{repo}/actions/runs?head_sha={head}&status={status}", "workflow_runs"):
+            if run["name"] == "Selected checks" and run["event"] == "pull_request":
+                api("POST", f"repos/{repo}/actions/runs/{run['id']}/cancel")
+
+
 def alert(api, repo, main_sha, attempts=10, delay=6, sleep=time.sleep):
     waiting = [pr["number"] for pr in pages(api, f"repos/{repo}/pulls?state=open&base=main")]
     alerted, failed = [], []
@@ -59,9 +66,10 @@ def alert(api, repo, main_sha, attempts=10, delay=6, sleep=time.sleep):
                 if any(marker in comment["body"] for comment in pages(api, f"repos/{repo}/issues/{number}/comments?")):
                     continue
                 api("POST", f"repos/{repo}/issues/{number}/comments", [("body", (
-                    f"{marker}\nThis PR conflicts with main at {main_sha[:12]}, so GitHub runs no checks on it. "
+                    f"{marker}\nThis PR conflicts with main at {main_sha[:12]}, so GitHub runs no checks on it and its running checks were cancelled. "
                     "Merge origin/main into the branch and push."))])
                 alerted.append(number)
+                cancel_checks(api, repo, pr["head"]["sha"])
             except (subprocess.CalledProcessError, KeyError, IndexError) as failure:
                 print(f"::warning::#{number}: {failure}: {getattr(failure, 'stderr', '') or ''}".strip())
                 failed.append(number)
