@@ -1584,7 +1584,6 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
             try sink.feed(tool_fold.row_marker);
             try toolResult(presentation, sink, colour);
         },
-        .call => {},
         .turn_ended => |ended| {
             if (ended.ending == .done) return false;
             if (!std.mem.eql(u8, ended.session.slice(), reads.sessionId())) {
@@ -1600,7 +1599,8 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
         },
         .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at),
         .send_failed => |failed| try sendFailed(sink, failed.target),
-        .approval_requested, .session_changed, .compacted, .model_call => {},
+        // Detail kinds (activity_read.roleOf == .detail) draw nothing in the conversation.
+        .call, .approval_requested, .session_changed, .compacted, .model_call => {},
     }
     return false;
 }

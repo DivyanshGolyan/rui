@@ -7,6 +7,34 @@ const change_ring = @import("change_ring.zig");
 
 pub const Kind = enum { admission, user, assistant, call, tool_result, hosted_call, turn_ended, stop, sent, send_failed, received, approval_requested, session_changed, compacted, model_call };
 
+pub const Role = enum { conversation, detail };
+
+/// Which part of the transcript a kind is drawn in: conversation rows, or detail rows
+/// that only the expanded view shows.
+pub fn roleOf(kind: Kind) Role {
+    return switch (kind) {
+        .admission, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed, .received => .conversation,
+        .call, .approval_requested, .session_changed, .compacted, .model_call => .detail,
+    };
+}
+
+/// The kinds a conversation feed asks for; the single owner of that set.
+pub const conversation: ActivityPage.Kinds = blk: {
+    var set = ActivityPage.Kinds.empty;
+    for (std.enums.values(Kind)) |kind| {
+        if (roleOf(kind) == .conversation) set.insert(kind);
+    }
+    break :blk set;
+};
+
+test "SUI-168 a conversation asks the feed for exactly the kinds whose role is conversation" {
+    const listed = ActivityPage.Kinds.initMany(&.{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed });
+    try std.testing.expect(conversation.eql(listed));
+    for (std.enums.values(Kind)) |kind| {
+        try std.testing.expectEqual(roleOf(kind) == .conversation, conversation.contains(kind));
+    }
+}
+
 pub const ActivityPage = struct {
     since: ?change_ring.SessionToken = null,
     store: Bounded(store_path.max_bytes) = .{},
