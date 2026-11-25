@@ -81,6 +81,9 @@ pub const Class = struct {
     yours: bool,
     /// A Session a peer started that asks nothing of the person: its row recedes.
     quiet: bool,
+    /// Where the counts line counts it, or nowhere: only a visible, unarchived Session counts, and this viewer's own pending stop
+    /// counts it as working.
+    counted: ?Standing,
 };
 
 pub fn classify(facts: Facts, viewer: Viewer) Class {
@@ -92,16 +95,18 @@ pub fn classify(facts: Facts, viewer: Viewer) Class {
         .approval
     else
         withStop(std.meta.activeTag(state), facts.stop_pending);
-    // Standing is the Host's, not read at this viewer's clock: a retry that has fallen due keeps counting and ordering as working
-    // until the Host publishes the crossing, while its words, mark and colour already read as pending.
+    // Standing follows the work as handed in. The overview advances each row's work with its clock on every tick, so a retry that has
+    // fallen due arrives here as pending; `kind` also reads it so for a row not yet advanced.
     const own: Standing = if (archived) .done else standing(facts.state.*);
     const yours = !facts.first_message or facts.from_person;
+    const visible = facts.in_list and viewer.filter.includes(facts.archive) and (facts.creator or facts.pinned or facts.first_message or facts.open);
     return .{
         .kind = kind,
         .standing = own,
-        .visible = facts.in_list and viewer.filter.includes(facts.archive) and (facts.creator or facts.pinned or facts.first_message or facts.open),
+        .visible = visible,
         .yours = yours,
         .quiet = !yours and !own.needsPerson(),
+        .counted = if (!visible or archived) null else if (facts.stop_pending) .working else own,
     };
 }
 
@@ -112,9 +117,8 @@ pub const Counts = struct {
     queued: usize = 0,
     failed: usize = 0,
 
-    pub fn add(self: *Counts, class: Class, facts: Facts) void {
-        if (!class.visible or facts.archive == .archived) return;
-        switch (if (facts.stop_pending) .working else class.standing) {
+    pub fn add(self: *Counts, class: Class) void {
+        switch (class.counted orelse return) {
             .needs_you => self.needs_you += 1,
             .working => self.working += 1,
             .queued => self.queued += 1,
@@ -157,7 +161,7 @@ test "SUI-168 a Session's class follows its work, archive state, listing and the
             const decidable = bits & 32 != 0;
             const open = bits & 64 != 0;
             for ([_]bool{ false, true }) |stop_pending| {
-                // A retry that has fallen due reads as pending work in its kind only; its standing stays the Host's.
+                // A retry that has fallen due reads as pending work in its kind only; its standing follows the state handed in.
                 for ([_]u64{ 1_000, 5_000 }) |now_ms| {
                     const facts: Facts = .{ .state = &probe.work, .archive = archive, .in_list = in_list, .creator = creator, .pinned = pinned, .first_message = first_message, .from_person = from_person, .decidable = decidable, .open = open, .stop_pending = stop_pending };
                     const got = classify(facts, .{ .filter = filter, .now_ms = now_ms });
@@ -185,7 +189,7 @@ test "SUI-168 a Session's class follows its work, archive state, listing and the
                     try std.testing.expectEqual(!expected_yours and expected_standing != .needs_you and expected_standing != .failed, got.quiet);
 
                     var counts: Counts = .{};
-                    counts.add(got, facts);
+                    counts.add(got);
                     const counted = got.visible and !archived;
                     // This viewer's unanswered stop moves the Session into working for the count only.
                     const counted_as: Standing = if (stop_pending) .working else expected_standing;
