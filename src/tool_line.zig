@@ -253,6 +253,7 @@ test "TPR-3 every tool call has fixed words, or the words of what it names" {
         .{ .call = .skill, .expected = "Use skills" },
         .{ .call = .stop_action, .expected = "Stop an Action" },
         .{ .call = .start_agent, .expected = "Start an agent" },
+        .{ .call = .watch_github_pr, .expected = "Watch a GitHub pull request" },
     };
     for (cases) |case| try std.testing.expectEqualStrings(case.expected, describe(case.call).slice());
 }

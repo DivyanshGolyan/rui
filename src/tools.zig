@@ -1,6 +1,5 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
-const codec_abi = @import("codec_abi.zig");
 pub const core_tools = @import("core_tools.zig");
 
 pub const bash_max_command_bytes = @import("tool_record.zig").bash_max_command_bytes;

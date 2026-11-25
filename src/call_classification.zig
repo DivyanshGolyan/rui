@@ -1,5 +1,4 @@
 const std = @import("std");
-const codec_abi = @import("codec_abi.zig");
 const core_tools = @import("message_agent_arguments.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const session_id = @import("session_id.zig");
@@ -22,6 +21,9 @@ pub const max_bash_description_bytes = 100;
 comptime {
     for (@typeInfo(Tool).@"enum".field_names) |name| {
         if (!@hasField(tool_line.Call, name)) @compileError("tool_line.Call has no words for tool " ++ name);
+    }
+    for (@typeInfo(tool_line.Call).@"union".field_names) |name| {
+        if (!@hasField(Tool, name)) @compileError("tool_line.Call names " ++ name ++ ", which is not a tool");
     }
 }
 
