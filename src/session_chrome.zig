@@ -186,7 +186,7 @@ pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []
         break :blk std.fmt.bufPrint(&folder_buffer, "{s}{s}", .{ short.prefix, short.rest }) catch unreachable;
     } else null else null;
     const parts: [5]?[]const u8 = if (facts) |value| .{
-        if (folder == null) value.name else null,
+        value.name,
         value.model,
         if (value.effort) |effort| @tagName(effort) else null,
         if (if (folder == null and (value.left orelse 101) <= 50) value.left else null) |left| std.fmt.bufPrint(&percent, "{d}% context left", .{left}) catch unreachable else null,
@@ -617,7 +617,10 @@ test "empty chat facts fit model effort and home folder with semantic fields" {
     for ([_]usize{ 33, 46, 140 }) |width| {
         var buffer: [facts_bytes]u8 = undefined;
         const shown = factsSpans(&buffer, facts, "ref", null, width, .unicode);
-        try std.testing.expectEqualStrings("gpt-6.1-sol · low · ~/code/rui", shown.text);
+        // The name is kept while the list is hidden (contract: omit the chat name only while the list is visible);
+        // at narrow widths it yields to model, effort and folder.
+        if (width >= 46) try std.testing.expectEqualStrings("reference · gpt-6.1-sol · low · ~/code/rui", shown.text);
+        try std.testing.expect(std.mem.endsWith(u8, shown.text, "gpt-6.1-sol · low · ~/code/rui"));
         var model: usize = 0;
         var effort: usize = 0;
         for (shown.spans[0..shown.len]) |span| if (span.field) |field| {

@@ -11364,7 +11364,7 @@ test "empty chat footer folder comes from current line with frontend home" {
     try self.line.folder.?.set("/home/u/code/rui");
     for ([_]usize{ 46, 140 }) |width| {
         var buffer: [session_chrome.facts_bytes]u8 = undefined;
-        try std.testing.expectEqualStrings("gpt-6.1-sol · low · ~/code/rui", session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode));
+        try std.testing.expectEqualStrings("ref · gpt-6.1-sol · low · ~/code/rui", session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode));
     }
     self.line.folder = null;
     try std.testing.expect(self.footerFacts().?.folder == null);
