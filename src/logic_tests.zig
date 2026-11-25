@@ -65,6 +65,7 @@ const cores = .{
     .{ "download_policy.zig", @import("download_policy.zig") },
     .{ "draft_layout.zig", @import("draft_layout.zig") },
     .{ "endpoint_value.zig", @import("endpoint_value.zig") },
+    .{ "entry_text.zig", @import("entry_text.zig") },
     .{ "environment.zig", @import("environment.zig") },
     .{ "error_set.zig", @import("error_set.zig") },
     .{ "excerpt.zig", @import("excerpt.zig") },

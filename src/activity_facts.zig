@@ -14,6 +14,7 @@ const turn_ending = @import("turn_ending.zig");
 const workspace_path = @import("workspace_path.zig");
 const model_capability = @import("model_capability.zig");
 const content_value = @import("content_value.zig");
+const tool_proposal = @import("tool_proposal.zig");
 
 const ToolPresentation = tool_presentation.ToolPresentation;
 
@@ -27,6 +28,27 @@ pub const Item = struct {
     value: Value,
     pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: content_value.Value, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall };
     pub const Kind = std.meta.Tag(Value);
+
+    /// What a row's text is: the one owner of which of its contents a reader can open. A row with no text has `none`.
+    pub const Body = union(enum) {
+        none,
+        value: content_value.Value,
+        /// A tool call's text is its name, a newline, then its arguments.
+        call: struct { name: activity_read.ProposalFieldReference, arguments: activity_read.ProposalFieldReference },
+    };
+
+    /// Exhaustive on purpose: a new row kind must say whether it has text.
+    pub fn body(self: *const Item) Body {
+        return switch (self.value) {
+            .admission, .user, .received => |message| .{ .value = message.content },
+            .assistant => |assistant| .{ .value = .{ .text = assistant.content } },
+            .call => |call| .{ .call = .{ .name = call.fields[@backingInt(tool_proposal.Field.name)], .arguments = call.fields[@backingInt(tool_proposal.Field.arguments)] } },
+            .tool_result => |result| .{ .value = result.content },
+            .sent => |sent| .{ .value = sent.content },
+            .turn_ended => |ended| if (ended.content) |reference| .{ .value = .{ .text = reference } } else .none,
+            .hosted_call, .stop, .send_failed, .approval_requested, .session_changed, .compacted, .model_call => .none,
+        };
+    }
     pub const Message = struct { admission: u64, key: Bounded(idempotency_key.max_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: content_value.Value, admitted_at: u64, sender: ?NamedPeer = null, source_action: ?u64 = null };
     pub const Call = activity_read.ProposalMetadata;
     /// Model text, never parts.
