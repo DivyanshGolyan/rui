@@ -9274,3 +9274,89 @@ test "SUI-108 App overview keyboard and pointer precedence" {
     try keyboardSelectionCase();
     try keyboardOriginCase();
 }
+
+test "SUI-158 draft-save refusal preserves the original until one recovery handoff" {
+    const Files = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    const Input = @import("SessionInput.zig");
+    const image = try Input.Image.validate(@embedFile("codecs/fixtures/image-input/pixel.png"));
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    for ([_]u16{ 46, 140 }) |width| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        Files.dir = tmp.dir;
+        Files.count = 0;
+        var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = root, .workspace = root, .home = root, .directory = root }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        overview.ops.open = openSession;
+        overview.hooks.scratch = Files.scratch;
+        _ = try rig.next(.{ .open = .{ .reference = "aaaaaa".* } });
+        defer {
+            if (overview.app_session) |left| {
+                left.frontend.?.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        overview.root.size = .{ .width = width, .height = 30 };
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        const source = overview.app_session.?.frontend.?;
+        source.reading.opening = false;
+        source.poll_at = std.math.maxInt(i96);
+        source.input.setImage(try image.clone());
+        const original = source.input.submitText("original");
+        source.submission.intent = .{ .message = original };
+        source.submission.state = .unconfirmed;
+        source.submission.publication = .published;
+        source.submission.key = key;
+        source.input.setImage(try image.clone());
+        _ = source.input.append("next draft");
+        source.input.editors[source.input.active].setCursor(3);
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+        source.init.gpa = failing.allocator();
+        defer source.init.gpa = std.testing.allocator;
+        for (0..2) |_| {
+            try source.openPeer(&ctx, "bbbbbb");
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expect(!ctx.quit and source.leaving == null);
+            try std.testing.expectEqualStrings("aaaaaa", &overview.app_session.?.session);
+            try std.testing.expect(overview.follow.pending == null);
+            try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
+            try std.testing.expectEqualStrings("next draft", source.input.composition().bytes);
+            try std.testing.expectEqual(@as(usize, 3), source.input.composition().cursor);
+            try std.testing.expectEqualDeep(image.identity, source.input.image().?.identity);
+            try std.testing.expectEqualStrings("original", try source.input.message(original));
+            try std.testing.expectEqualDeep(image.identity, (try source.input.messageImage(original)).?.identity);
+            try std.testing.expectEqual(key, source.submission.view().?.key);
+            try std.testing.expectEqual(@as(u64, 0), source.admission.sent);
+        }
+        source.init.gpa = std.testing.allocator;
+        try source.openPeer(&ctx, "bbbbbb");
+        try std.testing.expect(!ctx.quit);
+        try std.testing.expectEqualStrings("bbbbbb", &overview.app_session.?.session);
+        try std.testing.expectEqual(@as(usize, 1), overview.state.request_count);
+        const request = overview.state.requests[0];
+        try std.testing.expectEqual(@as(?view.Reference, "aaaaaa".*), request.session);
+        try std.testing.expectEqualDeep(@import("submission_state.zig").Recovery{ .saved = .{ .original = .{ .kind = .message, .key = key }, .rejected = false } }, request.sent);
+        try std.testing.expectEqual(@as(?view.Reference, "aaaaaa".*), overview.follow.return_to);
+        const saved = overview.session_drafts.take(std.testing.allocator, "aaaaaa") orelse return error.TestExpectedDraft;
+        defer saved.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("next draft", saved.snapshot.bytes);
+        try std.testing.expectEqual(@as(usize, 3), saved.snapshot.cursor);
+        try std.testing.expectEqualDeep(image.identity, saved.image.?.identity);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+    }
+}

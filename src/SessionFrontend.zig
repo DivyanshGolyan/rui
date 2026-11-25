@@ -155,6 +155,10 @@ expansion: struct {
 } = .{},
 dirty: bool = true,
 leaving: ?Outcome = null,
+pending_follow: ?[session_id.bytes]u8 = null,
+draft_save_failed_at: ?u64 = null,
+test_notice_now_ms: if (@import("builtin").is_test) ?u64 else void = if (@import("builtin").is_test) null else {},
+deferred_paste_refusals: std.enums.EnumSet(keymap.Refusal) = .empty,
 notice: ?[]const u8 = null,
 notice_buffer: [notice_capacity]u8 = undefined,
 shown_notice: session_chrome.Notice(notice_capacity) = .{},
@@ -672,6 +676,7 @@ pub fn titleName(self: *const Self) []const u8 {
 }
 
 fn nowMs(self: *const Self) u64 {
+    if (@import("builtin").is_test) if (self.test_notice_now_ms) |now| return now;
     return @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
 }
 
@@ -764,7 +769,7 @@ fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
             ctx.redraw = true;
         },
         .leave => {
-            try self.app_hooks.on_open(self.app_hooks.context, ctx, id[0..session_id.bytes]);
+            self.pending_follow = id[0..session_id.bytes].*;
             self.leaving = .returned;
         },
     }
@@ -862,6 +867,11 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
             ctx.consumeEvent();
             return;
         }
+    }
+    const now_ms = self.nowMs();
+    const save_failure = if (self.draft_save_failed_at) |shown| now_ms -| shown < session_chrome.notice_ms else false;
+    if (event == .key_press and !delivery.pasted and !save_failure) {
+        if (self.shown_notice.pasteRefusal(now_ms)) |why| self.deferred_paste_refusals.remove(why);
     }
     self.shown_notice.dismiss();
     const input: session_keys.Input = .{ .key = sessionKey(event), .pasted = delivery.pasted };
@@ -1077,7 +1087,12 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
             try self.app_info.widget().handleEvent(ctx, .tick);
             try self.openFooterChoice(ctx);
             if (self.expansion.queued == .after_frame) if (try self.expand()) |peer| try self.follow(ctx, &peer);
-            if (self.shown_notice.expire(self.nowMs())) self.dirty = true;
+            const now_ms = self.nowMs();
+            if (self.shown_notice.expire(now_ms)) self.dirty = true;
+            if (self.draft_save_failed_at) |shown| if (now_ms -| shown >= session_chrome.notice_ms) {
+                self.draft_save_failed_at = null;
+                self.dirty = true;
+            };
             ctx.redraw = ctx.redraw or self.dirty;
         },
         .key_press, .paste_start, .paste_end => return appKey(raw, ctx, event, .{ .under = .main, .pasted = false }),
@@ -1100,6 +1115,12 @@ fn afterInput(self: *Self, ctx: *vxfw.EventContext) !void {
         self.shown_notice.show(text, self.nowMs());
         self.notice = null;
         self.dirty = true;
+    } else if (self.draft_save_failed_at == null and self.shown_notice.current(self.nowMs()) == null) {
+        var pending = self.deferred_paste_refusals.iterator();
+        if (pending.next()) |why| {
+            self.shown_notice.showPasteRefusal(why, refusedNotice(why), self.nowMs());
+            self.dirty = true;
+        }
     }
     ctx.redraw = ctx.redraw or self.dirty;
     if (self.leaving == null) try self.serviceSkills();
@@ -1111,12 +1132,26 @@ fn afterInput(self: *Self, ctx: *vxfw.EventContext) !void {
 
 fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.leaving) |outcome| {
-        self.closePresentation();
         const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.input.pasting, false);
-        if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
+        const paste_refusal: ?keymap.Refusal = if (blurred == .editor and blurred.editor == .refused) blurred.editor.refused else null;
         if (self.app_hooks.drafts) |drafts| {
-            try drafts.putDraft(self.init.gpa, self.session, self.input.snapshot(), self.input.image());
+            drafts.putDraft(self.init.gpa, self.session, self.input.snapshot(), self.input.image()) catch {
+                self.pending_follow = null;
+                self.leaving = null;
+                if (paste_refusal) |why| self.deferred_paste_refusals.insert(why);
+                self.draft_save_failed_at = self.nowMs();
+                self.dirty = true;
+                ctx.redraw = true;
+                return;
+            };
         }
+        if (paste_refusal) |why| self.notice = refusedNotice(why);
+        if (self.pending_follow) |*target| {
+            try self.app_hooks.on_open(self.app_hooks.context, ctx, target);
+            self.pending_follow = null;
+        }
+        self.draft_save_failed_at = null;
+        self.closePresentation();
         self.app_consent.withdraw();
         self.app_card.ready_pending = false;
         self.stop();
@@ -1206,6 +1241,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         palette = self.app_palette.widget();
     };
     const now_ms = self.nowMs();
+    const save_failure = if (self.draft_save_failed_at) |shown| now_ms -| shown < session_chrome.notice_ms else false;
+    const paste_refusal = self.shown_notice.pasteRefusal(now_ms) != null;
     const said = self.lender.line(self.lender.context, self.live.work.actions.stop);
     const browsing = screen.view != .feed or !screen.anchor.following();
     if (screen.anchor.following()) self.new_below = 0;
@@ -1254,7 +1291,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .details = original_presentation.details,
         .repair_details = original_presentation.repair_details,
         .facts = .{ .current = self.footerFacts(), .name = self.session, .archive = self.line.archive_state },
-        .notice = self.shown_notice.current(now_ms) orelse queued_note orelse said.notice,
+        .notice = if (save_failure) "! Draft not saved; try leaving again." else self.shown_notice.current(now_ms) orelse queued_note orelse said.notice,
         .overview = said.text,
 
         .overlay = if (self.info_open)
@@ -1283,9 +1320,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.chrome.details.focused = focused == .details;
     self.chrome.status.key.focused = focused == .needs;
     self.chrome.status.stop.focused = focused == .stop;
-    chrome.force_notice = false;
+    chrome.force_notice = save_failure or paste_refusal;
     var surface = try self.app_screen.widget().draw(ctx);
-    if (held_preview and message_note != null and screen.view == .feed and (!local_preview or !chrome.activity.note_drawn or browsing)) {
+    if (!save_failure and !paste_refusal and held_preview and message_note != null and screen.view == .feed and (!local_preview or !chrome.activity.note_drawn or browsing)) {
         if (self.heldOriginal()) |original| if (session_notice.key(original)) |action| {
             chrome.force_notice = true;
             chrome.status.bar.notice = switch (action) {
@@ -4166,21 +4203,400 @@ test "App Session draft storage still guards pending originals Actions and comma
     }
 }
 
-test "App Session draft save failure retains the active text and does not leave" {
+test "SUI-157 draft-save refusal retains custody and permits an explicit retry" {
+    const Hooks = struct {
+        var opens: usize = 0;
+        var leaves: usize = 0;
+        var target: ?[session_id.bytes]u8 = null;
+        fn open(_: *anyopaque, _: *vxfw.EventContext, id: *const [session_id.bytes]u8) !void {
+            opens += 1;
+            target = id.*;
+        }
+        fn leave(raw: *anyopaque, _: *vxfw.EventContext, outcome: Outcome) !void {
+            const held: *HeldFrontend = @ptrCast(@alignCast(raw));
+            leaves += 1;
+            held.left = outcome;
+        }
+    };
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    const image = try Input.Image.validate(png);
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const accepted_key: [36]u8 = "abcdef01-2345-4678-9012-3456789abcde".*;
+    for ([_]usize{ 0, 1 }) |fail_index| for ([_]enum { same_link, other_link, back }{ .same_link, .other_link, .back }) |retry| {
+        var drafts: session_drafts.Drafts = .{};
+        defer drafts.deinit(std.testing.allocator);
+        try drafts.put(std.testing.allocator, "bbbbbb", .{ .bytes = "target draft", .cursor = 2 });
+        const held = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+        defer held.destroy();
+        held.size = .{ .width = 46, .height = 8 };
+        const self = &held.self;
+        self.test_notice_now_ms = 10_000;
+        self.store = self.directory;
+        self.submission.store = self.directory;
+        self.app_hooks.on_open = Hooks.open;
+        self.app_hooks.leave = Hooks.leave;
+        Hooks.opens = 0;
+        Hooks.leaves = 0;
+        Hooks.target = null;
+        self.input.setImage(try image.clone());
+        const ticket = self.input.submitText("sealed original");
+        self.submission.intent = .{ .message = ticket };
+        self.submission.state = .unconfirmed;
+        self.submission.publication = .published;
+        self.submission.key = key;
+        self.submission.retry = if (retry == .other_link) key else null;
+        self.submission.accepted = .{ .kind = .message, .key = accepted_key };
+        defer {
+            self.submission.intent = null;
+            self.submission.retry = null;
+            self.input.release(ticket) catch unreachable;
+        }
+        self.input.setImage(try image.clone());
+        _ = self.input.append("draft α");
+        self.input.editors[self.input.active].setCursor(3);
+        self.shown_notice.show("Earlier notice", self.nowMs());
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        self.init.gpa = failing.allocator();
+        defer self.init.gpa = std.testing.allocator;
+        var ctx = held.context();
+        defer ctx.cmds.deinit(held.arena.allocator());
+        try self.openPeer(&ctx, "bbbbbb");
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expect(ctx.redraw and held.left == null and self.leaving == null);
+        try std.testing.expect(self.pending_follow == null and Hooks.opens == 0 and Hooks.leaves == 0);
+        try std.testing.expectEqualStrings("draft α", self.input.composition().bytes);
+        try std.testing.expectEqual(@as(usize, 3), self.input.composition().cursor);
+        try std.testing.expectEqualDeep(image.identity, self.input.image().?.identity);
+        try std.testing.expectEqualStrings("sealed original", try self.input.message(ticket));
+        try std.testing.expectEqualDeep(image.identity, (try self.input.messageImage(ticket)).?.identity);
+        try std.testing.expectEqual(key, self.submission.view().?.key);
+        try std.testing.expectEqual(if (retry == .other_link) @as(?[36]u8, key) else null, self.submission.retry);
+        try std.testing.expectEqualDeep(@as(?Submission.Accepted, .{ .kind = .message, .key = accepted_key }), self.submission.accepted);
+        try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+        try std.testing.expect(self.submission.task.thread == null);
+        try std.testing.expectEqualStrings("Earlier notice", self.shown_notice.current(self.nowMs()).?);
+        if (retry != .other_link) {
+            for (0..2) |_| try held.deliver(&ctx, .tick);
+            try std.testing.expect(self.submission.task.thread == null);
+            try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+        }
+        const failed = try held.shownThroughRoot();
+        try std.testing.expect(std.mem.indexOf(u8, failed, "Draft not saved") != null);
+        try std.testing.expect(self.chrome.force_notice);
+        try std.testing.expectEqualStrings("! Draft not saved; try leaving again.", self.chrome.status.bar.notice.?);
+        self.init.gpa = std.testing.allocator;
+        try held.keys("X");
+        try std.testing.expectEqualStrings("draXft α", self.input.composition().bytes);
+        try std.testing.expectEqual(@as(usize, 4), self.input.composition().cursor);
+        switch (retry) {
+            .same_link => try self.openPeer(&ctx, "bbbbbb"),
+            .other_link => try self.openPeer(&ctx, "cccccc"),
+            .back => try held.keys("\x07"),
+        }
+        try std.testing.expectEqual(@as(?Outcome, .returned), held.left);
+        try std.testing.expectEqual(@as(usize, 1), Hooks.leaves);
+        try std.testing.expectEqual(@as(usize, if (retry == .back) 0 else 1), Hooks.opens);
+        if (retry != .back) try std.testing.expectEqualStrings(if (retry == .same_link) "bbbbbb" else "cccccc", &Hooks.target.?);
+        try std.testing.expect(self.draft_save_failed_at == null and self.pending_follow == null);
+        try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+        try std.testing.expectEqualStrings("sealed original", try self.input.message(ticket));
+        const saved = drafts.take(std.testing.allocator, "aaaaaa") orelse return error.TestExpectedDraft;
+        defer saved.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("draXft α", saved.snapshot.bytes);
+        try std.testing.expectEqual(@as(usize, 4), saved.snapshot.cursor);
+        try std.testing.expectEqualDeep(image.identity, saved.image.?.identity);
+        const other = drafts.take(std.testing.allocator, "bbbbbb") orelse return error.TestExpectedDraft;
+        defer other.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("target draft", other.snapshot.bytes);
+    };
+    try draftSaveRefusalPointer();
+    try draftSaveRefusalPaste();
+    try draftSaveRefusalRecoveryFrame();
+    try draftSaveRefusalOtherExits();
+}
+
+fn draftSaveRefusalPointer() !void {
+    const Pointer = @import("testing/app_events.zig");
+    const Hooks = struct {
+        var opens: usize = 0;
+        var leaves: usize = 0;
+        fn open(_: *anyopaque, _: *vxfw.EventContext, id: *const [session_id.bytes]u8) !void {
+            try std.testing.expectEqualStrings("bbbbbb", id);
+            opens += 1;
+        }
+        fn leave(raw: *anyopaque, _: *vxfw.EventContext, outcome: Outcome) !void {
+            const held: *HeldFrontend = @ptrCast(@alignCast(raw));
+            held.left = outcome;
+            leaves += 1;
+        }
+    };
     var drafts: session_drafts.Drafts = .{};
     defer drafts.deinit(std.testing.allocator);
-    const a = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
-    defer a.destroy();
-    try a.keys("kept\x1b[D");
-    var space: [0]u8 = .{};
-    var failing: std.heap.FixedBufferAllocator = .init(&space);
-    a.self.init.gpa = failing.allocator();
-    defer a.self.init.gpa = std.testing.allocator;
-    try std.testing.expectError(error.OutOfMemory, a.keys("\x07"));
-    try std.testing.expect(a.left == null);
-    try std.testing.expectEqualStrings("kept", a.self.input.composition().bytes);
-    try std.testing.expectEqual(@as(usize, 3), a.self.input.composition().cursor);
-    try std.testing.expect(drafts.take(std.testing.allocator, "aaaaaa") == null);
+    const held = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+    defer held.destroy();
+    held.size = .{ .width = 46, .height = 12 };
+    const self = &held.self;
+    self.test_notice_now_ms = 10_000;
+    self.store = self.directory;
+    self.submission.store = self.directory;
+    self.app_hooks.on_open = Hooks.open;
+    self.app_hooks.leave = Hooks.leave;
+    Hooks.opens = 0;
+    Hooks.leaves = 0;
+    const image = try Input.Image.validate(@embedFile("codecs/fixtures/image-input/pixel.png"));
+    self.input.setImage(try image.clone());
+    const ticket = self.input.submitText("sealed original");
+    self.submission.intent = .{ .message = ticket };
+    self.submission.state = .unconfirmed;
+    self.submission.publication = .published;
+    self.submission.key = @splat('K');
+    defer {
+        self.submission.intent = null;
+        self.input.release(ticket) catch unreachable;
+    }
+    self.input.setImage(try image.clone());
+    _ = self.input.append("next draft");
+    try seedFeed(held.screen, TerminalText.link_open ++ TerminalText.session_link ++ "bbbbbb" ++ TerminalText.link_end ++ "PeerLink" ++ TerminalText.link_close ++ "\n");
+    const frame = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
+    const point = screenTextPoint(frame, "PeerLink", 0, 0) orelse return error.MissingSessionLink;
+    var ctx = held.context();
+    defer ctx.cmds.deinit(held.arena.allocator());
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    self.init.gpa = failing.allocator();
+    defer self.init.gpa = std.testing.allocator;
+    for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try Pointer.mouse(&ctx, frame, .{ .col = point.col, .row = point.row, .button = .left, .type = kind, .mods = .{} });
+    try std.testing.expect(failing.has_induced_failure and held.left == null);
+    try std.testing.expectEqual(@as(usize, 0), Hooks.opens);
+    try std.testing.expectEqual(@as(usize, 0), Hooks.leaves);
+    try std.testing.expectEqualStrings("sealed original", try self.input.message(ticket));
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+    try std.testing.expectEqualDeep(image.identity, self.input.image().?.identity);
+    const shown = try held.shownThroughRoot();
+    try std.testing.expect(std.mem.indexOf(u8, shown, "Draft not saved") != null);
+    self.init.gpa = std.testing.allocator;
+    const retry_frame = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
+    const retry_point = screenTextPoint(retry_frame, "PeerLink", 0, 0) orelse return error.MissingSessionLink;
+    for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try Pointer.mouse(&ctx, retry_frame, .{ .col = retry_point.col, .row = retry_point.row, .button = .left, .type = kind, .mods = .{} });
+    try std.testing.expectEqual(@as(?Outcome, .returned), held.left);
+    try std.testing.expectEqual(@as(usize, 1), Hooks.opens);
+    try std.testing.expectEqual(@as(usize, 1), Hooks.leaves);
+    try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+    const saved = drafts.take(std.testing.allocator, "aaaaaa") orelse return error.TestExpectedDraft;
+    defer saved.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("next draft", saved.snapshot.bytes);
+    try std.testing.expectEqualDeep(image.identity, saved.image.?.identity);
+}
+
+fn draftSaveRefusalPaste() !void {
+    const Open = struct {
+        fn peer(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {}
+    };
+    const gpa = std.testing.allocator;
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    const image = try Input.Image.validate(png);
+    for ([_]enum { clipped_retry, covered_retry, expiry, delayed_paste_end }{ .clipped_retry, .covered_retry, .expiry, .delayed_paste_end }) |path| {
+        var drafts: session_drafts.Drafts = .{};
+        defer drafts.deinit(gpa);
+        const held = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+        defer held.destroy();
+        held.size = .{ .width = 46, .height = 8 };
+        const self = &held.self;
+        self.test_notice_now_ms = 10_000;
+        self.store = self.directory;
+        self.submission.store = self.directory;
+        self.app_hooks.on_open = Open.peer;
+        self.input.setImage(try image.clone());
+        const ticket = self.input.submitText("sealed original");
+        self.submission.intent = .{ .message = ticket };
+        self.submission.state = .unconfirmed;
+        self.submission.publication = .published;
+        self.submission.key = @splat('K');
+        defer {
+            self.submission.intent = null;
+            self.input.release(ticket) catch unreachable;
+        }
+        const full = try gpa.alloc(u8, Input.capacity);
+        defer gpa.free(full);
+        @memset(full, 'x');
+        self.input.restoreWithImage(.{ .bytes = full, .cursor = full.len }, try image.clone());
+        var failing: std.testing.FailingAllocator = .init(gpa, .{ .fail_index = 0 });
+        self.init.gpa = failing.allocator();
+        defer self.init.gpa = gpa;
+        var ctx = held.context();
+        defer ctx.cmds.deinit(held.arena.allocator());
+        for (0..2) |_| {
+            held.root.input.pasting = true;
+            _ = self.input.appEvent(conversation_keys, .paste_start, true, false);
+            _ = self.input.appEvent(conversation_keys, .{ .key_press = .{ .codepoint = 0, .text = "x" } }, true, false);
+            try std.testing.expect(self.input.editors[self.input.active].pasting());
+            try self.openPeer(&ctx, "bbbbbb");
+            try std.testing.expect(failing.has_induced_failure and held.left == null);
+            try std.testing.expect(!self.input.editors[self.input.active].pasting());
+            try std.testing.expect(self.deferred_paste_refusals.contains(.paste_overflow));
+            try std.testing.expectEqualSlices(u8, full, self.input.composition().bytes);
+            try std.testing.expectEqualDeep(image.identity, self.input.image().?.identity);
+            try std.testing.expectEqualStrings("sealed original", try self.input.message(ticket));
+            try std.testing.expectEqualDeep(image.identity, (try self.input.messageImage(ticket)).?.identity);
+            try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+            if (path == .delayed_paste_end) {
+                self.test_notice_now_ms = self.nowMs() + session_chrome.notice_ms;
+                try held.deliver(&ctx, .tick);
+                try std.testing.expect(self.shown_notice.pasteRefusal(self.nowMs()) == .paste_overflow);
+                try std.testing.expect(self.deferred_paste_refusals.contains(.paste_overflow));
+            }
+            try held.deliver(&ctx, .paste_end);
+            try std.testing.expect(!held.root.input.pasting);
+            try std.testing.expect(self.deferred_paste_refusals.contains(.paste_overflow));
+            if (path == .delayed_paste_end) {
+                try held.deliver(&ctx, .paste_start);
+                try std.testing.expect(self.deferred_paste_refusals.contains(.paste_overflow));
+                try held.deliver(&ctx, .{ .key_press = .{ .codepoint = 'x', .text = "x" } });
+                try std.testing.expect(self.deferred_paste_refusals.contains(.paste_overflow));
+                try held.deliver(&ctx, .paste_end);
+                try std.testing.expect(self.deferred_paste_refusals.contains(.paste_overflow));
+            }
+        }
+        if (path == .expiry or path == .delayed_paste_end) {
+            self.draft_save_failed_at = self.nowMs();
+            self.shown_notice.showPasteRefusal(.paste_overflow, refusedNotice(.paste_overflow), self.nowMs());
+            try held.keys("\x1b[D");
+            try std.testing.expect(self.deferred_paste_refusals.contains(.paste_overflow));
+            held.size = .{ .width = 1, .height = 1 };
+            _ = try held.shownThroughRoot();
+            try std.testing.expect(self.deferred_paste_refusals.contains(.paste_overflow));
+            self.test_notice_now_ms = self.nowMs() + session_chrome.notice_ms;
+            try held.deliver(&ctx, .tick);
+            try std.testing.expect(self.shown_notice.pasteRefusal(self.nowMs()) != null);
+            try std.testing.expectEqualStrings(refusedNotice(.paste_overflow), self.shown_notice.current(self.nowMs()).?);
+            try std.testing.expect(self.deferred_paste_refusals.contains(.paste_overflow));
+            self.test_notice_now_ms = self.nowMs() + session_chrome.notice_ms;
+            try held.deliver(&ctx, .tick);
+            try std.testing.expect(self.shown_notice.pasteRefusal(self.nowMs()) != null);
+            try std.testing.expect(self.deferred_paste_refusals.contains(.paste_overflow));
+            held.size = .{ .width = 46, .height = 8 };
+            const paste_frame = try held.shownThroughRoot();
+            try std.testing.expect(self.chrome.force_notice);
+            try std.testing.expect(std.mem.indexOf(u8, paste_frame, "Paste too long") != null);
+            try held.keys("\x1b[D");
+            try std.testing.expect(!self.deferred_paste_refusals.contains(.paste_overflow));
+            const fallback = try held.shownThroughRoot();
+            try std.testing.expect(self.chrome.force_notice);
+            try std.testing.expectEqualStrings("ctrl+r retries", self.chrome.status.bar.notice.?);
+            try std.testing.expect(std.mem.indexOf(u8, fallback, "ctrl+r retries") != null);
+        } else {
+            if (path == .clipped_retry) held.size = .{ .width = 1, .height = 1 } else self.info_open = true;
+            _ = try held.shownThroughRoot();
+            self.init.gpa = gpa;
+            try self.openPeer(&ctx, "bbbbbb");
+            try std.testing.expectEqual(@as(?Outcome, .returned), held.left);
+            try std.testing.expect(self.deferred_paste_refusals.contains(.paste_overflow));
+            try std.testing.expectEqualStrings("sealed original", try self.input.message(ticket));
+            try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+            continue;
+        }
+        self.init.gpa = gpa;
+        try self.openPeer(&ctx, "bbbbbb");
+        try std.testing.expectEqual(@as(?Outcome, .returned), held.left);
+        try std.testing.expectEqualStrings("sealed original", try self.input.message(ticket));
+        try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+        const saved = drafts.take(gpa, "aaaaaa") orelse return error.TestExpectedDraft;
+        defer saved.deinit(gpa);
+        try std.testing.expectEqualSlices(u8, full, saved.snapshot.bytes);
+        try std.testing.expectEqualDeep(image.identity, saved.image.?.identity);
+    }
+}
+
+fn draftSaveRefusalRecoveryFrame() !void {
+    const gpa = std.testing.allocator;
+    for ([_]bool{ false, true }) |scrolled| {
+        var drafts: session_drafts.Drafts = .{};
+        defer drafts.deinit(gpa);
+        const held = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+        defer held.destroy();
+        held.size = .{ .width = 46, .height = 8 };
+        const self = &held.self;
+        self.test_notice_now_ms = 10_000;
+        self.store = self.directory;
+        self.submission.store = self.directory;
+        var history: [1024]u8 = undefined;
+        var out = std.Io.Writer.fixed(&history);
+        for (0..40) |index| try out.print("History {d}\n", .{index});
+        try seedFeed(held.screen, out.buffered());
+        const ticket = self.input.submitText("sealed original");
+        self.submission.intent = .{ .message = ticket };
+        self.submission.state = .unconfirmed;
+        self.submission.publication = .published;
+        self.submission.key = @splat('K');
+        defer {
+            self.submission.intent = null;
+            self.input.release(ticket) catch unreachable;
+        }
+        _ = self.input.append("one\ntwo\nthree\nfour\nfive\nsix");
+        _ = try held.shownThroughRoot();
+        if (scrolled) {
+            try self.scroll(false, 2);
+            try std.testing.expect(!self.screen.anchor.following());
+        }
+        self.shown_notice.show("Earlier notice", self.nowMs());
+        var failing: std.testing.FailingAllocator = .init(gpa, .{ .fail_index = 0 });
+        self.init.gpa = failing.allocator();
+        defer self.init.gpa = gpa;
+        var ctx = held.context();
+        defer ctx.cmds.deinit(held.arena.allocator());
+        try self.openPeer(&ctx, "bbbbbb");
+        try std.testing.expect(failing.has_induced_failure and held.left == null);
+        try std.testing.expectEqualStrings("Earlier notice", self.shown_notice.current(self.nowMs()).?);
+        const shown = try held.shownThroughRoot();
+        try std.testing.expect(self.chrome.force_notice);
+        try std.testing.expectEqualStrings("! Draft not saved; try leaving again.", self.chrome.status.bar.notice.?);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "Draft not saved") != null);
+        self.init.gpa = gpa;
+        self.test_notice_now_ms = 10_000 + session_chrome.notice_ms;
+        try held.deliver(&ctx, .tick);
+        const fallback = try held.shownThroughRoot();
+        try std.testing.expect(self.chrome.force_notice);
+        try std.testing.expectEqualStrings("ctrl+r retries", self.chrome.status.bar.notice.?);
+        try std.testing.expect(std.mem.indexOf(u8, fallback, "ctrl+r retries") != null);
+        try std.testing.expectEqualStrings("sealed original", try self.input.message(ticket));
+        try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+    }
+}
+
+fn draftSaveRefusalOtherExits() !void {
+    for ([_]enum { back, new_session }{ .back, .new_session }) |path| {
+        var drafts: session_drafts.Drafts = .{};
+        defer drafts.deinit(std.testing.allocator);
+        const held = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+        defer held.destroy();
+        const self = &held.self;
+        self.test_notice_now_ms = 10_000;
+        self.store = self.directory;
+        self.submission.store = self.directory;
+        _ = self.input.append("kept");
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+        self.init.gpa = failing.allocator();
+        defer self.init.gpa = std.testing.allocator;
+        var ctx = held.context();
+        defer ctx.cmds.deinit(held.arena.allocator());
+        switch (path) {
+            .back => try held.keys("\x07"),
+            .new_session => try self.newSession(&ctx),
+        }
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expect(held.left == null and self.leaving == null and self.pending_follow == null);
+        try std.testing.expectEqualStrings("kept", self.input.composition().bytes);
+        try std.testing.expect(self.draft_save_failed_at != null);
+        self.init.gpa = std.testing.allocator;
+        switch (path) {
+            .back => try held.keys("\x07"),
+            .new_session => try self.newSession(&ctx),
+        }
+        try std.testing.expectEqual(@as(?Outcome, if (path == .back) .returned else .new_session), held.left);
+        try std.testing.expect(self.draft_save_failed_at == null);
+        const saved = drafts.take(std.testing.allocator, "aaaaaa") orelse return error.TestExpectedDraft;
+        defer saved.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("kept", saved.snapshot.bytes);
+    }
 }
 
 test "App Session draft handoff preserves valid overflow-rejected and malformed-rejected input" {

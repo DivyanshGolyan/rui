@@ -80,10 +80,10 @@ pub fn Notice(comptime capacity: usize) type {
         bytes: [capacity]u8 = undefined,
         len: usize = 0,
         shown_ms: ?u64 = null,
-        answers: NoticeAnswers = .other,
+        kind: union(enum) { other, panel_copy, paste_refusal: @import("keymap.zig").Refusal } = .other,
 
         pub fn show(self: *Self, text: []const u8, now_ms: u64) void {
-            self.answers = .other;
+            self.kind = .other;
             const len = utf8_validation.scalarStart(text, @min(text.len, capacity));
             std.mem.copyForwards(u8, self.bytes[0..len], text[0..len]);
             self.len = len;
@@ -92,11 +92,24 @@ pub fn Notice(comptime capacity: usize) type {
 
         pub fn showCopy(self: *Self, now_ms: u64, answers: NoticeAnswers) void {
             self.show("Sent to clipboard", now_ms);
-            self.answers = answers;
+            self.kind = switch (answers) {
+                .other => .other,
+                .panel_copy => .panel_copy,
+            };
         }
 
         pub fn showsPanelCopy(self: *const Self, now_ms: u64) bool {
-            return self.answers == .panel_copy and self.current(now_ms) != null;
+            return self.kind == .panel_copy and self.current(now_ms) != null;
+        }
+
+        pub fn showPasteRefusal(self: *Self, why: @import("keymap.zig").Refusal, text: []const u8, now_ms: u64) void {
+            self.show(text, now_ms);
+            self.kind = .{ .paste_refusal = why };
+        }
+
+        pub fn pasteRefusal(self: *const Self, now_ms: u64) ?@import("keymap.zig").Refusal {
+            if (self.current(now_ms) == null) return null;
+            return if (self.kind == .paste_refusal) self.kind.paste_refusal else null;
         }
 
         pub fn dismiss(self: *Self) void {

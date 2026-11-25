@@ -44,11 +44,15 @@ pub const Drafts = struct {
         }
     }
 
-    pub fn put(self: *Drafts, gpa: std.mem.Allocator, id: []const u8, snapshot: Input.Snapshot) !void {
+    pub fn put(self: *Drafts, gpa: std.mem.Allocator, id: []const u8, snapshot: Input.Snapshot) std.mem.Allocator.Error!void {
         return self.putDraft(gpa, id, snapshot, null);
     }
 
-    pub fn putDraft(self: *Drafts, gpa: std.mem.Allocator, id: []const u8, snapshot: Input.Snapshot, image: ?Input.Image) !void {
+    pub fn putDraft(self: *Drafts, gpa: std.mem.Allocator, id: []const u8, snapshot: Input.Snapshot, image: ?Input.Image) std.mem.Allocator.Error!void {
+        return self.putDraftWith(gpa, id, snapshot, image, Input.Image.clone);
+    }
+
+    fn putDraftWith(self: *Drafts, gpa: std.mem.Allocator, id: []const u8, snapshot: Input.Snapshot, image: ?Input.Image, clone: anytype) std.mem.Allocator.Error!void {
         std.debug.assert(session_id.valid(id));
         std.debug.assert(snapshot.cursor <= snapshot.bytes.len);
         if (snapshot.bytes.len == 0 and snapshot.anchor == null and snapshot.rejected == null and image == null) {
@@ -57,7 +61,7 @@ pub const Drafts = struct {
         }
         const copy = try gpa.dupe(u8, snapshot.bytes);
         errdefer gpa.free(copy);
-        const image_copy = if (image) |value| try value.clone() else null;
+        const image_copy = if (image) |value| try clone(value) else null;
         errdefer if (image_copy) |value| value.deinit();
         var draft: Draft = .{ .snapshot = snapshot, .image = image_copy };
         draft.snapshot.bytes = copy;
@@ -205,4 +209,17 @@ test "SUI-115 an image-only draft survives changing Sessions" {
     const other = drafts.take(allocator, "bbbbbb").?;
     defer other.deinit(allocator);
     try std.testing.expectEqualStrings("other chat", other.snapshot.bytes);
+
+    const FailImage = struct {
+        fn clone(_: Input.Image) error{OutOfMemory}!Input.Image {
+            return error.OutOfMemory;
+        }
+    };
+    try drafts.putDraft(allocator, "aaaaaa", .{ .bytes = "original", .cursor = 2 }, image);
+    try std.testing.expectError(error.OutOfMemory, drafts.putDraftWith(allocator, "aaaaaa", .{ .bytes = "replacement", .cursor = 3 }, image, FailImage.clone));
+    const kept = drafts.take(allocator, "aaaaaa").?;
+    defer kept.deinit(allocator);
+    try std.testing.expectEqualStrings("original", kept.snapshot.bytes);
+    try std.testing.expectEqual(@as(usize, 2), kept.snapshot.cursor);
+    try std.testing.expectEqualSlices(u8, png, kept.image.?.bytes);
 }
