@@ -1384,7 +1384,7 @@ test "MySQL plans each archiving candidate and page through its index" {
             const window_pages = [_][]const u8{ session_list_read.archived_newest_source, session_list_read.archived_oldest_source };
             inline for (window_pages) |source| {
                 var buffer: [16384]u8 = undefined;
-                const plan = try mysql_testing.plan(&storage, source, .{@as(u64, 1000)}, &buffer);
+                const plan = try mysql_testing.plan(&storage, source, .{ @as(u64, 1000), @as(u64, session_list.max_window_rows + 1) }, &buffer);
                 errdefer std.debug.print("MySQL plan for window page {s}:\n{s}", .{ source, plan });
                 // No table is scanned: the page ranges over session_tab, and each row's first Message (report.zig's
                 // first_admission_join, which the first-candidate read shares) is read through keyed probes of that
