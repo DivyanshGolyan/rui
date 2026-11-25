@@ -90,7 +90,7 @@ A green PR therefore no longer proves:
 - that the Store-reaching binaries (`test-native`, `test-store`, the integration product) still compile and pass after a change to build inputs alone, such as build.zig, the setup action or `build_artifact.py`; only `test-logic` runs through the changed path. A dependency pin change in `build.zig.zon` runs the PR roots that link the changed package;
 - that every unit partition still compiles after a branch merged main, when the candidate's own diff does not reach them: a semantic merge conflict that breaks only a unit partition reaches main, and Promote bisects it to the merge commit;
 - unit and fixture behavior against a live MySQL or Postgres server: the PR job starts such a server only for a Store migration change (see [Two tiers](#two-tiers)), so every other live leg runs only in Promote;
-- everything [Promote](../../.github/workflows/promote.yml) alone runs: macOS, `rsql-table`, the per-agent Host memory gate (`host-memory`, on the release archive, never on a PR), the installed-release upgrade and renderer contracts.
+- everything [Promote](../../.github/workflows/promote.yml) alone runs: macOS, the per-agent Host memory gate (`host-memory`, on the release archive, never on a PR), the installed-release upgrade and renderer contracts.
 
 Promotion proves those on main HEAD and names a failure's suspect commits; the owner accepted on 18 Nov 2026 that such a break reaches main first.
 
@@ -152,7 +152,7 @@ Syntax checks, probe compilation and unrelated product tests do not qualify a re
 
 ## Composed gates
 
-`check` runs formatting, ReleaseSafe native tests and process integrations, a Debug artifact and recovery smoke, ReleaseSmall deliverables; on Linux it also runs `rsql-table`, and promotion adds it beside `check-full`.
+`check` runs formatting, ReleaseSafe native tests and process integrations, a Debug artifact and recovery smoke, ReleaseSmall deliverables; on Linux it also runs `rsql-table`; promotion does not, since [statement-table.yml](../../.github/workflows/statement-table.yml) regenerates the table daily (a stale table costs compile time, never a release).
 Required functional assertions stay required when their fixture changes.
 Native, Store and process suites run concurrently, except short-deadline Host-startup and Debug smoke cases, which follow the parallel batch.
 The native and Store unit roots each compile once and run as four concurrent processes through [the shared shard launcher](../../tests/ci/store_shards.py); each process retains its own 1200-second deadline.
