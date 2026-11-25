@@ -51,6 +51,18 @@ Merge `origin/main` into a PR only when it conflicts with `main`; [Conflict aler
 After that merge, refresh local evidence invalidated by integration and wait for the new head's CI, including its required all-unit compile.
 A PR that merely trails `main` merges as it is.
 
+## Review evidence
+
+A PR merges only when its latest completed review is clean.
+Codex is that review ([Review](../../CODING_STANDARDS.md#review)).
+While Codex is out of allowance (through Tue 2026-12-01), the [pr-reviewer agent](../../.claude/agents/pr-reviewer.md) gives each PR one review instead, once per PR and not per push.
+Start it with the PR number alone, then post its verdict with `python3 tests/ci/open_pr.py review [--pr N] [--findings FILE]`.
+Fix each finding at its class, post `open_pr.py review --fixed`, and merge on green; there is no second review.
+A `sonnet-review-state:v1` marker counts only from a maintainer ([pr_timeline.py](../../tests/ci/pr_timeline.py) reads it with Codex's).
+[review_before_merge.py](../../.claude/hooks/review_before_merge.py) refuses `merge_pull_request`, `enable_pr_auto_merge` and `gh pr merge` on a PR whose latest review is missing or has unresolved findings, and [merge_review.py](../../tests/ci/merge_review.py) names the next step.
+It lets a merge through, with a warning, when GitHub cannot be read.
+When Codex reviews again, the same check reads Codex's reviews; delete the interim paragraph then.
+
 ## Concurrent PRs
 
 Before splitting work across lanes and again before opening a PR, compare its changed files with open PRs, including PRs opened since work began.

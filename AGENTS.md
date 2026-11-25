@@ -97,7 +97,7 @@ Say of each claim whether you ran it, read it in source or inferred it ([Evidenc
 
 ## Landing
 
-Standing grant: merge each small, coherent change once its PR is green, without further approval, lane completion or review signoff.
+Standing grant: merge each small, coherent change once its PR is green and its latest review is clean ([Review evidence](docs/agents/landing.md#review-evidence)), without further approval or lane completion.
 The same grant covers promoting `main` to a release when [Promote](docs/agents/landing.md#promote) says to.
 Changes reach `main` only by merging their PR; the admin bypass is allowed only under the conditions in [Landing procedures](docs/agents/landing.md#publish-and-merge).
 For PR publication, stacking, renaming a shared name, the admin bypass, landing or CI-failure ownership, read [Landing procedures](docs/agents/landing.md).

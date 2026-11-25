@@ -17,6 +17,15 @@
             "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block_full_runs.py"
           }
         ]
+      },
+      {
+        "matcher": "Bash|mcp__github__merge_pull_request|mcp__github__enable_pr_auto_merge",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/review_before_merge.py"
+          }
+        ]
       }
     ]
   }

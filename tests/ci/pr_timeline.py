@@ -9,7 +9,7 @@ later date). No checkout, fetch, tag, or GitHub mutation is performed.
 Every review stage (first review, Codex-clean, rounds) derives from one list
 of review outcomes: formal Codex reviews (findings), Codex receipt comments (no
 findings), the mutable summary at its Code Review completion time, and a
-maintainer's interim opus-review-state:v1 marker at its created_at (each interim
+maintainer's interim opus-review-state:v1 or sonnet-review-state:v1 marker at its created_at (each interim
 review is a new comment; a later edit, even after the merge, does not move it).
 Rounds count reviews, receipts and interim markers; the summary is only a
 fallback for a head without a review or receipt. Codex-clean is the time
@@ -59,7 +59,7 @@ RED_MAIN_LABEL = "main-red"
 STAGES = ("opened", "codex_requested", "codex_reviewed", "codex_clean", "ready",
           "admission_green", "merged", "released")
 SUMMARY = re.compile(r"<!--\s*codex-review-state:v1\s+(.*?)\s*-->", re.S)
-INTERIM = re.compile(r"<!--\s*opus-review-state:v1\s+(.*?)\s*-->", re.S)
+INTERIM = re.compile(r"<!--\s*(?:opus|sonnet)-review-state:v1\s+(.*?)\s*-->", re.S)
 MAINTAINERS = ("OWNER", "MEMBER", "COLLABORATOR")
 
 
