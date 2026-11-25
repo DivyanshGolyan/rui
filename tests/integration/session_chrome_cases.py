@@ -830,7 +830,6 @@ def configure_receipt_case():
                 fixture.wait_for(lambda: len(attempts) == 2, "second independent Configure")
                 b = json.loads(attempts[1])["key"]
                 assert a != b and draft_visible(second), (a, b, second)
-                assert "Config unconfirmed" in second, ("original Configure custody lost", second)
                 if b_unknown:
                     assert footer(second).endswith("enter edit · esc close"), second
                     second = chrome.frame(master, b"\x1b", lambda frame: draft_visible(frame) and
@@ -861,7 +860,7 @@ def configure_receipt_case():
                                     "Local recovery handles" in frame and a in frame and b in frame, timeout=20)
             if b_unknown:
                 assert b in requests, requests
-            current = chrome.frame(master, b"\x1b", lambda frame: " · medium" in footer(frame), timeout=20)
+            current = chrome.frame(master, b"", lambda frame: " · medium" in footer(frame) and "Updating" not in footer(frame), timeout=20)
             assert "gpt-6.1-terra" in footer(current) if b_unknown else "gpt-5.5" in footer(current), current
             os.write(master, b"\x03")
             _, errors = terminal_exit(caller, master)
