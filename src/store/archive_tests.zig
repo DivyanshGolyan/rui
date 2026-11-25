@@ -1031,6 +1031,82 @@ test "Archived window page size is the request's: every size tiles the same newe
     }.run);
 }
 
+/// Records, for one live listing page of Archived Sessions, each row's reference and first Message.
+const FirstWalk = struct {
+    refs: [8][6]u8 = undefined,
+    firsts: [8]?session_list.FirstMessage = undefined,
+    count: usize = 0,
+
+    pub fn head(_: *FirstWalk) !void {}
+    pub fn row(self: *FirstWalk, value: *const session_list.Row) !void {
+        try std.testing.expect(self.count < self.refs.len);
+        self.refs[self.count] = value.reference[0..6].*;
+        self.firsts[self.count] = value.first_message;
+        self.count += 1;
+    }
+    pub fn tail(_: *FirstWalk, _: session_list.Tail) !void {}
+    pub fn archivedRow(_: *FirstWalk, _: *const session_list.ArchivedRow) !void {
+        return error.TestUnexpectedResult;
+    }
+};
+
+test "SL-11: an Archived window row's first Message is its list row's first Message, and its prefix is the leading bytes of inline Text only" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+
+            const Shape = struct { name: []const u8, text: ?[]const u8, parts: bool };
+            const shapes = [_]Shape{
+                .{ .name = "sl11-text", .text = "first words\nsecond line", .parts = false },
+                .{ .name = "sl11-parts", .text = null, .parts = true },
+                .{ .name = "sl11-none", .text = null, .parts = false },
+                .{ .name = "sl11-blank", .text = "\n  Fix CI", .parts = false },
+            };
+            for (shapes) |shape| {
+                const session = try testing.configureTestSession(&storage, shape.name);
+                var file_key: [64]u8 = undefined;
+                const file = try std.fmt.bufPrint(&file_key, "{s}-file", .{shape.name});
+                if (shape.text) |text| try testing.submitTestMessage(&storage, &tmp, file, file, session.slice(), text);
+                if (shape.parts) try testing.submitTestMessageParts(&storage, &tmp, file, session.slice(), &.{ .{ .bytes = "first" }, .{ .bytes = "second" } });
+                var archive_key: [64]u8 = undefined;
+                var archive = try archiveCommand(try std.fmt.bufPrint(&archive_key, "{s}-archive", .{shape.name}), session.slice(), true);
+                try std.testing.expectEqual(protocol.SessionStopCompletion.completed, storage.archiveSession(&archive, .{}).accepted.completion);
+            }
+
+            var walk: FirstWalk = .{};
+            var pages: @import("domain/session_list_read.zig").Scratch = undefined;
+            try storage.readSessionList(&.{ .archive = .archived }, &walk, &pages);
+            try std.testing.expectEqual(shapes.len, walk.count);
+
+            var window: WindowVisitor = .{};
+            try readWindow(&storage, .head, &window);
+            try std.testing.expectEqual(shapes.len, window.count);
+            for (window.rowsSlice()) |row| {
+                const at = for (walk.refs[0..walk.count], 0..) |ref, index| {
+                    if (std.mem.eql(u8, &ref, &row.reference)) break index;
+                } else return error.TestUnexpectedResult;
+                const live = walk.firsts[at];
+                if (live) |want| {
+                    const got = row.first orelse return error.TestUnexpectedResult;
+                    try std.testing.expectEqual(want.position, got.position);
+                    try std.testing.expectEqual(want.admission, got.admission);
+                    try std.testing.expectEqual(want.admitted_at, got.admitted_at);
+                    try std.testing.expectEqualDeep(want.content, got.content);
+                    // The prefix is the Message's own leading bytes, raw, for inline Text, and nothing for parts.
+                    switch (got.content) {
+                        .text => try std.testing.expect(got.has_prefix),
+                        .parts => try std.testing.expect(!got.has_prefix),
+                    }
+                } else try std.testing.expect(row.first == null);
+            }
+        }
+    }.run);
+}
+
 test "Archived window equals the Archived membership over the archive's edge cases" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {

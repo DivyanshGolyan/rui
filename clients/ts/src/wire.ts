@@ -985,18 +985,13 @@ export interface components {
             connection?: string;
             workspace?: string;
         };
-        ArchivedFirstFields: {
-            position: components["schemas"]["Decimal"];
-            admission: components["schemas"]["Decimal"];
-            content: components["schemas"]["ContentValue"];
-            line: string | null;
-        };
         ArchivedRowFields: {
             reference: string;
             archive_seq: components["schemas"]["Decimal"];
             stopped_at: components["schemas"]["Decimal"];
             label: string | null;
-            first: components["schemas"]["ArchivedFirstFields"] | null;
+            first: components["schemas"]["FirstMessage"] | null;
+            first_prefix: string | null;
         };
         CallActivity: {
             total: components["schemas"]["Decimal"];
