@@ -1357,7 +1357,6 @@ const Ending = struct {
     mark: marks.Mark,
     words: []const u8,
     place: ?[]const u8 = null,
-    key: ?[]const u8 = null,
     agent: ?[]const u8 = null,
 };
 
@@ -1372,13 +1371,11 @@ fn ending(sink: anytype, end: Ending, colour: bool) !void {
         try sink.feed(if (end.mark == .stopped) " " else " · ");
     }
     try sink.feed(end.words);
-    for ([_]?[]const u8{ end.place, end.key }) |tail| {
-        if (tail) |words| {
-            try sink.feed(Style.quiet.code(colour));
-            try sink.feed(" · ");
-            try sink.feed(words);
-            try sink.feed(Style.normal.code(colour));
-        }
+    if (end.place) |place| {
+        try sink.feed(Style.quiet.code(colour));
+        try sink.feed(" · ");
+        try sink.feed(place);
+        try sink.feed(Style.normal.code(colour));
     }
     try sink.feed("\n");
 }
@@ -1481,11 +1478,8 @@ test "ending tails are quiet and joined in destination then key order" {
     try workEnded(&sink, .provider_refused, "provider_http_401", null, true);
     try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Sign-in expired\x1b[90m · Settings\x1b[39m\n", row_text.visible(out.buffered()));
     out.end = 0;
-    try ending(&sink, .{ .mark = .failed, .words = "Cause", .place = "Place", .key = "Key" }, false);
-    try std.testing.expectEqualStrings("× Cause · Place · Key\n", row_text.visible(out.buffered()));
-    out.end = 0;
-    try ending(&sink, .{ .mark = .failed, .words = "Cause", .key = "Key" }, false);
-    try std.testing.expectEqualStrings("× Cause · Key\n", row_text.visible(out.buffered()));
+    try ending(&sink, .{ .mark = .failed, .words = "Cause", .place = "Place" }, false);
+    try std.testing.expectEqualStrings("× Cause · Place\n", row_text.visible(out.buffered()));
 }
 
 pub const Fold = union(enum) { none, closed, open: *tool_fold.Output };

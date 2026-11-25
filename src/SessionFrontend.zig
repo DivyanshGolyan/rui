@@ -1364,7 +1364,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         if (self.heldOriginal()) |original| if (session_notice.key(original)) |action| {
             chrome_view.notice_priority = .recovery;
             chrome_view.notice = switch (action) {
-                .retry => "ctrl+r retries",
+                .retry => keymap.retry_hint,
                 .discard => "/discard",
                 .status => "alt+d details",
             };
@@ -2728,7 +2728,7 @@ fn settleAccepted(self: *Self, key: [36]u8, verdict: Submission.Verdict) void {
 
 fn retryable(self: *const Self) ?RetryFence {
     const ending = self.live.latest_ending orelse return null;
-    if (ending.cause.key == null or self.hostHeld()) return null;
+    if (!ending.cause.retry or self.hostHeld()) return null;
     if (self.live.work.state.progress() != null or self.live.queued.count != 0) return null;
     if (self.submission.intent != null or self.submission.messageHeld() or self.submission.task.thread != null or
         self.waitingAction() != null or self.live.work.first_action != null or

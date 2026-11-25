@@ -26,26 +26,27 @@ pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii:
 pub const Cause = struct {
     words: []const u8,
     place: ?[]const u8 = null,
-    key: ?[]const u8 = null,
+    /// Another attempt would help; each surface names the key that makes it.
+    retry: bool = false,
 };
 
 pub fn cause(code: []const u8, provider: ?connection.Name) Cause {
     if (std.mem.eql(u8, code, failure_class.ordered_input_not_supported)) return .{ .words = "This Host cannot send this input yet; no provider request was sent" };
     if (std.mem.eql(u8, code, failure_class.ordered_input_limit)) return .{ .words = "Input exceeds this Host's request limit; no provider request was sent" };
-    if (std.mem.eql(u8, code, "malformed_provider_output")) return .{ .words = "The model's reply didn't come through", .key = "ctrl+r retries" };
+    if (std.mem.eql(u8, code, "malformed_provider_output")) return .{ .words = "The model's reply didn't come through", .retry = true };
     return switch (failure_class.of(code)) {
         .policy => .{ .words = "Refused by the provider" },
         .quota => .{ .words = "Out of quota", .place = (if (provider) |known| if (provider_route.builtInOf(known)) |built_in| built_in.usage() else null else null) orelse "Settings" },
         .plan => .{ .words = "Model not in plan", .place = "Settings" },
-        .model => .{ .words = "Model not served", .key = "ctrl+r retries" },
+        .model => .{ .words = "Model not served", .retry = true },
         .sign_in => .{ .words = "Sign-in expired", .place = "Settings" },
         .api_key => .{ .words = "API key rejected", .place = "Settings" },
         .overflow => .{ .words = "Context full" },
-        .unreachable_provider => .{ .words = "Provider unreachable", .key = "ctrl+r retries" },
-        .retries_exhausted => .{ .words = "Retries ran out", .key = "ctrl+r retries" },
+        .unreachable_provider => .{ .words = "Provider unreachable", .retry = true },
+        .retries_exhausted => .{ .words = "Retries ran out", .retry = true },
         .interrupted => .{ .words = turn_ending.TurnEnding.stopped.words().? },
-        .refused => .{ .words = "Provider refused the request", .key = "ctrl+r retries" },
-        .other => .{ .words = "That didn't work", .key = "ctrl+r retries" },
+        .refused => .{ .words = "Provider refused the request", .retry = true },
+        .other => .{ .words = "That didn't work", .retry = true },
     };
 }
 
@@ -88,39 +89,37 @@ test "MRK-1 status marks and spinner represent their states" {
 }
 
 test "MRK-2 failure causes provide the appropriate explanation and advice" {
-    const Case = struct { code: []const u8, provider: ?connection.Name = null, words: []const u8, key: ?[]const u8, place: ?[]const u8 = null };
+    const Case = struct { code: []const u8, provider: ?connection.Name = null, words: []const u8, retry: bool, place: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .code = "malformed_provider_output", .words = "The model's reply didn't come through", .key = "ctrl+r retries" },
-        .{ .code = "provider_policy", .words = "Refused by the provider", .key = null },
-        .{ .code = "provider_quota", .words = "Out of quota", .key = null, .place = "Settings" },
-        .{ .code = "provider_quota", .words = "Out of quota", .provider = connection.Name.parse("codex"), .key = null, .place = "Settings" },
-        .{ .code = "provider_quota", .words = "Out of quota", .provider = connection.Name.parse("openai"), .key = null, .place = "Settings" },
-        .{ .code = "provider_quota", .words = "Out of quota", .provider = connection.Name.parse("chatgpt"), .key = null, .place = "Manage usage: https://chatgpt.com/settings/usage" },
-        .{ .code = "provider_plan", .words = "Model not in plan", .key = null, .place = "Settings" },
-        .{ .code = "provider_plan", .words = "Model not in plan", .provider = connection.Name.parse("chatgpt"), .key = null, .place = "Settings" },
-        .{ .code = "provider_model_unavailable", .words = "Model not served", .key = "ctrl+r retries" },
-        .{ .code = "provider_http_401", .words = "Sign-in expired", .key = null, .place = "Settings" },
-        .{ .code = "provider_http_401", .words = "Sign-in expired", .provider = connection.Name.parse("chatgpt"), .key = null, .place = "Settings" },
-        .{ .code = "provider_api_key_rejected", .words = "API key rejected", .key = null, .place = "Settings" },
-        .{ .code = "ResourceExceeded", .words = "Context full", .key = null },
-        .{ .code = "provider_tls_verification_failed", .words = "Provider unreachable", .key = "ctrl+r retries" },
-        .{ .code = "retry_exhausted", .words = "Retries ran out", .key = "ctrl+r retries" },
-        .{ .code = "cancelled", .words = "Stopped", .key = null },
-        .{ .code = "provider_http_400", .words = "Provider refused the request", .key = "ctrl+r retries" },
-        .{ .code = "unknown", .words = "That didn't work", .key = "ctrl+r retries" },
+        .{ .code = "malformed_provider_output", .words = "The model's reply didn't come through", .retry = true },
+        .{ .code = "provider_policy", .words = "Refused by the provider", .retry = false },
+        .{ .code = "provider_quota", .words = "Out of quota", .retry = false, .place = "Settings" },
+        .{ .code = "provider_quota", .words = "Out of quota", .provider = connection.Name.parse("codex"), .retry = false, .place = "Settings" },
+        .{ .code = "provider_quota", .words = "Out of quota", .provider = connection.Name.parse("openai"), .retry = false, .place = "Settings" },
+        .{ .code = "provider_quota", .words = "Out of quota", .provider = connection.Name.parse("chatgpt"), .retry = false, .place = "Manage usage: https://chatgpt.com/settings/usage" },
+        .{ .code = "provider_plan", .words = "Model not in plan", .retry = false, .place = "Settings" },
+        .{ .code = "provider_plan", .words = "Model not in plan", .provider = connection.Name.parse("chatgpt"), .retry = false, .place = "Settings" },
+        .{ .code = "provider_model_unavailable", .words = "Model not served", .retry = true },
+        .{ .code = "provider_http_401", .words = "Sign-in expired", .retry = false, .place = "Settings" },
+        .{ .code = "provider_http_401", .words = "Sign-in expired", .provider = connection.Name.parse("chatgpt"), .retry = false, .place = "Settings" },
+        .{ .code = "provider_api_key_rejected", .words = "API key rejected", .retry = false, .place = "Settings" },
+        .{ .code = "ResourceExceeded", .words = "Context full", .retry = false },
+        .{ .code = "provider_tls_verification_failed", .words = "Provider unreachable", .retry = true },
+        .{ .code = "retry_exhausted", .words = "Retries ran out", .retry = true },
+        .{ .code = "cancelled", .words = "Stopped", .retry = false },
+        .{ .code = "provider_http_400", .words = "Provider refused the request", .retry = true },
+        .{ .code = "unknown", .words = "That didn't work", .retry = true },
     };
     var seen: std.enums.EnumSet(failure_class.Class) = .empty;
     for (cases) |case| {
         seen.insert(failure_class.of(case.code));
         const shown = cause(case.code, case.provider);
         try std.testing.expectEqualStrings(case.words, shown.words);
-        if (case.key) |key| {
-            try std.testing.expectEqualStrings(key, shown.key orelse return error.MissingRetryKey);
-        } else try std.testing.expectEqual(@as(?[]const u8, null), shown.key);
+        try std.testing.expectEqual(case.retry, shown.retry);
         if (case.place) |place| {
             try std.testing.expectEqualStrings(place, shown.place orelse return error.MissingPlace);
         } else try std.testing.expectEqual(@as(?[]const u8, null), shown.place);
-        if (shown.place != null) try std.testing.expect(shown.key == null);
+        if (shown.place != null) try std.testing.expect(!shown.retry);
     }
     try std.testing.expect(seen.eql(.full));
     {
@@ -133,7 +132,7 @@ test "MRK-2 failure causes provide the appropriate explanation and advice" {
                 const provider = connection.Name.parse(@tagName(built_in)).?;
                 const shown = cause(code, provider);
                 try std.testing.expectEqualStrings(unknown.words, shown.words);
-                try std.testing.expectEqual(unknown.key, shown.key);
+                try std.testing.expectEqual(unknown.retry, shown.retry);
                 const usage = if (failure_class.of(code) == .quota) built_in.usage() else null;
                 try std.testing.expectEqualStrings(usage orelse unknown.place orelse "", shown.place orelse "");
             }
@@ -143,10 +142,10 @@ test "MRK-2 failure causes provide the appropriate explanation and advice" {
     {
         const local = cause(failure_class.ordered_input_limit, null);
         try std.testing.expectEqualStrings("Input exceeds this Host's request limit; no provider request was sent", local.words);
-        try std.testing.expect(local.key == null and local.place == null);
+        try std.testing.expect(!local.retry and local.place == null);
         const unsupported = cause(failure_class.ordered_input_not_supported, null);
         try std.testing.expectEqualStrings("This Host cannot send this input yet; no provider request was sent", unsupported.words);
-        try std.testing.expect(unsupported.key == null and unsupported.place == null);
-        try std.testing.expect(cause("provider_http_400", null).key != null);
+        try std.testing.expect(!unsupported.retry and unsupported.place == null);
+        try std.testing.expect(cause("provider_http_400", null).retry);
     }
 }
