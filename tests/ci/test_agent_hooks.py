@@ -101,5 +101,49 @@ class ReviewBeforeMergeTest(unittest.TestCase):
         self.assertIn("not blocking", message)
 
 
+def load_ready_hook():
+    spec = importlib.util.spec_from_file_location("ready_pr_shape", MERGE_HOOK.with_name("ready_pr_shape.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ReadyPrShapeTest(unittest.TestCase):
+    def setUp(self):
+        self.hook = load_ready_hook()
+        self.rui = {"owner": "DivyanshGolyan", "repo": "rui"}
+
+    def test_only_calls_that_make_a_rui_pr_ready_are_judged(self):
+        create = lambda **a: {"tool_name": "mcp__github__create_pull_request", "tool_input": {**self.rui, "head": "x", **a}}
+        update = lambda **a: {"tool_name": "mcp__github__update_pull_request", "tool_input": {**self.rui, "pullNumber": 9, **a}}
+        self.assertEqual(self.hook.ready_call(create(body="b")), (None, "x", "b"))
+        self.assertEqual(self.hook.ready_call(create(draft=False, body="b")), (None, "x", "b"))
+        self.assertIsNone(self.hook.ready_call(create(draft=True)))
+        self.assertEqual(self.hook.ready_call(update(draft=False)), (9, None, None))
+        self.assertIsNone(self.hook.ready_call(update(body="new body")))
+        self.assertIsNone(self.hook.ready_call(update(draft=True)))
+        other = {"tool_name": "mcp__github__create_pull_request", "tool_input": {"owner": "a", "repo": "b"}}
+        self.assertIsNone(self.hook.ready_call(other))
+
+    def test_pr_2305_without_a_screen_line_is_refused_and_with_one_passes(self):
+        # #2305 (one assertion in src/chat_info.zig) was marked ready with this body; admission rejected it 20 minutes later.
+        body = "No issue: main is red on two tests since #2284 added `watch_github_pr`.\n\n## Summary\n\n```\nx\n```\n"
+        api = lambda method, path: ({"body": body} if path.endswith("/pulls/9")
+                                    else [{"filename": "src/chat_info.zig"}, {"filename": "tests/integration/product_defaults.py"}])
+        with patch("pr_shape.screens_required", return_value=True), patch("pr_shape.sticky_screen_evidence", return_value=False):
+            reason = self.hook.refusal((9, None, None), api)
+            self.assertIn("No screen change:", reason)
+            fixed = body + "No screen change: one unit-test assertion\n"
+            self.assertIsNone(self.hook.refusal((9, None, fixed), api))
+
+    def test_an_unreadable_pr_does_not_block(self):
+        payload = {"tool_name": "mcp__github__update_pull_request", "tool_input": {**self.rui, "pullNumber": 9, "draft": False}}
+        stderr = io.StringIO()
+        with patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stderr(stderr), \
+                patch("conflict_alert.github", side_effect=subprocess.CalledProcessError(1, ["gh"])):
+            self.assertEqual(self.hook.main(), 0)
+        self.assertIn("not blocking", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

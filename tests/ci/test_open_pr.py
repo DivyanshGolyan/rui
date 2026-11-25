@@ -155,9 +155,10 @@ class OpenPrTest(unittest.TestCase):
 
     def test_ready_finds_the_pr_over_rest(self):
         head = "c" * 40
-        draft = {"number": 9, "draft": True, "head": {"sha": head}}
+        draft = {"number": 9, "draft": True, "head": {"sha": head}, "body": "No issue: a test body"}
         stdout = io.StringIO()
         with patch("sys.argv", ["open_pr.py", "ready"]), \
+             patch.object(open_pr, "branch_changes", return_value=(["docs/a.md"], [])), \
              patch.object(open_pr, "git", side_effect=["fix/x", head, ""]), \
              patch.object(open_pr, "origin_repo", return_value="example/rui"), \
              patch.object(open_pr, "github", return_value=[draft]) as github, \
@@ -203,6 +204,28 @@ class OpenPrTest(unittest.TestCase):
                 code, message = open_pr.post_review(lambda *call: posted.append(call), "example/rui", pr, args, lambda: last)
                 self.assertEqual((code, posted), (1, []))
                 self.assertTrue(message)
+
+    def test_ready_refuses_a_body_admission_would_fail(self):
+        # #2305 was ready for 20 minutes on a UI file with no screen line; only admission, last, said so.
+        head = "c" * 40
+        body = "No issue: fix main's red tests after the watch tool arrived"
+        draft = {"number": 9, "draft": True, "head": {"sha": head}, "body": body}
+        for sticky in (False, True):
+            with self.subTest(screens_comment=sticky):
+                stderr = io.StringIO()
+                with patch("sys.argv", ["open_pr.py", "ready"]), \
+                     patch.object(open_pr, "git", side_effect=["fix/x", head, ""]), \
+                     patch.object(open_pr, "origin_repo", return_value="example/rui"), \
+                     patch.object(open_pr, "branch_changes", return_value=(["src/chat_info.zig"], [])), \
+                     patch("pr_shape.screens_required", return_value=True), \
+                     patch("pr_shape.sticky_screen_evidence", return_value=sticky), \
+                     patch("pr_shape.summary_sketch", return_value=True), \
+                     patch.object(open_pr, "github", return_value=[draft]), \
+                     patch.object(open_pr, "gh", return_value="") as gh, redirect_stderr(stderr):
+                    self.assertEqual(open_pr.main(), 0 if sticky else 1)
+                self.assertEqual(gh.call_count, 1 if sticky else 0)
+                if not sticky:
+                    self.assertIn("No screen change:", stderr.getvalue())
 
     def test_opens_only_a_pushed_head(self):
         self.assertIsNone(open_pr.open_refusal("a" * 40, "a" * 40))

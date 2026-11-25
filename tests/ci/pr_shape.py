@@ -143,6 +143,15 @@ def screen_refusal(body) -> str | None:
     return None
 
 
+def ready_refusal(changed_paths, body, *, base=None, repo=None, number=None) -> str | None:
+    """Everything admission will say about a ready PR's body, so a PR is never marked ready to fail on it."""
+    if reason := refusal(changed_paths, body, base=base):
+        return reason
+    if screens_required(changed_paths, base=base) and (reason := screen_refusal(body)):
+        return None if number and sticky_screen_evidence(repo, number) else reason
+    return None
+
+
 def live_body(env_body) -> str:
     body = env_body
     repo, number = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("PR_NUMBER")
@@ -159,9 +168,9 @@ def live_body(env_body) -> str:
     return body
 
 
-def sticky_screen_evidence() -> bool:
+def sticky_screen_evidence(repo=None, number=None) -> bool:
     """Accept a bot screenshot comment only for the current PR head."""
-    repo, number = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("PR_NUMBER")
+    repo, number = repo or os.environ.get("GITHUB_REPOSITORY"), number or os.environ.get("PR_NUMBER")
     if not repo or not number:
         return False
     try:
