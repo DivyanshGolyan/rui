@@ -1719,6 +1719,7 @@ const ItemRead = struct {
                 }
                 if (!call.found.get()) return error.CorruptStore;
                 try checkCallDetails(&call.resolved, &item.value.call);
+                if (call.resolved.description.*) |*text| text.* = tool_presentation.savedWords(text.slice());
                 item.at = call.resolved.resolved_at.get();
             },
             10 => {
@@ -1762,6 +1763,7 @@ const ItemRead = struct {
                 }
                 if (!approval.found.get()) return error.CorruptStore;
                 try checkCallDetails(&approval.details, &approval.metadata);
+                if (approval.details.description.*) |*text| text.* = tool_presentation.savedWords(text.slice());
             },
             13 => {
                 const change = &read.state.change;

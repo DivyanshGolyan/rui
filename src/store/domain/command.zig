@@ -2785,7 +2785,7 @@ fn readRecovery(a: anytype, key: []const u8, out: *reads_domain.Recovery) !void 
             .action_id = row.action_id.get(),
             .operation_id = row.parent_operation_id.get(),
             .call = row.call_ordinal,
-            .description = row.description,
+            .description = if (row.description) |saved| tool_presentation.savedWords(saved.slice()) else null,
             .at = row.resolved_at.get(),
         };
     }
