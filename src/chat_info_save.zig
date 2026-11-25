@@ -15,7 +15,7 @@ pub const Event = union(enum) {
     copy_failed,
 };
 pub const SaveState = enum { idle, pending, saved, failed, unconfirmed };
-pub const Hold = packed struct { host: bool, upgrade: bool, opening: bool, command: bool, intent: bool };
+pub const Hold = packed struct { host: bool, upgrade: bool, opening: bool, command: bool, intent: bool, saving: bool };
 
 pub fn step(effect: Effect, event: Event) Effect {
     return switch (event) {
@@ -70,8 +70,13 @@ pub fn currentUnknown(effect: Effect) bool {
     return effect == .configure or awaitingCurrent(effect);
 }
 
+/// A save is in flight or its Current read is awaited; a new save would overwrite the effect that tracks it.
+pub fn saving(effect: Effect) bool {
+    return awaitingCurrent(effect) or effect == .configure or effect == .copy or effect == .archive;
+}
+
 pub fn maySave(hold: Hold) error{Busy}!void {
-    if (hold.host or hold.upgrade or hold.opening or hold.command or hold.intent) return error.Busy;
+    if (hold.host or hold.upgrade or hold.opening or hold.command or hold.intent or hold.saving) return error.Busy;
 }
 
 test "chat info save transition table covers every effect and event" {
@@ -107,8 +112,8 @@ test "chat info save transition table covers every effect and event" {
 }
 
 test "chat info save admission covers all holds" {
-    for (0..32) |bits| {
-        const hold: Hold = @bitCast(@as(u5, @intCast(bits)));
+    for (0..64) |bits| {
+        const hold: Hold = @bitCast(@as(u6, @intCast(bits)));
         if (bits == 0) try maySave(hold) else try std.testing.expectError(error.Busy, maySave(hold));
     }
 }

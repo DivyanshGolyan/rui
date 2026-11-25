@@ -514,19 +514,21 @@ pub const Carry = struct {
 pub const max_unconfirmed_line_bytes = 80;
 
 pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes]u8) ?[]const u8 {
+    var configure = false;
     var at = state.request_count;
     while (at > 0) {
         at -= 1;
         const request = &state.requests[at];
         if (request.status != .unknown) continue;
-        if (request.kind == .configure) return std.fmt.bufPrint(buffer, "! Config unconfirmed · exit for Store and intent", .{}) catch unreachable;
+        if (request.kind == .configure) configure = true;
         if (request.kind != .send) continue;
         return switch (request.sent) {
             .saved => |saved| std.fmt.bufPrint(buffer, "! Not confirmed · rui request recover {s}", .{&saved.original.key}),
             else => std.fmt.bufPrint(buffer, "! {s}: send not confirmed; details on exit", .{&request.session.?}),
         } catch unreachable;
     }
-    return null;
+    // A Send's recovery key is the actionable line; a Configure's Store and intent are printed on departure.
+    return if (configure) std.fmt.bufPrint(buffer, "! Config unconfirmed · exit for Store and intent", .{}) catch unreachable else null;
 }
 
 pub const StatusBuffer = [@max(upgrade_status.max_line_bytes, max_unconfirmed_line_bytes)]u8;
@@ -5684,6 +5686,19 @@ test "SUI-135 maximum Configure departure guidance fits its shared bound" {
     try writeDeparture(&state, null, &out);
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "\\u202e") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "\u{202e}") == null);
+}
+
+test "SUI-135 an unknown Send's key outranks a newer unconfirmed Configure on the status line" {
+    const ref = "k7m2qx".*;
+    var state = try opened(&.{session(&ref, .{ .idle = ago(0) }, .{})});
+    defer state.deinit();
+    state.requests[0] = .{ .kind = .send, .session = ref, .status = .unknown };
+    state.requests[1] = .{ .kind = .configure, .session = ref, .status = .unknown };
+    state.request_count = 2;
+    var line: [max_unconfirmed_line_bytes]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, unconfirmedLine(&state, &line).?, "send not confirmed") != null);
+    state.requests[0].status = .done;
+    try std.testing.expect(std.mem.indexOf(u8, unconfirmedLine(&state, &line).?, "Config unconfirmed") != null);
 }
 
 test "an original Esc left unconfirmed is named at once and recovered on departure, until the ledger is full" {

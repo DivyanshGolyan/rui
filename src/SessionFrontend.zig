@@ -642,7 +642,7 @@ pub fn archiveAnswered(self: *Self, result: overview_view.ArchiveResult) void {
 }
 
 fn infoMaySave(self: *const Self) !void {
-    return info_save.maySave(.{ .host = self.hostHeld(), .upgrade = self.upgradeHeld(), .opening = self.reading.opening, .command = self.commandActive(), .intent = self.submission.intent != null });
+    return info_save.maySave(.{ .host = self.hostHeld(), .upgrade = self.upgradeHeld(), .opening = self.reading.opening, .command = self.commandActive(), .intent = self.submission.intent != null, .saving = info_save.saving(self.info_effect) });
 }
 
 fn showSubmissionFailure(self: *Self) !void {
@@ -3086,8 +3086,12 @@ fn runLine(self: *Self) !void {
         var out = std.Io.Writer.fixed(&bytes);
         var safe: TerminalText = .{ .mode = .line };
         const intent = if (safe.feed(&out, text)) |_| if (safe.finish(&out)) |_| out.buffered() else |_| "configuration (see the saved request)" else |_| "configuration (see the saved request)";
+        if (info_save.saving(self.info_effect)) {
+            self.notice = "! Busy; try again shortly.";
+            return;
+        }
         if (try self.reserveConfigure(intent) != .admitted) {
-            self.notice = "! Request ledger full; use /requests or exit for details.";
+            self.notice = "! Configure not admitted; use /requests or exit for details.";
             return;
         }
         self.info_effect = info_save.step(self.info_effect, .{ .started = .edit });
@@ -10419,6 +10423,20 @@ test "SUI-136 Current and Configure receipt stay independent across a later edit
     try backend.configure(backend.context, .{ .effort = .high });
     try std.testing.expectEqual(ChatInfo.Edit{ .effort = .high }, self.info_edit.?);
     try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+}
+
+test "SUI-136 a configuring slash line never overwrites a save that awaits Current" {
+    for ([_]info_save.Effect{ .refreshing, .refreshing_unconfirmed, .copy, .archive }) |effect| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.info_effect = effect;
+        try held.keys("/effort high");
+        try self.runLine();
+        try std.testing.expectEqual(effect, self.info_effect);
+        try std.testing.expect(self.input.queuedCommand() == null);
+        try std.testing.expectEqualStrings("! Busy; try again shortly.", self.notice.?);
+    }
 }
 
 test "chat info typed configure completion never parses a slash line and retains definite failure" {
