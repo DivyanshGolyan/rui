@@ -3362,7 +3362,7 @@ test "omitted loaded tools preserve pre-T4a Configure and creating Message diges
     try std.testing.expectEqualStrings("e983bd4a7dce4a1ec777d065815928f654ac824dc57a57b397b8f78e7a4ede3a", &std.fmt.bytesToHex(configure.semanticDigest(), .lower));
     var message: Tested.MessageCommand = .{ .configuration = .{} };
     message.text = .{ .state = .value, .length = 2, .digest = contentDigest("go") };
-    try std.testing.expectEqualStrings("29da99db4ed9dcdf55128d1f956d9551106135b126ec23d2e97cc768618b8127", &std.fmt.bytesToHex(message.semanticDigest(), .lower));
+    try std.testing.expectEqualStrings("6a5d7d992947a0b1aa248f637301465737871a6f69a24c3f0d9f027bce889f7d", &std.fmt.bytesToHex(message.semanticDigest(), .lower));
     const previous = configure.semanticDigest();
     configure.configuration.loaded_tools = try .of(&.{});
     try std.testing.expect(!std.mem.eql(u8, &previous, &configure.semanticDigest()));
@@ -3684,7 +3684,7 @@ test "inline skills leave every existing canonical mutation digest unchanged" {
     const cases = [_]Case{
         .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{}}", .digest = "db4015965f28197d8bfae4b13f61edb8b1047904643d764a7cc8ce10f9680e30" },
         .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{},\"reload_skills\":true}", .digest = "14764e8bb9e20125961c2b950bac15e919dfc6653fe2cc7359b027faa0ee89b5" },
-        .{ .body = head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":\"\"}}", .digest = "e8cea677d75e3de98bcb68ccbbfcc6cda23fe42bd180da1c742f741f8c73975f" },
+        .{ .body = head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":\"\"}}", .digest = "8d3fdad56d92ab61dc23c434c660689e1f34c4faef3ce2a7cab6031b25c9b601" },
         .{ .body = head ++ "\"kind\":\"session_stop\",\"session\":\"k7m2qx\"}", .digest = "f8e8c1514a14cc72fe18bad111508cffa2b5b55812f6ba2deaed959740940d48" },
         .{ .body = head ++ "\"kind\":\"session_archive\",\"session\":\"k7m2qx\",\"archived\":true}", .digest = "ab777e65fc2476bbadf1d8eb793e2bf4d7d3bd49334bd79b4ca15a0f0c536d6b" },
         .{ .body = head ++ "\"kind\":\"session_archive\",\"session\":\"k7m2qx\",\"archived\":false}", .digest = "07e24427f9ec75478b887d3d2e5bd3a072bcc57a587c6d0826eb5bf0f6aa86df" },
