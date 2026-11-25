@@ -5,6 +5,7 @@ const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 
 pub const max_bytes = 200;
+pub const max_label_bytes = 100;
 pub const fallback_words = "Tool call";
 
 const replacement = "\xef\xbf\xbd";
@@ -206,4 +207,27 @@ test "TPR-3 every short byte string saves valid, stable and reads as one tidy id
             }
         }
     }
+}
+
+/// A stored Session Label as every reader shows it: its words as one tidy line of at most `max_label_bytes`, or null when it has none.
+/// Total; the door (`tool_presentation.validLabel`) is where a bad Label is refused, so every read of the stored column goes through here.
+pub fn labelWords(stored: ?Bounded(max_label_bytes)) ?Bounded(max_label_bytes) {
+    const label = stored orelse return null;
+    return readWords(max_label_bytes, label.slice());
+}
+
+test "TPR-3 a saved Session Label reads as one line of at most 100 bytes or none" {
+    const exact: [max_label_bytes]u8 = @splat('x');
+    const long: [150]u8 = @splat('x');
+    const words = struct {
+        fn of(bytes: []const u8) ?Bounded(max_label_bytes) {
+            return labelWords(Bounded(max_label_bytes).from(bytes[0..@min(bytes.len, max_label_bytes)]) catch unreachable);
+        }
+    }.of;
+    try std.testing.expectEqualStrings("Review PR 412", words("Review PR 412").?.slice());
+    try std.testing.expectEqualStrings("two lines", words("two\nlines").?.slice());
+    try std.testing.expect(words(" ") == null);
+    try std.testing.expect(words("") == null);
+    try std.testing.expect(labelWords(null) == null);
+    try std.testing.expectEqualStrings(&exact, words(&long).?.slice());
 }

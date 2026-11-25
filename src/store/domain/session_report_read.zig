@@ -13,6 +13,7 @@ const outcome_code = @import("../../outcome_code.zig");
 const session_report = @import("../../session_report.zig");
 const tool_name = @import("../../tool_name.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
+const saved_label = @import("../../saved_label.zig");
 const tool_defs = @import("../../tool_record.zig");
 const turn_policy = @import("../../turn_policy.zig");
 const store_core = @import("../Store.zig");
@@ -99,6 +100,7 @@ fn readHeadWithPressure(a: *ReadAccess, session_ref: []const u8, profile: cli_va
         return false;
     }
     try configuration_domain.checkSaved(&current);
+    current.label = saved_label.labelWords(current.label);
     try readCurrent(a, session_ref, profile, &current, watched, pressure);
     return true;
 }

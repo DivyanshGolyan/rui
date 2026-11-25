@@ -5,11 +5,11 @@ const saved_label = @import("saved_label.zig");
 
 pub const max_description_bytes = @import("tool_line.zig").max_bytes;
 
+pub const max_label_bytes = saved_label.max_label_bytes;
+
 comptime {
     std.debug.assert(max_description_bytes == saved_label.max_bytes);
 }
-
-pub const max_label_bytes = 100;
 
 pub const max_session_bytes = session_id.max_reference_bytes;
 

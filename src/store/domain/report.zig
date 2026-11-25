@@ -1737,6 +1737,7 @@ fn RevisionChunk(comptime Watcher: type) type {
         tools: [tool_defs.max_tools][]const u8 = undefined,
         loaded_tools: [tool_defs.max_tools][]const u8 = undefined,
         app_tools: [app_tools.max_records][]const u8 = undefined,
+        label: ?Bounded(tool_presentation.max_label_bytes) = null,
 
         const Failure = error{CorruptStore} || RowError(Watcher);
 
@@ -1788,7 +1789,7 @@ fn RevisionChunk(comptime Watcher: type) type {
         }
 
         fn settings(chunk: *@This(), row: *const RevisionRow) error{CorruptStore}!session_report.Revision {
-            if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
+            chunk.label = saved_label.labelWords(row.label);
             return .{
                 .revision = row.revision.get(),
                 .command_key = row.command_key.slice(),
@@ -1798,7 +1799,7 @@ fn RevisionChunk(comptime Watcher: type) type {
                 .compaction_trigger = optional(row.compaction_trigger),
                 .output_reservation = row.output_reservation,
                 .reasoning_effort = row.reasoning_effort,
-                .label = if (row.label) |*label| label.slice() else null,
+                .label = if (chunk.label) |*label| label.slice() else null,
                 .tools = try sortedToolNames(if (row.tools) |*names| names.slice() else null, &chunk.tools),
                 .loaded_tools = try sortedToolNames(if (row.loaded_tools) |*names| names.slice() else null, &chunk.loaded_tools),
                 .app_tools = try sortedToolNames(if (row.app_tools) |*names| names.slice() else null, &chunk.app_tools),
