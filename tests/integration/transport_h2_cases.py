@@ -170,7 +170,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                 session = sessions[index]
                 submitted = requests.call(
                     "message", key=f"message-{capacity}-{round_number}-{index}",
-                    session=session, sender=None, sender_handle=None, text={"state": "value", "value": f"h2-{capacity}-{round_number}-{index}"},
+                    session=session, text={"state": "value", "value": f"h2-{capacity}-{round_number}-{index}"},
                 )
                 assert submitted["answer"]["status"] == "accepted", submitted
             expected = (round_number + 1) * capacity
@@ -314,7 +314,7 @@ def held_population(root):
                 session = sessions[index]
                 submitted = requests.call(
                     "message", key=f"held-message-{round_number}-{index}",
-                    session=session, sender=None, sender_handle=None, text={"state": "value", "value": f"held-{round_number}-{index}"},
+                    session=session, text={"state": "value", "value": f"held-{round_number}-{index}"},
                 )
                 assert submitted["answer"]["status"] == "accepted", submitted
             result_deadline = time.monotonic() + 40

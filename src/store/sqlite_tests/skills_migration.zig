@@ -131,13 +131,10 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
     var archive: protocol.SessionArchiveCommand = .{};
     try archive.key.set("skills-58-archive");
     try archive.session.set("rhvzwc");
-    var refused: wire_request.MessageCommand = .{ .text = try testingBytesContent(&tmp, "skills-58-refused-body", "old wire 10 refused peer message"), .sender = .{}, .sender_handle = .{} };
+    var refused: wire_request.MessageCommand = .{ .text = try testingBytesContent(&tmp, "skills-58-refused-body", "old wire 10 refused peer message") };
     defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
     try refused.key.set("skills-58-refusal");
     try refused.session.set("absent");
-    try refused.sender.?.store.set(root);
-    try refused.sender.?.session.set("brhkcj");
-    try refused.sender_handle.?.set("00112233445566778899aabbccddeeff");
     {
         const raw = try openRaw(migrated);
         defer _ = c.sqlite3_close(raw);

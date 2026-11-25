@@ -59,7 +59,6 @@
     "public-parts-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "read-image-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "request-wait-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
-    "sender-identity-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "server-delivery-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "session-list-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "settings-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],

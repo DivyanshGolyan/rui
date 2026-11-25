@@ -7679,7 +7679,6 @@
                       "session_archiving",
                       "invalid_session_reference",
                       "unknown_session",
-                      "invalid_sender_handle",
                       "unsupported_permission_mode",
                       "unknown_connection",
                       "connection_unserved",
@@ -7839,7 +7838,6 @@
                       "session_archiving",
                       "invalid_session_reference",
                       "unknown_session",
-                      "invalid_sender_handle",
                       "unsupported_permission_mode",
                       "unknown_connection",
                       "connection_unserved",
@@ -7998,45 +7996,6 @@
                 "maxLength": 128,
                 "x-rui-max-bytes": 128
               },
-              "sender": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "store": {
-                        "type": "string",
-                        "maxLength": 492,
-                        "x-rui-max-bytes": 492
-                      },
-                      "session": {
-                        "type": "string",
-                        "maxLength": 128,
-                        "x-rui-max-bytes": 128
-                      }
-                    },
-                    "required": [
-                      "store",
-                      "session"
-                    ],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
               "configuration": {
                 "$ref": "#/components/schemas/Configuration"
               },
@@ -8067,8 +8026,6 @@
               "store",
               "key",
               "session",
-              "sender",
-              "sender_handle",
               "text"
             ],
             "additionalProperties": false
@@ -8097,45 +8054,6 @@
                 "maxLength": 128,
                 "x-rui-max-bytes": 128
               },
-              "sender": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "store": {
-                        "type": "string",
-                        "maxLength": 492,
-                        "x-rui-max-bytes": 492
-                      },
-                      "session": {
-                        "type": "string",
-                        "maxLength": 128,
-                        "x-rui-max-bytes": 128
-                      }
-                    },
-                    "required": [
-                      "store",
-                      "session"
-                    ],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
               "configuration": {
                 "$ref": "#/components/schemas/Configuration"
               },
@@ -8157,8 +8075,6 @@
               "store",
               "key",
               "session",
-              "sender",
-              "sender_handle",
               "parts"
             ],
             "additionalProperties": false

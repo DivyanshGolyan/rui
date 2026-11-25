@@ -18,7 +18,6 @@ const max_tool_list_name_bytes = tool_name.max_list_name_bytes;
 const max_tools = tool_name.max_tools;
 const validToolName = tool_name.valid;
 pub const max_preset_name_bytes = 64;
-pub const max_sender_handle_bytes = 32;
 
 pub fn Commands(comptime Custody: type) type {
     return struct {
@@ -302,8 +301,6 @@ fn MessageCommandOf(comptime Custody: type) type {
         store: Bounded(max_store_bytes) = .{},
         key: Bounded(max_key_bytes) = .{},
         session: Bounded(max_session_bytes) = .{},
-        sender: ?Address = null,
-        sender_handle: ?Bounded(max_sender_handle_bytes) = null,
         text: ContentField = .{},
         configuration: ?Configuration = null,
         require_model: bool = false,
@@ -329,15 +326,8 @@ fn MessageCommandOf(comptime Custody: type) type {
 
         fn inputDigest(self: *const MessageCommand, input: ?@import("input_parts.zig").Reference) [32]u8 {
             var hash = std.crypto.hash.sha2.Sha256.init(.{});
-            hashField(&hash, "rui/core/message/v4");
+            hashField(&hash, "rui/core/message/v5");
             hashField(&hash, self.session.slice());
-            hash.update(&.{@intFromBool(self.sender != null)});
-            if (self.sender) |sender| {
-                hashField(&hash, sender.store.slice());
-                hashField(&hash, sender.session.slice());
-            }
-            hash.update(&.{@intFromBool(self.sender_handle != null)});
-            if (self.sender_handle) |handle| hashField(&hash, handle.slice());
             if (input) |reference| {
                 const identity = reference.identity();
                 hashContentIdentity(&hash, .value, identity.length, &identity.digest);

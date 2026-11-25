@@ -2554,30 +2554,9 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
         input.operands = operands;
     }
 
-    const address = init.environ_map.get("RUI_ADDRESS");
-    const sender_store = init.environ_map.get("RUI_STORE");
-    const handle = init.environ_map.get("RUI_SENDER_HANDLE");
-    var sender_paths: platform.Paths = undefined;
-    if (address != null or sender_store != null or handle != null) {
-        if (address == null or sender_store == null or handle == null or
-            !protocol.validSessionId(address.?) or sender_store.?.len == 0 or handle.?.len == 0 or
-            std.meta.isError(client.validatePeer(sender_store.?, address.?, handle.?)))
-        {
-            return error.InvalidRuiAddress;
-        }
-        sender_paths = try client.resolveClientPaths(io, sender_store.?);
-        const elsewhere = if (parsed.get("store")) |override|
-            !(try client.resolveClientPaths(io, override)).store_identity.eql(sender_paths.store_identity.slice())
-        else
-            false;
-        if (!elsewhere) {
-            input.sender = .{ .store = sender_paths.store_identity.slice(), .session = address.? };
-            input.sender_handle = handle;
-        }
-    }
     step.* = .store;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = if (input.sender != null) sender_paths.selector() else try selectedStore(init, parsed.get("store"), &selected_buffer);
+    input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try takeCapture(step, client.captureMessage(io, input, target));
@@ -3348,7 +3327,7 @@ fn publishAction(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const store = init.environ_map.get("RUI_STORE") orelse return error.InvalidRuiAddress;
     const handle = init.environ_map.get("RUI_SENDER_HANDLE") orelse return error.InvalidRuiAddress;
     if (handle.len != 32) return error.InvalidRuiAddress;
-    try client.validatePeer(store, address, handle);
+    try client.validatePeer(store, address);
     var bytes: [protocol.max_action_value_bytes + 1]u8 = undefined;
     var len: usize = 0;
     while (len < bytes.len) {
@@ -5188,7 +5167,6 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.InvalidStore, .code = .store_path_malformed, .exit = 2, .phrase = "canonical form is at most 492 bytes" },
         .{ .err = error.StoreUnavailable, .code = .store_unavailable, .exit = 6, .phrase = "permissions to 0700" },
         .{ .err = error.InvalidRuiAddress, .code = .peer_context_invalid, .exit = 2, .phrase = "unset RUI_STORE RUI_ADDRESS RUI_SENDER_HANDLE" },
-        .{ .err = error.InvalidSenderHandle, .code = .invalid_sender_handle, .exit = 2, .phrase = "Send from a live Rui Session" },
         .{ .err = error.UnsupportedSelectionProvider, .code = .selection_provider_unsupported, .exit = 6, .phrase = "Accepted: a connection name the selected Store serves." },
         .{ .err = error.UnsupportedSelectionModel, .code = .selection_model_unsupported, .exit = 6, .phrase = "rui defaults configure --clear-model" },
         .{ .err = error.SavedPreferenceStoreInvalid, .code = .preferences_invalid, .exit = 6, .phrase = "HOME/.config/rui/preferences" },

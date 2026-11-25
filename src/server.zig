@@ -2838,7 +2838,7 @@ test "retired ordinary capture still consumes its intake classification and reso
                     .expected_kind = .message,
                 });
                 retained.ingress = ingress;
-                try ingress.feed("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"abc\"");
+                try ingress.feed("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"abc\"");
             },
             .retained_scratch, .report => {
                 const file = try tmp.dir.createFile(host.io, "retained", .{ .read = true });
@@ -3189,7 +3189,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
     var interface_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
     const interface = try std.fmt.bufPrint(&interface_buffer, "/tmp/rui-{s}", .{std.fs.path.basename(root)});
     defer std.Io.Dir.deleteDirAbsolute(std.testing.io, interface) catch {};
-    const message_template = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++
+    const message_template = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"" ++
         @as([4097]u8, @splat('x')) ++ "\"}}";
     for (std.enums.values(Probe.Phase)) |phase| {
         Probe.phase = phase;
@@ -3443,7 +3443,7 @@ test "ingress resumes its peer wait after local capture completion" {
     defer _ = std.c.close(sockets[1]);
     try setNonblocking(sockets[0]);
     const payload = @as([4097]u8, @splat('x'));
-    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++ payload ++ "\"}}";
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"" ++ payload ++ "\"}}";
     var header_buffer: [256]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nX-Rui-Environment-Bytes: 0\r\nContent-Length: {d}\r\n\r\n", .{body.len});
     try writeAll(std.testing.io, sockets[1], header);
@@ -3492,7 +3492,7 @@ test "a Message's environment header and entries are checked before admission" {
     host.retention = &retention;
     var replies = Replies.init(server_replies.testing_parts.sharedOf(&host), server_replies.testing_parts.factsOf(&host), &execution_state);
     var test_owner = Intake.parts(server_replies.testing_parts.sharedOf(&host), server_replies.testing_parts.factsOf(&host), host.limits.client_send_buffer_bytes, &replies);
-    const request = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"x\"}}";
+    const request = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":\"x\"}}";
     const Case = struct { route: []const u8 = "message", header: []const u8, entries: []const u8 = "", record: bool = true, result: anyerror!?[]const u8 };
     for ([_]Case{
         .{ .header = "", .result = error.EnvironmentRequired },
@@ -3579,7 +3579,7 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
             var replies = Replies.init(server_replies.testing_parts.sharedOf(owner), server_replies.testing_parts.factsOf(owner), &helper_execution);
             var test_owner = Intake.parts(server_replies.testing_parts.sharedOf(owner), server_replies.testing_parts.factsOf(owner), owner.limits.client_send_buffer_bytes, &replies);
             var request_buffer: [512]u8 = undefined;
-            const request = try std.fmt.bufPrint(&request_buffer, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"{s}\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{ key, to });
+            const request = try std.fmt.bufPrint(&request_buffer, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"{s}\",\"session\":\"{s}\",\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{ key, to });
             var sockets: [2]c_int = undefined;
             try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
             defer _ = std.c.close(sockets[1]);
@@ -3645,7 +3645,7 @@ test "exchange retirement retains failed ingress cleanup through retry" {
     execution_state.init(&.{}, null, &host_parts.lifecycle, &host.scratch_used, null);
     var replies = Replies.init(server_replies.testing_parts.sharedOf(&host), server_replies.testing_parts.factsOf(&host), &execution_state);
     var test_owner = Intake.parts(server_replies.testing_parts.sharedOf(&host), server_replies.testing_parts.factsOf(&host), host.limits.client_send_buffer_bytes, &replies);
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"";
     const payload = @as([8192]u8, @splat('x'));
     const suffix = "\"}}";
     for ([_]bool{ false, true }) |seal| {
@@ -5102,7 +5102,7 @@ test "SH-65 Host wire admits image bytes in order and preserves refusal identity
             else
                 try std.fmt.allocPrint(allocator, "{{\"type\":\"text\",\"text\":\"{s}\"}},{{\"type\":\"image\",\"mime\":\"image/jpeg\",\"data\":\"{s}\"}}", .{ text, image });
             defer allocator.free(parts);
-            return std.fmt.allocPrint(allocator, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"{s}\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"parts\":[{s}]}}", .{ key, session, parts });
+            return std.fmt.allocPrint(allocator, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"{s}\",\"session\":\"{s}\",\"parts\":[{s}]}}", .{ key, session, parts });
         }
     };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

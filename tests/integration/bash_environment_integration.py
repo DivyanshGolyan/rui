@@ -92,7 +92,7 @@ def run(environment, *args, expect=0, input=None):
 
 def raw_message(socket_path, store, key, session, header, entries):
     body = json.dumps({"version": host_process.WIRE_VERSION, "kind": "message", "store": str(store), "key": key, "session": session,
-                       "sender": None, "sender_handle": None, "text": {"state": "value", "value": "show"}},
+                       "text": {"state": "value", "value": "show"}},
                       separators=(",", ":")).encode()
     with os_semantics.unix_stream() as connection:
         connection.settimeout(10)

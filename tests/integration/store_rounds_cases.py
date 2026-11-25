@@ -200,7 +200,6 @@ def measure(rui, admin, socket, password, label):
             start = relay.count()
             key = f"message-{index}"
             sent = frame_host.post(sock, "message", {"version": WIRE, "kind": "message", "store": store, "key": key, "session": session,
-                                                     "sender": None, "sender_handle": None,
                                                      "text": {"state": "value", "value": f"rounds-{index}"}},
                                    extra=b"X-Rui-Environment-Bytes: 0\r\n")
             assert sent["answer"]["status"] == "accepted", sent

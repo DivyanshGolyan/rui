@@ -6,6 +6,7 @@ const store_core = @import("../Store.zig");
 const store_access = @import("../access.zig");
 const Store = store_core.Store;
 const action_domain = @import("../domain/action.zig");
+const command_domain = @import("../domain/command.zig");
 const configuration_domain = @import("../domain/configuration.zig");
 const content_domain = @import("../domain/content.zig");
 const historical_domain = @import("../domain/historical.zig");
@@ -375,68 +376,6 @@ test "skills reload out of memory in configure or the skill tool rolls back with
     }.run);
 }
 
-test "skills peer refusal persists its diagnostic and keyed replay across reopen" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            var opened = true;
-            defer if (opened) storage.close() catch unreachable;
-            const sender = try configureTestSession(&storage, "skills-peer-sender");
-            const receiver = try configureTestSession(&storage, "skills-peer-receiver");
-            var update: wire_request.ConfigureCommand = .{ .session = sender };
-            try update.key.set("skills-peer-bypass");
-            update.configuration.tools = try .of(&.{"bash"});
-            update.configuration.permission_mode.state = .value;
-            try update.configuration.permission_mode.value.set("bypass");
-            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
-            try submitTestMessage(&storage, &tmp, "skills-peer-input", "skills-peer-input", sender.slice(), "Invoke a skill for my peer");
-            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try settleTwoActionsForTesting(&storage, &tmp, model, "skills-peer-call");
-            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
-            var input: ActionExecutionInput = undefined;
-            try storage.readActionExecutionInput(.bash, action, &input);
-            var command: wire_request.MessageCommand = .{ .session = receiver, .text = .{ .state = .value, .digest = protocol.contentDigest("") }, .sender = .{}, .sender_handle = input.sender_handle };
-            try command.key.set("skills-peer-refusal");
-            try command.sender.?.store.set(storage.selector.slice());
-            command.sender.?.session = sender;
-            const diagnostic = "Skill missing-peer-skill is not in the receiver's saved catalog; nothing was sent.";
-            const captured: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = diagnostic } };
-            const sender_position = (try store_core.readSessionForTesting(&storage, sender.slice())).?.next_position;
-            const receiver_position = (try store_core.readSessionForTesting(&storage, receiver.slice())).?.next_position;
-            const rejected = storage.submitMessageCapturedSkills(&command, null, null, &captured, .{});
-            try std.testing.expect(rejected == .rejected and !rejected.rejected.replayed);
-            try std.testing.expectEqual(protocol.MessageRejection.skill_file_unavailable, rejected.rejected.code);
-            try storage.revokeActionSender(action);
-            const later: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_text_invalid, .bytes = "A different later disk failure" } };
-            for (0..2) |pass| {
-                if (pass == 1) {
-                    try storage.close();
-                    opened = false;
-                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-                    opened = true;
-                }
-                const replay = storage.submitMessageCapturedSkills(&command, null, null, &later, .{});
-                try std.testing.expect(replay == .rejected and replay.rejected.replayed);
-                try std.testing.expectEqual(protocol.MessageRejection.skill_file_unavailable, replay.rejected.code);
-                try std.testing.expectEqual(sender_position + 1, (try store_core.readSessionForTesting(&storage, sender.slice())).?.next_position);
-                try std.testing.expectEqual(receiver_position, (try store_core.readSessionForTesting(&storage, receiver.slice())).?.next_position);
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM sent_rejection WHERE command_key=?1 AND sender_session_ref=?2 AND sender_position=?3", .{ command.key.slice(), sender.slice(), sender_position }));
-                const diagnostic_id = try store_testing.queryU64(&storage, "SELECT secondary_content_id FROM core_command WHERE command_key=?1 AND accepted=0 AND code='skill_file_unavailable'", .{command.key.slice()});
-                const reference = try testingContentReference(&storage, diagnostic_id);
-                var reader: ContentReader = undefined;
-                reader.open(try storage.openContent(reference));
-                defer reader.close();
-                var bytes: [diagnostic.len]u8 = undefined;
-                try std.testing.expectEqual(bytes.len, try reader.read(0, &bytes));
-                try std.testing.expectEqualStrings(diagnostic, &bytes);
-            }
-        }
-    }.run);
-}
-
 test "inline skills a peer Session's Message may list the recipient's skills" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -457,32 +396,21 @@ test "inline skills a peer Session's Message may list the recipient's skills" {
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "skills-peer-accept-call");
             const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
-            var input: ActionExecutionInput = undefined;
-            try storage.readActionExecutionInput(.bash, action, &input);
             const authored = "check the flaky tests";
-            var command = try completeMessage("skills-peer-accept", receiver.slice(), try tmp.dir.createFile(std.testing.io, "peer-authored", .{ .read = true }), authored);
-            try command.text.file.?.writeStreamingAll(std.testing.io, authored);
-            defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-            command.sender = .{};
-            try command.sender.?.store.set(storage.selector.slice());
-            command.sender.?.session = sender;
-            command.sender_handle = input.sender_handle;
             const body = "Skill file: \"/receiver/skills/demo/SKILL.md\"\n\nreceiver body";
             const capture: skills_fixture_domain.MessageCapture = .{ .bound = &.{.{ .name = "demo", .bytes = body }} };
             var activity_request: protocol.ActivityPage = .{ .session = receiver };
             activity_request.position = (try store_core.activityPageForTesting(&storage, activity_request)).end;
-            const reply = storage.submitMessageCapturedSkills(&command, null, null, &capture, .{});
-            try std.testing.expect(reply == .accepted and !reply.accepted.replayed);
+            try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessageBound(action, receiver.slice(), authored, &capture, .{}));
             const page = try store_core.activityPageForTesting(&storage, activity_request);
             try std.testing.expectEqual(@as(usize, 1), page.count);
             const received = switch (page.items[0].value) {
                 .admission, .received => |message| message,
                 else => return error.TestUnexpectedResult,
             };
-            try std.testing.expectEqualStrings("skills-peer-accept", received.key.slice());
             try std.testing.expectEqualStrings(sender.slice(), received.sender.?.session.slice());
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest(authored), &received.content.text.digest);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill k JOIN message_admission m ON m.admission_id=k.admission_id JOIN content c ON c.content_id=k.content_id WHERE m.command_key='skills-peer-accept' AND k.position=1 AND k.name='demo' AND c.digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(body) }}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill k JOIN message_admission m ON m.admission_id=k.admission_id JOIN content c ON c.content_id=k.content_id WHERE m.sender_session_ref=?2 AND k.position=1 AND k.name='demo' AND c.digest=?1", .{ store_testing.Blob{ .bytes = &protocol.contentDigest(body) }, sender.slice() }));
         }
     }.run);
 }

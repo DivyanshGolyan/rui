@@ -327,8 +327,6 @@ export class Session {
 				store,
 				key: options.idempotencyKey,
 				session: this.id,
-				sender: null,
-				sender_handle: null,
 				text: { state: "value", value: text },
 			} satisfies Schemas["MessageRequest"]);
 		const reply = parse<Schemas["MessageReply"]>(await this.#link.exchange("/v1/message", body, environmentBytes(options.env)));

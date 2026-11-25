@@ -208,11 +208,10 @@ const MessageRequest = struct {
     }
     pub const examples = .{
         .{ 2, "\"\"", "\"aaaaaa\"" },
-        .{ 3, "{\"store\":\"/s\",\"session\":\"aaaaaa\"}", "null" },
     };
     pub fn schema(comptime S: type) type {
         const r = S.Wire.message_request;
-        return Shape(r.head ++ .{S.Sender} ++ r.sender_handle ++ .{
+        return Shape(r.head ++ .{
             S.Optional(r.configuration ++ .{S.Configuration}),
         } ++ r.text ++ .{S.Content} ++ r.text_tail ++ .{
             S.Optional(r.require_model),
@@ -220,7 +219,7 @@ const MessageRequest = struct {
     }
     pub fn partsSchema(comptime S: type) type {
         const r = S.Wire.message_request;
-        return Shape(r.head ++ .{S.Sender} ++ r.sender_handle ++ .{
+        return Shape(r.head ++ .{
             S.Optional(r.configuration ++ .{S.Configuration}),
         } ++ r.parts ++ .{S.Parts} ++ .{
             S.Optional(r.require_model),

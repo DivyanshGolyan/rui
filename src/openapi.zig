@@ -117,7 +117,6 @@ fn jsonReply(comptime shapes: anytype) Reply {
 const CommandSchema = struct {
     pub const Wire = protocol;
     pub const Configuration = configurationShape("Configuration");
-    pub const Sender = SenderSchema;
     pub const Content = ContentSchema;
     pub const Parts = PartsSchema;
     pub const Optional = optionalMember;
@@ -363,15 +362,6 @@ fn isOptional(comptime part: anytype) bool {
 fn actionValuesShape() @TypeOf(.{protocol.action_read_reply.values_head} ++ .{BoundedListOf(protocol.action_read_reply.item, @import("action_read.zig").page_items, false)} ++ protocol.action_read_reply.values_tail) {
     return .{protocol.action_read_reply.values_head} ++ .{BoundedListOf(protocol.action_read_reply.item, @import("action_read.zig").page_items, false)} ++ protocol.action_read_reply.values_tail;
 }
-
-const SenderSchema = struct {
-    pub fn openapi_inline(d: *Document) !Value {
-        return d.nullable(try d.shapeSchema(protocol.message_request.sender));
-    }
-    pub fn openapi_example(out: *std.Io.Writer) !void {
-        try out.writeAll("null");
-    }
-};
 
 /// One certified part in a `public_parts` reply: Text or Image metadata and its Store content identity.
 const PublicPart = struct {

@@ -98,7 +98,7 @@ test "Session archive idle replay restore and message admission preserve organiz
     }.run);
 }
 
-test "Session archive pending blocks person and peer work and completes after Action settlement" {
+test "Session archive pending blocks person work and completes after Action settlement" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -121,18 +121,6 @@ test "Session archive pending blocks person and peer work and completes after Ac
             const blocked = storage.submitMessageWithModel(&incoming, null, .{});
             try std.testing.expect(blocked == .rejected);
             try std.testing.expectEqual(protocol.MessageRejection.session_archiving, blocked.rejected.code);
-            const sender = try runningBash(&storage, &tmp, "archive-sender");
-            var input: action.ActionExecutionInput = undefined;
-            try storage.readActionExecutionInput(.bash, sender.binding, &input);
-            var peer = try message(&tmp, "archive-peer-blocked", receiver.session.slice());
-            defer peer.removeTemporaryContent(std.testing.io) catch unreachable;
-            peer.sender = .{};
-            try peer.sender.?.store.set(storage.selector.slice());
-            try peer.sender.?.session.set(sender.session.slice());
-            peer.sender_handle = input.sender_handle;
-            const peer_blocked = storage.submitMessageWithModel(&peer, null, .{});
-            try std.testing.expect(peer_blocked == .rejected);
-            try std.testing.expectEqual(protocol.MessageRejection.session_archiving, peer_blocked.rejected.code);
             try std.testing.expectEqual(action.ActionSettlement.Outcome.session_stop, (try storage.settleActionAttempt(receiver.binding, .cancelled, "Bash stopped.", .{})).outcome);
             try expectState(&storage, receiver.session.slice(), .archived);
             const replay = storage.archiveSession(&archive, .{});
