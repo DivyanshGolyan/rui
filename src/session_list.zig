@@ -12,11 +12,11 @@ const content_value = @import("content_value.zig");
 const first_line = @import("first_line.zig");
 
 pub const session_list_page_size: usize = 8;
-/// Archived rows per window page: one tall overview screen (about 40 rows at 24+ lines). A slim row is
-/// at most `ArchivedRow.max_json_bytes`, so a full page is `archived_window_size * max_json_bytes` bytes
+/// The most Archived rows one window page serves: a reply cost bound, not a screen size. A slim row is
+/// at most `ArchivedRow.max_json_bytes`, so a full page is `max_window_rows * max_json_bytes` bytes
 /// (about 88 KiB), inside the list reply bound that a live page already allows (8 full rows at 36 KiB
-/// each, 288 KiB).
-pub const archived_window_size: usize = 40;
+/// each, 288 KiB). A request asks for 1 to this many.
+pub const max_window_rows: usize = 40;
 /// The longest first Message line an Archived row carries: the overview's display cut (first_line).
 pub const max_first_line_bytes = first_line.max_line_bytes;
 pub const ListDelta = enum { not_modified, changed, full, window };
@@ -30,7 +30,7 @@ pub const ListSessions = struct {
     since: ?change_ring.Token = null,
     changed: ?ChangedCursor = null,
     /// Archived display window. Valid only with archive=.archived, no workspace, no since and after=0.
-    window: ?ArchivedCursor = null,
+    window: ?ArchivedWindow = null,
 
     pub const ChangedCursor = struct { through: u64, after_reference: change_ring.Id };
 
@@ -41,7 +41,8 @@ pub const ListSessions = struct {
         if (self.since != null and self.after != 0) return error.InvalidCursor;
         if (self.window) |window| {
             if (self.archive != .archived or self.workspace != null or self.since != null or self.changed != null or self.after != 0 or self.ceiling != 0) return error.InvalidCursor;
-            switch (window) {
+            if (window.rows == 0 or window.rows > max_window_rows) return error.InvalidCursor;
+            switch (window.cursor) {
                 .head, .tail => {},
                 .below, .above => |key| if (key == 0 or key > std.math.maxInt(i64)) return error.InvalidCursor,
             }
@@ -111,6 +112,9 @@ pub const ArchivedCursor = union(enum) {
     /// The Archived Sessions whose key is above `k`, the nearest to `k` first.
     above: ArchiveSeq,
 };
+
+/// One Archived window read: where to read from and how many rows (1 to `max_window_rows`) to return.
+pub const ArchivedWindow = struct { cursor: ArchivedCursor, rows: u8 };
 
 /// The request text of an ArchivedCursor: `head`, `tail`, `below:<key>` or `above:<key>`.
 pub const archived_cursor_text_bytes = "above:".len + std.fmt.count("{d}", .{std.math.maxInt(i64)});

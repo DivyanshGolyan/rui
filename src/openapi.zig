@@ -229,7 +229,7 @@ pub const routes = [_]Route{
             } ++ protocol.list_sessions_request.tail, .{ .{ 3, "0" }, .{ 4, "0" }, .{ 5, since_example }, .{ 7, "\"aaaaaa\"" } }),
             // The Archived window: archive is the constant archived; no since or through; window matches its grammar.
             windowVariant(protocol.list_sessions_request.head ++ protocol.list_sessions_request.archived_archive ++
-                protocol.list_sessions_request.cursor ++ protocol.list_sessions_request.window ++ protocol.list_sessions_request.tail, .{ .{ 2, "0" }, .{ 3, "0" }, .{ 4, "below:12" } }),
+                protocol.list_sessions_request.cursor ++ protocol.list_sessions_request.window ++ protocol.list_sessions_request.tail, .{ .{ 2, "0" }, .{ 3, "0" }, .{ 4, "below:12" }, .{ 5, "12" } }),
         },
         // Live replies never carry the window delta; the window reply carries only it.
         .reply = deltaReply(.{

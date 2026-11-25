@@ -236,9 +236,9 @@ pub const Requests = struct {
         return readReportResponse(self, fd, sink, reply_buffer);
     }
 
-    /// One Archived window page: `window` is `head`, `tail`, `below` or `above`, and the reply is read
+    /// One Archived window page of at most `window.rows` rows from `window.cursor` (`head`, `tail`, `below` or `above`); the reply is read
     /// with `protocol_reply.ArchivedWindowPage.read`.
-    pub fn listArchivedWindow(self: Requests, store_path: []const u8, window: session_list.ArchivedCursor, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+    pub fn listArchivedWindow(self: Requests, store_path: []const u8, window: session_list.ArchivedWindow, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
         reply_buffer.len = 0;
         try self.check();
         const paths = try resolveClientPaths(self.io, store_path);
@@ -247,7 +247,7 @@ pub const Requests = struct {
         try body.appendShape(protocol.list_sessions_request.head, .{ paths.store_identity.slice(), @as(?[]const u8, null) });
         try body.appendShape(protocol.list_sessions_request.archive, .{protocol.SessionArchiveFilter.archived});
         try body.appendShape(protocol.list_sessions_request.cursor, .{ @as(u64, 0), @as(u64, 0) });
-        try body.appendShape(protocol.list_sessions_request.window, .{session_list.formatArchivedCursor(window, &text)});
+        try body.appendShape(protocol.list_sessions_request.window, .{ session_list.formatArchivedCursor(window.cursor, &text), @as(u64, window.rows) });
         try body.appendShape(protocol.list_sessions_request.tail, .{});
         const fd = try openRead(self, &paths, "/v1/list-sessions", body.slice());
         defer closeSocket(self.io, fd);

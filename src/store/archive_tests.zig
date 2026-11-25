@@ -713,7 +713,7 @@ const WindowFirst = struct {
 
 /// Records one Archived window page: its rows (newest first), and the page's tail.
 const WindowVisitor = struct {
-    rows: [session_list.archived_window_size]WindowRow = undefined,
+    rows: [session_list.max_window_rows]WindowRow = undefined,
     count: usize = 0,
     first: ?u64 = null,
     last: ?u64 = null,
@@ -761,7 +761,11 @@ const WindowVisitor = struct {
 };
 
 fn readWindow(storage: *Store, cursor: session_list.ArchivedCursor, visitor: *WindowVisitor) !void {
-    const request: protocol.ListSessions = .{ .archive = .archived, .window = cursor };
+    try readWindowOf(storage, cursor, session_list.max_window_rows, visitor);
+}
+
+fn readWindowOf(storage: *Store, cursor: session_list.ArchivedCursor, rows: u8, visitor: *WindowVisitor) !void {
+    const request: protocol.ListSessions = .{ .archive = .archived, .window = .{ .cursor = cursor, .rows = rows } };
     var pages: @import("domain/session_list_read.zig").Scratch = undefined;
     try storage.readSessionList(&request, visitor, &pages);
 }
@@ -863,7 +867,7 @@ test "Archived window pages walk every archived Session once, newest archive fir
             var seen_len: usize = 0;
             var page: WindowVisitor = .{};
             try readWindow(&storage, .head, &page);
-            try std.testing.expectEqual(@as(usize, session_list.archived_window_size), page.count);
+            try std.testing.expectEqual(@as(usize, session_list.max_window_rows), page.count);
             try std.testing.expect(!page.more_above and page.more_below);
             while (true) {
                 for (page.rowsSlice()) |row| {
@@ -881,7 +885,7 @@ test "Archived window pages walk every archived Session once, newest archive fir
 
             // Oldest first from the tail, then upward by the newest key of each page. Blocks come out
             // oldest first, so they are reversed for display.
-            var blocks: [4][session_list.archived_window_size]WindowRow = undefined;
+            var blocks: [4][session_list.max_window_rows]WindowRow = undefined;
             var block_lengths: [4]usize = .{ 0, 0, 0, 0 };
             var blocks_len: usize = 0;
             try readWindow(&storage, .tail, &page);
@@ -980,6 +984,52 @@ fn archiveFreshSession(storage: *Store, key: []const u8) ![6]u8 {
     return session.slice()[0..6].*;
 }
 
+test "Archived window page size is the request's: every size tiles the same newest-first walk" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+
+            const total = 9;
+            var key_buffer: [48]u8 = undefined;
+            var expected: [total][6]u8 = undefined;
+            for (0..total) |index| {
+                expected[total - 1 - index] = try archiveFreshSession(&storage, try std.fmt.bufPrint(&key_buffer, "size-{d}", .{index}));
+            }
+
+            // A page of `rows` from the head holds min(rows, total) and flags what lies below it.
+            for ([_]u8{ 1, 4, 8, 9, 10, session_list.max_window_rows }) |rows| {
+                var page: WindowVisitor = .{};
+                try readWindowOf(&storage, .head, rows, &page);
+                try std.testing.expectEqual(@min(@as(usize, rows), total), page.count);
+                try std.testing.expect(!page.more_above);
+                try std.testing.expectEqual(rows < total, page.more_below);
+                for (page.rowsSlice(), 0..) |row, index| try std.testing.expectEqualSlices(u8, &expected[index], &row.reference);
+            }
+
+            // Walking down in pages of `rows` visits every Session exactly once, in order.
+            for ([_]u8{ 1, 2, 4, 9 }) |rows| {
+                var seen: usize = 0;
+                var cursor: session_list.ArchivedCursor = .head;
+                while (true) {
+                    var page: WindowVisitor = .{};
+                    try readWindowOf(&storage, cursor, rows, &page);
+                    for (page.rowsSlice()) |row| {
+                        try std.testing.expectEqualSlices(u8, &expected[seen], &row.reference);
+                        seen += 1;
+                    }
+                    if (!page.more_below) break;
+                    cursor = .{ .below = page.last.? };
+                }
+                try std.testing.expectEqual(@as(usize, total), seen);
+            }
+        }
+    }.run);
+}
+
 test "Archived window equals the Archived membership over the archive's edge cases" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {
@@ -998,12 +1048,12 @@ test "Archived window equals the Archived membership over the archive's edge cas
 
             // Exactly one full page: 40 archived Sessions, no more below.
             var key_buffer: [48]u8 = undefined;
-            for (0..session_list.archived_window_size) |index| {
+            for (0..session_list.max_window_rows) |index| {
                 _ = try archiveFreshSession(&storage, try std.fmt.bufPrint(&key_buffer, "edge-forty-{d}", .{index}));
             }
             var exact: WindowVisitor = .{};
             try readWindow(&storage, .head, &exact);
-            try std.testing.expectEqual(@as(usize, session_list.archived_window_size), exact.count);
+            try std.testing.expectEqual(@as(usize, session_list.max_window_rows), exact.count);
             try std.testing.expect(!exact.more_above and !exact.more_below);
             try expectWindowMatchesWalk(&storage);
 
@@ -1011,7 +1061,7 @@ test "Archived window equals the Archived membership over the archive's edge cas
             _ = try archiveFreshSession(&storage, "edge-forty-one");
             var head: WindowVisitor = .{};
             try readWindow(&storage, .head, &head);
-            try std.testing.expectEqual(@as(usize, session_list.archived_window_size), head.count);
+            try std.testing.expectEqual(@as(usize, session_list.max_window_rows), head.count);
             try std.testing.expect(!head.more_above and head.more_below);
             try expectWindowMatchesWalk(&storage);
 

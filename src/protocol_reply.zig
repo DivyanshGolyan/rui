@@ -1619,9 +1619,9 @@ pub const ArchivedWindowPage = struct {
     /// One slim row: the same decoder the wire shape is tested through (`ArchivedRowRead`).
     pub const Row = ArchivedRowRead;
 
-    const Rows = JsonArray(ArchivedRowRead, session_list.archived_window_size);
+    const Rows = JsonArray(ArchivedRowRead, session_list.max_window_rows);
 
-    rows: [session_list.archived_window_size]Row = undefined,
+    rows: [session_list.max_window_rows]Row = undefined,
     count: usize = 0,
     since: protocol.SinceToken = .{ .instance = @splat(0), .generation = 0 },
     first: ?u64 = null,
@@ -1630,7 +1630,7 @@ pub const ArchivedWindowPage = struct {
     more_below: bool = false,
 
     /// Reads the reply to `window` and refuses anything the Host could not have answered for that cursor.
-    pub fn read(io: std.Io, file: std.Io.File, bytes: u64, cursor: session_list.ArchivedCursor) !ArchivedWindowPage {
+    pub fn read(io: std.Io, file: std.Io.File, bytes: u64, window: session_list.ArchivedWindow) !ArchivedWindowPage {
         if (bytes == 0 or bytes > protocol.session_list_reply.max_bytes) return error.InvalidSessionPage;
         const Wire = struct {
             version: JsonString(8),
@@ -1678,7 +1678,8 @@ pub const ArchivedWindowPage = struct {
         if (next.last) |last| if (try ActivityPage.id(last, false) != result.last.?) return error.InvalidSessionPage;
         // The page's side is fixed by the cursor: head has nothing above it, tail nothing below, and a keyed
         // read keeps every row on its own side of the key.
-        switch (cursor) {
+        if (result.count > window.rows) return error.InvalidSessionPage;
+        switch (window.cursor) {
             .head => if (result.more_above) return error.InvalidSessionPage,
             .tail => if (result.more_below) return error.InvalidSessionPage,
             .below => |key| {
@@ -1698,9 +1699,9 @@ pub const ArchivedWindowReply = union(enum) {
     page: ArchivedWindowPage,
     failure: ReadFailure,
 
-    pub fn decode(io: std.Io, file: std.Io.File, cursor: session_list.ArchivedCursor, reply: ReportReply) !ArchivedWindowReply {
+    pub fn decode(io: std.Io, file: std.Io.File, window: session_list.ArchivedWindow, reply: ReportReply) !ArchivedWindowReply {
         return switch (reply) {
-            .report => |report| .{ .page = try ArchivedWindowPage.read(io, file, report.bytes, cursor) },
+            .report => |report| .{ .page = try ArchivedWindowPage.read(io, file, report.bytes, window) },
             .command => |command| .{ .failure = try decodeReadFailure(command, false) },
         };
     }
