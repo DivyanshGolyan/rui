@@ -260,6 +260,10 @@ const next_core_action = rsql.Read(.{
         "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE " ++ LocalSelection(.read_image).ready_sql ++ " AND " ++ capacity_sql ++ " " ++
+        "UNION ALL SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session,action.background_position IS NOT NULL AS background,0 AS auto_deny,'github_pr_watch' AS tool " ++
+        "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
+        "WHERE " ++ LocalSelection(.github_pr_watch).ready_sql ++ " AND " ++ capacity_sql ++ " " ++
         "ORDER BY auto_deny DESC,action_id LIMIT 1",
     .Args = CoreNames.Args(struct { foreground: bool, background: bool }),
     .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: Bounded(session_id.max_reference_bytes), background: bool, auto_deny: bool, tool: SelectionTool },
@@ -270,11 +274,16 @@ pub const CoreTool = tool_defs.CoreTool;
 
 const SelectionTool = blk: {
     const core_names = @typeInfo(CoreTool).@"enum".field_names;
-    const names = core_names ++ &[_][]const u8{"read_image"};
+    const names = core_names ++ &[_][]const u8{ "read_image", "github_pr_watch" };
     var values: [names.len]u8 = undefined;
     for (&values, 0..) |*value, i| value.* = @intCast(i);
     break :blk @Enum(u8, .exhaustive, names, &values);
 };
+
+/// The built-in runners that execute on the Host, in the same lane as MCP calls: they take a credit and are not Core tools.
+fn isLocalTool(tool: SelectionTool) bool {
+    return tool == .read_image or tool == .github_pr_watch;
+}
 
 pub const CoreActionInput = struct {
     binding: ActionAttemptBinding,
@@ -305,6 +314,7 @@ pub const CoreWork = union(enum) {
     action: CoreActionInput,
     mcp: ReadyAction,
     read_image: ReadyAction,
+    github_pr_watch: ReadyAction,
 };
 
 pub const ending_stop_sql = "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.source_id) AS stopped," ++
@@ -374,11 +384,11 @@ pub const WorkProbe = struct {
 
     pub fn core(probe: *const WorkProbe) bool {
         const found = &probe.selection;
-        return found.stop != null or found.ending != null or found.forward != null or (found.action != null and found.action.?.tool != .read_image);
+        return found.stop != null or found.ending != null or found.forward != null or (found.action != null and !isLocalTool(found.action.?.tool));
     }
 
     pub fn mcp(probe: *const WorkProbe) bool {
-        return probe.selection.mcp != null or (probe.selection.action != null and probe.selection.action.?.tool == .read_image);
+        return probe.selection.mcp != null or (probe.selection.action != null and isLocalTool(probe.selection.action.?.tool));
     }
 
     pub fn bash(probe: *const WorkProbe) bool {
@@ -420,6 +430,7 @@ pub fn nextCoreWork(a: anytype, capacity: Capacity) !?CoreWork {
     const found = next orelse return null;
     if (found.auto_deny) return .{ .auto_deny = .{ .action_id = found.action_id.get(), .session = found.session } };
     if (found.tool == .read_image) return .{ .read_image = .{ .action_id = found.action_id.get(), .runner = .read_image, .background = found.background } };
+    if (found.tool == .github_pr_watch) return .{ .github_pr_watch = .{ .action_id = found.action_id.get(), .runner = .github_pr_watch, .background = found.background } };
     return .{ .action = .{
         .binding = .{ .turn_id = found.turn_id.get(), .parent_operation_id = found.parent_operation_id.get(), .action_id = found.action_id.get() },
         .tool = std.meta.stringToEnum(CoreTool, @tagName(found.tool)) orelse unreachable,

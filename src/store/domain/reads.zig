@@ -1043,12 +1043,12 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
             try readItems(1, a, session_ref, end, &.{at}, (&scratch.item)[0..1], null, &located);
             scratch.hit_count = 0;
             scratch.matcher.init(request.query.slice());
-            if (scratch.item.value == .call) {
-                const fields = scratch.item.value.call.fields;
-                try searchField(a, scratch, fields[@backingInt(tool_proposal.Field.name)], &budget);
+            if (scratch.item.body() == .call) {
+                const call = scratch.item.body().call;
+                try searchField(a, scratch, call.name, &budget);
                 if (budget != 0) {
                     scratch.matcher.feed("\n");
-                    try searchField(a, scratch, fields[@backingInt(tool_proposal.Field.arguments)], &budget);
+                    try searchField(a, scratch, call.arguments, &budget);
                 }
                 collectHits(scratch, null);
             } else if (located) |content| switch (content.value) {
