@@ -1170,18 +1170,27 @@ def revision_text(commit, path):
 MYSQL_LEG = re.compile(r"\bforEachEngine\(|@import\(\"(?:[./]*store/)?mysql_testing\.zig\"\)")
 
 
-# Always part of a PR's MySQL leg: the migration and dialect check that drives MySQL 8.4 through the wire client.
-MYSQL_CHECK_MODULE = "store.mysql_dialect_check."
+# Always part of a PR's MySQL leg: the migration and dialect check that drives MySQL 8.4 through the wire
+# client, and one quick forEachEngine suite, so the acceptance record counts a passed conformance test.
+MYSQL_ALWAYS = ("store.mysql_dialect_check.", "store.tests.session.")
+STORE_TESTS = "src/store/tests/"
 
 
-def mysql_test_modules(paths):
-    """The Store test name prefixes a PR runs on live MySQL: the dialect check and each changed Store source.
+def store_module(path):
+    return path[len("src/"):-len(".zig")].replace("/", ".") + "."
+
+
+def mysql_test_modules(paths, root=ROOT):
+    """The Store test name prefixes a PR runs on live MySQL: MYSQL_ALWAYS, each changed Store source, and each
+    Store test file that imports a changed Store source by name.
 
     Every other Store test runs on SQLite on the PR and on MySQL in Promote (store_shards.py's split).
     """
-    changed = {path[len("src/"):-len(".zig")].replace("/", ".") + "."
-               for path in paths if path.startswith("src/store/") and path.endswith(".zig")}
-    return sorted(changed | {MYSQL_CHECK_MODULE})
+    changed = [path for path in paths if path.startswith("src/store/") and path.endswith(".zig")]
+    names = {'/' + Path(path).name + '"' for path in changed} | {'"' + Path(path).name + '"' for path in changed}
+    importers = [str(test.relative_to(root)) for test in sorted((root / STORE_TESTS).glob("*.zig"))
+                 if any(name in test.read_text(encoding="utf-8") for name in names)] if names else []
+    return sorted({store_module(path) for path in [*changed, *importers]} | set(MYSQL_ALWAYS))
 
 
 def mysql_leg_tests(paths, contents):

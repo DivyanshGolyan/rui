@@ -303,7 +303,8 @@ def run(binary, arguments, timeout, mode, environ, output=None):
         return run(binary, arguments, timeout, mode, sqlite, output) or run(binary, arguments, timeout, mode, mysql, output)
     started = time.monotonic()
     record = environ.get(live_engines.MYSQL_RECORD)
-    count = SHARD_COUNT if mode in ("run", "native") else 1
+    # A filtered MySQL pass is small, and every shard must write its own record (merge_records): one process.
+    count = 1 if environ.get("RUI_UNIT_ONLY") else SHARD_COUNT if mode in ("run", "native") else 1
     stop = threading.Event()
     test_timeout = duration(environ["RUI_UNIT_TEST_TIMEOUT"]) if environ.get("RUI_UNIT_TEST_TIMEOUT") else None
     with tempfile.TemporaryDirectory(prefix="rui-store-shards-") as directory:

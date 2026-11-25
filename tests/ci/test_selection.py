@@ -2883,12 +2883,18 @@ class PolicyPrepushTest(unittest.TestCase):
 
 
 class MysqlTestModulesTest(unittest.TestCase):
-    def test_dialect_check_and_each_changed_store_source(self):
-        from select_tests import mysql_test_modules
-        self.assertEqual(mysql_test_modules(["src/store/tests/tool_set.zig", "src/store/domain/tool_offer.zig",
-                                             "src/tool_name.zig", "docs/x.md"]),
-                         ["store.domain.tool_offer.", "store.mysql_dialect_check.", "store.tests.tool_set."])
-        self.assertEqual(mysql_test_modules([]), ["store.mysql_dialect_check."])
+    def test_always_listed_changed_sources_and_their_importing_tests(self):
+        import tempfile
+        from pathlib import Path
+        from select_tests import MYSQL_ALWAYS, mysql_test_modules
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src/store/tests").mkdir(parents=True)
+            (root / "src/store/tests/tool_set.zig").write_text('const o = @import("../domain/tool_offer.zig");')
+            (root / "src/store/tests/other.zig").write_text('const o = @import("../domain/tool_offering.zig");')
+            self.assertEqual(mysql_test_modules(["src/store/domain/tool_offer.zig", "src/tool_name.zig", "docs/x.md"], root),
+                             sorted({"store.domain.tool_offer.", "store.tests.tool_set.", *MYSQL_ALWAYS}))
+            self.assertEqual(mysql_test_modules([], root), sorted(MYSQL_ALWAYS))
 
 if __name__ == "__main__":
     unittest.main()
