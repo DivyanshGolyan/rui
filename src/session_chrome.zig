@@ -29,16 +29,25 @@ pub const Footer = struct {
 pub const ChoiceAction = enum { pick, close };
 pub const ChoiceKey = struct { text: []const u8, action: ChoiceAction };
 pub const ChoiceKeys = struct { text: []const u8, actions: [2]ChoiceKey };
-pub const ChoiceState = enum { closed, pick, retry };
+pub const ChoiceState = enum { closed, pick, retry, edit };
 
-pub fn choiceKeys(has_choice: bool) ChoiceKeys {
-    const pick = "enter pick";
-    const retry = "enter retry";
+pub fn choiceKeys(choice: ChoiceState) ChoiceKeys {
+    const action = switch (choice) {
+        .pick => "enter pick",
+        .retry => "enter retry",
+        .edit => "enter edit",
+        .closed => unreachable,
+    };
     const close = "esc close";
     return .{
-        .text = if (has_choice) pick ++ " · " ++ close else retry ++ " · " ++ close,
+        .text = switch (choice) {
+            .pick => "enter pick · esc close",
+            .retry => "enter retry · esc close",
+            .edit => "enter edit · esc close",
+            .closed => unreachable,
+        },
         .actions = .{
-            .{ .text = if (has_choice) pick else retry, .action = .pick },
+            .{ .text = action, .action = .pick },
             .{ .text = close, .action = .close },
         },
     };
@@ -53,7 +62,7 @@ pub const FooterKeys = struct {
 
 pub fn footerKeys(choice: ChoiceState) FooterKeys {
     if (choice == .closed) return .{ .text = "", .action = .info, .other_actions = true };
-    const keys = choiceKeys(choice == .pick);
+    const keys = choiceKeys(choice);
     return .{ .text = keys.actions[0].text, .action = .pick, .other_actions = false, .choice = keys };
 }
 
@@ -168,7 +177,23 @@ test "opening and decision progress share the footer while unresolved decisions 
     try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Opening…", .width = 80 }).left);
 }
 
-pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + "100% context left".len + 4 * " · ".len + "Stopping and archiving".len;
+pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + "100% context left".len + 4 * " · ".len + @import("session_archive.zig").State.longest_badge;
+
+test "SUI-174 the facts row's room holds the widest row with the longest archive badge" {
+    const protocol = @import("protocol.zig");
+    var buffer: [facts_bytes]u8 = undefined;
+    var model: [@import("model_capability.zig").max_model_bytes]u8 = undefined;
+    @memset(&model, 'm');
+    var folder: [protocol.max_workspace_bytes]u8 = undefined;
+    @memset(&folder, 'f');
+    folder[0] = '/';
+    const facts: session_line.Facts = .{ .model = &model, .folder = &folder, .effort = .high };
+    for (std.enums.values(protocol.SessionArchiveState)) |state| {
+        const row = factsRow(&buffer, facts, state.badge(), 1 << 20, .unicode);
+        try std.testing.expect(row.len <= facts_bytes);
+        if (state.badge()) |words| try std.testing.expect(std.mem.endsWith(u8, row, words));
+    }
+}
 
 /// The footer's facts row: model, effort and context or folder, then the archive `badge`. The chat's name
 /// is never part of it; the Session list and the terminal title carry the name.
@@ -545,13 +570,20 @@ test "deferred footer effect is superseded by interaction without making invisib
 }
 
 test "footer standalone actions describe pick retry and close from one owner" {
-    for ([_]ChoiceState{ .pick, .retry }) |state| {
+    for ([_]ChoiceState{ .pick, .retry, .edit }) |state| {
         const keys = footerKeys(state);
         try std.testing.expect(!keys.other_actions);
         try std.testing.expectEqual(.pick, keys.action);
         const choice = keys.choice.?;
-        try std.testing.expectEqualStrings(if (state == .pick) "enter pick · esc close" else "enter retry · esc close", choice.text);
-        try std.testing.expectEqualStrings(if (state == .pick) "enter pick" else "enter retry", choice.actions[0].text);
+        const expected = switch (state) {
+            .pick => "enter pick",
+            .retry => "enter retry",
+            .edit => "enter edit",
+            .closed => unreachable,
+        };
+        var buffer: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "{s} · esc close", .{expected}), choice.text);
+        try std.testing.expectEqualStrings(expected, choice.actions[0].text);
         try std.testing.expectEqualStrings("esc close", choice.actions[1].text);
         try std.testing.expectEqual(ChoiceAction.pick, choice.actions[0].action);
         try std.testing.expectEqual(ChoiceAction.close, choice.actions[1].action);
