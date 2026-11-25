@@ -613,6 +613,10 @@ BUILD_MODULES = {
 RULES += tuple(((module,), targets, tuple(target for target in targets if target not in LINUX_ONLY),
                 "Build module: the targets it defines or builds for")
                for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
+# The generated unit test runner and the shard launcher run every sharded unit root.
+UNIT_HARNESS = ("tests/ci/unit_test_runner.py", "tests/ci/store_shards.py")
+RULES += ((UNIT_HARNESS, ("test-native", "test-store"), ("test-native", "test-store"),
+           "Unit harness: the generated test runner and shard launcher of the sharded unit roots"),)
 RULES += ((("tests/ci/vaxis_test_owners.json", "tests/ci/verify_vaxis_test_owners.py"),
            VAXIS_CLIPBOARD_TARGETS, VAXIS_CLIPBOARD_TARGETS,
            "Pinned Vaxis invariant owners: verify the external source and reader tests"),)
@@ -768,7 +772,7 @@ PR_UNIT_ROOTS = frozenset({"test-native", "test-store", "test-logic", "test-h2",
 CI_RUNNABLE = frozenset(PR_UNIT_ROOTS | CHECK_COVERS | {covered for cases in FIXTURE_COVERS.values() for covered in cases}
                         | set(FIXTURE_COVERS) | {"test-vaxis-clipboard"})
 # Store unit tests run on a PR only for a change to the Store itself.
-STORE_PATHS = ("src/store.zig", "src/store/*")
+STORE_PATHS = ("src/store.zig", "src/store/*", *UNIT_HARNESS)
 
 
 # Targets the PR tier runs only when the diff touches their own files, never through an import:
