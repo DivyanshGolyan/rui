@@ -44,12 +44,14 @@ pub const compaction_trigger_percent: u64 = 90;
 
 pub const provider_compaction_triggers = [_]struct { provider: []const u8, tokens: u64 }{
     .{ .provider = "codex", .tokens = 244800 },
+    .{ .provider = "chatgpt", .tokens = 244800 },
 };
 
-pub const model_compaction_triggers = [_]struct { provider: []const u8, model: []const u8, tokens: u64 }{
-    .{ .provider = "codex", .model = "gpt-6.1-sol", .tokens = 450000 },
-    .{ .provider = "codex", .model = "gpt-6.1-terra", .tokens = 450000 },
-    .{ .provider = "codex", .model = "gpt-6.2-sol", .tokens = 450000 },
+/// Input size above which the provider charges a higher rate; the default compaction trigger stays under it.
+pub const price_steps = [_]struct { model: []const u8, tokens: u64 }{
+    .{ .model = "gpt-6.1-sol", .tokens = 272000 },
+    .{ .model = "gpt-6.1-terra", .tokens = 272000 },
+    .{ .model = "gpt-6.2-sol", .tokens = 272000 },
 };
 
 pub const unlisted_context_window: u64 = 128000;
@@ -71,14 +73,15 @@ test "approved product defaults" {
     try std.testing.expectEqualStrings("gpt-6.1-sol", recommended_model);
     try std.testing.expectEqualStrings("low", reasoning_effort);
     try std.testing.expectEqual(@as(u64, 90), compaction_trigger_percent);
-    try std.testing.expectEqual(@as(usize, 1), provider_compaction_triggers.len);
-    try std.testing.expectEqualStrings("codex", provider_compaction_triggers[0].provider);
-    try std.testing.expectEqual(@as(u64, 244800), provider_compaction_triggers[0].tokens);
-    try std.testing.expectEqual(@as(usize, 3), model_compaction_triggers.len);
-    for (model_compaction_triggers, [_][]const u8{ "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.2-sol" }) |entry, model| {
-        try std.testing.expectEqualStrings("codex", entry.provider);
+    try std.testing.expectEqual(@as(usize, 2), provider_compaction_triggers.len);
+    for (provider_compaction_triggers, [_][]const u8{ "codex", "chatgpt" }) |entry, provider| {
+        try std.testing.expectEqualStrings(provider, entry.provider);
+        try std.testing.expectEqual(@as(u64, 244800), entry.tokens);
+    }
+    try std.testing.expectEqual(@as(usize, 3), price_steps.len);
+    for (price_steps, [_][]const u8{ "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.2-sol" }) |entry, model| {
         try std.testing.expectEqualStrings(model, entry.model);
-        try std.testing.expectEqual(@as(u64, 450000), entry.tokens);
+        try std.testing.expectEqual(@as(u64, 272000), entry.tokens);
     }
     try std.testing.expectEqual(@as(u64, 128000), unlisted_context_window);
     try std.testing.expectEqual(@as(u32, 32000), unlisted_output_limit);

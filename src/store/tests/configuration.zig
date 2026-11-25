@@ -1336,7 +1336,7 @@ test "parent creation uses inherited provider for omitted compaction across save
                 try std.testing.expect(result == .accepted);
                 const observed = try storage.inspectSessionForTesting(result.accepted.session.slice());
                 try std.testing.expectEqualStrings("codex", observed.provider.?.slice());
-                try std.testing.expectEqual(@as(?u64, 450000), observed.compaction_trigger);
+                try std.testing.expectEqual(@as(?u64, 244800), observed.compaction_trigger);
                 try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
                 try std.testing.expect((try storage.configure(&child, .{})).accepted.replayed);
             }
