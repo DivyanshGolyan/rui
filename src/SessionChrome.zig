@@ -779,8 +779,6 @@ test "SessionChrome empty chat footer preserves model effort folder at both widt
         var text: std.ArrayList(u8) = .empty;
         for (0..width) |col| try text.appendSlice(arena.allocator(), footer.readCell(col, 0).char.grapheme);
         try std.testing.expect(std.mem.indexOf(u8, text.items, "gpt-6.1-sol · low · ~/code/rui") != null);
-        // The name is omitted only while the list is visible; a hidden list keeps it when the row has room.
-        if (visible) try std.testing.expect(std.mem.indexOf(u8, text.items, "reference") == null);
-        if (!visible and width == 140) try std.testing.expect(std.mem.indexOf(u8, text.items, "reference · gpt-6.1-sol") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text.items, "reference") == null);
     };
 }
