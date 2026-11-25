@@ -8179,7 +8179,7 @@ test "list input has no text domain and ignored printable or slash input preserv
     });
     var state = try opened(&.{session("aaaaaa", .{ .idle = ago(1) }, .{})});
     defer state.deinit();
-    state.say(.attention, "retained notice", .{});
+    state.say(.quiet, "retained notice", .{});
     const selected = state.selected;
     try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .ignored } }));
     try std.testing.expectEqual(selected, state.selected);
@@ -8578,7 +8578,7 @@ test "Upgrade is never refused as a Host request: the status bar shows its run a
     try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade.after);
 
     try expectEffects(&.{}, try submit(&state));
-    try std.testing.expectEqualStrings(upgrade_recovery, footerNotice(&state).?);
+    try std.testing.expectEqualStrings(state_marks.attention_sign ++ upgrade_recovery, footerNotice(&state).?);
     try expectEffects(&.{}, try step(&state, .start_upgrade));
     try expectStatus(&state, "Checking for updates…", .normal);
 }
@@ -8889,7 +8889,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
             .enter => {
                 if (phase.held) {
                     try expectEffects(&.{}, effects);
-                    try expectNotice(&state, upgrade_recovery);
+                    try expectNotice(&state, state_marks.attention_sign ++ upgrade_recovery);
                     try std.testing.expectEqual(before_requests, state.request_count);
                 } else {
                     try expectEffects(if (sidebar) &.{.new_session} else &.{.{ .create = null }}, effects);
@@ -9243,7 +9243,7 @@ test "Option session navigation retains populated creation and Upgrade admission
         const effects = try step(&state, .{ .input = .{ .key = .{ .action = action } } });
         for (effects.slice()) |effect| try std.testing.expect(effect != .open and effect != .create and effect != .open_settings);
         try std.testing.expectEqual(@as(?Reference, open), state.conversing);
-        if (guard != .upgrade) try std.testing.expectEqual(before, state.selected) else try expectNotice(&state, upgrade_recovery);
+        if (guard != .upgrade) try std.testing.expectEqual(before, state.selected) else try expectNotice(&state, state_marks.attention_sign ++ upgrade_recovery);
     };
 }
 
