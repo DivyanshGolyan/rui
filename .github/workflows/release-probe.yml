@@ -25,10 +25,8 @@ jobs:
             id=$(echo "$out" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
             if [ -n "$id" ]; then gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$id" && echo "deleted $id"; fi
           }
-          try "draft, target e4bda700 (v0.94.0 sha), plain body" "{\"tag_name\":\"$tag-e\",\"target_commitish\":\"e4bda700764624e0ac4f635f2fbd8fb0faf5751f\",\"draft\":true,\"name\":\"probe\",\"body\":\"probe\"}"
-          gh api "repos/$GITHUB_REPOSITORY/releases/457646706" --jq .body > body094.md
-          try "draft, target main sha, v0.94.0 body" "$(jq -n --rawfile b body094.md --arg t "$tag-f" --arg c "$MAIN" '{tag_name:$t,target_commitish:$c,draft:true,name:"probe",body:$b}')"
-          try "draft, target e4bda700, v0.94.0 body" "$(jq -n --rawfile b body094.md --arg t "$tag-g" '{tag_name:$t,target_commitish:"e4bda700764624e0ac4f635f2fbd8fb0faf5751f",draft:true,name:"probe",body:$b}')"
-          try "draft, target main sha, body without memory table" "$(jq -n --rawfile b body094.md --arg t "$tag-h" --arg c "$MAIN" '{tag_name:$t,target_commitish:$c,draft:true,name:"probe",body:($b|split("### Host memory")[0])}')"
+          try "draft, tag v0.95.0, target main sha" "{\"tag_name\":\"v0.95.0\",\"target_commitish\":\"$MAIN\",\"draft\":true,\"name\":\"Rui 0.95.0\",\"body\":\"probe\"}"
+          try "draft, tag v0.94.1, target main sha" "{\"tag_name\":\"v0.94.1\",\"target_commitish\":\"$MAIN\",\"draft\":true,\"name\":\"Rui 0.94.1\",\"body\":\"probe\"}"
+          try "draft, tag v0.94.0-probe, target main sha" "{\"tag_name\":\"v0.94.0-probe\",\"target_commitish\":\"$MAIN\",\"draft\":true,\"name\":\"probe\",\"body\":\"probe\"}"
           echo "== list drafts (read)"; gh api "repos/$GITHUB_REPOSITORY/releases?per_page=3" --jq '.[].tag_name'
           git ls-remote --tags "https://github.com/$GITHUB_REPOSITORY" "v0.0.0-probe-*" || true
