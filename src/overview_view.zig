@@ -3228,19 +3228,16 @@ fn move(state: *State, action: Action) void {
 
 pub const Band = session_class.Band;
 
-fn troubleRows(state: *const State) session_class.Rows {
+/// The provider trouble the visible Sessions share, if any; `session_class.trouble` decides it.
+pub fn band(state: *const State) ?Band {
     const Reader = struct {
         fn at(context: *const anyopaque, index: usize) session_class.Facts {
             const owner: *const State = @ptrCast(@alignCast(context));
             return factsOf(owner, &owner.rows.items[index]);
         }
     };
-    return .{ .context = state, .count = state.rows.items.len, .at = Reader.at };
-}
-
-/// The provider trouble the visible Sessions share, if any; `session_class.trouble` decides it.
-pub fn band(state: *const State) ?Band {
-    return session_class.trouble(troubleRows(state), viewerOf(state));
+    const rows: session_class.Rows = .{ .context = state, .count = state.rows.items.len, .at = Reader.at };
+    return session_class.trouble(rows, viewerOf(state));
 }
 
 pub const Rgb = @import("theme.zig").Rgb;
