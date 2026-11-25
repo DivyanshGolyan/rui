@@ -74,8 +74,8 @@ test "approved product defaults" {
     try std.testing.expectEqualStrings("low", reasoning_effort);
     try std.testing.expectEqual(@as(u64, 90), compaction_trigger_percent);
     try std.testing.expectEqual(@as(usize, 2), provider_compaction_triggers.len);
-    for (provider_compaction_triggers, [_][]const u8{ "codex", "chatgpt" }) |entry, provider| {
-        try std.testing.expectEqualStrings(provider, entry.provider);
+    for (provider_compaction_triggers, [_][]const u8{ "codex", "chatgpt" }) |entry, name| {
+        try std.testing.expectEqualStrings(name, entry.provider);
         try std.testing.expectEqual(@as(u64, 244800), entry.tokens);
     }
     try std.testing.expectEqual(@as(usize, 3), price_steps.len);
