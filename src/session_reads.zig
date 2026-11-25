@@ -2200,7 +2200,7 @@ test "SUI-53 replay replaces queued rows and counts only new rows" {
             try std.testing.expectEqualDeep(if (end == 23) @as(?Key, .{ .position = 21 }) else null, firstProvisional(&job.result));
             if (end == 24) {
                 try std.testing.expect(std.mem.indexOf(u8, host.shown, "Received message").? < std.mem.indexOf(u8, host.shown, "please wait").?);
-                try std.testing.expectEqual(@as(usize, @intFromBool(excluded)), std.mem.count(u8, host.shown, "◌ not sent"));
+                try std.testing.expectEqual(@as(usize, @intFromBool(excluded)), std.mem.count(u8, row_text.visible(host.shown), "◌ not sent"));
             }
         }
     }

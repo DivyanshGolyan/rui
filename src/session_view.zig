@@ -1203,12 +1203,14 @@ pub const Labels = enum {
     }
 };
 
-pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state"), labels: Labels) ?[]const u8 {
+pub const MessageLabel = struct { mark: ?marks.Mark = null, text: []const u8 };
+
+pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state"), labels: Labels) ?MessageLabel {
     if (labels == .none) return null;
     return switch (state) {
         .applied => null,
-        .queued => if (labels == .excluded_and_queued) "Queued" else null,
-        .excluded => "◌ not sent",
+        .queued => if (labels == .excluded_and_queued) .{ .text = "Queued" } else null,
+        .excluded => .{ .mark = .queued, .text = " not sent" },
     };
 }
 
@@ -1216,10 +1218,15 @@ test "a queued Message is labelled only while work under way holds it" {
     const working: protocol.WorkState = .{ .working = .{ .since = 1 } };
     const starting: protocol.WorkState = .{ .pending = .{ .since = 1 } };
     try std.testing.expect(messageLabel(.queued, .lasting(starting.holdsQueue())) == null);
-    try std.testing.expectEqualStrings("Queued", messageLabel(.queued, .lasting(working.holdsQueue())).?);
-    try std.testing.expectEqualStrings("◌ not sent", messageLabel(.excluded, .lasting(false)).?);
+    try std.testing.expectEqualStrings("Queued", messageLabel(.queued, .lasting(working.holdsQueue())).?.text);
+    try std.testing.expectEqualStrings(" not sent", messageLabel(.excluded, .lasting(false)).?.text);
     try std.testing.expect(messageLabel(.applied, .excluded_and_queued) == null);
     inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
+}
+
+fn labelRow(sink: anytype, label: MessageLabel, colour: bool) !void {
+    if (label.mark) |mark| try leader(sink, mark, "◌", colour);
+    try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), label.text, Style.normal.code(colour) });
 }
 
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
@@ -1228,9 +1235,7 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
 
 fn messageWith(reads: client.SessionReads, scratch: std.Io.File, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
     if (!visibleMessage(value)) return;
-    if (messageLabel(value.state, labels)) |text| {
-        try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
-    }
+    if (messageLabel(value.state, labels)) |label| try labelRow(sink, label, colour);
     if (value.sender) |sender| return peerLine(sink, sender, value.admitted_at);
     if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(true);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
@@ -1860,6 +1865,20 @@ test "SUI-176 every row that starts with a glyph tags it, and only a row that as
         try permissionMark(&sink, false, unicode_script);
         try sink.feed(" " ++ words);
         try Check.wraps(&document, true, "permission");
+    }
+    {
+        var raw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer raw.deinit();
+        const Raw = struct {
+            writer: *std.Io.Writer,
+            pub fn feed(self: *@This(), bytes: []const u8) !void {
+                try self.writer.writeAll(bytes);
+            }
+        };
+        var recorder: Raw = .{ .writer = &raw.writer };
+        try labelRow(&recorder, messageLabel(.excluded, .lasting(false)).?, false);
+        try std.testing.expect(std.mem.startsWith(u8, raw.written(), Text.leader_on ++ "◌" ++ Text.leader_off));
+        try std.testing.expectEqualStrings("◌ not sent\n", row_text.visible(raw.written()));
     }
     inline for (.{ content_mark, command_mark }) |mark| {
         var document: Document = .{ .quotes = true };
