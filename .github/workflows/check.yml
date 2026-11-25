@@ -941,13 +941,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Stop when main is red
-        if: ${{ needs.plan.outputs.main_red != '' }}
-        env:
-          MAIN_RED: ${{ needs.plan.outputs.main_red }}
-        run: |
-          echo "::error::main is red (#${MAIN_RED// /, #}); this PR's build and tests were skipped to save runner minutes. Push again or reopen the PR once it is closed; a rerun reuses the old PR body."
-          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
@@ -962,6 +955,13 @@ jobs:
             src/protocol.zig
           sparse-checkout-cone-mode: false
           persist-credentials: false
+      - name: Stop when main is red
+        if: ${{ needs.plan.outputs.main_red != '' }}
+        env:
+          MAIN_RED: ${{ needs.plan.outputs.main_red }}
+        run: |
+          echo "::error::main is red (#${MAIN_RED// /, #}); this PR's build and tests were skipped to save runner minutes. Push again or reopen the PR once it is closed; a rerun reuses the old PR body."
+          exit 1
       - name: Require the wire contract against the newest release
         run: |
           set -euo pipefail
@@ -1042,7 +1042,7 @@ jobs:
             *) echo 'Missing or invalid cache selection' >&2; exit 1 ;;
           esac
       - name: Require every selected Linux part
-        if: ${{ !cancelled() && needs.plan.outputs.main_red == '' }}
+        if: ${{ !cancelled() }}
         env:
           DRAFT_RUN: ${{ needs.plan.outputs.draft_run }}
           CHANGE_KIND: ${{ needs.plan.outputs.change_kind }}
@@ -1061,7 +1061,7 @@ jobs:
           COMPILE_ONLY: ${{ needs.plan.outputs.compile_only }}
         run: bash tests/ci/require_linux_parts.sh
       - name: Name each failed job and its cause
-        if: ${{ failure() && needs.plan.outputs.main_red == '' }}
+        if: ${{ failure() }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/failure_cause.py explain
