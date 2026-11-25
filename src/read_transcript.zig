@@ -7,6 +7,7 @@ const storage = @import("store.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const content_value = @import("content_value.zig");
 const part_text = @import("part_text.zig");
+const entry_text = @import("entry_text.zig");
 
 const window_bytes = 16 * 1024;
 
@@ -131,18 +132,6 @@ fn findEntry(store: *storage.Store, page: *protocol.ActivityFacts, request: *pro
         request.position = last.position;
         request.ordinal = last.ordinal;
     }
-}
-
-fn contentOf(item: *const protocol.ActivityItem) ?content_value.Value {
-    return switch (item.value) {
-        .admission, .user, .received => |message| message.content,
-        .assistant => |assistant| .{ .text = assistant.content },
-        .instruction => |instruction| .{ .text = instruction.content },
-        .tool_result => |result| result.content,
-        .sent => |sent| sent.content,
-        .turn_ended => |ended| if (ended.content) |reference| .{ .text = reference } else null,
-        else => null,
-    };
 }
 
 /// An entry's value as its display text: a text value's own bytes, or a parts value's
@@ -272,7 +261,9 @@ fn nameText(store: *storage.Store, arena: std.mem.Allocator, name: protocol.Prop
 
 fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, item: *const protocol.ActivityItem, out: *std.Io.Writer) !void {
     const note = try outlineHeader(store, arena, session, item, out);
-    if (contentOf(item)) |value| {
+    try entry_text.writeFacts(out, item);
+    if (item.body() == .value) {
+        const value = item.body().value;
         var parts: ?Shown = null;
         switch (value) {
             .text => |reference| try out.print(" {d} bytes", .{reference.length}),
@@ -281,7 +272,6 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
                 try out.print(" {d} parts, {d} images", .{ parts.?.parts.parts.len, parts.?.parts.images() });
             },
         }
-        if (item.value == .assistant and item.value.assistant.final) try out.writeAll(", final");
         if (item.value != .tool_result) {
             var shown = parts orelse try Shown.open(store, arena, session, item, value);
             const bytes = try shown.read(arena, 0, 100);
@@ -295,6 +285,8 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
 }
 
 // Keep the tool presentation scratch off the content-reading stack chain.
+/// The address, the kind and the words a typed fact cannot give by itself (who a Message came from, the saved tool name, the call's line).
+/// Every typed fact of the row follows from `entry_text.writeFacts`.
 noinline fn outlineHeader(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, item: *const protocol.ActivityItem, out: *std.Io.Writer) !?[]const u8 {
     try out.print("{d}.{d} {s}", .{ item.position, item.ordinal, @tagName(item.value) });
     var note: ?[]const u8 = null;
@@ -305,11 +297,6 @@ noinline fn outlineHeader(store: *storage.Store, arena: std.mem.Allocator, sessi
             try out.print(" {s}", .{sender.session.slice()})
         else
             try out.writeAll(" person"),
-        .sent => |sent| try out.print(" {s}", .{sent.target.session.slice()}),
-        .send_failed => |sent| if (sent.target) |target|
-            try out.print(" {s}", .{target.session.slice()})
-        else
-            try out.writeAll(" (no valid target reference)"),
         .call, .tool_result => {
             const request = try contentRequest(arena, session, item);
             const tool = try store.activityTool(request);
@@ -319,17 +306,11 @@ noinline fn outlineHeader(store: *storage.Store, arena: std.mem.Allocator, sessi
             if (tool.presentation.line) |line| if (line.description()) |description| {
                 note = try arena.dupe(u8, description.slice());
             };
-            if (item.value == .tool_result) try out.print(" {s}", .{@tagName(item.value.tool_result.presentation.code)});
         },
         .hosted_call => |*presentation| if (presentation.line) |*line| {
             note = try arena.dupe(u8, (line.description() orelse return error.CorruptStore).slice());
         },
-        .turn_ended => |ended| {
-            try out.print(" {s}", .{@tagName(ended.ending)});
-            if (!std.mem.eql(u8, ended.session.slice(), session)) try out.print(" agent {s}", .{ended.session.slice()});
-        },
-        .approval_requested => |requested| if (!std.mem.eql(u8, requested.session.slice(), session)) try out.print(" agent {s}", .{requested.session.slice()}),
-        else => {},
+        .assistant, .turn_ended, .stop, .sent, .send_failed, .approval_requested, .session_changed, .compacted, .model_call => {},
     }
     return note;
 }
@@ -337,38 +318,41 @@ noinline fn outlineHeader(store: *storage.Store, arena: std.mem.Allocator, sessi
 fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, item: *const protocol.ActivityItem, offset: u64, out: *std.Io.Writer) !void {
     var text: []const u8 = undefined;
     var total: u64 = undefined;
-    if (item.value == .call) {
-        const fields = item.value.call.fields;
-        const name = fields[@backingInt(protocol.ProposalField.name)];
-        const arguments = fields[@backingInt(protocol.ProposalField.arguments)];
-        total = name.length + 1 + arguments.length;
-        if (offset > total) return error.InvalidOffset;
-        const bytes = try arena.alloc(u8, @intCast(@min(window_bytes, total - offset)));
-        var written: usize = 0;
-        var start = offset;
-        if (start < name.length) {
-            const piece = try readLocation(arena, try store.openContent(.{ .length = name.length, .digest = name.digest }), start, bytes.len);
-            @memcpy(bytes[0..piece.len], piece);
-            written += piece.len;
-            start += piece.len;
-        }
-        if (start == name.length and written < bytes.len) {
-            bytes[written] = '\n';
-            written += 1;
-            start += 1;
-        }
-        if (written < bytes.len) {
-            const piece = try readLocation(arena, try store.openContent(.{ .length = arguments.length, .digest = arguments.digest }), start - name.length - 1, bytes.len - written);
-            @memcpy(bytes[written..][0..piece.len], piece);
-        }
-        text = bytes;
-    } else if (contentOf(item)) |value| {
-        var shown = try Shown.open(store, arena, session, item, value);
-        total = try shown.length();
-        text = try shown.read(arena, offset, window_bytes);
-    } else {
-        if (offset != 0) return error.InvalidOffset;
-        return outline(store, arena, session, item, out);
+    switch (item.body()) {
+        .call => |call| {
+            const name = call.name;
+            const arguments = call.arguments;
+            total = name.length + 1 + arguments.length;
+            if (offset > total) return error.InvalidOffset;
+            const bytes = try arena.alloc(u8, @intCast(@min(window_bytes, total - offset)));
+            var written: usize = 0;
+            var start = offset;
+            if (start < name.length) {
+                const piece = try readLocation(arena, try store.openContent(.{ .length = name.length, .digest = name.digest }), start, bytes.len);
+                @memcpy(bytes[0..piece.len], piece);
+                written += piece.len;
+                start += piece.len;
+            }
+            if (start == name.length and written < bytes.len) {
+                bytes[written] = '\n';
+                written += 1;
+                start += 1;
+            }
+            if (written < bytes.len) {
+                const piece = try readLocation(arena, try store.openContent(.{ .length = arguments.length, .digest = arguments.digest }), start - name.length - 1, bytes.len - written);
+                @memcpy(bytes[written..][0..piece.len], piece);
+            }
+            text = bytes;
+        },
+        .value => |value| {
+            var shown = try Shown.open(store, arena, session, item, value);
+            total = try shown.length();
+            text = try shown.read(arena, offset, window_bytes);
+        },
+        .none => {
+            if (offset != 0) return error.InvalidOffset;
+            return outline(store, arena, session, item, out);
+        },
     }
     if (text.len > 0 and text[0] & 0xc0 == 0x80) return error.InvalidOffset;
     const prefix = utf8_validation.wholePrefix(text) orelse "";
@@ -560,7 +544,8 @@ test "EXR-66 read_transcript renders parts entries" {
     const long_display = try std.fmt.allocPrint(arena, "{s}\n[image 1: PNG 1x1, 0.1 KB]\ntail", .{long_text});
     const Case = struct { arguments: []const u8, expected: []const u8, whole: bool = false };
     const cases = [_]Case{
-        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1,\"before\":\"{d}.0\"}}", .{ other.slice(), long_position }), .expected = try std.fmt.allocPrint(arena, "{d}.0 admission person 3 parts, 1 images: \"before\"\n", .{position}) },
+        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1,\"before\":\"{d}.0\"}}", .{ other.slice(), long_position }), .expected = " 3 parts, 1 images: \"before\"\n" },
+        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1,\"before\":\"{d}.0\"}}", .{ other.slice(), long_position }), .expected = try std.fmt.allocPrint(arena, "{d}.0 admission person at=", .{position}) },
         .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), position }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to {d} of {d}:\n{s}", .{ position, display.len, display.len, display }) },
         // Starts inside the placeholder, then on the separator before it.
         .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":10}}", .{ other.slice(), position }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 10 to {d} of {d}:\n{s}", .{ position, display.len, display.len, display[10..] }) },
@@ -739,8 +724,10 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
         try std.testing.expectEqual(@as(u64, 1), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ input.binding.action_id, if (index < 5 or index >= 8) "succeeded" else "failed" }));
         switch (index) {
             0 => {
-                try std.testing.expect(std.mem.indexOf(u8, bytes, ".2 tool_result message_agent failed") != null);
-                try std.testing.expect(std.mem.indexOf(u8, bytes, ".1 tool_result not_offered unknown_tool") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, ".2 tool_result message_agent at=") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, " code=failed ") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, ".1 tool_result not_offered at=") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, " code=unknown_tool ") != null);
                 try std.testing.expect(std.mem.indexOf(u8, bytes, "Message zzzzzz") != null);
             },
             1, 2 => {
@@ -748,23 +735,20 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
                 const expected = try std.fmt.allocPrint(arena, "Entry {d}.0 call, bytes {d} to {d} of {d}:\n{s}", .{ call_address, offset, full_text.len, full_text.len, full_text[offset..] });
                 try std.testing.expectEqualStrings(expected, bytes);
             },
-            3 => try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}.0 stop\n", .{stop_address}), bytes),
+            3 => {
+                const line = try outlineLine(arena, bytes, try std.fmt.allocPrint(arena, "{d}.0 stop at=", .{stop_address}));
+                for ([_][]const u8{ " key=", " cutoff=", " completion=" }) |token| try std.testing.expect(std.mem.indexOf(u8, line, token) != null);
+            },
             4 => try std.testing.expect(std.mem.indexOf(u8, bytes, "empty selection") != null),
             5 => try std.testing.expect(std.mem.indexOf(u8, bytes, "offset must be within") != null),
             6 => try std.testing.expect(std.mem.indexOf(u8, bytes, "more than 4096 bytes") != null),
             7 => try std.testing.expect(std.mem.indexOf(u8, bytes, "not one well-formed JSON object") != null),
             8 => {
-                for (refusal_addresses, 0..) |address, refusal| {
-                    const suffix = if (refusal == 0) "(no valid target reference)" else refusals[refusal].target;
-                    const line = try std.fmt.allocPrint(arena, "{d}.0 send_failed {s}\n", .{ address, suffix });
-                    try std.testing.expect(std.mem.indexOf(u8, bytes, line) != null);
-                }
+                for (refusal_addresses, 0..) |address, refusal| try expectRefusalLine(arena, bytes, address, refusal == 0, refusals[refusal].target);
             },
             9, 10, 11 => {
                 const refusal = index - 9;
-                const suffix = if (refusal == 0) "(no valid target reference)" else refusals[refusal].target;
-                const expected = try std.fmt.allocPrint(arena, "{d}.0 send_failed {s}\n", .{ refusal_addresses[refusal], suffix });
-                try std.testing.expectEqualStrings(expected, bytes);
+                try expectRefusalLine(arena, bytes, refusal_addresses[refusal], refusal == 0, refusals[refusal].target);
             },
             else => unreachable,
         }
@@ -774,6 +758,28 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
             try std.testing.expect(std.mem.indexOf(u8, bytes, "invalid_session_reference") == null);
             try std.testing.expect(std.mem.indexOf(u8, bytes, "Rejected text is never transcript content.") == null);
         }
+    }
+}
+
+/// The outline line that starts with `prefix`, without its newline.
+fn outlineLine(arena: std.mem.Allocator, bytes: []const u8, prefix: []const u8) ![]const u8 {
+    _ = arena;
+    const start = std.mem.indexOf(u8, bytes, prefix) orelse {
+        std.debug.print("missing {s} in {s}\n", .{ prefix, bytes });
+        return error.TestUnexpectedResult;
+    };
+    const rest = bytes[start..];
+    return rest[0 .. std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len];
+}
+
+/// A refused send's outline prints its facts: the key, and the target Session only when the reference was valid.
+fn expectRefusalLine(arena: std.mem.Allocator, bytes: []const u8, address: u64, no_target: bool, target: []const u8) !void {
+    const line = try outlineLine(arena, bytes, try std.fmt.allocPrint(arena, "{d}.0 send_failed at=", .{address}));
+    try std.testing.expect(std.mem.indexOf(u8, line, " key=") != null);
+    if (no_target) {
+        try std.testing.expect(std.mem.indexOf(u8, line, " target=") == null);
+    } else {
+        try std.testing.expect(std.mem.endsWith(u8, line, try std.fmt.allocPrint(arena, " target=\"{s}\"", .{target})));
     }
 }
 
@@ -866,8 +872,10 @@ test "read_transcript hosted call uses its recorded provider presentation" {
             var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
             defer output.deinit();
             try outline(&database, arena, session.slice(), item, &output.writer);
-            const expected = try std.fmt.allocPrint(arena, "{d}.0 hosted_call: Search “recorded provider query”\n", .{item.position});
-            try std.testing.expectEqualStrings(expected, output.written());
+            const prefix = try std.fmt.allocPrint(arena, "{d}.0 hosted_call at=", .{item.position});
+            try std.testing.expect(std.mem.startsWith(u8, output.written(), prefix));
+            try std.testing.expect(std.mem.indexOf(u8, output.written(), " code=succeeded ") != null);
+            try std.testing.expect(std.mem.endsWith(u8, output.written(), ": Search “recorded provider query”\n"));
         }
     }.check);
 }

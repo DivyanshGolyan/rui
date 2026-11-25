@@ -157,7 +157,7 @@ A refused send's `send_failed.target` is required and nullable: it names the can
 The Store derives that peer from the full saved target with the shared ID grammar, resolves a label only for a peer, and leaves the original command target, digest, refusal and replay identity unchanged.
 This read-time projection covers existing refusals as well as new ones; null does not distinguish refused creation from a malformed addressed send and never means that a Session was created or not created.
 Every non-null peer remains strictly validated; a missing target or malformed peer is not an alternative null encoding.
-The human row with no peer reads `! Message rejected — No valid target reference`; model transcript outlines use `(no valid target reference)` rather than a label or invalid attempted spelling.
+The human row with no peer reads `! Message rejected — No valid target reference`; model transcript outlines print no `target` for it, and never a label or invalid attempted spelling.
 Calls retain historical rejected proposals and all three complete field references under the proposal contract above.
 Tool Results validate the complete group's accepted call/output-item and Session/Turn/attempt provenance before exposure; malformed sibling links fence even when the caller skips proposal rows.
 Outcome provenance is the terminal Turn's causing model Operation, not a later Session Operation.
