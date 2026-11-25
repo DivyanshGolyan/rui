@@ -301,8 +301,7 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                 patch.configuration.output_reservation.state = .explicit_null;
                 const cleared = try storage.configure(&patch, .{});
                 try std.testing.expect(cleared == .accepted);
-                const codex_limit: u64 = if (std.mem.eql(u8, model, "gpt-6.1-sol") or std.mem.eql(u8, model, "gpt-6.1-terra")) 450000 else 244800;
-                const host_default = @min(expected.?, codex_limit);
+                const host_default = @min(expected.?, 244800);
                 const cleared_settings = try storage.inspectSessionForTesting(created_session_0.slice());
                 try std.testing.expectEqual(@as(?u64, host_default), cleared_settings.compaction_trigger);
                 try std.testing.expectEqual(@as(u64, 0), cleared_settings.output_reservation);

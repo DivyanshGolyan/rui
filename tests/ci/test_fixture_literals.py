@@ -37,8 +37,6 @@ def owned_numbers(root):
             numbers[value] = f"DEFAULTS.{name}"
     for provider, tokens in defaults.provider_compaction_triggers.items():
         numbers[tokens] = f"DEFAULTS.provider_compaction_triggers[{provider!r}]"
-    for key, tokens in defaults.model_compaction_triggers.items():
-        numbers[tokens] = f"DEFAULTS.model_compaction_triggers[{key!r}]"
     models = [(model, repr(model)) for model, row in owner.CATALOG.items()
               if row.openai_listed and owner.context_window(model) >= SMALLEST_WINDOW]
     for model, spelled in [(defaults.recommended_model, "DEFAULTS.recommended_model"), (None, "an unlisted model")] + models:
@@ -188,8 +186,7 @@ class FixtureLiteralsTest(unittest.TestCase):
         finally:
             sys.path.remove(str(ROOT / "tests/integration"))
         numbers = owned_numbers(ROOT)
-        for owned in (*DEFAULTS.provider_compaction_triggers.values(), *DEFAULTS.model_compaction_triggers.values(),
-                      context_window(DEFAULTS.recommended_model)):
+        for owned in (*DEFAULTS.provider_compaction_triggers.values(), context_window(DEFAULTS.recommended_model)):
             self.assertIn(owned, numbers)
         self.assertTrue(catalog_prose(ROOT))
         self.assertTrue(built_in_tools(ROOT))

@@ -6,7 +6,7 @@ _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SOURCE = _ROOT / "src" / "product_defaults.zig"
 _DECLARATION = re.compile(r'^pub const (\w+)(?:: \w+)? = (?:"([^"\\]*)"|(\d+));$', re.MULTILINE)
 _TRIGGER = re.compile(r'\.provider = "(\w+)", \.tokens = (\d+)')
-_MODEL_TRIGGER = re.compile(r'\.provider = "(\w+)", \.model = "([^"\\]+)", \.tokens = (\d+)')
+_STEP = re.compile(r'\.model = "([^"\\]+)", \.tokens = (\d+)')
 _ROW = re.compile(r'\.id = "((?:[^"\\]|\\.)*)", \.context_window = (null|\d+), '
                   r'\.efforts = \.init\(\.\{([^}]*)\}\), \.openai_listed = (true|false)')
 EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
@@ -19,9 +19,8 @@ def _load():
         values[name] = text if number == "" else int(number)
     triggers = source.split("pub const provider_compaction_triggers", 1)[1].split("};", 1)[0]
     values["provider_compaction_triggers"] = {provider: int(tokens) for provider, tokens in _TRIGGER.findall(triggers)}
-    triggers = source.split("pub const model_compaction_triggers", 1)[1].split("};", 1)[0]
-    values["model_compaction_triggers"] = {(provider, model): int(tokens)
-                                           for provider, model, tokens in _MODEL_TRIGGER.findall(triggers)}
+    steps = source.split("pub const price_steps", 1)[1].split("};", 1)[0]
+    values["price_steps"] = {model: int(tokens) for model, tokens in _STEP.findall(steps)}
     catalog = (_ROOT / "src" / "built_in_tool.zig").read_text()
     names = re.search(r"pub const BuiltInTool = enum \{([^}]+)\};", catalog)
     assert names, "built-in tool catalog missing"
@@ -54,7 +53,9 @@ def context_window(model):
 def compaction_trigger(provider, model):
     model_trigger = context_window(model) * DEFAULTS.compaction_trigger_percent // 100
     provider_trigger = DEFAULTS.provider_compaction_triggers.get(provider, model_trigger)
-    return min(DEFAULTS.model_compaction_triggers.get((provider, model), provider_trigger), model_trigger)
+    step = DEFAULTS.price_steps.get(model)
+    step_trigger = step * DEFAULTS.compaction_trigger_percent // 100 if step else model_trigger
+    return min(provider_trigger, model_trigger, step_trigger)
 
 
 def start_effort(model, saved=None):
