@@ -139,7 +139,7 @@ def screens_required(changed_paths, *, base=None) -> bool:
 def screen_refusal(body) -> str | None:
     if not screen_evidence(body):
         return ("UI PRs need a visible user-attachments image/video line or a line 'No screen change: <reason>'. "
-                "Run verify-rui frames HEAD --before BASE, then verify-rui publish DIR --pr PR (gh 2.104.0+ and a classic PAT or gh OAuth token with push access); re-run the failed admission job after updating the body.")
+                "Run verify-rui frames HEAD --before BASE, then verify-rui publish DIR --pr PR (gh 2.104.0+ and a classic PAT or gh OAuth token with push access); editing the body reruns admission.")
     return None
 
 
@@ -203,7 +203,8 @@ def main():
                 print(f"screens_required={str(required).lower()}", file=f)
         reason = refusal(paths, body, base=base)
     if reason:
-        print(reason, file=sys.stderr)
+        # The annotation is what admission_notice.py comments on the PR.
+        print("::error::" + reason.replace("%", "%25").replace("\n", "%0A"), file=sys.stderr)
         return 1
     return 0
 
