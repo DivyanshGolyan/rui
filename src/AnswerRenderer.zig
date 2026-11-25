@@ -1,5 +1,6 @@
 const std = @import("std");
 const TerminalText = @import("TerminalText.zig");
+const session_id = @import("session_id.zig");
 const gwidth = @import("terminal_width");
 const display_text = @import("display_text.zig");
 const Renderer = @This();
@@ -731,7 +732,8 @@ fn linkByte(self: *Renderer, byte: u8) !void {
             '(' => self.link_depth += 1,
             ')' => if (self.link_depth == 0) {
                 const target = self.held[self.link_text_end + 2 .. self.link_len];
-                if (!TerminalText.linkTarget(target) and self.markdownLocalParts(target) == null) return self.dropLink(byte);
+                if (!TerminalText.linkTarget(target) and self.markdownLocalParts(target) == null and
+                    !(self.destination == .viewport and session_id.fromLink(target) != null)) return self.dropLink(byte);
                 return self.showText();
             } else {
                 self.link_depth -= 1;
@@ -1712,6 +1714,31 @@ fn visible(output: []const u8, shown: *std.Io.Writer) !void {
 }
 
 test "content_link_render SUI-26 link targets and labels" {
+    {
+        try expectRendered("See [review](rui-session:k7m2qx).", "See " ++ comptime linked("rui-session:k7m2qx", "review") ++ ".");
+        for ([_][]const u8{
+            "[x](rui-session:k7m2q)",                          "[x](rui-session:k7m2qxx)",
+            "[x](rui-session:K7M2QX)",                         "[x](rui-session:k7m2qx?x)",
+            "[x](rui-session:k7m2qx#x)",                       "[x](rui-session:%6b7m2qx)",
+            "[x](rui-session://k7m2qx)",                       "[x](rui-session:k7m2qi)",
+            "`[x](rui-session:k7m2qx)`",                       "```\n[x](rui-session:k7m2qx)\n```",
+            "\x1b]8;;rui-session:k7m2qx\x1b\\x\x1b]8;;\x1b\\", "rui-session:k7m2qx",
+            "k7m2qx",
+        }) |input| {
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            var renderer: Renderer = .{ .out = &output.writer, .destination = .{ .viewport = .wcwidth } };
+            for (input) |byte| try renderer.feed(&.{byte});
+            try renderer.finish();
+            try std.testing.expect(std.mem.indexOf(u8, output.written(), TerminalText.link_open ++ TerminalText.session_link) == null);
+        }
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: Renderer = .{ .out = &output.writer, .destination = .terminal };
+        try renderer.feed("[review](rui-session:k7m2qx)");
+        try renderer.finish();
+        try std.testing.expectEqualStrings("[review](rui-session:k7m2qx)", output.written());
+    }
     {
         try expectRendered("See [github.com](https://github.com/a/b).", "See " ++ comptime linked("https://github.com/a/b", "github.com") ++ ".");
         try expectRendered("Zig 0.17 ([ziglang.org](https://ziglang.org/download/))\n", "Zig 0.17 (" ++ comptime linked("https://ziglang.org/download/", "ziglang.org") ++ ")\n");

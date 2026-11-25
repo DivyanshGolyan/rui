@@ -367,6 +367,8 @@ pub const AppHooks = struct {
     leave: *const fn (*anyopaque, *vxfw.EventContext, Outcome) anyerror!void,
     copy: *const fn (*anyopaque, std.Io.File, u64, u64) anyerror!void,
     on_open: *const fn (*anyopaque, *vxfw.EventContext, *const [session_id.bytes]u8) anyerror!void,
+    /// A one-line notice the Session opens with, shown on its first input turn.
+    notice: ?[]const u8 = null,
 };
 
 fn cancelPointerSelection(raw: *anyopaque) void {
@@ -413,6 +415,7 @@ fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input
 
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
+    self.notice = hooks.notice;
     self.app_input.bottom = &hooks.root.bottom;
     hooks.root.session_focus = .{ .context = self, .changed = focusChanged, .cancel_pointer = cancelPointerSelection, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates, .clipboard = .{ .target = clipboardTarget, .paste = pasteClipboard } };
     self.app_info = .{ .backend = self.infoBackend(), .home = self.home };

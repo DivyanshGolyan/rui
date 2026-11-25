@@ -16,7 +16,7 @@ pub const link_open = "\x1b]8;;";
 pub const link_end = "\x1b\\";
 pub const link_close = link_open ++ link_end;
 pub const max_link_bytes = 2048;
-pub const session_link = "rui-session:";
+pub const session_link = @import("session_id.zig").link_prefix;
 
 pub const user_message_on = "\x1b[202m";
 pub const user_message_off = "\x1b[203m";
