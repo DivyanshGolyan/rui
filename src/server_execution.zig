@@ -5367,7 +5367,7 @@ test "an encode failure settles unanswered and releases request scratch" {
                 "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND session_ref=?2 AND attempt_ordinal=?3 AND turn_id=?4 AND resolution_code=?5 AND resolved_at IS NOT NULL AND retry_due_at_ms IS NULL AND attempt_at IS NULL AND request_id IS NULL",
                 .{ binding.operation_id, configured.accepted.session.slice(), binding.attempt_ordinal, binding.turn_id, "local_ordered_input_limit" },
             ));
-            try std.testing.expect(@import("marks.zig").cause("local_ordered_input_limit", null).key == null);
+            try std.testing.expect(@import("marks.zig").cause("local_ordered_input_limit", null).retry == false);
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
             try std.testing.expect(!storage.isFenced());
             continue;
