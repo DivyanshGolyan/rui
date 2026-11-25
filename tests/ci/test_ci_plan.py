@@ -111,6 +111,7 @@ class PlanTest(unittest.TestCase):
                     policy_skips=['test_unchanged'] if event == 'pull_request' else [],
                     compile_only=False,
                     pr_mysql_migration=False,
+                    pr_mysql_tests='',
                 )
                 self.assertEqual(result.outputs, expected)
                 if promotion:
@@ -297,10 +298,13 @@ class PrMySqlMigrationTest(unittest.TestCase):
             with self.subTest(case=name):
                 # A documentation-only diff selects nothing, so it is documentation whatever the selection says.
                 base = selection(kind is ChangeKind.DOCUMENTATION)
-                source = dict(base, fast_targets=['test-logic', 'test-store'], mysql_migration=migration)
+                source = dict(base, fast_targets=['test-logic', 'test-store'], mysql_migration=migration,
+                              mysql_tests=['store.mysql_dialect_check.', 'store.tests.tool_set.'])
                 output = plan(source, event_name=event, draft=draft, promotion=promotion, change_kind=kind,
                               compile_only=name == 'compile only').outputs
                 self.assertIs(output['pr_mysql_migration'], expected)
+                self.assertEqual(output['pr_mysql_tests'],
+                                 'store.mysql_dialect_check. store.tests.tool_set.' if expected else '')
         # A selection from before the owner existed has no key: no MySQL.
         output = plan(selection(), event_name='pull_request', draft=False, promotion=False,
                       change_kind=ChangeKind.NORMAL).outputs
@@ -314,6 +318,8 @@ class PrMySqlMigrationTest(unittest.TestCase):
                            promotion=False, change_kind=ChangeKind.NORMAL).outputs
         self.assertEqual(with_change.pop('pr_mysql_migration'), True)
         without.pop('pr_mysql_migration')
+        with_change.pop('pr_mysql_tests')
+        without.pop('pr_mysql_tests')
         self.assertEqual(with_change, without)
 
     def test_a_schema_step_change_selects_test_store_on_the_pr(self):

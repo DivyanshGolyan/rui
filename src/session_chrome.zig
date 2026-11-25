@@ -177,7 +177,23 @@ test "opening and decision progress share the footer while unresolved decisions 
     try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Opening…", .width = 80 }).left);
 }
 
-pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + session_line.Context.footer_bytes + 4 * " · ".len + "Stopping and archiving".len;
+pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + session_line.Context.footer_bytes + 4 * " · ".len + @import("session_archive.zig").State.longest_badge;
+
+test "SUI-174 the facts row's room holds the widest row with the longest archive badge" {
+    const protocol = @import("protocol.zig");
+    var buffer: [facts_bytes]u8 = undefined;
+    var model: [@import("model_capability.zig").max_model_bytes]u8 = undefined;
+    @memset(&model, 'm');
+    var folder: [protocol.max_workspace_bytes]u8 = undefined;
+    @memset(&folder, 'f');
+    folder[0] = '/';
+    const facts: session_line.Facts = .{ .model = &model, .folder = &folder, .effort = .high };
+    for (std.enums.values(protocol.SessionArchiveState)) |state| {
+        const row = factsRow(&buffer, facts, state.badge(), 1 << 20, .unicode);
+        try std.testing.expect(row.len <= facts_bytes);
+        if (state.badge()) |words| try std.testing.expect(std.mem.endsWith(u8, row, words));
+    }
+}
 
 /// The footer's facts row: model, effort and context or folder, then the archive `badge`. The chat's name
 /// is never part of it; the Session list and the terminal title carry the name.
