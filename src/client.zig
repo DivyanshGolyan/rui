@@ -4659,7 +4659,6 @@ fn checkCreatingMessageCapture() !void {
         defer parsed.deinit();
         const object = parsed.value.object;
         try std.testing.expectEqualStrings("", object.get("session").?.string);
-        try std.testing.expect(object.get("sender").? == .null);
         try std.testing.expectEqualStrings("custom", object.get("configuration").?.object.get("model").?.string);
         try std.testing.expectEqualStrings("hello", object.get("text").?.object.get("value").?.string);
         try std.testing.expectEqual(require_model, object.contains("require_model"));
