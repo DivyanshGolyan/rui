@@ -35,7 +35,7 @@ pub const Identity = struct {
     }
 
     fn spans(self: Identity, buffer: *[chrome.facts_bytes]u8, width: usize, method: vaxis.gwidth.Method) chrome.FooterSpans {
-        return chrome.factsSpans(buffer, self.current, chrome.archiveBadge(self.archive), width, method);
+        return chrome.factsSpans(buffer, self.current, self.archive.badge(), width, method);
     }
 };
 

@@ -168,39 +168,21 @@ test "opening and decision progress share the footer while unresolved decisions 
     try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Opening…", .width = 80 }).left);
 }
 
-/// The words the facts row ends with for a Session's archive state; null while it is active.
-pub fn archiveBadge(state: @import("protocol.zig").SessionArchiveState) ?[]const u8 {
-    return switch (state) {
-        .active => null,
-        .archiving => "Stopping and archiving",
-        .archived => "Archived",
-    };
-}
+pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + "100% context left".len + 4 * " · ".len + @import("session_archive.zig").State.longest_badge;
 
-const longest_badge = longest: {
-    var longest: usize = 0;
-    for (std.enums.values(@import("protocol.zig").SessionArchiveState)) |state| {
-        if (archiveBadge(state)) |badge| longest = @max(longest, badge.len);
-    }
-    break :longest longest;
-};
-
-pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + "100% context left".len + 4 * " · ".len + longest_badge;
-
-test "SUI-169 the facts row's room covers every archive state's badge" {
+test "SUI-169 the facts row's room holds the widest row with the longest archive badge" {
+    const protocol = @import("protocol.zig");
     var buffer: [facts_bytes]u8 = undefined;
-    const facts: session_line.Facts = .{ .model = "gpt-6.1-sol", .effort = .high, .left = 40 };
-    for (std.enums.values(@import("protocol.zig").SessionArchiveState)) |state| {
-        const badge = archiveBadge(state);
-        try std.testing.expect((state == .active) == (badge == null));
-        if (badge) |words| {
-            try std.testing.expect(words.len <= longest_badge);
-            for ([_]usize{ 46, 140 }) |width| {
-                const row = factsRow(&buffer, facts, words, width, .unicode);
-                try std.testing.expect(session_line.cells(row, .unicode) <= width);
-                try std.testing.expect(std.mem.endsWith(u8, row, words));
-            }
-        }
+    var model: [@import("model_capability.zig").max_model_bytes]u8 = undefined;
+    @memset(&model, 'm');
+    var folder: [protocol.max_workspace_bytes]u8 = undefined;
+    @memset(&folder, 'f');
+    folder[0] = '/';
+    const facts: session_line.Facts = .{ .model = &model, .folder = &folder, .effort = .high };
+    for (std.enums.values(protocol.SessionArchiveState)) |state| {
+        const row = factsRow(&buffer, facts, state.badge(), 1 << 20, .unicode);
+        try std.testing.expect(row.len <= facts_bytes);
+        if (state.badge()) |words| try std.testing.expect(std.mem.endsWith(u8, row, words));
     }
 }
 
