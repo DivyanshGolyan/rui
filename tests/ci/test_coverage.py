@@ -61,7 +61,7 @@ class CoverageTest(unittest.TestCase):
         for broad, cases in FIXTURE_COVERS.items():
             self.assertEqual(normalize((required - cases) | {broad}), {"check"})
 
-    def test_coverage_distinguishes_full_check_and_rsql_table(self):
+    def test_check_covers_the_statement_table_and_check_full_does_not(self):
         self.assertTrue(covers("check", {"check-full"}))
         self.assertTrue(covers("rsql-table", {"check"}))
         self.assertFalse(covers("rsql-table", {"check-full"}))
@@ -70,8 +70,8 @@ class CoverageTest(unittest.TestCase):
             self.assertTrue(covers(target, {target}))
             self.assertFalse(covers(target, set()))
 
-    def test_promotion_restores_mysql_after_normalization_and_keeps_rsql_table(self):
-        selected = dict(targets=["check", "rsql-table", "host-status-integration"],
+    def test_promotion_restores_mysql_after_normalization(self):
+        selected = dict(targets=["check", "host-status-integration"],
                         native_targets=["check", "test-native"], native_required=True,
                         mac_required=True, upgrade_required=False, server_targets=[],
                         cache_execution_checks=False, typecheck_macos=False, linux_memory_checks=False,
@@ -80,9 +80,9 @@ class CoverageTest(unittest.TestCase):
                       change_kind=ChangeKind.NORMAL)
         core = {"check-full", "test-logic", "admission-debug-integration"}
         self.assertEqual(result.outputs["targets"], ["admission-debug-integration", "check-full", "deep-modules", "host-status-integration",
-                                                     "mysql-wire-integration", "rsql-table", "test-logic"])
+                                                     "mysql-wire-integration", "test-logic"])
         self.assertEqual(result.outputs["native_targets"], sorted(core))
-        self.assertEqual(selected["targets"], ["check", "rsql-table", "host-status-integration"])
+        self.assertEqual(selected["targets"], ["check", "host-status-integration"])
 
 
 if __name__ == "__main__":

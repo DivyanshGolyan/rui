@@ -92,7 +92,8 @@ FIXTURES = {
     "bash-recovery-integration": ((I + "bash_recovery_integration.py",), (), BASH),
     "bash-environment-integration": ((I + "bash_environment_integration.py",), (),
                                      ("src/bash.zig", "src/SessionEnvironments.zig")),
-    "peer-integration": ((I + "peer_integration.py",), (), ("src/bash.zig", "src/peer_message.txt")),
+    "peer-integration": ((I + "peer_integration.py",), (), ("src/bash.zig", "src/peer_message.txt",
+        "src/AnswerRenderer.zig", "src/ConversationViewport.zig", "src/TerminalText.zig", "src/FeedView.zig")),
     "sender-identity-integration": ((I + "sender_identity_integration.py",), (), ("src/bash.zig",)),
     "codex-integration": ((I + "codex_integration.py",), (), ("src/providers.zig", *CREDENTIALS)),
     "codex-h2-integration": ((I + "codex_h2_integration.py",), (), ("src/providers.zig", *CREDENTIALS)),
@@ -735,7 +736,8 @@ def live_mysql_suites(targets, mysql_suites):
 def covers(target, targets) -> bool:
     """Whether a selected target executes target's checks.
 
-    check-full deliberately excludes rsql-table; promotion adds it separately.
+    check-full deliberately excludes rsql-table, and promotion no longer adds it: the scheduled
+    statement-table workflow regenerates the table instead.
     """
     broader = {"test": {"test-native", "test-store"},
                "check": CHECK_COVERS | {"rsql-table", "deep-modules"},
@@ -780,7 +782,7 @@ PR_SELECTED_TARGETS = frozenset({"deep-modules", "deep-modules-test", "test-vaxi
 # Promotion's own targets: the PR tier never runs these whatever the diff touches. ci_plan.py adds
 # them to every promotion, and the issue filer names a red's target as promotion-only with them.
 PROMOTION_CORE_TARGETS = frozenset({"check-full", "test-logic", "admission-debug-integration"})
-PROMOTION_EXTRA_TARGETS = frozenset({"deep-modules", "rsql-table", "mysql-wire-integration"})
+PROMOTION_EXTRA_TARGETS = frozenset({"deep-modules", "mysql-wire-integration"})
 # The targets the PR tier never runs, whatever the diff touches: the escape classifier's promotion-only set.
 # Own-file and selected targets are checked first in the classifier, so this is what remains of the extras.
 PR_NEVER_TARGETS = PROMOTION_EXTRA_TARGETS - PR_OWN_FILE_TARGETS - PR_SELECTED_TARGETS
@@ -1186,32 +1188,23 @@ def revision_contents(paths, base, head):
 DIRECT, GRAPH, BROAD = 0, 1, 2
 EXTRA_OWN_FILES = {"deep-modules": ("tests/ci/deep_modules.allow", "tests/ci/deep_modules/*", "build/deep_modules.zig"),
                    "deep-modules-test": ("tests/ci/deep_modules/*", "build/deep_modules.zig"),
-                   "rsql-table": ("tests/ci/rsql_table.py", "src/store/rsql_table.zig"),
                    # Attribution only: host-memory is in no selection rule, so only Promote's memory job runs it.
                    "host-memory": ("tests/ci/host_memory.py",),
                    # The Go packages select() maps to measurement-check by its path rule (QUALIFICATION_GO).
                    "measurement-check": tuple(f"{QUALIFICATION_ROOT}*{suffix}" for suffix in QUALIFICATION_GO)}
-# The targets whose binaries rsql-table's collect build compiles: every statement and fixture text they
-# reach is a rsql-table input, so a change any of them reaches is one. tests/ci/rsql_table.py runs these.
+# The targets whose binaries the statement table's collect build compiles: every statement and fixture text they
+# reach is a table input. tests/ci/rsql_table.py runs these.
 STATEMENT_TABLE_TARGETS = ("test-native", "test-store", "session-list-integration")
 
 
-def own_patterns(target, read=None):
-    """The files that are a target's own sources, scripts or declared inputs, as the build and selector name them.
-
-    `read` (a repository reader) is needed only for rsql-table's statement-table list; without it that list is absent.
-    """
+def own_patterns(target):
+    """The files that are a target's own sources, scripts or declared inputs, as the build and selector name them."""
     scripts, executables, owners = FIXTURES.get(target, ((), (), ()))
     own = [*scripts, *executables, *owners, *UNIT_ROOTS.get(target, ()), *EXTRA_OWN_FILES.get(target, ())]
-    if target == "rsql-table" and read is not None:
-        # build/product.zig owns the statement-table inputs; the list moves with the commit, so read it there.
-        text = read("build/product.zig") or ""
-        listed = re.search(r"pub const rsql_table_inputs = \[_\]\[\]const u8\{([^}]*)\}", text)
-        own += re.findall(r'"([^"]+)"', listed.group(1)) if listed else []
     return tuple(own)
 
 
-def attribute(path, graph, available, read, contents=None, fixture_literals=None):
+def attribute(path, graph, available, contents=None, fixture_literals=None):
     """How each target the selector reaches for one changed path reaches it: {target: DIRECT | GRAPH | BROAD}.
 
     The selector's own mapping (select()) names the selected targets; a selected target covers each target
@@ -1224,14 +1217,12 @@ def attribute(path, graph, available, read, contents=None, fixture_literals=None
         attributes[target] = min(tier, attributes.get(target, BROAD + 1))
 
     for target in available:
-        if matches(path, own_patterns(target, read)):
+        if matches(path, own_patterns(target)):
             record(target, DIRECT)
     selected = select([path], "review", available, graph=graph, contents=contents or {},
                       fixture_literals=fixture_literals)["targets"]
     reached = graph.targets(path) or set()
     rule_named = {target for patterns, checks, *_ in RULES if matches(path, patterns) for target in checks}
-    if any(path in graph.reached[root] for root in STATEMENT_TABLE_TARGETS):
-        record("rsql-table", GRAPH)
     if path in graph.host:
         # Host graph paths reach the memory gate through the Host's closure, which no selection rule names.
         record("host-memory", GRAPH)

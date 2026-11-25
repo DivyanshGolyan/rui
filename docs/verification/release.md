@@ -90,7 +90,7 @@ Each failed step's suspect lines name the commits to read first, and a suspect i
 Two failed steps get separate suspect lists; the job's issues carry every suspect line, and a job with several causes says so.
 The run then files one `promotion-red` issue (`main-red` when scheduled) per failure signature through [report_issue.py](../../tests/ci/report_issue.py), with the suspects on it.
 Each new issue carries an `escape:<class>` label and an `Escape class` line saying why the ready PR tier did not catch the failure.
-The classes are `own-files:<target>`; `promotion-only:<target>` for a target the PR tier never runs (today only `rsql-table`), or bare `promotion-only` for a whole-tier job (the renderer contracts, the release build, cache execution); `live-mysql`, which comes only from the failing cause's own text naming MySQL, with `:<target>` when a target is named; `macos`; `upgrade`; `pr-tier`; `cold-cache-timeout`; and `unknown`.
+The classes are `own-files:<target>`; `promotion-only:<target>` for a target the PR tier never runs (none today), or bare `promotion-only` for a whole-tier job (the renderer contracts, the release build, cache execution); `live-mysql`, which comes only from the failing cause's own text naming MySQL, with `:<target>` when a target is named; `macos`; `upgrade`; `pr-tier`; `cold-cache-timeout`; and `unknown`.
 `pr-tier` means the PR tier did run the check, so its selection or a combination of tests let the failure through; a target the PR tier runs is `pr-tier` even where promotion also runs it.
 A `check-full` failure that names no target is `unknown`.
 An infrastructure red, as [failure_cause.py](../../tests/ci/failure_cause.py) classifies it, carries no escape class.

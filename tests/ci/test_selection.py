@@ -973,6 +973,12 @@ class SelectionTest(unittest.TestCase):
                         "review", AVAILABLE)
         self.assertNotIn("terminal-restoration-integration", result["targets"])
 
+    def test_assistant_session_links_select_peer_journey(self):
+        for path in ("src/AnswerRenderer.zig", "src/ConversationViewport.zig", "src/TerminalText.zig", "src/FeedView.zig"):
+            with self.subTest(path=path):
+                targets = set(select([path], "review", AVAILABLE)["targets"])
+                self.assertTrue(covers("peer-integration", targets), (path, targets))
+
     def test_renderer_diff_skips_check_before_landing(self):
         for paths in (["src/SessionFrontend.zig"], ["src/TerminalText.zig"], ["src/AnswerRenderer.zig"],
                       ["src/ConversationViewport.zig"],
@@ -1673,7 +1679,7 @@ fi
 
     def test_long_gate_runs_alone_and_short_suites_share_three_shards(self):
         short = [f"suite-{index}-integration" for index in range(14)]
-        for gates in (["check"], ["test"], ["check-full"], ["check-full", "rsql-table"]):
+        for gates in (["check"], ["test"], ["check-full"]):
             with self.subTest(gates=gates):
                 rows = shards(sorted(gates + short))["include"]
                 packed = [row for row in rows if not LONG_GATES.intersection(row["targets"])]
@@ -1702,7 +1708,7 @@ fi
 
     def test_requested_ref_cannot_publish_shared_caches(self):
         read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'release-build.yml',
-                     'race-sweep.yml')
+                     'race-sweep.yml', 'statement-table.yml')
         for name in read_only:
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
@@ -2817,14 +2823,10 @@ class SuspectAttributionTest(unittest.TestCase):
         cls.literals = tree_fixture_literals()
 
     def reach(self, path, contents=None):
-        def read(name):
-            return (ROOT / name).read_text() if (ROOT / name).is_file() else None
-
-        return attribute(path, self.graph, self.available, read, contents=contents, fixture_literals=self.literals)
+        return attribute(path, self.graph, self.available, contents=contents, fixture_literals=self.literals)
 
     def test_a_targets_own_script_or_source_is_direct(self):
         self.assertEqual(self.reach("src/bash.zig")["bash-integration"], DIRECT)
-        self.assertEqual(self.reach("src/store/rsql.zig")["rsql-table"], DIRECT)
 
     def test_a_go_test_under_qualification_is_its_packages_own_source(self):
         self.assertEqual(self.reach("tests/qualification/measurement/measurement_test.go")["measurement-check"], DIRECT)
@@ -2841,9 +2843,6 @@ class SuspectAttributionTest(unittest.TestCase):
         # Its scripts are read by tests/ci/test_verify_rui*.py, which the policy suite runs; no fixture or unit root imports them.
         self.assertEqual(self.reach(".claude/skills/verify-rui/scripts/verify-rui"), {})
         self.assertEqual(self.reach(".claude/skills/verify-rui/scripts/frames.json"), {})
-
-    def test_a_statement_table_root_reach_makes_rsql_table_a_graph_suspect(self):
-        self.assertEqual(self.reach("src/store/tests.zig").get("rsql-table"), GRAPH)
 
     def test_host_memory_is_attribution_only_over_its_domain(self):
         """CI-93: host-memory is DIRECT for its own script, GRAPH for Host graph paths, and no selection names it."""

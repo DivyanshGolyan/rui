@@ -330,7 +330,6 @@ pub const Lender = struct {
     models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
 
     pub const Said = struct {
-        text: ?[]const u8 = null,
         notice: ?[]const u8 = null,
         stoppable: bool = false,
     };
@@ -367,6 +366,8 @@ pub const AppHooks = struct {
     leave: *const fn (*anyopaque, *vxfw.EventContext, Outcome) anyerror!void,
     copy: *const fn (*anyopaque, std.Io.File, u64, u64) anyerror!void,
     on_open: *const fn (*anyopaque, *vxfw.EventContext, *const [session_id.bytes]u8) anyerror!void,
+    /// A one-line notice the Session opens with, shown on its first input turn.
+    notice: ?[]const u8 = null,
 };
 
 fn cancelPointerSelection(raw: *anyopaque) void {
@@ -413,6 +414,7 @@ fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input
 
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
+    self.notice = hooks.notice;
     self.app_input.bottom = &hooks.root.bottom;
     hooks.root.session_focus = .{ .context = self, .changed = focusChanged, .cancel_pointer = cancelPointerSelection, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates, .clipboard = .{ .target = clipboardTarget, .paste = pasteClipboard } };
     self.app_info = .{ .backend = self.infoBackend(), .home = self.home };
@@ -1258,7 +1260,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .repair_details = original_presentation.repair_details,
         .facts = .{ .current = self.line.facts(self.home), .archive = self.line.archive_state },
         .notice = self.shown_notice.current(now_ms) orelse queued_note orelse said.notice,
-        .overview = said.text,
         .info_footer = if (self.info_open) self.app_info.footerWidget() else null,
 
         .overlay = if (self.info_open)
@@ -5170,15 +5171,11 @@ fn heldUpgrade(hold: usize, afters: [2]session_upgrade.After) session_upgrade.Up
 const FakeOverview = struct {
     stopping: bool = false,
     stops: usize = 0,
-    notice: ?[]const u8 = null,
 
     fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.IntentAdmission {
         const fake: *FakeOverview = @ptrCast(@alignCast(raw));
-        fake.notice = null;
         if (input != .stop) return .refused;
-        if (fake.stopping or work != .working) {
-            fake.notice = "unused: Stopping";
-        } else {
+        if (!fake.stopping and work == .working) {
             fake.stops += 1;
             fake.stopping = true;
         }
@@ -5191,7 +5188,7 @@ const FakeOverview = struct {
 
     fn line(raw: *anyopaque, can_stop: bool) Lender.Said {
         const fake: *FakeOverview = @ptrCast(@alignCast(raw));
-        return .{ .text = fake.notice, .stoppable = can_stop and !fake.stopping };
+        return .{ .stoppable = can_stop and !fake.stopping };
     }
 
     fn lender(fake: *FakeOverview) Lender {
@@ -5576,7 +5573,7 @@ test "app settings starts the overview's run and keeps the original submission; 
         try std.testing.expect(self.input.queuedCommand() == null);
         try std.testing.expectEqual(session_upgrade.Phase.quiescing, self.upgradePhase());
         const said = self.lender.line(self.lender.context, false);
-        try std.testing.expect(said.text == null and said.notice == null);
+        try std.testing.expect(said.notice == null);
         _ = try overview_view.step(&overview.state, .start_upgrade);
         try std.testing.expect(overview.state.upgrade.run.? == .checking);
         try sendKeys(self, "keep\x1b");
@@ -5768,7 +5765,7 @@ const ArchiveOverview = struct {
     fn line(raw: *anyopaque, can_stop: bool) Lender.Said {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
         const said = overview_view.conversation(&self.state, "k7m2qx".*, can_stop);
-        return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
+        return .{ .notice = said.notice, .stoppable = said.stoppable };
     }
 
     fn upgrade(raw: *anyopaque) session_upgrade.Upgrade {

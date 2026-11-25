@@ -535,7 +535,8 @@ test "sparse creation and default reset replay keep admitted catalog defaults" {
                 try std.testing.expectEqual(initial, first.reasoning_effort);
                 try std.testing.expectEqual(@as(?u64, 900), first.compaction_trigger);
                 try std.testing.expectEqualStrings(@import("../../product_defaults.zig").permission_mode, first.permission_mode.slice());
-                try std.testing.expectEqual(@as(u64, tool_defs.built_in_tool_set.records.len), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{first.tool_set_id}));
+                // A fresh Session loads every built-in tool except the watcher, which stays hidden until the Host runs it.
+                try std.testing.expectEqual(@as(u64, tool_defs.built_in_tool_set.records.len - 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{first.tool_set_id}));
                 var retained: wire_request.ConfigureCommand = .{ .session = session };
                 try retained.key.set("sparse-catalog-retain");
                 retained.configuration.label.state = .value;

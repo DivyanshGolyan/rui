@@ -404,8 +404,6 @@ class EscapeClassTest(unittest.TestCase):
             (MEASUREMENT_BUNDLE, 'failure', [(selected, failed)], Cause('signature'), 'unknown'),
             ('qualify / selected / linux suites (deep-modules)', 'failure', [(selected, failed)], Cause('signature'),
              'pr-tier'),
-            ('qualify / selected / linux suites (rsql-table)', 'failure', [(selected, failed)], Cause('signature'),
-             'promotion-only:rsql-table'),
             ('qualify / selected / cache execution (ubuntu-24.04)', 'failure',
              [('Prove warm compilation does not cache test acceptance', failed)], Cause('signature'), 'promotion-only'),
             ('qualify / renderer / contracts', 'failure', [('Run the contracts', failed)], Cause('signature'),

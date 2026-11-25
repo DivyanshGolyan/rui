@@ -277,7 +277,7 @@ pub fn retry(raw: *anyopaque, task: *Task) !void {
     try job.files.scratch.setLength(task.io, 0);
     const newest = switch (try requests.activityPage(job.store, job.session, .{
         .direction = .backward,
-        .kinds = .full,
+        .kinds = drawn_kinds,
         .limit = 1,
     })) {
         .page => |page| page,
@@ -450,11 +450,20 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
     return scanWorker(raw, task, true);
 }
 
+/// Every Activity kind the Session reads. A peer send draws on its own tool row, so the separate send entries
+/// are never requested; slice 3 deletes the two kinds.
+const drawn_kinds: protocol.ActivityPage.Kinds = blk: {
+    var kinds: protocol.ActivityPage.Kinds = .full;
+    kinds.remove(.sent);
+    kinds.remove(.send_failed);
+    break :blk kinds;
+};
+
 fn pageCursor(job: *const Job, plan: FeedPolicy.Page) protocol_reply.ActivityCursor {
     var cursor: protocol_reply.ActivityCursor = .{
         .direction = if (plan.direction == .backward) .backward else .forward,
         .limit = plan.limit,
-        .kinds = if (plan.kinds == .all) .full else .initMany(&.{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop }),
+        .kinds = if (plan.kinds == .all) drawn_kinds else .initMany(&.{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop }),
         .end = if (plan.kinds == .all and plan.continuing) job.cursor.end else null,
     };
     if (plan.from) |from| {
@@ -1182,6 +1191,13 @@ const FakeHost = struct {
 
     fn message(admission: u64) protocol.ActivityItem.Value {
         return .{ .admission = .{ .admission = admission, .key = .{}, .turn = null, .state = .queued, .content = textValue(), .admitted_at = 1 } };
+    }
+
+    /// A Message that arrived from another Session: a row the Session draws, unlike the retired `sent` entries.
+    fn received(admission: u64, peer: protocol.NamedPeer) protocol.ActivityItem.Message {
+        var value = message(admission).admission;
+        value.sender = peer;
+        return value;
     }
 
     const Row = struct { position: u64, ordinal: u64 = 0 };
@@ -1966,11 +1982,27 @@ test "session_reads policy cursor is inclusive only for a fresh provisional repl
     try std.testing.expect(!above.kinds.contains(.send_failed));
 }
 
-test "SUI-51 opening reads expose ordered rows and scan boundaries" {
+test "SUI-51 an opening read never requests the retired send entries, so a peer send draws only on its tool row" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     const tail = [_]FakeHost.Tail{
         .{ .value = .{ .sent = .{ .admission = 1, .target = peer, .content = FakeHost.textValue(), .admitted_at = 1 } } },
+        .{ .value = .{ .send_failed = .{ .key = .{}, .target = peer, .code = .{} } } },
+        .{ .value = FakeHost.message(3) },
+    };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 3 };
+    var job: Job = .{ .opening = true, .session = "k7m2qx", .line_read = .{ .revision = 1, .end = 3 } };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "Messaged"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "not delivered"));
+}
+
+test "SUI-51 opening reads expose ordered rows and scan boundaries" {
+    var peer: protocol.NamedPeer = .{ .session = .{} };
+    try peer.session.set("9f8e7d");
+    const tail = [_]FakeHost.Tail{
+        .{ .value = .{ .received = FakeHost.received(1, peer) } },
         .{ .value = FakeHost.message(2) },
     };
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 2 };
@@ -1988,7 +2020,7 @@ test "SUI-51 opening reads expose ordered rows and scan boundaries" {
         try std.testing.expectEqual(index == 0, row.tight);
         const body = host.shown[@intCast(row.offset)..][0..@intCast(row.length)];
         try std.testing.expect(index == 1 or (body.len != 0 and body[0] != '\n'));
-        try std.testing.expectEqual(@as(usize, if (index == 0) 1 else 0), std.mem.count(u8, body, "Messaged"));
+        try std.testing.expectEqual(@as(usize, if (index == 0) 1 else 0), std.mem.count(u8, body, "Received message"));
         try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, body, "please wait"));
     }
     try std.testing.expectEqual(job.result.rows[0].length, job.result.rows[1].offset);
@@ -2035,7 +2067,7 @@ test "SUI-53 replay replaces queued rows and counts only new rows" {
         const tail = [_]FakeHost.Tail{
             .{ .value = FakeHost.message(1), .applied_at = if (excluded) null else 24, .excluded_at = if (excluded) 24 else null },
             .{ .value = .{ .received = incoming } },
-            .{ .value = .{ .sent = .{ .admission = 91, .target = peer, .content = FakeHost.textValue(), .admitted_at = 1 } } },
+            .{ .value = .{ .received = FakeHost.received(91, peer) } },
             .{ .value = if (excluded) .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 1, .completion = .completed } } else .{ .user = applied } },
         };
         var host: FakeHost = .{ .history = 20, .tail = &tail, .end = 21 };
@@ -2053,8 +2085,8 @@ test "SUI-53 replay replaces queued rows and counts only new rows" {
             try host.read(&job);
             try std.testing.expectEqual(@as(usize, if (end == 23) 0 else 1), std.mem.count(u8, host.shown, "please wait"));
             try std.testing.expectEqual(@as(usize, if (end == 23) 2 else 1), job.result.new_rows);
-            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Received message"));
-            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Messaged"));
+            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, host.shown, "Received message"));
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "Messaged"));
             try std.testing.expectEqualDeep(if (end == 23) @as(?Key, .{ .position = 21 }) else null, firstProvisional(&job.result));
             if (end == 24) {
                 try std.testing.expect(std.mem.indexOf(u8, host.shown, "Received message").? < std.mem.indexOf(u8, host.shown, "please wait").?);
@@ -2069,7 +2101,7 @@ test "SUI-54 queued replay retains its starting point across pages" {
     try peer.session.set("9f8e7d");
     var tail: [40]FakeHost.Tail = undefined;
     tail[0] = .{ .value = FakeHost.message(1) };
-    for (tail[1..], 2..) |*row, admission| row.* = .{ .value = .{ .sent = .{ .admission = admission, .target = peer, .content = FakeHost.textValue(), .admitted_at = 1 } } };
+    for (tail[1..], 2..) |*row, admission| row.* = .{ .value = .{ .received = FakeHost.received(admission, peer) } };
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1 };
     var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
     try host.read(&job);
