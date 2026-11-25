@@ -927,4 +927,3 @@ fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_
         .peers = .{ .from_person_at = if (row.from_person_at) |at| at.get() else null },
     };
 }
-

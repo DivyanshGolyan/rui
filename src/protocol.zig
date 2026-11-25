@@ -618,11 +618,10 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"read_version\":\"", Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState }, "\",\"pin_order\":",         Hole.optional_id,                          ",\"reference\":",                   Hole{ .string = max_session_bytes },      ",\"archive_seq\":",          Hole.optional_id,                            ",\"workspace\":",                      Hole{ .string = max_workspace_bytes },
-        ",\"connection\":\"",   Hole{ .text = connection.max_name_bytes },   "\",\"model\":",           Hole{ .string = max_model_bytes },  ",\"tools\":",               Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"",           Hole{ .tag = PermissionMode },            "\",\"parent\":",             Hole{ .optional_string = session_id_bytes }, ",\"creator\":",                        Hole{ .optional_string = session_id_bytes },
-        ",\"label\":",          Hole{ .optional_string = max_label_bytes },  ",\"created_at\":\"",      Hole.decimal,                       "\",\"state_change_at\":\"", Hole.decimal,                              "\",\"subtree_state_change_at\":\"", Hole.decimal,                             "\",\"descendant_count\":\"", Hole.decimal,                                "\",\"descendant_needs_you_count\":\"", Hole.decimal,
-        "\",\"revision\":\"",   Hole.decimal,                                "\",\"end\":\"",           Hole.decimal,                       "\",\"first_message\":",     Hole{ .optional_json = FirstMessage },     ",\"work\":",                 Hole{ .json = SessionWork },                 ",\"peers\":",                          Hole{ .json = PeerFacts },
-        "}",
+        "{\"read_version\":\"", Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState }, "\",\"pin_order\":",         Hole.optional_id,                          ",\"reference\":",                   Hole{ .string = max_session_bytes }, ",\"archive_seq\":",          Hole.optional_id,                            ",\"workspace\":",                      Hole{ .string = max_workspace_bytes },
+        ",\"connection\":\"",   Hole{ .text = connection.max_name_bytes },   "\",\"model\":",           Hole{ .string = max_model_bytes },  ",\"tools\":",               Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"",           Hole{ .tag = PermissionMode },       "\",\"parent\":",             Hole{ .optional_string = session_id_bytes }, ",\"creator\":",                        Hole{ .optional_string = session_id_bytes },
+        ",\"label\":",          Hole{ .optional_string = max_label_bytes },  ",\"created_at\":\"",      Hole.decimal,                       "\",\"state_change_at\":\"", Hole.decimal,                              "\",\"subtree_state_change_at\":\"", Hole.decimal,                        "\",\"descendant_count\":\"", Hole.decimal,                                "\",\"descendant_needs_you_count\":\"", Hole.decimal,
+        "\",\"revision\":\"",   Hole.decimal,                                "\",\"end\":\"",           Hole.decimal,                       "\",\"first_message\":",     Hole{ .optional_json = FirstMessage },     ",\"work\":",                        Hole{ .json = SessionWork },         ",\"peers\":",                Hole{ .json = PeerFacts },                   "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     pub const budget_bytes = 36 * 1024;
@@ -662,7 +661,7 @@ pub const SessionRow = struct {
             try writeShape(out, json_shape, .{
                 f.read_version.format(&token_buffer), f.archive_state,              f.pin_order, f.reference, f.archive_seq,   f.workspace,  f.provider.slice(), f.model,
                 f.tools,                              f.permission_mode,            f.parent,    f.creator,   f.label,         f.created_at, f.state_change_at,  f.subtree_state_change_at,
-                f.descendant_count,                   f.descendant_needs_you_count, f.revision,  f.end,       f.first_message, f.work,             f.peers,
+                f.descendant_count,                   f.descendant_needs_you_count, f.revision,  f.end,       f.first_message, f.work,       f.peers,
             });
         }
     };
