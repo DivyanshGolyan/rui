@@ -28,7 +28,6 @@ pub const Actions = struct {
 
 pub const Identity = struct {
     current: ?session_line.Facts = null,
-    name: []const u8 = "",
     archive: @import("protocol.zig").SessionArchiveState = .active,
 
     fn fit(self: Identity, buffer: *[chrome.facts_bytes]u8, width: usize, method: vaxis.gwidth.Method) []const u8 {
@@ -41,7 +40,7 @@ pub const Identity = struct {
             .archiving => "Stopping and archiving",
             .archived => "Archived",
         };
-        return chrome.factsSpans(buffer, self.current, self.name, badge, width, method);
+        return chrome.factsSpans(buffer, self.current, badge, width, method);
     }
 };
 
@@ -186,12 +185,7 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     const gap: u16 = @intFromBool(right_width != 0);
     const room = right_col -| gap -| @as(u16, @intCast(ctx.stringWidth(prefix)));
     const buffer = try ctx.arena.create([chrome.facts_bytes]u8);
-    var identity = self.facts.identity;
-    if (self.list_visible) {
-        identity.name = "";
-        if (identity.current) |*facts| facts.name = "";
-    }
-    const spans = identity.spans(buffer, room, self.facts.method);
+    const spans = self.facts.identity.spans(buffer, room, self.facts.method);
     const label = spans.text;
     const left = try std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ prefix, label });
     footer.left = left;
@@ -305,7 +299,7 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
-    const view: View = .{ .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries", .stoppable = true, .facts = .{ .current = .{ .name = "Fix flaky store test", .model = "gpt-6.1-sol", .effort = .high, .left = 62 } }, .width = 80 };
+    const view: View = .{ .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries", .stoppable = true, .facts = .{ .current = .{ .model = "gpt-6.1-sol", .effort = .high, .left = 62 } }, .width = 80 };
 
     self.place(&screen, &input, view);
     try std.testing.expect(screen.tail == null and screen.marker != null);
@@ -351,14 +345,14 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
     defer arena.deinit();
     for ([_]u16{ 46, 140 }) |width| {
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
-        self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived } });
+        self.place(&screen, &input, .{ .width = width, .facts = .{ .archive = .archived } });
         const idle = try input.widget().draw(ctx);
-        self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived }, .progress = "Opening…" });
+        self.place(&screen, &input, .{ .width = width, .facts = .{ .archive = .archived }, .progress = "Opening…" });
         const opening = try input.widget().draw(ctx);
         try std.testing.expectEqual(idle.size.height, opening.size.height);
         try std.testing.expectEqualStrings("", self.state.text);
         try std.testing.expectEqualStrings("Opening…", self.status.bar.notice.?);
-        self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived }, .notice = "Copied 3 lines", .stoppable = true });
+        self.place(&screen, &input, .{ .width = width, .facts = .{ .archive = .archived }, .notice = "Copied 3 lines", .stoppable = true });
         const noticed = try input.widget().draw(ctx);
         try std.testing.expectEqual(idle.size.height, noticed.size.height);
         const footer = try input.facts.draw(ctx);
@@ -389,7 +383,7 @@ test "SessionChrome footer keeps identity left and active keys right, with back 
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]u16{ 140, 46 }) |width| for ([_]bool{ true, false }) |list_visible| {
-        self.place(&screen, &input, .{ .width = width, .facts = .{ .current = .{ .name = "Chat", .model = "model", .effort = .high, .left = 62 } }, .list_visible = list_visible, .stoppable = true });
+        self.place(&screen, &input, .{ .width = width, .facts = .{ .current = .{ .model = "model", .effort = .high, .left = 62 } }, .list_visible = list_visible, .stoppable = true });
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
         const footer = try input.facts.draw(ctx);
         try std.testing.expectEqual(@as(u16, 1), footer.size.height);
@@ -402,7 +396,7 @@ test "SessionChrome footer keeps identity left and active keys right, with back 
     };
     try std.testing.expectEqual(@as(usize, 2), recorder.clicked.get(.back));
     try std.testing.expectEqual(@as(usize, 4), recorder.clicked.get(.stop));
-    self.place(&screen, &input, .{ .width = 46, .facts = .{ .name = "Chat", .archive = .archived } });
+    self.place(&screen, &input, .{ .width = 46, .facts = .{ .archive = .archived } });
     const archived = try input.facts.draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
     for (archived.buffer) |cell| try std.testing.expect(!std.mem.eql(u8, cell.char.grapheme, "/"));
     for (0..8) |width| for (0..2) |height| {
@@ -423,7 +417,7 @@ test "SessionChrome archive confirmation is one durable badge at both widths, wi
     var screen: AppScreen.Session = undefined;
     screen.input = input.widget();
     for ([_]u16{ 46, 99, 140 }) |width| {
-        self.place(&screen, &input, .{ .width = width, .facts = .{ .current = .{ .name = "Archive audit", .model = "gpt-6.1-sol", .effort = .low, .left = 100 }, .archive = .archived } });
+        self.place(&screen, &input, .{ .width = width, .facts = .{ .current = .{ .model = "gpt-6.1-sol", .effort = .low, .left = 100 }, .archive = .archived } });
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} };
         const drawn = try input.widget().draw(ctx);
         try std.testing.expectEqual(@as(u16, 4), drawn.size.height);
@@ -433,7 +427,6 @@ test "SessionChrome archive confirmation is one durable badge at both widths, wi
         for (footer.buffer) |cell| if (cell.char.width != 0) try text.writer.writeAll(cell.char.grapheme);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), "Archived"));
         try std.testing.expect(std.mem.indexOf(u8, text.written(), " · Archived") != null);
-        try std.testing.expectEqual(@as(usize, @intFromBool(width >= 99)), std.mem.count(u8, text.written(), "Archive audit"));
         try std.testing.expectEqualStrings("", self.state.text);
         try std.testing.expect(self.status.bar.notice == null);
     }
@@ -450,7 +443,7 @@ test "SessionChrome transient reply categories appear once in Footer and never i
     var screen: AppScreen.Session = undefined;
     screen.input = input.widget();
     for ([_][]const u8{ "Copied 3 lines", "Configured.", "! Unknown command /nope", "! Copy unavailable", "Opening tool output…", "No earlier message.", "Restored chat" }) |notice| for ([_]u16{ 46, 99 }) |width| {
-        self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Chat" }, .notice = notice });
+        self.place(&screen, &input, .{ .width = width, .facts = .{}, .notice = notice });
         const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
         try std.testing.expectEqual(@as(u16, 4), drawn.size.height);
         try std.testing.expectEqual(@as(usize, 2), drawn.children.len);
@@ -463,8 +456,8 @@ test "SessionChrome transient reply categories appear once in Footer and never i
 
 test "SessionChrome identity omits permission and archive command hints" {
     var bytes: [chrome.facts_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("Chat · model · high", (@as(Identity, .{ .current = .{ .name = "Chat", .model = "model", .effort = .high, .left = 62 }, .name = "ref" })).fit(&bytes, 140, .unicode));
-    try std.testing.expectEqualStrings("ref · Archived", (@as(Identity, .{ .name = "ref", .archive = .archived })).fit(&bytes, 46, .unicode));
+    try std.testing.expectEqualStrings("model · high", (@as(Identity, .{ .current = .{ .model = "model", .effort = .high, .left = 62 } })).fit(&bytes, 140, .unicode));
+    try std.testing.expectEqualStrings("Archived", (@as(Identity, .{ .archive = .archived })).fit(&bytes, 46, .unicode));
     try std.testing.expectEqualStrings("! Not confirmed", stateText("! Not confirmed · ctrl+r retries original", "ctrl+r retries original"));
     try std.testing.expectEqualStrings("Copied 12 lines", stateText("Copied 12 lines", ""));
 }
@@ -473,7 +466,7 @@ test "SessionChrome footer keeps the input gutter beside the visible list" {
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
     self.list_visible = true;
-    self.facts.identity = .{ .current = .{ .name = "Fix retry deadline", .model = "gpt-6.1-sol", .effort = .high, .left = 100 } };
+    self.facts.identity = .{ .current = .{ .model = "gpt-6.1-sol", .effort = .high, .left = 100 } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 99, .height = 1 }, .cell_size = .{} });
@@ -487,14 +480,14 @@ test "SessionChrome footer identity covers list visibility context threshold and
         var recorder: Recorder = .{};
         var self: Self = .init(recorder.actions());
         self.list_visible = list_visible;
-        self.facts.identity = .{ .current = .{ .name = "Chat", .model = "model", .effort = .high, .left = left } };
+        self.facts.identity = .{ .current = .{ .model = "model", .effort = .high, .left = left } };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
         for (footer.buffer) |cell| if (cell.char.width != 0) try text.writer.writeAll(cell.char.grapheme);
         const context = if (left <= 50) try std.fmt.allocPrint(arena.allocator(), " · {d}% context left", .{left}) else "";
-        const want = try std.fmt.allocPrint(arena.allocator(), "{s}{s}model · high{s}", .{ if (list_visible) " " else " ‹ ", if (list_visible) "" else "Chat · ", context });
+        const want = try std.fmt.allocPrint(arena.allocator(), "{s}model · high{s}", .{ if (list_visible) " " else " ‹ ", context });
         try std.testing.expectEqualStrings(want, std.mem.trimEnd(u8, text.written(), " "));
         try std.testing.expect(std.mem.indexOf(u8, text.written(), "alt+i") == null);
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -525,13 +518,13 @@ test "Session chrome back control exists only while the shell hides the list" {
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} };
     for ([_]bool{ true, false, true, false }) |list_visible| {
-        self.place(&screen, &input, .{ .width = 80, .list_visible = list_visible, .facts = .{ .current = .{ .name = "demo", .model = "gpt-5.5", .effort = .low, .left = 100 } } });
+        self.place(&screen, &input, .{ .width = 80, .list_visible = list_visible, .facts = .{ .current = .{ .model = "gpt-5.5", .effort = .low, .left = 100 } } });
         const row = try input.facts.draw(draw);
         if (list_visible) {
             try std.testing.expectEqualStrings("g", row.readCell(1, 0).char.grapheme);
             try std.testing.expectEqual(@as(usize, 2), row.children.len);
         } else {
-            try std.testing.expectEqualStrings("d", row.readCell(3, 0).char.grapheme);
+            try std.testing.expectEqualStrings("g", row.readCell(3, 0).char.grapheme);
             try std.testing.expectEqualStrings("‹", row.children[0].surface.readCell(0, 0).char.grapheme);
         }
         const before = recorder.clicked.get(.back);
@@ -551,7 +544,7 @@ test "SessionChrome model and effort words are independent controls beside the i
         var recorder: Recorder = .{};
         var self: Self = .init(recorder.actions());
         self.list_visible = list_visible;
-        self.facts.identity = .{ .current = .{ .name = "Chat", .model = "gpt-6-luna", .effort = .low, .left = 62 }, .archive = archive };
+        self.facts.identity = .{ .current = .{ .model = "gpt-6-luna", .effort = .low, .left = 62 }, .archive = archive };
         const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         defer ctx.cmds.deinit(arena.allocator());
@@ -592,7 +585,7 @@ test "SessionChrome info background preserves control order without info focus s
         var recorder: Recorder = .{};
         var self: Self = .init(recorder.actions());
         self.list_visible = list_visible;
-        self.facts.identity = .{ .current = .{ .name = "Chat", .model = "model", .effort = if (has_effort) .low else null, .left = left } };
+        self.facts.identity = .{ .current = .{ .model = "model", .effort = if (has_effort) .low else null, .left = left } };
         const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         const controls = [_]vxfw.Widget{ self.facts.back.widget(), self.facts.model.widget(), self.facts.effort.widget() };
         const start: usize = @intFromBool(list_visible);
@@ -620,8 +613,8 @@ test "SessionChrome info background preserves control order without info focus s
 
 test "SessionChrome identity chips preserve cells and clicks for every terminal width method" {
     defer vxfw.DrawContext.init(.unicode);
-    const names = [_][]const u8{ "👩‍🚀X", "❤️X", "Retry 👩‍🚀 with ❤️" };
-    for ([_]vaxis.gwidth.Method{ .wcwidth, .unicode, .no_zwj }) |method| for (names) |name| for ([_]bool{ false, true }) |list_visible| for (0..66) |size| {
+    const models = [_][]const u8{ "👩‍🚀X", "❤️X", "Retry 👩‍🚀 with ❤️" };
+    for ([_]vaxis.gwidth.Method{ .wcwidth, .unicode, .no_zwj }) |method| for (models) |model| for ([_]bool{ false, true }) |list_visible| for (0..66) |size| {
         const width: u16 = if (size == 65) 140 else @intCast(size);
         vxfw.DrawContext.init(method);
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -630,7 +623,7 @@ test "SessionChrome identity chips preserve cells and clicks for every terminal 
         var self: Self = .init(recorder.actions());
         self.list_visible = list_visible;
         self.facts.method = method;
-        self.facts.identity = .{ .current = .{ .name = name, .model = "model", .effort = .low, .left = 62 } };
+        self.facts.identity = .{ .current = .{ .model = model, .effort = .low, .left = 62 } };
         const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
         const footer = try drawFooter(&self, draw);
         var terminal: vaxis.Screen = .{ .width = width, .height = 1, .width_method = method, .buf = try arena.allocator().alloc(vaxis.Cell, width) };
@@ -693,7 +686,7 @@ test "SessionChrome drawn field identity survives a newer model and nonbutton wo
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
     self.list_visible = true;
-    self.facts.identity = .{ .current = .{ .name = "model", .model = "model", .effort = .low, .left = 62 } };
+    self.facts.identity = .{ .current = .{ .model = "model", .effort = .low, .left = 62 } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 1 }, .cell_size = .{} });
@@ -716,14 +709,14 @@ test "SessionChrome footer text and button styling cover both widths and applied
         var recorder: Recorder = .{};
         var self: Self = .init(recorder.actions());
         self.facts.focus = focus;
-        self.facts.identity = .{ .current = .{ .name = "C", .model = "m", .effort = if (explicit) .low else .high, .left = 62 } };
+        self.facts.identity = .{ .current = .{ .model = "m", .effort = if (explicit) .low else .high, .left = 62 } };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
         const footer = try drawFooter(&self, draw);
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
         for (footer.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
-        const left = try std.fmt.allocPrint(arena.allocator(), " ‹ C · m · {s}", .{if (explicit) "low" else "high"});
+        const left = try std.fmt.allocPrint(arena.allocator(), " ‹ m · {s}", .{if (explicit) "low" else "high"});
         try std.testing.expectEqualStrings(left, std.mem.trimEnd(u8, text.written(), " "));
         try std.testing.expect(std.mem.indexOf(u8, text.written(), "alt+i") == null);
         var buttons: usize = 0;
@@ -749,7 +742,7 @@ test "SessionChrome standalone choice footer offers bounded existing pick and cl
     self.stoppable = true;
     self.status.key.label = "ctrl+r retries";
     self.details.label = "alt+d details";
-    self.facts.identity = .{ .name = "Chat", .archive = .archived };
+    self.facts.identity = .{ .archive = .archived };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
@@ -772,7 +765,7 @@ test "SessionChrome empty chat footer preserves model effort folder at both widt
         self.list_visible = visible;
         self.keys = chrome.footerKeys(.closed);
         self.details.label = "alt+d details";
-        self.facts.identity = .{ .current = .{ .name = "reference", .model = "gpt-6.1-sol", .effort = .low, .folder = "/home/u/code/rui", .home = "/home/u" } };
+        self.facts.identity = .{ .current = .{ .model = "gpt-6.1-sol", .effort = .low, .folder = "/home/u/code/rui", .home = "/home/u" } };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });

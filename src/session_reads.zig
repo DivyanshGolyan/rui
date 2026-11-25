@@ -107,17 +107,23 @@ pub const Line = struct {
         };
     }
 
-    pub fn facts(self: *const Line, hint: *const Hint, reference: []const u8) ?session_line.Facts {
-        if (self.read == null) return null;
+    /// The chat's name for the terminal title: its label, else its first line, else `reference`.
+    pub fn title(self: *const Line, hint: *const Hint, reference: []const u8) []const u8 {
+        if (self.read == null) return reference;
         const label: ?[]const u8 = if (self.label) |*text| text.slice() else null;
         const line: ?[]const u8 = switch (hint.*) {
             .line => |*text| text.slice(),
             .unread, .absent => null,
         };
+        return session_line.name(label, line, reference).text;
+    }
+
+    pub fn facts(self: *const Line, home: []const u8) ?session_line.Facts {
+        if (self.read == null) return null;
         return .{
-            .name = session_line.name(label, line, reference).text,
             .model = self.model.slice(),
             .folder = if (self.folder) |*folder| folder.slice() else null,
+            .home = home,
             .effort = self.effort,
             .left = self.left,
         };
@@ -1029,7 +1035,8 @@ test "session_reads the Session line takes archive and other facts from Current 
     const reference_format = "{{\"type\":\"text\",\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}";
     var line: ?Line = null;
     const unread: Hint = .unread;
-    try std.testing.expect((Line{}).facts(&unread, "k7m2qx") == null);
+    try std.testing.expect((Line{}).facts("") == null);
+    try std.testing.expectEqualStrings("k7m2qx", (Line{}).title(&unread, "k7m2qx"));
     const moment: Moment = .{ .revision = 3, .end = 40 };
     var page: protocol.ActivityFacts = .{ .end = 40, .work = .{ .revision = 3 } };
     try std.testing.expect(Line.stale(null, &page));
@@ -1050,8 +1057,9 @@ test "session_reads the Session line takes archive and other facts from Current 
             Line.take(&line, &reply.current, moment);
             try std.testing.expectEqual(archive, line.?.archive_state);
             try std.testing.expect(!Line.stale(line.?.read, &page));
-            const facts = line.?.facts(&unread, "k7m2qx").?;
-            try std.testing.expectEqualStrings(case.name, facts.name);
+            const facts = line.?.facts("/home/u").?;
+            try std.testing.expectEqualStrings(case.name, line.?.title(&unread, "k7m2qx"));
+            try std.testing.expectEqualStrings("/home/u", facts.home);
             if (std.mem.eql(u8, case.first, "null")) {
                 try std.testing.expectEqualStrings("/w", facts.folder.?);
             } else try std.testing.expect(facts.folder == null);
@@ -1062,9 +1070,9 @@ test "session_reads the Session line takes archive and other facts from Current 
         }
     }
     const hint: Hint = .{ .line = plain(session_line.max_line_bytes, session_line.firstLine("  Summarize\tCI\r\nand more")) };
-    try std.testing.expectEqualStrings("Summarize CI", line.?.facts(&hint, "k7m2qx").?.name);
+    try std.testing.expectEqualStrings("Summarize CI", line.?.title(&hint, "k7m2qx"));
     const absent: Hint = .absent;
-    try std.testing.expectEqualStrings("k7m2qx", line.?.facts(&absent, "k7m2qx").?.name);
+    try std.testing.expectEqualStrings("k7m2qx", line.?.title(&absent, "k7m2qx"));
     for ([_]Moment{ .{ .revision = 4, .end = 40 }, .{ .revision = 3, .end = 41 } }) |next| {
         page.work.revision = next.revision;
         page.end = next.end;

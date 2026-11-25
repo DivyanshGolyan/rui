@@ -32,8 +32,9 @@ pub fn left(trigger: u64, pressure: u64) u8 {
     return @intCast((remaining * 100 + trigger - 1) / trigger);
 }
 
+/// What the chat footer says about a chat. The name is not among them: the Session list and the
+/// terminal title carry it.
 pub const Facts = struct {
-    name: []const u8,
     model: []const u8,
     folder: ?[]const u8 = null,
     home: []const u8 = "",

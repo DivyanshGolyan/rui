@@ -64,7 +64,7 @@ class NavigationTests(unittest.TestCase):
                         with self.subTest(persistent=persistent, draft=draft, split=split, right=right):
                             feed = 24 - 1 - len(persistent) - 3 - 1
                             lines = (["history"] * feed + ["", "┄" * 46, " › " + draft, "┄" * 46]
-                                     + [" ‹ Chat · Archived    " + right] + persistent)
+                                     + [" ‹ Archived    " + right] + persistent)
                             if split:
                                 lines = [" " * 40 + "┆" + line for line in lines]
                             screen = "\n".join(lines)

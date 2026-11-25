@@ -40,6 +40,10 @@ class Screen:
     def text(self):
         return self.capture.completed
 
+    @property
+    def title(self):
+        return self.capture.title
+
     def rows(self):
         return self.text.split("\n")
 
