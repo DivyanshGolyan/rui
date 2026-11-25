@@ -168,7 +168,7 @@ chrome: SessionChrome = undefined,
 line: reads.Line = .{},
 hint: reads.Hint = .unread,
 
-const rejection_suffix = " · " ++ session_notice.keyWords(.discard);
+const rejection_suffix = session_notice.rejection_suffix;
 const too_large_advice = "\nUnset or shorten them in another shell, then run rui request recover there.";
 const failure_capacity = @max(
     "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,

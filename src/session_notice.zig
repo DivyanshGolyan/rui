@@ -14,7 +14,7 @@ pub const Failure = struct { line: []const u8, key: Key };
 pub const Key = enum { retry, discard, status };
 
 /// The words that end the line offering `action`, and are the part of it a click runs. The only place they are spelled.
-pub fn keyWords(action: Key) []const u8 {
+fn keyWords(action: Key) []const u8 {
     return switch (action) {
         .retry => retry_original,
         .discard => "/discard",
@@ -34,6 +34,8 @@ pub const Presentation = struct {
     in_flight: bool = false,
 };
 
+/// What ends a rejected original's line: the key that discards it.
+pub const rejection_suffix = " · " ++ keyWords(.discard);
 pub const too_large = "! Environment too large; nothing sent · " ++ keyWords(.status);
 
 /// The refusal of a chat Message whose Session's provider this Host does not serve; the fix is in the Host's settings.
