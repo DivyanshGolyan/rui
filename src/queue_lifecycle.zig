@@ -78,14 +78,17 @@ pub fn view(state: State, queue: ?Queue, has_ticket: bool, at_latest: bool) Pres
     const current = queue orelse return result;
     if (current.count == 0) return result;
     if (!current.line_matches) return result;
+    if (message) |local| if (local.phase == .terminal and isIdentical(local, current)) {
+        // The local message's own row is already in the transcript, so it no longer waits and its queue line would repeat that text.
+        result.durable = if (current.count > 1) .{ .summary = current.count - 1 } else .none;
+        return result;
+    };
     if (!result.local) {
         result.durable = .line;
         return result;
     }
     const local = message.?;
-    const identical = (local.admission != null and local.admission.? == current.newest) or
-        (local.position != null and local.position.? == current.position);
-    if (identical) {
+    if (isIdentical(local, current)) {
         result.local = false;
         result.durable = .line;
     } else if (local.before_newest == current.newest or (local.admission != null and local.admission.? != current.newest)) {
@@ -94,6 +97,12 @@ pub fn view(state: State, queue: ?Queue, has_ticket: bool, at_latest: bool) Pres
         result.durable = .{ .summary = current.count };
     }
     return result;
+}
+
+/// The queue's newest line is this local message's own queued entry.
+fn isIdentical(local: Message, current: Queue) bool {
+    return (local.admission != null and local.admission.? == current.newest) or
+        (local.position != null and local.position.? == current.position);
 }
 
 pub fn accounted(state: State, key: Key) bool {

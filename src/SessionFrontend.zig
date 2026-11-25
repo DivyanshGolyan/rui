@@ -3526,6 +3526,7 @@ fn queuedProjection() !void {
             .files = undefined,
             .command = undefined,
             .colour = false,
+            .submission = .{ .io = undefined, .store = "unused", .session = "unused", .directory = "unused", .input = undefined, .environment = .empty },
             .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .queued_line = if (case.line) |admission| .{ .admission = admission, .line = line } else null },
         };
         const row = self.queuedRow() orelse {
