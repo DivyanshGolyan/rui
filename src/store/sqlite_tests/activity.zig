@@ -207,8 +207,8 @@ test "a saved tool label reads as one line on every publication route, and only 
             try request.session.set(session.slice());
             request.direction = .backward;
             const healthy = try store_core.activityPageForTesting(&storage, request);
-            try std.testing.expectEqual(@as(u64, 2), healthy.call_activity.total);
-            try std.testing.expectEqualStrings("Run first command", healthy.call_activity.entries[0].presentation.line.?.words.slice());
+            try std.testing.expectEqual(@as(u64, 2), healthy.aggregates.?.call_activity.total);
+            try std.testing.expectEqualStrings("Run first command", healthy.aggregates.?.call_activity.entries[0].presentation.line.?.words.slice());
             if (route == .settled_activity or route == .conversation) {
                 var stop = try completeSessionStop("label-stop", session.slice());
                 try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
@@ -223,7 +223,7 @@ test "a saved tool label reads as one line on every publication route, and only 
                     break :blk {};
                 } else |err| err,
                 .live_activity, .settled_activity => if (store_core.activityPageForTesting(&storage, request)) |page| blk: {
-                    if (route == .live_activity) if (description.words) |words| try std.testing.expectEqualStrings(words, page.call_activity.entries[0].presentation.line.?.words.slice());
+                    if (route == .live_activity) if (description.words) |words| try std.testing.expectEqualStrings(words, page.aggregates.?.call_activity.entries[0].presentation.line.?.words.slice());
                     break :blk {};
                 } else |err| err,
                 .conversation => if (store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })) |_| {} else |err| err,
@@ -373,7 +373,7 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
         cost.* = try activityPageSteps(&storage, request);
         const page = try store_core.activityPageForTesting(&storage, request);
         try std.testing.expect(page.count == 1 and page.items[0].position > first and page.more);
-        try std.testing.expectEqual(@as(u64, 0), page.call_activity.total);
+        try std.testing.expect(page.aggregates == null);
     }
     try std.testing.expectEqual(steps[0], steps[1]);
 }
@@ -407,7 +407,7 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
         cost.* = try activityPageSteps(&storage, request);
         const page = try store_core.activityPageForTesting(&storage, request);
         try std.testing.expect(page.count == 1 and page.items[0].value.admission.state == .queued and page.more);
-        try std.testing.expectEqual(@as(u64, 0), page.queued.count);
+        try std.testing.expect(page.aggregates == null);
     }
     try std.testing.expectEqual(steps[0], steps[1]);
 }
@@ -463,9 +463,9 @@ test "activity judges every candidate Operation's tool outcomes, not only its ke
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
         const page = try store_core.activityPageForTesting(&storage, request);
-        try std.testing.expectEqual(@as(usize, 3), page.call_activity.count);
-        try std.testing.expect(page.call_activity.total >= 4);
-        if (shape == .many_operations) try std.testing.expect(page.call_activity.total > 32);
+        try std.testing.expectEqual(@as(usize, 3), page.aggregates.?.call_activity.count);
+        try std.testing.expect(page.aggregates.?.call_activity.total >= 4);
+        if (shape == .many_operations) try std.testing.expect(page.aggregates.?.call_activity.total > 32);
         try store_testing.sqlite_only.exec(&storage, "UPDATE model_output_item SET item_kind=1 WHERE (operation_id,item_ordinal)=" ++
             "(SELECT operation_id,item_ordinal FROM model_tool_call ORDER BY operation_id DESC,call_ordinal DESC LIMIT 1)", .{});
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));

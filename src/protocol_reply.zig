@@ -163,7 +163,7 @@ pub const ActivityPage = struct {
         const Calls = JsonArray(CallEntry, 3);
         const Work = struct { creator: ?JsonString(protocol.session_id_bytes), read_version: JsonString(protocol.SinceToken.max_bytes), state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), actions: JsonWorkActions, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
         const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20), newest_content: ?Ref };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), delta: JsonEnum(enum { full }), since: ?JsonString(SessionToken.max_bytes), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), delta: JsonEnum(enum { full }), since: ?JsonString(SessionToken.max_bytes), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, aggregates: ?struct { as_of: JsonString(20), call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued }, work: Work };
         var storage: [2 * activity_reply.max_page_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const Header = struct { delta: JsonEnum(enum { full, not_modified }) };
@@ -280,30 +280,37 @@ pub const ActivityPage = struct {
             position = fact.position;
             ordinal = fact.ordinal;
         }
-        page.facts.call_activity.total = try id(wire.call_activity.total, true);
-        page.facts.call_activity.count = wire.call_activity.entries.count;
-        if (page.facts.call_activity.count != @min(3, page.facts.call_activity.total)) return error.InvalidActivityPage;
-        const last = if (page.facts.direction == .forward and page.facts.more) page.facts.items[page.facts.count - 1] else null;
-        const boundary_position = if (last) |item| item.position else page.facts.end;
-        const boundary_ordinal: ?u64 = if (last) |item| item.ordinal else null;
-        var previous: ?protocol.CallActivity.Entry = null;
-        for (wire.call_activity.entries.values[0..page.facts.call_activity.count], page.facts.call_activity.entries[0..page.facts.call_activity.count]) |entry, *fact| {
-            fact.* = .{ .operation = try id(entry.operation, false), .ordinal = try id(entry.ordinal, true), .presentation = entry.presentation.value };
-            if (fact.ordinal == std.math.maxInt(i64)) return error.InvalidActivityPage;
-            if (previous) |prior| if (fact.operation < prior.operation or
-                fact.operation == prior.operation and fact.ordinal <= prior.ordinal) return error.InvalidActivityPage;
-            if (fact.presentation.publication_position) |p| if (p < boundary_position or
-                p == boundary_position and (boundary_ordinal == null or fact.ordinal + 1 <= boundary_ordinal.?)) return error.InvalidActivityPage;
-            previous = fact.*;
+        // The aggregates are read exactly when every kind is asked for, and are counted where the page's own rows stop.
+        if ((wire.aggregates != null) != cursor.kinds.eql(.full)) return error.InvalidActivityPage;
+        if (wire.aggregates) |wire_aggregates| {
+            const last = if (page.facts.direction == .forward and page.facts.more) page.facts.items[page.facts.count - 1] else null;
+            const as_of = try id(wire_aggregates.as_of, true);
+            if (as_of != if (last) |item| item.position else page.facts.end) return error.InvalidActivityPage;
+            const boundary_ordinal: ?u64 = if (last) |item| item.ordinal else null;
+            var aggregates: @import("activity_facts.zig").Aggregates = .{ .as_of = as_of };
+            aggregates.call_activity.total = try id(wire_aggregates.call_activity.total, true);
+            aggregates.call_activity.count = wire_aggregates.call_activity.entries.count;
+            if (aggregates.call_activity.count != @min(3, aggregates.call_activity.total)) return error.InvalidActivityPage;
+            var previous: ?protocol.CallActivity.Entry = null;
+            for (wire_aggregates.call_activity.entries.values[0..aggregates.call_activity.count], aggregates.call_activity.entries[0..aggregates.call_activity.count]) |entry, *fact| {
+                fact.* = .{ .operation = try id(entry.operation, false), .ordinal = try id(entry.ordinal, true), .presentation = entry.presentation.value };
+                if (fact.ordinal == std.math.maxInt(i64)) return error.InvalidActivityPage;
+                if (previous) |prior| if (fact.operation < prior.operation or
+                    fact.operation == prior.operation and fact.ordinal <= prior.ordinal) return error.InvalidActivityPage;
+                if (fact.presentation.publication_position) |p| if (p < as_of or
+                    p == as_of and (boundary_ordinal == null or fact.ordinal + 1 <= boundary_ordinal.?)) return error.InvalidActivityPage;
+                previous = fact.*;
+            }
+            const queued: protocol.Queued = .{ .count = try id(wire_aggregates.queued.count, true), .oldest_position = try id(wire_aggregates.queued.oldest_position, true), .newest_admission = try id(wire_aggregates.queued.newest_admission, true), .newest_position = try id(wire_aggregates.queued.newest_position, true), .newest_content = if (wire_aggregates.queued.newest_content) |value| value.value else null };
+            if (if (queued.count == 0)
+                !std.meta.eql(queued, protocol.Queued{})
+            else
+                queued.newest_admission == 0 or queued.oldest_position == 0 or queued.oldest_position > queued.newest_position or
+                    queued.newest_position > as_of or queued.count > queued.newest_position - queued.oldest_position + 1 or
+                    !mutation_answer.matchesMessageAdmission(queued.newest_content orelse return error.InvalidActivityPage, queued.newest_admission)) return error.InvalidActivityPage;
+            aggregates.queued = queued;
+            page.facts.aggregates = aggregates;
         }
-        const queued: protocol.Queued = .{ .count = try id(wire.queued.count, true), .oldest_position = try id(wire.queued.oldest_position, true), .newest_admission = try id(wire.queued.newest_admission, true), .newest_position = try id(wire.queued.newest_position, true), .newest_content = if (wire.queued.newest_content) |value| value.value else null };
-        if (if (queued.count == 0)
-            !std.meta.eql(queued, protocol.Queued{})
-        else
-            queued.newest_admission == 0 or queued.oldest_position == 0 or queued.oldest_position > queued.newest_position or
-                queued.newest_position > boundary_position or queued.count > queued.newest_position - queued.oldest_position + 1 or
-                !mutation_answer.matchesMessageAdmission(queued.newest_content orelse return error.InvalidActivityPage, queued.newest_admission)) return error.InvalidActivityPage;
-        page.facts.queued = queued;
         const facts = &page.facts.work;
         const work = &facts.work;
         work.state = wire.work.state.value;
@@ -2353,16 +2360,16 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     const roundtrip = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, writer.buffered(), .{});
     defer roundtrip.deinit();
     try std.testing.expectEqualDeep(maximum.value.value, roundtrip.value.value);
-    var facts: protocol.ActivityFacts = .{ .end = std.math.maxInt(i64) - 1, .count = 16 };
-    facts.queued = .{ .count = std.math.maxInt(i64) - 1_000_000_000_000_000_000, .oldest_position = 1_000_000_000_000_000_000, .newest_admission = std.math.maxInt(i64), .newest_position = std.math.maxInt(i64) - 1, .newest_content = .{ .text = .{ .length = 1, .digest = @splat(1) } } };
+    var facts: protocol.ActivityFacts = .{ .end = std.math.maxInt(i64) - 1, .aggregates = .{ .as_of = std.math.maxInt(i64) - 1 }, .count = 16 };
+    facts.aggregates.?.queued = .{ .count = std.math.maxInt(i64) - 1_000_000_000_000_000_000, .oldest_position = 1_000_000_000_000_000_000, .newest_admission = std.math.maxInt(i64), .newest_position = std.math.maxInt(i64) - 1, .newest_content = .{ .text = .{ .length = 1, .digest = @splat(1) } } };
     for (&facts.items, 0..) |*item, index| item.* = .{
         .position = index + 1,
         .ordinal = 1,
         .at = std.math.maxInt(i64) - index,
         .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } }, .presentation = .{ .line = maximum.value.value.line, .sign = .finished, .code = .succeeded, .publication_position = index + 1 } } },
     };
-    facts.call_activity = .{ .total = std.math.maxInt(i64), .count = 3 };
-    for (&facts.call_activity.entries, 0..) |*entry, index| entry.* = .{
+    facts.aggregates.?.call_activity = .{ .total = std.math.maxInt(i64), .count = 3 };
+    for (&facts.aggregates.?.call_activity.entries, 0..) |*entry, index| entry.* = .{
         .operation = std.math.maxInt(i64) - 2 + index,
         .ordinal = std.math.maxInt(i64) - 1,
         .presentation = .{ .line = maximum.value.value.line, .sign = .failed, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
@@ -2376,8 +2383,8 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     try activity_reply.writePage(&page_writer, &facts);
     const page = try ActivityPage.parse(page_writer.buffered(), .{});
     try std.testing.expectEqual(@as(usize, 16), page.facts.count);
-    try std.testing.expectEqualDeep(facts.call_activity, page.facts.call_activity);
-    try std.testing.expectEqualDeep(facts.queued, page.facts.queued);
+    try std.testing.expectEqualDeep(facts.aggregates.?.call_activity, page.facts.aggregates.?.call_activity);
+    try std.testing.expectEqualDeep(facts.aggregates.?.queued, page.facts.aggregates.?.queued);
     try std.testing.expectEqualDeep(facts.work, page.facts.work);
     for (page.facts.items) |item| {
         try std.testing.expectEqual(@as(usize, 200), item.value.tool_result.presentation.line.?.words.len);
@@ -2387,7 +2394,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
 }
 
 test "activity page preserves its work" {
-    var facts: protocol.ActivityFacts = .{ .end = 4, .work = .{
+    var facts: protocol.ActivityFacts = .{ .end = 4, .aggregates = .{ .as_of = 4 }, .work = .{
         .revision = 1,
         .work = .{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1, .operation = 1 },
     } };
@@ -2402,7 +2409,7 @@ test "activity page preserves its work" {
 }
 
 test "CLI-17 activity_served_work" {
-    var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{
+    var facts: protocol.ActivityFacts = .{ .end = 0, .aggregates = .{ .as_of = 0 }, .work = .{
         .revision = 1,
         .work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 2, .actions = .{ .stop = true, .interrupt = .{ .turn = 1, .operation = 2 } } },
     } };
@@ -2426,7 +2433,7 @@ test "CLI-17 activity_served_work" {
 }
 
 test "an instruction row carries a Turn and a revision together, or neither" {
-    var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/work");
     const content: @import("content_value.zig").Reference = .{ .length = 3, .digest = @splat(0xab) };
     var buffer: [activity_reply.max_page_bytes]u8 = undefined;
@@ -2451,7 +2458,7 @@ test "an instruction row carries a Turn and a revision together, or neither" {
 }
 
 test "a skill row carries a valid name and a text no larger than a SKILL.md may be" {
-    var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/work");
     var buffer: [activity_reply.max_page_bytes]u8 = undefined;
     const largest = @import("skill_reference.zig").max_skill_bytes;
@@ -2482,7 +2489,7 @@ test "a skill row carries a valid name and a text no larger than a SKILL.md may 
 }
 
 test "activity page creator is required nullable canonical provenance" {
-    var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    var facts: protocol.ActivityFacts = .{ .end = 0, .aggregates = .{ .as_of = 0 }, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/work");
     var buffer: [activity_reply.max_page_bytes]u8 = undefined;
     for ([_]?[]const u8{ null, "cr3at0" }) |creator| {
@@ -2509,7 +2516,7 @@ test "activity page creator is required nullable canonical provenance" {
 }
 
 test "activity page requires a canonical read version" {
-    var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{ .revision = 1 } };
+    var facts: protocol.ActivityFacts = .{ .end = 0, .aggregates = .{ .as_of = 0 }, .work = .{ .revision = 1 } };
     try facts.work.workspace.set("/work");
     var buffer: [activity_reply.max_page_bytes]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
@@ -2546,7 +2553,7 @@ test "activity page delta variants validate tokens and preserve the cursor" {
         "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"unknown\",\"since\":\"" ++ token_text ++ "\"}",
     }) |invalid| try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(invalid, .{}));
 
-    var facts: protocol.ActivityFacts = .{ .end = 40, .token = token, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    var facts: protocol.ActivityFacts = .{ .end = 40, .aggregates = .{ .as_of = 40 }, .token = token, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/w");
     var buffer: [activity_reply.max_page_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -2570,18 +2577,18 @@ test "activity page delta variants validate tokens and preserve the cursor" {
 }
 
 test "INS-7 the integration empty queue matches the Activity writer and decoder" {
-    var facts: protocol.ActivityFacts = .{ .end = 40, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+    var facts: protocol.ActivityFacts = .{ .end = 40, .aggregates = .{ .as_of = 40 }, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
     try facts.work.workspace.set("/w");
     var buffer: [activity_reply.max_page_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try activity_reply.writePage(&writer, &facts);
     const fixture = @embedFile("codecs/fixtures/activity/empty-queue.json");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), fixture) != null);
-    try std.testing.expectEqualDeep(protocol.Queued{}, (try ActivityPage.parse(writer.buffered(), .{})).facts.queued);
+    try std.testing.expectEqualDeep(protocol.Queued{}, (try ActivityPage.parse(writer.buffered(), .{})).facts.aggregates.?.queued);
 }
 
 test "an activity page's queued Messages are none or a span at its boundary" {
-    var facts: protocol.ActivityFacts = .{ .end = 40, .work = .{ .work = .{ .state = .{ .working = .{ .since = 1 } } }, .revision = 1 } };
+    var facts: protocol.ActivityFacts = .{ .end = 40, .aggregates = .{ .as_of = 40 }, .work = .{ .work = .{ .state = .{ .working = .{ .since = 1 } } }, .revision = 1 } };
     try facts.work.workspace.set("/w");
     const Case = struct { queued: protocol.Queued, valid: bool };
     const text: content_value.Value = .{ .text = .{ .length = 1, .digest = @splat(1) } };
@@ -2601,13 +2608,40 @@ test "an activity page's queued Messages are none or a span at its boundary" {
         .{ .queued = .{ .count = 3, .oldest_position = 39, .newest_admission = 9, .newest_position = 40, .newest_content = text }, .valid = false },
         .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 0, .newest_position = 40, .newest_content = text }, .valid = false },
     }) |case| {
-        facts.queued = case.queued;
+        facts.aggregates.?.queued = case.queued;
         var buffer: [activity_reply.max_page_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
         try activity_reply.writePage(&writer, &facts);
         if (case.valid) {
-            try std.testing.expectEqualDeep(case.queued, (try ActivityPage.parse(writer.buffered(), .{})).facts.queued);
+            try std.testing.expectEqualDeep(case.queued, (try ActivityPage.parse(writer.buffered(), .{})).facts.aggregates.?.queued);
         } else try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
+    }
+}
+
+test "an activity page's aggregates are read exactly when every kind is asked for, and are taken where its rows stop" {
+    const Case = struct { kinds: protocol.ActivityPage.Kinds, rows: usize, as_of: ?u64, valid: bool };
+    for ([_]Case{
+        .{ .kinds = .full, .rows = 0, .as_of = 40, .valid = true },
+        .{ .kinds = .full, .rows = 0, .as_of = null, .valid = false },
+        .{ .kinds = .full, .rows = 0, .as_of = 39, .valid = false },
+        .{ .kinds = .full, .rows = 0, .as_of = 41, .valid = false },
+        .{ .kinds = .initOne(.session_changed), .rows = 0, .as_of = null, .valid = true },
+        .{ .kinds = .initOne(.session_changed), .rows = 0, .as_of = 40, .valid = false },
+        // A forward page with more follows takes them at its last row.
+        .{ .kinds = .full, .rows = 1, .as_of = 7, .valid = true },
+        .{ .kinds = .full, .rows = 1, .as_of = 40, .valid = false },
+    }) |case| {
+        var facts: protocol.ActivityFacts = .{ .end = 40, .count = case.rows, .more = case.rows != 0, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        if (case.rows != 0) facts.items[0] = .{ .position = 7, .at = 1, .value = .{ .session_changed = .{ .revision = 2, .field = .label } } };
+        if (case.as_of) |as_of| facts.aggregates = .{ .as_of = as_of };
+        try facts.work.workspace.set("/w");
+        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&writer, &facts);
+        const cursor: ActivityCursor = .{ .kinds = case.kinds, .limit = 1 };
+        if (case.valid) {
+            try std.testing.expectEqual(case.as_of, if ((try ActivityPage.parse(writer.buffered(), cursor)).facts.aggregates) |aggregates| aggregates.as_of else null);
+        } else try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), cursor));
     }
 }
 
@@ -2627,7 +2661,7 @@ test "a turn_ended row's ending agrees with its saved code and content, and a fi
     }) |case| {
         var code: protocol.Bounded(protocol.max_code_bytes) = .{};
         try code.set(case.code);
-        var facts: protocol.ActivityFacts = .{ .end = 2, .count = 2, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        var facts: protocol.ActivityFacts = .{ .end = 2, .aggregates = .{ .as_of = 2 }, .count = 2, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = 1, .value = .{ .assistant = .{ .content = content, .final = case.ending == .done } } };
         facts.items[1] = .{ .position = 2, .at = 1, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = case.ending, .code = code, .content = case.content } } };
         try facts.work.workspace.set("/w");
@@ -2652,7 +2686,7 @@ test "an activity row carries its time, and a Message's rows carry its admission
         .{ .value = .{ .admission = message }, .at = 1792925001, .failure = error.InvalidActivityPage },
         .{ .value = .{ .assistant = .{ .content = content.text } }, .at = 0, .failure = error.InvalidResponse },
     }) |case| {
-        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = case.at, .value = case.value };
         try facts.work.workspace.set("/w");
         var buffer: [activity_reply.max_page_bytes]u8 = undefined;
@@ -2662,7 +2696,7 @@ test "an activity row carries its time, and a Message's rows carry its admission
             try std.testing.expectError(failure, ActivityPage.parse(writer.buffered(), .{}));
         } else try std.testing.expectEqual(case.at, (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].at);
     }
-    var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+    var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
     facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .assistant = .{ .content = content.text } } };
     try facts.work.workspace.set("/w");
     var buffer: [activity_reply.max_page_bytes]u8 = undefined;
@@ -4141,7 +4175,7 @@ test "a hosted call travels as its presentation alone, in the conversation and t
         try std.testing.expectError(error.InvalidConversationPage, ConversationPage.parse(bytes, .{ .end = 0 }));
     }
 
-    var facts: protocol.ActivityFacts = .{ .end = 9, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+    var facts: protocol.ActivityFacts = .{ .end = 9, .aggregates = .{ .as_of = 9 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
     try facts.work.workspace.set("/w");
     var action: protocol.ActivityItem.HostedAction = .{ .kind = .search, .targets_total = 2, .pattern = .{ .length = 1, .digest = @splat(3) } };
     try action.targets.append(.{ .length = 4, .digest = @splat(1) });
@@ -4179,7 +4213,7 @@ test "a hosted call's action names nothing under none and serves as many targets
     }) |case| {
         var action: protocol.ActivityItem.HostedAction = .{ .kind = case.kind, .targets_total = case.total, .pattern = if (case.pattern) .{ .length = 2, .digest = @splat(9) } else null };
         for (0..case.served) |index| try action.targets.append(.{ .length = index, .digest = @splat(1) });
-        var facts: protocol.ActivityFacts = .{ .end = 9, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        var facts: protocol.ActivityFacts = .{ .end = 9, .aggregates = .{ .as_of = 9 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         try facts.work.workspace.set("/w");
         facts.items[0] = .{ .position = 7, .at = 5, .value = .{ .hosted_call = .{ .presentation = presentation, .action = action } } };
         var buffer: [activity_reply.max_page_bytes]u8 = undefined;
@@ -4196,7 +4230,7 @@ test "session change activity carries refusal text only for a refused later revi
     for (std.enums.values(protocol.SessionField)) |field| {
         for ([_]u64{ 1, 2 }) |revision| {
             for ([_]bool{ false, true }) |has_text| {
-                var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 2 } };
+                var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 2 } };
                 try facts.work.workspace.set("/w");
                 facts.items[0] = .{ .position = 1, .at = 1, .value = .{ .session_changed = .{ .revision = revision, .field = field } } };
                 if (has_text) {
@@ -4220,7 +4254,7 @@ test "session change activity carries refusal text only for a refused later revi
 test "approval activity accepts own and forwarded ordinals and validates child session" {
     for ([_]u64{ 0, 1, 2 }) |ordinal| {
         for ([_][]const u8{ "k7m2qx", "BAD" }) |session| {
-            var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+            var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
             facts.items[0] = .{ .position = 1, .ordinal = ordinal, .at = 1, .value = .{ .approval_requested = .{ .session = .{}, .action = 1, .operation = 1, .call_ordinal = 0 } } };
             try facts.items[0].value.approval_requested.session.set(session);
             try facts.work.workspace.set("/w");
@@ -4249,7 +4283,7 @@ test "call and approval activity round trip saved inline description tool and se
         .{ .call = .{ .position = 1, .operation = 2, .turn = 1, .call_ordinal = 0, .action = 3, .rejection = null, .fields = @splat(field), .description = description, .tool = tool, .server = server } },
         .{ .approval_requested = .{ .session = .{ .bytes = "ch11d1".*, .len = 6 }, .action = 3, .operation = 2, .call_ordinal = 0, .description = description, .tool = tool, .server = server } },
     }) |value| {
-        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = 1, .value = value };
         try facts.work.workspace.set("/w");
         var buffer: [activity_reply.max_page_bytes]u8 = undefined;
@@ -4268,7 +4302,7 @@ test "approval and ending activity require a valid explicit child session" {
         .{ .approval_requested = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .action = 1, .operation = 1, .call_ordinal = 0 } },
         .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = .stopped, .code = .{ .bytes = "cancelled".* ++ @as([protocol.max_code_bytes - 9]u8, undefined), .len = 9 }, .content = null } },
     }) |value| {
-        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = 1, .value = value };
         try facts.work.workspace.set("/w");
         var buffer: [activity_reply.max_page_bytes]u8 = undefined;
@@ -4421,7 +4455,7 @@ test "CM-48 inline skills suggestion replies preserve Host relevance order" {
 test "activity golden model call null evidence and zero usage roundtrip" {
     const facts = try std.testing.allocator.create(protocol.ActivityFacts);
     defer std.testing.allocator.destroy(facts);
-    facts.* = .{ .end = 4, .count = 1, .work = .{ .revision = 1, .workspace = .{ .len = 0 }, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    facts.* = .{ .end = 4, .aggregates = .{ .as_of = 4 }, .count = 1, .work = .{ .revision = 1, .workspace = .{ .len = 0 }, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/w");
     facts.items[0] = .{ .position = 4, .at = 7, .value = .{ .model_call = .{
         .model = .{ .len = 0 },

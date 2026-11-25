@@ -1502,11 +1502,11 @@ pub fn visibleMessage(value: protocol.ActivityItem.Message) bool {
 }
 
 /// `scratch` holds the part list of a parts value while its row draws.
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, provider: ?@import("connection.zig").Name, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
-    return renderWith(client.SessionReads.selected(requests, store, session), scratch, provider, item, queued, held, sink, colour, home, destination, fold);
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, provider: ?@import("connection.zig").Name, item: protocol.ActivityItem, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
+    return renderWith(client.SessionReads.selected(requests, store, session), scratch, provider, item, held, sink, colour, home, destination, fold);
 }
 
-pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@import("connection.zig").Name, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
+pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@import("connection.zig").Name, item: protocol.ActivityItem, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
     switch (item.value) {
         .admission, .received, .user => |value| if (!visibleMessage(value)) return false,
         else => {},
@@ -1514,7 +1514,6 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
     switch (item.value) {
         .admission => |value| {
             _ = value;
-            _ = queued;
             _ = held;
             return false;
         },

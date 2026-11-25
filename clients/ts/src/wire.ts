@@ -894,8 +894,7 @@ export interface components {
             direction: "forward" | "backward";
             items: components["schemas"]["ActivityItem"][];
             more: boolean;
-            call_activity: components["schemas"]["CallActivity"];
-            queued: components["schemas"]["Queued"];
+            aggregates: components["schemas"]["Aggregates"] | null;
             work: components["schemas"]["PageWork"];
             /** @constant */
             delta: "full";
@@ -987,6 +986,11 @@ export interface components {
             };
             connection?: string;
             workspace?: string;
+        };
+        Aggregates: {
+            as_of: components["schemas"]["Decimal"];
+            call_activity: components["schemas"]["CallActivity"];
+            queued: components["schemas"]["Queued"];
         };
         ArchivedRowFields: {
             reference: string;

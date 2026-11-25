@@ -3323,11 +3323,15 @@
               "more": {
                 "type": "boolean"
               },
-              "call_activity": {
-                "$ref": "#/components/schemas/CallActivity"
-              },
-              "queued": {
-                "$ref": "#/components/schemas/Queued"
+              "aggregates": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Aggregates"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "work": {
                 "$ref": "#/components/schemas/PageWork"
@@ -3355,8 +3359,7 @@
               "direction",
               "items",
               "more",
-              "call_activity",
-              "queued",
+              "aggregates",
               "work",
               "delta",
               "since"
@@ -3811,6 +3814,26 @@
         "required": [
           "model"
         ]
+      },
+      "Aggregates": {
+        "type": "object",
+        "properties": {
+          "as_of": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "call_activity": {
+            "$ref": "#/components/schemas/CallActivity"
+          },
+          "queued": {
+            "$ref": "#/components/schemas/Queued"
+          }
+        },
+        "required": [
+          "as_of",
+          "call_activity",
+          "queued"
+        ],
+        "additionalProperties": false
       },
       "ArchivedRowFields": {
         "type": "object",

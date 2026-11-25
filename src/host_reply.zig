@@ -2,6 +2,7 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const connection = @import("connection.zig");
 const provider_route = @import("provider_route.zig");
+const activity_facts = @import("activity_facts.zig");
 const change_ring = @import("change_ring.zig");
 const command_reply = @import("command_reply.zig");
 const command_spec = @import("command_spec.zig");
@@ -644,9 +645,10 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(activity_reply.ItemJson.max_json_bytes, longest_item_bytes);
     var facts: protocol.ActivityFacts = .{ .end = max, .direction = Worst.tag(@FieldType(protocol.ActivityPage, "direction")), .count = 16, .more = false };
     @memset(&facts.items, longest_item);
-    facts.call_activity = .{ .total = max, .count = 3 };
-    @memset(&facts.call_activity.entries, .{ .operation = max, .ordinal = max, .presentation = presentation });
-    facts.queued = .{ .count = max, .oldest_position = max, .newest_admission = max, .newest_position = max, .newest_content = .{ .parts = .{ .identity = .{ .length = max, .digest = @splat(0xff) }, .owner = .{ .message = max } } } };
+    var aggregates: activity_facts.Aggregates = .{ .as_of = max, .call_activity = .{ .total = max, .count = 3 } };
+    @memset(&aggregates.call_activity.entries, .{ .operation = max, .ordinal = max, .presentation = presentation });
+    aggregates.queued = .{ .count = max, .oldest_position = max, .newest_admission = max, .newest_position = max, .newest_content = .{ .parts = .{ .identity = .{ .length = max, .digest = @splat(0xff) }, .owner = .{ .message = max } } } };
+    facts.aggregates = aggregates;
     var longest_state: protocol.WorkState = undefined;
     var longest_state_bytes: usize = 0;
     for ([_]protocol.WorkState{

@@ -254,7 +254,7 @@ test "SUI-61 Action-sourced inputs draw nothing in the conversation" {
         };
         for ([_]protocol.ActivityItem.Value{ .{ .received = value }, .{ .user = value }, .{ .admission = value } }) |row| {
             const item: protocol.ActivityItem = .{ .position = 1, .at = 1, .value = row };
-            try std.testing.expect(!try View.render(undefined, "unused", "k7m2qx", undefined, null, item, .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1 }, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
+            try std.testing.expect(!try View.render(undefined, "unused", "k7m2qx", undefined, null, item, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
         }
     }
 }

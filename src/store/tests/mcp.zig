@@ -87,8 +87,8 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{line.expected}));
                 if (line.expected.len == 200) {
                     const page = try store_core.activityPageForTesting(&storage, .{ .session = session });
-                    try std.testing.expectEqual(@as(usize, 1), page.call_activity.count);
-                    try std.testing.expectEqualStrings(line.expected, page.call_activity.entries[0].presentation.line.?.words.slice());
+                    try std.testing.expectEqual(@as(usize, 1), page.aggregates.?.call_activity.count);
+                    try std.testing.expectEqualStrings(line.expected, page.aggregates.?.call_activity.entries[0].presentation.line.?.words.slice());
                     const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
                     defer std.testing.allocator.free(report);
                     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
@@ -152,7 +152,7 @@ test "saved MCP call lines survive all work reads pending, running and completed
             var request: protocol.ActivityPage = .{};
             try request.session.set(session);
             const page = try store_core.activityPageForTesting(storage, request);
-            for (page.call_activity.entries[0..page.call_activity.count]) |*call|
+            for (page.aggregates.?.call_activity.entries[0..page.aggregates.?.call_activity.count]) |*call|
                 try std.testing.expectEqualStrings(description, call.presentation.line.?.words.slice());
             var listed = try testingListRow(storage, tmp, session);
             defer listed.deinit();

@@ -5191,7 +5191,7 @@ test "permission resolved between the activity scan and Current keeps the fronte
         };
     }
     try self.launch(self.freeze(.permission), reads.permission);
-    var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{ .revision = 1, .work = .{ .state = .{ .approval = .{ .since = 1 } }, .turn = 1, .operation = 1, .first_action = 7 } } };
+    var facts: protocol.ActivityFacts = .{ .end = 0, .aggregates = .{ .as_of = 0 }, .work = .{ .revision = 1, .work = .{ .state = .{ .approval = .{ .since = 1 } }, .turn = 1, .operation = 1, .first_action = 7 } } };
     try facts.work.workspace.set("/w");
     var page_buffer: [4096]u8 = undefined;
     var page = std.Io.Writer.fixed(&page_buffer);
@@ -8772,8 +8772,9 @@ test "failed reply stale pre-admission scan must not authorize a fresh Ctrl-R af
                 }
                 var storage: [4096]u8 = undefined;
                 var fixed = std.heap.FixedBufferAllocator.init(&storage);
-                const cursor = try std.json.parseFromSliceLeaky(struct { position: []const u8 }, fixed.allocator(), request[body_start..used], .{ .ignore_unknown_fields = true });
+                const cursor = try std.json.parseFromSliceLeaky(struct { position: []const u8, kinds: ?[]const []const u8 = null }, fixed.allocator(), request[body_start..used], .{ .ignore_unknown_fields = true });
                 const position = try std.fmt.parseInt(u64, cursor.position, 10);
+                const full = if (cursor.kinds) |kinds| kinds.len == std.meta.tags(protocol.ActivityItem.Kind).len else false;
                 var buffer: [4096]u8 = undefined;
                 var out = std.Io.Writer.fixed(&buffer);
                 var extra_buffer: [128]u8 = undefined;
@@ -8782,7 +8783,7 @@ test "failed reply stale pre-admission scan must not authorize a fresh Ctrl-R af
                 if (std.mem.startsWith(u8, request[0..used], "POST /v1/activity-page ")) {
                     host.pages += 1;
                     const reference: content_value.Value = .{ .text = .{ .length = text.len, .digest = protocol.contentDigest(text) } };
-                    var facts: protocol.ActivityFacts = .{ .end = 3, .direction = .backward, .count = 1, .queued = .{ .count = 1, .oldest_position = 3, .newest_admission = 37, .newest_position = 3, .newest_content = reference }, .work = .{ .revision = 2, .work = .{ .state = .{ .pending = .{ .since = 2 } } } } };
+                    var facts: protocol.ActivityFacts = .{ .end = 3, .direction = .backward, .count = 1, .aggregates = if (full) .{ .as_of = 3, .queued = .{ .count = 1, .oldest_position = 3, .newest_admission = 37, .newest_position = 3, .newest_content = reference } } else null, .work = .{ .revision = 2, .work = .{ .state = .{ .pending = .{ .since = 2 } } } } };
                     try facts.work.workspace.set("/");
                     facts.items[0] = .{ .position = if (position == 0) 3 else 1, .at = 1, .value = .{ .admission = .{ .admission = if (position == 0) 37 else 1, .key = .{}, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 } } };
                     try activity_reply.writePage(&out, &facts);
@@ -9294,7 +9295,7 @@ test "SessionFrontend capped answer Ctrl-O opens the whole authenticated source"
     var hash = protocol.contentHasher();
     hash.update(source);
     const reference: content_value.Reference = .{ .length = source.len, .digest = hash.finalResult() };
-    var facts: protocol.ActivityFacts = .{ .end = 1, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/");
     facts.items[0] = .{ .position = 1, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = reference, .final = true } } };
     facts.count = 1;
@@ -9359,7 +9360,7 @@ test "SUI-126 SessionFrontend tool row Ctrl-O opens saved output in place, close
     const saved = "Bash failed. Exit code: 7.\nREADME.md\nbad \x1b[2J\n";
     const answer = "Listed.";
     const description = try protocol.ToolLine.plain("List project files");
-    var facts: protocol.ActivityFacts = .{ .end = 2, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    var facts: protocol.ActivityFacts = .{ .end = 2, .aggregates = .{ .as_of = 2 }, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/");
     const tool: protocol.ActivityItem = .{ .position = 1, .ordinal = 1, .at = 1, .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = saved.len, .digest = protocol.contentDigest(saved) } }, .presentation = .{ .line = description, .code = .failed, .sign = .failed, .publication_position = 1 } } } };
     facts.items[0] = .{ .position = 2, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = .{ .length = answer.len, .digest = protocol.contentDigest(answer) }, .final = true } } };
@@ -9369,6 +9370,8 @@ test "SUI-126 SessionFrontend tool row Ctrl-O opens saved output in place, close
     var opening = std.Io.Writer.fixed(&opening_buffer);
     try activity_reply.writePage(&opening, &facts);
     facts.direction = .forward;
+    // The row read asks for the one tool row, not every kind, so its page reads no aggregates.
+    facts.aggregates = null;
     facts.items[0] = tool;
     facts.count = 1;
     var row_buffer: [4096]u8 = undefined;
@@ -9760,7 +9763,7 @@ test "failed reply retry reader keeps every read failure at the shared settlemen
                     extra = try std.fmt.bufPrint(&extra_buffer, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ text.len, text.len });
                     try out.writeAll(if (failing and host.fault == .digest) "LOST literal Message" else text);
                 } else {
-                    var facts: protocol.ActivityFacts = .{ .end = 3, .direction = .backward, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+                    var facts: protocol.ActivityFacts = .{ .end = 3, .aggregates = if (stage == .head) .{ .as_of = 3 } else null, .direction = .backward, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
                     try facts.work.workspace.set("/");
                     const reference: content_value.Value = .{ .text = .{ .length = text.len + @intFromBool(host.fault == .length), .digest = protocol.contentDigest(text) } };
                     facts.items[0] = .{ .position = if (stage == .head) 3 else 2, .at = 1, .value = .{ .admission = .{ .admission = 2, .key = .{}, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 } } };
@@ -10006,7 +10009,7 @@ fn paginatedReplayCount() !void {
         }
         fn page(frontend: *Self, listener: *std.Io.net.Server, read: feed_reads.Read, first: u64, last: u64, end: u64) !void {
             const content: content_value.Value = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } };
-            var facts: protocol.ActivityFacts = .{ .end = end, .direction = if (read == .opening or read == .fill_above) .backward else .forward, .count = @intCast(last - first + 1), .queued = .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1, .newest_content = content }, .work = .{ .revision = 1, .work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 1 } } };
+            var facts: protocol.ActivityFacts = .{ .end = end, .direction = if (read == .opening or read == .fill_above) .backward else .forward, .count = @intCast(last - first + 1), .work = .{ .revision = 1, .work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 1 } } };
             facts.more = if (facts.direction == .backward) first != 1 else last < end;
             try facts.work.workspace.set("/");
             var peer: protocol.NamedPeer = .{ .session = .{} };
@@ -10020,6 +10023,7 @@ fn paginatedReplayCount() !void {
             job.feed_page = FeedPolicy.request(read, frontend.feedState());
             job.line_read = .{ .revision = 1, .end = end };
             job.queued_line = 1;
+            if (job.feed_page.?.kinds == .all) facts.aggregates = .{ .as_of = if (facts.direction == .forward and facts.more) last else end, .queued = .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1, .newest_content = content } };
             try frontend.launch(job, reads.scan);
             var buffer: [16384]u8 = undefined;
             var out = std.Io.Writer.fixed(&buffer);
@@ -10161,7 +10165,7 @@ test "SessionFrontend huge person source keeps the following short answer bottom
     const answer = "SHORT ANSWER done.";
     const person_reference: content_value.Value = .{ .text = .{ .length = person.len, .digest = protocol.contentDigest(person) } };
     const answer_reference: content_value.Reference = .{ .length = answer.len, .digest = protocol.contentDigest(answer) };
-    var facts: protocol.ActivityFacts = .{ .end = 2, .direction = .backward, .count = 2, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    var facts: protocol.ActivityFacts = .{ .end = 2, .aggregates = .{ .as_of = 2 }, .direction = .backward, .count = 2, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/");
     facts.items[0] = .{ .position = 2, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = answer_reference, .final = true } } };
     facts.items[1] = .{ .position = 1, .ordinal = 0, .at = 1, .value = .{ .user = .{ .admission = 1, .key = .{}, .turn = 1, .state = .applied, .content = person_reference, .admitted_at = 1 } } };

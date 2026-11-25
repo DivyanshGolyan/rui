@@ -552,10 +552,12 @@ fn scanAt(job: *Job, task: *Task, reads: client.SessionReads, plan: FeedPolicy.P
         if (job.result.line) |*line| if (job.hint_wanted and line.label == null) if (line.first) |first| {
             job.result.hint = try readHint(reads, job, first);
         };
-        job.result.live = View.Live.init(page.facts.call_activity);
-        job.result.queued = page.facts.queued;
-        job.result.queue_cutoff = activity_facts.queueCutoff(page.facts.end, plan.direction == .forward, page.facts.more, if (page.facts.count == 0) null else page.facts.items[page.facts.count - 1].position);
-        const queued = page.facts.queued;
+        // An `.all` read asks for every kind, so its page names the Session's live calls and queued Messages.
+        const aggregates = page.facts.aggregates orelse return error.InvalidActivityPage;
+        job.result.live = View.Live.init(aggregates.call_activity);
+        job.result.queued = aggregates.queued;
+        job.result.queue_cutoff = aggregates.as_of;
+        const queued = aggregates.queued;
         if (queued.count != 0 and queued.newest_admission != job.queued_line) {
             job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(reads, job, queued.newest_position, queued.newest_content orelse return error.InvalidActivityPage, .fails)).? };
         }
@@ -593,7 +595,7 @@ fn scanAt(job: *Job, task: *Task, reads: client.SessionReads, plan: FeedPolicy.P
             .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = .{ .text = answer.content } },
             else => null,
         } };
-        row.provisional = try View.renderWith(reads, job.files.parts, job.sessionProvider(), item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
+        row.provisional = try View.renderWith(reads, job.files.parts, job.sessionProvider(), item, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
         row.tight = View.tight(item.value);
         try capture.finish();
         row.length = capture.length;
@@ -1372,16 +1374,18 @@ const FakeHost = struct {
         }
         facts.more = next != null;
         const boundary = if (direction == .forward and facts.more) facts.items[facts.count - 1].position else end;
+        var aggregates: activity_facts.Aggregates = .{ .as_of = boundary };
         for (self.tail, @as(usize, @intCast(self.history)) + 1..) |_, at| {
             if (at > boundary) break;
             const value = self.item(.{ .position = at }, boundary).value;
             if (value != .admission or value.admission.state != .queued or value.admission.sender != null or value.admission.source_action != null) continue;
-            if (facts.queued.count == 0) facts.queued.oldest_position = at;
-            facts.queued.count += 1;
-            facts.queued.newest_admission = value.admission.admission;
-            facts.queued.newest_position = at;
-            facts.queued.newest_content = value.admission.content;
+            if (aggregates.queued.count == 0) aggregates.queued.oldest_position = at;
+            aggregates.queued.count += 1;
+            aggregates.queued.newest_admission = value.admission.admission;
+            aggregates.queued.newest_position = at;
+            aggregates.queued.newest_content = value.admission.content;
         }
+        if (kinds.eql(.full)) facts.aggregates = aggregates;
         facts.work = .{ .work = if (self.work_state) |state| .{ .state = state, .turn = 1, .operation = 1 } else if (self.held) .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 1 } else .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 };
         facts.work.workspace.set("/") catch unreachable;
         return facts;
@@ -1507,7 +1511,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
         };
         const Expected = struct { text: []const u8 = "", provisional: bool = false, lowest: ?u64 = null };
 
-        fn check(root: []const u8, rows: []const protocol.ActivityItem, expected: []const Expected, queued: protocol.Queued, held: bool) !void {
+        fn check(root: []const u8, rows: []const protocol.ActivityItem, expected: []const Expected, held: bool) !void {
             const requests: client.Requests = .{ .io = std.testing.io };
             for ([_]bool{ false, true }) |backward| for (0..rows.len + 1) |split| {
                 for (0..2) |part| {
@@ -1522,7 +1526,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
                             var buffer: [8192]u8 = undefined;
                             var out = std.Io.Writer.fixed(&buffer);
                             var sink: Sink = .{ .out = &out };
-                            const provisional = try View.render(requests, root, "k7m2qx", undefined, null, rows[index], queued, held, &sink, false, "", .{ .viewport = .wcwidth }, .none);
+                            const provisional = try View.render(requests, root, "k7m2qx", undefined, null, rows[index], held, &sink, false, "", .{ .viewport = .wcwidth }, .none);
                             try row_text.expectVisible(expected[index].text, out.buffered());
                             try std.testing.expectEqual(expected[index].provisional, provisional);
                             try std.testing.expectEqual(expected[index].lowest, sink.lowest);
@@ -1542,7 +1546,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
             incoming.admitted_at = std.math.maxInt(u64);
             for ([_]enum { person, script, session }{ .person, .script, .session }) |source| {
                 for (std.enums.values(@FieldType(protocol.ActivityItem.Message, "state"))) |state| {
-                    for ([_]bool{ false, true }) |oldest| for ([_]bool{ false, true }) |held| {
+                    for ([_]bool{ false, true }) |held| {
                         var value = FakeHost.message(1).admission;
                         value.state = state;
                         value.turn = if (state == .applied) 1 else null;
@@ -1559,9 +1563,8 @@ test "SUI-49 Message placement preserves provenance across pages" {
                             .{ .text = received },
                             .{ .text = if (state == .applied and source != .session) user else "" },
                         };
-                        const queued: protocol.Queued = if (state == .queued and source != .session) .{ .count = if (oldest) 1 else 2, .oldest_position = if (oldest) 2 else 1, .newest_admission = 1, .newest_position = 2 } else .{};
-                        try check(root, &rows, &expected, queued, held);
-                    };
+                        try check(root, &rows, &expected, held);
+                    }
                 }
             }
 
@@ -1605,7 +1608,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
                     for (3..excluded + 3) |index| try stop_out.print("{s}◌ not sent\n{s}{s}" ++ View.Mark.reset ++ "\n", .{ if (index == 3) "" else "\n", prefix, texts[index] });
                     try stop_out.writeAll(if (excluded == 0) "▪ Stopped\n" else "\n▪ Stopped\n");
                     expected[stop_at - 1] = .{ .text = stop_out.buffered(), .lowest = if (excluded == 0) null else 4 };
-                    try check(root, rows[0..stop_at], expected[0..stop_at], .{}, false);
+                    try check(root, rows[0..stop_at], expected[0..stop_at], false);
                 }
             }
         }
@@ -1714,7 +1717,7 @@ test "CLI-36 one Session scan and permission retain their resolved Store route" 
                 self.page_count += 1;
                 var page: protocol.ActivityFacts = undefined;
                 if (self.mode == .permission) {
-                    page = .{ .end = 2, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .approval = .{ .since = 1 } }, .turn = 2, .operation = 2, .first_action = 2, .actions = .{ .stop = true, .decide = 2 } } } };
+                    page = .{ .end = 2, .aggregates = .{ .as_of = 2 }, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .approval = .{ .since = 1 } }, .turn = 2, .operation = 2, .first_action = 2, .actions = .{ .stop = true, .decide = 2 } } } };
                     try page.work.workspace.set("/w");
                 } else {
                     const admission = FakeHost.message(1);
@@ -1943,14 +1946,14 @@ test "activity golden stop with interrupted ending draws one line across pages" 
                 if (!split) page.facts.items[1] = if (historical) stop else ended;
                 for (0..page.facts.count) |index| {
                     const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
-                    _ = try View.render(undefined, "unused", session.slice(), undefined, null, item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
+                    _ = try View.render(undefined, "unused", session.slice(), undefined, null, item, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
                 }
                 if (split) {
                     try std.testing.expectEqualStrings("", out.buffered());
                     page.facts.items[0] = ended;
                     for (0..page.facts.count) |index| {
                         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
-                        _ = try View.render(undefined, "unused", session.slice(), undefined, null, item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
+                        _ = try View.render(undefined, "unused", session.slice(), undefined, null, item, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
                     }
                 }
                 try std.testing.expectEqualStrings(if (colour) "\x1b[39m▪\x1b[39m Stopped\n" else "▪ Stopped\n", row_text.visible(out.buffered()));
@@ -1963,7 +1966,7 @@ test "activity golden stop with interrupted ending draws one line across pages" 
     var buffer: [256]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    _ = try View.render(undefined, "unused", session.slice(), undefined, null, page.facts.items[0], .{}, false, &sink, true, "", .{ .viewport = .wcwidth }, .none);
+    _ = try View.render(undefined, "unused", session.slice(), undefined, null, page.facts.items[0], false, &sink, true, "", .{ .viewport = .wcwidth }, .none);
     try std.testing.expectEqualStrings("\x1b[39m▪\x1b[39m Stopped\n", row_text.visible(out.buffered()));
 }
 
@@ -2005,7 +2008,7 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
         document.* = .{};
         var sink: Sink = .{ .document = document };
         const item: protocol.ActivityItem = .{ .position = index + 1, .at = 1, .value = kind.value };
-        try testing.expect(!try View.render(undefined, "unused", "k7m2qx", undefined, null, item, .{}, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
+        try testing.expect(!try View.render(undefined, "unused", "k7m2qx", undefined, null, item, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
         try document.prepare();
         text_.* = Text.fromDocument(document);
         try testing.expect(text_.bytes[0] != '\n' and std.mem.count(u8, text_.bytes, "\n") == 1);
