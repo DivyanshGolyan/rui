@@ -14,10 +14,11 @@ pub const SavedLabel = struct {
     text: Bounded(max_bytes) = .{},
 
     /// The label saved for `bytes`: repaired, then cut to at most max_bytes at a scalar boundary.
-    /// Null when no words are left, so the caller can use its tool's fixed words instead.
+    /// Null when the text has no words at all (empty or only separators), so the caller can use its tool's fixed words
+    /// instead; judged before the cut, so a long run of spaces ahead of a word does not make the label blank.
     pub fn of(bytes: []const u8) ?SavedLabel {
-        const label = fromColumn(bytes);
-        return if (readWords(max_bytes, label.raw()) == null) null else label;
+        if (readWords(max_bytes, bytes) == null) return null;
+        return fromColumn(bytes);
     }
 
     /// The label held by a column. Total: any bytes read back, repaired and cut the same way as `of`.
@@ -115,13 +116,16 @@ fn repeat(comptime unit: []const u8, comptime times: usize) *const [unit.len * t
 }
 
 test "TPR-3 a saved label reads as one tidy line and is never invalid" {
-    const cases = comptime [_]struct { saved: []const u8, words: ?[]const u8, short: ?[]const u8 = null }{
+    const cases = comptime [_]struct { saved: []const u8, words: ?[]const u8, short: ?[]const u8 = null, stored: ?[]const u8 = null }{
         .{ .saved = "read src/main.zig", .words = "read src/main.zig" },
-        .{ .saved = "  read   src/main.zig\n", .words = "read src/main.zig" },
-        .{ .saved = "Run tests\nthen lint", .words = "Run tests then lint" },
+        .{ .saved = "  read   src/main.zig\n", .words = "read src/main.zig", .stored = "  read   src/main.zig\n" },
+        .{ .saved = "Run tests\nthen lint", .words = "Run tests then lint", .stored = "Run tests\nthen lint" },
         .{ .saved = "\tgrep\r\n\u{2028}pattern\u{2029}", .words = "grep pattern" },
         .{ .saved = "a\u{85}b\u{a0}c\u{3000}\u{3000}d", .words = "a b c d" },
-        .{ .saved = "a\x00b", .words = "a\u{fffd}b" },
+        .{ .saved = "a\x00b", .words = "a\u{fffd}b", .stored = "a\u{fffd}b" },
+        .{ .saved = "\xf0\x9f\x98\x80 ok", .words = "\u{1f600} ok", .stored = "\xf0\x9f\x98\x80 ok" },
+        .{ .saved = "\xc0\x80\xed\xa0\x80\xf5", .words = "\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}" },
+        .{ .saved = "\xf0\x9f\x98", .words = "\u{fffd}\u{fffd}\u{fffd}" },
         .{ .saved = "\xff\xfe", .words = "\u{fffd}\u{fffd}" },
         .{ .saved = "\xe2\x82", .words = "\u{fffd}\u{fffd}" },
         .{ .saved = "x\xc3\xa9\x80y", .words = "x\u{e9}\u{fffd}y" },
@@ -139,7 +143,9 @@ test "TPR-3 a saved label reads as one tidy line and is never invalid" {
         const stored = label.raw();
         try std.testing.expect(std.unicode.utf8ValidateSlice(stored));
         try std.testing.expect(stored.len <= max_bytes);
+        if (case.stored) |expected| try std.testing.expectEqualStrings(expected, stored);
         try std.testing.expectEqual(case.words == null, SavedLabel.of(case.saved) == null);
+        try std.testing.expectEqualStrings(stored, SavedLabel.fromColumn(stored).raw());
 
         inline for (.{ max_bytes, 100 }) |max| {
             const expected = if (max == 100) (case.short orelse case.words) else case.words;
@@ -159,6 +165,38 @@ test "TPR-3 a saved label reads as one tidy line and is never invalid" {
 
                 const again = readWords(max, shown) orelse return error.TestUnexpectedResult;
                 try std.testing.expectEqualStrings(shown, again.slice());
+            }
+        }
+    }
+}
+
+test "TPR-3 a label with words is kept even when spaces ahead of them are cut" {
+    try std.testing.expect(SavedLabel.of(repeat(" ", 250) ++ "x") != null);
+    try std.testing.expect(SavedLabel.of(repeat(" ", 250)) == null);
+}
+
+test "TPR-3 every short byte string saves valid, stable and reads as one tidy idempotent line" {
+    const alphabet = [_]u8{ 0x00, ' ', '\n', 'a', 0x80, 0xc2, 0x85, 0xc3, 0xa9, 0xe2, 0xf0, 0xff };
+    var input: [3]u8 = undefined;
+    for (1..input.len + 1) |length| {
+        var code: usize = 0;
+        while (code < std.math.pow(usize, alphabet.len, length)) : (code += 1) {
+            var rest = code;
+            for (input[0..length]) |*byte| {
+                byte.* = alphabet[rest % alphabet.len];
+                rest /= alphabet.len;
+            }
+            const label = SavedLabel.fromColumn(input[0..length]);
+            try std.testing.expect(std.unicode.utf8ValidateSlice(label.raw()));
+            try std.testing.expectEqualStrings(label.raw(), SavedLabel.fromColumn(label.raw()).raw());
+            inline for (.{ 1, 3, 4, 100 }) |max| {
+                const line = readWords(max, input[0..length]);
+                try std.testing.expectEqual(line != null, label.words(max) != null);
+                if (line) |words| {
+                    try std.testing.expect(words.len <= max and std.unicode.utf8ValidateSlice(words.slice()));
+                    const again = readWords(max, words.slice()) orelse return error.TestUnexpectedResult;
+                    try std.testing.expectEqualStrings(words.slice(), again.slice());
+                }
             }
         }
     }
