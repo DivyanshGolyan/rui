@@ -190,6 +190,100 @@ fn reduceReviews(reviews: []const Review, coverage: Coverage, requested: bool) R
     return if (approved) .approved else .none;
 }
 
+/// How a watch ended; the tag is the Resolution's `outcome`. `changed`, `closed`,
+/// `merged` and `no_change` deliver the latest snapshot; the failures end a watch
+/// that could not keep observing; the rest refuse before any observation.
+pub const Outcome = enum {
+    changed,
+    closed,
+    merged,
+    no_change,
+    network_failure,
+    rate_limited,
+    revoked,
+    pr_inaccessible,
+    account_unavailable,
+    gh_unavailable,
+    account_discovery_failed,
+
+    fn carriesSnapshot(self: Outcome) bool {
+        return switch (self) {
+            .changed, .closed, .merged, .no_change, .network_failure, .rate_limited => true,
+            .revoked, .pr_inaccessible, .account_unavailable, .gh_unavailable, .account_discovery_failed => false,
+        };
+    }
+};
+
+/// Whether `current` ends a watch whose first observation was `baseline`. A closed or merged pull request
+/// always ends it. Otherwise a new head, a lifecycle change or any reviews change ends it, and a checks
+/// change ends it only into a settled state: pending and incomplete moves alone do not.
+pub fn endingOutcome(baseline: Snapshot, current: Snapshot) ?Outcome {
+    switch (current.lifecycle) {
+        .closed => return .closed,
+        .merged => return .merged,
+        .open, .draft => {},
+    }
+    const changed = changesBetween(baseline, current);
+    if (changed.head or changed.lifecycle or changed.reviews) return .changed;
+    if (changed.checks and (current.checks == .passing or current.checks == .failing)) return .changed;
+    return null;
+}
+
+/// The latest observation a Resolution reports, with what differs from the baseline.
+pub const Latest = struct { snapshot: Snapshot, changed: Changes, coverage: Coverage };
+
+pub const max_resolution_bytes = 8192;
+
+/// Builds the Resolution text of a finished watch from typed values only: no response body, title,
+/// review text or check output can reach it. `retry_at` is reported for `rate_limited` alone.
+pub fn encodeOutcome(buffer: []u8, outcome: Outcome, latest: ?Latest, retry_at: ?i64) error{NoSpaceLeft}![]const u8 {
+    var out: std.Io.Writer = .fixed(buffer);
+    out.print("{{\"outcome\":\"{s}\"", .{@tagName(outcome)}) catch return error.NoSpaceLeft;
+    if (outcome.carriesSnapshot()) {
+        if (latest) |value| {
+            const snapshot = value.snapshot;
+            out.print(",\"snapshot\":{{\"observed_at\":{d},\"head_sha\":\"{x}\",\"lifecycle\":\"{s}\",\"checks\":\"{s}\",\"reviews\":\"{s}\"}},\"changed\":[", .{
+                snapshot.observed_at,
+                &snapshot.head,
+                @tagName(snapshot.lifecycle),
+                @tagName(snapshot.checks),
+                @tagName(snapshot.reviews),
+            }) catch return error.NoSpaceLeft;
+            var first = true;
+            for ([_]struct { name: []const u8, changed: bool }{
+                .{ .name = "head", .changed = value.changed.head },
+                .{ .name = "lifecycle", .changed = value.changed.lifecycle },
+                .{ .name = "checks", .changed = value.changed.checks },
+                .{ .name = "reviews", .changed = value.changed.reviews },
+            }) |dimension| {
+                if (!dimension.changed) continue;
+                out.print("{s}\"{s}\"", .{ if (first) "" else ",", dimension.name }) catch return error.NoSpaceLeft;
+                first = false;
+            }
+            out.print("],\"coverage\":\"{s}\"", .{@tagName(value.coverage)}) catch return error.NoSpaceLeft;
+        } else out.writeAll(",\"snapshot\":null") catch return error.NoSpaceLeft;
+    }
+    if (outcome == .rate_limited) {
+        if (retry_at) |when| out.print(",\"retry_at\":{d}", .{when}) catch return error.NoSpaceLeft else out.writeAll(",\"retry_at\":null") catch return error.NoSpaceLeft;
+    }
+    out.writeAll("}") catch return error.NoSpaceLeft;
+    return out.buffered();
+}
+
+/// The Resolution of a watch that started without an account: no authenticated account, or several to choose from.
+/// `names` are sorted logins that already passed `validLogin`, so they need no escaping.
+pub fn encodeAccountChoice(buffer: []u8, names: []const []const u8) error{NoSpaceLeft}![]const u8 {
+    var out: std.Io.Writer = .fixed(buffer);
+    if (names.len == 0) {
+        out.writeAll("{\"outcome\":\"auth_required\",\"host\":\"github.com\"}") catch return error.NoSpaceLeft;
+        return out.buffered();
+    }
+    out.writeAll("{\"outcome\":\"account_required\",\"host\":\"github.com\",\"usernames\":[") catch return error.NoSpaceLeft;
+    for (names, 0..) |name, i| out.print("{s}\"{s}\"", .{ if (i == 0) "" else ",", name }) catch return error.NoSpaceLeft;
+    out.writeAll("]}") catch return error.NoSpaceLeft;
+    return out.buffered();
+}
+
 test "PRW-1 URL accepts only bounded unambiguous GitHub pull requests" {
     _ = try parseUrl("https://github.com/alice_acme/repo/pull/1");
     try std.testing.expectError(error.InvalidUrl, parseUrl("https://github.com/_alice/repo/pull/1"));
@@ -307,4 +401,62 @@ fn testReviews(reviews: []const Review, coverage: Coverage, requested: bool) Rev
     const head: Digest = @splat(0);
     const result = reduce(null, .{ .observed_at = 0, .head_before = head, .head_after = head, .lifecycle = .open, .checks = &.{}, .checks_coverage = .complete, .reviews = reviews, .reviews_coverage = coverage, .review_requested = requested }) catch unreachable;
     return result.snapshot.reviews;
+}
+
+fn testSnapshot(lifecycle: Lifecycle, checks: Checks, reviews: Reviews) Snapshot {
+    return .{ .observed_at = 7, .head = @splat(0xab), .lifecycle = lifecycle, .checks = checks, .reviews = reviews };
+}
+
+test "PRW-61 a watch ends on a new head, lifecycle, reviews, settled checks or a closed pull request" {
+    const base = testSnapshot(.open, .pending, .none);
+    try std.testing.expectEqual(@as(?Outcome, null), endingOutcome(base, base));
+    // Checks moving among unsettled states, or out of a settled one, never end a watch alone.
+    try std.testing.expectEqual(@as(?Outcome, null), endingOutcome(base, testSnapshot(.open, .incomplete, .none)));
+    try std.testing.expectEqual(@as(?Outcome, null), endingOutcome(testSnapshot(.open, .passing, .none), testSnapshot(.open, .pending, .none)));
+    try std.testing.expectEqual(@as(?Outcome, null), endingOutcome(testSnapshot(.open, .passing, .none), testSnapshot(.open, .incomplete, .none)));
+    for ([_]Checks{ .passing, .failing }) |settled| {
+        try std.testing.expectEqual(@as(?Outcome, .changed), endingOutcome(base, testSnapshot(.open, settled, .none)));
+    }
+    try std.testing.expectEqual(@as(?Outcome, .changed), endingOutcome(testSnapshot(.open, .passing, .none), testSnapshot(.open, .failing, .none)));
+    try std.testing.expectEqual(@as(?Outcome, .changed), endingOutcome(testSnapshot(.open, .incomplete, .none), testSnapshot(.open, .passing, .none)));
+    for ([_]Reviews{ .pending, .approved, .changes_requested, .incomplete }) |reviews| {
+        try std.testing.expectEqual(@as(?Outcome, .changed), endingOutcome(base, testSnapshot(.open, .pending, reviews)));
+    }
+    try std.testing.expectEqual(@as(?Outcome, .changed), endingOutcome(base, testSnapshot(.draft, .pending, .none)));
+    var moved = base;
+    moved.head = @splat(0xcd);
+    try std.testing.expectEqual(@as(?Outcome, .changed), endingOutcome(base, moved));
+    try std.testing.expectEqual(@as(?Outcome, .closed), endingOutcome(base, testSnapshot(.closed, .pending, .none)));
+    try std.testing.expectEqual(@as(?Outcome, .merged), endingOutcome(base, testSnapshot(.merged, .pending, .none)));
+    // A pull request that is already closed ends its watch at the baseline.
+    const closed = testSnapshot(.closed, .passing, .approved);
+    try std.testing.expectEqual(@as(?Outcome, .closed), endingOutcome(closed, closed));
+}
+
+test "PRW-62 a Resolution holds only typed values" {
+    var buffer: [max_resolution_bytes]u8 = undefined;
+    const latest: Latest = .{ .snapshot = testSnapshot(.open, .passing, .approved), .changed = .{ .head = true, .checks = true }, .coverage = .partial };
+    try std.testing.expectEqualStrings(
+        "{\"outcome\":\"changed\",\"snapshot\":{\"observed_at\":7,\"head_sha\":\"abababababababababababababababababababab\",\"lifecycle\":\"open\",\"checks\":\"passing\",\"reviews\":\"approved\"},\"changed\":[\"head\",\"checks\"],\"coverage\":\"partial\"}",
+        try encodeOutcome(&buffer, .changed, latest, null),
+    );
+    try std.testing.expectEqualStrings(
+        "{\"outcome\":\"no_change\",\"snapshot\":{\"observed_at\":7,\"head_sha\":\"abababababababababababababababababababab\",\"lifecycle\":\"open\",\"checks\":\"pending\",\"reviews\":\"none\"},\"changed\":[],\"coverage\":\"complete\"}",
+        try encodeOutcome(&buffer, .no_change, .{ .snapshot = testSnapshot(.open, .pending, .none), .changed = .{}, .coverage = .complete }, 99),
+    );
+    try std.testing.expectEqualStrings("{\"outcome\":\"rate_limited\",\"snapshot\":null,\"retry_at\":1234}", try encodeOutcome(&buffer, .rate_limited, null, 1234));
+    try std.testing.expectEqualStrings("{\"outcome\":\"rate_limited\",\"snapshot\":null,\"retry_at\":null}", try encodeOutcome(&buffer, .rate_limited, null, null));
+    try std.testing.expectEqualStrings("{\"outcome\":\"network_failure\",\"snapshot\":null}", try encodeOutcome(&buffer, .network_failure, null, 5));
+    for ([_]Outcome{ .revoked, .pr_inaccessible, .account_unavailable, .gh_unavailable, .account_discovery_failed }) |refusal| {
+        const text = try encodeOutcome(&buffer, refusal, latest, 5);
+        var expected: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"outcome\":\"{s}\"}}", .{@tagName(refusal)}), text);
+    }
+    try std.testing.expectError(error.NoSpaceLeft, encodeOutcome(buffer[0..20], .changed, latest, null));
+}
+
+test "PRW-63 an account choice lists the sorted logins or asks for authentication" {
+    var buffer: [max_resolution_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("{\"outcome\":\"auth_required\",\"host\":\"github.com\"}", try encodeAccountChoice(&buffer, &.{}));
+    try std.testing.expectEqualStrings("{\"outcome\":\"account_required\",\"host\":\"github.com\",\"usernames\":[\"alice\",\"bob_2\"]}", try encodeAccountChoice(&buffer, &.{ "alice", "bob_2" }));
 }

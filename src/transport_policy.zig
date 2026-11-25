@@ -198,7 +198,7 @@ const day_names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"
 const long_day_names = [_][]const u8{ "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday" };
 const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
-pub fn parseHttpDate(value: []const u8, now_seconds: i64) ?i64 {
+fn parseHttpDate(value: []const u8, now_seconds: i64) ?i64 {
     var day: u8 = undefined;
     var month: u4 = undefined;
     var year: u16 = undefined;

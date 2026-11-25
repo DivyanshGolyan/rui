@@ -36,20 +36,19 @@ fn responseStatus(response: anytype, now: i64, retry_at: *?i64) !void {
     if (limited) {
         var when = now;
         if (response.retry_after) |header| {
-            if (std.fmt.parseInt(u64, header, 10)) |seconds| {
-                const delay: i64 = @intCast(@min(seconds, std.math.maxInt(i64)));
-                when = std.math.add(i64, now, delay) catch std.math.maxInt(i64);
-            } else |_| {
-                if (transport_policy.parseHttpDate(header, now)) |due| {
-                    when = @max(when, due);
-                } else if (header.len > 0) {
-                    var digits_only = true;
-                    for (header) |c| if (!std.ascii.isDigit(c)) {
-                        digits_only = false;
-                        break;
-                    };
-                    if (digits_only) when = std.math.maxInt(i64);
-                }
+            if (transport_policy.parseRetryAfter(header, now)) |constraint| {
+                when = switch (constraint) {
+                    .delay_ms => |delay_ms| std.math.add(i64, now, @intCast(delay_ms / 1000)) catch std.math.maxInt(i64),
+                    .deadline_ms => |deadline_ms| @max(when, @divFloor(deadline_ms, 1000)),
+                };
+            } else if (header.len > 0) {
+                // A number too large to represent holds the watch for the full cap.
+                var digits_only = true;
+                for (header) |c| if (!std.ascii.isDigit(c)) {
+                    digits_only = false;
+                    break;
+                };
+                if (digits_only) when = std.math.maxInt(i64);
             }
         }
         if (response.rate_reset) |header| {

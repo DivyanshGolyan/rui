@@ -58,6 +58,8 @@ pub const Hooks = struct {
     observe_allowance: bool = false,
     phase_trace: bool = false,
     pause_fd: if (test_pause.enabled) ?c_int else void = if (test_pause.enabled) null else {},
+    /// A numeric loopback origin that `watch_github_pr` uses in place of api.github.com.
+    github_api_origin: if (test_pause.enabled) ?[]const u8 else void = if (test_pause.enabled) null else {},
     observation_fd: ?c_int = null,
     observation_state_fd: ?c_int = null,
     observation_plan: ?TestObservation.Plan = null,
@@ -151,6 +153,8 @@ pub const Tuning = struct {
     /// Digest of the admitted settings frame, with `admitted_directory`.
     settings_digest: ?settings_handoff.Digest = null,
     home: ?[]const u8 = null,
+    /// The Host process environment; `watch_github_pr` takes its `gh` profile from it and never reads a token variable.
+    github_environment: ?*const std.process.Environ.Map = null,
     limits: Limits = .{},
     hooks: Hooks = .{},
 
@@ -177,7 +181,13 @@ pub const Tuning = struct {
         if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| hooks.inspection_reply.delay_ms = delay;
         limits.client_send_buffer_bytes = try parsed.number(u32, "test-client-send-buffer-bytes");
         if (parsed.has("test-phase-trace")) hooks.phase_trace = true;
-        if (comptime test_pause.enabled) hooks.pause_fd = try parsed.number(c_int, "test-pause-fd");
+        if (comptime test_pause.enabled) {
+            hooks.pause_fd = try parsed.number(c_int, "test-pause-fd");
+            if (parsed.get("test-github-api-origin")) |origin| {
+                @import("github_watch_origin.zig").validateLoopback(origin) catch return error.InvalidTestGithubOrigin;
+                hooks.github_api_origin = origin;
+            }
+        }
         if (try parsed.number(c_int, "test-observation-fd")) |fd| {
             hooks.observation_fd = fd;
             hooks.phase_trace = true;
@@ -476,6 +486,12 @@ pub const Probes = struct {
 
     pub fn init(io: std.Io, hooks: Hooks) Probes {
         return .{ .io = io, .hooks = hooks, .trace_run_ns = nowNs(io) };
+    }
+
+    /// The loopback origin a test Host sends `watch_github_pr` requests to, in a pause build started with one.
+    pub fn githubFixtureOrigin(self: *const Probes) ?[]const u8 {
+        if (comptime test_pause.enabled) return self.hooks.github_api_origin;
+        return null;
     }
 
     pub fn attachPauseOwner(self: *Probes, owner: ?*test_pause.PauseController) void {
