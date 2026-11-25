@@ -20,13 +20,16 @@ VALUE_FLAGS = {"-b", "--body", "-F", "--body-file", "-t", "--subject", "-A", "--
 SELECTOR = re.compile(r"^(?:https?://\S*/pull/|#)?(\d+)/?$")
 
 
-def selector_number(selector, repo):
+def gh_view(command):
+    return subprocess.run(command, check=True, capture_output=True, text=True).stdout
+
+
+def selector_number(selector, repo, view=gh_view):
     """The PR number a `gh pr merge` selector names; a branch or none means the current branch's PR (gh resolves it)."""
     match = SELECTOR.match(selector or "")
     if match:
         return int(match[1])
-    command = ["gh", "pr", "view", *([selector] if selector else []), "--repo", repo, "--json", "number", "--jq", ".number"]
-    return int(subprocess.run(command, check=True, capture_output=True, text=True).stdout)
+    return int(view(["gh", "pr", "view", *([selector] if selector else []), "--repo", repo, "--json", "number", "--jq", ".number"]))
 
 
 def gh_merges(command):
@@ -58,29 +61,40 @@ def gh_merges(command):
     return merges
 
 
-def merged_prs(payload):
+def merged_prs(payload, view=gh_view):
     """The Rui PR numbers this tool call would merge; resolving a branch selector may call `gh`."""
     tool, args = payload.get("tool_name", ""), payload.get("tool_input", {})
     if tool in MERGE_TOOLS:
         slug = f"{args.get('owner')}/{args.get('repo')}"
         return [args["pullNumber"]] if slug.lower() == REPO.lower() and args.get("pullNumber") else []
     if tool == "Bash":
-        return [selector_number(selector, repo) for repo, selector in gh_merges(args.get("command", ""))
+        return [selector_number(selector, repo, view) for repo, selector in gh_merges(args.get("command", ""))
                 if repo.lower() == REPO.lower()]
     return []
+
+
+def judge(payload, pr_refusal, view=gh_view):
+    """(exit code, message) for a tool call; an unreadable review record lets the merge through."""
+    try:
+        for number in merged_prs(payload, view):
+            if reason := pr_refusal(int(number)):
+                return 2, f"Refused the merge: {reason}"
+    except (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError) as error:
+        return 0, f"warning: could not read the review record ({error}); not blocking."
+    return 0, ""
 
 
 def main():
     payload = json.load(sys.stdin)
     try:
         from merge_review import pr_refusal
-        for number in merged_prs(payload):
-            if reason := pr_refusal(int(number)):
-                print(f"Refused the merge: {reason}", file=sys.stderr)
-                return 2
-    except (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError, ImportError) as error:
-        print(f"warning: could not read the review record ({error}); not blocking.", file=sys.stderr)
-    return 0
+    except ImportError as error:
+        print(f"warning: could not load merge_review ({error}); not blocking.", file=sys.stderr)
+        return 0
+    code, message = judge(payload, pr_refusal)
+    if message:
+        print(message, file=sys.stderr)
+    return code
 
 
 if __name__ == "__main__":

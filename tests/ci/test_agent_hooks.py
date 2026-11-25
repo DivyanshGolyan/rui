@@ -1,12 +1,9 @@
-import contextlib
 import importlib.util
-import io
 import json
 from pathlib import Path
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
 
 HOOK = Path(__file__).resolve().parents[2] / ".claude/hooks/block_full_runs.py"
 MERGE_HOOK = HOOK.with_name("review_before_merge.py")
@@ -57,12 +54,6 @@ class ReviewBeforeMergeTest(unittest.TestCase):
     def setUp(self):
         self.hook = load_merge_hook()
 
-    def run_hook(self, payload, refusal=None, error=None):
-        stderr = io.StringIO()
-        with patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stderr(stderr), \
-                patch("merge_review.pr_refusal", side_effect=error, return_value=refusal):
-            return self.hook.main(), stderr.getvalue()
-
     def test_every_way_to_merge_a_rui_pr_is_recognised(self):
         rui = {"owner": "DivyanshGolyan", "repo": "rui"}
         for payload, numbers in (
@@ -80,10 +71,11 @@ class ReviewBeforeMergeTest(unittest.TestCase):
 
     def test_a_merge_without_a_number_resolves_the_branch_pr(self):
         for command in ("gh pr merge --squash --auto", "gh pr merge", "gh pr merge --squash --delete-branch", "gh pr merge fix/x"):
-            with self.subTest(command=command), patch.object(self.hook.subprocess, "run") as run:
-                run.return_value.stdout = "2310\n"
-                self.assertEqual(self.hook.merged_prs(merge_call("Bash", command=command)), [2310])
-                self.assertIn("--repo", run.call_args.args[0])
+            with self.subTest(command=command):
+                asked = []
+                view = lambda argv: asked.append(argv) or "2310\n"
+                self.assertEqual(self.hook.merged_prs(merge_call("Bash", command=command), view), [2310])
+                self.assertIn("--repo", asked[0])
 
     def test_other_calls_and_other_repositories_are_ignored(self):
         for payload in (merge_call("mcp__github__merge_pull_request", owner="someone", repo="else", pullNumber=1),
@@ -96,14 +88,15 @@ class ReviewBeforeMergeTest(unittest.TestCase):
 
     def test_an_unreviewed_pr_is_refused_and_a_reviewed_one_passes(self):
         merge = merge_call("mcp__github__merge_pull_request", owner="DivyanshGolyan", repo="rui", pullNumber=2302)
-        code, message = self.run_hook(merge, refusal="PR #2302 has no completed review. open_pr.py review")
+        code, message = self.hook.judge(merge, lambda number: f"PR #{number} has no completed review. open_pr.py review")
         self.assertEqual(code, 2)
         self.assertIn("open_pr.py review", message)
-        self.assertEqual(self.run_hook(merge)[0], 0)
+        self.assertEqual(self.hook.judge(merge, lambda number: None), (0, ""))
 
     def test_an_unreadable_review_record_does_not_block(self):
-        merge = merge_call("Bash", command="gh pr merge 2302")
-        code, message = self.run_hook(merge, error=subprocess.CalledProcessError(1, ["gh"], stderr="offline"))
+        def offline(number):
+            raise subprocess.CalledProcessError(1, ["gh"], stderr="offline")
+        code, message = self.hook.judge(merge_call("Bash", command="gh pr merge 2302"), offline)
         self.assertEqual(code, 0)
         self.assertIn("not blocking", message)
 

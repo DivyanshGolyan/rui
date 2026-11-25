@@ -72,6 +72,23 @@ def review_comment(head, findings=None, fixed=False):
     return f"{heading}\n{text}\n<!-- sonnet-review-state:v1 {state} -->{REVIEW_FOOTER}"
 
 
+def post_review(api, repo, pr, args, last_verdict):
+    """Post a review verdict (or its fix) on `pr`; returns (exit code, message)."""
+    if args.fixed == bool(args.head) or (args.fixed and args.findings):
+        return 1, "Pass --head SHA (with --findings FILE when it found some) for a verdict, or --fixed alone."
+    if args.fixed:
+        last = last_verdict()
+        if not last or last[0]["clean"]:
+            return 1, f"PR #{pr['number']} has no unresolved review findings to mark fixed."
+    try:
+        findings = Path(args.findings).read_text(encoding="utf-8") if args.findings else None
+    except (OSError, UnicodeError) as error:
+        return 1, f"Cannot read findings: {error}"
+    reviewed = args.head or pr["head"]["sha"]
+    api("POST", f"repos/{repo}/issues/{pr['number']}/comments", [("body", review_comment(reviewed, findings, args.fixed))])
+    return 0, f"Posted the review verdict on PR #{pr['number']} at {reviewed[:10]}."
+
+
 def git(*args):
     result = subprocess.run(["git", *args], capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else None
@@ -134,25 +151,12 @@ def main():
             if pr is None:
                 print("This branch has no open PR; pass --pr N.", file=sys.stderr)
                 return 1
-            if args.fixed == bool(args.head) or (args.fixed and args.findings):
-                print("Pass --head SHA (with --findings FILE when it found some) for a verdict, or --fixed alone.", file=sys.stderr)
-                return 1
-            if args.fixed:
+            def last_verdict():
                 from merge_review import pr_outcomes, verdicts
-                last = verdicts(pr_outcomes(pr["number"], repo)[0])[-1:]
-                if not last or last[0]["clean"]:
-                    print(f"PR #{pr['number']} has no unresolved review findings to mark fixed.", file=sys.stderr)
-                    return 1
-            try:
-                findings = Path(args.findings).read_text(encoding="utf-8") if args.findings else None
-            except (OSError, UnicodeError) as error:
-                print(f"Cannot read findings: {error}", file=sys.stderr)
-                return 1
-            reviewed = args.head or pr["head"]["sha"]
-            github("POST", f"repos/{repo}/issues/{pr['number']}/comments",
-                   [("body", review_comment(reviewed, findings, args.fixed))])
-            print(f"Posted the review verdict on PR #{pr['number']} at {reviewed[:10]}.")
-            return 0
+                return verdicts(pr_outcomes(pr["number"], repo)[0])[-1:]
+            code, message = post_review(github, repo, pr, args, last_verdict)
+            print(message, file=sys.stderr if code else sys.stdout)
+            return code
         if refusal := ready_refusal(pr, head, bool(git("status", "--porcelain"))):
             print(refusal, file=sys.stderr)
             return 1
