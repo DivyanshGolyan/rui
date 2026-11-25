@@ -3,6 +3,7 @@ const tool_fold = @import("tool_fold.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
+const activity_read = @import("activity_read.zig");
 const content_value = @import("content_value.zig");
 const value_reads = @import("value_reads.zig");
 const Text = @import("TerminalText.zig");
@@ -839,7 +840,7 @@ pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype
     return switch (try tool.runner()) {
         .bash => request(io, scratch, sink, colour, unicode_script),
         // An app call needs ask-mode approval like an MCP call, so its card shows the tool request.
-        .mcp, .read_image, .app => toolRequest(io, scratch, sink, colour, unicode_script, tool),
+        .mcp, .read_image, .github_pr_watch, .app => toolRequest(io, scratch, sink, colour, unicode_script, tool),
         .core, .provider => error.InvalidObservation,
     };
 }
@@ -1584,7 +1585,6 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
             try sink.feed(tool_fold.row_marker);
             try toolResult(presentation, sink, colour);
         },
-        .call => {},
         .turn_ended => |ended| {
             if (ended.ending.sign() == .finished) return false;
             if (!std.mem.eql(u8, ended.session.slice(), reads.sessionId())) {
@@ -1600,7 +1600,8 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
         },
         .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at),
         .send_failed => |failed| try sendFailed(sink, failed.target),
-        .approval_requested, .session_changed, .compacted, .model_call => {},
+        // A kind whose role is `detail` draws nothing in the conversation; a kind that gains the conversation role fails to compile here.
+        inline .call, .approval_requested, .session_changed, .compacted, .model_call => |_, kind| comptime std.debug.assert(activity_read.roleOf(kind) == .detail),
     }
     return false;
 }
@@ -1676,29 +1677,36 @@ test "hosted calls draw as adjacent tool rows across outcomes" {
     );
 }
 
-test "read_image approval displays the exact path arguments without a server" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
-    defer scratch.close(std.testing.io);
-    try scratch.writePositionalAll(std.testing.io, "{\"path\":\"image.png\"}", 0);
-    const Sink = struct {
-        bytes: [2048]u8 = undefined,
-        length: usize = 0,
-        pub fn feed(self: *@This(), text: []const u8) !void {
-            @memcpy(self.bytes[self.length..][0..text.len], text);
-            self.length += text.len;
-        }
-    };
-    var sink: Sink = .{};
-    var tool: ActionTool = .{ .name = .{}, .description = .{}, .server = null };
-    try tool.name.set("read_image");
-    try tool.description.set("Read image");
-    try renderPermissionArguments(std.testing.io, scratch, &sink, false, true, &tool);
-    const rendered = sink.bytes[0..sink.length];
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "Tool: read_image") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "{\"path\":\"image.png\"}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "Server:") == null);
+test "read_image and watch_github_pr approvals display the exact arguments without a server" {
+    const Case = struct { name: []const u8, description: []const u8, arguments: []const u8 };
+    for ([_]Case{
+        .{ .name = "read_image", .description = "Read image", .arguments = "{\"path\":\"image.png\"}" },
+        .{ .name = "watch_github_pr", .description = "Watch a GitHub pull request", .arguments = "{\"url\":\"https://github.com/org/repo/pull/42\"}" },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
+        defer scratch.close(std.testing.io);
+        try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
+        const Sink = struct {
+            bytes: [2048]u8 = undefined,
+            length: usize = 0,
+            pub fn feed(self: *@This(), text: []const u8) !void {
+                @memcpy(self.bytes[self.length..][0..text.len], text);
+                self.length += text.len;
+            }
+        };
+        var sink: Sink = .{};
+        var tool: ActionTool = .{ .name = .{}, .description = .{}, .server = null };
+        try tool.name.set(case.name);
+        try tool.description.set(case.description);
+        try renderPermissionArguments(std.testing.io, scratch, &sink, false, true, &tool);
+        const rendered = sink.bytes[0..sink.length];
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Tool: ") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, case.name) != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, case.arguments) != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Server:") == null);
+    }
 }
 
 test "MCP approval uses the saved description and renders exact arguments with Allow once and Deny" {

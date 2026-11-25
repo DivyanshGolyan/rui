@@ -282,7 +282,7 @@ fn pickModel(raw: *anyopaque, ctx: *vxfw.EventContext, model: []const u8) !void 
 
 fn updateTools(self: *Self) void {
     inline for (std.enums.values(tools.BuiltInTool), 0..) |tool, at| {
-        const name = if (tool == .web_search) "web search" else @tagName(tool);
+        const name = comptime tools.shown(tool);
         self.tool_labels[at] = if (self.tool_draft.?.contains(tool)) "✓ " ++ name else "  " ++ name;
     }
 }
@@ -505,7 +505,7 @@ fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.
         var selected = self.session.tools.iterator();
         while (selected.next()) |tool_name| {
             if (tool_text.written().len > 0) try tool_text.writer.writeAll(", ");
-            try tool_text.writer.writeAll(if (std.mem.eql(u8, tool_name, "web_search")) "web search" else tool_name);
+            try tool_text.writer.writeAll(tools.shownName(tool_name));
         }
     }
     self.fields[2].value = if (!self.ready) "unavailable" else if (tool_text.written().len == 0) "no tools" else tool_text.written();
@@ -776,6 +776,10 @@ test "Chat info effort permissions and tools choices pick and cancel typed edits
     try page.widget().handleEvent(&ctx, .tick);
     page.panel.selected = 2;
     try press(&page, &ctx, vaxis.Key.enter);
+    for (page.panel.choice.?.labels) |label| try std.testing.expect(std.mem.indexOf(u8, label, "web_search") == null);
+    var offers_web_search = false;
+    for (page.panel.choice.?.labels) |label| offers_web_search = offers_web_search or std.mem.indexOf(u8, label, "web search") != null;
+    try std.testing.expect(offers_web_search);
     try press(&page, &ctx, ' ');
     try std.testing.expect(!page.tool_draft.?.contains(.bash));
     try std.testing.expect(page.session.tools.contains("bash"));
