@@ -580,23 +580,30 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
     try std.testing.expectEqual(steps[0], steps[1]);
 }
 
-test "hidden value admissions and user entries do not increase Activity page work" {
+test "a long history of Action values does not increase one-row received page work" {
     var costs: [2][2]i64 = undefined;
-    for ([_]usize{ 10, 10_000 }, &costs) |history, *directions| {
+    for ([_]usize{ 100, 10_000 }, &costs) |history, *directions| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
-        const session = try configureTestSession(&storage, "hidden-work");
+        const session = try configureTestSession(&storage, "value-work");
+        try submitTestMessage(&storage, &tmp, "seed", "seed", session.slice(), "published value");
         const insert = try std.testing.allocator.printSentinel(
-            "CREATE TEMP TABLE hidden_history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+            "CREATE TEMP TABLE value_history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT value,next_position+2*value-2 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,decided_at,background_content_id,background_position,background_at) SELECT 5000,1,1,'{1s}',1,1,1,1,instructions_content_id,1,1 FROM session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) VALUES(1,'{1s}',1001,1001,1,'cancelled',1,1); " ++
+                "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq,primary_content_id) " ++
+                "SELECT printf('value-%d',value),2,'{1s}',zeroblob(32),1,'',0,0,(SELECT max(command_seq) FROM core_command)+value,content FROM value_history; " ++
                 "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,source_kind) " ++
-                "SELECT 1000+value,'{1s}',printf('hidden-%d',value),content,position,1,1,4 FROM hidden_history; " ++
+                "SELECT 1000+value,'{1s}',printf('value-%d',value),content,position,1,1,4 FROM value_history; " ++
+                "INSERT INTO action_value(action_id,ordinal,handle,publication_key,content_id,admission_id,published_at) " ++
+                "SELECT 5000,value,printf('%032x',value),printf('value-%d',value),content,1000+value,1 FROM value_history; " ++
                 "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_kind,content_id,recorded_at) " ++
-                "SELECT '{1s}',value,position+1,1,1,1000+value,4,content,1 FROM hidden_history; " ++
-                "UPDATE session SET next_position=next_position+2*{0} WHERE session_ref='{1s}'; DROP TABLE hidden_history",
+                "SELECT '{1s}',value,position+1,1,1,1000+value,4,content,1 FROM value_history; " ++
+                "UPDATE session SET next_position=next_position+2*{0} WHERE session_ref='{1s}'; DROP TABLE value_history",
             .{ history, session.slice() },
             0,
         );
@@ -606,9 +613,9 @@ test "hidden value admissions and user entries do not increase Activity page wor
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
         try store_core.reloadIdentitiesForTesting(&storage);
         for ([_]@FieldType(protocol.ActivityPage, "direction"){ .forward, .backward }, directions) |direction, *cost| {
-            const request: protocol.ActivityPage = .{ .session = session, .direction = direction, .kinds = .initMany(&.{ .received, .user }), .limit = 1 };
+            const request: protocol.ActivityPage = .{ .session = session, .direction = direction, .kinds = .initOne(.received), .limit = 1 };
             const page = try store_core.activityPageForTesting(&storage, request);
-            try std.testing.expectEqual(@as(usize, 0), page.count);
+            try std.testing.expectEqual(@as(usize, 1), page.count);
             cost.* = try activityPageSteps(&storage, request);
         }
     }
