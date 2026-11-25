@@ -87,6 +87,7 @@ requests: Requests = undefined,
 status: Status = undefined,
 screen: *Screen = undefined,
 app_content: FeedView = .{ .window = undefined, .anchor = undefined },
+feed_origin: SurfaceOrigin = .{},
 app_document: DocumentView = .{ .document = undefined },
 app_body: AppScreen.Content = undefined,
 app_input: InputArea = undefined,
@@ -364,8 +365,15 @@ pub const AppHooks = struct {
     on_open: *const fn (*anyopaque, *vxfw.EventContext, *const [session_id.bytes]u8) anyerror!void,
 };
 
+fn cancelPointerSelection(raw: *anyopaque) void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.app_content.cancelSelection()) self.dirty = true;
+}
+
 fn focusChanged(raw: *anyopaque) void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    cancelPointerSelection(raw);
+    if (self.app_document.cancelSelection()) self.dirty = true;
     self.footer.pending = null;
     self.shown_notice.dismiss();
     self.dirty = true;
@@ -402,7 +410,7 @@ fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
     self.app_input.bottom = &hooks.root.bottom;
-    hooks.root.session_focus = .{ .context = self, .changed = focusChanged, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates, .clipboard = .{ .target = clipboardTarget, .paste = pasteClipboard } };
+    hooks.root.session_focus = .{ .context = self, .changed = focusChanged, .cancel_pointer = cancelPointerSelection, .accepts_tab = acceptsTab, .modal = modalFocus, .candidates = focusCandidates, .clipboard = .{ .target = clipboardTarget, .paste = pasteClipboard } };
     self.app_info = .{ .backend = self.infoBackend(), .home = self.home };
     if (hooks.drafts) |drafts| if (drafts.take(self.init.gpa, self.session)) |draft| {
         defer self.init.gpa.free(draft.snapshot.bytes);
@@ -668,7 +676,38 @@ fn nowMs(self: *const Self) u64 {
 }
 
 pub fn widget(self: *Self) vxfw.Widget {
-    return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appDraw };
+    return .{ .userdata = self, .captureHandler = appCapture, .eventHandler = appEvent, .drawFn = appDraw };
+}
+
+fn selectionContextActive(self: *const Self) bool {
+    const root = self.app_hooks.root;
+    return self.leaving == null and self.screen.view == .feed and !self.info_open and !self.app_info.standaloneOpen() and
+        self.app_consent.request == null and root.input.layer == .main and root.input.mainFocused() and !root.input.pasting and
+        @import("app_input.zig").mainPane(root.input, root.session != null, root.size.width >= Root.split_at) == .session;
+}
+
+fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (event == .focus_out) {
+        cancelPointerSelection(raw);
+        if (self.app_document.cancelSelection()) self.dirty = true;
+        if (self.dirty) ctx.redraw = true;
+        return;
+    }
+    const mouse = if (event == .mouse) event.mouse else return;
+    if (self.app_content.capturePointerLifecycle(ctx, mouse)) return;
+    if (mouse.type == .press or mouse.type == .motion) return;
+    if (!self.app_content.capturesCopySelection()) return;
+    if (!self.selectionContextActive()) {
+        if (self.app_content.cancelSelection()) ctx.redraw = true;
+        if (self.app_content.capturePointerLifecycle(ctx, mouse)) return;
+        ctx.consumeAndRedraw();
+        return;
+    }
+    var local = mouse;
+    local.col -= @intCast(self.feed_origin.col);
+    local.row -= @intCast(self.feed_origin.row);
+    try self.app_content.widget().handleEvent(ctx, .{ .mouse = local });
 }
 
 fn appNotice(raw: *anyopaque, ctx: *vxfw.EventContext, text: []const u8) !void {
@@ -1091,9 +1130,18 @@ fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
     }
 }
 
+const SurfaceOrigin = struct { row: i32 = 0, col: i32 = 0 };
+
+fn surfaceOrigin(surface: vxfw.Surface, target: vxfw.Widget, row: i32, col: i32) ?SurfaceOrigin {
+    if (surface.widget.eql(target)) return .{ .row = row, .col = col };
+    for (surface.children) |child| if (surfaceOrigin(child.surface, target, row + child.origin.row, col + child.origin.col)) |found| return found;
+    return null;
+}
+
 fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const screen = self.screen;
+    if (!self.selectionContextActive()) _ = self.app_content.cancelSelection();
     if (!self.quoteReady()) _ = self.app_content.cancelQuote();
     const normal = style.of(self.app_caps, .{});
     const quiet = style.of(self.app_caps, .{ .colour = .quiet });
@@ -1232,6 +1280,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.chrome.status.key.focused = focused == .needs;
     self.chrome.status.stop.focused = focused == .stop;
     var surface = try self.app_screen.widget().draw(ctx);
+    if (screen.view == .feed) self.feed_origin = surfaceOrigin(surface, self.app_content.widget(), 0, 0) orelse .{};
     const size = if (self.app_consent.request != null) self.app_preview.size else if (screen.view == .feed) self.app_content.size else self.app_document.size;
     screen.height = size.height;
     screen.vx.screen.width = size.width;
@@ -2895,7 +2944,7 @@ fn feedState(self: *Self) FeedPolicy.State {
         .scan = self.live.scan,
         .window_provisional = screen.feed.firstProvisional(),
         .window_continuing = screen.feed.forward_partial,
-        .selection_held = self.app_content.dragging(),
+        .selection_held = self.app_content.selectionHeld(),
         .fills = self.reading.fills,
         .choice_open = screen.consent != null or self.app_consent.request != null,
         .action_named = self.live.work.first_action != null,
@@ -3519,6 +3568,8 @@ const HeldFrontend = struct {
     tmp: std.testing.TmpDir,
     directory: [std.Io.Dir.max_path_bytes]u8 = undefined,
     interrupted: client.Cancellation = .{},
+    peer_opened: usize = 0,
+    peer_id: [session_id.bytes]u8 = @splat(0),
     root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() },
     arena: std.heap.ArenaAllocator,
     left: ?Outcome = null,
@@ -3587,6 +3638,12 @@ const HeldFrontend = struct {
 
     fn onOpen(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {
         return error.UnexpectedOpen;
+    }
+
+    fn recordPeerOpen(raw: *anyopaque, _: *vxfw.EventContext, id: *const [session_id.bytes]u8) !void {
+        const held: *HeldFrontend = @ptrCast(@alignCast(raw));
+        held.peer_opened += 1;
+        held.peer_id = id.*;
     }
 
     fn context(held: *HeldFrontend) vxfw.EventContext {
@@ -3811,6 +3868,279 @@ test "a held frontend stops a read still running and joins it before it is freed
     try held.self.reader.start(std.testing.io, &held.self, Worker.read);
     held.destroy();
     try std.testing.expect(Worker.stopped.load(.acquire));
+}
+
+const ScreenPoint = struct { row: i16, col: i16 };
+
+fn screenTextPoint(surface: vxfw.Surface, text: []const u8, row: i32, col: i32) ?ScreenPoint {
+    const width: usize = surface.size.width;
+    const height: usize = surface.size.height;
+    if (surface.buffer.len == width * height and text.len <= width) {
+        for (0..height) |y| for (0..width - text.len + 1) |x| {
+            for (text, 0..) |byte, offset| {
+                const cell = surface.buffer[y * width + x + offset];
+                if (cell.char.grapheme.len != 1 or cell.char.grapheme[0] != byte) break;
+            } else return .{ .row = @intCast(row + @as(i32, @intCast(y))), .col = @intCast(col + @as(i32, @intCast(x))) };
+        };
+    }
+    for (surface.children) |child| if (screenTextPoint(child.surface, text, row + @as(i32, @intCast(child.origin.row)), col + @as(i32, @intCast(child.origin.col)))) |point| return point;
+    return null;
+}
+
+fn clipboardCount(ctx: *const vxfw.EventContext) usize {
+    var count: usize = 0;
+    for (ctx.cmds.items) |command| {
+        if (command == .copy_to_clipboard) count += 1;
+    }
+    return count;
+}
+
+fn lastClipboard(ctx: *const vxfw.EventContext) ?[]const u8 {
+    for (ctx.cmds.items) |command| {
+        if (command == .copy_to_clipboard) return command.copy_to_clipboard;
+    }
+    return null;
+}
+
+test "SUI-143 SessionFrontend selection routes Root targets while links and quotes keep their own gestures" {
+    const Pointer = @import("testing/app_events.zig");
+    const Actions = struct {
+        frontend: *Self,
+        opened: usize = 0,
+        uri: [128]u8 = undefined,
+        uri_len: usize = 0,
+        quotes: usize = 0,
+        quote: [128]u8 = undefined,
+        quote_len: usize = 0,
+
+        fn external(raw: *anyopaque, _: *vxfw.EventContext, uri: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.opened += 1;
+            @memcpy(self.uri[0..uri.len], uri);
+            self.uri_len = uri.len;
+        }
+        fn notice(_: *anyopaque, _: *vxfw.EventContext, _: []const u8) !void {}
+        fn scrollNoop(_: *anyopaque, _: *vxfw.EventContext, _: bool) !void {}
+        fn quoteBegin(raw: *anyopaque) ?Input.Insertion {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.frontend.input.insertionTarget();
+        }
+        fn quoteInsert(raw: *anyopaque, _: *vxfw.EventContext, _: Input.Insertion, body: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.quotes += 1;
+            @memcpy(self.quote[0..body.len], body);
+            self.quote_len = body.len;
+        }
+        fn handler(self: *@This()) FeedView.Handler {
+            return .{ .userdata = self, .on_external = external, .on_notice = notice, .on_scroll = scrollNoop, .quote = .{ .begin = quoteBegin, .insert = quoteInsert } };
+        }
+    };
+    const FocusPath = struct {
+        fn deliver(held: *HeldFrontend, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+            // Mirror vxfw FocusHandler's capture-to-focused-composer route.
+            const field = held.root.input.field;
+            ctx.consume_event = false;
+            ctx.phase = .capturing;
+            try held.root.widget().captureEvent(ctx, event);
+            try std.testing.expect(!ctx.consume_event);
+            try std.testing.expectEqual(field, held.root.input.field);
+            try std.testing.expect(held.root.input.mainFocused());
+            try held.self.widget().captureEvent(ctx, event);
+            try std.testing.expect(!ctx.consume_event);
+            try std.testing.expectEqual(field, held.root.input.field);
+            try std.testing.expect(held.root.input.mainFocused());
+            ctx.phase = .at_target;
+            try held.self.app_input.composer.widget().handleEvent(ctx, event);
+            try std.testing.expectEqual(field, held.root.input.field);
+            try std.testing.expect(held.root.input.mainFocused());
+        }
+    };
+
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    held.size = .{ .width = 140, .height = 25 };
+    const url = "https://example.com/selection";
+    const link = TerminalText.link_open ++ url ++ TerminalText.link_end ++ "LinkText" ++ TerminalText.link_close;
+    const shown = TerminalText.user_message_on ++ TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ TerminalText.body_on ++ "UserAlpha" ++ TerminalText.body_off ++ TerminalText.user_message_off ++
+        "\n" ++ TerminalText.body_on ++ link ++ TerminalText.body_off ++ "\n";
+    try seedFeed(held.screen, shown);
+    var actions: Actions = .{ .frontend = &held.self };
+    held.self.app_content.handler = actions.handler();
+    const frame = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
+    const user = screenTextPoint(frame, "UserAlpha", 0, 0) orelse return error.MissingUserCell;
+    const web = screenTextPoint(frame, "LinkText", 0, 0) orelse return error.MissingLinkCell;
+    try std.testing.expectEqual(@import("app_input.zig").Field.input, held.root.input.field);
+    try std.testing.expect(held.root.input.mainFocused());
+    var ctx = held.context();
+
+    try Pointer.mouse(&ctx, frame, .{ .col = user.col + 4, .row = user.row, .button = .left, .type = .press, .mods = .{} });
+    try held.self.app_content.widget().handleEvent(&ctx, .mouse_leave);
+    try Pointer.mouse(&ctx, frame, .{ .col = 40, .row = user.row, .button = .left, .type = .release, .mods = .{} });
+    try std.testing.expectEqual(@as(usize, 1), clipboardCount(&ctx));
+    try std.testing.expectEqualStrings("UserA", lastClipboard(&ctx).?);
+    try std.testing.expectEqual(@as(usize, 0), actions.opened);
+
+    ctx.cmds.clearRetainingCapacity();
+    try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .press, .mods = .{} });
+    try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .release, .mods = .{} });
+    try std.testing.expectEqual(@as(usize, 1), actions.opened);
+    try std.testing.expectEqualStrings(url, actions.uri[0..actions.uri_len]);
+    try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+
+    // Focus events with no held selection pass through to the composer.
+    try FocusPath.deliver(held, &ctx, .focus_out);
+    try FocusPath.deliver(held, &ctx, .focus_in);
+    try std.testing.expect(!held.self.app_content.selectionHeld());
+
+    // Terminal focus loss is captured by Root and SessionFrontend before the
+    // focused composer receives it; focus-in alone must not cancel a gesture.
+    try FocusPath.deliver(held, &ctx, .focus_out);
+    try FocusPath.deliver(held, &ctx, .focus_in);
+    try std.testing.expect(!held.self.app_content.selectionHeld());
+    for ([_]bool{ false, true }) |dragging| {
+        try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .press, .mods = .{} });
+        try FocusPath.deliver(held, &ctx, .focus_in);
+        try std.testing.expect(held.self.app_content.selectionHeld());
+        try std.testing.expect(!held.self.app_content.dragging());
+        var release_col = web.col;
+        if (dragging) {
+            try Pointer.mouse(&ctx, frame, .{ .col = web.col + 1, .row = web.row, .button = .left, .type = .drag, .mods = .{} });
+            release_col += 1;
+            try std.testing.expect(held.self.app_content.dragging());
+        }
+        try FocusPath.deliver(held, &ctx, .focus_out);
+        try std.testing.expect(!held.self.app_content.selectionHeld());
+        try FocusPath.deliver(held, &ctx, .focus_in);
+        try Pointer.mouse(&ctx, frame, .{ .col = release_col, .row = web.row, .button = .left, .type = .release, .mods = .{} });
+        try std.testing.expectEqual(@as(usize, 1), actions.opened);
+        try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+    }
+    try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .press, .mods = .{} });
+    try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .release, .mods = .{} });
+    try std.testing.expectEqual(@as(usize, 2), actions.opened);
+
+    try Pointer.mouse(&ctx, frame, .{ .col = web.col, .row = web.row, .button = .left, .type = .press, .mods = .{} });
+    try held.self.app_content.widget().handleEvent(&ctx, .mouse_leave);
+    try Pointer.mouse(&ctx, frame, .{ .col = 40, .row = web.row, .button = .left, .type = .release, .mods = .{} });
+    try std.testing.expectEqual(@as(usize, 2), actions.opened);
+    try std.testing.expectEqual(@as(usize, 1), clipboardCount(&ctx));
+    try std.testing.expect(lastClipboard(&ctx).?.len < url.len);
+
+    ctx.cmds.clearRetainingCapacity();
+    try Pointer.mouse(&ctx, frame, .{ .col = user.col + 4, .row = user.row, .button = .left, .type = .press, .mods = .{ .alt = true } });
+    try Pointer.mouse(&ctx, frame, .{ .col = user.col + 5, .row = user.row, .button = .left, .type = .drag, .mods = .{} });
+    try Pointer.mouse(&ctx, frame, .{ .col = user.col + 5, .row = user.row, .button = .left, .type = .release, .mods = .{} });
+    try std.testing.expectEqual(@as(usize, 1), actions.quotes);
+    try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+
+    try Pointer.mouse(&ctx, frame, .{ .col = user.col + 4, .row = user.row, .button = .left, .type = .press, .mods = .{ .alt = true } });
+    try held.self.app_content.widget().handleEvent(&ctx, .mouse_leave);
+    try Pointer.mouse(&ctx, frame, .{ .col = 40, .row = user.row, .button = .left, .type = .release, .mods = .{} });
+    try std.testing.expectEqual(@as(usize, 1), actions.quotes);
+    try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+
+    const peer = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "Plan" ++ TerminalText.link_close;
+    for ([_][]const u8{ peer, TerminalText.body_on ++ peer ++ TerminalText.body_off }) |content| {
+        const document = try HeldFrontend.create();
+        defer document.destroy();
+        document.size = .{ .width = 140, .height = 25 };
+        document.self.app_hooks.on_open = HeldFrontend.recordPeerOpen;
+        try document.screen.staging.append(content);
+        try document.screen.staging.prepare();
+        document.screen.view = .message;
+        const document_frame = try document.root.widget().draw(.{ .arena = document.arena.allocator(), .cell_arena = document.arena.allocator(), .min = .{}, .max = document.size, .cell_size = .{} });
+        const document_link = screenTextPoint(document_frame, "Plan", 0, 0) orelse return error.MissingDocumentLink;
+        var document_ctx = document.context();
+        try FocusPath.deliver(document, &document_ctx, .focus_out);
+        try FocusPath.deliver(document, &document_ctx, .focus_in);
+        try std.testing.expect(!document.self.app_document.dragging());
+        for ([_]bool{ false, true }) |dragging| {
+            try Pointer.mouse(&document_ctx, document_frame, .{ .col = document_link.col, .row = document_link.row, .button = .left, .type = .press, .mods = .{} });
+            try FocusPath.deliver(document, &document_ctx, .focus_in);
+            try std.testing.expect(document.self.app_document.dragging());
+            var release_col = document_link.col;
+            if (dragging) {
+                try Pointer.mouse(&document_ctx, document_frame, .{ .col = document_link.col + 1, .row = document_link.row, .button = .left, .type = .drag, .mods = .{} });
+                release_col += 1;
+                try std.testing.expect(document.self.app_document.dragging());
+            }
+            try FocusPath.deliver(document, &document_ctx, .focus_out);
+            try std.testing.expect(!document.self.app_document.dragging());
+            try FocusPath.deliver(document, &document_ctx, .focus_in);
+            try Pointer.mouse(&document_ctx, document_frame, .{ .col = release_col, .row = document_link.row, .button = .left, .type = .release, .mods = .{} });
+            try std.testing.expectEqual(@as(usize, 0), document.peer_opened);
+        }
+        try Pointer.mouse(&document_ctx, document_frame, .{ .col = document_link.col, .row = document_link.row, .button = .left, .type = .press, .mods = .{} });
+        try Pointer.mouse(&document_ctx, document_frame, .{ .col = document_link.col, .row = document_link.row, .button = .left, .type = .release, .mods = .{} });
+        try std.testing.expectEqual(@as(usize, 1), document.peer_opened);
+        try std.testing.expectEqualStrings("k7m2qx", &document.peer_id);
+    }
+}
+
+test "SUI-144 SessionFrontend cancels copy selection when its feed context is covered" {
+    const Pointer = @import("testing/app_events.zig");
+    const Context = enum { consent, info, standalone, settings, message, paste, focus, resize, leaving };
+    const Gesture = enum { press, drag };
+    const contexts = std.enums.values(Context);
+    const gestures = std.enums.values(Gesture);
+    for (contexts) |context| for (gestures) |gesture| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const initial_width: u16 = if (context == .focus) 140 else 46;
+        held.size = .{ .width = initial_width, .height = 30 };
+        const text = TerminalText.user_message_on ++ TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ "UserAlpha" ++ TerminalText.user_message_off;
+        try seedFeed(held.screen, text);
+        const frame = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
+        const user = screenTextPoint(frame, "UserAlpha", 0, 0) orelse return error.MissingUserCell;
+        var ctx = held.context();
+        try Pointer.mouse(&ctx, frame, .{ .col = user.col + 4, .row = user.row, .button = .left, .type = .press, .mods = .{} });
+        if (gesture == .drag) try Pointer.mouse(&ctx, frame, .{ .col = user.col + 5, .row = user.row, .button = .left, .type = .drag, .mods = .{} });
+        try std.testing.expect(held.self.app_content.capturesCopySelection());
+
+        switch (context) {
+            .consent => {
+                held.self.app_consent.adopt(41);
+                held.self.app_input.permission = &held.self.app_card;
+            },
+            .info => held.self.info_open = true,
+            .standalone => held.self.app_info.standalone = .{ .row = .effort },
+            .settings => held.root.input.layer = .settings,
+            .message => held.screen.view = .message,
+            .paste => held.root.input.pasting = true,
+            .focus => {
+                try std.testing.expect(try held.root.focusList(&ctx));
+                try std.testing.expect(!held.self.app_content.selectionHeld());
+            },
+            .resize => {
+                held.size.width = (held.size.width orelse 0) + 1;
+                _ = try held.self.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
+            },
+            .leaving => held.self.leaving = .returned,
+        }
+
+        if ((gesture == .press and context != .focus and context != .standalone) or context == .resize) {
+            _ = try held.self.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
+        }
+        ctx.consume_event = false;
+        try held.self.widget().captureEvent(&ctx, .{ .mouse = .{ .col = user.col, .row = user.row, .button = .left, .type = .release, .mods = .{} } });
+        try std.testing.expect(ctx.consume_event);
+        try std.testing.expect(!held.self.app_content.dragging());
+        try std.testing.expect(!held.self.app_content.selectionHeld());
+        try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+
+        held.self.app_consent.withdraw();
+        held.self.app_input.permission = null;
+        held.self.info_open = false;
+        held.self.app_info.closeStandaloneChoice();
+        held.root.input.layer = .main;
+        held.root.input.area = .main;
+        held.root.input.pasting = false;
+        held.screen.view = .feed;
+        held.self.leaving = null;
+        held.size = .{ .width = 46, .height = 30 };
+        try held.frame();
+        try std.testing.expect(!held.self.app_content.dragging());
+    };
 }
 
 fn barShows(held: *HeldFrontend) ![]const u8 {
@@ -8335,7 +8665,7 @@ fn provisionalEvictionReplay() !void {
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "answer after eviction") != null);
 }
 
-test "SessionFrontend feed press and drag hold both loading edges until release while scans continue" {
+test "SUI-160 SessionFrontend selection holds edge fills from press through drag until release" {
     for ([_]@FieldType(FeedPolicy.State, "need"){ .above, .below }) |edge| {
         const fixture = try FeedFixture.create();
         defer fixture.destroy();
@@ -8357,11 +8687,15 @@ test "SessionFrontend feed press and drag hold both loading edges until release 
             .{ .col = 4, .row = 2, .button = .left, .mods = .{}, .type = .release },
         }) |mouse| {
             try held.self.app_content.widget().handleEvent(&ctx, .{ .mouse = mouse });
-            try std.testing.expectEqual(mouse.type != .release, held.self.app_content.dragging());
+            try std.testing.expectEqual(mouse.type == .drag, held.self.app_content.dragging());
+            try std.testing.expectEqual(mouse.type != .release, held.self.app_content.selectionHeld());
             try std.testing.expectEqual(if (mouse.type == .release) @as(?feed_reads.Read, fill) else null, FeedPolicy.nextRead(held.self.feedState()));
             held.self.poll_at = 0;
             try std.testing.expectEqual(feed_reads.Read.scan, FeedPolicy.nextRead(held.self.feedState()).?);
             held.self.poll_at = std.math.maxInt(i96);
+            held.self.live.work.first_action = 17;
+            try std.testing.expectEqual(feed_reads.Read.permission, FeedPolicy.nextRead(held.self.feedState()).?);
+            held.self.live.work.first_action = null;
         }
     }
 }

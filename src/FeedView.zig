@@ -7,6 +7,7 @@ const Window = resident.Window;
 const Feed = resident.Feed;
 const View = @import("session_view.zig");
 const selecting = @import("transcript_selection.zig");
+const copy_gesture = @import("copy_gesture.zig");
 const Row = selecting.RowFor(@FieldType(Window, "document"));
 const Self = @This();
 const SessionInput = @import("SessionInput.zig");
@@ -67,9 +68,10 @@ const Selection = struct {
     purpose: Purpose = .copy,
     link: LinkClick = .{},
     press: Cell,
+    size: vxfw.Size = .{},
     anchor: Spot,
     head: Spot,
-    dragging: bool = false,
+    phase: copy_gesture.Phase = .pressed,
     edge: enum { none, up, down } = .none,
     ticking: bool = false,
     view: ?resident.Point = null,
@@ -108,14 +110,113 @@ pub fn scroll(self: *Self, rows: i32) void {
 }
 
 pub fn dragging(self: *const Self) bool {
-    return self.selection != null;
+    return if (self.selection) |held| held.phase == .dragging else false;
+}
+
+pub fn selectionHeld(self: *const Self) bool {
+    return if (self.selection) |held| held.phase == .pressed or held.phase == .dragging else false;
+}
+
+pub fn capturesCopySelection(self: *const Self) bool {
+    return if (self.selection) |held| held.purpose == .copy else false;
 }
 
 pub fn cancelSelection(self: *Self) bool {
-    const held = self.selection != null;
+    const held = self.selection orelse {
+        self.retry_press = null;
+        return false;
+    };
+    self.retry_press = null;
+    if (held.purpose != .copy) {
+        self.selection = null;
+        return true;
+    }
+    const transition = copy_gesture.step(held.phase, .cancel);
+    if (transition.effect != .cancel) return false;
+    if (self.selection) |*selection| {
+        selection.phase = transition.phase;
+        _ = selection.link.step(.cancel);
+        selection.edge = .none;
+        selection.ticking = false;
+    }
+    return true;
+}
+
+fn consumeCancelledPointer(self: *Self, ctx: *vxfw.EventContext, kind: vaxis.Mouse.Type) bool {
+    const held = self.selection orelse return false;
+    if (held.purpose != .copy or held.phase != .cancelled) return false;
+    const input: copy_gesture.Input = switch (kind) {
+        .press => .press,
+        .motion => .motion,
+        .drag => .{ .drag = false },
+        .release => .{ .release = false },
+    };
+    const transition = copy_gesture.step(held.phase, input);
+    if (self.selection) |*selection| selection.phase = transition.phase;
+    switch (transition.effect) {
+        .consume_drag => {
+            ctx.consumeEvent();
+            return true;
+        },
+        .consume_release => {
+            self.selection = null;
+            self.retry_press = null;
+            ctx.consumeAndRedraw();
+            return true;
+        },
+        .restart => {
+            self.selection = null;
+            self.retry_press = null;
+            ctx.redraw = true;
+            return false;
+        },
+        .retire => {
+            self.selection = null;
+            self.retry_press = null;
+            ctx.redraw = true;
+            return false;
+        },
+        else => return false,
+    }
+}
+
+fn retireCopyOnMotion(self: *Self) bool {
+    const held = self.selection orelse return false;
+    if (held.purpose != .copy) return false;
+    const transition = copy_gesture.step(held.phase, .motion);
+    if (transition.effect != .retire) return false;
     self.selection = null;
     self.retry_press = null;
-    return held;
+    return true;
+}
+
+fn retireForNewPress(self: *Self) bool {
+    const held = self.selection orelse return false;
+    if (held.purpose == .quote) {
+        self.selection = null;
+        self.retry_press = null;
+        return true;
+    }
+    const transition = copy_gesture.step(held.phase, .press);
+    if (transition.effect != .restart) return false;
+    self.selection = null;
+    self.retry_press = null;
+    return true;
+}
+
+/// Applies lifecycle effects before hit-target dispatch; the caller keeps no gesture state.
+pub fn capturePointerLifecycle(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) bool {
+    switch (value.type) {
+        .press => {
+            if (self.retireForNewPress()) ctx.redraw = true;
+            return false;
+        },
+        .motion => {
+            if (self.retireCopyOnMotion()) ctx.redraw = true;
+            return false;
+        },
+        .drag, .release => return self.consumeCancelledPointer(ctx, value.type),
+    }
 }
 
 pub fn cancelQuote(self: *Self) bool {
@@ -298,19 +399,18 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
     switch (input) {
         .mouse => |value| try self.mouse(ctx, value),
         .focus_out => {
-            if (self.selection) |*held| _ = held.link.step(.cancel);
-            if (self.cancelQuote()) ctx.redraw = true;
+            if (self.cancelSelection()) ctx.redraw = true;
         },
         .mouse_leave => {
             self.retry_press = null;
-            if (self.selection != null) {
+            if (self.selection) |held| if (held.purpose == .quote) {
                 self.selection = null;
                 ctx.redraw = true;
-            }
+            };
         },
         .tick => {
             const held = if (self.selection) |*selection| selection else return;
-            if (!held.dragging or held.edge == .none) {
+            if (held.phase != .dragging or held.edge == .none) {
                 held.ticking = false;
                 return;
             }
@@ -324,6 +424,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
 }
 
 fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
+    if (self.capturePointerLifecycle(ctx, value)) return;
     const handler = self.handler orelse return;
     const at: Cell = .{ .row = value.row, .col = value.col };
     if (self.selection) |held| if (!self.current(held.purpose)) {
@@ -375,7 +476,8 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
                 return;
             };
             const spot = try self.spotAt(ctx.alloc, at) orelse return;
-            var selection: Selection = .{ .purpose = purpose, .press = at, .anchor = spot, .head = spot };
+            const started = copy_gesture.step(.idle, .press);
+            var selection: Selection = .{ .purpose = purpose, .press = at, .size = self.size, .anchor = spot, .head = spot, .phase = started.phase };
             const plain = purpose == .copy and !value.mods.alt and !value.mods.ctrl and !value.mods.shift;
             _ = selection.link.step(.{ .press = .{ .plain = plain, .cell = at, .hit = if (plain) self.linkHit(at) else null } });
             self.selection = selection;
@@ -384,8 +486,17 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
         .drag => {
             const held = if (self.selection) |*selection| selection else return;
             _ = held.link.step(.drag);
-            if (!held.dragging and std.meta.eql(at, held.press)) return;
-            held.dragging = true;
+            const transition = copy_gesture.step(held.phase, .{ .drag = !std.meta.eql(at, held.press) });
+            held.phase = transition.phase;
+            switch (transition.effect) {
+                .none => return,
+                .start_drag, .update_drag => {},
+                .consume_drag => {
+                    ctx.consumeEvent();
+                    return;
+                },
+                else => return,
+            }
             held.head = try self.spotAt(ctx.alloc, at) orelse return;
             held.view = self.drawn.first;
             held.row = self.drawn.row;
@@ -398,12 +509,21 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
         },
         .release => {
             var held = self.selection orelse return;
+            const was_dragging = held.phase == .dragging;
+            const transition = copy_gesture.step(held.phase, .{ .release = std.meta.eql(at, held.press) });
+            held.phase = transition.phase;
             self.selection = null;
             ctx.consumeAndRedraw();
+            switch (transition.effect) {
+                .consume_release => return,
+                .finish_click, .finish_copy => {},
+                else => return,
+            }
+            if (held.purpose == .copy and transition.effect == .finish_copy) held.head = try self.spotAt(ctx.alloc, at) orelse held.head;
             const anchor = self.resolved(held.anchor) orelse return;
             const head = self.resolved(held.head) orelse return;
             if (held.purpose == .quote) {
-                if (!held.dragging or (value.button != .left and value.button != .none) or at.row < 0 or at.col < 0 or at.row >= self.drawn.height or at.col >= self.drawn.width) return;
+                if (!was_dragging or (value.button != .left and value.button != .none) or at.row < 0 or at.col < 0 or at.row >= self.drawn.height or at.col >= self.drawn.width) return;
                 const quote = handler.quote orelse return;
                 const result = try selecting.copyBody(ctx.alloc, self.window, .of(anchor, head));
                 switch (result) {
@@ -416,7 +536,7 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
                 }
                 return;
             }
-            if (held.dragging) {
+            if (transition.effect == .finish_copy) {
                 const result = try selecting.copy(ctx.alloc, &self.window.document, .of(anchor, head));
                 if (result == .text) try ctx.addCmd(.{ .copy_to_clipboard = result.text.bytes });
                 var buffer: [64]u8 = undefined;
@@ -481,7 +601,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
     self.size = surface.size;
-    if (self.selection) |held| if (!self.current(held.purpose)) {
+    if (self.selection) |held| if ((held.purpose == .copy and held.size.width != 0 and !std.meta.eql(held.size, self.size)) or !self.current(held.purpose)) {
         _ = self.cancelSelection();
     };
     const pending = if (self.pending != null) try self.pendingDocument(ctx) else null;
@@ -550,15 +670,16 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     try self.drawnLinks(ctx.arena, surface);
     try self.drawHover(ctx, surface);
     if (self.selection) |*held| {
+        if (held.phase == .cancelled) return surface;
         const anchor = self.resolved(held.anchor) orelse {
-            self.selection = null;
+            _ = self.cancelSelection();
             return surface;
         };
         _ = self.resolved(held.head) orelse {
-            self.selection = null;
+            _ = self.cancelSelection();
             return surface;
         };
-        if (held.dragging and self.size.width > 0 and self.size.height > 0) {
+        if (held.phase == .dragging and self.size.width > 0 and self.size.height > 0) {
             if (!std.meta.eql(held.view, first) or held.row != visible.row) switch (held.edge) {
                 .none => {},
                 .up => if (try self.spotAt(ctx.arena, .{ .row = 0, .col = 0 })) |spot| {
@@ -684,7 +805,7 @@ test "FeedView selection endpoints survive prepends and edits but not eviction" 
     _ = try testFrame(&view, arena.allocator(), 16, 2);
     const start = (try view.spotAt(arena.allocator(), .{ .row = 0, .col = 6 })).?;
     const end = (try view.spotAt(arena.allocator(), .{ .row = 1, .col = 4 })).?;
-    view.selection = .{ .press = .{ .row = 0, .col = 6 }, .anchor = start, .head = end, .dragging = true };
+    view.selection = .{ .press = .{ .row = 0, .col = 6 }, .size = view.size, .anchor = start, .head = end, .phase = .dragging };
     view.scroll(-1);
     try window.prepend(&.{.{ .key = .{ .position = 10 }, .text = .{ .bytes = "older\n" } }});
     const first_copy = try selecting.copy(std.testing.allocator, &window.document, .of(view.resolved(start).?, view.resolved(end).?));
@@ -1131,7 +1252,7 @@ test "FeedView hover and drag highlight measure each visible line a bounded numb
         defer arena.deinit();
         _ = try testFrame(&view, arena.allocator(), 8, height);
         const start = (try view.spotAt(arena.allocator(), .{ .row = 0, .col = 0 })).?;
-        view.selection = .{ .press = .{ .row = 0, .col = 0 }, .anchor = start, .head = start, .dragging = true };
+        view.selection = .{ .press = .{ .row = 0, .col = 0 }, .size = view.size, .anchor = start, .head = start, .phase = .dragging };
         viewport.measured_lines = 0;
         const frame = try testFrame(&view, arena.allocator(), 8, height);
         try std.testing.expect(frame.buffer[0].style.reverse);
@@ -1627,7 +1748,7 @@ test "SUI-112 painted assistant links open on plain clicks while drags select" {
     for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) {
         copied = command.copy_to_clipboard;
     };
-    try std.testing.expectEqualStrings("we", copied orelse return error.MissingClipboardCopy);
+    try std.testing.expectEqualStrings("w", copied orelse return error.MissingClipboardCopy);
     try retryMouse(&view, &ctx, at, .press);
     try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(at.row), .col = @intCast(at.col), .button = .left, .mods = .{ .ctrl = true }, .type = .release } });
     try std.testing.expectEqual(@as(usize, 1), actions.count);
