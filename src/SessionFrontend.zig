@@ -3455,12 +3455,11 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             const result = &self.job.result;
             observed = .{ .snapshot = .{ .read_version = result.work.read_version, .work = result.work.work, .last_line = result.work.last_line }, .opening = read == .opening };
             self.live.work = .fromCore(result.work.work);
-            const roster = if (result.queue_cutoff) |cutoff| self.queue_horizon.adopt(cutoff) else false;
-            if (roster) {
+            if (if (result.queue_cutoff) |cutoff| self.queue_horizon.adopt(cutoff) else false) {
                 self.live.queued = result.queued;
                 if (result.queued_line) |shown| self.live.queued_line = shown;
             }
-            if (result.attached_pending) |pending| if (roster and self.screen.feed.indexOf(pending.row) != null) {
+            if (result.attached_pending) |pending| if (self.screen.feed.indexOf(pending.row) != null) {
                 _ = self.submission.observe(.{ .pending = .{ .key = pending.key, .position = pending.row.position, .page_all = true, .adopted = true, .queue = self.queueFacts() } });
             };
             if (self.job.open_status or self.job.watch_status) try self.applyStatus();
@@ -7744,6 +7743,26 @@ test "SUI-163 a newer aggregate reuses its unchanged queued preview after anothe
     const waiting = self.queuedRow().?;
     try std.testing.expectEqual(@as(u64, 1), waiting.waiting.count);
     try std.testing.expectEqualStrings("still waiting", waiting.waiting.line);
+}
+
+test "SUI-163 a replay page whose aggregate is refused still hands off the keyed pending Message" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const ticket = self.input.submitText("local input");
+    _ = self.submission.observe(.{ .begin = .{ .key = @splat('K'), .before = null } });
+    _ = self.submission.observe(.{ .receipt = .{ .key = @splat('K'), .admission = 7 } });
+    self.submission.holdAccepted(ticket, @splat('K'));
+    defer self.submission.disposeMessage();
+    try fixture.page(.opening, &.{.{ .key = 1, .text = "earlier\n" }}, true, true);
+    // A newer aggregate is held: the replay's first page below is partial, so its cutoff is older.
+    try std.testing.expect(self.queue_horizon.adopt(100));
+    self.live.queued = .{ .count = 2, .oldest_position = 3, .newest_admission = 7, .newest_position = 50 };
+    self.live.queued_line = .{ .admission = 7, .line = .{} };
+    try self.live.queued_line.?.line.set("local input");
+    try fixture.page(.scan, &.{.{ .key = 3, .text = "", .provisional = true, .message_key = @splat('K') }}, false, false);
+    try std.testing.expect(self.queue_horizon.roster.? == 100);
+    try std.testing.expectEqual(queue_lifecycle.Phase.represented, self.submission.queue.message.?.phase);
 }
 
 fn queuedAndTakenAcrossWork() !void {
