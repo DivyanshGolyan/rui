@@ -159,6 +159,7 @@ const cores = .{
     .{ "serve_grammar.zig", @import("serve_grammar.zig") },
     .{ "session_archive.zig", @import("session_archive.zig") },
     .{ "session_chrome.zig", @import("session_chrome.zig") },
+    .{ "session_class.zig", @import("session_class.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
     .{ "session_id.zig", @import("session_id.zig") },
