@@ -201,6 +201,7 @@ fn freeze(self: *Self, phase: ReadPhase) *Job {
 
     const job = &self.job;
     job.local_message_key = self.submission.messageKey() orelse self.submission.lastMessageKey();
+    if (phase == .activity and self.reading.opening) job.accepted = self.submission.acceptedProbe();
     job.latest_ending = self.live.latest_ending;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -2622,6 +2623,20 @@ fn refreshAcceptedMessage(self: *Self) void {
     self.dirty = true;
 }
 
+/// The refresh also asked the Host what became of the held accepted Message, which the loaded page
+/// may not hold. A row the page did show has already settled it, and the answer then adds nothing.
+fn settleAccepted(self: *Self, key: [36]u8, verdict: Submission.Verdict) void {
+    if (!self.submission.settleAccepted(key, verdict)) return;
+    switch (verdict) {
+        .taken => self.notice = "Message sent earlier in the conversation",
+        .queued => self.notice = "Message accepted and still queued",
+        .stopped => self.shown_notice.show("! Stopped before it ran · send it again to run it", self.nowMs()),
+        .unverified => self.notice = "Message accepted; could not confirm it yet · Enter asks again",
+        .elsewhere => self.notice = "Message accepted on another Store; reopen that Store to settle it",
+    }
+    self.dirty = true;
+}
+
 fn retryable(self: *const Self) ?RetryFence {
     const ending = self.live.latest_ending orelse return null;
     if (ending.cause.key == null or self.hostHeld()) return null;
@@ -3449,6 +3464,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             if (result.attached_pending) |pending| if (self.screen.feed.indexOf(pending.row) != null) {
                 _ = self.submission.observe(.{ .pending = .{ .key = pending.key, .position = pending.row.position, .page_all = true, .adopted = true, .queue = self.queueFacts() } });
             };
+            if (self.job.accepted) |probe| if (result.accepted) |verdict| self.settleAccepted(probe.key, verdict);
             if (self.job.open_status or self.job.watch_status) try self.applyStatus();
             if (result.line) |*line| self.line = line.*;
             if (result.hint) |*hint| self.hint = hint.*;
@@ -6911,7 +6927,7 @@ test "App Session accepted message refresh keeps the next draft intact without p
     defer fixture.deinit();
     const self = fixture.self;
     const original = self.input.submitText("accepted original");
-    self.submission.holdAccepted(original, @splat('K'));
+    self.submission.holdAccepted(original, @splat('K'), .{});
     self.submission.accepted = .{ .kind = .message, .key = @splat('K') };
     defer self.submission.disposeMessage();
     _ = self.input.append("next draft");
@@ -6930,6 +6946,48 @@ test "App Session accepted message refresh keeps the next draft intact without p
     try std.testing.expect(self.submission.retry == null);
     const shown = try fixture.rows();
     try std.testing.expect(ChromeFixture.find(&shown, "◌ accepted original") != null);
+}
+
+test "SUI-165 a refresh asks the Host about a held accepted Message and settles it on the answer" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    for (std.enums.values(Submission.Verdict), 0..) |verdict, round| {
+        const key: [36]u8 = @splat(@intCast('A' + round));
+        _ = self.submission.observe(.{ .begin = .{ .key = key, .before = null } });
+        var store: protocol.Bounded(protocol.max_store_bytes) = .{};
+        try store.set("/canonical-store");
+        self.submission.holdAccepted(self.input.submitText("accepted original"), key, store);
+        defer self.submission.disposeMessage();
+        _ = self.input.append("next draft");
+        self.reading.opening = false;
+        try std.testing.expect(self.freeze(.activity).accepted == null);
+        self.reading.opening = true;
+        try std.testing.expectEqual(key, self.freeze(.activity).accepted.?.key);
+        try std.testing.expectEqualStrings("/canonical-store", self.job.accepted.?.store.slice());
+        self.notice = null;
+        self.settleAccepted(key, verdict);
+        const released = verdict == .taken or verdict == .stopped;
+        try std.testing.expectEqual(!released, self.submission.messageHeld());
+        const said: []const u8 = switch (verdict) {
+            .taken => "Message sent earlier in the conversation",
+            .queued => "Message accepted and still queued",
+            .unverified => "Message accepted; could not confirm it yet · Enter asks again",
+            .elsewhere => "Message accepted on another Store; reopen that Store to settle it",
+            .stopped => "! Stopped before it ran · send it again to run it",
+        };
+        if (verdict == .stopped) {
+            try std.testing.expectEqualStrings(said, self.shown_notice.bytes[0..self.shown_notice.len]);
+            self.shown_notice.len = 0;
+        } else try std.testing.expectEqualStrings(said, self.notice.?);
+        try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+        // A page that already accounted for the Message leaves nothing for the answer to say.
+        self.notice = null;
+        self.settleAccepted(key, verdict);
+        try std.testing.expectEqual(released, self.notice == null and self.shown_notice.len == 0);
+        self.input.clear();
+    }
 }
 
 fn optimisticEnteredFrame() !void {
@@ -7691,7 +7749,7 @@ fn queuedAndTakenAcrossWork() !void {
         try std.testing.expect(std.mem.indexOf(u8, working, "› first request") != null);
         try std.testing.expect(std.mem.indexOf(u8, working, "Thinking") != null);
         const ticket = self.input.submitText("waiting one");
-        self.submission.holdAccepted(ticket, @splat('K'));
+        self.submission.holdAccepted(ticket, @splat('K'), .{});
         defer self.submission.disposeMessage();
         var first_line: queued_line.Line = .{};
         try first_line.set("waiting one");
@@ -7869,7 +7927,7 @@ fn localAppliedFill() !void {
     const ticket = self.input.submitText("local input");
     _ = self.submission.observe(.{ .begin = .{ .key = @splat('K'), .before = null } });
     _ = self.submission.observe(.{ .receipt = .{ .key = @splat('K'), .admission = 7 } });
-    self.submission.holdAccepted(ticket, @splat('K'));
+    self.submission.holdAccepted(ticket, @splat('K'), .{});
     defer self.submission.disposeMessage();
     try fixture.page(.opening, &.{}, true, true);
     self.live.queued = .{ .count = 2, .oldest_position = 1, .newest_admission = 7, .newest_position = 2 };
@@ -7978,7 +8036,7 @@ fn newerQueueHandoff() !void {
     const original = self.input.submitText("local original");
     _ = self.submission.observe(.{ .begin = .{ .key = @splat('K'), .before = null } });
     _ = self.submission.observe(.{ .receipt = .{ .key = @splat('K'), .admission = 7 } });
-    self.submission.holdAccepted(original, @splat('K'));
+    self.submission.holdAccepted(original, @splat('K'), .{});
     defer self.submission.disposeMessage();
     try fixture.page(.opening, &.{}, true, true);
     const before = try fixture.held.shown();
@@ -8005,7 +8063,7 @@ fn stoppedQueueHandoff() !void {
     defer fixture.destroy();
     const self = &fixture.held.self;
     const ticket = self.input.submitText("stopped original");
-    self.submission.holdAccepted(ticket, @splat('K'));
+    self.submission.holdAccepted(ticket, @splat('K'), .{});
     defer self.submission.disposeMessage();
     try fixture.page(.opening, &.{}, true, true);
     try fixture.page(.scan, &.{.{ .key = 2, .text = "◌ not sent\nother\n", .excluded_key = @splat('J') }}, true, true);
@@ -8050,7 +8108,7 @@ fn keyedAcceptedHandoff() !void {
     defer fixture.destroy();
     const self = &fixture.held.self;
     const original = self.input.submitText("accepted keyed original");
-    self.submission.holdAccepted(original, @splat('K'));
+    self.submission.holdAccepted(original, @splat('K'), .{});
     defer self.submission.disposeMessage();
     _ = self.input.append("next draft");
     try fixture.page(.opening, &.{.{ .key = 10, .text = "other message\n", .message_key = @splat('J') }}, true, true);
@@ -10198,7 +10256,7 @@ test "Enter while the Host line or opening holds sending keeps the draft, names 
         defer held.self.app_hooks.host = null;
         held.self.reading.opening = opening;
         defer held.self.reading.opening = false;
-        if (accepted) held.self.submission.holdAccepted(held.self.input.submitText("accepted earlier"), @splat('K'));
+        if (accepted) held.self.submission.holdAccepted(held.self.input.submitText("accepted earlier"), @splat('K'), .{});
         defer if (accepted) held.self.submission.disposeMessage();
         try held.keys("sent right after a restart\r");
         try std.testing.expect(held.self.submission.intent == null);

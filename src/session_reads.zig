@@ -187,6 +187,7 @@ pub const Job = struct {
     retry: ?Key = null,
     queued_line: u64 = 0,
     local_message_key: ?[36]u8 = null,
+    accepted: ?Submission.Probe = null,
     inspection_kind: Inspection = .requests,
     interrupted: *client.Cancellation = undefined,
     command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
@@ -216,6 +217,7 @@ pub const Job = struct {
         queued: protocol.Queued = .{},
         attached_pending: ?struct { key: [36]u8, row: Key } = null,
         queued_line: ?queued_line.Shown = null,
+        accepted: ?Submission.Verdict = null,
         live: View.Live = .{},
         latest_ending: ?LatestEnding = null,
         cursor: protocol_reply.ActivityCursor = .{},
@@ -484,12 +486,32 @@ fn scanWorker(raw: *anyopaque, task: *Task, prepare_permission: bool) !void {
     };
     const paths = try requests.resolveActivityRoute(job.store, job.session, pageCursor(job, plan));
     const reads = client.SessionReads.bound(requests, &paths, job.session);
+    // Asked before the page, so a Turn that takes the Message after this answer still finds its row in the page.
+    if (job.accepted) |probe| job.result.accepted = try readAccepted(requests, &paths, job.session, probe);
     try scanAt(job, task, reads, plan);
     if (prepare_permission) if (job.result.work.work.first_action) |action| {
         try job.files.action.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
         if (!try View.permissionWith(reads, action, job.files.scratch, &output, job.colour, job.unicode_script)) return;
         job.result.action = action;
+    };
+}
+
+/// The one Store read that settles a held accepted Message, whether or not its row lies on the loaded
+/// page: the Host's answer for its key, asked of the route the Activity read resolved, and only when
+/// that route is the canonical Store whose receipt took the Message. A transport or Host failure is the
+/// read's failure, as for the page; only an answer that is not this Message's leaves it unverified.
+fn readAccepted(requests: client.Requests, paths: *const @import("platform.zig").Paths, session: []const u8, probe: Submission.Probe) !Submission.Verdict {
+    if (!paths.store_identity.eql(probe.store.slice())) return .elsewhere;
+    const address = protocol_reply.MessageAddress.init(probe.store.slice(), session, &probe.key) catch return .unverified;
+    const reply = requests.observeMessageAt(paths, &address) catch |err| switch (@as(anyerror, err)) {
+        error.RequestNotAdmitted, error.RequestBindingMismatch => return .unverified,
+        else => return err,
+    };
+    return switch (reply) {
+        .observation => |observed| Submission.verdict(observed.facts),
+        .failure => |failure| requests.failRead(failure),
+        .not_modified => .unverified,
     };
 }
 
@@ -1123,6 +1145,9 @@ const FakeHost = struct {
     pages: usize = 0,
     contents: usize = 0,
     others: usize = 0,
+    /// The body served for a keyed observation; unset closes the connection unanswered.
+    observation: ?[]const u8 = null,
+    observed: usize = 0,
     output: [4096]u8 = undefined,
     shown: []const u8 = "",
 
@@ -1220,6 +1245,11 @@ const FakeHost = struct {
             self.others += 1;
             return;
         }
+        if (request.is("/v1/observe-command")) {
+            self.observed += 1;
+            const body = self.observation orelse return;
+            return fake_host.respond(fd, "200 OK", "application/json", "", body);
+        }
         var storage: [4096]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const Cursor = struct { end: ?[]const u8 = null, position: []const u8, ordinal: ?[]const u8 = null, direction: []const u8 = "forward", kinds: []const protocol.ActivityItem.Kind = &.{}, limit: []const u8 = "16" };
@@ -1271,6 +1301,44 @@ const FakeHost = struct {
         try self.withHost(&action);
     }
 };
+
+test "SUI-164 one observation read settles an accepted Message on the Store that took it" {
+    const key = "01234567-89ab-4cde-8012-0123456789ab";
+    const head = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"" ++ key ++ "\",\"delta\":\"full\",\"since\":null,\"observation\":";
+    const accepted = "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"state\":\"";
+    const input = "\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"admission\":\"23\",\"admitted_at\":\"1762329000\"}";
+    const binding = ",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
+    const work = ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}";
+    const Case = struct { body: ?[]const u8, store: enum { took, other }, verdict: ?Submission.Verdict, asked: bool = true };
+    const cases = [_]Case{
+        .{ .body = head ++ accepted ++ "processing" ++ input ++ binding ++ work ++ "}}", .store = .took, .verdict = .taken },
+        .{ .body = head ++ accepted ++ "queued" ++ input ++ work ++ "}}", .store = .took, .verdict = .queued },
+        .{ .body = head ++ accepted ++ "cancelled" ++ input ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}}}", .store = .took, .verdict = .stopped },
+        .{ .body = head ++ "{\"status\":\"absent\"}}", .store = .took, .verdict = .unverified },
+        .{ .body = head ++ "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"a1b2c3\",\"state\":\"processing" ++ input ++ binding ++ work ++ "}}", .store = .took, .verdict = .unverified },
+        .{ .body = null, .store = .took, .verdict = null },
+        .{ .body = head ++ accepted ++ "processing" ++ input ++ binding ++ work ++ "}}", .store = .other, .verdict = .elsewhere, .asked = false },
+    };
+    const Action = struct {
+        case: Case,
+        pub fn run(action: *@This(), host: *FakeHost, _: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            const paths = try client.resolveClientPaths(io, root);
+            var probe: Submission.Probe = .{ .store = paths.store_identity, .key = key.* };
+            if (action.case.store == .other) try probe.store.set("/another-store");
+            const settled = readAccepted(.{ .io = io }, &paths, "k7m2qx", probe);
+            // No answer is the read's failure, as for the page; it never reads as a verdict.
+            if (action.case.verdict) |verdict| try std.testing.expectEqual(verdict, try settled) else try std.testing.expect(std.meta.isError(settled));
+            try std.testing.expectEqual(@as(usize, @intFromBool(action.case.asked)), host.observed);
+            try std.testing.expectEqual(@as(usize, 0), host.pages + host.others);
+        }
+    };
+    for (cases) |case| {
+        var host: FakeHost = .{ .history = 0, .tail = &.{}, .end = 0, .observation = case.body };
+        var action: Action = .{ .case = case };
+        try host.withHost(&action);
+    }
+}
 
 test "SUI-49 Message placement preserves provenance across pages" {
     const Domain = struct {
