@@ -15,17 +15,28 @@ class FakeGitHub:
         self.prs, self.comments, self.failing = prs, comments or {}, set(failing)
         self.failing_after = failing_after
         self.stale = dict.fromkeys(prs, stale)
+        self.runs, self.cancelled, self.cancel_error = {}, [], None
         self.posted, self.listed, self.reads = [], [], dict.fromkeys(prs, 0)
 
     def __call__(self, method, path, fields=()):
         route, _, query = path.partition("?")
         parts = route.split("/")
+        if method == "POST" and parts[-1] == "cancel":
+            if self.cancel_error:
+                error, self.cancel_error = self.cancel_error, None
+                raise subprocess.CalledProcessError(1, "gh", stderr=error)
+            self.cancelled.append(int(parts[-2]))
+            return {}
         if method == "POST":
             number = int(parts[-2])
             self.posted.append((number, dict(fields)["body"]))
             self.comments.setdefault(number, []).append(dict(fields))
             return {}
         page = int(query.rsplit("page=", 1)[1]) if "page=" in query else 1
+        if parts[-1] == "runs":
+            head = query.split("head_sha=")[1].split("&")[0]
+            status = query.split("status=")[1].split("&")[0]
+            return {"workflow_runs": [run for run in self.runs.get(head, []) if run["status"] == status]}
         if parts[-1] == "pulls":
             self.listed.append(query)
             return [{"number": number} for number in self.prs][(page - 1) * 100:page * 100]
@@ -57,6 +68,29 @@ class ConflictAlertTest(unittest.TestCase):
         self.assertIn(MARKER.format(head="h2"), github.posted[0][1])
         self.assertIn(MAIN[:12], github.posted[0][1])
         self.assertTrue(all("base=main" in query for query in github.listed))
+
+    def test_cancels_only_the_newly_conflicting_prs_running_pr_checks(self):
+        github = FakeGitHub({1: ("h1", True, MAIN), 2: ("h2", False, MAIN)})
+        run_ = lambda id, name="Selected checks", event="pull_request", status="in_progress": {
+            "id": id, "name": name, "event": event, "status": status}
+        github.runs = {"h1": [run_(10)], "h2": [run_(20), run_(21, status="queued"), run_(22, name="Promote"),
+                                               run_(23, event="push"), run_(24, status="completed")]}
+        run(github)
+        self.assertEqual(sorted(github.cancelled), [20, 21])
+        github.cancelled.clear()
+        github.runs["h2"][0]["status"] = "completed"
+        run(github)
+        self.assertEqual(github.cancelled, [21], "an alerted head's checks that still run are cancelled on the next pass")
+
+    def test_a_finished_run_is_not_a_failure_and_a_failed_cancel_is_retried(self):
+        github = FakeGitHub({2: ("h2", False, MAIN)})
+        github.runs = {"h2": [{"id": 20, "name": "Selected checks", "event": "pull_request", "status": "in_progress"}]}
+        github.cancel_error = "HTTP 409"
+        self.assertEqual(run(github), ([2], [], []))
+        github.cancel_error = "HTTP 502"
+        self.assertEqual(run(github), ([], [], [2]))
+        self.assertEqual(run(github), ([], [], []))
+        self.assertEqual(github.cancelled, [20])
 
     def test_one_comment_per_head_however_many_moves(self):
         github = FakeGitHub({2: ("h2", False, MAIN)})
