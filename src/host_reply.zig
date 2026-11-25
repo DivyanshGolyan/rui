@@ -579,7 +579,11 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try label.set(&@as([protocol.max_label_bytes]u8, @splat(1)));
     var bash_description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
     try bash_description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
-    const presentation: protocol.ToolPresentation = .{ .description = description, .code = Worst.tag(protocol.ToolPresentation.Code), .publication_position = max };
+    var line: protocol.ToolLine = .{ .link = .{ .at = 100, .peer = .{ .session = .{}, .label = .{} } } };
+    try line.words.set(&@as([protocol.max_tool_description_bytes]u8, @splat(1)));
+    try line.link.?.peer.session.set(&@as([protocol.max_session_bytes]u8, @splat(1)));
+    try line.link.?.peer.label.set(&@as([protocol.max_label_bytes]u8, @splat(1)));
+    const presentation: protocol.ToolPresentation = .{ .line = line, .code = Worst.tag(protocol.ToolPresentation.Code), .sign = Worst.tag(protocol.ToolPresentation.Sign), .publication_position = max };
     var longest_conversation: usize = 0;
     for (std.meta.tags(protocol.ConversationItemKind)) |kind| {
         var page: command_reply.PublicConversationPage = .{ .end = max, .count = protocol.public_conversation_page_items, .more = true };

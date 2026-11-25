@@ -192,8 +192,8 @@ fn entry(operation: u64, ordinal: u64, description: []const u8, code: @import("p
     value.operation = operation;
     value.ordinal = ordinal;
     value.presentation.code = code;
-    value.presentation.description = .{};
-    value.presentation.description.?.set(description) catch unreachable;
+    value.presentation.sign = @import("tool_presentation.zig").signOf(code, .done);
+    value.presentation.line = @import("tool_presentation.zig").Line.plain(description) catch unreachable;
     return value;
 }
 

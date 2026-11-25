@@ -207,7 +207,7 @@ test "persisted tool label corruption fences every publication route" {
             request.direction = .backward;
             const healthy = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(u64, 2), healthy.call_activity.total);
-            try std.testing.expectEqualStrings("Run first command", healthy.call_activity.entries[0].presentation.description.?.slice());
+            try std.testing.expectEqualStrings("Run first command", healthy.call_activity.entries[0].presentation.line.?.words.slice());
             if (route == .settled_activity or route == .conversation) {
                 var stop = try completeSessionStop("label-stop", session.slice());
                 try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);

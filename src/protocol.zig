@@ -358,17 +358,50 @@ pub const ActivitySearch = activity_read.ActivitySearch;
 pub const ActivitySearchFacts = activity_facts.Search;
 
 pub const ToolPresentation = tool_presentation.ToolPresentation;
+pub const ToolLine = tool_presentation.Line;
+pub const ToolCompletion = tool_presentation.Completion;
+
+/// A row's words and the Session they name, as facts: the words before the reference, the reference
+/// with the label the Store read for it, and the words after it. A UI draws the reference however it
+/// can, so none of them slices a byte offset or learns which tool wrote the row.
+pub const ToolLineJson = struct {
+    value: ToolLine,
+
+    pub const openapi_name = "ToolLine";
+    pub const json_shape = .{ "{\"before\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"peer\":", Hole{ .optional_json = NamedPeerJson }, ",\"after\":", Hole{ .optional_string = max_tool_description_bytes }, "}" };
+    /// `before` and `after` share one 200-byte budget, so their two holes never both reach their own
+    /// maximum. With a reference present both are strings, and the worst line splits the budget: its
+    /// escaped bytes are those of one 200-byte string plus the quotes of the second.
+    const hole_bytes = Hole.maxBytes(.{ .optional_string = max_tool_description_bytes });
+    pub const max_json_bytes = shapeBytes(json_shape) - 2 * hole_bytes + Hole.maxBytes(.{ .string = max_tool_description_bytes }) + "\"\"".len;
+
+    pub fn optional(value: ?ToolLine) ?ToolLineJson {
+        return if (value) |line| .{ .value = line } else null;
+    }
+
+    pub fn writeJson(self: *const ToolLineJson, out: *std.Io.Writer) !void {
+        const line = &self.value;
+        const at = if (line.link) |link| link.at else line.words.len;
+        const before = line.words.bytes[0..at];
+        const after = line.words.slice()[at..];
+        try writeShape(out, json_shape, .{
+            if (before.len == 0) null else before,
+            if (line.link) |*link| NamedPeerJson{ .value = link.peer } else null,
+            if (after.len == 0) null else after,
+        });
+    }
+};
 
 pub const ToolPresentationJson = struct {
     value: ToolPresentation,
 
     pub const openapi_name = "ToolPresentation";
-    pub const json_shape = .{ "{\"description\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"code\":\"", Hole{ .tag = ToolPresentation.Code }, "\",\"publication_position\":", Hole.optional_id, "}" };
+    pub const json_shape = .{ "{\"line\":", Hole{ .optional_json = ToolLineJson }, ",\"code\":\"", Hole{ .tag = ToolPresentation.Code }, "\",\"sign\":\"", Hole{ .tag = ToolPresentation.Sign }, "\",\"publication_position\":", Hole.optional_id, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: ToolPresentationJson, out: *std.Io.Writer) !void {
         const presentation = self.value;
-        try writeShape(out, json_shape, .{ if (presentation.description) |description| description.slice() else null, presentation.code, presentation.publication_position });
+        try writeShape(out, json_shape, .{ ToolLineJson.optional(presentation.line), presentation.code, presentation.sign, presentation.publication_position });
     }
 };
 

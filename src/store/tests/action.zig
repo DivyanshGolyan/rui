@@ -427,8 +427,8 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             try std.testing.expectEqual(settled_page.items[0].position, settled_page.items[1].position);
             try std.testing.expectEqual(@as(u64, 2), settled_page.items[0].ordinal);
             try std.testing.expectEqual(@as(u64, 1), settled_page.items[1].ordinal);
-            try std.testing.expectEqualStrings("Run second command", settled_page.items[0].presentation.?.description.?.slice());
-            try std.testing.expectEqualStrings("Run first command", settled_page.items[1].presentation.?.description.?.slice());
+            try std.testing.expectEqualStrings("Run second command", settled_page.items[0].presentation.?.line.?.words.slice());
+            try std.testing.expectEqualStrings("Run first command", settled_page.items[1].presentation.?.line.?.words.slice());
             try std.testing.expectEqual(protocol.ToolPresentation.Code.denied, settled_page.items[1].presentation.?.code);
             for (settled_page.items[0..2]) |item| try std.testing.expectEqual(item.position, item.presentation.?.publication_position.?);
             const activity = try store_core.activityPageForTesting(&storage, .{ .session = public_request.session, .direction = .backward });
@@ -436,7 +436,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             for (activity.items[0..activity.count]) |item| if (item.value == .tool_result) {
                 const p = item.value.tool_result.presentation;
                 try std.testing.expectEqual(item.position, p.publication_position.?);
-                try std.testing.expectEqualStrings(if (item.ordinal == 1) "Run first command" else "Run second command", p.description.?.slice());
+                try std.testing.expectEqualStrings(if (item.ordinal == 1) "Run first command" else "Run second command", p.line.?.words.slice());
                 results += 1;
             };
             try std.testing.expectEqual(@as(usize, 2), results);

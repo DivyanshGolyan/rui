@@ -6707,8 +6707,8 @@ const ChromeFixture = struct {
         value.operation = operation;
         value.ordinal = ordinal;
         value.presentation.code = .unresolved;
-        value.presentation.description = .{};
-        value.presentation.description.?.set(description) catch unreachable;
+        value.presentation.sign = @import("tool_presentation.zig").signOf(.unresolved, .done);
+        value.presentation.line = @import("tool_presentation.zig").Line.plain(description) catch unreachable;
         return value;
     }
 };
@@ -8833,11 +8833,10 @@ test "SUI-126 SessionFrontend tool row Ctrl-O opens saved output in place, close
     }
     const saved = "Bash failed. Exit code: 7.\nREADME.md\nbad \x1b[2J\n";
     const answer = "Listed.";
-    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
-    try description.set("List project files");
+    const description = try protocol.ToolLine.plain("List project files");
     var facts: protocol.ActivityFacts = .{ .end = 2, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/");
-    const tool: protocol.ActivityItem = .{ .position = 1, .ordinal = 1, .at = 1, .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = saved.len, .digest = protocol.contentDigest(saved) } }, .presentation = .{ .description = description, .code = .failed, .publication_position = 1 } } } };
+    const tool: protocol.ActivityItem = .{ .position = 1, .ordinal = 1, .at = 1, .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = saved.len, .digest = protocol.contentDigest(saved) } }, .presentation = .{ .line = description, .code = .failed, .sign = .failed, .publication_position = 1 } } } };
     facts.items[0] = .{ .position = 2, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = .{ .length = answer.len, .digest = protocol.contentDigest(answer) }, .final = true } } };
     facts.items[1] = tool;
     facts.count = 2;

@@ -162,6 +162,11 @@ Tool Call admission validates the original descriptor and atomically saves its n
 Bash keeps its independent 100-byte argument bound; a valid Bash descriptor retains its label even when Bash is disabled and the call is rejected; malformed Bash descriptors and unknown tools have null labels.
 The Store combines that admission-owned label with canonical outcomes for shared `ToolPresentation` metadata on Current, Activity, and Conversation.
 There is no presentation table, copied log, frontend cache, or identity-to-description map.
+A `ToolPresentation` is `{line, code, sign, publication_position}`.
+`line` is the row's words as facts: `before` text, at most one `peer` (a Session reference with the label the Store holds when the page is read), and `after` text, sharing one 200-byte budget; it is null only for `unknown_tool` and `invalid_arguments`.
+`code` is the call's lifecycle, derived from its resolution as before.
+`sign` is the mark the row shows (`needs_you`, `active`, `finished`, `sent`, `failed`, `stopped`), decided once by `tool_presentation.signOf` from the code and the finish the tool chose (`done`, or `sent` for a call that handed work to another Session; the choice refines a success only, so failure, denial and cancellation marks are never the tool's).
+A frontend draws `sign` and `line` and never learns which tool wrote the row; a UI that cannot draw a link shows the peer's label or ID in its place.
 One `tools.describe`, exhaustive over the Tool Catalog, gives every tool its description: Bash's is the one its model wrote, and a hosted web search, which has no field for the model to fill, gets one Rui writes from the provider's action at settlement: `Search “query”`, `Open site/page` (without the scheme or `www.`), `Find “pattern” in site/page`, or `Search the web` when the provider gives no details, on one line and cut with `…` within the saved 200-byte bound.
 The search stays a model output item, not a Tool Call: the item row saves that description and whether it failed (Store schema 49).
 Conversation and Activity pages return it at the item's own position as a `hosted_call` item that carries only its `ToolPresentation` and no content, and the frontend draws it as a tool row, so successes pack with Bash rows and a failure stands apart.

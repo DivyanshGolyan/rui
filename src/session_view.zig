@@ -11,6 +11,7 @@ pub const Destination = Renderer.Destination;
 const tools = @import("tools.zig");
 const failure_class = @import("failure_class.zig");
 const marks = @import("marks.zig");
+const tool_presentation = @import("tool_presentation.zig");
 const work_line = @import("work_line.zig");
 const unicode = @import("terminal_unicode");
 
@@ -159,7 +160,7 @@ test "failed peer Messages distinguish absent targets without changing named out
 pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: protocol.NamedPeer, admitted_at: u64) !void {
     try sink.feed(Mark.summary);
     try sink.feed(if (direction == .inbound) "← Received message from " else "→ Messaged ");
-    try peerName(sink, peer);
+    try peerName(sink, peer, Mark.summary);
     var buffer: [5]u8 = undefined;
     if (clock(admitted_at, &buffer)) |time| {
         try sink.feed(Mark.sidenote);
@@ -172,12 +173,12 @@ pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer) !void {
     try sink.feed(Mark.summary);
     if (target) |peer| {
         try sink.feed("× Messaged ");
-        try peerName(sink, peer);
+        try peerName(sink, peer, Mark.summary);
     } else try sink.feed("× Message not delivered");
     try sink.feed(Mark.reset ++ "\n");
 }
 
-fn peerName(sink: anytype, peer: protocol.NamedPeer) !void {
+fn peerName(sink: anytype, peer: protocol.NamedPeer, resume_style: []const u8) !void {
     const id = peer.session.slice();
     const linked = id.len != 0 and for (id) |byte| {
         if (byte <= ' ' or byte >= 0x7f or byte == '\\') break false;
@@ -190,7 +191,10 @@ fn peerName(sink: anytype, peer: protocol.NamedPeer) !void {
     var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
     try escaped.feed(peer.name());
     try escaped.finish();
-    if (linked) try sink.feed(Text.link_close ++ Mark.reset ++ Mark.summary);
+    if (linked) {
+        try sink.feed(Text.link_close ++ Mark.reset);
+        try sink.feed(resume_style);
+    }
 }
 
 pub const Collapsed = struct {
@@ -459,25 +463,33 @@ test "a long user Message shows two non-blank lines and what it hides" {
     try std.testing.expectError(error.ContentLengthMismatch, body.feed("abcd"));
 }
 
-fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, suffix: []const u8, style: Style } {
-    const state: struct { mark: marks.Mark, suffix: []const u8 } = switch (code) {
-        .unresolved => .{ .mark = .active, .suffix = "" },
-        .pending_permission => .{ .mark = .needs_you, .suffix = "" },
-        .background => .{ .mark = .finished, .suffix = " · background" },
-        .succeeded => .{ .mark = .finished, .suffix = "" },
-        .denied => .{ .mark = .stopped, .suffix = " · denied" },
-        .unknown_tool => .{ .mark = .failed, .suffix = " · rejected" },
-        .invalid_arguments => .{ .mark = .failed, .suffix = " · rejected" },
-        .failed => .{ .mark = .failed, .suffix = "" },
-        .timed_out => .{ .mark = .failed, .suffix = " · timed out" },
-        .indeterminate => .{ .mark = .failed, .suffix = " · may have run" },
-        .storage_failed => .{ .mark = .failed, .suffix = " · output lost" },
-        .spawn_failed => .{ .mark = .failed, .suffix = " · could not start" },
-        .cancelled => .{ .mark = .stopped, .suffix = "" },
-        .infrastructure_shutdown => .{ .mark = .failed, .suffix = " · may have run" },
+/// The mark comes from the row's Sign, which the Store already decided; the words after it are this
+/// surface's own copy, so no other reader repeats them.
+fn toolState(presentation: protocol.ToolPresentation) struct { glyph: []const u8, suffix: []const u8, style: Style } {
+    const suffix: []const u8 = switch (presentation.code) {
+        .unresolved, .succeeded, .failed, .cancelled => "",
+        .background => " · background",
+        .pending_permission => "",
+        .denied => " · denied",
+        .unknown_tool, .invalid_arguments => " · rejected",
+        .timed_out => " · timed out",
+        .indeterminate, .infrastructure_shutdown => " · may have run",
+        .storage_failed => " · output lost",
+        .spawn_failed => " · could not start",
     };
-    const shown = marks.marks.get(state.mark);
-    return .{ .glyph = shown.unicode, .suffix = state.suffix, .style = Style.fromTone(shown.tone) };
+    const shown = marks.marks.get(markOf(presentation.sign));
+    return .{ .glyph = shown.unicode, .suffix = suffix, .style = Style.fromTone(shown.tone) };
+}
+
+fn markOf(sign: protocol.ToolPresentation.Sign) marks.Mark {
+    return switch (sign) {
+        .needs_you => .needs_you,
+        .active => .active,
+        .finished => .finished,
+        .sent => .sent,
+        .failed => .failed,
+        .stopped => .stopped,
+    };
 }
 
 test "list rows share chat heading marks except unmarked finished Sessions" {
@@ -534,7 +546,7 @@ test "list rows share chat heading marks except unmarked finished Sessions" {
         }
         if (case.tool) |code| {
             var heading: Sink = .{};
-            try toolHeading(.{ .description = null, .code = code, .publication_position = null }, &heading, false);
+            try toolHeading(.{ .line = null, .code = code, .sign = tool_presentation.signOf(code, .done), .publication_position = null }, &heading, false);
             const end = std.mem.indexOfScalar(u8, heading.bytes[0..heading.length], ' ').?;
             try std.testing.expectEqualStrings(shared.unicode, heading.bytes[0..end]);
         }
@@ -542,6 +554,7 @@ test "list rows share chat heading marks except unmarked finished Sessions" {
     var states: std.enums.EnumSet(marks.Mark) = .full;
     states.remove(.newer);
     states.remove(.none);
+    states.remove(.sent);
     try std.testing.expect(seen.eql(states));
 }
 
@@ -550,19 +563,37 @@ pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colou
 }
 
 fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, foldable: bool) !void {
-    const state = toolState(presentation.code);
+    const state = toolState(presentation);
     if (foldable) try sink.feed(tool_fold.heading_marker);
     try sink.feed(state.style.code(colour));
     try sink.feed(state.glyph);
     try sink.feed(Style.normal.code(colour));
     try sink.feed(" ");
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
-    var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .label } };
-    try escaped.feed(if (presentation.description) |label| label.slice() else "Tool call");
-    try escaped.finish();
+    try writeLine(&indented, presentation.line, Mark.summary);
     try indented.feed(state.suffix);
     try indented.finish();
     try sink.feed("\n");
+}
+
+/// A row's words, with a referenced Session drawn as a link. The one place a Line becomes terminal text.
+/// `resume_style` is what follows a link, so a heading and a peer row can each keep their own styling.
+fn writeLine(sink: anytype, line: ?protocol.ToolLine, resume_style: []const u8) !void {
+    const shown = line orelse {
+        var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
+        try escaped.feed("Tool call");
+        try escaped.finish();
+        return;
+    };
+    var walk = shown.parts();
+    while (walk.next()) |part| switch (part) {
+        .words => |words| {
+            var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
+            try escaped.feed(words);
+            try escaped.finish();
+        },
+        .peer => |peer| try peerName(sink, peer.*, resume_style),
+    };
 }
 
 pub const Live = struct {
@@ -582,11 +613,17 @@ pub const Live = struct {
 
     pub fn line(self: *const Live, index: usize, buffer: *[line_bytes]u8, running: []const u8) ![]const u8 {
         const entry = self.entries[index];
-        const state = toolState(entry.presentation.code);
+        const state = toolState(entry.presentation);
         var writer = std.Io.Writer.fixed(buffer);
         try writer.print("{s} ", .{state.glyph});
         var text: Text = .{ .mode = .label };
-        try text.feed(&writer, if (entry.presentation.description) |label| label.slice() else "Tool call");
+        if (entry.presentation.line) |shown| {
+            var walk = shown.parts();
+            while (walk.next()) |part| try text.feed(&writer, switch (part) {
+                .words => |words| words,
+                .peer => |peer| peer.name(),
+            });
+        } else try text.feed(&writer, "Tool call");
         try text.finish(&writer);
         try writer.writeAll(state.suffix);
         try writer.writeAll(running);
@@ -594,7 +631,7 @@ pub const Live = struct {
     }
 
     pub fn style(self: *const Live, index: usize) Style {
-        return toolState(self.entries[index].presentation.code).style;
+        return toolState(self.entries[index].presentation).style;
     }
 };
 
@@ -728,7 +765,7 @@ pub fn actionToolFromCapture(observed: *const protocol_reply.Current, io: std.Io
             switch (attention) {
                 .unresolved => |row| if (row.action.value == self.action) {
                     if (self.selected != null) return error.InvalidObservation;
-                    var tool: ActionTool = .{ .name = .{}, .description = row.presentation.value.description orelse return error.InvalidObservation };
+                    var tool: ActionTool = .{ .name = .{}, .description = (row.presentation.value.line orelse return error.InvalidObservation).description() orelse return error.InvalidObservation };
                     try tool.name.set(row.tool.slice());
                     if (row.server.value) |server| {
                         tool.server = .{};
@@ -1260,6 +1297,36 @@ pub fn toolResult(presentation: protocol.ToolPresentation, sink: anytype, colour
     return toolHeadingWith(presentation, sink, colour, false);
 }
 
+test "SUI-125 a tool heading draws its line's words, a linked Session and the mark its sign names" {
+    const Sink = struct {
+        bytes: [1024]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const link = Text.link_open ++ Text.session_link ++ "k7m2qx" ++ Text.link_end ++ "\x1b[4m";
+    const resume_style = Text.link_close ++ Mark.reset ++ Mark.summary;
+    const Case = struct { before: []const u8, after: []const u8, label: []const u8, code: protocol.ToolPresentation.Code, completion: tool_presentation.Completion, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .before = "Messaged ", .after = "", .label = "", .code = .succeeded, .completion = .sent, .expected = "→ Messaged " ++ link ++ "k7m2qx" ++ resume_style },
+        .{ .before = "Messaged ", .after = "", .label = "Review\x1b[2m the WAL", .code = .succeeded, .completion = .sent, .expected = "→ Messaged " ++ link ++ "Review\\x1b[2m the WAL" ++ resume_style },
+        // A tool chooses how a success reads; a failure keeps the failure mark whatever it chose.
+        .{ .before = "Messaged ", .after = "", .label = "", .code = .failed, .completion = .sent, .expected = "× Messaged " ++ link ++ "k7m2qx" ++ resume_style },
+        .{ .before = "Messaged ", .after = "", .label = "", .code = .succeeded, .completion = .done, .expected = "✓ Messaged " ++ link ++ "k7m2qx" ++ resume_style },
+        .{ .before = "Read ", .after = "'s transcript", .label = "", .code = .timed_out, .completion = .done, .expected = "× Read " ++ link ++ "k7m2qx" ++ resume_style ++ "'s transcript · timed out" },
+    };
+    inline for (cases) |case| {
+        var line = try protocol.ToolLine.linked(case.before, "k7m2qx", case.after);
+        if (case.label.len != 0) try line.setLabel(case.label);
+        const presentation = try tool_presentation.ToolPresentation.of(line, case.code, case.completion, null);
+        var sink: Sink = .{};
+        try toolResult(presentation, &sink, false);
+        try std.testing.expectEqualStrings(case.expected ++ "\n", sink.bytes[0..sink.length]);
+    }
+}
+
 test "SUI-125 tool headings show each outcome without exit fields" {
     const Sink = struct {
         bytes: [1024]u8 = undefined,
@@ -1289,7 +1356,7 @@ test "SUI-125 tool headings show each outcome without exit fields" {
     inline for (cases) |case| {
         for ([_]bool{ false, true }) |colour| {
             var sink: Sink = .{};
-            const presentation: protocol.ToolPresentation = .{ .description = null, .code = case[0], .publication_position = null };
+            const presentation: protocol.ToolPresentation = .{ .line = null, .code = case[0], .sign = tool_presentation.signOf(case[0], .done), .publication_position = null };
             try toolResult(presentation, &sink, colour);
             var expected: Sink = .{};
             const glyph_end = std.mem.indexOfScalar(u8, case[1], ' ').?;
@@ -1593,9 +1660,7 @@ test "hosted calls draw as adjacent tool rows across outcomes" {
         .{ "Find “Io” in ziglang.org/x", .failed, "× Find “Io” in ziglang.org/x\n" },
         .{ "Search the web", .succeeded, "✓ Search the web\n" },
     }) |call| {
-        var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
-        try description.set(call[0]);
-        const presentation: protocol.ToolPresentation = .{ .description = description, .code = call[1], .publication_position = 1 };
+        const presentation: protocol.ToolPresentation = .{ .line = try protocol.ToolLine.plain(call[0]), .code = call[1], .sign = tool_presentation.signOf(call[1], .done), .publication_position = 1 };
         var row: Sink = .{};
         try toolResult(presentation, &row, false);
         try std.testing.expectEqualStrings(call[2], row.bytes[0..row.length]);
