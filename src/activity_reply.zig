@@ -42,7 +42,7 @@ pub const ItemJson = struct {
         pub const assistant = .{ "{\"content\":", H{ .json = ContentValueJson }, ",\"final\":", H.boolean, "}" };
         pub const call = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"action\":", H.optional_id, ",\"rejection\":", H{ .optional_tag = protocol.ProposalRejection }, ",\"fields\":[", H{ .json = ContentValueJson }, ",", H{ .json = ContentValueJson }, ",", H{ .json = ContentValueJson }, "]" } ++ call_details ++ .{"}"};
         pub const tool_result = .{ "{\"content\":", H{ .json = ContentValueJson }, ",\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
-        pub const hosted_call = .{ "{\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
+        pub const hosted_call = .{ "{\"presentation\":", H{ .json = ToolPresentationJson }, ",\"action\":", H{ .json = protocol.HostedActionJson }, "}" };
         pub const turn_ended = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"turn\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"ending\":\"", H{ .tag = protocol.TurnEnding }, "\",\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = ContentValueJson }, "}" };
         pub const stop = .{ "{\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"cutoff\":\"", H.decimal, "\",\"completion\":\"", H{ .tag = protocol.SessionStopCompletion }, "\"}" };
         pub const approval_requested = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"action\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\"" } ++ call_details ++ .{"}"};
@@ -83,7 +83,7 @@ pub const ItemJson = struct {
             .model_call => |call| try writeShape(out, value_shapes.model_call, .{ call.model.slice(), if (call.served_model) |model| model.slice() else null, call.input_tokens, call.output_tokens, call.cached_tokens, call.latency_ms, call.first_event_ms, call.status.slice(), call.attempts }),
             .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ ContentValueJson.text(assistant.content), assistant.final }),
             .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ ContentValueJson{ .value = result.content }, ToolPresentationJson{ .value = result.presentation } }),
-            .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{ToolPresentationJson{ .value = presentation }}),
+            .hosted_call => |hosted| try writeShape(out, value_shapes.hosted_call, .{ ToolPresentationJson{ .value = hosted.presentation }, protocol.HostedActionJson{ .value = hosted.action } }),
             .call => |call| {
                 comptime std.debug.assert(call.fields.len == 3);
                 var fields: [3]ContentValueJson = undefined;

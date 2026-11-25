@@ -389,14 +389,23 @@ const OversizedItem = struct {
             part_rows += part_count;
             switch (item) {
                 .reasoning => try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item i JOIN content b ON b.content_id=i.extras_content_id " ++
-                    "WHERE i.operation_id=?1 AND i.item_ordinal=?2 AND i.part_count=?3 AND i.message_content_id IS NULL AND i.description IS NULL AND b.private=1", .{ operation, ordinal, part_count })),
-                .find_in_page, .failed_search => try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item i JOIN content b ON b.content_id=i.extras_content_id " ++
-                    "WHERE i.operation_id=?1 AND i.item_ordinal=?2 AND i.part_count=0 AND i.message_content_id IS NULL AND i.description=?3 AND i.call_failed=?4 AND b.private=1", .{
-                    operation,
-                    ordinal,
-                    if (item == .find_in_page) "Find “Io” in ziglang.org" else "Search “zig”",
-                    @intFromBool(item == .failed_search),
-                })),
+                    "WHERE i.operation_id=?1 AND i.item_ordinal=?2 AND i.part_count=?3 AND i.message_content_id IS NULL AND i.hosted_action IS NULL AND b.private=1", .{ operation, ordinal, part_count })),
+                .find_in_page, .failed_search => {
+                    try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item i JOIN content b ON b.content_id=i.extras_content_id " ++
+                        "WHERE i.operation_id=?1 AND i.item_ordinal=?2 AND i.part_count=0 AND i.message_content_id IS NULL AND i.hosted_action=?3 AND i.call_failed=?4 AND b.private=1", .{
+                        operation,
+                        ordinal,
+                        @as(u64, if (item == .find_in_page) 3 else 1),
+                        @intFromBool(item == .failed_search),
+                    }));
+                    // The facts are saved as public content, never as the line: one target, and the pattern only for a find.
+                    const target_digest = protocol.contentDigest(if (item == .find_in_page) "ziglang.org" else "zig");
+                    try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM hosted_target t JOIN content c ON c.content_id=t.content_id " ++
+                        "WHERE t.operation_id=?1 AND t.item_ordinal=?2 AND t.target_ordinal=0 AND c.private=0 AND c.digest=?3", .{ operation, ordinal, store_testing.Blob{ .bytes = &target_digest } }));
+                    const pattern_digest = protocol.contentDigest("Io");
+                    try std.testing.expectEqual(@as(u64, if (item == .find_in_page) 1 else 0), try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item i JOIN content c ON c.content_id=i.hosted_pattern_content_id " ++
+                        "WHERE i.operation_id=?1 AND i.item_ordinal=?2 AND c.private=0 AND c.digest=?3", .{ operation, ordinal, store_testing.Blob{ .bytes = &pattern_digest } }));
+                },
                 .message, .done => {
                     messages += 1;
                     var whole: std.Io.Writer.Allocating = .init(std.testing.allocator);

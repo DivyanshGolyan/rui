@@ -1235,6 +1235,11 @@ pub fn hostedCall(document: []const u8, item_value: *const codec_abi.OutputItem)
     unreachable;
 }
 
+pub fn nextHostedTarget(document: []const u8, call: *const codec_abi.HostedCall, cursor: *codec_abi.HostedCursor) ?codec_abi.Range {
+    _ = .{ document, call, cursor };
+    unreachable;
+}
+
 // ---------------------------------------------------------------------------
 // HTTP error bodies
 // ---------------------------------------------------------------------------

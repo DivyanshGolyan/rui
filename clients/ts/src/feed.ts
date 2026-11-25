@@ -152,7 +152,12 @@ function activityBody(store: string, session: string, request: { end: string | n
 	} satisfies Schemas["ActivityPageRequest"]);
 }
 
-function contentBody(store: string, session: string, entry: { position: string; ordinal: string }): string {
+/** Which exact text of a row to open. A hosted call holds several: its targets in order, then its pattern. Every other row has one, field 0. */
+export interface ContentOptions {
+	field?: number;
+}
+
+function contentBody(store: string, session: string, entry: { position: string; ordinal: string }, options: ContentOptions = {}): string {
 	return JSON.stringify({
 		version: WIRE_VERSION,
 		kind: "activity_content",
@@ -160,23 +165,24 @@ function contentBody(store: string, session: string, entry: { position: string; 
 		session,
 		position: entry.position,
 		ordinal: entry.ordinal,
+		...(options.field === undefined ? {} : { field: String(options.field) }),
 	} satisfies Schemas["ActivityContentRequest"]);
 }
 
 const MAX_CONTENT_BYTES = 1024 * 1024 * 1024;
 
 /** The Host owns the rule: its text route refuses a parts value as `ContentIsParts`. */
-export async function readContentBytes(link: Link, session: string, entry: { position: string; ordinal: string }): Promise<Buffer> {
+export async function readContentBytes(link: Link, session: string, entry: { position: string; ordinal: string }, options: ContentOptions = {}): Promise<Buffer> {
 	try {
-		return await link.exchange("/v1/activity-content", (store) => contentBody(store, session, entry), undefined, { max: MAX_CONTENT_BYTES });
+		return await link.exchange("/v1/activity-content", (store) => contentBody(store, session, entry, options), undefined, { max: MAX_CONTENT_BYTES });
 	} catch (error) {
 		if (error instanceof RuiRequestError && error.code === "ContentIsParts") throw new ContentIsPartsError();
 		throw error;
 	}
 }
 
-export async function readContent(link: Link, session: string, entry: { position: string; ordinal: string }): Promise<string> {
-	return (await readContentBytes(link, session, entry)).toString("utf8");
+export async function readContent(link: Link, session: string, entry: { position: string; ordinal: string }, options: ContentOptions = {}): Promise<string> {
+	return (await readContentBytes(link, session, entry, options)).toString("utf8");
 }
 
 /** A page request: the next row's cursor, the `since` token of the last full reply, and the kinds. `end` pins a bounded traversal. */

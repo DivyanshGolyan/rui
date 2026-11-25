@@ -87,6 +87,12 @@ pub fn describe(call: Call) Description {
     return out;
 }
 
+/// A hosted web search's line from its stored action, read at display time. `target` and `pattern` are the leading bytes
+/// of the first target and of the pattern (at most `WebSearchCall.excerpt_bytes` of each is looked at), never the stored text.
+pub fn ofHosted(action: HostedAction, target: []const u8, pattern: []const u8) Description {
+    return describe(.{ .web_search = .{ .action = action, .target = target, .pattern = pattern } });
+}
+
 fn describeWebSearch(call: WebSearchCall) Description {
     var target_text: Excerpt = .{};
     var pattern_text: Excerpt = .{};
