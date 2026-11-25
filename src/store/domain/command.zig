@@ -886,9 +886,15 @@ pub const DeliverAgentMessage = struct {
 
     fn resolve(t: *DeliverAgentMessage, r: *transition.Round(DeliverAgentMessage)) !transition.Next(DeliverAgentMessage) {
         const outcome_id = try content_domain.importBytes(r, &t.outcome, t.result);
-        try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, if (t.delivered) .succeeded else .failed, outcome_id);
+        try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, if (t.delivered) .succeeded else .failed, outcome_id, t.shown());
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;
+    }
+
+    /// The row names the Session it messaged whether or not the message arrived: a send that failed reads "Messaged X" with the failure mark.
+    fn shown(t: *const DeliverAgentMessage) action_domain.Shown {
+        const receiver = if (t.receiver) |*row| row else return .call_line;
+        return .{ .outcome = .sent("Messaged ", &receiver.session.ref) };
     }
 
     pub fn committed(t: *const DeliverAgentMessage) Result {
@@ -1214,9 +1220,15 @@ pub const StartAgent = struct {
 
     fn resolve(t: *StartAgent, r: *transition.Round(StartAgent)) !transition.Next(StartAgent) {
         const outcome_id = try content_domain.importBytes(r, &t.outcome, t.result);
-        try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, if (t.applied != null) .succeeded else .failed, outcome_id);
+        try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, if (t.applied != null) .succeeded else .failed, outcome_id, t.shown());
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;
+    }
+
+    /// A started Agent reads "Started X"; a start that did not happen keeps its call line.
+    fn shown(t: *const StartAgent) action_domain.Shown {
+        const applied = t.applied orelse return .call_line;
+        return .{ .outcome = .sent("Started ", applied.session.slice()) };
     }
 
     pub fn announced(t: *const StartAgent) ?store_core.Announcement {
@@ -1555,7 +1567,7 @@ pub const ResolveCoreCall = struct {
         if (found.stopped) return .{ .done = false };
         if (r.faults().content_import) return error.InjectedContentImportFailure;
         const outcome_id = try content_domain.importBytes(r, &t.outcome, t.input.result);
-        try action_domain.queueResolution(r, binding, found.session, t.input.code, outcome_id);
+        try action_domain.queueResolution(r, binding, found.session, t.input.code, outcome_id, .call_line);
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;
     }

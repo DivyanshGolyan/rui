@@ -719,12 +719,12 @@ Non-TTY conversation invocation is refused; one-shot and pipe commands keep thei
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).
 If required instructions, overflow and input cannot fit, the renderer fails before emitting a clipped prompt and restores terminal configuration.
 
-Peer Messages show as one upright, dim line each, never with `›`: `← Received message from NAME` for a Message from a peer, `→ Messaged NAME` for one this Session sent, and `! Messaged NAME — Failed` for a send its target refused.
+A Message from a peer shows as one upright, dim line, never with `›`: `← Received message from NAME`.
+A send this Session made through `message_agent` or `start_agent` is its tool row and the only record of it: `→ Messaged NAME` or `→ Started NAME` with the sign mark the row carries, and `× Messaged NAME` when the target refused it; it has no separate peer row.
 The Message's text never shows: the model reads it, and the person sees only who it came from or went to.
 NAME is the peer's label as the Store holds it when the page is read, so a rename shows on every row; a peer without one shows its ID (`k7m2qx`).
 The Store looks the label up once per peer row; it is not copied into the Message.
-Peer rows group with successful tool rows and other peer rows with no blank line.
-A peer row beside any other tool outcome, or a failed send, retains block separation.
+Received rows group with successful tool rows and other received rows with no blank line; a send groups as the tool row it is, and a failed one retains block separation.
 The line keeps one row and ends in `…` when it does not fit; it is never a collapsed block for Ctrl-O.
 Its admission time goes in the right margin as on a user block; below 40 columns it does not show.
 NAME alone is underlined and links to the peer's Session: the retained text keeps the ID as a hidden `rui-session:` address that takes no cells and is never sent to the terminal as an OSC 8 hyperlink.

@@ -166,6 +166,7 @@ Full, Current and exact Action inspection retain their independent authorities.
 Tool Call admission validates the original descriptor and atomically saves its nullable decoded description, bounded to 200 UTF-8 bytes, and the three accepted field lengths and digests on the immutable call.
 Bash keeps its independent 100-byte argument bound; a valid Bash descriptor retains its label even when Bash is disabled and the call is rejected; malformed Bash descriptors and unknown tools have null labels.
 The Store combines that admission-owned label with canonical outcomes for shared `ToolPresentation` metadata on Current, Activity, and Conversation.
+A call that handed work to another Session also saves an outcome line (the words, the Session it names and the finish it chose) with its resolution, written by `action.queueResolution`, the one writer; a failed send to a Session that exists saves it too, and every other call keeps its call line. `line` reads that outcome in place of the call line, with the named Session's label as the Store holds it when the page is read.
 There is no presentation table, copied log, frontend cache, or identity-to-description map.
 A `ToolPresentation` is `{line, code, sign, publication_position}`.
 `line` is the row's words as facts: `before` text, at most one `peer` (a Session reference with the label the Store holds when the page is read), and `after` text, sharing one 200-byte budget; it is null only for `unknown_tool` and `invalid_arguments`.

@@ -384,7 +384,7 @@ pub const FindTools = struct {
     }
 
     fn resolve(t: *FindTools, r: *transition.Round(FindTools), outcome_id: u64) !transition.Next(FindTools) {
-        try action.queueResolution(r, t.input.binding, t.facts.?.session, if (t.input.refusal == null) .succeeded else .failed, outcome_id);
+        try action.queueResolution(r, t.input.binding, t.facts.?.session, if (t.input.refusal == null) .succeeded else .failed, outcome_id, .call_line);
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;
     }

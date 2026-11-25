@@ -110,72 +110,28 @@ test "peer Messages render as one dim line each, named, with time in the margin 
     const R = Mark.reset;
     const L = peerLink;
     var sink: Sink = .{};
-    try peerLine(&sink, .inbound, peer, 1_800_000_000);
+    try peerLine(&sink, peer, 1_800_000_000);
     try std.testing.expectEqualStrings(S ++ "← Received message from " ++ comptime L("9f8e7d", "9f8e7d") ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
-    sink = .{};
-    try peerLine(&sink, .outbound, peer, std.math.maxInt(u64));
-    try std.testing.expectEqualStrings(S ++ "→ Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", sink.bytes[0..sink.length]);
-    var failed: Sink = .{};
-    try sendFailed(&failed, peer);
-    try std.testing.expectEqualStrings(S ++ "× Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", failed.bytes[0..failed.length]);
     var named = peer;
     try named.label.set("Review\x1b[2m the WAL");
     var group: Sink = .{};
-    try peerLine(&group, .outbound, named, 1_800_000_000);
-    try peerLine(&group, .inbound, named, 1_800_000_000);
-    try std.testing.expectEqualStrings(S ++ "→ Messaged " ++ comptime L("9f8e7d", "Review\\x1b[2m the WAL") ++ N ++ "08:00" ++ R ++ "\n" ++
-        S ++ "← Received message from " ++ L("9f8e7d", "Review\\x1b[2m the WAL") ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
+    try peerLine(&group, named, 1_800_000_000);
+    try std.testing.expectEqualStrings(S ++ "← Received message from " ++ comptime L("9f8e7d", "Review\\x1b[2m the WAL") ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
 }
 
 fn peerLink(comptime id: []const u8, comptime name: []const u8) []const u8 {
     return Text.link_open ++ Text.session_link ++ id ++ Text.link_end ++ "\x1b[4m" ++ name ++ Text.link_close ++ Mark.reset ++ Mark.summary;
 }
 
-test "failed peer Messages distinguish absent targets without changing named output" {
-    const Sink = struct {
-        bytes: [1024]u8 = undefined,
-        length: usize = 0,
-        pub fn feed(self: *@This(), bytes: []const u8) !void {
-            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
-            self.length += bytes.len;
-        }
-    };
-    var peer: protocol.NamedPeer = .{ .session = .{} };
-    try peer.session.set("k7m2qx");
-    var named = peer;
-    try named.label.set("Review\x1b[2m the WAL");
-    const cases = [_]struct { target: ?protocol.NamedPeer, line: []const u8 }{
-        .{ .target = null, .line = "× Message not delivered" },
-        .{ .target = peer, .line = "× Messaged " ++ comptime peerLink("k7m2qx", "k7m2qx") },
-        .{ .target = named, .line = "× Messaged " ++ comptime peerLink("k7m2qx", "Review\\x1b[2m the WAL") },
-    };
-    for (cases) |case| {
-        var sink: Sink = .{};
-        try sendFailed(&sink, case.target);
-        var expected: [1024]u8 = undefined;
-        const line = try std.fmt.bufPrint(&expected, Mark.summary ++ "{s}" ++ Mark.reset ++ "\n", .{case.line});
-        try std.testing.expectEqualStrings(line, sink.bytes[0..sink.length]);
-    }
-}
-
-pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: protocol.NamedPeer, admitted_at: u64) !void {
+pub fn peerLine(sink: anytype, peer: protocol.NamedPeer, admitted_at: u64) !void {
     try sink.feed(Mark.summary);
-    try sink.feed(if (direction == .inbound) "← Received message from " else "→ Messaged ");
+    try sink.feed("← Received message from ");
     try peerName(sink, peer, Mark.summary);
     var buffer: [5]u8 = undefined;
     if (clock(admitted_at, &buffer)) |time| {
         try sink.feed(Mark.sidenote);
         try sink.feed(time);
     }
-    try sink.feed(Mark.reset ++ "\n");
-}
-
-pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer) !void {
-    try sink.feed(Mark.summary);
-    if (target) |peer| {
-        try sink.feed("× Messaged ");
-        try peerName(sink, peer, Mark.summary);
-    } else try sink.feed("× Message not delivered");
     try sink.feed(Mark.reset ++ "\n");
 }
 
@@ -1262,7 +1218,7 @@ fn messageWith(reads: client.SessionReads, scratch: std.Io.File, item: protocol.
     if (messageLabel(value.state, labels)) |text| {
         try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
     }
-    if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at);
+    if (value.sender) |sender| return peerLine(sink, sender, value.admitted_at);
     if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(true);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     try userPrefix(sink, colour, value.admitted_at);
@@ -1598,8 +1554,8 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
                 try ending(sink, .{ .mark = .stopped, .words = protocol.TurnEnding.stopped.words().? }, colour);
             }
         },
-        .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at),
-        .send_failed => |failed| try sendFailed(sink, failed.target),
+        // A send is drawn once, as the tool row of the call that made it; slice 3 deletes these two entries.
+        .sent, .send_failed => {},
         // A kind whose role is `detail` draws nothing in the conversation; a kind that gains the conversation role fails to compile here.
         inline .call, .approval_requested, .session_changed, .compacted, .model_call, .instruction => |_, kind| comptime std.debug.assert(activity_read.roleOf(kind) == .detail),
     }
