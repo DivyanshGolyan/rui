@@ -157,8 +157,6 @@ pub const Work = struct {
     operation: ?u64 = null,
     first_action: ?u64 = null,
     actions: Actions = .{},
-    served_attention: ?Attention = null,
-    served_group: ?Group = null,
 };
 
 pub const Actions = struct {
@@ -185,7 +183,7 @@ pub fn attention(work: Work) ?Attention {
     };
 }
 
-/// What a Session's work asks of the person. `failed` is its own standing; `Group` folds it into `done`.
+/// What a Session's work asks of the person; a failed Turn is its own standing, not a kind of done.
 pub const Standing = enum {
     /// An Action awaits a decision: an approval, or a Bash proposal with approvals pending.
     needs_you,
@@ -211,19 +209,6 @@ pub fn standing(state: WorkState) Standing {
         .pending => .queued,
         .failed => .failed,
         .idle, .finished, .stopped => .done,
-    };
-}
-
-pub const Group = enum { needs_you, working, queued, done };
-
-/// Classifies the state as derived at the Host's observation time.
-pub fn group(work: Work) Group {
-    return switch (work.state) {
-        .approval => .needs_you,
-        .bash => |bash| if (bash.approvals != 0) .needs_you else .working,
-        .working, .retrying, .stopping => .working,
-        .pending => .queued,
-        .idle, .finished, .failed, .stopped => .done,
     };
 }
 
@@ -683,26 +668,26 @@ test "Session approval target belongs to Session inputs through continuation ter
     try std.testing.expectError(error.CorruptStore, derive(.{ .created_at = 1, .now_ms = 0, .first_action = 41 }));
 }
 
-test "attention and group match base client classification across work states" {
+test "attention and standing match base client classification across work states" {
     // Expectations transcribed from attention.Attention.of and overview_view.orderClass
     // at 3e389620a3a6b83e314e02657c9e6a95e67488e8, with no viewer open stop.
-    const Case = struct { state: WorkState, attention_kind: ?@FieldType(Attention, "kind"), group: Group };
+    const Case = struct { state: WorkState, attention_kind: ?@FieldType(Attention, "kind"), standing: Standing };
     const cases = [_]Case{
-        .{ .state = .{ .idle = .{ .since = 1 } }, .attention_kind = null, .group = .done },
-        .{ .state = .{ .pending = .{ .since = 1 } }, .attention_kind = null, .group = .queued },
-        .{ .state = .{ .working = .{ .since = 1 } }, .attention_kind = null, .group = .working },
-        .{ .state = .{ .retrying = .{ .since = 1, .due_at_ms = 9999, .cause = try bounded(max_code_bytes, "retry"), .attempt = 1 } }, .attention_kind = null, .group = .working },
-        .{ .state = .{ .bash = .{ .since = 1, .call = 1, .description = null, .running = 1, .approvals = 0 } }, .attention_kind = null, .group = .working },
-        .{ .state = .{ .bash = .{ .since = 1, .call = 1, .description = null, .running = 1, .approvals = 1 } }, .attention_kind = .approval, .group = .needs_you },
-        .{ .state = .{ .approval = .{ .since = 1 } }, .attention_kind = .approval, .group = .needs_you },
-        .{ .state = .{ .stopping = .{ .since = 1 } }, .attention_kind = null, .group = .working },
-        .{ .state = .{ .finished = .{ .since = 1 } }, .attention_kind = .finished, .group = .done },
-        .{ .state = .{ .failed = .{ .since = 1, .code = try bounded(max_code_bytes, "failed"), .resets_at = null } }, .attention_kind = .failed, .group = .done },
-        .{ .state = .{ .stopped = .{ .since = 1, .cause = .stop } }, .attention_kind = null, .group = .done },
+        .{ .state = .{ .idle = .{ .since = 1 } }, .attention_kind = null, .standing = .done },
+        .{ .state = .{ .pending = .{ .since = 1 } }, .attention_kind = null, .standing = .queued },
+        .{ .state = .{ .working = .{ .since = 1 } }, .attention_kind = null, .standing = .working },
+        .{ .state = .{ .retrying = .{ .since = 1, .due_at_ms = 9999, .cause = try bounded(max_code_bytes, "retry"), .attempt = 1 } }, .attention_kind = null, .standing = .working },
+        .{ .state = .{ .bash = .{ .since = 1, .call = 1, .description = null, .running = 1, .approvals = 0 } }, .attention_kind = null, .standing = .working },
+        .{ .state = .{ .bash = .{ .since = 1, .call = 1, .description = null, .running = 1, .approvals = 1 } }, .attention_kind = .approval, .standing = .needs_you },
+        .{ .state = .{ .approval = .{ .since = 1 } }, .attention_kind = .approval, .standing = .needs_you },
+        .{ .state = .{ .stopping = .{ .since = 1 } }, .attention_kind = null, .standing = .working },
+        .{ .state = .{ .finished = .{ .since = 1 } }, .attention_kind = .finished, .standing = .done },
+        .{ .state = .{ .failed = .{ .since = 1, .code = try bounded(max_code_bytes, "failed"), .resets_at = null } }, .attention_kind = .failed, .standing = .failed },
+        .{ .state = .{ .stopped = .{ .since = 1, .cause = .stop } }, .attention_kind = null, .standing = .done },
     };
     for (cases) |case| for (0..8) |mask| {
         const work: Work = .{ .state = case.state, .turn = if (mask & 1 != 0) 7 else null, .operation = if (mask & 2 != 0) 19 else null, .first_action = if (mask & 4 != 0) 41 else null };
-        try std.testing.expectEqual(case.group, group(work));
+        try std.testing.expectEqual(case.standing, standing(work.state));
         const got = attention(work);
         if (case.attention_kind) |kind| {
             try std.testing.expect(got != null);

@@ -729,7 +729,7 @@ def observe(store, key, *, deadline=None):
             assert "work" not in result, result
         else:
             work = result["work"]
-            assert isinstance(work, dict) and {"state", "first_action", "attention", "group", "actions"} <= work.keys(), result
+            assert isinstance(work, dict) and {"state", "first_action", "actions"} <= work.keys(), result
             actions = work["actions"]
             assert isinstance(actions, dict) and {"stop", "interrupt", "decide"} <= actions.keys(), result
     assert deadline is None or time.monotonic() < deadline, "result observation exceeded original deadline"

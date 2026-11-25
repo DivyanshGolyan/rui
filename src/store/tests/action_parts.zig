@@ -320,7 +320,7 @@ test "Action settlement reports whether stop replaced text and parts" {
                         var workspace: [protocol.max_workspace_bytes]u8 = undefined;
                         var configure = try testing.completeConfiguration("kept-config", "", try testing.canonicalCwd(std.testing.io, &workspace), "model-a");
                         const name = if (runner == .bash) "bash" else "fetch_page";
-                        configure.configuration.tools = try .of(&.{ name, "read_action", "stop_action" });
+                        configure.configuration.tools = try .of(&.{ name, "stop_action" });
                         configure.configuration.permission_mode.state = .value;
                         try configure.configuration.permission_mode.value.set("bypass");
                         const session = (try storage.configure(&configure, .{})).accepted.session;

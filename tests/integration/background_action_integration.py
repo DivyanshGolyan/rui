@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 
-from background_action_cases import prove_native_background, prove_model_action_read, prove_automatic_background, prove_message_background_and_stop, prove_client_action_stop, prove_background_action_values
+from background_action_cases import prove_native_background, prove_model_transcript_read, prove_automatic_background, prove_message_background_and_stop, prove_client_action_stop, prove_background_action_values
 import host_process
 from host_process import canonical_fixture_root
 
@@ -29,7 +29,7 @@ def main():
     print(prove_client_action_stop(state))
     print(prove_background_action_values(state))
     print(prove_native_background(state))
-    print(prove_model_action_read(state))
+    print(prove_model_transcript_read(state))
     print(prove_automatic_background(state))
     print(prove_message_background_and_stop(state))
 

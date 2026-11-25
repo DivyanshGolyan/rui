@@ -250,7 +250,7 @@ const next_core_action = rsql.Read(.{
         "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
         "AND (active.outcome_code IS NULL OR action.background_position IS NOT NULL) AND NOT " ++ actionStoppedSql("action", "operation") ++ " AND " ++ coreCallSql(3) ++ " " ++
         "AND NOT EXISTS(SELECT 1 FROM action_stop waiting JOIN action_operation target ON target.action_id=waiting.target_action_id WHERE waiting.source_action_id=action.action_id AND target.resolution_code IS NULL) " ++
-        "UNION ALL SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session,action.background_position IS NOT NULL AS background,1 AS auto_deny,'read_action' AS tool " ++
+        "UNION ALL SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session,action.background_position IS NOT NULL AS background,1 AS auto_deny,'read_image' AS tool " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.authorized=0 AND action.resolution_code IS NULL AND action.approval_position IS NOT NULL " ++

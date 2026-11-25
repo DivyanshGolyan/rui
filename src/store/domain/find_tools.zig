@@ -43,7 +43,7 @@ const Candidates = struct {
 };
 
 const loaded_names = rsql.Read(.{
-    .sql = "SELECT tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?1 ORDER BY tool.name",
+    .sql = "SELECT tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?1 AND NOT " ++ tools.sql.retired("tool.owner", "tool.name") ++ " ORDER BY tool.name",
     .Args = struct { set: u64 },
     .Row = struct { name: Bounded(tools.max_name_bytes) },
     .cardinality = .each,

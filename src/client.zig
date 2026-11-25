@@ -4481,7 +4481,7 @@ test "client activity peer boundary rejects noncanonical IDs and owns canonical 
         var body: protocol.RequestBuffer = .{};
         try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"received\":{\"admission\":\"1\",\"key\":\"key\\u0000雪\",\"turn\":null,\"state\":\"queued\",\"admitted_at\":\"1\",\"source_action\":null,\"content\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"abababababababababababababababababababababababababababababababab\"},\"sender\":{\"session\":");
         try body.appendJsonString(session);
-        try body.append("}}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\",\"newest_content\":null},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("}}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\",\"newest_content\":null},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (index < 2) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
@@ -4502,7 +4502,7 @@ test "client activity sender labels are canonical or refused" {
         try body.appendJsonString("k7m2qx");
         try body.append(",\"label\":");
         try body.appendJsonString(case.label);
-        try body.append("}}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\",\"newest_content\":null},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("}}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\",\"newest_content\":null},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (case.ok) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');

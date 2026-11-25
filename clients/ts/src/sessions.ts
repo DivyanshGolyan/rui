@@ -112,8 +112,6 @@ export interface SessionArchiveResult {
 export type SessionPinResult = Pick<Extract<Schemas["SessionPinReply"]["answer"], { status: "accepted" }>, "pinned">;
 
 export interface ServedWork {
-	attention: Schemas["SessionWork"]["attention"];
-	group: Schemas["SessionWork"]["group"];
 	canStop: boolean;
 	decide: string | null;
 	interruptTarget: InterruptTarget | null;
