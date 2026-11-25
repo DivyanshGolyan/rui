@@ -1305,7 +1305,7 @@ test "Chat info Context appears only for measured estimates regardless of work o
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "unknown") == null);
 }
 
-test "Chat info Context shows the Host reported threshold" {
+test "SUI-171 Chat info Context shows the Host reported threshold" {
     var fixture: Fixture = .{};
     fixture.init();
     var page: Self = .{ .backend = fixture.backend() };

@@ -80,6 +80,7 @@ pub const Context = struct {
 
     /// A reading with exactly `percent` left, for tests that care about the words and not the tokens.
     pub fn atLeft(percent: u8) Context {
+        comptime std.debug.assert(@import("builtin").is_test);
         std.debug.assert(percent <= 100);
         return .{ .estimate = 100 - percent, .trigger = 100 };
     }
