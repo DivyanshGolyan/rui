@@ -2,6 +2,9 @@ const std = @import("std");
 const session_line = @import("session_line.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const TerminalText = @import("TerminalText.zig");
+const marks = @import("marks.zig");
+
+pub const Say = marks.Say;
 
 pub const Method = session_line.Method;
 
@@ -88,19 +91,21 @@ pub fn Notice(comptime capacity: usize) type {
         const Self = @This();
         bytes: [capacity]u8 = undefined,
         len: usize = 0,
+        tone: @FieldType(Say, "tone") = .quiet,
         shown_ms: ?u64 = null,
         answers: NoticeAnswers = .other,
 
-        pub fn show(self: *Self, text: []const u8, now_ms: u64) void {
+        pub fn show(self: *Self, say: Say, now_ms: u64) void {
             self.answers = .other;
-            const len = utf8_validation.scalarStart(text, @min(text.len, capacity));
-            std.mem.copyForwards(u8, self.bytes[0..len], text[0..len]);
+            const len = utf8_validation.scalarStart(say.words, @min(say.words.len, capacity));
+            std.mem.copyForwards(u8, self.bytes[0..len], say.words[0..len]);
             self.len = len;
+            self.tone = say.tone;
             self.shown_ms = now_ms;
         }
 
         pub fn showCopy(self: *Self, now_ms: u64, answers: NoticeAnswers) void {
-            self.show("Sent to clipboard", now_ms);
+            self.show(Say.quiet("Sent to clipboard"), now_ms);
             self.answers = answers;
         }
 
@@ -112,9 +117,9 @@ pub fn Notice(comptime capacity: usize) type {
             self.shown_ms = null;
         }
 
-        pub fn current(self: *const Self, now_ms: u64) ?[]const u8 {
+        pub fn current(self: *const Self, now_ms: u64) ?Say {
             const shown = self.shown_ms orelse return null;
-            return if (now_ms -| shown < notice_ms) self.bytes[0..self.len] else null;
+            return if (now_ms -| shown < notice_ms) .{ .words = self.bytes[0..self.len], .tone = self.tone } else null;
         }
 
         pub fn expire(self: *Self, now_ms: u64) bool {
@@ -125,11 +130,14 @@ pub fn Notice(comptime capacity: usize) type {
     };
 }
 
-pub fn noticeLine(arena: std.mem.Allocator, notice: []const u8) std.mem.Allocator.Error![]const u8 {
-    const capacity = std.math.mul(usize, notice.len, TerminalText.max_bytes_per_byte) catch return error.OutOfMemory;
+/// What the footer draws for `say`: its sign for attention, then its words flattened to one line and escaped.
+pub fn noticeLine(arena: std.mem.Allocator, say: Say) std.mem.Allocator.Error![]const u8 {
+    const sign = say.sign();
+    const capacity = std.math.add(usize, sign.len, std.math.mul(usize, say.words.len, TerminalText.max_bytes_per_byte) catch return error.OutOfMemory) catch return error.OutOfMemory;
     var out: std.Io.Writer = .fixed(try arena.alloc(u8, capacity));
+    out.writeAll(sign) catch unreachable;
     var text: TerminalText = .{ .mode = .label };
-    for (notice) |byte| {
+    for (say.words) |byte| {
         if (byte == '\n' or byte == '\r') {
             text.finish(&out) catch unreachable;
             out.writeByte(' ') catch unreachable;
@@ -141,8 +149,8 @@ pub fn noticeLine(arena: std.mem.Allocator, notice: []const u8) std.mem.Allocato
 test "notice text flattens result lines and escapes terminal controls before Footer draws it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    try std.testing.expectEqualStrings("Saved. ! warning\\x1b", try noticeLine(arena.allocator(), "Saved.\n! warning\x1b"));
-    try std.testing.expectEqualStrings("界e\u{301}", try noticeLine(arena.allocator(), "界e\u{301}"));
+    try std.testing.expectEqualStrings("Saved. ! warning\\x1b", try noticeLine(arena.allocator(), Say.quiet("Saved.\n! warning\x1b")));
+    try std.testing.expectEqualStrings("界e\u{301}", try noticeLine(arena.allocator(), Say.quiet("界e\u{301}")));
 }
 
 pub const stop_key = session_line.stop_hint;
@@ -169,12 +177,12 @@ test "opening and decision progress share the footer while unresolved decisions 
     try same(.{ .needs = "! Not confirmed · ctrl+r retries original" }, send("! Not confirmed · ctrl+r retries original", false));
     try same(.{}, send("", false));
     for ([_]bool{ false, true }) |in_flight| try same(.{}, send(null, in_flight));
-    try std.testing.expectEqualStrings("! Unknown command /x", bar(.{ .progress = "Opening…", .notice = "! Unknown command /x", .width = 80 }).notice.?);
+    try std.testing.expectEqualStrings("Unknown command /x", bar(.{ .progress = "Opening…", .notice = Say.attention("Unknown command /x"), .width = 80 }).notice.?.words);
     const opening = bar(.{ .progress = "Opening…", .width = 80 });
     try std.testing.expectEqualStrings("", opening.left);
-    try std.testing.expectEqualStrings("Opening…", opening.notice.?);
+    try std.testing.expectEqualStrings("Opening…", opening.notice.?.words);
     try std.testing.expectEqual(Tone.quiet, opening.tone);
-    try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Opening…", .width = 80 }).left);
+    try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = Say.quiet("Copied 3 lines"), .progress = "Opening…", .width = 80 }).left);
 }
 
 pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + session_line.Context.footer_bytes + 4 * " · ".len + @import("session_archive.zig").State.longest_badge;
@@ -303,7 +311,7 @@ test "a short facts row preserves editable words before context" {
 pub const Tone = enum { quiet, attention };
 
 pub const Bar = struct {
-    notice: ?[]const u8 = null,
+    notice: ?Say = null,
     left: []const u8 = "",
     tone: Tone = .quiet,
     stop: bool = false,
@@ -313,25 +321,16 @@ pub const Bar = struct {
 pub const Facts = struct {
     needs: ?[]const u8 = null,
     progress: ?[]const u8 = null,
-    notice: ?[]const u8 = null,
+    notice: ?Say = null,
     stoppable: bool = false,
     width: u16,
     method: Method = .unicode,
 };
 
-pub fn fitsBar(result: []const u8) bool {
-    return std.mem.indexOfScalar(u8, result, '\n') == null;
-}
-
-test "a result of one line is a notice; one of two lines is a page" {
-    try std.testing.expect(fitsBar("Saved."));
-    try std.testing.expect(!fitsBar("Saved.\n! Host unavailable"));
-}
-
 const gap = 2;
 
 pub fn bar(facts: Facts) Bar {
-    var result: Bar = .{ .notice = facts.notice orelse facts.progress };
+    var result: Bar = .{ .notice = facts.notice orelse if (facts.progress) |progress| Say.quiet(progress) else null };
     if (facts.needs) |needs| {
         result.left = needs;
         result.tone = .attention;
@@ -392,27 +391,28 @@ pub const Title = struct {
 
 test "a notice goes after about five seconds or at the next key; the newest replaces it; what needs the person stays" {
     var notice: Notice(256) = .{};
-    try std.testing.expectEqual(@as(?[]const u8, null), notice.current(0));
-    notice.show("Copied 12 lines", 10_000);
-    try std.testing.expectEqualStrings("Copied 12 lines", notice.current(10_000).?);
-    try std.testing.expectEqualStrings("Copied 12 lines", notice.current(14_999).?);
-    try std.testing.expectEqual(@as(?[]const u8, null), notice.current(15_000));
+    try std.testing.expectEqual(@as(?Say, null), notice.current(0));
+    notice.show(Say.quiet("Copied 12 lines"), 10_000);
+    try std.testing.expectEqualStrings("Copied 12 lines", notice.current(10_000).?.words);
+    try std.testing.expectEqualStrings("Copied 12 lines", notice.current(14_999).?.words);
+    try std.testing.expectEqual(@as(?Say, null), notice.current(15_000));
     try std.testing.expect(!notice.expire(14_999));
     try std.testing.expect(notice.expire(15_000));
     try std.testing.expect(!notice.expire(15_001));
-    notice.show("Copied 12 lines", 10_000);
+    notice.show(Say.quiet("Copied 12 lines"), 10_000);
     try std.testing.expect(notice.current(9_000) != null);
-    notice.show("! Unknown command /x", 12_000);
-    try std.testing.expectEqualStrings("! Unknown command /x", notice.current(16_000).?);
+    notice.show(Say.attention("Unknown command /x"), 12_000);
+    try std.testing.expectEqualStrings("Unknown command /x", notice.current(16_000).?.words);
+    try std.testing.expect(notice.current(16_000).?.tone == .attention);
     notice.dismiss();
-    try std.testing.expectEqual(@as(?[]const u8, null), notice.current(12_001));
-    notice.show(comptime repeat("é", 200), 0);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(notice.current(0).?));
-    try std.testing.expectEqual(@as(usize, 256), notice.current(0).?.len);
+    try std.testing.expectEqual(@as(?Say, null), notice.current(12_001));
+    notice.show(Say.quiet(comptime repeat("é", 200)), 0);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(notice.current(0).?.words));
+    try std.testing.expectEqual(@as(usize, 256), notice.current(0).?.words.len);
 
-    try std.testing.expectEqual(Tone.quiet, bar(.{ .notice = "Copied 12 lines", .width = 80 }).tone);
-    try std.testing.expectEqualStrings("! Unknown command /x", bar(.{ .notice = "! Unknown command /x", .width = 80 }).notice.?);
-    const unconfirmed = bar(.{ .needs = "! Not confirmed · ctrl+r retries", .notice = "Copied 12 lines", .width = 80 });
+    try std.testing.expectEqual(Tone.quiet, bar(.{ .notice = Say.quiet("Copied 12 lines"), .width = 80 }).tone);
+    try std.testing.expectEqualStrings("Unknown command /x", bar(.{ .notice = Say.attention("Unknown command /x"), .width = 80 }).notice.?.words);
+    const unconfirmed = bar(.{ .needs = "! Not confirmed · ctrl+r retries", .notice = Say.quiet("Copied 12 lines"), .width = 80 });
     try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", unconfirmed.left);
     try std.testing.expectEqual(Tone.attention, unconfirmed.tone);
 }
@@ -604,11 +604,11 @@ test "copy success shares short reply next-key replacement and expiry owner" {
     notice.dismiss();
     try std.testing.expect(!notice.showsPanelCopy(10));
     notice.showCopy(10, .panel_copy);
-    notice.show("failure reply", 11);
+    notice.show(Say.quiet("failure reply"), 11);
     try std.testing.expect(!notice.showsPanelCopy(11));
     notice.showCopy(10, .panel_copy);
     notice.showCopy(11, .other);
-    try std.testing.expectEqualStrings("Sent to clipboard", notice.current(11).?);
+    try std.testing.expectEqualStrings("Sent to clipboard", notice.current(11).?.words);
     try std.testing.expect(!notice.showsPanelCopy(11));
     notice.showCopy(10, .panel_copy);
     try std.testing.expect(!notice.showsPanelCopy(10 + notice_ms));
@@ -690,16 +690,16 @@ test "SUI-14 send state and transient notice occupy their intended footer slots"
         for ([_]u16{ 46, 140 }) |width| {
             const ordinary = bar(.{ .needs = result.needs, .progress = result.progress, .width = width });
             try std.testing.expectEqualStrings(case.needs orelse "", ordinary.left);
-            try checkText(case.progress, ordinary.notice);
+            try checkText(case.progress, if (ordinary.notice) |said| said.words else null);
             try std.testing.expectEqual(if (case.needs == null) Tone.quiet else Tone.attention, ordinary.tone);
-            const with_notice = bar(.{ .needs = result.needs, .progress = result.progress, .notice = "! Usage: /new", .width = width });
+            const with_notice = bar(.{ .needs = result.needs, .progress = result.progress, .notice = Say.attention("Usage: /new"), .width = width });
             try std.testing.expectEqualStrings(case.needs orelse "", with_notice.left);
-            try std.testing.expectEqualStrings("! Usage: /new", with_notice.notice.?);
+            try std.testing.expectEqualStrings("Usage: /new", with_notice.notice.?.words);
         }
     }
     var notice: Notice(64) = .{};
-    notice.show("! Usage: /new", 100);
-    try std.testing.expectEqualStrings("! Usage: /new", notice.current(100).?);
+    notice.show(Say.attention("Usage: /new"), 100);
+    try std.testing.expectEqualStrings("Usage: /new", notice.current(100).?.words);
     notice.dismiss();
-    try std.testing.expectEqual(@as(?[]const u8, null), notice.current(101));
+    try std.testing.expectEqual(@as(?Say, null), notice.current(101));
 }

@@ -10,6 +10,24 @@ pub const Tone = enum { ink, normal, quiet, attention, failure };
 /// What an attention-toned notice starts with, so a terminal without colour still reads it as one.
 pub const attention_sign = "! ";
 
+/// A short line the footer shows: its words and whether it asks for attention. The sign is written where the line is drawn, so no words spell it.
+pub const Say = struct {
+    words: []const u8,
+    tone: enum { quiet, attention } = .quiet,
+
+    pub fn quiet(words: []const u8) Say {
+        return .{ .words = words };
+    }
+
+    pub fn attention(words: []const u8) Say {
+        return .{ .words = words, .tone = .attention };
+    }
+
+    pub fn sign(self: Say) []const u8 {
+        return if (self.tone == .attention) attention_sign else "";
+    }
+};
+
 pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii: []const u8, tone: Tone }).init(.{
     .needs_you = .{ .unicode = "●", .ascii = "?", .tone = .attention },
     .active = .{ .unicode = "◝", .ascii = "*", .tone = .ink },
