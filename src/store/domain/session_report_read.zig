@@ -99,6 +99,7 @@ fn readHeadWithPressure(a: *ReadAccess, session_ref: []const u8, profile: cli_va
         return false;
     }
     try configuration_domain.checkSaved(&current);
+    current.label = tool_presentation.readStoredLabel(current.label);
     try readCurrent(a, session_ref, profile, &current, watched, pressure);
     return true;
 }

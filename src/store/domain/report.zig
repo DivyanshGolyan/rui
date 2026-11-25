@@ -1788,7 +1788,7 @@ fn RevisionChunk(comptime Watcher: type) type {
         }
 
         fn settings(chunk: *@This(), row: *const RevisionRow) error{CorruptStore}!session_report.Revision {
-            chunk.label = if (row.label) |*label| tool_presentation.readLabel(label.slice()) else null;
+            chunk.label = tool_presentation.readStoredLabel(row.label);
             return .{
                 .revision = row.revision.get(),
                 .command_key = row.command_key.slice(),

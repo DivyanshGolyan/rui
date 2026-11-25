@@ -239,8 +239,14 @@ pub fn validLabel(bytes: []const u8) bool {
 }
 
 /// A Session Label as a reader gets it: its words as one tidy line of at most max_label_bytes, or null when it has none. Total; the door (`validLabel`) is where a bad Label is refused.
-pub fn readLabel(stored: []const u8) ?Bounded(max_label_bytes) {
+fn readLabel(stored: []const u8) ?Bounded(max_label_bytes) {
     return saved_label.readWords(max_label_bytes, stored);
+}
+
+/// A stored Session Label as a reader gets it: `readLabel` over an optional column. Every read of a stored Label goes through here, so a missed reader shows up by search.
+pub fn readStoredLabel(stored: ?Bounded(max_label_bytes)) ?Bounded(max_label_bytes) {
+    const label = stored orelse return null;
+    return readLabel(label.slice());
 }
 
 test "a Label is one non-blank line of at most 100 bytes" {

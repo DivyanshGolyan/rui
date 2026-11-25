@@ -18,6 +18,7 @@ const completeSessionStop = tests.completeSessionStop;
 const configureTestSessionAsk = tests.configureTestSessionAsk;
 const settleCallsForTesting = tests.settleCallsForTesting;
 const settleTwoActionsForTesting = tests.settleTwoActionsForTesting;
+const testingSessionList = tests.testingSessionList;
 const testingSessionReport = tests.testingSessionReport;
 const testingSessionReportWithProfile = tests.testingSessionReportWithProfile;
 const testingStore = store_testing.testingSqliteStore;
@@ -238,6 +239,64 @@ test "a saved tool label reads as one line on every publication route, and only 
             }
             try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
+        }
+    }
+}
+
+test "TPR-3 a saved Session Label reads as one tidy line on every route that shows it and never fences" {
+    const cases = [_]struct { sql: []const u8, shown: ?[]const u8 }{
+        .{ .sql = "'two'||char(10)||'lines'", .shown = "two lines" },
+        .{ .sql = "'  two   lines  '", .shown = "two lines" },
+        .{ .sql = "'two'||char(8232)||'lines'", .shown = "two lines" },
+        .{ .sql = "char(10)", .shown = null },
+    };
+    const Route = enum { list, report_current, report_full, outcome_peer };
+    for (cases) |label| {
+        for ([_]Route{ .list, .report_current, .report_full, .outcome_peer }) |route| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSessionAsk(&storage, "label-route-config");
+            const peer = try configureTestSession(&storage, "label-route-peer");
+            try submitTestMessage(&storage, &tmp, "label-route-input", "label-route-input", session.slice(), "propose");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, binding, "label-route-calls");
+            var sql: [320]u8 = undefined;
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+            try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE session SET label={s} WHERE session_ref IN ('{s}','{s}')", .{ label.sql, session.slice(), peer.slice() }, 0));
+            try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE session_revision SET label={s} WHERE session_ref='{s}'", .{ label.sql, session.slice() }, 0));
+            try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE action_operation SET outcome_text='Messaged ',outcome_link_at=9,outcome_link_session='{s}',outcome_completion=1 WHERE call_ordinal=0", .{peer.slice()}, 0));
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
+            switch (route) {
+                .list => {
+                    var used = std.atomic.Value(u64).init(0);
+                    const bytes = try testingSessionList(&storage, &tmp, .{}, &used, 5);
+                    defer std.testing.allocator.free(bytes);
+                    try std.testing.expectEqual(label.shown != null, std.mem.indexOf(u8, bytes, "\"label\":\"") != null);
+                    if (label.shown) |words| try std.testing.expect(std.mem.indexOf(u8, bytes, words) != null);
+                },
+                .report_current, .report_full => {
+                    const bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, if (route == .report_full) .full else .current);
+                    defer std.testing.allocator.free(bytes);
+                    if (label.shown) |words| try std.testing.expect(std.mem.indexOf(u8, bytes, words) != null);
+                },
+                .outcome_peer => {
+                    var request: protocol.ActivityPage = .{};
+                    try request.session.set(session.slice());
+                    request.direction = .backward;
+                    const page = try store_core.activityPageForTesting(&storage, request);
+                    var linked: usize = 0;
+                    for (page.call_activity.entries[0..@intCast(page.call_activity.total)]) |entry| if (entry.presentation.line.?.link) |link| {
+                        linked += 1;
+                        try std.testing.expectEqualStrings(label.shown orelse "", link.peer.label.slice());
+                    };
+                    try std.testing.expectEqual(@as(usize, 1), linked);
+                },
+            }
+            try std.testing.expect(!storage.isFenced());
         }
     }
 }
