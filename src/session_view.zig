@@ -3,6 +3,7 @@ const tool_fold = @import("tool_fold.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
+const activity_read = @import("activity_read.zig");
 const content_value = @import("content_value.zig");
 const value_reads = @import("value_reads.zig");
 const Text = @import("TerminalText.zig");
@@ -1599,8 +1600,8 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
         },
         .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at),
         .send_failed => |failed| try sendFailed(sink, failed.target),
-        // Detail kinds (activity_read.roleOf == .detail) draw nothing in the conversation.
-        .call, .approval_requested, .session_changed, .compacted, .model_call => {},
+        // A kind whose role is `detail` draws nothing in the conversation; a kind that gains the conversation role fails to compile here.
+        inline .call, .approval_requested, .session_changed, .compacted, .model_call => |_, kind| comptime std.debug.assert(activity_read.roleOf(kind) == .detail),
     }
     return false;
 }
