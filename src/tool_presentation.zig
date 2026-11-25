@@ -1,8 +1,13 @@
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const session_id = @import("session_id.zig");
+const saved_label = @import("saved_label.zig");
 
 pub const max_description_bytes = @import("tool_line.zig").max_bytes;
+
+comptime {
+    std.debug.assert(max_description_bytes == saved_label.max_bytes);
+}
 
 pub const max_label_bytes = 100;
 
@@ -39,6 +44,12 @@ pub const Line = struct {
     pub fn plain(words: []const u8) Error!Line {
         if (!ToolPresentation.validDescription(words)) return error.InvalidLine;
         return .{ .words = Bounded(max_description_bytes).from(words) catch return error.InvalidLine };
+    }
+
+    /// The line a saved label reads as: its words as one tidy line, or fallback_words when it has none. Total.
+    pub fn ofSaved(saved: []const u8) Line {
+        const words = saved_label.readWords(max_description_bytes, saved) orelse return plain(saved_label.fallback_words) catch unreachable;
+        return plain(words.slice()) catch unreachable;
     }
 
     /// Words with one Session named between them: `linked("Messaged ", id, "")`.
@@ -321,6 +332,29 @@ test "TPR-1 a reference's label comes from the read and replaces its ID in the w
     try std.testing.expect(!split.valid());
     split.link.?.at = split.words.len + 1;
     try std.testing.expect(!split.valid());
+}
+
+test "TPR-3 a saved label always reads as a valid tool row line" {
+    const cases = [_]struct { saved: []const u8, words: []const u8 }{
+        .{ .saved = "", .words = "Tool call" },
+        .{ .saved = "   ", .words = "Tool call" },
+        .{ .saved = "Run tests\nthen lint", .words = "Run tests then lint" },
+        .{ .saved = "a\r\n\u{2028}b", .words = "a b" },
+        .{ .saved = "\xff\xfe", .words = "\u{FFFD}\u{FFFD}" },
+        .{ .saved = "a\x00b", .words = "a\u{FFFD}b" },
+    };
+    for (cases) |case| {
+        const line = Line.ofSaved(case.saved);
+        try std.testing.expect(line.valid());
+        try std.testing.expect(line.link == null);
+        try std.testing.expectEqualStrings(case.words, line.words.slice());
+    }
+    const long: [300]u8 = @splat('x');
+    const bounded = Line.ofSaved(&long);
+    try std.testing.expect(bounded.valid());
+    try std.testing.expect(bounded.link == null);
+    try std.testing.expectEqual(max_description_bytes, bounded.words.slice().len);
+    try std.testing.expectEqualStrings(long[0..max_description_bytes], bounded.words.slice());
 }
 
 test "TPR-2 a tool chooses how a success reads and never how a failure reads" {
