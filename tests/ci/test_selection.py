@@ -2896,5 +2896,15 @@ class MysqlTestModulesTest(unittest.TestCase):
                              sorted({"store.domain.tool_offer.", "store.tests.tool_set.", *MYSQL_ALWAYS}))
             self.assertEqual(mysql_test_modules([], root), sorted(MYSQL_ALWAYS))
 
+
+class UnitHarnessSelectionTest(unittest.TestCase):
+    def test_runner_and_launcher_changes_run_the_sharded_roots_on_the_pr(self):
+        from select_tests import UNIT_HARNESS
+        for path in UNIT_HARNESS:
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertLessEqual({"test-native", "test-store"}, set(result["fast_targets"]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ on:
   # Re-check open PRs by hand.
   workflow_dispatch:
 permissions:
+  actions: write
   contents: read
   pull-requests: write
 concurrency:
@@ -19,7 +20,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Comment on each open PR that this move of main left conflicting
+      - name: Comment on each open PR that this move of main left conflicting, and cancel its running checks
         env:
           GH_TOKEN: ${{ github.token }}
           MAIN_SHA: ${{ github.sha }}
