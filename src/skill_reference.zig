@@ -1,7 +1,13 @@
 const std = @import("std");
 
+/// The largest SKILL.md the model is given.
+pub const max_skill_bytes = 1024 * 1024;
+
+/// The longest skill name; the Store column `message_skill.name` holds the same bound.
+pub const max_name_bytes = 64;
+
 pub fn validName(name: []const u8) bool {
-    if (name.len == 0 or name.len > 64 or name[0] == '-' or name[name.len - 1] == '-') return false;
+    if (name.len == 0 or name.len > max_name_bytes or name[0] == '-' or name[name.len - 1] == '-') return false;
     var hyphen = false;
     for (name) |byte| {
         if (byte == '-') {
