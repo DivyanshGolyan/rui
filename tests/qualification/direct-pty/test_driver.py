@@ -75,7 +75,7 @@ class NavigationTests(unittest.TestCase):
                             self.assertEqual(len(transcript_rows(screen)), feed + 1)
                             self.assertEqual(status(screen), "\n".join(persistent))
                             self.assertIn(f";{24 - len(persistent)}M".encode(), footer_click(screen, column=1))
-                            self.assertIn(f";{24 - len(persistent)}M".encode(), footer_click(screen, marker="Chat"))
+                            self.assertIn(f";{24 - len(persistent)}M".encode(), footer_click(screen, marker="Archived"))
                             self.assertFalse(composing(screen.replace("┄", " "), draft))
 
     def test_chat_info_observes_fields_footer_and_fitted_folder(self):
