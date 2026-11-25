@@ -309,7 +309,7 @@ noinline fn outlineHeader(store: *storage.Store, arena: std.mem.Allocator, sessi
         .hosted_call => |*presentation| if (presentation.line) |*line| {
             note = try arena.dupe(u8, (line.description() orelse return error.CorruptStore).slice());
         },
-        .assistant, .instruction, .turn_ended, .stop, .approval_requested, .session_changed, .compacted, .model_call => {},
+        .assistant, .instruction, .skill, .turn_ended, .stop, .approval_requested, .session_changed, .compacted, .model_call => {},
     }
     return note;
 }
@@ -833,6 +833,35 @@ test "read_transcript lists instruction rows with their text and first line" {
             const line = try outlineLine(arena, output.written(), try std.fmt.allocPrint(arena, "{d}.0 instruction at=", .{item.position}));
             try std.testing.expect(std.mem.indexOf(u8, line, " turn=1 revision=2 ") != null);
             try std.testing.expect(std.mem.endsWith(u8, line, try std.fmt.allocPrint(arena, " {d} bytes: \"You are the release steward.\"", .{text.len})));
+        }
+    }.check);
+}
+
+test "read_transcript lists skill rows with their facts, size and first line" {
+    try storage.testing.forEachEngine(struct {
+        fn check(case: *storage.testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var database: storage.Store = undefined;
+            try storage.testing.testingStore(case, &database, &tmp, std.testing.io);
+            defer database.close() catch unreachable;
+            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer memory.deinit();
+            const arena = memory.allocator();
+            const session = try storage.testing.configureTestSession(&database, "skill-transcript");
+            const text = "# Release notes\nSecond line.";
+            try storage.testing.submitTestMessageWithSkills(&database, &tmp, "skill-transcript-input", "skill-transcript-input", session.slice(), "use the skill", &.{.{ .name = "release-notes", .bytes = text }});
+            _ = (try database.admitNextModelAttempt(.{})).?;
+            const page = try arena.create(protocol.ActivityFacts);
+            try database.activityPage(&.{ .session = session, .kinds = .initOne(.skill) }, page);
+            try std.testing.expectEqual(@as(usize, 1), page.count);
+            const item = &page.items[0];
+            var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer output.deinit();
+            try outline(&database, arena, session.slice(), item, &output.writer);
+            const line = try outlineLine(arena, output.written(), try std.fmt.allocPrint(arena, "{d}.0 skill at=", .{item.position}));
+            try std.testing.expect(std.mem.indexOf(u8, line, try std.fmt.allocPrint(arena, " admission={d} turn={d} ordinal=1 name=\"release-notes\" ", .{ item.value.skill.admission, item.value.skill.turn })) != null);
+            try std.testing.expect(std.mem.endsWith(u8, line, try std.fmt.allocPrint(arena, " {d} bytes: \"# Release notes\"", .{text.len})));
         }
     }.check);
 }

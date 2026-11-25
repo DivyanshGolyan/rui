@@ -210,9 +210,13 @@ fn flushPrefix(self: *Renderer) !void {
         if (end == indent or end >= prefix.len or prefix[end] != '.') end = indent else end += 1;
     }
     if (end > indent and end < prefix.len and prefix[end] == ' ') {
+        // A bullet leads its row, so a wrapped line hangs under the item's text; a number does not (a separate decision).
+        const bullet = self.destination == .viewport and end - indent == 1 and std.mem.indexOfScalar(u8, "-*+", prefix[indent]) != null;
         try self.safeSlice(prefix[0..indent]);
+        if (bullet) try self.out.writeAll(TerminalText.leader_on);
         try self.transition(.{ .bold = true });
         try self.safeSlice(prefix[indent..end]);
+        if (bullet) try self.out.writeAll(TerminalText.leader_off);
         try self.transition(.{});
         try self.safeSlice(prefix[end .. end + 1]);
         try self.proseSlice(prefix[end + 1 ..]);
@@ -1211,7 +1215,7 @@ test "chunked subset, malformed markup and terminal controls" {
         "bad \x1b]2;title\x07 \r \x7f \xe2\x80\xae café\n";
     for (input) |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[1mHeading\x1b[0m\n\x1b[1m-\x1b[0m \x1b[3mitem\x1b[0m and \x1b[94mcode\x1b[0m\n" ++
+    try std.testing.expectEqualStrings("\x1b[1mHeading\x1b[0m\n" ++ TerminalText.leader_on ++ "\x1b[1m-" ++ TerminalText.leader_off ++ "\x1b[0m \x1b[3mitem\x1b[0m and \x1b[94mcode\x1b[0m\n" ++
         "\x1b[1mbold\x1b[0m\n" ++ TerminalText.full_width_on ++ "\x1b[40m  x\t= 1\n\x1b[0m" ++ TerminalText.full_width_off ++ "unfinished *mark\n\\*literal*\n" ++
         "bad \\x1b]2;title\\x07 \\x0d \\x7f \\u202e café\n", output.written());
 }
@@ -1806,7 +1810,7 @@ test "content_link_render SUI-26 link targets and labels" {
     {
         try expectRendered("Docs: https://ziglang.org/doc/, then", "Docs: " ++ comptime linked("https://ziglang.org/doc/", "https://ziglang.org/doc/") ++ ", then");
         try expectRendered("(see https://en.wikipedia.org/wiki/Zig_(language)).", "(see " ++ comptime linked("https://en.wikipedia.org/wiki/Zig_(language)", "https://en.wikipedia.org/wiki/Zig_(language)") ++ ").");
-        try expectRendered("- HTTP://A.dev\nhttp://b.dev", "\x1b[1m-\x1b[0m " ++ comptime linked("HTTP://A.dev", "HTTP://A.dev") ++ "\n" ++ linked("http://b.dev", "http://b.dev"));
+        try expectRendered("- HTTP://A.dev\nhttp://b.dev", TerminalText.leader_on ++ "\x1b[1m-" ++ TerminalText.leader_off ++ "\x1b[0m " ++ comptime linked("HTTP://A.dev", "HTTP://A.dev") ++ "\n" ++ linked("http://b.dev", "http://b.dev"));
     }
     {
         inline for (.{

@@ -42,6 +42,7 @@ export const FEED_KINDS = [
 	"compacted",
 	"model_call",
 	"instruction",
+	"skill",
 ] as const satisfies readonly WireKind[];
 export type FeedKind = (typeof FEED_KINDS)[number];
 const complete: [Exclude<WireKind, FeedKind>] extends [never] ? true : never = true;

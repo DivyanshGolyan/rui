@@ -209,7 +209,7 @@ fn rowColumnsMap() !void {
     const document = try std.testing.allocator.create(Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
-    try document.append("◝ 雪 fall fast\n\nend");
+    try document.append(TerminalText.leader_on ++ "◝" ++ TerminalText.leader_off ++ " 雪 fall fast\n\nend");
     try document.prepare();
     var cells: [10 * 4]vaxis.Cell = undefined;
     layOut(document, .{}, 10, 4, &cells);
@@ -242,7 +242,7 @@ test "SUI-145 transcript projection leaves generated gutters and preserves autho
     const testing = std.testing;
     const DocumentType = viewport.Sized(256, true);
     var document: DocumentType = .{};
-    const marker = TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off;
+    const marker = TerminalText.user_marker;
     try document.append(TerminalText.user_message_on ++ marker ++ "UserAlpha\n\nAnswerBeta" ++ TerminalText.user_message_off);
     try document.prepare();
     const SelectionRow = RowFor(@TypeOf(document));
@@ -446,7 +446,7 @@ fn testBandCopy() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
         const method: vaxis.gwidth.Method = if (unicode_caps) .unicode else .wcwidth;
         var document: viewport.Sized(1024, true) = .{ .sidenotes = true, .width_method = method };
-        const marker = TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off;
+        const marker = TerminalText.user_marker;
         try document.append(TerminalText.user_message_on ++ marker ++ "\x1b[8m14:20\x1b[0mshort\n" ++ TerminalText.user_message_off ++
             TerminalText.user_message_on ++ marker);
         const count: usize = if (width == 46) 75 else 265;

@@ -33,6 +33,7 @@ const content_domain = @import("content.zig");
 const content_parts = @import("content_parts.zig");
 const sourced_input = @import("sourced_input.zig");
 const skills_domain = @import("skills.zig");
+const skill_reference = @import("../../skill_reference.zig");
 const report_domain = @import("report.zig");
 const session_list_domain = @import("session_list_read.zig");
 const store_schema = @import("../schema.zig");
@@ -207,13 +208,15 @@ fn kindOn(comptime kinds: []const u8, comptime kind: u5) []const u8 {
     return std.fmt.comptimePrint("({s}/{d})%2=1", .{ kinds, @as(u64, 1) << kind });
 }
 
-/// The entries delivered to a Turn that no other source owns: the model's text (kind 3) and the instruction text it was given (kind 2).
-/// SQLite allows 4 terms in a compound SELECT, so the pair sits in its own CTE beside the other inputs.
+/// The entries delivered to a Turn that no other source owns: the model's text (kind 3), the instruction text it was given (kind 2)
+/// and the skill text bound to a Message (kind 4). SQLite allows 4 terms in a compound SELECT, so the three sit in their own CTE beside the other inputs.
 fn activityDeliveredEntries(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime kinds: []const u8, comptime order: []const u8) []const u8 {
     return "SELECT e.session_position AS position,0 AS ordinal,3 AS kind,e.source_admission_id AS id FROM conversation_entry e @index(conversation_entry_activity_assistant) " ++
         "WHERE e.session_ref=?1 AND e.entry_kind=3 AND " ++ kindOn(kinds, 3) ++ " AND " ++ range("e.session_position", "0") ++
         " UNION ALL SELECT e.session_position,0,16,NULL FROM conversation_entry e @index(conversation_entry_activity_assistant) " ++
-        "WHERE e.session_ref=?1 AND e.entry_kind=2 AND " ++ kindOn(kinds, 16) ++ " AND " ++ range("e.session_position", "0") ++ order;
+        "WHERE e.session_ref=?1 AND e.entry_kind=2 AND " ++ kindOn(kinds, 16) ++ " AND " ++ range("e.session_position", "0") ++
+        " UNION ALL SELECT e.session_position,0,17,NULL FROM conversation_entry e @index(conversation_entry_activity_assistant) " ++
+        "WHERE e.session_ref=?1 AND e.entry_kind=4 AND " ++ kindOn(kinds, 17) ++ " AND " ++ range("e.session_position", "0") ++ order;
 }
 
 fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime kinds: []const u8, comptime order: []const u8) [4][]const u8 {
@@ -245,7 +248,7 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
 }
 
 /// Every kind bit. Codes 8 and 9 belonged to the deleted `sent` and `send_failed` kinds; no row carries them, so their bits select nothing.
-const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 17) - 2});
+const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 18) - 2});
 
 fn activityKindCode(kind: activity_facts.Item.Kind) u5 {
     return switch (kind) {
@@ -263,6 +266,7 @@ fn activityKindCode(kind: activity_facts.Item.Kind) u5 {
         .compacted => 14,
         .model_call => 15,
         .instruction => 16,
+        .skill => 17,
     };
 }
 
@@ -647,16 +651,23 @@ pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
 const instruction_entry_consistent = "(e.entry_kind=2 AND c.content_id IS NOT NULL AND c.private=0 AND ((e.source_catalog_position IS NULL AND e.turn_id IS NOT NULL AND t.session_ref=e.session_ref AND " ++
     "EXISTS(SELECT 1 FROM session_revision r WHERE r.session_ref=e.session_ref AND r.revision=e.source_revision AND r.instructions_content_id=e.content_id)) OR " ++ skills_domain.instructionConsistentSql("e") ++ ")) OR ";
 
-/// The Conversation entry a position holds. The public Conversation hides Action values (source kind 4) and instruction entries (kind 2); the Activity feed keeps them.
+/// A skill entry's text is the public SKILL.md its Message saved, bound to a Message of the entry's own Session and Turn.
+/// The Conversation reports read the same fact, so one owner serves both.
+pub const skill_entry_consistent = "(e.entry_kind=4 AND c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND EXISTS(SELECT 1 FROM message_skill skill " ++
+    "JOIN message_admission owner ON owner.admission_id=skill.admission_id WHERE skill.admission_id=e.source_skill_admission_id AND skill.position=e.source_skill_position " ++
+    "AND skill.content_id=e.content_id AND owner.session_ref=e.session_ref AND owner.turn_id=e.turn_id)) OR ";
+
+/// The Conversation entry a position holds. The public Conversation hides Action values (source kind 4) and instruction and skill entries (kinds 2 and 4); the Activity feed keeps them.
 fn entryRead(comptime hide_values: bool) type {
     return rsql.Read(.{
         .sql = publicEntryRead("e.content_id,e.turn_id,e.source_revision,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
             "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender," ++
             "CASE WHEN e.entry_kind=1 THEN " ++ sourced_input.actionIdSql("m") ++ " END AS source_action," ++
-            "CASE WHEN e.entry_kind=1 THEN e.source_admission_id END AS admission,e.recorded_at", if (hide_values) "" else instruction_entry_consistent, "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(" ++ (if (hide_values) "1,3" else "1,2,3") ++ ")" ++
+            "CASE WHEN e.entry_kind=1 THEN e.source_admission_id END AS admission,e.source_skill_admission_id AS skill_admission,e.source_skill_position AS skill_position," ++
+            "(SELECT skill.name FROM message_skill skill WHERE skill.admission_id=e.source_skill_admission_id AND skill.position=e.source_skill_position) AS skill_name,e.recorded_at", if (hide_values) "" else instruction_entry_consistent ++ skill_entry_consistent, "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(" ++ (if (hide_values) "1,3" else "1,2,3,4") ++ ")" ++
             (if (hide_values) " AND " ++ visibleEntrySql("e") else "")),
         .Args = struct { session: []const u8, position: u64 },
-        .Row = struct { content_id: rsql.Positive, turn_id: ?rsql.Positive, source_revision: ?rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, source_action: ?rsql.Positive, admission: ?rsql.Positive, recorded_at: rsql.Positive, consistent: bool },
+        .Row = struct { content_id: rsql.Positive, turn_id: ?rsql.Positive, source_revision: ?rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, source_action: ?rsql.Positive, admission: ?rsql.Positive, skill_admission: ?rsql.Positive, skill_position: ?rsql.Positive, skill_name: ?Bounded(skill_reference.max_name_bytes), recorded_at: rsql.Positive, consistent: bool },
         .cardinality = .each,
     });
 }
@@ -708,6 +719,8 @@ const PublicContentRead = struct {
     position: u64,
     ordinal: u64,
     sender: ?*?activity_facts.NamedPeer = null,
+    /// The Activity row a skill entry fills; null for every other read.
+    skill: ?*activity_facts.Item.Skill = null,
     content: PublicContent = undefined,
     missing: missing_assistant_entry.Result = null,
     metadata: content_metadata.Row = undefined,
@@ -732,6 +745,11 @@ const PublicContentRead = struct {
         if (!row.consistent) return error.CorruptStore;
         if (@TypeOf(row.*) == public_entry.Row or @TypeOf(row.*) == activity_entry.Row) {
             read.content = .{ .id = @intCast(row.content_id.get()), .value = undefined, .tool_operation = null, .admitted_at = if (row.admitted_at) |second| second.get() else null, .at = row.recorded_at.get(), .source_action = if (row.source_action) |action| action.get() else null, .owner = if (row.admission) |admission| .{ .message = admission.get() } else null, .turn = if (row.turn_id) |turn| turn.get() else null, .revision = if (row.source_revision) |revision| revision.get() else null };
+            // A skill entry fills the row it was read for; any other entry read for a skill row, or a skill entry read for another kind, is inconsistent.
+            if (row.skill_admission) |admission| {
+                const skill = read.skill orelse return error.CorruptStore;
+                skill.* = .{ .admission = admission.get(), .turn = (row.turn_id orelse return error.CorruptStore).get(), .ordinal = (row.skill_position orelse return error.CorruptStore).get(), .name = row.skill_name orelse return error.CorruptStore, .content = undefined };
+            } else if (read.skill != null) return error.CorruptStore;
             if (read.sender) |sender| sender.* = if (row.sender) |session| .{ .session = session } else null;
         } else {
             read.content = .{ .id = @intCast(row.content_id.get()), .value = undefined, .tool_operation = row.operation_id.get(), .admitted_at = null, .at = row.at.get(), .owner = if (row.resolution_action) |action| .{ .action = action.get() } else null };
@@ -1578,7 +1596,7 @@ const ItemRead = struct {
                     if (kind == 2) message.entry.queueMetadata(a);
                 }
             },
-            3, 5, 16 => {
+            3, 5, 16, 17 => {
                 const content = &read.state.content;
                 switch (read.round) {
                     1 => content.read.queue(a, session),
@@ -1658,7 +1676,7 @@ const ItemRead = struct {
                 }
                 read.exposes(message.read.content_id, message.read.message.content);
             },
-            3, 5, 16 => {
+            3, 5, 16, 17 => {
                 const content = &read.state.content;
                 switch (read.round) {
                     1 => return content.read.found(),
@@ -1673,12 +1691,13 @@ const ItemRead = struct {
                             read.done = true;
                             return;
                         }
-                        if (read.kind == 16) {
-                            // Instruction text has no owner, so its projection is text or fenced.
-                            item.value = .{ .instruction = .{ .turn = found.turn, .revision = found.revision, .content = switch (found.value) {
+                        if (read.kind == 16 or read.kind == 17) {
+                            // Instruction and skill text have no owner, so their projection is text or fenced.
+                            const text = switch (found.value) {
                                 .text => |reference| reference,
                                 .parts => return error.CorruptStore,
-                            } } };
+                            };
+                            if (read.kind == 17) item.value.skill.content = text else item.value = .{ .instruction = .{ .turn = found.turn, .revision = found.revision, .content = text } };
                             read.exposes(@intCast(found.id), found.value);
                             read.done = true;
                             return;
@@ -1815,6 +1834,10 @@ const ItemRead = struct {
             },
             15 => read.state = .{ .model_call = .{ .operation = (row.id orelse return error.CorruptStore).get(), .item = item } },
             16 => read.state = .{ .content = .{ .read = .{ .position = read.position, .ordinal = read.ordinal, .values = true } } },
+            17 => {
+                item.value = .{ .skill = undefined };
+                read.state = .{ .content = .{ .read = .{ .position = read.position, .ordinal = read.ordinal, .values = true, .skill = &item.value.skill } } };
+            },
             else => return error.CorruptStore,
         }
     }

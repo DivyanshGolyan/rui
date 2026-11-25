@@ -15,6 +15,7 @@ const workspace_path = @import("workspace_path.zig");
 const model_capability = @import("model_capability.zig");
 const content_value = @import("content_value.zig");
 const tool_proposal = @import("tool_proposal.zig");
+const skill_reference = @import("skill_reference.zig");
 
 const ToolPresentation = tool_presentation.ToolPresentation;
 
@@ -26,7 +27,7 @@ pub const Item = struct {
     ordinal: u64 = 0,
     at: u64,
     value: Value,
-    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: content_value.Value, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction };
+    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: content_value.Value, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction, skill: Skill };
     pub const Kind = std.meta.Tag(Value);
 
     /// What a row's text is: the one owner of which of its contents a reader can open. A row with no text has `none`.
@@ -43,6 +44,7 @@ pub const Item = struct {
             .admission, .user, .received => |message| .{ .value = message.content },
             .assistant => |assistant| .{ .value = .{ .text = assistant.content } },
             .instruction => |instruction| .{ .value = .{ .text = instruction.content } },
+            .skill => |skill| .{ .value = .{ .text = skill.content } },
             .call => |call| .{ .call = .{ .name = call.fields[@backingInt(tool_proposal.Field.name)], .arguments = call.fields[@backingInt(tool_proposal.Field.arguments)] } },
             .tool_result => |result| .{ .value = result.content },
             .turn_ended => |ended| if (ended.content) |reference| .{ .value = .{ .text = reference } } else .none,
@@ -68,6 +70,9 @@ pub const Item = struct {
     /// Instruction text the model was given. `turn` and `revision` are both null exactly for the skill-catalog instruction,
     /// which no Turn and no authored revision owns. The text is public; a private value never becomes a row.
     pub const Instruction = struct { turn: ?u64, revision: ?u64, content: content_value.Reference };
+    /// The complete raw SKILL.md the model was given with a Message. `ordinal` is the skill's position among that Message's skills.
+    /// The text is public, at most 1 MiB; a private value never becomes a row.
+    pub const Skill = struct { admission: u64, turn: u64, ordinal: u64, name: Bounded(skill_reference.max_name_bytes), content: content_value.Reference };
     pub const Compacted = struct { operation: u64, dropped: u64 };
     pub const ModelCall = struct {
         model: Bounded(model_capability.max_model_bytes),

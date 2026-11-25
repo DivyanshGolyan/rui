@@ -4,7 +4,7 @@ const json_scalar = @import("json_scalar.zig");
 const skill_reference = @import("skill_reference.zig");
 const Allocator = std.mem.Allocator;
 
-pub const max_skill_bytes = 1024 * 1024;
+pub const max_skill_bytes = skill_reference.max_skill_bytes;
 pub const max_frontmatter_bytes = 64 * 1024;
 const max_description_characters = 1024;
 pub const max_entries = 4096;

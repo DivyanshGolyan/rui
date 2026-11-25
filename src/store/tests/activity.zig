@@ -253,7 +253,7 @@ test "every activity row is dated by the fact that owns it" {
                     .turn_ended => 107,
                     .stop => 108,
                     .approval_requested => 104,
-                    .hosted_call, .received, .session_changed, .compacted, .instruction => unreachable,
+                    .hosted_call, .received, .session_changed, .compacted, .instruction, .skill => unreachable,
                 };
                 try std.testing.expectEqual(expected, item.at);
                 seen.insert(item.value);
@@ -1021,6 +1021,212 @@ test "instruction rows serve each entry that gave the model its instructions, at
             try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND session_position=?2)", .{ session.slice(), refused });
             try std.testing.expectError(error.CorruptStore, storage.openActivityContent(&.{ .session = session, .position = refused }));
             try std.testing.expect(storage.isFenced());
+        }
+    }.run);
+}
+
+test "skill rows serve each skill a Message bound, at its own position" {
+    try store_testing.forEachEngine(struct {
+        /// The text of each skill a Turn was given. The first skill of the first Message is the one over 16 KiB, so its content opens in windows.
+        const big = blk: {
+            @setEvalBranchQuota(100_000);
+            var bytes: [40_000]u8 = undefined;
+            for (&bytes, 0..) |*byte, index| byte.* = "abcdefghijklmnopqrstuvwxyz\n"[index % 27];
+            break :blk bytes;
+        };
+        const turns = 9;
+
+        fn name(comptime turn: usize, comptime ordinal: usize) []const u8 {
+            return std.fmt.comptimePrint("skill-{d}-{d}", .{ turn, ordinal });
+        }
+
+        fn text(comptime turn: usize, comptime ordinal: usize) []const u8 {
+            if (turn == 0 and ordinal == 2) return &big;
+            return std.fmt.comptimePrint("Skill file: \"/skills/{d}/SKILL.md\"\n\nbody {d}.{d}", .{ turn, turn, ordinal });
+        }
+
+        fn readWindows(storage: *Store, session: anytype, position: u64, out: *std.ArrayList(u8)) !void {
+            var reader: content_domain.ContentReader = undefined;
+            reader.open(try storage.openActivityContent(&.{ .session = session, .position = position }));
+            defer reader.close();
+            var window: [16 * 1024]u8 = undefined;
+            var at: u64 = 0;
+            while (true) {
+                const count = try reader.read(at, &window);
+                if (count == 0) break;
+                try out.appendSlice(std.testing.allocator, window[0..count]);
+                at += count;
+            }
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "skill-rows-config");
+            inline for (0..turns) |turn| {
+                const key = std.fmt.comptimePrint("skill-rows-{d}", .{turn});
+                try store_testing.submitTestMessageWithSkills(&storage, &tmp, key, key, session.slice(), "use the skills", &.{
+                    .{ .name = name(turn, 1), .bytes = text(turn, 1) }, .{ .name = name(turn, 2), .bytes = text(turn, 2) },
+                });
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try store_testing.settleAnswerTestTurn(&storage, &tmp, binding, key, &.{.{ .encoded = "ok", .decoded = "ok" }});
+            }
+            const rows = 2 * turns;
+
+            // Only skill rows, across the 16-row page boundary, forward and backward.
+            for ([_]bool{ true, false }) |forward| {
+                var request: protocol.ActivityPage = .{ .direction = if (forward) .forward else .backward, .kinds = .initOne(.skill) };
+                try request.session.set(session.slice());
+                var seen: usize = 0;
+                var pages: usize = 0;
+                while (true) {
+                    const page = try store_core.activityPageForTesting(&storage, request);
+                    pages += 1;
+                    for (page.items[0..page.count]) |item| {
+                        const index = if (forward) seen else rows - 1 - seen;
+                        const turn = index / 2;
+                        const ordinal = index % 2 + 1;
+                        var keys: [16]u8 = undefined;
+                        const command_key = try std.fmt.bufPrint(&keys, "skill-rows-{d}", .{turn});
+                        const admission = try store_testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE session_ref=?1 AND command_key=?2", .{ session.slice(), command_key });
+                        const message_position = try store_testing.queryU64(&storage, "SELECT session_position FROM conversation_entry WHERE session_ref=?1 AND entry_kind=1 AND source_admission_id=?2", .{ session.slice(), admission });
+                        const position = message_position + ordinal;
+                        try std.testing.expectEqual(position, item.position);
+                        try std.testing.expectEqual(@as(u64, 0), item.ordinal);
+                        try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT recorded_at FROM conversation_entry WHERE session_ref=?1 AND session_position=?2 AND entry_kind=4", .{ session.slice(), position }), item.at);
+                        const skill = item.value.skill;
+                        try std.testing.expectEqual(admission, skill.admission);
+                        try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT turn_id FROM message_admission WHERE admission_id=?1", .{admission}), skill.turn);
+                        try std.testing.expectEqual(@as(u64, ordinal), skill.ordinal);
+                        var expected_name: [16]u8 = undefined;
+                        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_name, "skill-{d}-{d}", .{ turn, ordinal }), skill.name.slice());
+                        var expected_text: [64]u8 = undefined;
+                        const expected = if (turn == 0 and ordinal == 2) &big else try std.fmt.bufPrint(&expected_text, "Skill file: \"/skills/{d}/SKILL.md\"\n\nbody {d}.{d}", .{ turn, turn, ordinal });
+                        try std.testing.expectEqual(@as(u64, expected.len), skill.content.length);
+                        var actual: std.ArrayList(u8) = .empty;
+                        defer actual.deinit(std.testing.allocator);
+                        try readWindows(&storage, session, position, &actual);
+                        try std.testing.expectEqualSlices(u8, expected, actual.items);
+                        seen += 1;
+                    }
+                    if (!page.more) break;
+                    request.end = page.end;
+                    request.position = page.items[page.count - 1].position;
+                    request.ordinal = page.items[page.count - 1].ordinal;
+                }
+                try std.testing.expectEqual(rows, seen);
+                try std.testing.expectEqual(@as(usize, 2), pages);
+            }
+
+            // A filter that omits the kind serves none, and every kind keeps position order with each skill after its Message's user row.
+            var all: protocol.ActivityPage = .{};
+            try all.session.set(session.slice());
+            var others: protocol.ActivityPage = .{ .kinds = .full };
+            others.kinds.remove(.skill);
+            try others.session.set(session.slice());
+            var counted: usize = 0;
+            while (true) {
+                const page = try store_core.activityPageForTesting(&storage, others);
+                for (page.items[0..page.count]) |item| try std.testing.expect(item.value != .skill);
+                if (!page.more) break;
+                others.position = page.items[page.count - 1].position;
+                others.ordinal = page.items[page.count - 1].ordinal;
+            }
+            while (true) {
+                const page = try store_core.activityPageForTesting(&storage, all);
+                for (page.items[0..page.count]) |item| counted += @intFromBool(item.value == .skill);
+                if (!page.more) break;
+                all.position = page.items[page.count - 1].position;
+                all.ordinal = page.items[page.count - 1].ordinal;
+            }
+            try std.testing.expectEqual(rows, counted);
+
+            // A private skill text is refused, not served.
+            const refused = try store_testing.queryU64(&storage, "SELECT session_position FROM conversation_entry WHERE session_ref=?1 AND entry_kind=4 ORDER BY session_position LIMIT 1 OFFSET 4", .{session.slice()});
+            try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND session_position=?2)", .{ session.slice(), refused });
+            try std.testing.expectError(error.CorruptStore, storage.openActivityContent(&.{ .session = session, .position = refused }));
+            try std.testing.expect(storage.isFenced());
+        }
+    }.run);
+}
+
+test "every kind of Conversation entry a model is given has an Activity row at its position" {
+    try store_testing.forEachEngine(struct {
+        /// The Activity row kinds that may serve a Historical entry. A kind added to `HistoricalEntryKind` fails to compile until it is mapped here.
+        fn serving(kind: HistoricalEntryKind) []const protocol.ActivityItem.Kind {
+            return switch (kind) {
+                .user => &.{.user},
+                .instruction => &.{.instruction},
+                .skill => &.{.skill},
+                .provider_output => &.{ .assistant, .call, .hosted_call, .compacted },
+                .tool_results => &.{.tool_result},
+                .operation => &.{.model_call},
+            };
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const first = "Instruction text A.";
+            const second = "Instruction text B.";
+            var create = try completeConfiguration("complete-create", "", workspace, "model-a");
+            create.configuration.instructions = .{ .state = .value, .borrowed = first.ptr, .length = first.len, .digest = protocol.contentDigest(first) };
+            const session = (try storage.configure(&create, .{})).accepted.session;
+            try answerTestTurn(&storage, &tmp, session.slice(), "complete-first", &.{.{ .encoded = "ok", .decoded = "ok" }});
+            var update = try completeConfiguration("complete-update", session.slice(), workspace, "model-a");
+            update.configuration.instructions = try testingBytesContent(&tmp, "complete-update-text", second);
+            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+            try store_testing.submitTestMessageWithSkills(&storage, &tmp, "complete-input", "complete-input", session.slice(), "propose", &.{
+                .{ .name = "complete-a", .bytes = "skill text a" }, .{ .name = "complete-b", .bytes = "skill text b" },
+            });
+            const calling = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, calling, "complete-calls");
+            var stop = try completeSessionStop("complete-stop", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            try submitTestMessage(&storage, &tmp, "complete-next", "complete-next", session.slice(), "continue");
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+            // Every Activity row, with its position.
+            const Row = struct { position: u64, kind: protocol.ActivityItem.Kind };
+            var rows: std.ArrayList(Row) = .empty;
+            defer rows.deinit(std.testing.allocator);
+            var request: protocol.ActivityPage = .{ .kinds = .full };
+            try request.session.set(session.slice());
+            while (true) {
+                const page = try store_core.activityPageForTesting(&storage, request);
+                for (page.items[0..page.count]) |item| try rows.append(std.testing.allocator, .{ .position = item.position, .kind = std.meta.activeTag(item.value) });
+                if (!page.more) break;
+                request.position = page.items[page.count - 1].position;
+                request.ordinal = page.items[page.count - 1].ordinal;
+            }
+
+            // Every entry the model is given, and that this Session gave it one of each kind.
+            var view: TestingPage = undefined;
+            view.open(&storage, next);
+            defer view.close();
+            var given: std.EnumSet(HistoricalEntryKind) = .empty;
+            var after: u64 = 0;
+            while (try view.nextEntry(after)) |entry| {
+                after = entry.position;
+                given.insert(entry.kind);
+                // A request reads a group's results before the next entry.
+                if (entry.kind == .tool_results) while (try view.nextToolResult()) |_| {};
+                const kinds = serving(entry.kind);
+                const served = for (rows.items) |row| {
+                    if (row.position == entry.position and std.mem.indexOfScalar(protocol.ActivityItem.Kind, kinds, row.kind) != null) break true;
+                } else false;
+                if (!served) std.debug.print("no Activity row serves the {s} entry at position {d}\n", .{ @tagName(entry.kind), entry.position });
+                try std.testing.expect(served);
+            }
+            try std.testing.expectEqual(std.EnumSet(HistoricalEntryKind).full, given);
         }
     }.run);
 }

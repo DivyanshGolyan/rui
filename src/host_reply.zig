@@ -623,6 +623,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .session_changed = .{ .revision = max, .field = Worst.tag(protocol.SessionField), .provider_text = .{ .bytes = @splat(1), .len = protocol.max_report_bytes } } },
         .{ .compacted = .{ .operation = max, .dropped = max } },
         .{ .instruction = .{ .turn = max, .revision = max, .content = text } },
+        .{ .skill = .{ .admission = max, .turn = max, .ordinal = max, .name = .{ .bytes = @splat(1), .len = @import("skill_reference.zig").max_name_bytes }, .content = text } },
         .{ .model_call = .{ .model = .{ .bytes = @splat(1), .len = protocol.max_model_bytes }, .served_model = .{ .bytes = @splat(1), .len = protocol.max_model_bytes }, .input_tokens = max, .output_tokens = max, .cached_tokens = max, .latency_ms = max, .first_event_ms = max, .status = code, .attempts = max } },
     };
     try std.testing.expectEqual(std.meta.tags(std.meta.Tag(protocol.ActivityItem.Value)).len, values.len);

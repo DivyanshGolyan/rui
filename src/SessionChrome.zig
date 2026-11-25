@@ -1,4 +1,5 @@
 const std = @import("std");
+const row_text = @import("testing/row_text.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const chrome = @import("session_chrome.zig");
@@ -289,7 +290,7 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
-    try document.append("› Port the overview\nI'll start.\n");
+    try document.append(row_text.user_line ++ "Port the overview\nI'll start.\n");
     var transcript: @import("DocumentView.zig") = .{ .document = document };
     var facade: AppScreen.Content = .{ .shown = transcript.widget() };
     var screen: AppScreen.Session = .{ .content = &facade, .input = input.widget(), .userdata = &recorder, .on_event = Recorder.event };
