@@ -146,11 +146,6 @@ The requested Workspace and archive filters apply at each creator link. An exclu
 Page boundaries do not limit the descendants included in a row.
 The MySQL Store connection sets its recursive-query limit to one more than the number of valid Session IDs, including after reconnect.
 The TypeScript `SessionSummary` exposes these four values as decimal strings without numeric conversion.
-Rows also carry nullable `last_line`: `{position, text}`, with a string-valued activity position and nullable text.
-It is the later by position of the newest ended Turn's outcome and the oldest pending approval's call.
-Completed Turn text is the first non-blank line from at most the first 1 KiB of public answer content, cut to at most 200 UTF-8 bytes at a code point with “…” when longer.
-Private content and failure or stop outcomes have null text; an approval uses its saved `model_tool_call.description`.
-Deciding an approval removes that candidate, falling back to the newest ended Turn; a Session with neither candidate has null `last_line`.
 These derived facts join the existing row-settings read, adding no list-page round, stored copy, Host cache or write.
 `work` is the same value that activity pages, Current and Message observations carry.
 With `since`, the Host answers one of three `delta` values.
