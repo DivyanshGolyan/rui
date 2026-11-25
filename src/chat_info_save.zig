@@ -1,15 +1,20 @@
 const std = @import("std");
 
-pub const Effect = enum { idle, configure, refreshing, copy, archive, saved, failed };
+/// `refreshing` and `refreshing_unconfirmed` await a Current read after a Configure that may have reached the Host.
+/// The second reports its unconfirmed receipt at once and keeps it once the read lands.
+pub const Effect = enum { idle, configure, refreshing, refreshing_unconfirmed, copy, archive, saved, failed, unconfirmed };
 pub const Kind = enum { edit, copy, archive };
+pub const EditResult = enum { saved, failed, unconfirmed };
 pub const Event = union(enum) {
     started: Kind,
-    worker_done: struct { kind: Kind, ok: bool },
+    edit_done: EditResult,
+    worker_done: struct { kind: enum { copy, archive }, ok: bool },
+    receipt_observed,
     status_refreshed,
     archive_answered: enum { requested, failed },
     copy_failed,
 };
-pub const SaveState = enum { idle, pending, saved, failed };
+pub const SaveState = enum { idle, pending, saved, failed, unconfirmed };
 pub const Hold = packed struct { host: bool, upgrade: bool, opening: bool, command: bool, intent: bool };
 
 pub fn step(effect: Effect, event: Event) Effect {
@@ -19,12 +24,24 @@ pub fn step(effect: Effect, event: Event) Effect {
             .copy => .copy,
             .archive => .archive,
         },
+        .edit_done => |result| if (effect != .configure) effect else switch (result) {
+            .saved => .refreshing,
+            .failed => .failed,
+            .unconfirmed => .refreshing_unconfirmed,
+        },
         .worker_done => |done| switch (done.kind) {
-            .edit => if (effect != .configure) effect else if (done.ok) .refreshing else .failed,
             .copy => if (effect != .copy) effect else if (done.ok) .saved else .failed,
             .archive => effect,
         },
-        .status_refreshed => if (effect == .refreshing) .saved else effect,
+        .receipt_observed => switch (effect) {
+            .idle, .saved, .failed, .unconfirmed => .refreshing,
+            else => effect,
+        },
+        .status_refreshed => switch (effect) {
+            .refreshing => .saved,
+            .refreshing_unconfirmed => .unconfirmed,
+            else => effect,
+        },
         .archive_answered => |answer| if (effect != .archive) effect else switch (answer) {
             .requested => .saved,
             .failed => .failed,
@@ -39,7 +56,18 @@ pub fn saveState(effect: Effect) SaveState {
         .configure, .refreshing, .copy, .archive => .pending,
         .saved => .saved,
         .failed => .failed,
+        .refreshing_unconfirmed, .unconfirmed => .unconfirmed,
     };
+}
+
+/// A Configure completed that may have changed the Host, and no Current read taken after it has landed.
+pub fn awaitingCurrent(effect: Effect) bool {
+    return effect == .refreshing or effect == .refreshing_unconfirmed;
+}
+
+/// The footer cannot name the model and effort while a Configure is in flight or its Current read is awaited.
+pub fn currentUnknown(effect: Effect) bool {
+    return effect == .configure or awaitingCurrent(effect);
 }
 
 pub fn maySave(hold: Hold) error{Busy}!void {
@@ -48,27 +76,34 @@ pub fn maySave(hold: Hold) error{Busy}!void {
 
 test "chat info save transition table covers every effect and event" {
     // Columns follow Effect declaration order; rows encode the base frontend's decisions.
-    const Row = struct { event: Event, expected: [7]Effect };
+    const Row = struct { event: Event, expected: [9]Effect };
     const rows = [_]Row{
         .{ .event = .{ .started = .edit }, .expected = @splat(.configure) },
         .{ .event = .{ .started = .copy }, .expected = @splat(.copy) },
         .{ .event = .{ .started = .archive }, .expected = @splat(.archive) },
-        .{ .event = .{ .worker_done = .{ .kind = .edit, .ok = true } }, .expected = .{ .idle, .refreshing, .refreshing, .copy, .archive, .saved, .failed } },
-        .{ .event = .{ .worker_done = .{ .kind = .edit, .ok = false } }, .expected = .{ .idle, .failed, .refreshing, .copy, .archive, .saved, .failed } },
-        .{ .event = .{ .worker_done = .{ .kind = .copy, .ok = true } }, .expected = .{ .idle, .configure, .refreshing, .saved, .archive, .saved, .failed } },
-        .{ .event = .{ .worker_done = .{ .kind = .copy, .ok = false } }, .expected = .{ .idle, .configure, .refreshing, .failed, .archive, .saved, .failed } },
-        .{ .event = .{ .worker_done = .{ .kind = .archive, .ok = true } }, .expected = .{ .idle, .configure, .refreshing, .copy, .archive, .saved, .failed } },
-        .{ .event = .{ .worker_done = .{ .kind = .archive, .ok = false } }, .expected = .{ .idle, .configure, .refreshing, .copy, .archive, .saved, .failed } },
-        .{ .event = .status_refreshed, .expected = .{ .idle, .configure, .saved, .copy, .archive, .saved, .failed } },
-        .{ .event = .{ .archive_answered = .requested }, .expected = .{ .idle, .configure, .refreshing, .copy, .saved, .saved, .failed } },
-        .{ .event = .{ .archive_answered = .failed }, .expected = .{ .idle, .configure, .refreshing, .copy, .failed, .saved, .failed } },
+        .{ .event = .{ .edit_done = .saved }, .expected = .{ .idle, .refreshing, .refreshing, .refreshing_unconfirmed, .copy, .archive, .saved, .failed, .unconfirmed } },
+        .{ .event = .{ .edit_done = .failed }, .expected = .{ .idle, .failed, .refreshing, .refreshing_unconfirmed, .copy, .archive, .saved, .failed, .unconfirmed } },
+        .{ .event = .{ .edit_done = .unconfirmed }, .expected = .{ .idle, .refreshing_unconfirmed, .refreshing, .refreshing_unconfirmed, .copy, .archive, .saved, .failed, .unconfirmed } },
+        .{ .event = .{ .worker_done = .{ .kind = .copy, .ok = true } }, .expected = .{ .idle, .configure, .refreshing, .refreshing_unconfirmed, .saved, .archive, .saved, .failed, .unconfirmed } },
+        .{ .event = .{ .worker_done = .{ .kind = .copy, .ok = false } }, .expected = .{ .idle, .configure, .refreshing, .refreshing_unconfirmed, .failed, .archive, .saved, .failed, .unconfirmed } },
+        .{ .event = .{ .worker_done = .{ .kind = .archive, .ok = true } }, .expected = .{ .idle, .configure, .refreshing, .refreshing_unconfirmed, .copy, .archive, .saved, .failed, .unconfirmed } },
+        .{ .event = .{ .worker_done = .{ .kind = .archive, .ok = false } }, .expected = .{ .idle, .configure, .refreshing, .refreshing_unconfirmed, .copy, .archive, .saved, .failed, .unconfirmed } },
+        .{ .event = .receipt_observed, .expected = .{ .refreshing, .configure, .refreshing, .refreshing_unconfirmed, .copy, .archive, .refreshing, .refreshing, .refreshing } },
+        .{ .event = .status_refreshed, .expected = .{ .idle, .configure, .saved, .unconfirmed, .copy, .archive, .saved, .failed, .unconfirmed } },
+        .{ .event = .{ .archive_answered = .requested }, .expected = .{ .idle, .configure, .refreshing, .refreshing_unconfirmed, .copy, .saved, .saved, .failed, .unconfirmed } },
+        .{ .event = .{ .archive_answered = .failed }, .expected = .{ .idle, .configure, .refreshing, .refreshing_unconfirmed, .copy, .failed, .saved, .failed, .unconfirmed } },
         .{ .event = .copy_failed, .expected = @splat(.failed) },
     };
     for (rows) |row| for (std.enums.values(Effect), 0..) |effect, i| {
         try std.testing.expectEqual(row.expected[i], step(effect, row.event));
     };
-    const states = [_]SaveState{ .idle, .pending, .pending, .pending, .pending, .saved, .failed };
-    for (std.enums.values(Effect), 0..) |effect, i| try std.testing.expectEqual(states[i], saveState(effect));
+    const states = [_]SaveState{ .idle, .pending, .pending, .unconfirmed, .pending, .pending, .saved, .failed, .unconfirmed };
+    const awaiting = [_]bool{ false, false, true, true, false, false, false, false, false };
+    for (std.enums.values(Effect), 0..) |effect, i| {
+        try std.testing.expectEqual(states[i], saveState(effect));
+        try std.testing.expectEqual(awaiting[i], awaitingCurrent(effect));
+        try std.testing.expectEqual(awaiting[i] or effect == .configure, currentUnknown(effect));
+    }
 }
 
 test "chat info save admission covers all holds" {
