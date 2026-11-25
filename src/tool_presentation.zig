@@ -177,7 +177,45 @@ pub const ToolPresentation = struct {
     sign: Sign,
     publication_position: ?u64,
 
-    pub const Code = enum { unresolved, pending_permission, background, succeeded, failed, timed_out, indeterminate, storage_failed, spawn_failed, cancelled, infrastructure_shutdown, denied, unknown_tool, invalid_arguments };
+    pub const Code = enum {
+        unresolved,
+        pending_permission,
+        background,
+        succeeded,
+        failed,
+        timed_out,
+        indeterminate,
+        storage_failed,
+        spawn_failed,
+        cancelled,
+        infrastructure_shutdown,
+        denied,
+        unknown_tool,
+        invalid_arguments,
+
+        /// Whether a row of this code sits against the row after it with no blank line between. Only a plain
+        /// success does: a background call has the same mark but is still running work, so it keeps its space.
+        pub fn packs(self: Code) bool {
+            return switch (self) {
+                .succeeded => true,
+                .unresolved, .pending_permission, .background, .failed, .timed_out, .indeterminate, .storage_failed, .spawn_failed, .cancelled, .infrastructure_shutdown, .denied, .unknown_tool, .invalid_arguments => false,
+            };
+        }
+
+        /// The words after a row's mark that its code adds to the call's own words, or null when the mark says it all.
+        pub fn words(self: Code) ?[]const u8 {
+            return switch (self) {
+                .unresolved, .pending_permission, .succeeded, .failed, .cancelled => null,
+                .background => "background",
+                .denied => "denied",
+                .unknown_tool, .invalid_arguments => "rejected",
+                .timed_out => "timed out",
+                .indeterminate, .infrastructure_shutdown => "may have run",
+                .storage_failed => "output lost",
+                .spawn_failed => "could not start",
+            };
+        }
+    };
 
     pub const Sign = enum { needs_you, active, finished, sent, failed, stopped };
 
@@ -214,6 +252,35 @@ pub const ToolPresentation = struct {
         return nonblank;
     }
 };
+
+test "TPR-5 a tool code says once whether its row packs against the next and the words it adds after the mark" {
+    const Case = struct { code: ToolPresentation.Code, packs: bool, words: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .code = .unresolved, .packs = false, .words = null },
+        .{ .code = .pending_permission, .packs = false, .words = null },
+        .{ .code = .background, .packs = false, .words = "background" },
+        .{ .code = .succeeded, .packs = true, .words = null },
+        .{ .code = .failed, .packs = false, .words = null },
+        .{ .code = .timed_out, .packs = false, .words = "timed out" },
+        .{ .code = .indeterminate, .packs = false, .words = "may have run" },
+        .{ .code = .storage_failed, .packs = false, .words = "output lost" },
+        .{ .code = .spawn_failed, .packs = false, .words = "could not start" },
+        .{ .code = .cancelled, .packs = false, .words = null },
+        .{ .code = .infrastructure_shutdown, .packs = false, .words = "may have run" },
+        .{ .code = .denied, .packs = false, .words = "denied" },
+        .{ .code = .unknown_tool, .packs = false, .words = "rejected" },
+        .{ .code = .invalid_arguments, .packs = false, .words = "rejected" },
+    };
+    try std.testing.expectEqual(std.enums.values(ToolPresentation.Code).len, cases.len);
+    for (cases) |case| {
+        try std.testing.expectEqual(case.packs, case.code.packs());
+        if (case.words) |expected| {
+            try std.testing.expectEqualStrings(expected, case.code.words().?);
+        } else {
+            try std.testing.expect(case.code.words() == null);
+        }
+    }
+}
 
 /// What kind of finish a successful call was. Closed: a new member is a wire change.
 /// `sent` means the call handed work to another Session, so the row reads as an arrow, not a tick.
