@@ -137,7 +137,7 @@ pub const Outcome = enum { closed, merged, cancelled, deadline_expired, auth_req
 pub fn encodeValue(value: Delivery.Value, buffer: []u8) ![]const u8 {
     const head = std.fmt.bytesToHex(value.snapshot.head, .lower);
     const changed = value.changed;
-    return std.fmt.bufPrint(buffer, "{{\"version\":1,\"sequence\":{d},\"snapshot\":{{\"observed_at\":{d},\"head_sha\":\"{s}\",\"lifecycle\":\"{s}\",\"checks\":\"{s}\",\"reviews\":\"{s}\"}},\"changed\":[{s}{s}{s}{s}],\"kind\":\"{s}\",\"coverage\":\"{s}\"}}", .{
+    return std.fmt.bufPrint(buffer, "{{\"sequence\":{d},\"snapshot\":{{\"observed_at\":{d},\"head_sha\":\"{s}\",\"lifecycle\":\"{s}\",\"checks\":\"{s}\",\"reviews\":\"{s}\"}},\"changed\":[{s}{s}{s}{s}],\"kind\":\"{s}\",\"coverage\":\"{s}\"}}", .{
         value.sequence,                       value.snapshot.observed_at,                                                             head,                                                                                               @tagName(value.snapshot.lifecycle),                                                                                      @tagName(value.snapshot.checks), @tagName(value.snapshot.reviews),
         if (changed.head) "\"head\"" else "", if (changed.lifecycle) if (changed.head) ",\"lifecycle\"" else "\"lifecycle\"" else "", if (changed.checks) if (changed.head or changed.lifecycle) ",\"checks\"" else "\"checks\"" else "", if (changed.reviews) if (changed.head or changed.lifecycle or changed.checks) ",\"reviews\"" else "\"reviews\"" else "", @tagName(value.kind),            @tagName(value.coverage),
     });

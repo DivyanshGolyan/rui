@@ -159,9 +159,15 @@ test "PRW-5 remote responses normalize to typed checks and reviews" {
     var two_runs: [2]watch.Check = .{ out.items[0], out.items[1] };
     two_runs[1].state = .success;
     const observation: watch.Observation = .{
-        .observed_at = 0, .head_before = @splat(0xaa), .head_after = @splat(0xaa),
-        .lifecycle = .open, .checks = &two_runs, .checks_coverage = .complete,
-        .reviews = &.{}, .reviews_coverage = .complete, .review_requested = false,
+        .observed_at = 0,
+        .head_before = @splat(0xaa),
+        .head_after = @splat(0xaa),
+        .lifecycle = .open,
+        .checks = &two_runs,
+        .checks_coverage = .complete,
+        .reviews = &.{},
+        .reviews_coverage = .complete,
+        .review_requested = false,
     };
     const reduced = try watch.reduce(null, observation);
     try std.testing.expectEqual(watch.Checks.failing, reduced.snapshot.checks);
@@ -283,9 +289,8 @@ test "PRW-5 remote responses normalize to typed checks and reviews" {
     try std.testing.expectEqual(@as(usize, 0), result.len);
 
     const invalid_responses = [_][]const u8{
-        "null", "{}", "{\"total_count\":-1,\"check_runs\":[]}",
-        "{\"total_count\":1,\"check_runs\":[{}]}",
-        "{\"total_count\":1,\"check_runs\":[{\"head_sha\":\"not-a-sha\"}]}",
+        "null",                                    "{}",                                                                "{\"total_count\":-1,\"check_runs\":[]}",
+        "{\"total_count\":1,\"check_runs\":[{}]}", "{\"total_count\":1,\"check_runs\":[{\"head_sha\":\"not-a-sha\"}]}",
     };
     for (invalid_responses) |body| {
         var value = try std.json.parseFromSlice(Value, a, body, .{});
@@ -294,10 +299,8 @@ test "PRW-5 remote responses normalize to typed checks and reviews" {
         try std.testing.expectError(error.InvalidResponse, checks(value.value, @splat(0xaa), &out));
     }
     const invalid_statuses = [_][]const u8{
-        "null", "{}", "{\"sha\":\"invalid\",\"total_count\":0,\"statuses\":[]}",
-        "{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"total_count\":-1,\"statuses\":[]}",
-        "{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"total_count\":1,\"statuses\":[{\"id\":1,\"context\":\"ci\",\"state\":\"success\",\"created_at\":\"bad\"}]}",
-        "{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"total_count\":1,\"statuses\":[{\"id\":0,\"context\":\"ci\",\"state\":\"success\",\"created_at\":\"2026-01-01T00:00:00Z\"}]}",
+        "null",                                                                                      "{}",                                                                                                                                                                 "{\"sha\":\"invalid\",\"total_count\":0,\"statuses\":[]}",
+        "{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"total_count\":-1,\"statuses\":[]}", "{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"total_count\":1,\"statuses\":[{\"id\":1,\"context\":\"ci\",\"state\":\"success\",\"created_at\":\"bad\"}]}", "{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"total_count\":1,\"statuses\":[{\"id\":0,\"context\":\"ci\",\"state\":\"success\",\"created_at\":\"2026-01-01T00:00:00Z\"}]}",
     };
     for (invalid_statuses) |body| {
         var value = try std.json.parseFromSlice(Value, a, body, .{});
@@ -306,9 +309,8 @@ test "PRW-5 remote responses normalize to typed checks and reviews" {
         try std.testing.expectError(error.InvalidResponse, statuses(value.value, @splat(0xaa), &out));
     }
     const invalid_reviews = [_][]const u8{
-        "{}", "[{}]", "[{\"state\":\"APPROVED\"}]",
-        "[{\"id\":1,\"user\":{\"id\":2},\"state\":\"APPROVED\",\"commit_id\":\"invalid\",\"submitted_at\":\"2026-01-01T00:00:00Z\"}]",
-        "[{\"id\":1,\"user\":{\"id\":2},\"state\":\"APPROVED\",\"commit_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"submitted_at\":\"bad\"}]",
+        "{}",                                                                                                                          "[{}]",                                                                                                                                        "[{\"state\":\"APPROVED\"}]",
+        "[{\"id\":1,\"user\":{\"id\":2},\"state\":\"APPROVED\",\"commit_id\":\"invalid\",\"submitted_at\":\"2026-01-01T00:00:00Z\"}]", "[{\"id\":1,\"user\":{\"id\":2},\"state\":\"APPROVED\",\"commit_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"submitted_at\":\"bad\"}]",
     };
     for (invalid_reviews) |body| {
         var value = try std.json.parseFromSlice(Value, a, body, .{});
