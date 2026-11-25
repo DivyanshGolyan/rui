@@ -956,7 +956,7 @@ pub const app_tools = struct {
     const shape = @import("mcp/shape.zig");
 
     /// Declared records per lane root. The Store's round budget for one configure is sized to this.
-    pub const max_records = 16;
+    pub const max_records = tool_name.max_app_records;
     /// The largest document `parse` accepts; a larger one is refused by name before it is read.
     pub const max_document_bytes = 64 * 1024;
     /// Bytes the parse may use for the document copy, the JSON tree and the saved text of one declaration.

@@ -321,7 +321,7 @@ pub noinline fn savedPlacement(io: std.Io, dir: []const u8) !Paths {
     var canonical: [protocol.max_store_bytes]u8 = undefined;
     const host = try canonicalStoreDestination(io, dir, &canonical);
     var failure: start_report.Failure = undefined;
-    _ = try @import("host_settings_file.zig").read(io, arena.allocator(), arena.allocator(), host, settings, &failure);
+    _ = try @import("host_settings_file.zig").read(io, arena.allocator(), arena.allocator(), host, settings, .{ .preset = @import("host_settings_file.zig").checkPreset, .host_field = @import("host_headers.zig").hostField }, &failure);
     try anchorPlacement(io, settings, host, &failure);
     var paths = try placementPaths(io, settings);
     try paths.host_directory.set(host);

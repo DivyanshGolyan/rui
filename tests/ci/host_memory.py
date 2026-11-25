@@ -17,7 +17,6 @@ sys.path.insert(0, str(ROOT / "tests/integration"))
 import host_process
 import settings_fixture
 import os_semantics
-from product_defaults import compaction_trigger
 
 RUNS = 7                          # publish-only scenarios, each run one fresh Host
 RAMP_RUNS = 5                     # gated ramp; each run is one fresh Host
@@ -171,12 +170,11 @@ def ramp(binary, root, store) -> Iterator[Ramp]:
     """One Host with execution.activeCapacity=RAMP_TO and an h2 endpoint holding RAMP_TO streams.
     Admit RAMP_FROM agents, wait until exactly RAMP_FROM streams are held, read steady(Private_Dirty);
     admit the rest, wait for exactly RAMP_TO streams, read again."""
+    import h2_fixture
     endpoint = h2_endpoint(root, RAMP_TO)
     with served(endpoint, codex_args(binary, root, store, endpoint, RAMP_TO),
                 required_fields={"execution": "enabled"}) as (host, ready):
-        configuration = {"workspace": str(root), "provider": "codex", "model": "gpt-6-sol", "tools": ["bash"],
-                         "permissionMode": "ask", "compactAt": compaction_trigger("codex", "gpt-6-sol"),
-                         "effort": "medium"}
+        configuration = h2_fixture.codex_wait_configuration(root)
         admit(ready, store, configuration, 0, RAMP_FROM)
         held_exactly(endpoint, RAMP_FROM)
         at_from = steady(host.pid, "Private_Dirty")
