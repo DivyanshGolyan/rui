@@ -3,6 +3,7 @@ const provider_route = @import("provider_route.zig");
 const connection_names = @import("connection_names.zig");
 const tool_result = @import("tool_result.zig");
 const server_mcp = @import("server_mcp.zig");
+const server_github_pr_watch = @import("server_github_pr_watch.zig");
 const server_mcp_relist = @import("server_mcp_relist.zig");
 const server_mcp_settings = @import("server_mcp_settings.zig");
 const tool_record = @import("tool_record.zig");
@@ -177,6 +178,8 @@ pub const Shared = struct {
     model_lists: *ModelLists,
     environments: ?*SessionEnvironments,
     allowance_diagnostic: *server_host.AllowanceDiagnostic,
+    /// The Host process environment that `watch_github_pr` takes its `gh` profile from.
+    github_environment: ?*const std.process.Environ.Map = null,
 };
 
 /// Settings the execution thread reads for its whole life, passed in by the thread's spawn.
@@ -811,11 +814,14 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
     if (reactor != null) run.scratch_budget = budget;
     defer run.scratch_budget = null;
     var mcp_calls: server_mcp.Calls = .{};
+    var github_pr_watches: server_github_pr_watch.Calls = .{ .environment = run.shared.github_environment };
+    github_pr_watches.useFixtureOrigin(run.shared.probes.githubFixtureOrigin());
     const attempts: action_attempt.Parts = run.execution.attempts(run.shared.store, run.shared.probes);
     workspace.image_calls = .{};
     defer workspace.image_calls.shutdown(toolResults(&run));
     defer shutdownExecution(&run, slots, workspace);
     defer mcp_calls.shutdown(toolResults(&run));
+    defer github_pr_watches.shutdown(toolResults(&run));
 
     workspace.turn_state = .{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
@@ -829,6 +835,7 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
             .workspace = workspace,
             .measurement = &measurement,
             .mcp = &mcp_calls,
+            .watches = &github_pr_watches,
             .images = &workspace.image_calls,
             .attempts = attempts,
             .fenced = false,
@@ -901,6 +908,7 @@ const NativeTurn = struct {
     workspace: *Workspace,
     measurement: *LifecycleMeasurement,
     mcp: *server_mcp.Calls,
+    watches: ?*server_github_pr_watch.Calls = null,
     images: ?*server_read_image.Calls = null,
     attempts: action_attempt.Parts,
     fenced: bool,
@@ -1003,7 +1011,8 @@ const NativeTurn = struct {
         const mcp_progress = self.mcp.service(toolResults(self.run));
         const relist_progress = serviceRelist(self.run);
         const image_progress = if (self.images) |images| images.service(toolResults(self.run)) else false;
-        return advanceBash(self.run, self.slots, self.workspace) or mcp_progress or relist_progress or image_progress;
+        const watch_progress = if (self.watches) |watches| watches.service(toolResults(self.run)) else false;
+        return advanceBash(self.run, self.slots, self.workspace) or mcp_progress or relist_progress or image_progress or watch_progress;
     }
 
     pub noinline fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
@@ -1041,10 +1050,11 @@ const NativeTurn = struct {
         return true;
     }
 
-    /// A model call, Bash command, MCP call or image read holds execution.
+    /// A model call, Bash command, MCP call, image read or pull request watch holds execution.
     /// Pooled provider connections and catalog listings are not Turn work.
     pub fn workInFlight(self: *const NativeTurn) bool {
         if (hasOwnedSlots(self.slots) or self.mcp.any()) return true;
+        if (self.watches) |watches| if (watches.any()) return true;
         return if (self.images) |images| images.any() else false;
     }
 
@@ -1055,11 +1065,11 @@ const NativeTurn = struct {
     }
 
     pub fn hasBash(self: *const NativeTurn) bool {
-        return slotsHaveBash(self.slots) or self.mcp.any() or (if (self.images) |images| images.any() else false);
+        return slotsHaveBash(self.slots) or self.mcp.any() or (if (self.images) |images| images.any() else false) or (if (self.watches) |watches| watches.any() else false);
     }
 
     pub noinline fn recoverUncertainAction(self: *NativeTurn) error{Fence}!bool {
-        const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp, .images = self.images };
+        const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp, .images = self.images, .watches = self.watches };
         const active_actions = store_module.ActiveOperationFilter{
             .context = &active_slots,
             .containsFn = activeActionContains,
@@ -1097,7 +1107,7 @@ const NativeTurn = struct {
     }
 
     pub fn runCoreAction(self: *NativeTurn) execution_turn.Admission {
-        return runNextCoreAction(self.run, self.attempts, self.mcp, self.images);
+        return runNextCoreAction(self.run, self.attempts, self.mcp, self.images, self.watches);
     }
 
     pub noinline fn admitBash(self: *NativeTurn) execution_turn.Admission {
@@ -1569,6 +1579,7 @@ const ActiveSlots = struct {
     slots: []ExecutionSlot,
     mcp: ?*const server_mcp.Calls = null,
     images: ?*const server_read_image.Calls = null,
+    watches: ?*const server_github_pr_watch.Calls = null,
 };
 
 fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
@@ -1588,6 +1599,7 @@ fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
     const active: *const ActiveSlots = @ptrCast(@alignCast(context));
     if (active.mcp) |mcp| if (mcp.contains(action_id)) return true;
     if (active.images) |images| if (images.contains(action_id)) return true;
+    if (active.watches) |watches| if (watches.contains(action_id)) return true;
     for (active.slots) |slot| switch (slot) {
         .bash_preparing => |value| if (value.attempt.binding.action_id == action_id) return true,
         .bash => |value| if (value.attempt.binding.action_id == action_id) return true,
@@ -1643,7 +1655,7 @@ fn advanceBash(run: *Run, slots: []ExecutionSlot, workspace: *Workspace) bool {
     return made_progress;
 }
 
-noinline fn runNextCoreAction(run: *Run, attempts: action_attempt.Parts, mcp: *server_mcp.Calls, images: ?*server_read_image.Calls) execution_turn.Admission {
+noinline fn runNextCoreAction(run: *Run, attempts: action_attempt.Parts, mcp: *server_mcp.Calls, images: ?*server_read_image.Calls, watches: ?*server_github_pr_watch.Calls) execution_turn.Admission {
     const work = (run.shared.store.nextCoreWork(run.custody.dispatchCapacity(!mcp.full())) catch |err| {
         run.shared.lifecycle.fenceDispatch("core tool selection", err);
         return .retry_later;
@@ -1652,6 +1664,7 @@ noinline fn runNextCoreAction(run: *Run, attempts: action_attempt.Parts, mcp: *s
         .stop => |*owed| runOwedStop(run, owed),
         .mcp => |call| mcp.admit(attempts, toolResults(run), run.settings.mcp_servers, call),
         .read_image => |call| if (images) |calls| calls.admit(attempts, toolResults(run), call) else .retry_later,
+        .github_pr_watch => |call| if (watches) |calls| calls.admit(attempts, toolResults(run), call) else .retry_later,
         .ending => |*owed| runOwedEnding(run, owed),
         .forward => |id| runSessionForward(run, id),
         .auto_deny => |decision| runMessageDecline(run, decision.action_id, decision.session.slice()),

@@ -457,7 +457,7 @@ pub const web_search_record: Record = .{ .name = "web_search", .owner = .provide
 pub const watch_github_pr_record: Record = .{
     .name = "watch_github_pr",
     .owner = .rui,
-    .description = "Watch one GitHub.com pull request until it meaningfully changes. Returns a typed snapshot of the head, lifecycle, checks and observed reviews when the head changes, checks settle, a review decision appears, or the pull request is closed or merged, and after at most one hour without change. Call it again to keep watching. Select a stored GitHub CLI account with account; when omitted, the only authenticated account is used, several return account_required with their names, and none return auth_required.",
+    .description = "Watch one GitHub.com pull request until it meaningfully changes. Returns a typed snapshot of the head, lifecycle, checks and observed reviews when the head or lifecycle changes, checks settle, the reviews change (a review requested, submitted or dismissed), or the pull request is closed or merged, and after at most one hour without change. Call it again to keep watching. Select a stored GitHub CLI account with account; when omitted, the only authenticated account is used, several return account_required with their names, and none return auth_required.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"maxLength\":256},\"account\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":39}},\"required\":[\"url\"],\"additionalProperties\":false}",
 };
 
