@@ -198,7 +198,7 @@ const Random = struct {
     }
 };
 
-test "CM-66 a complete provider citation marker is removed from answer text and nothing else is" {
+test "SUI-167 a complete provider citation marker is removed from answer text and nothing else is" {
     const marker = "\u{e200}cite\u{e202}turn0search0\u{e202}turn0search1\u{e201}";
     const cases = [_]struct { input: []const u8, expected: []const u8 }{
         .{ .input = "Rust is fast." ++ marker ++ " Zig too.", .expected = "Rust is fast. Zig too." },
@@ -224,14 +224,14 @@ test "CM-66 a complete provider citation marker is removed from answer text and 
     for (cases) |case| try expectFiltered(case.input, case.expected);
 }
 
-test "CM-66 a marker longer than the hold bound stays text" {
+test "SUI-167 a marker longer than the hold bound stays text" {
     const ids: [max_held - lead.len - close.len]u8 = @splat('x');
     try expectFiltered("a" ++ lead ++ ids ++ close ++ "b", "ab");
     const too_long = "a" ++ lead ++ ids ++ "x" ++ close ++ "b";
     try expectFiltered(too_long, too_long);
 }
 
-test "CM-66 the stream filter agrees with the whole-text definition over generated text" {
+test "SUI-167 the stream filter agrees with the whole-text definition over generated text" {
     const alphabet = [_]u8{ 'c', 'i', 't', 'e', 'a', '7', '-', '_', ' ', 0xee, 0x88, 0x80, 0x81, 0x82, 0x83, 0xc3, 0xa9 };
     var random: Random = .{ .state = 0x6d61726b };
     var text: [160]u8 = undefined;
