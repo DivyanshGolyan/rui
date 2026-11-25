@@ -168,7 +168,7 @@ chrome: SessionChrome = undefined,
 line: reads.Line = .{},
 hint: reads.Hint = .unread,
 
-const rejection_suffix = " · /discard";
+const rejection_suffix = " · " ++ session_notice.keyWords(.discard);
 const too_large_advice = "\nUnset or shorten them in another shell, then run rui request recover there.";
 const failure_capacity = @max(
     "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
@@ -1327,7 +1327,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .browsing = browsing,
         .new_entries = self.new_below,
         .needs = send.needs,
-        .needs_key = if (send.needs) |needs| session_chrome.needsKey(needs) else "",
+        .needs_key = original_presentation.action_words,
         .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
         .stoppable = said.stoppable,
         .details = original_presentation.details,
