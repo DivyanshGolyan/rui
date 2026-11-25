@@ -7,6 +7,9 @@ const turn_ending = @import("turn_ending.zig");
 pub const Mark = enum { needs_you, active, queued, waiting, finished, sent, failed, stopped, newer, none };
 pub const Tone = enum { ink, normal, quiet, attention, failure };
 
+/// What an attention-toned notice starts with, so a terminal without colour still reads it as one.
+pub const attention_sign = "! ";
+
 pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii: []const u8, tone: Tone }).init(.{
     .needs_you = .{ .unicode = "●", .ascii = "?", .tone = .attention },
     .active = .{ .unicode = "◝", .ascii = "*", .tone = .ink },

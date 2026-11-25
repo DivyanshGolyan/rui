@@ -335,7 +335,7 @@ def run(binary, arguments, timeout, mode, environ, output=None):
             jobs.append((child, label))
         # Clear previous acceptance before any child starts.
         if record and mode != "native":
-            Path(record).unlink(missing_ok=True)
+            Path(live_engines.accepted(record) if mode == "run" else record).unlink(missing_ok=True)
         results = []
         with cancellation(stop) as caught, live_engines.mysql_lease(environ, exclusive=mode != "native", timeout=timeout, stop=stop) as lock, ThreadPoolExecutor(max_workers=count) as pool:
             released = threading.Event()
@@ -388,7 +388,7 @@ def run(binary, arguments, timeout, mode, environ, output=None):
             for name, seconds in top:
                 print(f"{seconds:.3f}s {name}")
         if record and mode == "run":
-            merge_records(records, record)
+            merge_records(records, live_engines.accepted(record))
         print(f"{'Store root' if mode == 'run' else mode} wall: {time.monotonic() - started:.3f}s; "
               f"{sum(len(result.tests) for result in results)} tests across {count} processes", flush=True)
     return 0

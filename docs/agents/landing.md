@@ -49,7 +49,7 @@ Ship later fixes as follow-up PRs.
 The admin bypass in [the main ruleset](../../.github/main-ruleset.json) is a last resort, used only for changes on the critical path.
 Use it only when every red or missing check is a macOS job that GitHub never assigned a runner, every check that ran passed, and an infra-retry also failed to get a runner; state why in the merge commit or a PR comment.
 
-Merge `origin/main` into a PR only when it conflicts with `main`; [Conflict alert](../../.github/workflows/conflict-alert.yml) comments on each PR a move of `main` leaves conflicting.
+Merge `origin/main` into a PR only when it conflicts with `main`; [Conflict alert](../../.github/workflows/conflict-alert.yml) comments on each PR a move of `main` leaves conflicting and cancels that head's running Selected checks, which nothing reruns until the merge push.
 After that merge, refresh local evidence invalidated by integration and wait for the new head's CI, including its required all-unit compile.
 A PR that merely trails `main` merges as it is.
 
