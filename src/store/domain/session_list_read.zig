@@ -729,18 +729,9 @@ const settings_columns = "session.session_ref,session.archive_seq,session.parent
     archive_membership.stateSql("session") ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.personMessageSql("session.session_ref") ++ ") AS from_person_at," ++
-    last_line_columns ++ ",awaiting.action_id AS first_awaiting_action," ++ clockColumnsSql("session.session_ref") ++ ",";
+    "awaiting.action_id AS first_awaiting_action," ++ clockColumnsSql("session.session_ref") ++ ",";
 
-const last_line_columns =
-    "last_turn.outcome_position AS last_turn_position," ++
-    "(SELECT substr(@payload(content),1,1024) FROM content WHERE content_id=last_turn.outcome_content_id " ++
-    "AND private=0 AND last_turn.outcome_code='completed') AS last_answer," ++
-    "awaiting.approval_position AS last_approval_position,awaiting_call.description AS last_approval_text";
-
-const last_line_joins = " LEFT JOIN turn last_turn ON last_turn.turn_id=(SELECT turn_id FROM turn @index(turn_session_latest) " ++
-    "WHERE session_ref=session.session_ref AND outcome_code IS NOT NULL ORDER BY turn_id DESC LIMIT 1) " ++
-    "LEFT JOIN action_operation awaiting ON awaiting.action_id=(" ++ report_domain.firstApprovalSql("session.session_ref") ++ ") " ++
-    "LEFT JOIN model_tool_call awaiting_call ON awaiting_call.operation_id=awaiting.parent_operation_id AND awaiting_call.call_ordinal=awaiting.call_ordinal ";
+const awaiting_join = " LEFT JOIN action_operation awaiting ON awaiting.action_id=(" ++ report_domain.firstApprovalSql("session.session_ref") ++ ") ";
 
 /// The settings rows of up to session_list_page_size Sessions: one row per Session found, in no promised order, each
 /// carrying its own ref. Unused slots are empty and match no Session. Its first Message and first awaiting approval
@@ -749,7 +740,7 @@ const last_line_joins = " LEFT JOIN turn last_turn ON last_turn.turn_id=(SELECT 
 /// session key for each; an IN list holding a UNION made it scan session, see livePageSql).
 /// The statement source, with `@index` marks as written (the MySQL plan test renders it).
 pub const list_rows_source = "SELECT " ++ settings_columns ++ report_domain.first_pick_columns ++ " FROM session" ++ report_domain.first_admission_join ++
-    report_domain.first_pick_content_join ++ last_line_joins ++ " WHERE session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8)";
+    report_domain.first_pick_content_join ++ awaiting_join ++ " WHERE session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8)";
 
 pub const list_rows = rsql.Read(.{
     .sql = page_slots.statement(list_rows_source),
@@ -775,10 +766,6 @@ const ListRow = struct {
     archive_state: session_archive.State,
     pin_order: ?rsql.Positive,
     from_person_at: ?rsql.Positive,
-    last_turn_position: ?rsql.Positive,
-    last_answer: ?rsql.Blob(1024),
-    last_approval_position: ?rsql.Positive,
-    last_approval_text: ?Bounded(tool_presentation.max_description_bytes),
     first_awaiting_action: ?rsql.Positive,
     clock_started_at: ?rsql.Positive,
     clock_approval_entered_at: ?rsql.Positive,
@@ -863,8 +850,7 @@ noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, settings: []
     const read_version: change_ring.Token = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
     for (settings[0..rows.len], 0..) |*row, index| {
         var sorted: [tool_name.max_tools][]const u8 = undefined;
-        var last_text: Bounded(session_list.max_last_line_bytes) = undefined;
-        var values = try rowValues(rows, rollups, index, now_ms, row, &sorted, &last_text);
+        var values = try rowValues(rows, rollups, index, now_ms, row, &sorted);
         values.read_version = read_version;
         try visitor.row(&values);
     }
@@ -904,7 +890,7 @@ fn stateChangeAt(facts: ClockFacts, read: *const WorkRead, work: @import("../../
     return clock;
 }
 
-fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_ms: u64, row: *const ListRow, sorted: *[tool_name.max_tools][]const u8, last_text: *Bounded(session_list.max_last_line_bytes)) !session_list.Row {
+fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_ms: u64, row: *const ListRow, sorted: *[tool_name.max_tools][]const u8) !session_list.Row {
     if (index == rows.len or !std.mem.eql(u8, row.session_ref.slice(), rows[index].reference)) return error.CorruptStore;
     const names = try report_domain.sortedToolNames(if (row.tools) |*tools| tools.slice() else null, sorted);
     if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
@@ -937,63 +923,8 @@ fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_
         .revision = row.revision.get(),
         .end = row.next_position.get() - 1,
         .first_message = first_message,
-        .last_line = lastLine(row, last_text),
         .work = work,
         .peers = .{ .from_person_at = if (row.from_person_at) |at| at.get() else null },
     };
 }
 
-fn lastLine(row: anytype, text: *Bounded(session_list.max_last_line_bytes)) ?session_list.LastLine {
-    const ended = if (row.last_turn_position) |position| position.get() else 0;
-    if (row.last_approval_position) |position| if (position.get() > ended) return .{
-        .position = position.get(),
-        .text = if (row.last_approval_text) |*line| line.slice() else null,
-    };
-    if (ended == 0) return null;
-    var answer: ?[]const u8 = null;
-    if (row.last_answer) |*prefix| {
-        const bytes = utf8_validation.completePrefix(prefix.slice());
-        var lines = std.mem.splitAny(u8, bytes, "\r\n");
-        while (lines.next()) |line| {
-            const trimmed = first_line.firstLine(line);
-            if (trimmed.len == 0) continue;
-            text.* = first_line.cut(session_list.max_last_line_bytes, trimmed);
-            answer = text.slice();
-            break;
-        }
-    }
-    return .{ .position = ended, .text = answer };
-}
-
-const last_line = rsql.Read(.{
-    .sql = "SELECT " ++ last_line_columns ++ " FROM session" ++ last_line_joins ++ " WHERE session.session_ref=?1",
-    .Args = struct { session: []const u8 },
-    .Row = struct {
-        last_turn_position: ?rsql.Positive,
-        last_answer: ?rsql.Blob(1024),
-        last_approval_position: ?rsql.Positive,
-        last_approval_text: ?Bounded(tool_presentation.max_description_bytes),
-    },
-    .cardinality = .optional,
-});
-
-pub const last_line_failures = .{.{ last_line, error.SessionReadFailed }};
-
-pub const LastLineRead = struct {
-    row: last_line.Row = undefined,
-    found: store_access.Found = undefined,
-
-    pub fn queue(self: *LastLineRead, a: *ReadAccess, session: []const u8) void {
-        a.readInto(last_line, .{ .session = session }, &self.row, &self.found);
-    }
-
-    pub fn finish(self: *const LastLineRead, out: *?session_list.SavedLastLine) !void {
-        if (!self.found.get()) return error.CorruptStore;
-        var text: Bounded(session_list.max_last_line_bytes) = undefined;
-        out.* = if (lastLine(&self.row, &text)) |line| .{ .position = line.position, .text = if (line.text) |bytes| blk: {
-            var owned: Bounded(session_list.max_last_line_bytes) = .{};
-            try owned.set(bytes);
-            break :blk owned;
-        } else null } else null;
-    }
-};

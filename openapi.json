@@ -6881,31 +6881,6 @@
           }
         ]
       },
-      "LastLineFields": {
-        "type": "object",
-        "properties": {
-          "position": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "text": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 200,
-                "x-rui-max-bytes": 200
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "position",
-          "text"
-        ],
-        "additionalProperties": false
-      },
       "ListSessionsReply": {
         "anyOf": [
           {
@@ -12376,16 +12351,6 @@
           "actions": {
             "$ref": "#/components/schemas/WorkActionsJson"
           },
-          "last_line": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/LastLineFields"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "revision": {
             "$ref": "#/components/schemas/Decimal"
           },
@@ -12405,7 +12370,6 @@
           "attention",
           "group",
           "actions",
-          "last_line",
           "revision",
           "workspace"
         ],
@@ -13925,16 +13889,6 @@
               }
             ]
           },
-          "last_line": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/LastLineFields"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "work": {
             "$ref": "#/components/schemas/SessionWork"
           },
@@ -13964,7 +13918,6 @@
           "revision",
           "end",
           "first_message",
-          "last_line",
           "work",
           "peers"
         ],

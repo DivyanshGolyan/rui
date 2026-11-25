@@ -1680,10 +1680,6 @@ export interface components {
             operation: components["schemas"]["Decimal"];
             attempt: components["schemas"]["Decimal"];
         };
-        LastLineFields: {
-            position: components["schemas"]["Decimal"];
-            text: string | null;
-        };
         ListSessionsReply: {
             /** @constant */
             version: "28";
@@ -2944,7 +2940,6 @@ export interface components {
             /** @enum {string} */
             group: "needs_you" | "working" | "queued" | "done";
             actions: components["schemas"]["WorkActionsJson"];
-            last_line: components["schemas"]["LastLineFields"] | null;
             revision: components["schemas"]["Decimal"];
             workspace: string;
         };
@@ -3330,7 +3325,6 @@ export interface components {
             revision: components["schemas"]["Decimal"];
             end: components["schemas"]["Decimal"];
             first_message: components["schemas"]["FirstMessage"] | null;
-            last_line: components["schemas"]["LastLineFields"] | null;
             work: components["schemas"]["SessionWork"];
             peers: components["schemas"]["PeerFacts"];
         };

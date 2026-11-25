@@ -152,7 +152,6 @@ def main():
             assert all(row["creator"] is None for row in after_growth[1]["sessions"])
             creator_field_bytes = len(', "creator": null'.encode())
             pin_field_bytes = len(', "pin_order": null'.encode())
-            last_line_field_bytes = len(', "last_line": null'.encode())
             read_version_bytes = sum(len(', "read_version": ' + json.dumps(row["read_version"]))
                                      for row in after_growth[1]["sessions"])
             derived_work_bytes = sum(len(', ' + json.dumps(name) + ': ' + json.dumps(row["work"][name]))
@@ -166,7 +165,7 @@ def main():
                                for row in after_growth[1]["sessions"] for name in rollup_names)
             # Each row echoes its workspace path, whose length is the runner's temporary directory, not Rui's.
             workspace_bytes = sum(len(json.dumps(row["workspace"]).encode()) for row in after_growth[1]["sessions"])
-            assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * (archive_field_bytes + pin_field_bytes + last_line_field_bytes + creator_field_bytes) + read_version_bytes + derived_work_bytes + rollup_bytes + workspace_bytes
+            assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * (archive_field_bytes + pin_field_bytes + creator_field_bytes) + read_version_bytes + derived_work_bytes + rollup_bytes + workspace_bytes
             safe = subprocess.run([binary, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert safe.returncode == 0 and "\\u0000" in safe.stdout and "\x00" not in safe.stdout, safe

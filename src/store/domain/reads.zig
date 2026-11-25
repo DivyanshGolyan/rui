@@ -135,7 +135,7 @@ pub const read_failures = .{
     .{ call_outcomes, error.CallReadFailed },
     .{ operation_outcome, error.CallReadFailed },
     .{ queued, error.ActivityReadFailed },
-} ++ report_domain.work_failures ++ session_list_domain.last_line_failures;
+} ++ report_domain.work_failures;
 
 fn runRows(a: *ReadAccess) !void {
     return store_access.runNamed(a, read_failures, error.CorruptStore);
@@ -907,8 +907,6 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     try work.advance();
     try report_domain.readWorks(a, (&work)[0..1]);
     page.work.work = try work.work(session.created_at.get(), std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange);
-    var last_line: session_list_domain.LastLineRead = undefined;
-    last_line.queue(a, session_ref);
     page.count = @min(rows.len, limit);
     page.more = rows.len > limit;
     var at: [page.items.len]ItemAt = undefined;
@@ -930,7 +928,6 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     if (missing != null) return error.CorruptStore;
     page.queued = waiting.queued;
     if (waiting.queued.count != 0) page.queued.newest_content = try content_parts.publicValue(&(waiting.newest orelse return error.CorruptStore), .{ .message = waiting.queued.newest_admission });
-    try last_line.finish(&page.work.last_line);
     page.work.read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
     page.work.revision = session.revision.get();
     page.work.creator = session.creator_ref;

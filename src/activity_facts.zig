@@ -96,7 +96,6 @@ pub const PageWork = struct {
     creator: ?Bounded(session_id.bytes) = null,
     read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     work: session_work.Work = .{ .state = .{ .idle = .{ .since = 0 } } },
-    last_line: ?session_list.SavedLastLine = null,
     revision: u64 = 0,
     workspace: Bounded(workspace_path.max_bytes) = .{},
 };
