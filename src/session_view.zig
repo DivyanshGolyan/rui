@@ -1526,7 +1526,7 @@ pub fn tight(value: protocol.ActivityItem.Value) bool {
         .hosted_call => |presentation| presentation.code == .succeeded,
         .sent => true,
         .admission, .received, .user => |message_| message_.sender != null,
-        .assistant, .call, .turn_ended, .stop, .send_failed, .approval_requested, .session_changed, .compacted, .model_call => false,
+        .assistant, .call, .turn_ended, .stop, .send_failed, .approval_requested, .session_changed, .compacted, .model_call, .instruction => false,
     };
 }
 
@@ -1601,7 +1601,7 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
         .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at),
         .send_failed => |failed| try sendFailed(sink, failed.target),
         // A kind whose role is `detail` draws nothing in the conversation; a kind that gains the conversation role fails to compile here.
-        inline .call, .approval_requested, .session_changed, .compacted, .model_call => |_, kind| comptime std.debug.assert(activity_read.roleOf(kind) == .detail),
+        inline .call, .approval_requested, .session_changed, .compacted, .model_call, .instruction => |_, kind| comptime std.debug.assert(activity_read.roleOf(kind) == .detail),
     }
     return false;
 }

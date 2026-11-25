@@ -120,6 +120,12 @@ function narrowed(entry: FeedEntry): void {
 			void [model, served, input, output, cached, latency, first, status, attempts];
 			break;
 		}
+		case "instruction": {
+			const turn: string | null = entry.turn;
+			const revision: string | null = entry.revision;
+			void [turn, revision];
+			break;
+		}
 		default: {
 			const exhaustive: never = entry;
 			void exhaustive;

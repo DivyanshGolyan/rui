@@ -26,7 +26,7 @@ pub const Item = struct {
     ordinal: u64 = 0,
     at: u64,
     value: Value,
-    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: content_value.Value, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall };
+    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: content_value.Value, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction };
     pub const Kind = std.meta.Tag(Value);
 
     /// What a row's text is: the one owner of which of its contents a reader can open. A row with no text has `none`.
@@ -42,6 +42,7 @@ pub const Item = struct {
         return switch (self.value) {
             .admission, .user, .received => |message| .{ .value = message.content },
             .assistant => |assistant| .{ .value = .{ .text = assistant.content } },
+            .instruction => |instruction| .{ .value = .{ .text = instruction.content } },
             .call => |call| .{ .call = .{ .name = call.fields[@backingInt(tool_proposal.Field.name)], .arguments = call.fields[@backingInt(tool_proposal.Field.arguments)] } },
             .tool_result => |result| .{ .value = result.content },
             .sent => |sent| .{ .value = sent.content },
@@ -71,6 +72,9 @@ pub const Item = struct {
         server: ?activity_read.CallText.Server = null,
     };
     pub const SessionChanged = struct { revision: u64, field: session_settings.SessionField, provider_text: ?Bounded(outcome_code.max_report_bytes) = null };
+    /// Instruction text the model was given. `turn` and `revision` are both null exactly for the skill-catalog instruction,
+    /// which no Turn and no authored revision owns. The text is public; a private value never becomes a row.
+    pub const Instruction = struct { turn: ?u64, revision: ?u64, content: content_value.Reference };
     pub const Compacted = struct { operation: u64, dropped: u64 };
     pub const ModelCall = struct {
         model: Bounded(model_capability.max_model_bytes),

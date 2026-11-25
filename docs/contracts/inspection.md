@@ -57,7 +57,7 @@ No reply queue, worker, payload copy or new persistent state is introduced.
 ### Public Conversation pages
 
 The separate `conversation_page` Host read is a filtered projection of canonical applied User entries, assistant text and completed Tool Results; it does not change Current/Full reports or persist a transcript.
-Action values, pending input, instruction updates, model-output items (including private reasoning and encrypted continuation), proposals and partial tool groups are outside this projection.
+Action values, pending input, instruction text, model-output items (including private reasoning and encrypted continuation), proposals and partial tool groups are outside this projection.
 Full retains its complete inventory; Action inspection remains the exact approval-target read.
 A missing Session or malformed/stale cursor fails without changing work.
 
@@ -144,7 +144,11 @@ Proposal metadata grants no authorization: a later approval still binds the fres
 ### Public Session activity
 
 Session activity is a separate projection with a row kind for each `Kind` in `src/activity_read.zig`, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), a sourced input (`received`, naming either its peer `sender` or its background `source_action`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
-The remaining kinds are `approval_requested` (a call whose Action was saved under an `ask` revision, D115), `session_changed` (a settings revision's change, D138), `compacted` (a successful compaction, D217) and `model_call` (a resolved model Operation, D179).
+The remaining kinds are `approval_requested` (a call whose Action was saved under an `ask` revision, D115), `session_changed` (a settings revision's change, D138), `compacted` (a successful compaction, D217), `model_call` (a resolved model Operation, D179) and `instruction`.
+An `instruction` row is the text a Turn was given as its System Instruction entry (Conversation entry kind `instruction`): `turn` and `revision` name the Turn and the authored revision, and `content` is the entry's text reference.
+The Skill catalog's instruction has no Turn and no authored revision, so both are null exactly for it.
+The row sits at the entry's own Session position, dated its `recorded_at`, so a model or client re-reading the Session sees what it was told; the `session_changed` row for `instructions` stays beside it, because configuring the text and giving it to a Turn are two facts at two positions.
+Instruction text is public, and a private or inconsistent entry fences like assistant text; search does not read it, and a screen draws nothing for the kind.
 `received` mirrors `sent` for peer Messages and records final Action input with its Action identity; it split from `admission` on 2026-11-03 so a page can list a person's Messages alone (design thread on Rui's core and plug-in points).
 Activity and public Conversation retain `source_action` as a nullable Action ID alongside the shared Resolution content reference for background finals; person-only admission queries exclude them. Published Action values are sourced inputs like finals: Activity lists each as a `received` row (and as a User row once applied) naming its `source_action`, so the transcript holds everything the model was sent and a model can search and open it with `read_transcript`. Values add no public Conversation rows; that page is a filtered projection, and what a screen draws is decided in the view, never by what Activity holds.
 Admission, stop, send, refusal and every terminal outcome claim the existing Session sequence in their owning transaction, and each also records its commit time there.

@@ -880,6 +880,17 @@ export interface components {
                     attempts: components["schemas"]["Decimal"];
                 };
             };
+        } | {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+            at: components["schemas"]["Decimal"];
+            value: {
+                instruction: {
+                    turn: components["schemas"]["Decimal"] | null;
+                    revision: components["schemas"]["Decimal"] | null;
+                    content: components["schemas"]["ContentValue"];
+                };
+            };
         };
         ActivityPageReply: {
             /** @constant */
@@ -919,7 +930,7 @@ export interface components {
             /** @enum {string} */
             direction: "forward" | "backward";
             /** @description Each at most once, in the order the enum lists them. */
-            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted" | "model_call")[];
+            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted" | "model_call" | "instruction")[];
             limit: components["schemas"]["Decimal"];
             since?: string | null;
         };
@@ -937,7 +948,7 @@ export interface components {
             position: components["schemas"]["Decimal"];
             ordinal: components["schemas"]["Decimal"];
             /** @enum {string} */
-            kind: "admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted" | "model_call";
+            kind: "admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted" | "model_call" | "instruction";
             hits: components["schemas"]["ActivitySearchFactsHit"][];
         };
         ActivitySearchReply: {
@@ -957,7 +968,7 @@ export interface components {
             session: string;
             query: string;
             /** @description Each at most once, in the order the enum lists them. */
-            kinds?: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted" | "model_call")[];
+            kinds?: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted" | "model_call" | "instruction")[];
             before_position?: components["schemas"]["Decimal"] | null;
             before_ordinal?: components["schemas"]["Decimal"] | null;
             limit?: components["schemas"]["Decimal"];
