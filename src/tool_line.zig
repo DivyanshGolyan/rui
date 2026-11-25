@@ -192,7 +192,7 @@ fn writeCut(writer: *std.Io.Writer, text: []const u8, width: usize) void {
     writer.writeAll(ellipsis) catch unreachable;
 }
 
-test "TPR-3 a web search call's description says what it did, on one line, within the bound" {
+test "TPR-4 a web search call's description says what it did, on one line, within the bound" {
     @setEvalBranchQuota(10_000);
     const repeat = struct {
         fn of(comptime text: []const u8, comptime count: usize) *const [text.len * count]u8 {
@@ -233,11 +233,11 @@ test "TPR-3 a web search call's description says what it did, on one line, withi
     }
 }
 
-test "TPR-3 a Bash call is described by the description its arguments carry" {
+test "TPR-4 a Bash call is described by the description its arguments carry" {
     try std.testing.expectEqualStrings("Run parser tests", describe(.{ .bash = "Run parser tests" }).slice());
 }
 
-test "TPR-3 every tool call has fixed words, or the words of what it names" {
+test "TPR-4 every tool call has fixed words, or the words of what it names" {
     const id: []const u8 = "abc123";
     const own: ?Bounded(session_id.bytes) = null;
     var other: Bounded(session_id.bytes) = .{};

@@ -2406,7 +2406,7 @@ test "action value pages preserve delivery state" {
     }.run);
 }
 
-test "APV-10 public pages omit Action values while preserving other inputs" {
+test "APV-10 Activity keeps Action values and public Conversation omits them" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -2440,29 +2440,52 @@ test "APV-10 public pages omit Action values while preserving other inputs" {
             try std.testing.expect(storage.submitMessageWithModel(&peer, null, .{}) == .accepted);
             _ = try storage.settleActionAttempt(binding, .succeeded, "visible final", .{});
 
-            const queued = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.received) });
-            try std.testing.expectEqual(@as(usize, 2), queued.count);
+            var queued_request: protocol.ActivityPage = .{ .session = session, .direction = .forward, .kinds = .initOne(.received) };
             var peer_queued = false;
             var final_queued = false;
-            for (queued.items[0..queued.count]) |item| {
-                const message = item.value.received;
-                try std.testing.expect(message.state == .queued);
-                if (message.sender != null) peer_queued = true;
-                if (message.source_action != null and message.source_action.? == action_id) final_queued = true;
+            var value_queued: usize = 0;
+            var value_at: ?struct { position: u64, ordinal: u64 } = null;
+            while (true) {
+                const queued = try store_core.activityPageForTesting(&storage, queued_request);
+                for (queued.items[0..queued.count]) |item| {
+                    const message = item.value.received;
+                    try std.testing.expect(message.state == .queued);
+                    if (message.sender != null) peer_queued = true;
+                    if (message.source_action != null and message.source_action.? == action_id) {
+                        if (std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("hidden value"))) {
+                            value_queued += 1;
+                            if (value_at == null) value_at = .{ .position = item.position, .ordinal = item.ordinal };
+                        } else final_queued = true;
+                    }
+                }
+                for (queued.items[0..queued.count]) |item| {
+                    _ = try storage.openActivityContent(&.{ .session = session, .position = item.position, .ordinal = item.ordinal });
+                }
+                if (!queued.more) break;
+                queued_request.end = queued.end;
+                queued_request.position = queued.items[queued.count - 1].position;
+                queued_request.ordinal = queued.items[queued.count - 1].ordinal;
             }
             try std.testing.expect(peer_queued and final_queued);
+            try std.testing.expectEqual(@as(usize, 20), value_queued);
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            const hidden_admission = try store_testing.queryU64(&storage, "SELECT min(admission_position) FROM message_admission WHERE session_ref=?1 AND source_kind=4", .{session.slice()});
             const hidden_entry = try store_testing.queryU64(&storage, "SELECT min(e.session_position) FROM conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id WHERE m.session_ref=?1 AND m.source_kind=4", .{session.slice()});
-            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = session, .position = hidden_admission }));
-            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = session, .position = hidden_entry }));
+            _ = try storage.openActivityContent(&.{ .session = session, .position = value_at.?.position, .ordinal = value_at.?.ordinal });
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = session, .position = hidden_entry }));
+            const found = try std.testing.allocator.create(protocol.ActivitySearchFacts);
+            defer std.testing.allocator.destroy(found);
+            var search: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.received), .limit = 4 };
+            try search.query.set("hidden value");
+            try storage.searchActivity(&search, found);
+            try std.testing.expectEqual(@as(usize, 4), found.count);
+            var value_user: ?struct { position: u64, ordinal: u64 } = null;
 
             for ([_]@FieldType(protocol.ActivityPage, "direction"){ .forward, .backward }) |direction| {
                 var request: protocol.ActivityPage = .{ .session = session, .direction = direction, .kinds = .initMany(&.{ .admission, .received, .user }), .limit = 3 };
                 var person_count: usize = 0;
                 var peer_count: usize = 0;
                 var final_count: usize = 0;
+                var value_count: usize = 0;
                 var pages: usize = 0;
                 while (true) {
                     const page = try store_core.activityPageForTesting(&storage, request);
@@ -2472,10 +2495,13 @@ test "APV-10 public pages omit Action values while preserving other inputs" {
                             .admission, .received, .user => |value| value,
                             else => unreachable,
                         };
-                        try std.testing.expect(!std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("hidden value")));
+                        if (item.value == .user and value_user == null and message.source_action != null and message.source_action.? == action_id and
+                            std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("hidden value"))) value_user = .{ .position = item.position, .ordinal = item.ordinal };
                         if (std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("visible person"))) person_count += 1;
                         if (message.sender != null) peer_count += 1;
-                        if (message.source_action != null and message.source_action.? == action_id) final_count += 1;
+                        if (message.source_action != null and message.source_action.? == action_id) {
+                            if (std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("hidden value"))) value_count += 1 else final_count += 1;
+                        }
                     }
                     if (!page.more) break;
                     try std.testing.expectEqual(@as(usize, 3), page.count);
@@ -2487,7 +2513,9 @@ test "APV-10 public pages omit Action values while preserving other inputs" {
                 try std.testing.expectEqual(@as(usize, 40), person_count);
                 try std.testing.expectEqual(@as(usize, 2), peer_count);
                 try std.testing.expectEqual(@as(usize, 2), final_count);
+                try std.testing.expectEqual(@as(usize, 40), value_count);
             }
+            _ = try storage.openActivityContent(&.{ .session = session, .position = value_user.?.position, .ordinal = value_user.?.ordinal });
             var conversation: protocol.ConversationPage = .{ .session = session };
             var person_count: usize = 0;
             var peer_count: usize = 0;
