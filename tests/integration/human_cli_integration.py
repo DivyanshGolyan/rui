@@ -2984,7 +2984,8 @@ def main(selected="all"):
             terminal_gate(entered, master, observation_held, "accepted Message before activity loss", timeout=8)
             optimistic = await_screen(master, "observe after Host loss", composer=True)
             assert "Sending" not in optimistic, optimistic
-            assert conversation_text(optimistic).count("› observe after Host loss") == 1, optimistic
+            assert conversation_text(optimistic).count("◌ observe after Host loss") == 1, optimistic
+            assert "› observe after Host loss" not in conversation_text(optimistic), optimistic
             after = set(json.loads(run(home, "request", "list")))
             assert len(after - before) == 1, (before, after)
             saved_key = (after - before).pop()
