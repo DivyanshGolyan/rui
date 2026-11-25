@@ -335,7 +335,7 @@ fn expectOutcomeLine(storage: *Store, action_id: u64, words: []const u8, session
     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL AND outcome_text=?2 AND outcome_link_at=?3 AND outcome_link_session=?4 AND outcome_completion=1", .{ action_id, words, @as(u64, words.len), session }));
 }
 
-test "session message writer covers peer message_agent start_agent and ending with wake and refusal" {
+test "session message writer covers message_agent start_agent and ending with wake and refusal" {
     const owner = @embedFile("../domain/sourced_input.zig");
     const callers = @embedFile("../domain/command.zig");
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, owner, "a.write(admit_message,"));
@@ -343,10 +343,10 @@ test "session message writer covers peer message_agent start_agent and ending wi
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, owner, "a.identity(.admission_id)"));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, callers, "INSERT INTO message_admission"));
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, callers, "sourced_input.queue("));
-    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, callers, "try admitFromSession("));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, callers, "try admitFromSession("));
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const Source = enum { peer, message_agent, start_agent, ending };
+            const Source = enum { message_agent, start_agent, ending };
             inline for (std.enums.values(Source)) |source| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
@@ -360,7 +360,7 @@ test "session message writer covers peer message_agent start_agent and ending wi
                 try create.configuration.permission_mode.value.set("bypass");
                 const sender = (try storage.configure(&create, .{})).accepted.session;
                 var receiver = try configureTestSession(&storage, "writer-target");
-                if (source == .peer or source == .message_agent) {
+                if (source == .message_agent) {
                     var stop = try completeSessionStop("writer-target-stop", receiver.slice());
                     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
                 }
@@ -371,13 +371,7 @@ test "session message writer covers peer message_agent start_agent and ending wi
                 var key_buffer: [128]u8 = undefined;
                 var key: []const u8 = undefined;
                 var action: action_domain.CoreActionInput = undefined;
-                var peer: ActionExecutionInput = undefined;
-                if (source == .peer) {
-                    try settleTwoActionsForTesting(&storage, &tmp, model, "writer-peer-calls");
-                    const binding = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
-                    try storage.readActionExecutionInput(.bash, binding, &peer);
-                    key = "writer-peer-send";
-                } else if (source == .ending) {
+                if (source == .ending) {
                     try settleItemsForTesting(&storage, &tmp, model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"writer's saved content\"}]}"}, text);
                     key = try std.fmt.bufPrint(&key_buffer, "rui.core/ending/{d}", .{model.turn_id});
                 } else {
@@ -400,16 +394,6 @@ test "session message writer covers peer message_agent start_agent and ending wi
                 defer storage.commitWake().store(null, .release);
                 var commits: TestingCommits = .{};
                 switch (source) {
-                    .peer => {
-                        const file = try tmp.dir.createFile(std.testing.io, "peer-content", .{ .read = true });
-                        try file.writeStreamingAll(std.testing.io, text);
-                        try file.sync(std.testing.io);
-                        var command = try completeMessage(key, receiver.slice(), file, text);
-                        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-                        command.sender = .{ .store = storage.selector, .session = sender };
-                        command.sender_handle = peer.sender_handle;
-                        try std.testing.expect(storage.submitMessageWithModel(&command, commits.callback(), .{}) == .accepted);
-                    },
                     .message_agent => {
                         try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action.binding, receiver.slice(), text, .{}));
                         try expectOutcomeLine(&storage, action.binding.action_id, "Messaged ", receiver.slice());
@@ -436,7 +420,7 @@ test "session message writer covers peer message_agent start_agent and ending wi
                     .ending => try std.testing.expect(try storage.deliverChildEnding(model.turn_id, .{})),
                 }
                 try std.testing.expect(wake.isSet());
-                if (source == .peer or source == .start_agent) {
+                if (source == .start_agent) {
                     try std.testing.expectEqual(@as(usize, 1), commits.count);
                     try std.testing.expect(commits.calls[0].from_peer);
                     try std.testing.expectEqualStrings(receiver.slice(), commits.calls[0].session.slice());
@@ -445,16 +429,7 @@ test "session message writer covers peer message_agent start_agent and ending wi
                 const content_id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{key});
                 try expectContent(&storage, try testingContentReference(&storage, content_id), text);
                 try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT next_position-1 FROM session WHERE session_ref=?1", .{receiver.slice()}), try store_testing.queryU64(&storage, "SELECT admission_position FROM message_admission WHERE command_key=?1", .{key}));
-                if (source == .peer) {
-                    const file = try tmp.dir.createFile(std.testing.io, "missing-content", .{ .read = true });
-                    try file.writeStreamingAll(std.testing.io, text);
-                    try file.sync(std.testing.io);
-                    var missing = try completeMessage("writer-missing", "zzzzzz", file, text);
-                    defer missing.removeTemporaryContent(std.testing.io) catch unreachable;
-                    missing.sender = .{ .store = storage.selector, .session = sender };
-                    missing.sender_handle = peer.sender_handle;
-                    try std.testing.expectEqual(protocol.MessageRejection.unknown_session, storage.submitMessageWithModel(&missing, null, .{}).rejected.code);
-                } else if (source == .message_agent) {
+                if (source == .message_agent) {
                     const missing = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
                     try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(missing.binding, "zzzzzz", text, .{}));
                     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL AND outcome_text IS NULL AND outcome_link_at IS NULL AND outcome_link_session IS NULL AND outcome_completion IS NULL", .{missing.binding.action_id}));

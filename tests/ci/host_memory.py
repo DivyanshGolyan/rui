@@ -155,7 +155,7 @@ def admit(ready, store, configuration, start, stop):
         assert configured["answer"]["status"] == "accepted", configured
         sent = h2_fixture.closed_host_request(
             ready["socket"], store, "message", key=f"m{index}", session=configured["answer"]["session"],
-            sender=None, sender_handle=None, text={"state": "value", "value": f"waiting-{index}"})
+            text={"state": "value", "value": f"waiting-{index}"})
         assert sent["answer"]["status"] == "accepted", sent
 
 

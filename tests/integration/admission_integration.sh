@@ -580,8 +580,6 @@ body = json.dumps({
     "store": store,
     "key": "partial-message-key",
     "session": session,
-    "sender": None,
-    "sender_handle": None,
     "text": {"state": "value", "value": "unterminated"},
 }, separators=(",", ":")).encode()
 client = os_semantics.unix_stream()

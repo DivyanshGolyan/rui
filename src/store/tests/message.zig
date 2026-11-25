@@ -365,7 +365,7 @@ test "message rejections replay before current Session checks without retained i
     }.run);
 }
 
-test "a peer sender is resolved from its Action handle and exact replays survive revocation" {
+test "a peer Message is recorded with the sender Session of the Action that delivered it" {
     try store_testing.forEachEngine(struct {
         fn run(store_case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -380,85 +380,12 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             var tools: wire_request.ConfigureCommand = .{};
             try tools.key.set("sender-tools");
             try tools.session.set(sender);
-            tools.configuration.tools = try .of(&.{"bash"});
+            tools.configuration.tools = try .of(&.{ "bash", "message_agent" });
             tools.configuration.permission_mode.state = .value;
             try tools.configuration.permission_mode.value.set("bypass");
             try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
-            try submitTestMessage(&storage, &tmp, "sender-seed", "sender-seed", sender, "send a report");
-            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try settleTwoActionsForTesting(&storage, &tmp, model, "sender-calls");
-            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
-            var input: ActionExecutionInput = undefined;
-            try storage.readActionExecutionInput(.bash, action, &input);
-            const handle = input.sender_handle;
-            const Send = struct {
-                fn make(dir: std.Io.Dir, store_id: []const u8, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !wire_request.MessageCommand {
-                    const file = try dir.createFile(std.testing.io, key, .{ .read = true });
-                    try file.writeStreamingAll(std.testing.io, text);
-                    try file.sync(std.testing.io);
-                    var command = try completeMessage(key, target, file, text);
-                    if (from) |ref| {
-                        command.sender = .{};
-                        try command.sender.?.store.set(store_id);
-                        try command.sender.?.session.set(ref);
-                    }
-                    return command;
-                }
-            };
-
-            var sent = try Send.make(tmp.dir, storage.storeId(), "peer-send", allocated_session_1.slice(), sender, "look at this\nsecond line");
-            sent.sender_handle = handle;
-            defer sent.removeTemporaryContent(std.testing.io) catch unreachable;
-            var commits: TestingCommits = .{};
-            const accepted = storage.submitMessageWithModel(&sent, commits.callback(), .{});
-            try std.testing.expect(accepted == .accepted);
-            try std.testing.expect(storage.submitMessageWithModel(&sent, commits.callback(), .{}).accepted.replayed);
-            try std.testing.expectEqual(@as(usize, 1), commits.count);
-            try std.testing.expect(commits.calls[0].from_peer);
-            try std.testing.expectEqual(accepted.accepted.admission_id, commits.calls[0].admission_id);
-            var anonymous = try Send.make(tmp.dir, storage.storeId(), "peer-send-anonymous", allocated_session_1.slice(), null, "look at this\nsecond line");
-            defer anonymous.removeTemporaryContent(std.testing.io) catch unreachable;
-            try anonymous.key.set("peer-send");
-            try std.testing.expect(storage.submitMessageWithModel(&anonymous, null, .{}) == .conflict);
-
-            var refused = try Send.make(tmp.dir, storage.storeId(), "peer-refused", "absent", sender, "lost");
-            refused.sender_handle = handle;
-            defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expectEqual(protocol.MessageRejection.unknown_session, storage.submitMessageWithModel(&refused, commits.callback(), .{}).rejected.code);
-            try std.testing.expectEqual(@as(usize, 1), commits.count);
-
-            var forged = try Send.make(tmp.dir, storage.storeId(), "peer-forged", allocated_session_1.slice(), "f0rged", "forged");
-            defer forged.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&forged, null, .{}).rejected.code);
-            const forged_replay = storage.submitMessageWithModel(&forged, null, .{});
-            try std.testing.expect(forged_replay.rejected.replayed and forged_replay.rejected.code == .invalid_sender_handle);
-            for (0..5) |variant| {
-                var invalid = sent;
-                var key_buffer: [32]u8 = undefined;
-                try invalid.key.set(try std.fmt.bufPrint(&key_buffer, "invalid-binding-{d}", .{variant}));
-                switch (variant) {
-                    0 => invalid.sender_handle = null,
-                    1 => try invalid.sender_handle.?.set(""),
-                    2 => try invalid.sender_handle.?.set("00000000000000000000000000000000"),
-                    3 => try invalid.sender.?.session.set(allocated_session_1.slice()),
-                    4 => invalid.sender = null,
-                    else => unreachable,
-                }
-                try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&invalid, null, .{}).rejected.code);
-            }
-            var changed_handle = sent;
-            changed_handle.sender_handle = null;
-            try std.testing.expect(storage.submitMessageWithModel(&changed_handle, null, .{}) == .conflict);
-            for ([_]struct { key: []const u8, from: []const u8 }{
-                .{ .key = "peer-empty-forged", .from = "f0rged" },
-                .{ .key = "peer-empty-known", .from = sender },
-            }) |case| {
-                var empty = try Send.make(tmp.dir, storage.storeId(), case.key, "", case.from, "nowhere");
-                if (std.mem.eql(u8, case.from, sender)) empty.sender_handle = handle;
-                defer empty.removeTemporaryContent(std.testing.io) catch unreachable;
-                try std.testing.expectEqual(protocol.MessageRejection.invalid_session_reference, storage.submitMessageWithModel(&empty, null, .{}).rejected.code);
-            }
-            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM sent_rejection", .{}));
+            const action = try shared_fixtures.proposeMessageAgent(&storage, &tmp, sender, allocated_session_1.slice(), "look at this");
+            try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action, allocated_session_1.slice(), "look at this\nsecond line", .{}));
             try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(allocated_session_1.slice())).pending_messages);
 
             var session: protocol.Bounded(protocol.max_session_bytes) = .{};
@@ -477,11 +404,6 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try store_testing.exec(&storage, "UPDATE session SET label='Lead' WHERE session_ref=?1", .{sender});
             const named = try store_core.activityPageForTesting(&storage, .{ .session = session });
             try std.testing.expectEqualStrings("Lead", named.items[0].value.received.sender.?.label.slice());
-            try storage.revokeActionSender(action);
-            try std.testing.expect(storage.submitMessageWithModel(&sent, null, .{}).accepted.replayed);
-            var stale = sent;
-            try stale.key.set("stale-handle");
-            try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&stale, null, .{}).rejected.code);
             var admitted = (try storage.admitNextModelAttempt(.{})).?;
             var view: TestingPage = undefined;
             view.open(&storage, try admitted.permit.consume());
@@ -493,7 +415,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     }.run);
 }
 
-test "refused peer creation and addressed sends keep their command identity and replay" {
+test "refused creation and addressed sends keep their command identity and replay" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -504,17 +426,12 @@ test "refused peer creation and addressed sends keep their command identity and 
 
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            var configuration = try completeConfiguration("creation-refusal-sender", "", workspace, "model-a");
+            var configuration = try completeConfiguration("creation-refusal-session", "", workspace, "model-a");
             configuration.configuration.tools = try .of(&.{"bash"});
             const configured = try storage.configure(&configuration, .{});
             try std.testing.expect(configured == .accepted);
             const sender = configured.accepted.session;
             try submitTestMessage(&storage, &tmp, "creation-refusal-seed", "creation-refusal-seed", sender.slice(), "start another Session");
-            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try settleTwoActionsForTesting(&storage, &tmp, model, "creation-refusal-calls");
-            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
-            var input: ActionExecutionInput = undefined;
-            try storage.readActionExecutionInput(.bash, action, &input);
             const text = "work that must not be admitted";
             const file = try tmp.dir.createFile(std.testing.io, "creation-refusal-message", .{ .read = true });
             try file.writeStreamingAll(std.testing.io, text);
@@ -525,10 +442,6 @@ test "refused peer creation and addressed sends keep their command identity and 
             creation.configuration.reasoning_effort.state = .value;
             try creation.configuration.reasoning_effort.value.set("none");
             message.configuration = creation.configuration;
-            message.sender = .{};
-            try message.sender.?.store.set(storage.storeId());
-            message.sender.?.session = sender;
-            message.sender_handle = input.sender_handle;
             var commits: TestingCommits = .{};
             const refused = storage.submitMessageWithModel(&message, commits.callback(), .{});
             try std.testing.expect(refused == .rejected);
@@ -545,7 +458,6 @@ test "refused peer creation and addressed sends keep their command identity and 
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1 AND target='' AND kind=2 AND accepted=0 AND code='unsupported_reasoning_effort'", .{message.key.slice()}));
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM sent_rejection WHERE command_key=?1 AND sender_session_ref=?2", .{ message.key.slice(), sender.slice() }));
             const observed = try store_testing.observeCommandForTesting(&storage, message.key.slice());
             try std.testing.expect(observed.status == .rejected);
             try std.testing.expect(observed.kind.message == null);
@@ -580,30 +492,23 @@ test "refused peer creation and addressed sends keep their command identity and 
             try std.testing.expect(unknown_answer == .rejected);
             try std.testing.expectEqual(protocol.MessageRejection.unknown_session, unknown_answer.rejected.code);
             var accepted = message;
-            try accepted.key.set("accepted-peer-creation");
+            try accepted.key.set("accepted-creation");
             try accepted.configuration.?.reasoning_effort.value.set("low");
             const admitted = storage.submitMessageWithModel(&accepted, commits.callback(), .{});
             try std.testing.expect(admitted == .accepted);
             try std.testing.expect(protocol.validSessionId(admitted.accepted.session.slice()));
             try std.testing.expect(!admitted.accepted.session.eql(sender.slice()));
             try std.testing.expectEqual(@as(usize, 1), commits.count);
-            try std.testing.expect(commits.calls[0].from_peer);
+            try std.testing.expect(!commits.calls[0].from_peer);
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
 
-            try storage.revokeActionSender(action);
-            const revoked_replay = storage.submitMessageWithModel(&message, commits.callback(), .{});
-            try std.testing.expect(revoked_replay == .rejected);
-            try std.testing.expect(revoked_replay.rejected.replayed);
-            try std.testing.expectEqual(refused.rejected.code, revoked_replay.rejected.code);
-            try std.testing.expectEqualSlices(u8, &refused.rejected.content.digest, &revoked_replay.rejected.content.digest);
             var changed = message;
             try changed.configuration.?.reasoning_effort.value.set("low");
             try std.testing.expect(storage.submitMessageWithModel(&changed, commits.callback(), .{}) == .conflict);
             const original_digest = message.semanticDigest();
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1 AND target='' AND input_digest=?2 AND kind=2 AND accepted=0 AND code='unsupported_reasoning_effort' AND created=0 AND revision=0", .{ message.key.slice(), store_testing.Blob{ .bytes = &original_digest } }));
-            try std.testing.expectEqual(@as(u64, invalid_count + 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM sent_rejection", .{}));
             try std.testing.expectEqual(@as(usize, 1), commits.count);
         }
     }.run);

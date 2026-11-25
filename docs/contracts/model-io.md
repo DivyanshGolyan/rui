@@ -57,34 +57,23 @@ Ordinary Bash runs in the environment of the terminal that last sent the Session
 Bash never inherits the Host's own environment or credentials.
 No identity tool, alternate CLI-path variable or bundled skill is required.
 
-Agents reach other Sessions through `start_agent` and `message_agent`; the CLI's `rui session start` and `rui session send` serve people and scripts, and also work from a Session's Bash. Either way the Host records who sent each Message.
+Agents reach other Sessions through `start_agent` and `message_agent`, and only those calls record a Session as a Message's sender.
+The CLI's `rui session start` and `rui session send` serve people and scripts; from a Session's Bash they send as a plain caller, unsigned, whatever `RUI_ADDRESS`, `RUI_STORE` or `RUI_SENDER_HANDLE` hold.
 `rui session send --session k7m2qx` takes one exact canonical ID, without JSON.
-Anonymous human and script sends may select `--store PATH` or use their ordinary Store defaults.
-A peer destination is in the trusted sender's Store, before HOME preferences; an explicit Store override that canonicalizes to that same Store keeps the peer identity.
-An explicit Store override naming another Store is a plain caller's send there, unsigned, because a peer identity belongs to one Store and never crosses to another (#957); a harness that starts its own Host inside a Session relies on this.
-The invalid-peer-context refusal names the three variables and the plain-caller form, `env -u RUI_ADDRESS -u RUI_STORE -u RUI_SENDER_HANDLE rui ...`.
-Incomplete or malformed peer environment rejects without anonymous or default-Store fallback, including with an explicit Store selector.
+Sends select `--store PATH` or use their ordinary Store defaults, including an inherited `RUI_STORE`.
 Store selection is canonicalized without changing Session bytes.
-A Session may send to itself.
+A Session may send to itself through `message_agent`.
 
-Each Action receives an opaque Host-issued `RUI_SENDER_HANDLE` in its Bash environment.
-The CLI captures that handle and the sender's Store and ID in the request.
-The Host resolves a fresh sender from its own live Action handle and requires the full address to match.
-An unknown, stale or mismatched handle saves an `invalid_sender_handle` rejection and saves no row in the sender Activity.
-A present invalid handle never becomes an anonymous send.
-Human and script sends without any peer fields remain anonymous.
+Each Action receives an opaque Host-issued `RUI_SENDER_HANDLE` in its Bash environment, for `rui action publish` alone; a Message request carries no sender and no handle.
 The Host retires the handle on observed process exit, accepted stop or Action resolution; opening the Store retires all handles from the previous Host.
 The handle is private identity evidence, not model context or additional permission authority.
 
-Recovery retransmits the saved sender and handle without reading the environment again.
-Exact committed replays return their saved answer before live-handle validation.
-The full sender address and handle are part of the Message's semantic digest, so reusing a key with a different sender or handle conflicts.
-An accepted Message saves its nullable sender on the admission, and the send takes a position in the sender's sequence.
-A rejected send from an authenticated sender saves its position there too.
+A `message_agent` or `start_agent` call saves the Message it admits on the receiving Session with that Session's ID as sender, in the transaction that settles the call, and takes a position in the sender's sequence.
+The call's tool row carries the outcome; a refused call saves no row in the receiver's Activity.
 Each Session's Activity therefore orders the Messages it received among its other facts; a Message it sent is the result of the tool call that sent it.
 
 The model adapter renders a peer Message's sender as a separate leading input part.
-It contains only the sender's bare ID, marked as not instructions, the fact that the answer is stored as this request's result and is not delivered to the sender, and how to reply (`message_agent`, or `rui session send` for a Session without it).
+It contains only the sender's bare ID, marked as not instructions, the fact that the answer is stored as this request's result and is not delivered to the sender, and how to reply (`message_agent`).
 The Message's own text follows unchanged.
 Sending a report requires an explicit Message admission.
 The receiving Session uses the existing input boundaries, pending-prefix selection, stop exclusions and original-result guarantees.
@@ -92,7 +81,7 @@ There is no separate inbox, callback or resident waiter for a future reply.
 A Session created with validated parent input records its creator in immutable `session.creator_ref`, whether attached or detached.
 An attached `start_agent` child also records its lifecycle **parent** in `session.parent_ref`, never itself.
 A detached child retains creator provenance with no lifecycle parent.
-Without parent input, the authenticated sender of a Session's first admitted Message becomes its creator, with no lifecycle parent, so an agent that starts a chat from Bash is its creator ([Session provenance](sessions.md#session-provenance)).
+Without parent input, the sender of a Session's first admitted Message, when a Session sent it through `message_agent`, becomes its creator, with no lifecycle parent ([Session provenance](sessions.md#session-provenance)).
 Creation without parent input records no lifecycle parent.
 [Session provenance](sessions.md#session-provenance) owns creator identity; the following stop, ending-Message, and forwarding rules follow lifecycle parent links alone.
 When a parent stops, or a Turn of it ends out of context, each of its attached children owes a stop (`session_stop_owed`, written in the same transaction, keyed `rui.core/stop/<child>/<parent>/<position>` by the parent position that caused it).
@@ -114,8 +103,7 @@ A Permission Decision addressed to an ancestor may name the child's Action only 
 Dormant peers retain only saved facts.
 
 Peer composition supports one Host, which owns one Store.
-Peer CLI sends cannot select a foreign Store.
-The Host independently rejects unknown or mismatched sender handles before delivery, including forged wire requests.
+A Message request carries no sender, so a forged wire request cannot claim one.
 There is no cross-Host authentication, RPC, issuer startup, foreign Store read or claimed-sender mode.
 Remote-machine routing and distributed storage are outside this contract.
 
@@ -784,16 +772,14 @@ Extend existing owners and their gates; replace obsolete wait wrappers and fixed
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| Model self-address, `rui --help` pointer and self-label command, unchanged preamble, Workspace and caller instructions; peer start and reply taught only by the `start_agent` and `message_agent` descriptions; separate peer sender, local-result and how-to-reply facts; explicit report delivery through Bash still carries its Host-recorded sender (`RUI_ADDRESS`, Action handle, capture recovery) | `peer_integration.py`, `human_cli_integration.py`, `'request preparation'`, `'recorded sender facts'` | Scripted provider proves workflow and rendered facts, not future model compliance. Fixture-observer snapshots synchronize holds and audit saved outcomes. Native Linux x86-64 and macOS arm64. Compaction and replacement Attempt identity: none located |
-| Peer self-send admitted with explicit and generated capture; canonical Store alias and bare Session ID; plain answers saved as request results without implicit delivery; parent receives literal backticks, `$()` and quotes byte-exact through Bash tool stdin and file sends without shell evaluation or login | `peer_integration.py`, `'a peer capture preserves'` | No sender is inferred for human or script sends; original-capture recovery is unchanged. Shared text owns prose; independent request encoding, structural validation, history and digest negatives remain |
-| Peer page identities and TUI labels carry the same full six-character ID; Activity decoding rejects obsolete abbreviation metadata without changing Message selection | `activity_integration.py`, `store/tests/` `'a peer sender'`, `session_view.zig` `'a peer reference'` | Conversation decoding retains its ordinary unknown-field policy. No independent label allocation or abbreviation collision machinery |
-| Bare `--session ID`; sender Store beats conflicting HOME defaults; anonymous explicit Store selection; conflicting peer Store override and malformed peer context reject before capture; JSON, prefix, UUID, NUL, uppercase and excluded alphabet variants reject without aliases | `'grammar rejects ambiguous'`, `peer_integration.py`, `sender_identity_integration.py` | Genuine no-sender external sends remain anonymous. Noncanonical references are never coerced or prefix-matched |
+| Model self-address, `rui --help` pointer and self-label command, unchanged preamble, Workspace and caller instructions; peer start and reply taught only by the `start_agent` and `message_agent` descriptions; separate peer sender, local-result and how-to-reply facts; a report sent through `message_agent` carries its Host-recorded sender | `peer_integration.py`, `human_cli_integration.py`, `'request preparation'`, `'recorded sender facts'` | Scripted provider proves workflow and rendered facts, not future model compliance. Fixture-observer snapshots synchronize holds and audit saved outcomes. Native Linux x86-64 and macOS arm64. Compaction and replacement Attempt identity: none located |
+| A `message_agent` report is admitted with the sender recorded by the call; plain answers saved as request results without implicit delivery; the parent receives literal backticks, `$()` and quotes byte-exact without shell evaluation or login | `peer_integration.py`, `'a peer Message is recorded'` | No sender is inferred for human or script sends, including from a Session's Bash; original-capture recovery is unchanged. Shared text owns prose; independent request encoding, structural validation, history and digest negatives remain |
+| Peer page identities and TUI labels carry the same full six-character ID; Activity decoding rejects obsolete abbreviation metadata without changing Message selection | `activity_integration.py`, `store/tests/` `'a peer Message is recorded'`, `session_view.zig` `'a peer reference'` | Conversation decoding retains its ordinary unknown-field policy. No independent label allocation or abbreviation collision machinery |
+| Bare `--session ID`; anonymous explicit Store selection; JSON, prefix, UUID, NUL, uppercase and excluded alphabet variants reject without aliases | `'grammar rejects ambiguous'`, `peer_integration.py` | Noncanonical references are never coerced or prefix-matched |
 | Store allocates exactly six CSPRNG Crockford characters under unique insertion; actual collision retries, original creation replay, unknown update no-create; ten concurrently created peers each start and send back by ID; guessed unknown IDs admit no work | `store/tests/` `'Store allocates six'`, `peer_integration.py` | Forced secure-entropy draws exercise the collision branch independently of random chance. Scripted provider proves runtime routing, not model compliance |
 | `session start` atomically allocates and admits its first Message; committed lost output and concurrent first admissions/replays retain one ID and input; rollback/rejection leave no orphan; cancellation/reopen never readmit | `store/tests/` `'initial Message'`, `server.zig` `'initial Message reply'`, `peer_integration.py` | An ID is admission, not execution/completion. Existing Message observation and original-result contracts apply |
-| Refused peer creation and malformed addressed sends retain their sender position, key, code and replay identity; public activity shows no row for them (the call's tool row carries the failure) | `store/tests/` `'refused peer creation'`, `'a peer sender'`; schema 58 and populated migration tests; generated OpenAPI and TS feed checks | The regression crosses Store admission and replay. Supported Store migration preserves saved attempts; no format-49 upgrade or per-row decoder recovery is implied |
-| Message and instruction stdin preserve NUL, UTF-8 and trailing newlines; file-valued/literal alternatives reject; malformed peer context cannot downgrade; errors distinguish Store, stdin read, parse, content-file read, connect and uncertain admission | `peer_integration.py`, `admission_integration.sh`, `'grammar rejects ambiguous'` | Linux/synthetic evidence is separate from physical Mac qualification. No automatic report delivery or provider parser change |
-| Action-issued sender identity; forged, missing, empty, unknown and misbound handles fail closed; exit, stop and restart retire authority; exact committed capture replay preserves admission after retirement | `'a peer sender is resolved'`, `'peer wire rejects old'`, `sender_identity_integration.py` (in `check`) | Single Host only. Handles never appear in public snapshots or model context. Native fixture uses a controlled scripted provider |
-| Conflicting explicit peer Store fails before capture; forged foreign-Store context reaches the receiving Host, saves `invalid_sender_handle`, replays its rejection and creates no recipient admission | `peer_integration.py` | Successful cross-Store peer delivery is unsupported; no RPC, issuer startup, foreign Store reads or claimed-sender mode |
+| Message and instruction stdin preserve NUL, UTF-8 and trailing newlines; file-valued/literal alternatives reject; errors distinguish Store, stdin read, parse, content-file read, connect and uncertain admission | `peer_integration.py`, `admission_integration.sh`, `'grammar rejects ambiguous'` | Linux/synthetic evidence is separate from physical Mac qualification. No automatic report delivery or provider parser change |
+| Action-issued handle for `rui action publish`; exit, stop and restart retire authority | `'APV-8 stopped and retired senders reject new values'` | Single Host only. Handles never appear in public snapshots or model context. Native fixture uses a controlled scripted provider |
 | 60 s mutation reply inactivity, shared with transfers | `ResponseTiming.zig` `'renews mutation inactivity'`, `'a mutation answer after five seconds'`; TS `unit.test.ts` `'a Host that answers after five seconds'` | Intake independence, held credit, peer burst and native stall: none located |
 | Peer selection progress and Host stop | `'skipped continuation'`, `host-stop-integration` | Peer input: none located. Iterated stops are not group cancellation |
 
