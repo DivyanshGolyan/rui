@@ -414,7 +414,7 @@ def prove_message_background_and_stop(state, *, deadline=None):
         configured = fixture.command(
             "session", "configure", "--store", store, "--key", "configure", "--record", case / "configure.json",
             "--workspace", workspace, "--connection", "codex", "--model", "gpt-6-sol",
-            "--tools", "bash,read_action", "--permission-mode", "ask",
+            "--tools", "bash,read_action,stop_action", "--permission-mode", "ask",
         )
         session = configured["context"]["session"]
         fixture.message(case, store, "target", session, "Start a long running command")
