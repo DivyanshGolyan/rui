@@ -272,10 +272,39 @@ def cancellation(stop):
             signal.signal(signum, handler)
 
 
+MYSQL_ONLY = "RUI_STORE_MYSQL_ONLY"
+
+
+def split_mysql(environ):
+    """A PR's Store run as (SQLite-only environment, MySQL environment for the listed tests), or None.
+
+    MYSQL_ONLY names test prefixes (select_tests.mysql_test_modules). The whole root runs on SQLite; only those
+    tests also run on live MySQL. Promotion sets no MYSQL_ONLY and runs every test on both engines.
+    """
+    prefixes = environ.get(MYSQL_ONLY, "").strip()
+    if not prefixes or not environ.get(live_engines.MYSQL_SOCKET):
+        return None
+    sqlite = {name: value for name, value in environ.items()
+              if name not in live_engines.ENGINES["mysql"] and name != MYSQL_ONLY}
+    engines = [engine for engine in environ.get(live_engines.REQUIRE, "").split(",") if engine and engine != "mysql"]
+    if engines:
+        sqlite[live_engines.REQUIRE] = ",".join(engines)
+    else:
+        sqlite.pop(live_engines.REQUIRE, None)
+    mysql = {name: value for name, value in environ.items() if name != MYSQL_ONLY}
+    mysql["RUI_UNIT_ONLY"] = prefixes
+    return sqlite, mysql
+
+
 def run(binary, arguments, timeout, mode, environ, output=None):
+    if mode == "run" and (split := split_mysql(environ)):
+        sqlite, mysql = split
+        print(f"Store root: every test on SQLite, then on MySQL only {mysql['RUI_UNIT_ONLY']}", flush=True)
+        return run(binary, arguments, timeout, mode, sqlite, output) or run(binary, arguments, timeout, mode, mysql, output)
     started = time.monotonic()
     record = environ.get(live_engines.MYSQL_RECORD)
-    count = SHARD_COUNT if mode in ("run", "native") else 1
+    # A filtered MySQL pass is small, and every shard must write its own record (merge_records): one process.
+    count = 1 if environ.get("RUI_UNIT_ONLY") else SHARD_COUNT if mode in ("run", "native") else 1
     stop = threading.Event()
     test_timeout = duration(environ["RUI_UNIT_TEST_TIMEOUT"]) if environ.get("RUI_UNIT_TEST_TIMEOUT") else None
     with tempfile.TemporaryDirectory(prefix="rui-store-shards-") as directory:
@@ -306,7 +335,7 @@ def run(binary, arguments, timeout, mode, environ, output=None):
             jobs.append((child, label))
         # Clear previous acceptance before any child starts.
         if record and mode != "native":
-            Path(record).unlink(missing_ok=True)
+            Path(live_engines.accepted(record) if mode == "run" else record).unlink(missing_ok=True)
         results = []
         with cancellation(stop) as caught, live_engines.mysql_lease(environ, exclusive=mode != "native", timeout=timeout, stop=stop) as lock, ThreadPoolExecutor(max_workers=count) as pool:
             released = threading.Event()
@@ -359,7 +388,7 @@ def run(binary, arguments, timeout, mode, environ, output=None):
             for name, seconds in top:
                 print(f"{seconds:.3f}s {name}")
         if record and mode == "run":
-            merge_records(records, record)
+            merge_records(records, live_engines.accepted(record))
         print(f"{'Store root' if mode == 'run' else mode} wall: {time.monotonic() - started:.3f}s; "
               f"{sum(len(result.tests) for result in results)} tests across {count} processes", flush=True)
     return 0

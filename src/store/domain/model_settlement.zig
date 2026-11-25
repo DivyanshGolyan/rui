@@ -6,6 +6,7 @@ const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const tool_defs = @import("../../call_classification.zig");
+const tool_line = @import("../../tool_line.zig");
 const tool_record = @import("../../tool_record.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const mcp_arguments = @import("../../mcp/arguments.zig");
@@ -1767,7 +1768,7 @@ const Settlement = struct {
             .approval_position = if (authorized) null else s.first_item_position + record.ordinal,
         });
         if (unserved_content_id) |content_id| {
-            try action_domain.queueResolution(a, .{ .action_id = action_id, .parent_operation_id = s.binding.operation_id, .turn_id = s.binding.turn_id }, s.session, .failed, content_id);
+            try action_domain.queueResolution(a, .{ .action_id = action_id, .parent_operation_id = s.binding.operation_id, .turn_id = s.binding.turn_id }, s.session, .failed, content_id, .call_line);
             return;
         }
         if (!authorized) try forward_domain.queue(a, &s.session.ref, &s.session.ref, .approval, action_id);
@@ -1777,13 +1778,15 @@ const Settlement = struct {
 const ImportedNeutral = struct { bag: u64, part_count: u64, text: ?u64, text_length: u64, text_digest: [32]u8, described: bool, call_failed: bool };
 
 noinline fn describeWebSearch(io: std.Io, source: std.Io.File, call: OutputMetadataRecord, pattern: ?OutputMetadataRecord) !tool_record.Description {
-    var target: [tool_defs.WebSearchCall.excerpt_bytes]u8 = undefined;
-    var found: [tool_defs.WebSearchCall.excerpt_bytes]u8 = undefined;
-    return tool_defs.describe(.{ .web_search = .{
-        .action = @fromBackingInt(@backingInt(call.action)),
+    var target: [tool_line.WebSearchCall.excerpt_bytes]u8 = undefined;
+    var found: [tool_line.WebSearchCall.excerpt_bytes]u8 = undefined;
+    const words = tool_line.describe(.{ .web_search = .{
+        .action = call.action,
         .target = try excerpt(io, source, call, &target),
         .pattern = if (pattern) |field| try excerpt(io, source, field, &found) else "",
     } });
+    std.debug.assert(tool_presentation.ToolPresentation.validDescription(words.slice()));
+    return words;
 }
 
 fn excerpt(io: std.Io, source: std.Io.File, record: OutputMetadataRecord, buffer: []u8) ![]const u8 {

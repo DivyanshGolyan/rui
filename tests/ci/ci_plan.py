@@ -17,7 +17,7 @@ class Plan:
 
 
 def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
-         change_kind: ChangeKind, compile_only: bool = False, native_targets=_UNSET) -> Plan:
+         change_kind: ChangeKind, compile_only: bool = False, native_targets=_UNSET, main_red: bool = False) -> Plan:
     if promotion and compile_only:
         raise ValueError('A promotion runs its suites; a compile-only build runs none')
     p = dict(selection)
@@ -26,6 +26,12 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
                               'server_targets', 'cache_execution_checks', 'typecheck_macos', 'linux_memory_checks',
                               'manual_checks')) or p.get('unit_compile_required', False):
         kind = ChangeKind.NORMAL
+    if main_red and event_name == 'pull_request':
+        # While main is red a PR selects nothing; admission fails it without spending runner minutes.
+        kind = ChangeKind.DOCUMENTATION
+        for key in ('native_required', 'mac_required', 'upgrade_required', 'manual_checks', 'unit_compile_required'):
+            if key in p:
+                p[key] = [] if isinstance(p[key], list) else False
     p['change_kind'] = kind.value
     draft_run = event_name == 'pull_request' and draft
     p['draft_run'] = draft_run
@@ -97,6 +103,8 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         pr_job=pr_job,
         # The ready PR runs the live MySQL migration check on a MySQL 8.4 server it starts itself (check.yml pr_linux).
         pr_mysql_migration=pr_job and bool(p.get('mysql_migration', False)),
+        # The Store tests that run on MySQL in that check; the rest of test-store runs on SQLite (store_shards.py).
+        pr_mysql_tests=' '.join(p.get('mysql_tests', [])) if pr_job and p.get('mysql_migration', False) else '',
         pr_setup_targets=sorted(set(p['targets']) | set(compile_targets)) if pr_job else [],
         change_kind=kind.value,
         draft_run=draft_run,

@@ -2,7 +2,7 @@ const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const session_id = @import("session_id.zig");
 
-pub const max_description_bytes = @import("mcp/shape.zig").description_max_bytes;
+pub const max_description_bytes = @import("tool_line.zig").max_bytes;
 
 pub const max_label_bytes = 100;
 
@@ -206,7 +206,7 @@ pub const ToolPresentation = struct {
 
 /// What kind of finish a successful call was. Closed: a new member is a wire change.
 /// `sent` means the call handed work to another Session, so the row reads as an arrow, not a tick.
-pub const Completion = enum { done, sent };
+pub const Completion = enum(u8) { done, sent };
 
 /// The one rule that turns a resolution and a tool's chosen finish into a mark.
 /// A tool's choice refines a successful finish alone; failure, denial and cancellation stay the system's.

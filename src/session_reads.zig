@@ -25,6 +25,7 @@ const Bounded = @import("bounded.zig").Bounded;
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const status_page = @import("status_page.zig");
 const ChatInfo = @import("chat_info.zig");
+const activity_read = @import("activity_read.zig");
 const ReadPhase = departure.ReadPhase;
 const feed_reads = @import("feed_reads.zig");
 const feed_window = @import("feed_window.zig");
@@ -46,7 +47,8 @@ pub const RenderedRow = struct {
     queue_terminal: bool = false,
 };
 
-pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ChatInfo.Edit) anyerror!bool;
+pub const ConfigureAttempt = union(enum) { edit: ChatInfo.Edit, slash: []u8 };
+pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ConfigureAttempt) anyerror!@import("configure_outcome.zig").Outcome;
 pub const Command = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, []u8) anyerror!void;
 pub const Requests = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, *std.Io.Writer, *SavedRequests) anyerror!void;
 pub const SavedRequests = slash_commands.Requests(protocol.max_key_bytes);
@@ -83,7 +85,7 @@ pub const Line = struct {
     model: Bounded(protocol.max_model_bytes) = .{},
     provider: ?@import("connection.zig").Name = null,
     effort: ?protocol.ReasoningEffort = null,
-    left: ?u8 = null,
+    context: ?session_line.Context = null,
     archive_state: protocol.SessionArchiveState = .active,
 
     pub const First = struct { position: u64, content: content_value.Value };
@@ -106,7 +108,7 @@ pub const Line = struct {
             .model = plain(protocol.max_model_bytes, settings.model.slice()),
             .provider = @import("connection.zig").Name.parse(settings.connection.value.slice()),
             .effort = if (settings.reasoning_effort) |effort| effort.value else null,
-            .left = if (trigger != null and estimate != null) session_line.left(trigger.?.value, estimate.?.value) else null,
+            .context = session_line.Context.of(if (estimate) |tokens| tokens.value else null, if (trigger) |limit| limit.value else null),
             .archive_state = current.archive_state,
         };
     }
@@ -129,7 +131,7 @@ pub const Line = struct {
             .folder = if (self.folder) |*folder| folder.slice() else null,
             .home = home,
             .effort = self.effort,
-            .left = self.left,
+            .context = self.context,
         };
     }
 };
@@ -177,6 +179,9 @@ pub const Job = struct {
     command: Command = undefined,
     configure: ?Configure = null,
     info_edit: ?ChatInfo.Edit = null,
+    info_slash: bool = false,
+    configure_keys: [@import("overview_view.zig").max_requests]@import("configure_outcome.zig").Original = undefined,
+    configure_count: usize = 0,
     requests: Requests = undefined,
     status: Status = undefined,
     phase: ReadPhase = .activity,
@@ -227,7 +232,9 @@ pub const Job = struct {
         cursor: protocol_reply.ActivityCursor = .{},
         rendering: bool = false,
         command_stderr_restored: bool = false,
-        info_saved: bool = false,
+        info_outcome: ?@import("configure_outcome.zig").Outcome = null,
+        configure_resolved: [@import("overview_view.zig").max_requests]@import("configure_outcome.zig").Original = undefined,
+        configure_resolved_count: usize = 0,
         action: ?u64 = null,
         output_length: u64 = 0,
         copied: Copied = .no_answer,
@@ -395,7 +402,7 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     var read = task.readContext();
     read.cancellation = job.interrupted;
-    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = read, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length], .configure = job.configure, .edit = job.info_edit, .saved = &job.result.info_saved };
+    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = read, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length], .configure = job.configure, .edit = job.info_edit, .slash = job.info_slash, .outcome = &job.result.info_outcome };
     const ended = run.into(job.files.inspection);
     job.result.rendering = ended.rendering;
     job.result.command_stderr_restored = ended.stderr_restored;
@@ -411,12 +418,14 @@ pub const CommandRun = struct {
     line: []u8,
     configure: ?Configure = null,
     edit: ?ChatInfo.Edit = null,
-    saved: ?*bool = null,
+    slash: bool = false,
+    outcome: ?*?@import("configure_outcome.zig").Outcome = null,
 
     fn execute(self: CommandRun) !void {
-        if (self.edit) |edit| {
+        if (self.edit != null or self.slash) {
             const configure = self.configure orelse return error.ConfigureUnavailable;
-            self.saved.?.* = try configure(self.init, self.requests, self.store, self.session, edit);
+            const attempt: ConfigureAttempt = if (self.edit) |edit| .{ .edit = edit } else .{ .slash = self.line };
+            self.outcome.?.* = try configure(self.init, self.requests, self.store, self.session, attempt);
         } else try self.command(self.init, self.requests, self.store, self.session, self.line);
     }
 
@@ -454,7 +463,7 @@ fn pageCursor(job: *const Job, plan: FeedPolicy.Page) protocol_reply.ActivityCur
     var cursor: protocol_reply.ActivityCursor = .{
         .direction = if (plan.direction == .backward) .backward else .forward,
         .limit = plan.limit,
-        .kinds = if (plan.kinds == .all) .full else .initMany(&.{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed }),
+        .kinds = if (plan.kinds == .all) .full else activity_read.conversation,
         .end = if (plan.kinds == .all and plan.continuing) job.cursor.end else null,
     };
     if (plan.from) |from| {
@@ -529,7 +538,7 @@ fn scanAt(job: *Job, task: *Task, reads: client.SessionReads, plan: FeedPolicy.P
         const line_stale = Line.stale(job.line_read, &page.facts);
         if (job.open_status or job.watch_status or line_stale) {
             const current = try View.currentWith(reads, job.files.scratch);
-            if (line_stale) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
+            if (line_stale or job.open_status) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
             if (job.open_status or job.watch_status) {
                 job.result.status = try job.status(task.io, &current, job.files.scratch, job.status_taken, if (job.open_status) null else job.status_shown, job.status_actions);
             }
@@ -615,8 +624,8 @@ fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: [
     if (latest.*) |old| if (key.order(old.key) != .gt) return;
     const marks = @import("marks.zig");
     const cause: marks.Cause = switch (item.value) {
-        .turn_ended => |ended| if (!std.mem.eql(u8, ended.session.slice(), session)) return else if (ended.ending == .done) .{ .words = "Finished" } else marks.cause(ended.code.slice(), provider),
-        .stop => |stop| if (stop.turn == null) marks.cause("cancelled", provider) else return,
+        .turn_ended => |ended| if (!std.mem.eql(u8, ended.session.slice(), session)) return else if (ended.ending.words()) |words| .{ .words = words } else marks.cause(ended.code.slice(), provider),
+        .stop => |stop| if (stop.turn == null) .{ .words = protocol.TurnEnding.stopped.words().? } else return,
         else => return,
     };
     latest.* = .{ .key = key, .cause = cause };
@@ -1006,6 +1015,97 @@ fn lastAnswer(requests: client.Requests, store: []const u8, session: []const u8)
     }
 }
 
+const ConfigureObservation = enum { resolved, absent, invalid };
+
+fn configureObservation(reply: protocol_reply.ObservationReply, original: @import("configure_outcome.zig").Original, store: []const u8, session: []const u8) ConfigureObservation {
+    if (!original.store.eql(store)) return .invalid;
+    return switch (reply) {
+        .observation => |observation| blk: {
+            const facts = observation.facts;
+            if (!facts.key.eql(&original.key)) break :blk .invalid;
+            if (facts.status == .absent) break :blk .absent;
+            if (facts.kind != .configure or facts.target == null or !facts.target.?.eql(session)) break :blk .invalid;
+            break :blk .resolved;
+        },
+        .failure, .not_modified => .invalid,
+    };
+}
+
+test "SUI-137 Configure observations settle only the exact saved key and Session" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const other: [36]u8 = "01234567-89ab-4cde-8012-0123456789ac".*;
+    const store = try @import("bounded.zig").Bounded(@import("store_path.zig").max_bytes).from("/store-a");
+    const original: @import("configure_outcome.zig").Original = .{ .key = key, .store = store };
+    const other_original: @import("configure_outcome.zig").Original = .{ .key = other, .store = store };
+    var facts: protocol_reply.CommandObservation = .{ .key = .{}, .status = .absent };
+    try facts.key.set(&key);
+    const reply = struct {
+        fn make(value: protocol_reply.CommandObservation) protocol_reply.ObservationReply {
+            return .{ .observation = .{ .facts = value, .since = null } };
+        }
+    }.make;
+    try std.testing.expectEqual(ConfigureObservation.absent, configureObservation(reply(facts), original, "/store-a", "k7m2qx"));
+    for ([_]@TypeOf(facts.status){ .accepted, .rejected }) |status| {
+        facts.status = status;
+        facts.kind = .configure;
+        facts.target = .{};
+        try facts.target.?.set("k7m2qx");
+        try std.testing.expectEqual(ConfigureObservation.resolved, configureObservation(reply(facts), original, "/store-a", "k7m2qx"));
+        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), other_original, "/store-a", "k7m2qx"));
+        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), original, "/store-b", "k7m2qx"));
+        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), original, "/store-a", "a1b2c3"));
+        facts.kind = .message;
+        try std.testing.expectEqual(ConfigureObservation.invalid, configureObservation(reply(facts), original, "/store-a", "k7m2qx"));
+    }
+}
+
+test "SUI-137 a retargeted Store cannot reconcile another Store's same key" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const Host = struct {
+        pub fn answer(_: *@This(), fd: std.posix.fd_t) !void {
+            var request_buffer: [8192]u8 = undefined;
+            const request = try fake_host.readRequest(fd, &request_buffer) orelse return;
+            try std.testing.expect(request.is("/v1/observe-command"));
+            const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"" ++ key ++ "\",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"accepted\",\"kind\":\"configure\",\"target\":\"k7m2qx\",\"revision\":\"2\",\"created\":false}}";
+            fake_host.respond(fd, "200 OK", "application/json", "", body);
+        }
+    };
+    const Action = struct {
+        fn listing(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, out: *std.Io.Writer, _: *SavedRequests) !void {
+            try out.writeAll("Local handles\n");
+        }
+        pub fn run(_: *@This(), _: *Host, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            try dir.createDir(io, "other", .fromMode(0o700));
+            try dir.symLink(io, "other", "alias", .{ .is_directory = true });
+            var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias", .{root});
+            const first = try client.resolveClientPaths(io, alias);
+            try dir.deleteFile(io, "alias");
+            try dir.symLink(io, ".", "alias", .{ .is_directory = true });
+            const second = try client.resolveClientPaths(io, alias);
+            try std.testing.expect(!first.store_identity.eql(second.store_identity.slice()));
+            const page = try dir.createFile(io, "inspection", .{ .read = true });
+            defer page.close(io);
+            var job: Job = .{ .store = alias, .session = "k7m2qx", .requests = listing, .files = .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page }, .parts = page } };
+            job.configure_keys[0] = .{ .key = key, .store = first.store_identity };
+            job.configure_keys[1] = .{ .key = key, .store = second.store_identity };
+            job.configure_count = 2;
+            var task: Task = .{ .io = io };
+            try inspectPage(&job, &task);
+            try std.testing.expectEqual(@as(usize, 1), job.result.configure_resolved_count);
+            try std.testing.expectEqual(key, job.result.configure_resolved[0].key);
+            try std.testing.expect(job.result.configure_resolved[0].store.eql(second.store_identity.slice()));
+            var bytes: [1024]u8 = undefined;
+            const count = try page.readPositionalAll(io, &bytes, 0);
+            try std.testing.expect(std.mem.indexOf(u8, bytes[0..count], "keys remain unconfirmed") != null);
+        }
+    };
+    var host: Host = .{};
+    var action: Action = .{};
+    try fake_host.withHost(&host, &action);
+}
+
 pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     try job.files.inspection.setLength(task.io, 0);
@@ -1013,7 +1113,33 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     var buffer: [4096]u8 = undefined;
     var output = job.files.inspection.writerStreaming(task.io, &buffer);
     std.debug.assert(job.inspection_kind == .requests);
-    try job.requests(job.init, task.readContext(), job.store, job.session, &output.interface, &job.result.requests);
+    const paths = if (job.configure_count != 0) try client.resolveClientPaths(task.io, job.store) else null;
+    const store = if (paths) |*selected| selected.selector() else job.store;
+    try job.requests(job.init, task.readContext(), store, job.session, &output.interface, &job.result.requests);
+    var unable = false;
+    for (job.configure_keys[0..job.configure_count]) |original| {
+        const selected = &paths.?;
+        if (!original.store.eql(selected.store_identity.slice())) {
+            unable = true;
+            continue;
+        }
+        var response_buffer: client.ObservationBuffer = .{};
+        const response = task.requests().observeCommandAt(selected, &original.key, null, &response_buffer, null) catch |err| {
+            if (@as(anyerror, err) == error.Cancelled or @as(anyerror, err) == error.Canceled or @as(anyerror, err) == error.CanonicalStoreFailure) return err;
+            unable = true;
+            continue;
+        };
+        if (response == .failure and response.failure.err() == error.CanonicalStoreFailure) return task.requests().failRead(response.failure);
+        switch (configureObservation(response, original, selected.store_identity.slice(), job.session)) {
+            .resolved => {
+                job.result.configure_resolved[job.result.configure_resolved_count] = original;
+                job.result.configure_resolved_count += 1;
+            },
+            .absent => {},
+            .invalid => unable = true,
+        }
+    }
+    if (unable) try output.interface.writeAll("Some original Stores differ or receipts could not be checked; their keys remain unconfirmed.\n");
     try writeSubmission(job.inspection_submission, null, &output.interface);
     try output.flush();
 }
@@ -1093,7 +1219,7 @@ test "session_reads the Session line takes archive and other facts from Current 
                 try std.testing.expectEqualStrings("/w", facts.folder.?);
             } else try std.testing.expect(facts.folder == null);
             try std.testing.expectEqualStrings("gpt\\x01x", facts.model);
-            try std.testing.expectEqual(case.left, facts.left);
+            try std.testing.expectEqual(case.left, if (facts.context) |context| context.left() else null);
             try std.testing.expectEqual(!std.mem.eql(u8, case.effort, "null"), facts.effort != null);
             try std.testing.expectEqual(!std.mem.eql(u8, case.first, "null"), line.?.first != null);
         }
@@ -1182,6 +1308,13 @@ const FakeHost = struct {
 
     fn message(admission: u64) protocol.ActivityItem.Value {
         return .{ .admission = .{ .admission = admission, .key = .{}, .turn = null, .state = .queued, .content = textValue(), .admitted_at = 1 } };
+    }
+
+    /// A Message that arrived from another Session: a row the Session draws, unlike the retired `sent` entries.
+    fn received(admission: u64, peer: protocol.NamedPeer) protocol.ActivityItem.Message {
+        var value = message(admission).admission;
+        value.sender = peer;
+        return value;
     }
 
     const Row = struct { position: u64, ordinal: u64 = 0 };
@@ -1361,7 +1494,6 @@ test "SUI-49 Message placement preserves provenance across pages" {
         const user = TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ View.Mark.body ++ "please wait\n  for the build" ++ View.Mark.reset ++ "\n";
         const link = TerminalText.link_open ++ TerminalText.session_link ++ "9f8e7d" ++ TerminalText.link_end ++ "\x1b[4mPeer" ++ TerminalText.link_close ++ View.Mark.reset ++ View.Mark.summary;
         const received = View.Mark.summary ++ "← Received message from " ++ link ++ View.Mark.reset ++ "\n";
-        const sent = View.Mark.summary ++ "→ Messaged " ++ link ++ View.Mark.reset ++ "\n";
         const Sink = struct {
             out: *std.Io.Writer,
             lowest: ?u64 = null,
@@ -1426,7 +1558,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
                         const expected = [_]Expected{
                             .{ .text = if (source == .session) received else "" },
                             .{ .text = received },
-                            .{ .text = sent },
+                            .{ .text = "" },
                             .{ .text = if (state == .applied and source != .session) user else "" },
                         };
                         const queued: protocol.Queued = if (state == .queued and source != .session) .{ .count = if (oldest) 1 else 2, .oldest_position = if (oldest) 2 else 1, .newest_admission = 1, .newest_position = 2 } else .{};
@@ -1864,11 +1996,9 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
     const content: content_value.Value = .{ .text = .{ .length = 3, .digest = @splat(0xab) } };
     const Kind = struct { value: protocol.ActivityItem.Value, line: []const u8, packed_: bool };
     const kinds = [_]Kind{
-        .{ .value = .{ .sent = .{ .admission = 4, .target = peer, .content = content, .admitted_at = std.math.maxInt(u64) } }, .line = "→ Messaged 9f8e7d", .packed_ = true },
         .{ .value = .{ .received = .{ .admission = 5, .key = .{}, .turn = 3, .state = .applied, .content = content, .admitted_at = std.math.maxInt(u64), .sender = peer } }, .line = "← Received message from 9f8e7d", .packed_ = true },
         .{ .value = .{ .hosted_call = .{ .line = search, .code = .succeeded, .sign = .finished, .publication_position = null } }, .line = "✓ Search", .packed_ = true },
         .{ .value = .{ .hosted_call = .{ .line = find, .code = .failed, .sign = .failed, .publication_position = null } }, .line = "× Find", .packed_ = false },
-        .{ .value = .{ .send_failed = .{ .key = .{}, .target = null, .code = .{} } }, .line = "× Message not delivered", .packed_ = false },
         .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 0, .completion = .completed } }, .line = "▪ Stopped", .packed_ = false },
     };
     var documents: [kinds.len]Viewport.Sized(512, true) = undefined;
@@ -1925,7 +2055,7 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
             var row: u16 = 0;
             for (order, 0..) |kind, at| {
                 if (at != 0 and !((kinds[order[at - 1]].packed_ and kinds[kind].packed_) or
-                    ((order[at - 1] == 2 or order[at - 1] == 3) and (kind == 2 or kind == 3))))
+                    ((order[at - 1] == 1 or order[at - 1] == 2) and (kind == 1 or kind == 2))))
                 {
                     try testing.expectEqualStrings("", Rows.at(&screen, row, &buffer));
                     row += 1;
@@ -1960,14 +2090,28 @@ test "session_reads policy cursor is inclusive only for a fresh provisional repl
     try std.testing.expect(!above.kinds.contains(.approval_requested));
     try std.testing.expect(!above.kinds.contains(.session_changed));
     try std.testing.expect(!above.kinds.contains(.compacted));
-    for ([_]protocol.ActivityItem.Kind{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed }) |kind| try std.testing.expect(above.kinds.contains(kind));
+    try std.testing.expect(above.kinds.eql(activity_read.conversation));
+}
+
+test "SUI-51 a stored send entry draws nothing, so a peer send shows only on its tool row" {
+    var peer: protocol.NamedPeer = .{ .session = .{} };
+    try peer.session.set("9f8e7d");
+    const tail = [_]FakeHost.Tail{
+        .{ .value = .{ .sent = .{ .admission = 1, .target = peer, .content = FakeHost.textValue(), .admitted_at = 1 } } },
+        .{ .value = .{ .received = FakeHost.received(2, peer) } },
+    };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 2 };
+    var job: Job = .{ .opening = true, .session = "k7m2qx", .line_read = .{ .revision = 1, .end = 2 } };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Received message"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "Messaged"));
 }
 
 test "SUI-51 opening reads expose ordered rows and scan boundaries" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     const tail = [_]FakeHost.Tail{
-        .{ .value = .{ .sent = .{ .admission = 1, .target = peer, .content = FakeHost.textValue(), .admitted_at = 1 } } },
+        .{ .value = .{ .received = FakeHost.received(1, peer) } },
         .{ .value = FakeHost.message(2) },
     };
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 2 };
@@ -1985,7 +2129,7 @@ test "SUI-51 opening reads expose ordered rows and scan boundaries" {
         try std.testing.expectEqual(index == 0, row.tight);
         const body = host.shown[@intCast(row.offset)..][0..@intCast(row.length)];
         try std.testing.expect(index == 1 or (body.len != 0 and body[0] != '\n'));
-        try std.testing.expectEqual(@as(usize, if (index == 0) 1 else 0), std.mem.count(u8, body, "Messaged"));
+        try std.testing.expectEqual(@as(usize, if (index == 0) 1 else 0), std.mem.count(u8, body, "Received message"));
         try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, body, "please wait"));
     }
     try std.testing.expectEqual(job.result.rows[0].length, job.result.rows[1].offset);
@@ -2032,7 +2176,7 @@ test "SUI-53 replay replaces queued rows and counts only new rows" {
         const tail = [_]FakeHost.Tail{
             .{ .value = FakeHost.message(1), .applied_at = if (excluded) null else 24, .excluded_at = if (excluded) 24 else null },
             .{ .value = .{ .received = incoming } },
-            .{ .value = .{ .sent = .{ .admission = 91, .target = peer, .content = FakeHost.textValue(), .admitted_at = 1 } } },
+            .{ .value = .{ .received = FakeHost.received(91, peer) } },
             .{ .value = if (excluded) .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 1, .completion = .completed } } else .{ .user = applied } },
         };
         var host: FakeHost = .{ .history = 20, .tail = &tail, .end = 21 };
@@ -2050,8 +2194,8 @@ test "SUI-53 replay replaces queued rows and counts only new rows" {
             try host.read(&job);
             try std.testing.expectEqual(@as(usize, if (end == 23) 0 else 1), std.mem.count(u8, host.shown, "please wait"));
             try std.testing.expectEqual(@as(usize, if (end == 23) 2 else 1), job.result.new_rows);
-            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Received message"));
-            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Messaged"));
+            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, host.shown, "Received message"));
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "Messaged"));
             try std.testing.expectEqualDeep(if (end == 23) @as(?Key, .{ .position = 21 }) else null, firstProvisional(&job.result));
             if (end == 24) {
                 try std.testing.expect(std.mem.indexOf(u8, host.shown, "Received message").? < std.mem.indexOf(u8, host.shown, "please wait").?);
@@ -2066,7 +2210,7 @@ test "SUI-54 queued replay retains its starting point across pages" {
     try peer.session.set("9f8e7d");
     var tail: [40]FakeHost.Tail = undefined;
     tail[0] = .{ .value = FakeHost.message(1) };
-    for (tail[1..], 2..) |*row, admission| row.* = .{ .value = .{ .sent = .{ .admission = admission, .target = peer, .content = FakeHost.textValue(), .admitted_at = 1 } } };
+    for (tail[1..], 2..) |*row, admission| row.* = .{ .value = .{ .received = FakeHost.received(admission, peer) } };
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1 };
     var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
     try host.read(&job);

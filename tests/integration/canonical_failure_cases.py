@@ -358,7 +358,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     marker = reason if route == "/v1/configure" else "Decision not confirmed" if route == "/v1/control/permission-decision" else "Not confirmed"
                     deadline = time.monotonic() + 15
                     if route == "/v1/configure":
-                        human.panel_frame(master, lambda frame: "couldn't save" in frame,
+                        human.panel_frame(master, lambda frame: "not confirmed · /requests" in frame,
                                           timeout=deadline - time.monotonic())
                         output = human.panel_frame(master, lambda frame: marker in frame and "Copy last answer" not in frame,
                                                    b"\x1b", timeout=deadline - time.monotonic())

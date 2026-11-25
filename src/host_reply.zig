@@ -624,6 +624,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .approval_requested = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .action = max, .operation = max, .call_ordinal = max, .description = .{ .bytes = @splat(1), .len = CallText.max_description_bytes }, .tool = .{ .bytes = @splat(1), .len = CallText.max_tool_bytes }, .server = .{ .bytes = @splat(1), .len = CallText.max_server_bytes } } },
         .{ .session_changed = .{ .revision = max, .field = Worst.tag(protocol.SessionField), .provider_text = .{ .bytes = @splat(1), .len = protocol.max_report_bytes } } },
         .{ .compacted = .{ .operation = max, .dropped = max } },
+        .{ .instruction = .{ .turn = max, .revision = max, .content = text } },
         .{ .model_call = .{ .model = .{ .bytes = @splat(1), .len = protocol.max_model_bytes }, .served_model = .{ .bytes = @splat(1), .len = protocol.max_model_bytes }, .input_tokens = max, .output_tokens = max, .cached_tokens = max, .latency_ms = max, .first_event_ms = max, .status = code, .attempts = max } },
     };
     try std.testing.expectEqual(std.meta.tags(std.meta.Tag(protocol.ActivityItem.Value)).len, values.len);

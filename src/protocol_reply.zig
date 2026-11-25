@@ -152,9 +152,10 @@ pub const ActivityPage = struct {
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
+        const Instruction = struct { turn: ?JsonString(20), revision: ?JsonString(20), content: Ref };
         const ModelCall = struct { model: JsonString(protocol.max_model_bytes), served_model: ?JsonString(protocol.max_model_bytes), input_tokens: ?JsonString(20), output_tokens: ?JsonString(20), cached_tokens: ?JsonString(20), latency_ms: ?JsonString(20), first_event_ms: ?JsonString(20), status: JsonString(protocol.max_code_bytes), attempts: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction } };
         const Items = JsonArray(Item, 16);
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
         const Calls = JsonArray(CallEntry, 3);
@@ -214,6 +215,11 @@ pub const ActivityPage = struct {
                     if (revision <= 1 or (change.field == .reasoning_effort_refused) != (change.provider_text != null)) return error.InvalidActivityPage;
                     fact.value = .{ .session_changed = .{ .revision = revision, .field = change.field, .provider_text = if (change.provider_text) |text| text.value else null } };
                 },
+                .instruction => |instruction| {
+                    // The skill-catalog instruction has neither a Turn nor an authored revision; every other one has both.
+                    if ((instruction.turn == null) != (instruction.revision == null)) return error.InvalidActivityPage;
+                    fact.value = .{ .instruction = .{ .turn = if (instruction.turn) |turn| try id(turn, false) else null, .revision = if (instruction.revision) |revision| try id(revision, false) else null, .content = try textOf(instruction.content) } };
+                },
                 .compacted => |compacted| fact.value = .{ .compacted = .{ .operation = try id(compacted.operation, false), .dropped = try id(compacted.dropped, true) } },
                 .model_call => |call| {
                     if (call.model.slice().len == 0 or call.status.slice().len == 0 or (call.served_model != null and call.served_model.?.slice().len == 0)) return error.InvalidActivityPage;
@@ -254,8 +260,8 @@ pub const ActivityPage = struct {
                 .turn_ended => |ended| {
                     if (!protocol.validSessionId(ended.session.slice())) return error.InvalidActivityPage;
                     const ending = ended.ending.value;
-                    const done = ending == .done;
-                    const cancelled = ending == .stopped or ending == .interrupted;
+                    const done = ending.sign() == .finished;
+                    const cancelled = ending.sign() == .stopped;
                     if (ended.code.slice().len == 0 or done != ended.code.eql("completed") or cancelled != ended.code.eql("cancelled") or
                         (done and ended.content == null) or (cancelled and ended.content != null)) return error.InvalidActivityPage;
                     fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try textOf(reference) else null } };
@@ -2433,6 +2439,31 @@ test "CLI-17 activity_served_work" {
             defer std.testing.allocator.free(missing);
             try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(missing, .{}));
         }
+    }
+}
+
+test "an instruction row carries a Turn and a revision together, or neither" {
+    var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try facts.work.workspace.set("/work");
+    const content: @import("content_value.zig").Reference = .{ .length = 3, .digest = @splat(0xab) };
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    for ([_]struct { turn: ?u64, revision: ?u64, valid: bool }{
+        .{ .turn = 2, .revision = 3, .valid = true },
+        .{ .turn = null, .revision = null, .valid = true },
+        .{ .turn = 2, .revision = null, .valid = false },
+        .{ .turn = null, .revision = 3, .valid = false },
+    }) |row| {
+        facts.items[0] = .{ .position = 1, .ordinal = 0, .at = 5, .value = .{ .instruction = .{ .turn = row.turn, .revision = row.revision, .content = content } } };
+        var out = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&out, &facts);
+        if (!row.valid) {
+            try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(out.buffered(), .{}));
+            continue;
+        }
+        const parsed = try ActivityPage.parse(out.buffered(), .{});
+        const instruction = parsed.facts.items[0].value.instruction;
+        try std.testing.expectEqual(row.turn, instruction.turn);
+        try std.testing.expectEqual(row.revision, instruction.revision);
     }
 }
 

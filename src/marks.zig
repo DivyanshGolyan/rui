@@ -2,9 +2,13 @@ const std = @import("std");
 const failure_class = @import("failure_class.zig");
 const connection = @import("connection.zig");
 const provider_route = @import("provider_route.zig");
+const turn_ending = @import("turn_ending.zig");
 
 pub const Mark = enum { needs_you, active, queued, waiting, finished, sent, failed, stopped, newer, none };
 pub const Tone = enum { ink, normal, quiet, attention, failure };
+
+/// What an attention-toned notice starts with, so a terminal without colour still reads it as one.
+pub const attention_sign = "! ";
 
 pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii: []const u8, tone: Tone }).init(.{
     .needs_you = .{ .unicode = "●", .ascii = "?", .tone = .attention },
@@ -39,7 +43,7 @@ pub fn cause(code: []const u8, provider: ?connection.Name) Cause {
         .overflow => .{ .words = "Context full" },
         .unreachable_provider => .{ .words = "Provider unreachable", .key = "ctrl+r retries" },
         .retries_exhausted => .{ .words = "Retries ran out", .key = "ctrl+r retries" },
-        .interrupted => .{ .words = "Stopped" },
+        .interrupted => .{ .words = turn_ending.TurnEnding.stopped.words().? },
         .refused => .{ .words = "Provider refused the request", .key = "ctrl+r retries" },
         .other => .{ .words = "That didn't work", .key = "ctrl+r retries" },
     };

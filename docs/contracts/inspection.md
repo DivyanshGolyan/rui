@@ -57,7 +57,7 @@ No reply queue, worker, payload copy or new persistent state is introduced.
 ### Public Conversation pages
 
 The separate `conversation_page` Host read is a filtered projection of canonical applied User entries, assistant text and completed Tool Results; it does not change Current/Full reports or persist a transcript.
-Action values, pending input, instruction updates, model-output items (including private reasoning and encrypted continuation), proposals and partial tool groups are outside this projection.
+Action values, pending input, instruction text, model-output items (including private reasoning and encrypted continuation), proposals and partial tool groups are outside this projection.
 Full retains its complete inventory; Action inspection remains the exact approval-target read.
 A missing Session or malformed/stale cursor fails without changing work.
 
@@ -144,7 +144,11 @@ Proposal metadata grants no authorization: a later approval still binds the fres
 ### Public Session activity
 
 Session activity is a separate projection with a row kind for each `Kind` in `src/activity_read.zig`, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), a sourced input (`received`, naming either its peer `sender` or its background `source_action`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
-The remaining kinds are `approval_requested` (a call whose Action was saved under an `ask` revision, D115), `session_changed` (a settings revision's change, D138), `compacted` (a successful compaction, D217) and `model_call` (a resolved model Operation, D179).
+The remaining kinds are `approval_requested` (a call whose Action was saved under an `ask` revision, D115), `session_changed` (a settings revision's change, D138), `compacted` (a successful compaction, D217), `model_call` (a resolved model Operation, D179) and `instruction`.
+An `instruction` row is the text a Turn was given as its System Instruction entry (Conversation entry kind `instruction`): `turn` and `revision` name the Turn and the authored revision, and `content` is the entry's text reference.
+The Skill catalog's instruction has no Turn and no authored revision, so both are null exactly for it.
+The row sits at the entry's own Session position, dated its `recorded_at`, so a model or client re-reading the Session sees what it was told; the `session_changed` row for `instructions` stays beside it, because configuring the text and giving it to a Turn are two facts at two positions.
+Instruction text is public, and a private or inconsistent entry fences like assistant text; search does not read it, and a screen draws nothing for the kind.
 `received` mirrors `sent` for peer Messages and records final Action input with its Action identity; it split from `admission` on 2026-11-03 so a page can list a person's Messages alone (design thread on Rui's core and plug-in points).
 Activity and public Conversation retain `source_action` as a nullable Action ID alongside the shared Resolution content reference for background finals; person-only admission queries exclude them. Published Action values are sourced inputs like finals: Activity lists each as a `received` row (and as a User row once applied) naming its `source_action`, so the transcript holds everything the model was sent and a model can search and open it with `read_transcript`. Values add no public Conversation rows; that page is a filtered projection, and what a screen draws is decided in the view, never by what Activity holds.
 Admission, stop, send, refusal and every terminal outcome claim the existing Session sequence in their owning transaction, and each also records its commit time there.
@@ -153,7 +157,7 @@ A refused send's `send_failed.target` is required and nullable: it names the can
 The Store derives that peer from the full saved target with the shared ID grammar, resolves a label only for a peer, and leaves the original command target, digest, refusal and replay identity unchanged.
 This read-time projection covers existing refusals as well as new ones; null does not distinguish refused creation from a malformed addressed send and never means that a Session was created or not created.
 Every non-null peer remains strictly validated; a missing target or malformed peer is not an alternative null encoding.
-The human row with no peer reads `! Message rejected — No valid target reference`; model transcript outlines use `(no valid target reference)` rather than a label or invalid attempted spelling.
+The human row with no peer reads `! Message rejected — No valid target reference`; model transcript outlines print no `target` for it, and never a label or invalid attempted spelling.
 Calls retain historical rejected proposals and all three complete field references under the proposal contract above.
 Tool Results validate the complete group's accepted call/output-item and Session/Turn/attempt provenance before exposure; malformed sibling links fence even when the caller skips proposal rows.
 Outcome provenance is the terminal Turn's causing model Operation, not a later Session Operation.
@@ -162,6 +166,7 @@ Full, Current and exact Action inspection retain their independent authorities.
 Tool Call admission validates the original descriptor and atomically saves its nullable decoded description, bounded to 200 UTF-8 bytes, and the three accepted field lengths and digests on the immutable call.
 Bash keeps its independent 100-byte argument bound; a valid Bash descriptor retains its label even when Bash is disabled and the call is rejected; malformed Bash descriptors and unknown tools have null labels.
 The Store combines that admission-owned label with canonical outcomes for shared `ToolPresentation` metadata on Current, Activity, and Conversation.
+A call that handed work to another Session also saves an outcome line (the words, the Session it names and the finish it chose) with its resolution, written by `action.queueResolution`, the one writer; a failed send to a Session that exists saves it too, and every other call keeps its call line. `line` reads that outcome in place of the call line, with the named Session's label as the Store holds it when the page is read.
 There is no presentation table, copied log, frontend cache, or identity-to-description map.
 A `ToolPresentation` is `{line, code, sign, publication_position}`.
 `line` is the row's words as facts: `before` text, at most one `peer` (a Session reference with the label the Store holds when the page is read), and `after` text, sharing one 200-byte budget; it is null only for `unknown_tool` and `invalid_arguments`.

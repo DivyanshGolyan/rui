@@ -4,8 +4,8 @@
         Appends ENGINE to RUI_TEST_REQUIRE_ENGINES and each of ENGINE's
         variables, in ENGINES order, to $GITHUB_ENV.
     live_engine_step.py verify mysql
-        Fails unless the record RUI_TEST_MYSQL_RECORD names exists and
-        counts at least one PREPARE; prints the record either way.
+        Fails unless the Store shards' joined record (live_engines.accepted)
+        exists and passes; prints the record either way.
 """
 
 import os
