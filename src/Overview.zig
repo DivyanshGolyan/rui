@@ -4528,7 +4528,9 @@ test "Footer notice domain uses production clipping sanitization and colour" {
         rig.overview.state.notice = notice;
         var shown = try rig.shown(width, 24);
         defer shown.deinit();
-        const visible = case.displayed[0..@min(case.displayed.len, width)];
+        var drawn_buffer: [1024]u8 = undefined;
+        const drawn = try std.fmt.bufPrint(&drawn_buffer, "{s}{s}", .{ if (colour == .attention) "! " else "", case.displayed });
+        const visible = drawn[0..@min(drawn.len, width)];
         const footer_row = view.layout(&rig.overview.state).settings.start - 1;
         const footer = try shown.line(footer_row);
         try std.testing.expectEqual(@as(u16, 22), footer_row + 1);
