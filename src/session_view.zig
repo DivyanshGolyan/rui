@@ -3,6 +3,7 @@ const tool_fold = @import("tool_fold.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
+const activity_read = @import("activity_read.zig");
 const content_value = @import("content_value.zig");
 const value_reads = @import("value_reads.zig");
 const Text = @import("TerminalText.zig");
@@ -109,72 +110,28 @@ test "peer Messages render as one dim line each, named, with time in the margin 
     const R = Mark.reset;
     const L = peerLink;
     var sink: Sink = .{};
-    try peerLine(&sink, .inbound, peer, 1_800_000_000);
+    try peerLine(&sink, peer, 1_800_000_000);
     try std.testing.expectEqualStrings(S ++ "← Received message from " ++ comptime L("9f8e7d", "9f8e7d") ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
-    sink = .{};
-    try peerLine(&sink, .outbound, peer, std.math.maxInt(u64));
-    try std.testing.expectEqualStrings(S ++ "→ Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", sink.bytes[0..sink.length]);
-    var failed: Sink = .{};
-    try sendFailed(&failed, peer);
-    try std.testing.expectEqualStrings(S ++ "× Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", failed.bytes[0..failed.length]);
     var named = peer;
     try named.label.set("Review\x1b[2m the WAL");
     var group: Sink = .{};
-    try peerLine(&group, .outbound, named, 1_800_000_000);
-    try peerLine(&group, .inbound, named, 1_800_000_000);
-    try std.testing.expectEqualStrings(S ++ "→ Messaged " ++ comptime L("9f8e7d", "Review\\x1b[2m the WAL") ++ N ++ "08:00" ++ R ++ "\n" ++
-        S ++ "← Received message from " ++ L("9f8e7d", "Review\\x1b[2m the WAL") ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
+    try peerLine(&group, named, 1_800_000_000);
+    try std.testing.expectEqualStrings(S ++ "← Received message from " ++ comptime L("9f8e7d", "Review\\x1b[2m the WAL") ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
 }
 
 fn peerLink(comptime id: []const u8, comptime name: []const u8) []const u8 {
     return Text.link_open ++ Text.session_link ++ id ++ Text.link_end ++ "\x1b[4m" ++ name ++ Text.link_close ++ Mark.reset ++ Mark.summary;
 }
 
-test "failed peer Messages distinguish absent targets without changing named output" {
-    const Sink = struct {
-        bytes: [1024]u8 = undefined,
-        length: usize = 0,
-        pub fn feed(self: *@This(), bytes: []const u8) !void {
-            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
-            self.length += bytes.len;
-        }
-    };
-    var peer: protocol.NamedPeer = .{ .session = .{} };
-    try peer.session.set("k7m2qx");
-    var named = peer;
-    try named.label.set("Review\x1b[2m the WAL");
-    const cases = [_]struct { target: ?protocol.NamedPeer, line: []const u8 }{
-        .{ .target = null, .line = "× Message not delivered" },
-        .{ .target = peer, .line = "× Messaged " ++ comptime peerLink("k7m2qx", "k7m2qx") },
-        .{ .target = named, .line = "× Messaged " ++ comptime peerLink("k7m2qx", "Review\\x1b[2m the WAL") },
-    };
-    for (cases) |case| {
-        var sink: Sink = .{};
-        try sendFailed(&sink, case.target);
-        var expected: [1024]u8 = undefined;
-        const line = try std.fmt.bufPrint(&expected, Mark.summary ++ "{s}" ++ Mark.reset ++ "\n", .{case.line});
-        try std.testing.expectEqualStrings(line, sink.bytes[0..sink.length]);
-    }
-}
-
-pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: protocol.NamedPeer, admitted_at: u64) !void {
+pub fn peerLine(sink: anytype, peer: protocol.NamedPeer, admitted_at: u64) !void {
     try sink.feed(Mark.summary);
-    try sink.feed(if (direction == .inbound) "← Received message from " else "→ Messaged ");
+    try sink.feed("← Received message from ");
     try peerName(sink, peer, Mark.summary);
     var buffer: [5]u8 = undefined;
     if (clock(admitted_at, &buffer)) |time| {
         try sink.feed(Mark.sidenote);
         try sink.feed(time);
     }
-    try sink.feed(Mark.reset ++ "\n");
-}
-
-pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer) !void {
-    try sink.feed(Mark.summary);
-    if (target) |peer| {
-        try sink.feed("× Messaged ");
-        try peerName(sink, peer, Mark.summary);
-    } else try sink.feed("× Message not delivered");
     try sink.feed(Mark.reset ++ "\n");
 }
 
@@ -1261,7 +1218,7 @@ fn messageWith(reads: client.SessionReads, scratch: std.Io.File, item: protocol.
     if (messageLabel(value.state, labels)) |text| {
         try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
     }
-    if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at);
+    if (value.sender) |sender| return peerLine(sink, sender, value.admitted_at);
     if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(true);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     try userPrefix(sink, colour, value.admitted_at);
@@ -1412,13 +1369,13 @@ fn ending(sink: anytype, end: Ending, colour: bool) !void {
     try sink.feed("\n");
 }
 
-fn workEnded(sink: anytype, code: []const u8, provider: ?@import("connection.zig").Name, colour: bool) !void {
+fn workEnded(sink: anytype, ended: protocol.TurnEnding, code: []const u8, provider: ?@import("connection.zig").Name, colour: bool) !void {
     const cause = marks.cause(code, provider);
-    try ending(sink, .{ .mark = if (failure_class.of(code) == .interrupted) .stopped else .failed, .words = cause.words, .place = cause.place }, colour);
+    try ending(sink, .{ .mark = if (ended.sign() == .stopped) .stopped else .failed, .words = ended.words() orelse cause.words, .place = cause.place }, colour);
 }
 
-fn agentEnded(sink: anytype, agent: []const u8, code: []const u8, colour: bool) !void {
-    const stopped = failure_class.of(code) == .interrupted;
+fn agentEnded(sink: anytype, agent: []const u8, ended: protocol.TurnEnding, code: []const u8, colour: bool) !void {
+    const stopped = ended.sign() == .stopped;
     try ending(sink, .{ .mark = if (stopped) .stopped else .failed, .words = if (stopped) "stopped" else marks.cause(code, null).words, .agent = agent }, colour);
 }
 
@@ -1432,9 +1389,9 @@ test "a descendant's ending names the agent without codes or advice" {
     var buffer: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    try agentEnded(&sink, "9f8e7d", "provider_http_401", false);
-    try agentEnded(&sink, "9f8e7d", "cancelled", false);
-    try agentEnded(&sink, "bad\x1b[2J", "malformed_provider_output", false);
+    try agentEnded(&sink, "9f8e7d", .provider_refused, "provider_http_401", false);
+    try agentEnded(&sink, "9f8e7d", .interrupted, "cancelled", false);
+    try agentEnded(&sink, "bad\x1b[2J", .failed, "malformed_provider_output", false);
     try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n▪ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · The model's reply didn't come through\n", out.buffered());
 }
 
@@ -1471,7 +1428,7 @@ test "an ended Turn shows one plain cause line for every failure class, and its 
         var buffer: [512]u8 = undefined;
         var out = std.Io.Writer.fixed(&buffer);
         var sink: Sink = .{ .out = &out };
-        try workEnded(&sink, case[0], case[1], false);
+        try workEnded(&sink, if (comptime std.mem.eql(u8, case[0], "cancelled")) .interrupted else .failed, case[0], case[1], false);
         try std.testing.expectEqualStrings(case[2] ++ "\n", out.buffered());
     }
     try std.testing.expect(seen.eql(.full));
@@ -1487,10 +1444,10 @@ test "turn and agent ending marks use their table tones" {
     var buffer: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    try workEnded(&sink, "malformed_provider_output", null, true);
-    try workEnded(&sink, "cancelled", null, true);
-    try agentEnded(&sink, "9f8e7d", "malformed_provider_output", true);
-    try agentEnded(&sink, "9f8e7d", "cancelled", true);
+    try workEnded(&sink, .failed, "malformed_provider_output", null, true);
+    try workEnded(&sink, .interrupted, "cancelled", null, true);
+    try agentEnded(&sink, "9f8e7d", .failed, "malformed_provider_output", true);
+    try agentEnded(&sink, "9f8e7d", .interrupted, "cancelled", true);
     try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m The model's reply didn't come through\n" ++
         "\x1b[39m▪\x1b[39m Stopped\n" ++
         "\x1b[91m×\x1b[39m Agent 9f8e7d · The model's reply didn't come through\n" ++
@@ -1507,7 +1464,7 @@ test "ending tails are quiet and joined in destination then key order" {
     var buffer: [256]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    try workEnded(&sink, "provider_http_401", null, true);
+    try workEnded(&sink, .provider_refused, "provider_http_401", null, true);
     try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Sign-in expired\x1b[90m · Settings\x1b[39m\n", out.buffered());
     out.end = 0;
     try ending(&sink, .{ .mark = .failed, .words = "Cause", .place = "Place", .key = "Key" }, false);
@@ -1525,7 +1482,7 @@ pub fn tight(value: protocol.ActivityItem.Value) bool {
         .hosted_call => |presentation| presentation.code == .succeeded,
         .sent => true,
         .admission, .received, .user => |message_| message_.sender != null,
-        .assistant, .call, .turn_ended, .stop, .send_failed, .approval_requested, .session_changed, .compacted, .model_call => false,
+        .assistant, .call, .turn_ended, .stop, .send_failed, .approval_requested, .session_changed, .compacted, .model_call, .instruction => false,
     };
 }
 
@@ -1584,23 +1541,23 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
             try sink.feed(tool_fold.row_marker);
             try toolResult(presentation, sink, colour);
         },
-        .call => {},
         .turn_ended => |ended| {
-            if (ended.ending == .done) return false;
+            if (ended.ending.sign() == .finished) return false;
             if (!std.mem.eql(u8, ended.session.slice(), reads.sessionId())) {
-                try agentEnded(sink, ended.session.slice(), ended.code.slice(), colour);
-            } else try workEnded(sink, ended.code.slice(), provider, colour);
+                try agentEnded(sink, ended.session.slice(), ended.ending, ended.code.slice(), colour);
+            } else try workEnded(sink, ended.ending, ended.code.slice(), provider, colour);
         },
         .stop => |stop| {
             const excluded = try excludedAtStop(reads, scratch, item, sink, colour);
             if (stop.turn == null) {
                 if (excluded) try sink.feed("\n");
-                try ending(sink, .{ .mark = .stopped, .words = "Stopped" }, colour);
+                try ending(sink, .{ .mark = .stopped, .words = protocol.TurnEnding.stopped.words().? }, colour);
             }
         },
-        .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at),
-        .send_failed => |failed| try sendFailed(sink, failed.target),
-        .approval_requested, .session_changed, .compacted, .model_call => {},
+        // A send is drawn once, as the tool row of the call that made it; slice 3 deletes these two entries.
+        .sent, .send_failed => {},
+        // A kind whose role is `detail` draws nothing in the conversation; a kind that gains the conversation role fails to compile here.
+        inline .call, .approval_requested, .session_changed, .compacted, .model_call, .instruction => |_, kind| comptime std.debug.assert(activity_read.roleOf(kind) == .detail),
     }
     return false;
 }

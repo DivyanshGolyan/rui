@@ -262,7 +262,7 @@ def main():
                 "call_activity": {"total": "0", "entries": []},
                 "queued": json.loads((pathlib.Path(__file__).resolve().parents[2] / "src/codecs/fixtures/activity/empty-queue.json").read_text()),
                 "work": {"creator": None, "read_version": "0"*32 + ".0", "state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "attention": None, "group": "done",
-                    "actions": {"stop": False, "interrupt": None, "decide": None}, "last_line": None, "revision": "1", "workspace": "/w"},
+                    "actions": {"stop": False, "interrupt": None, "decide": None}, "revision": "1", "workspace": "/w"},
                 "items": [{"position": str(i+1), "ordinal": "0", "at": str(2**63-1), "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
                     "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"type": "text", "bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)

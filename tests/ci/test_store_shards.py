@@ -139,7 +139,7 @@ class LauncherTest(unittest.TestCase):
         entries = events.read_text().splitlines()
         self.assertEqual({line.split(':')[0] for line in entries}, {str(i) for i in range(shards.SHARD_COUNT)})
         self.assertEqual(len({line.split(':')[1] for line in entries}), shards.SHARD_COUNT)
-        self.assertEqual(shards.live_engines.parse_record(record.read_text()),
+        self.assertEqual(shards.live_engines.parse_record(Path(shards.live_engines.accepted(str(record))).read_text()),
                          {"prepares": shards.SHARD_COUNT, "migrations": 1, "conformance": shards.SHARD_COUNT})
 
     def test_shard_zero_finishes_global_mutations_before_peers_start(self):
@@ -452,15 +452,15 @@ class LauncherTest(unittest.TestCase):
 
     def test_nonzero_child_and_missing_record_cannot_publish_acceptance(self):
         record = self.directory / "record"
-        record.write_text("prepares=999\n")
+        Path(shards.live_engines.accepted(str(record))).write_text("prepares=999\n")
         self.script("raise SystemExit(7)\n")
         with patch("builtins.print"):
             self.assertEqual(shards.run(self.binary, [], 30, "run", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record))), 7)
-        self.assertFalse(record.exists())
+        self.assertFalse(Path(shards.live_engines.accepted(str(record))).exists())
         self.script("print('1/1 store.test.ok...OK')\n")
         with patch("builtins.print"), self.assertRaises(FileNotFoundError):
             shards.run(self.binary, [], 30, "run", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record)))
-        self.assertFalse(record.exists())
+        self.assertFalse(Path(shards.live_engines.accepted(str(record))).exists())
 
     def test_native_record_cannot_overwrite_store_and_aggregate_retains_original(self):
         record = self.directory / "record"
@@ -653,3 +653,19 @@ class StoreInventoryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MysqlSplitTest(unittest.TestCase):
+    MYSQL = {"RUI_TEST_REQUIRE_ENGINES": "sqlite,mysql", "RUI_TEST_MYSQL_SOCKET": "/s",
+             "RUI_TEST_MYSQL_ROOT_PASSWORD": "p", "RUI_TEST_MYSQL_RECORD": "/r", "PATH": "/bin"}
+
+    def test_pr_runs_every_test_on_sqlite_and_only_listed_tests_on_mysql(self):
+        from store_shards import split_mysql
+        sqlite, mysql = split_mysql(dict(self.MYSQL, RUI_STORE_MYSQL_ONLY="store.a. store.b."))
+        self.assertEqual(sqlite, {"RUI_TEST_REQUIRE_ENGINES": "sqlite", "PATH": "/bin"})
+        self.assertEqual(mysql, dict(self.MYSQL, RUI_UNIT_ONLY="store.a. store.b."))
+
+    def test_promotion_and_runs_without_mysql_do_not_split(self):
+        from store_shards import split_mysql
+        self.assertIsNone(split_mysql(self.MYSQL))
+        self.assertIsNone(split_mysql({"RUI_STORE_MYSQL_ONLY": "store.a.", "PATH": "/bin"}))

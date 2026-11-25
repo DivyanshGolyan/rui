@@ -216,7 +216,7 @@ def assistant_session_link_journey(installed, store, home, workspace, session_a,
         return f"\x1b[<0;{column};{row + 1}M{motion}\x1b[<0;{end};{row + 1}m".encode()
 
     with terminal_process([str(installed), "session", "resume", "--store", str(store), session_a], env=env) as (_, master):
-        read_terminal(master, f"Messaged {B_LABEL}")
+        read_terminal(master, "✓ Run a-ask peer command")
         (workspace / "b-release").write_text("")
         frame = keyed_frame(master, b"", lambda screen, x, y: showing(screen, x, y) and "Open worker" in screen, chat=A_LABEL)
         assert "rui-session:" not in frame and "[Open worker]" not in frame, frame

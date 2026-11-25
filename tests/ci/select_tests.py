@@ -86,7 +86,10 @@ FIXTURES = {
     "read-image-integration": ((I + "read_image_integration.py",), (),
                                ("src/server_read_image.zig", "src/os/read_image_file.zig", "src/input_media.zig",
                                 "src/session_reads.zig", "src/part_text.zig")),
-    "bash-integration": ((I + "bash_integration.py",), (), BASH),
+    "bash-integration": ((I + "bash_integration.py", I + "github_pr_watch_integration.py"), (),
+                         (*BASH, "src/github_pr_watch.zig", "src/github_pr_watch_descriptor.zig",
+                          "src/github_transport.zig", "src/github_observation.zig", "src/github_observation_fetch.zig",
+                          "src/github_watch_pressure.zig", "src/github_watch_origin.zig", "src/server_github_pr_watch.zig")),
     "bash-owner-integration": ((I + "bash_owner_integration.py",), (), BASH),
     "bash-lifecycle-integration": ((I + "bash_lifecycle_integration.py",), (), BASH),
     "bash-recovery-integration": ((I + "bash_recovery_integration.py",), (), BASH),
@@ -613,6 +616,11 @@ BUILD_MODULES = {
 RULES += tuple(((module,), targets, tuple(target for target in targets if target not in LINUX_ONLY),
                 "Build module: the targets it defines or builds for")
                for module, targets in BUILD_MODULES.items() if targets != BUILD_HUB)
+# The generated unit test runner and the shard launcher run every sharded unit root.
+UNIT_HARNESS = ("tests/ci/unit_test_runner.py", "tests/ci/store_shards.py", "tests/ci/unit_test_metadata.py",
+                "tests/ci/unit_test_names.py")
+RULES += ((UNIT_HARNESS, ("test-native", "test-store"), ("test-native", "test-store"),
+           "Unit harness: the generated test runner and shard launcher of the sharded unit roots"),)
 RULES += ((("tests/ci/vaxis_test_owners.json", "tests/ci/verify_vaxis_test_owners.py"),
            VAXIS_CLIPBOARD_TARGETS, VAXIS_CLIPBOARD_TARGETS,
            "Pinned Vaxis invariant owners: verify the external source and reader tests"),)
@@ -767,8 +775,8 @@ PR_UNIT_ROOTS = frozenset({"test-native", "test-store", "test-logic", "test-h2",
 # Links to other targets (measurement, cross, typecheck, upgrade ...) are not added.
 CI_RUNNABLE = frozenset(PR_UNIT_ROOTS | CHECK_COVERS | {covered for cases in FIXTURE_COVERS.values() for covered in cases}
                         | set(FIXTURE_COVERS) | {"test-vaxis-clipboard"})
-# Store unit tests run on a PR only for a change to the Store itself.
-STORE_PATHS = ("src/store.zig", "src/store/*")
+# Store unit tests run on a PR only for a change to the Store itself or to the unit harness that runs it.
+STORE_PATHS = ("src/store.zig", "src/store/*", *UNIT_HARNESS)
 
 
 # Targets the PR tier runs only when the diff touches their own files, never through an import:
@@ -825,7 +833,7 @@ def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassi
 
     It keeps the unit roots the diff reaches (a whole-suite gate becomes
     `test-native` and `test-logic`, or only `test-logic` when bootstrap inputs
-    alone selected it; `test-store` only for Store paths) and the targets whose
+    alone selected it; `test-store` only for Store paths and UNIT_HARNESS) and the targets whose
     own files the diff touches (fixtures, PR_OWN_FILE_TARGETS), and PR_SELECTED_TARGETS
     whenever the selection has them. `importers` are
     the fixtures that import a changed shared helper (`shared_helper_importers`);
@@ -1113,6 +1121,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
         reasons.add("Store migration step or migration input: the PR runs test-store against a live MySQL 8.4 migration check")
     if mysql_legs:
         reasons.add("Test code with a MySQL leg (" + ", ".join(mysql_legs) + "): the PR runs it against live MySQL 8.4")
+    mysql_tests = mysql_test_modules(changed) if mysql_migration else []
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)
@@ -1137,6 +1146,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             "mac_required": mac_required, "upgrade_required": upgrade_required,
             "unit_compile_required": "src/store/schema.zig" in paths,
             "mysql_migration": mysql_migration,
+            "mysql_tests": mysql_tests,
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,
             "typecheck_macos": typecheck_macos,
@@ -1166,6 +1176,29 @@ def revision_text(commit, path):
 # What marks Zig code as running a MySQL leg: a call of the engine loop (a test file or a production file's inline
 # tests, as read_transcript.zig has), or an import of the live MySQL fixture owner itself.
 MYSQL_LEG = re.compile(r"\bforEachEngine\(|@import\(\"(?:[./]*store/)?mysql_testing\.zig\"\)")
+
+
+# Always part of a PR's MySQL leg: the migration and dialect check that drives MySQL 8.4 through the wire
+# client, and one quick forEachEngine suite, so the acceptance record counts a passed conformance test.
+MYSQL_ALWAYS = ("store.mysql_dialect_check.", "store.tests.session.")
+STORE_TESTS = "src/store/tests/"
+
+
+def store_module(path):
+    return path[len("src/"):-len(".zig")].replace("/", ".") + "."
+
+
+def mysql_test_modules(paths, root=ROOT):
+    """The Store test name prefixes a PR runs on live MySQL: MYSQL_ALWAYS, each changed Store source, and each
+    Store test file that imports a changed Store source by name.
+
+    Every other Store test runs on SQLite on the PR and on MySQL in Promote (store_shards.py's split).
+    """
+    changed = [path for path in paths if path.startswith("src/store/") and path.endswith(".zig")]
+    names = {'/' + Path(path).name + '"' for path in changed} | {'"' + Path(path).name + '"' for path in changed}
+    importers = [str(test.relative_to(root)) for test in sorted((root / STORE_TESTS).glob("*.zig"))
+                 if any(name in test.read_text(encoding="utf-8") for name in names)] if names else []
+    return sorted({store_module(path) for path in [*changed, *importers]} | set(MYSQL_ALWAYS))
 
 
 def mysql_leg_tests(paths, contents):

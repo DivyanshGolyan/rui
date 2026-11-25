@@ -27,8 +27,6 @@ fn json(wiping: *secrets.WipingAllocator, response: anytype) !std.json.Parsed(st
     };
 }
 
-pub const max_retry_seconds: i64 = 3600;
-
 // Only numeric timing leaves the private HTTP response. Invalid
 // headers are ignored and the runner applies its ordinary backoff.
 fn responseStatus(response: anytype, now: i64, retry_at: *?i64) !void {
@@ -36,20 +34,19 @@ fn responseStatus(response: anytype, now: i64, retry_at: *?i64) !void {
     if (limited) {
         var when = now;
         if (response.retry_after) |header| {
-            if (std.fmt.parseInt(u64, header, 10)) |seconds| {
-                const delay: i64 = @intCast(@min(seconds, std.math.maxInt(i64)));
-                when = std.math.add(i64, now, delay) catch std.math.maxInt(i64);
-            } else |_| {
-                if (transport_policy.parseHttpDate(header, now)) |due| {
-                    when = @max(when, due);
-                } else if (header.len > 0) {
-                    var digits_only = true;
-                    for (header) |c| if (!std.ascii.isDigit(c)) {
-                        digits_only = false;
-                        break;
-                    };
-                    if (digits_only) when = std.math.maxInt(i64);
-                }
+            if (transport_policy.parseRetryAfter(header, now)) |constraint| {
+                when = switch (constraint) {
+                    .delay_ms => |delay_ms| std.math.add(i64, now, @intCast(delay_ms / 1000)) catch std.math.maxInt(i64),
+                    .deadline_ms => |deadline_ms| @max(when, @divFloor(deadline_ms, 1000)),
+                };
+            } else if (header.len > 0) {
+                // A number too large to represent holds the watch for the full cap.
+                var digits_only = true;
+                for (header) |c| if (!std.ascii.isDigit(c)) {
+                    digits_only = false;
+                    break;
+                };
+                if (digits_only) when = std.math.maxInt(i64);
             }
         }
         if (response.rate_reset) |header| {
@@ -58,7 +55,7 @@ fn responseStatus(response: anytype, now: i64, retry_at: *?i64) !void {
             } else |_| {}
         }
         // A header never holds a watch for longer than the cap; the runner still ends it at its deadline.
-        if (when > now) retry_at.* = @min(when, std.math.add(i64, now, max_retry_seconds) catch std.math.maxInt(i64));
+        if (when > now) retry_at.* = @min(when, std.math.add(i64, now, watch.max_retry_seconds) catch std.math.maxInt(i64));
         return error.RateLimited;
     }
     if (response.status == 401) return error.AuthenticationFailed;
@@ -300,7 +297,7 @@ test "PRW-15 rate limits expose only bounded retry times" {
     response.retry_after = "999999999";
     retry = null;
     try std.testing.expectError(error.RateLimited, responseStatus(&response, 1000, &retry));
-    try std.testing.expectEqual(@as(?i64, 1000 + max_retry_seconds), retry);
+    try std.testing.expectEqual(@as(?i64, 1000 + watch.max_retry_seconds), retry);
     response.rate_remaining = null;
     response.rate_reset = null;
     response.retry_after = "Tue, 14 Nov 2023 22:13:21 GMT";

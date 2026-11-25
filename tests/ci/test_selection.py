@@ -2881,5 +2881,30 @@ class PolicyPrepushTest(unittest.TestCase):
         self.assertIn('select(paths, "development", available)["policy_skips"]', source)
 
 
+
+class MysqlTestModulesTest(unittest.TestCase):
+    def test_always_listed_changed_sources_and_their_importing_tests(self):
+        import tempfile
+        from pathlib import Path
+        from select_tests import MYSQL_ALWAYS, mysql_test_modules
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src/store/tests").mkdir(parents=True)
+            (root / "src/store/tests/tool_set.zig").write_text('const o = @import("../domain/tool_offer.zig");')
+            (root / "src/store/tests/other.zig").write_text('const o = @import("../domain/tool_offering.zig");')
+            self.assertEqual(mysql_test_modules(["src/store/domain/tool_offer.zig", "src/tool_name.zig", "docs/x.md"], root),
+                             sorted({"store.domain.tool_offer.", "store.tests.tool_set.", *MYSQL_ALWAYS}))
+            self.assertEqual(mysql_test_modules([], root), sorted(MYSQL_ALWAYS))
+
+
+class UnitHarnessSelectionTest(unittest.TestCase):
+    def test_runner_and_launcher_changes_run_the_sharded_roots_on_the_pr(self):
+        from select_tests import UNIT_HARNESS
+        for path in UNIT_HARNESS:
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertLessEqual({"test-native", "test-store"}, set(result["fast_targets"]))
+
+
 if __name__ == "__main__":
     unittest.main()

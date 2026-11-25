@@ -292,7 +292,7 @@ test "core tool table routes every built-in and promotion excludes the full core
                 try settleCallsForTesting(&storage, &tmp, binding, "table-calls", &calls);
                 const core = try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true });
                 const bash = try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{});
-                try std.testing.expectEqual(expected == .core or expected == .read_image, core != null);
+                try std.testing.expectEqual(expected == .core or expected == .read_image or expected == .github_pr_watch, core != null);
                 try std.testing.expectEqual(expected == .bash, bash != null);
                 if (expected == .read_image) {
                     const call = core.?.read_image;
@@ -303,8 +303,12 @@ test "core tool table routes every built-in and promotion excludes the full core
                     try std.testing.expectEqual(binding.turn_id, attempted.turn_id);
                     try std.testing.expect((try storage.nextCoreWork(.fromFree(1, false))) == null);
                 } else if (expected == .github_pr_watch) {
-                    // The Host runs the watcher only when the dispatcher asks for it by runner.
-                    try std.testing.expect((try storage.nextAction(.github_pr_watch, .fromFree(1, false))) != null);
+                    const call = core.?.github_pr_watch;
+                    try std.testing.expectEqual(records.Runner.github_pr_watch, call.runner);
+                    try std.testing.expectEqualDeep(call, (try storage.nextAction(.github_pr_watch, .fromFree(1, false))).?);
+                    const attempted = (try storage.admitActionAttempt(call, 1234, .{})).?.permit.binding;
+                    try std.testing.expectEqual(binding.operation_id, attempted.parent_operation_id);
+                    try std.testing.expect((try storage.nextCoreWork(.fromFree(1, false))) == null);
                 } else if (core) |work| {
                     const call = work.action;
                     try std.testing.expectEqualStrings(@tagName(tool), @tagName(call.tool));
@@ -695,14 +699,18 @@ test "PRW-60 a settled watch call is selected only as a watch and reads its raw 
                     .{ .item_id = "watch-item", .name = "watch_github_pr", .encoded_call_id = "watch-call", .decoded_call_id = "watch-call", .encoded_arguments = "{\\\"url\\\":\\\"https://github.com/org/repo/pull/42\\\",\\\"account\\\":\\\"octocat\\\"}", .decoded_arguments = arguments },
                 });
                 const capacity: action_domain.Capacity = .{ .free_credit = .one, .mcp_open = true };
-                // No other runner's selection, the core lane or the Bash lane returns the watch.
+                // Neither another runner's selection nor the Bash lane returns the watch; the core lane offers it
+                // only as a watch, and only with a free credit, like `read_image`.
                 try std.testing.expect((try storage.nextAction(.bash, capacity)) == null);
                 try std.testing.expect((try storage.nextAction(.mcp, capacity)) == null);
                 try std.testing.expect((try storage.nextAction(.read_image, capacity)) == null);
-                try std.testing.expect((try storage.nextCoreWork(capacity)) == null);
+                try std.testing.expect((try storage.nextCoreWork(.{ .free_credit = .none, .mcp_open = true })) == null);
                 try std.testing.expect((try storage.admitNextActionAttempt(capacity, 300_000, .{})) == null);
                 try std.testing.expect((try storage.nextAction(.github_pr_watch, .{ .free_credit = .none, .mcp_open = true })) == null);
                 const selected = (try storage.nextAction(.github_pr_watch, capacity)).?;
+                const lane = (try storage.nextCoreWork(capacity)).?;
+                try std.testing.expectEqual(selected.action_id, lane.github_pr_watch.action_id);
+                try std.testing.expectEqual(tool_defs.Runner.github_pr_watch, lane.github_pr_watch.runner);
                 try std.testing.expectEqual(tool_defs.Runner.github_pr_watch, selected.runner);
                 const binding = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
                 var input: action_domain.ActionExecutionInput = undefined;
@@ -711,6 +719,7 @@ test "PRW-60 a settled watch call is selected only as a watch and reads its raw 
                 try std.testing.expectEqualSlices(u8, &protocol.contentDigest(arguments), &input.arguments.digest);
                 try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.read_image, binding, &input));
                 try std.testing.expect((try storage.nextAction(.github_pr_watch, capacity)) == null);
+                try std.testing.expect((try storage.nextCoreWork(capacity)) == null);
                 const text: []const u8 = switch (ending) {
                     .recovered => "The Host stopped while watching this pull request. The watch was not automatically repeated.",
                     .stopped => "Stopped before this pull request watch completed.",

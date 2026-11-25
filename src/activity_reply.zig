@@ -48,6 +48,7 @@ pub const ItemJson = struct {
         pub const send_failed = .{ "{\"key\":", H{ .string = protocol.max_key_bytes }, ",\"target\":", H{ .optional_json = NamedPeerJson }, ",\"code\":", H{ .string = protocol.max_code_bytes }, "}" };
         pub const approval_requested = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"action\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\"" } ++ call_details ++ .{"}"};
         pub const session_changed = .{ "{\"revision\":\"", H.decimal, "\",\"field\":\"", H{ .tag = protocol.SessionField }, "\",\"provider_text\":", H{ .optional_string = protocol.max_report_bytes }, "}" };
+        pub const instruction = .{ "{\"turn\":", H.optional_id, ",\"revision\":", H.optional_id, ",\"content\":", H{ .json = ContentValueJson }, "}" };
         pub const compacted = .{ "{\"operation\":\"", H.decimal, "\",\"dropped\":\"", H.decimal, "\"}" };
         pub const model_call = .{ "{\"model\":", H{ .string = protocol.max_model_bytes }, ",\"served_model\":", H{ .optional_string = protocol.max_model_bytes }, ",\"input_tokens\":", H.optional_id, ",\"output_tokens\":", H.optional_id, ",\"cached_tokens\":", H.optional_id, ",\"latency_ms\":", H.optional_id, ",\"first_event_ms\":", H.optional_id, ",\"status\":", H{ .string = protocol.max_code_bytes }, ",\"attempts\":\"", H.decimal, "\"}" };
     };
@@ -78,6 +79,7 @@ pub const ItemJson = struct {
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), NamedPeerJson.optional(failed.target), failed.code.slice() }),
             .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal, optionalText(&request.description), optionalText(&request.tool), optionalText(&request.server) }),
             .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field, if (change.provider_text) |text| text.slice() else null }),
+            .instruction => |instruction| try writeShape(out, value_shapes.instruction, .{ instruction.turn, instruction.revision, ContentValueJson.text(instruction.content) }),
             .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),
             .model_call => |call| try writeShape(out, value_shapes.model_call, .{ call.model.slice(), if (call.served_model) |model| model.slice() else null, call.input_tokens, call.output_tokens, call.cached_tokens, call.latency_ms, call.first_event_ms, call.status.slice(), call.attempts }),
             .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ ContentValueJson.text(assistant.content), assistant.final }),
@@ -133,13 +135,13 @@ pub const PageWorkJson = struct {
     value: *const activity_facts.PageWork,
 
     pub const openapi_name = "PageWork";
-    pub const json_shape = .{ "{\"creator\":", H{ .optional_string = protocol.session_id_bytes }, ",\"read_version\":\"", H{ .text = change_ring.Token.max_bytes }, "\"," } ++ protocol.SessionWork.fields ++ .{ ",\"last_line\":", H{ .optional_json = protocol.LastLine.Fields }, ",\"revision\":\"", H.decimal, "\",\"workspace\":", H{ .string = protocol.max_workspace_bytes }, "}" };
+    pub const json_shape = .{ "{\"creator\":", H{ .optional_string = protocol.session_id_bytes }, ",\"read_version\":\"", H{ .text = change_ring.Token.max_bytes }, "\"," } ++ protocol.SessionWork.fields ++ .{ ",\"revision\":\"", H.decimal, "\",\"workspace\":", H{ .string = protocol.max_workspace_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: *const PageWorkJson, out: *std.Io.Writer) !void {
         var token_buffer: [change_ring.Token.max_bytes]u8 = undefined;
         const work: protocol.SessionWork = .fromCore(self.value.work);
-        try writeShape(out, json_shape, .{ if (self.value.creator) |*creator| creator.slice() else null, self.value.read_version.format(&token_buffer) } ++ work.args() ++ .{ if (self.value.last_line) |*line| protocol.LastLine.Fields{ .position = line.position, .text = if (line.text) |*text| text.slice() else null } else null, self.value.revision, self.value.workspace.slice() });
+        try writeShape(out, json_shape, .{ if (self.value.creator) |*creator| creator.slice() else null, self.value.read_version.format(&token_buffer) } ++ work.args() ++ .{ self.value.revision, self.value.workspace.slice() });
     }
 };
 

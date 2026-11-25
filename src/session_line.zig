@@ -50,11 +50,41 @@ pub fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
     return value;
 }
 
-pub fn left(trigger: u64, pressure: u64) u8 {
-    std.debug.assert(trigger != 0);
-    const remaining: u128 = trigger - @min(pressure, trigger);
-    return @intCast((remaining * 100 + trigger - 1) / trigger);
-}
+/// A chat's context reading: the tokens its next request will carry against the point where it compacts.
+/// A chat has one only when both numbers are known and the trigger is not zero.
+pub const Context = struct {
+    estimate: u64,
+    trigger: u64,
+
+    pub const footer_bytes = "100% context left".len;
+
+    pub fn of(estimate: ?u64, trigger: ?u64) ?Context {
+        const tokens = estimate orelse return null;
+        const limit = trigger orelse return null;
+        if (limit == 0) return null;
+        return .{ .estimate = tokens, .trigger = limit };
+    }
+
+    /// Whole percent of the trigger still free; zero exactly when the estimate reaches the trigger.
+    pub fn left(self: Context) u8 {
+        const remaining: u128 = self.trigger - @min(self.estimate, self.trigger);
+        return @intCast((remaining * 100 + self.trigger - 1) / self.trigger);
+    }
+
+    /// "N% context left", once half of the room is used (exactly half included); null before that.
+    pub fn footerWords(self: Context, buffer: *[footer_bytes]u8) ?[]const u8 {
+        const percent = self.left();
+        if (percent > 50) return null;
+        return std.fmt.bufPrint(buffer, "{d}% context left", .{percent}) catch unreachable;
+    }
+
+    /// A reading with exactly `percent` left, for tests that care about the words and not the tokens.
+    pub fn atLeft(percent: u8) Context {
+        comptime std.debug.assert(@import("builtin").is_test);
+        std.debug.assert(percent <= 100);
+        return .{ .estimate = 100 - percent, .trigger = 100 };
+    }
+};
 
 /// What the chat footer says about a chat. The name is not among them: the Session list and the
 /// terminal title carry it.
@@ -63,7 +93,7 @@ pub const Facts = struct {
     folder: ?[]const u8 = null,
     home: []const u8 = "",
     effort: ?ReasoningEffort = null,
-    left: ?u8 = null,
+    context: ?Context = null,
 };
 
 pub const max_name_bytes = max_line_bytes;
@@ -112,20 +142,44 @@ test "a long line keeps whole code points and ends in an ellipsis" {
     try std.testing.expect(!std.mem.endsWith(u8, cut(max_line_bytes, line[0..max_line_bytes]).slice(), ellipsis));
 }
 
-test "context left is zero exactly when the pressure reaches the trigger" {
-    try std.testing.expectEqual(@as(u8, 100), left(244_800, 0));
-    try std.testing.expectEqual(@as(u8, 69), left(244_800, 75_888));
-    try std.testing.expectEqual(@as(u8, 1), left(244_800, 244_799));
-    try std.testing.expectEqual(@as(u8, 0), left(244_800, 244_800));
-    try std.testing.expectEqual(@as(u8, 0), left(244_800, std.math.maxInt(u64)));
-    try std.testing.expectEqual(@as(u8, 100), left(std.math.maxInt(u64), 1));
+fn leftOf(trigger: u64, pressure: u64) u8 {
+    return Context.of(pressure, trigger).?.left();
+}
+
+test "SUI-171 a context reading exists only with both numbers and shows its footer words from half used" {
+    try std.testing.expectEqual(@as(u8, 100), leftOf(244_800, 0));
+    try std.testing.expectEqual(@as(u8, 69), leftOf(244_800, 75_888));
+    try std.testing.expectEqual(@as(u8, 1), leftOf(244_800, 244_799));
+    try std.testing.expectEqual(@as(u8, 0), leftOf(244_800, 244_800));
+    try std.testing.expectEqual(@as(u8, 0), leftOf(244_800, std.math.maxInt(u64)));
+    try std.testing.expectEqual(@as(u8, 100), leftOf(std.math.maxInt(u64), 1));
     for (1..120) |trigger| for (0..trigger + 2) |pressure| {
-        const value = left(trigger, pressure);
+        const value = leftOf(trigger, pressure);
         const remaining = trigger -| pressure;
         try std.testing.expectEqual(remaining == 0, value == 0);
         try std.testing.expect(@as(u64, value) * trigger >= remaining * 100);
         if (value != 0) try std.testing.expect(@as(u64, value - 1) * trigger < remaining * 100);
     };
+    for ([_]?u64{ null, 1, 244_800 }) |trigger| {
+        const half: u64 = (trigger orelse 0) / 2;
+        for ([_]?u64{ null, 0, half -| 1, half, half + 1, trigger, if (trigger) |limit| limit + 1 else null }) |estimate| {
+            const reading = Context.of(estimate, trigger);
+            try std.testing.expectEqual(estimate != null and trigger != null, reading != null);
+            const context = reading orelse continue;
+            var buffer: [Context.footer_bytes]u8 = undefined;
+            const percent = context.left();
+            if (context.footerWords(&buffer)) |words| {
+                try std.testing.expect(percent <= 50);
+                var expected: [Context.footer_bytes]u8 = undefined;
+                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{d}% context left", .{percent}), words);
+            } else try std.testing.expect(percent > 50);
+        }
+    }
+    try std.testing.expect(Context.of(5, 0) == null);
+    var buffer: [Context.footer_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("50% context left", Context.of(122_400, 244_800).?.footerWords(&buffer).?);
+    try std.testing.expect(Context.of(122_399, 244_800).?.footerWords(&buffer) == null);
+    for (0..101) |percent| try std.testing.expectEqual(@as(u8, @intCast(percent)), Context.atLeft(@intCast(percent)).left());
 }
 
 test "a first Message names its Session by its first physical line, and a leading blank line names nothing" {
