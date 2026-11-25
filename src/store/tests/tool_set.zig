@@ -1845,7 +1845,7 @@ test "SH-173 an app tool never shares a name with a Host tool: a clashing declar
 }
 
 // SH-174: a request's offer holds the Host's whole tool set beside every app tool a lane declares, with each app name at
-// the full 64 bytes. The offer is sized from max_offered_tools, which counts the Host tools (stop_action among them) and
+// the full 64 bytes. The offer is sized from max_offered_tools, which counts the Host tools and
 // the app records, so this is the largest offer the owner admits.
 test "SH-174 a request offers the Host's full tool set beside every app tool a lane declares, at the largest name sizes" {
     try store_testing.forEachEngine(struct {
@@ -1855,12 +1855,10 @@ test "SH-174 a request offers the Host's full tool set beside every app tool a l
                 @setEvalBranchQuota(10_000_000);
                 const count = tool_name.max_offered_tools - app_tools.max_records - tool_defs.built_in_tool_set.records.len;
                 var records: [count]tool_defs.Record = undefined;
-                // The root names every Host tool but stop_action, which the offer adds itself: those names and the stubs fill
-                // the configurable list's bytes (its separators counted once).
+                // The root names every Host tool: those names and the stubs fill the configurable list's bytes (its separators counted once).
                 var builtin_bytes: usize = 0;
                 var builtin_count: usize = 0;
                 for (tool_defs.built_in_tool_set.records) |record| {
-                    if (std.mem.eql(u8, record.name, "stop_action")) continue;
                     builtin_bytes += record.name.len;
                     builtin_count += 1;
                 }
@@ -1881,12 +1879,11 @@ test "SH-174 a request offers the Host's full tool set beside every app tool a l
                 break :blk records;
             };
             const records = comptime testingHostToolRecords(&host_extras);
-            // The names the root configures: the Host's built-ins but stop_action, then every stub.
+            // The names the root configures: the Host's built-ins, then every stub.
             const configured_names = comptime blk: {
-                var names: [tool_defs.built_in_tool_set.records.len - 1 + host_extras.len][]const u8 = undefined;
+                var names: [tool_defs.built_in_tool_set.records.len + host_extras.len][]const u8 = undefined;
                 var at: usize = 0;
                 for (tool_defs.built_in_tool_set.records) |record| {
-                    if (std.mem.eql(u8, record.name, "stop_action")) continue;
                     names[at] = record.name;
                     at += 1;
                 }
