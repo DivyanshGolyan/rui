@@ -9,8 +9,9 @@ pub const Kind = enum { admission, user, assistant, call, tool_result, hosted_ca
 
 pub const Role = enum { conversation, detail };
 
-/// Which part of the transcript a kind is drawn in: conversation rows, or detail rows
-/// that only the expanded view shows.
+/// Whether the conversation feed asks for a kind. `conversation` kinds are requested by a conversation reader
+/// (`admission` for queue state, some rows for peers or an Action, a finished Turn's ending, draw nothing: a
+/// surface decides what to draw); `detail` kinds are stored and served but only an `.all` read fetches them.
 pub fn roleOf(kind: Kind) Role {
     return switch (kind) {
         .admission, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed, .received => .conversation,
@@ -28,6 +29,7 @@ pub const conversation: ActivityPage.Kinds = blk: {
 };
 
 test "SUI-168 a conversation asks the feed for exactly the kinds whose role is conversation" {
+    // The literal is a deliberate pin of what the conversation requested before the table existed: reclassifying a kind edits both.
     const listed = ActivityPage.Kinds.initMany(&.{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed });
     try std.testing.expect(conversation.eql(listed));
     for (std.enums.values(Kind)) |kind| {
