@@ -129,7 +129,7 @@ Delete or consolidate these blocks only after the replacement owner covers their
 - `src/store/tests/model_settlement.zig:48`, `:77`, `:126`, `:166`, `:194`, `:487`, `:512`, `:570`: EXR-1/3/14; `tests/integration/dispatch_integration.py:707`, `:991`: EXR-2.
 - `src/tools.zig:139`, `:211`, `:230`, `:285`, `:350`, `:384`: EXR-3/4/38; `src/find_tools_tests.zig`: EXR-35.
 - `src/store/tests/action.zig:30`, `:275`, `:466`, `:700`, `:919`, `:975`, `:1010`, `:1100`, `:1146`, `:1214`, `:1320`, `:1342`, `:1372`, `:1412`, `:1439`, `:1461`, `:1497`, `:1682`, `:1922`: EXR-5/7/8/9/10/11; retain independent archive and Session guarantees under their own catalog.
-- `src/read_action_tool.zig:36`, `src/stop_action_tool.zig:51`, `tests/integration/background_action_cases.py:15`, `:196`, `:307`, `:381`, `:468`: EXR-7/8/9/10.
+- `src/stop_action_tool.zig:51`, `tests/integration/background_action_cases.py:15`, `:196`, `:307`, `:381`, `:468`: EXR-7/8/9/10.
 - `tests/integration/bash_recovery_integration.py:35`, `:58`, `:98`: EXR-12; keep process crash evidence in its replacement. `tests/integration/read_image_integration.py:29`, `:210`: EXR-17/22.
 - `src/retry_policy.zig:47`, `:77`, `:117`, `:123`, `tests/integration/dispatch_integration.py:533`, `:763`: EXR-15/16; retain independently owned provider-report assertions.
 - `src/BashLifecycle.zig:292`, `:317`, `:331`, `:346`, `:360`, `:368`, `:391`, `:436`, `:456`, `:490`, `:511`, `tests/integration/bash_lifecycle_integration.py:156`, `:260`: EXR-19/20.

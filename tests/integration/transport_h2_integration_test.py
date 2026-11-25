@@ -197,7 +197,6 @@ class MessageObservationTests(unittest.TestCase):
             "kind": "message", "state": "queued",
             "queue": {"admission": "1", "admitted_at": "90"},
             "work": {"state": {"kind": "pending", "since": "90"}, "first_action": None,
-                     "attention": None, "group": "queued",
                      "actions": {"stop": True, "interrupt": None, "decide": None}},
         }
         with patch.object(transport.dispatch, "command") as command, \
@@ -213,19 +212,14 @@ class MessageObservationTests(unittest.TestCase):
                             transport.dispatch.observe("/store", "key")
 
             work = {"state": {"kind": "approval", "since": "90"}, "first_action": None,
-                    "attention": {"kind": "approval", "turn": "1", "step": "0"}, "group": "needs_you",
                     "actions": {"stop": True, "interrupt": None, "decide": None}}
             cases = [("complete", None)] + [("work", name) for name in work] + [
                 ("actions", name) for name in work["actions"]]
-            for state, kind, group in (("queued", "pending", "queued"), ("processing", "working", "working"),
-                                       ("waiting_for_permission", "approval", "needs_you")):
+            for state, kind in (("queued", "pending"), ("processing", "working"), ("waiting_for_permission", "approval")):
                 for owner, missing in cases:
                     with self.subTest(state=state, owner=owner, missing=missing):
                         candidate = copy.deepcopy(work)
                         candidate["state"]["kind"] = kind
-                        candidate["group"] = group
-                        if kind != "approval":
-                            candidate["attention"] = None
                         if missing is not None:
                             del (candidate["actions"] if owner == "actions" else candidate)[missing]
                         observed = {"kind": "message", "state": state, "work": candidate}

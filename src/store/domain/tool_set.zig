@@ -42,7 +42,7 @@ pub fn offeredSetSql(comptime revision_alias: []const u8) []const u8 {
 
 pub fn namesSql(comptime set_column: []const u8) []const u8 {
     return "(SELECT @list(tool.name) FROM tool_set_member member " ++
-        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=" ++ set_column ++ ")";
+        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=" ++ set_column ++ " AND NOT " ++ tool_record.sql.retired("tool.owner", "tool.name") ++ ")";
 }
 
 /// The names of the app-owned members of a set: the subset of `namesSql` that `Offered.apps` reads.

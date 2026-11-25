@@ -632,7 +632,7 @@ const builtin_names_sql = blk: {
 const success_facts = rsql.Read(.{
     .sql = "SELECT r.revision AS frozen_revision,coalesce(" ++ tool_set.namesSql("o.tool_set_id") ++ ",'') AS tool_names,coalesce(" ++ tool_set.appNamesSql("o.tool_set_id") ++ ",'') AS app_names," ++
         "EXISTS(SELECT 1 FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE member.tool_set_id=o.tool_set_id AND tool.name NOT IN (" ++ builtin_names_sql ++ ") AND tool.owner NOT IN ('mcp','app')) AS invalid_owner," ++
+        "WHERE member.tool_set_id=o.tool_set_id AND tool.name NOT IN (" ++ builtin_names_sql ++ ") AND tool.owner NOT IN ('mcp','app') AND NOT " ++ tool_record.sql.retired("tool.owner", "tool.name") ++ ") AS invalid_owner," ++
         "s.permission_mode,s.revision," ++
         "coalesce((SELECT max(e.entry_ordinal) FROM conversation_entry e WHERE e.session_ref=o.session_ref),0) AS entry_base " ++
         "FROM model_operation o LEFT JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++

@@ -2185,9 +2185,9 @@ test "Message observation schema requires Host state and bounds recovery" {
     const recovery = ",\"recovery\":{\"unknown_outcomes\":[{\"action\":\"5\",\"operation\":\"4\",\"call\":\"0\",\"description\":null,\"at\":\"6\"}],\"more\":false}";
     const cases = .{
         prefix ++ "\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"code\":\"unknown_session\",\"state\":\"rejected\"}}",
-        head ++ "\"state\":\"queued\"," ++ input ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"2\"},\"first_action\":null,\"attention\":null,\"group\":\"queued\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}",
-        head ++ "\"state\":\"waiting_for_permission\"," ++ input ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"2\"},\"first_action\":\"5\",\"attention\":{\"kind\":\"approval\",\"turn\":\"3\",\"step\":\"5\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":\"5\"}}}}",
-        head ++ "\"state\":\"processing\"," ++ input ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"2\"},\"first_action\":null,\"attention\":null,\"group\":\"working\",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":null}}" ++ recovery ++ "}}",
+        head ++ "\"state\":\"queued\"," ++ input ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"2\"},\"first_action\":null,\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}",
+        head ++ "\"state\":\"waiting_for_permission\"," ++ input ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"2\"},\"first_action\":\"5\",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":\"5\"}}}}",
+        head ++ "\"state\":\"processing\"," ++ input ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"2\"},\"first_action\":null,\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":null}}" ++ recovery ++ "}}",
         head ++ "\"state\":\"completed\"," ++ input ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ "0000000000000000000000000000000000000000000000000000000000000000" ++ "\"}}" ++ recovery ++ "}}",
         head ++ "\"state\":\"failed\"," ++ input ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"failed\"}" ++ recovery ++ "}}",
         head ++ "\"state\":\"cancelled\"," ++ input ++ binding ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" ++ recovery ++ "}}",
@@ -2211,18 +2211,12 @@ test "Message observation schema requires Host state and bounds recovery" {
     try queued_facts.put(allocator, "status", .{ .string = "rejected" });
     try std.testing.expect(!conforms(schemas, schema, queued));
 
-    for ([_][]const u8{ "attention", "group", "actions" }) |name| {
+    for ([_][]const u8{"actions"}) |name| {
         var missing = try std.json.parseFromSliceLeaky(Value, allocator, cases[1], .{});
         const work = &missing.object.getPtr("observation").?.object.getPtr("work").?.object;
         _ = work.orderedRemove(name);
         try std.testing.expect(!conforms(schemas, schema, missing));
     }
-    var bad_group = try std.json.parseFromSliceLeaky(Value, allocator, cases[1], .{});
-    try bad_group.object.getPtr("observation").?.object.getPtr("work").?.object.put(allocator, "group", .{ .string = "invented" });
-    try std.testing.expect(!conforms(schemas, schema, bad_group));
-    var bad_attention = try std.json.parseFromSliceLeaky(Value, allocator, cases[2], .{});
-    try bad_attention.object.getPtr("observation").?.object.getPtr("work").?.object.getPtr("attention").?.object.put(allocator, "kind", .{ .string = "invented" });
-    try std.testing.expect(!conforms(schemas, schema, bad_attention));
     const missing_state = try std.json.parseFromSliceLeaky(Value, allocator, prefix ++ "\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"k7m2qx\"}}", .{});
     try std.testing.expect(!conforms(schemas, schema, missing_state));
 
@@ -2317,7 +2311,7 @@ test "Activity schema distinguishes full pages and token-only repeats" {
     }
 }
 
-test "Activity schema requires a nullable failed-send target without weakening other peers" {
+test "Activity schema requires a canonical sender on a received Message" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2325,17 +2319,15 @@ test "Activity schema requires a nullable failed-send target without weakening o
     const built = try document.build();
     const schemas = built.object.get("components").?.object.get("schemas").?.object;
     const schema = schemas.get("ActivityItem").?;
-    const prefix = "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused\",\"code\":\"invalid_session_reference\"";
+    const prefix = "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"received\":{\"admission\":\"1\",\"key\":\"k\",\"turn\":null,\"state\":\"queued\",\"admitted_at\":\"1\",\"source_action\":null,\"content\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"abababababababababababababababababababababababababababababababab\"}";
     const cases = .{
-        .{ prefix ++ ",\"target\":null}}}", true },
-        .{ prefix ++ ",\"target\":{\"session\":\"absent\",\"label\":null}}}}", true },
-        .{ prefix ++ ",\"target\":{\"session\":\"\",\"label\":null}}}}", true },
+        .{ prefix ++ ",\"sender\":{\"session\":\"absent\",\"label\":null}}}}", true },
+        .{ prefix ++ ",\"sender\":null}}}", true },
         .{ prefix ++ "}}}", false },
-        .{ prefix ++ ",\"target\":{}}}}", false },
-        .{ prefix ++ ",\"target\":\"\"}}}", false },
-        .{ prefix ++ ",\"target\":{\"session\":\"absent\"}}}}", false },
-        .{ prefix ++ ",\"target\":{\"session\":null,\"label\":null}}}}", false },
-        .{ "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"sent\":{\"admission\":\"1\",\"admitted_at\":\"1\",\"target\":null,\"content\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ "abababababababababababababababababababababababababababababababab" ++ "\"}}}}", false },
+        .{ prefix ++ ",\"sender\":{}}}}", false },
+        .{ prefix ++ ",\"sender\":\"\"}}}", false },
+        .{ prefix ++ ",\"sender\":{\"session\":\"absent\"}}}}", false },
+        .{ prefix ++ ",\"sender\":{\"session\":null,\"label\":null}}}}", false },
     };
     inline for (cases) |case| {
         const value = try std.json.parseFromSliceLeaky(Value, allocator, case[0], .{});

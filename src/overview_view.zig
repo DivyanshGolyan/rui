@@ -223,8 +223,6 @@ pub const Listed = struct {
     turn: ?u64 = null,
 
     first_action: ?u64 = null,
-    attention: ?session_work.Attention = null,
-    group: session_work.Group = .done,
     actions: session_work.Actions = .{},
     first: ?First = null,
 
@@ -251,8 +249,6 @@ pub const Listed = struct {
             .state = row.work.state,
             .turn = row.work.turn,
             .first_action = row.work.first_action,
-            .attention = row.work.attention,
-            .group = row.work.group,
             .actions = row.work.actions,
             .first = if (row.first_message) |*message| .{
                 .position = message.position,
@@ -897,8 +893,6 @@ pub const Row = struct {
     turn: ?u64,
 
     first_action: ?u64,
-    attention: ?session_work.Attention = null,
-    group: session_work.Group = .done,
     actions: session_work.Actions = .{},
     first: ?First,
     from_person_at: ?u64,
@@ -913,8 +907,6 @@ pub const Row = struct {
             self.turn = was.turn;
             self.operation = was.operation;
             self.first_action = was.first_action;
-            self.attention = was.attention;
-            self.group = was.group;
             self.actions = was.actions;
             self.clock_version = was.clock_version;
             self.state_change_at = was.state_change_at;
@@ -950,7 +942,7 @@ pub const Row = struct {
     }
 
     fn work(self: *const Row) session_work.Work {
-        return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action, .served_attention = self.attention, .served_group = self.group, .actions = self.actions };
+        return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action, .actions = self.actions };
     }
 };
 
@@ -1287,7 +1279,6 @@ pub const State = struct {
                     .workspace = self.cwd,
                     .label = null,
                     .state = .{ .idle = .{ .since = 0 } },
-                    .group = .done,
                     .turn = null,
                     .first_action = null,
                     .first = null,
@@ -2511,8 +2502,7 @@ fn reconcileSelection(state: *State, selected_at: ?usize, opening: bool) void {
 fn workChanged(old: session_work.Work, work: session_work.Work) bool {
     if (std.meta.activeTag(old.state) != std.meta.activeTag(work.state) or old.state.since() != work.state.since()) return true;
     if (!std.meta.eql(old.turn, work.turn) or !std.meta.eql(old.operation, work.operation) or
-        !std.meta.eql(old.first_action, work.first_action) or !std.meta.eql(old.actions, work.actions) or
-        !std.meta.eql(old.served_attention, work.served_attention) or !std.meta.eql(old.served_group, work.served_group)) return true;
+        !std.meta.eql(old.first_action, work.first_action) or !std.meta.eql(old.actions, work.actions)) return true;
     return switch (old.state) {
         .retrying => |value| value.due_at_ms != work.state.retrying.due_at_ms or value.attempt != work.state.retrying.attempt or !value.cause.eql(work.state.retrying.cause.slice()),
         .bash => |value| changed: {
@@ -2553,8 +2543,6 @@ fn settleRow(state: *State, row: *Row, read: session_list.Snapshot) void {
     row.turn = read.work.turn;
     row.operation = read.work.operation;
     row.first_action = read.work.first_action;
-    row.attention = read.work.served_attention;
-    row.group = read.work.served_group.?;
     row.actions = read.work.actions;
 }
 
@@ -2657,8 +2645,6 @@ fn pendingRow(state: *State, input: Listed) error{OutOfMemory}!Row {
         .state = shown,
         .turn = listed.turn,
         .first_action = listed.first_action,
-        .attention = listed.attention,
-        .group = listed.group,
         .actions = listed.actions,
         .first = listed.first,
         .from_person_at = listed.from_person_at,
@@ -4209,7 +4195,7 @@ const TestSession = struct {
 };
 
 fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
-    const work: session_work.Work = .{ .state = state.asOf(test_now_s * 1000), .turn = options.turn, .first_action = options.first_action };
+    const standing = session_work.standing(state.asOf(test_now_s * 1000));
     return .{
         .reference = ref.*,
         .creator = options.creator,
@@ -4228,12 +4214,10 @@ fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
         .descendant_needs_you_count = options.descendant_needs_you_count,
         .turn = options.turn,
         .first_action = options.first_action,
-        .attention = session_work.attention(work),
-        .group = session_work.group(work),
         .actions = .{ .stop = switch (std.meta.activeTag(state)) {
             .pending, .working, .retrying, .bash, .approval => true,
             else => false,
-        }, .decide = if (session_work.group(work) == .needs_you) options.first_action orelse 1 else null },
+        }, .decide = if (standing == .needs_you) options.first_action orelse 1 else null },
         .first = options.first,
         .from_person_at = if (options.yours) test_now_s - 3600 else null,
     };
@@ -4241,13 +4225,11 @@ fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
 
 fn fixtureWork(value: session_work.Work) session_work.Work {
     var work = value;
-    work.served_attention = session_work.attention(work);
-    work.served_group = session_work.group(work);
     work.actions.stop = switch (std.meta.activeTag(work.state)) {
         .pending, .working, .retrying, .bash, .approval => true,
         else => false,
     };
-    work.actions.decide = if (work.served_group == .needs_you) work.first_action orelse 1 else null;
+    work.actions.decide = if (session_work.standing(work.state) == .needs_you) work.first_action orelse 1 else null;
     return work;
 }
 
@@ -4576,10 +4558,8 @@ test "SUI-21 opening a Session records its outcome as seen from the work state a
     var state = try opened(&.{session("b4n8wd", .{ .idle = ago(20) }, .{ .label = "Pinned" })});
     defer state.deinit();
     _ = try step(&state, .{ .conversation = "b4n8wd".* });
-    // The read carries no served attention: the finished state is what the person opened and saw.
-    var work: session_work.Work = .{ .state = .{ .finished = ago(1) }, .turn = 2 };
-    work.served_attention = null;
-    work.served_group = session_work.group(work);
+    // The finished state is what the person opened and saw.
+    const work: session_work.Work = .{ .state = .{ .finished = ago(1) }, .turn = 2 };
     _ = try step(&state, .{ .observed = .{ .reference = "b4n8wd".*, .read_version = testToken(3), .work = work, .opening = true } });
     const seen = (try state.record("b4n8wd".*)).acknowledged.?;
     try std.testing.expectEqual(session_work.attention(work).?, seen);
@@ -7147,7 +7127,7 @@ test "an Archived window row has no mark: its name and age show, and no count re
     // The age is the stop time, and the failed row is not counted: Archived rows are never counted.
     try std.testing.expectEqual(Counts{}, state.summary.counts);
     try std.testing.expectEqual(WorkState.stopped, std.meta.activeTag(state.find("w00010".*).?.state));
-    try std.testing.expect(state.find("w00009".*).?.group == .done);
+    try std.testing.expect(session_work.standing(state.find("w00009".*).?.state) == .failed);
 }
 
 test "archived window scrolls back up after trimming and reads the rows above with an above cursor" {
@@ -8024,9 +8004,7 @@ fn projectionCase0() !void {
     for (expected, state.order.items) |ref, at| try std.testing.expectEqualStrings(ref, &state.rows.items[at].reference);
     var waiting = rows[8];
     waiting.state.bash.approvals = 1;
-    waiting.group = .needs_you;
     waiting.actions.decide = 1;
-    waiting.attention = session_work.attention(.{ .state = waiting.state, .turn = waiting.turn, .first_action = 1 });
     _ = try refresh(&state, .changed, testToken(2), &.{waiting});
     try std.testing.expectEqualStrings("newend", &state.rows.items[state.order.items[0]].reference);
 }
@@ -8057,8 +8035,6 @@ fn sUI132RefreshCase() !void {
 
 fn projectionCase1() !void {
     var listed = session("asking", .{ .approval = ago(1) }, .{ .first_action = 7, .label = "Superseded" });
-    listed.group = .working;
-    listed.attention = null;
     listed.actions = .{ .stop = false, .decide = null };
     const genuine = session("real00", .{ .approval = ago(100) }, .{ .first_action = 8, .label = "Genuine" });
     var state = try opened(&.{ listed, genuine });
@@ -8067,7 +8043,7 @@ fn projectionCase1() !void {
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "Superseded").? < std.mem.indexOf(u8, text, "Genuine").?);
     const row = state.find("asking".*).?;
-    try std.testing.expectEqual(session_work.Group.working, state.workOf(row).served_group.?);
+    try std.testing.expectEqual(session_work.Standing.needs_you, session_work.standing(row.state));
     state.selected = .{ .session = row.reference };
     try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .{ .action = .stop } } }));
     try std.testing.expect(!conversation(&state, row.reference, row.actions.stop).stoppable);
@@ -8079,7 +8055,7 @@ fn projectionCase2() !void {
     try source.reference.set("k7m2qx");
     try source.workspace.set("/work/rui/");
     source.read_version = testToken(1);
-    source.work = .{ .state = .{ .approval = ago(1) }, .turn = 1, .operation = 2, .attention = .{ .kind = .approval, .turn = 1, .step = 7 }, .group = .needs_you, .actions = .{ .stop = true, .interrupt = .{ .turn = 1, .operation = 2 }, .decide = null } };
+    source.work = .{ .state = .{ .approval = ago(1) }, .turn = 1, .operation = 2, .actions = .{ .stop = true, .interrupt = .{ .turn = 1, .operation = 2 }, .decide = null } };
     var state = try opened(&.{Listed.of(&source)});
     defer state.deinit();
     const row = @constCast(state.find("k7m2qx".*).?);
@@ -9501,7 +9477,6 @@ test "approval rows require no command reads across waiting Action and conversat
         try expectEffects(&.{}, try respond(&state, .full, testToken(1), &.{waiting}));
         waiting.first_action = 42;
         waiting.actions.decide = 42;
-        waiting.attention = session_work.attention(.{ .state = waiting.state, .turn = waiting.turn, .first_action = 42 });
         try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{waiting}));
         state.conversing = null;
         try expectEffects(&.{}, try refresh(&state, .not_modified, testToken(2), &.{}));

@@ -20,7 +20,6 @@ pub const bash_record = @import("tool_record.zig").bash_record;
 pub const find_tools_record = @import("tool_record.zig").find_tools_record;
 pub const message_agent_record = @import("tool_record.zig").message_agent_record;
 pub const read_image_record = @import("tool_record.zig").read_image_record;
-pub const read_action_record = @import("tool_record.zig").read_action_record;
 pub const read_transcript_record = @import("tool_record.zig").read_transcript_record;
 pub const skill_record = @import("tool_record.zig").skill_record;
 pub const start_agent_record = @import("tool_record.zig").start_agent_record;
@@ -399,20 +398,20 @@ test "find_tools is a core tool and settlement defers its words check" {
     try std.testing.expectEqual(Runner.core, Runner.of(&find_tools_record));
 }
 
-test "read_action honors the offered core record and defers argument checks" {
+test "stop_action honors the offered core record and defers argument checks" {
     for ([_][]const u8{ "{\"action\":\"42\"}", "{\"session\":\"k7m2qx\"}", "not JSON" }) |text| {
-        var name: TestSource = .{ .bytes = "read_action" };
+        var name: TestSource = .{ .bytes = "stop_action" };
         var arguments: TestSource = .{ .bytes = text };
-        const offered: Offered = .{ .names = "read_action" };
-        const facts = try inspectCall(&name, "read_action".len, &arguments, &offered);
+        const offered: Offered = .{ .names = "stop_action" };
+        const facts = try inspectCall(&name, "stop_action".len, &arguments, &offered);
         try std.testing.expectEqual(@as(?protocol.ProposalRejection, null), classifyCall(&facts));
         try std.testing.expectEqual(Runner.core, facts.tool.?.runner());
         const description = facts.description().?;
-        try std.testing.expectEqualStrings("Read an Action", description.slice());
-        name = .{ .bytes = "read_action" };
+        try std.testing.expectEqualStrings("Stop an Action", description.slice());
+        name = .{ .bytes = "stop_action" };
         arguments = .{ .bytes = text };
         const excluded: Offered = .{ .names = "read_transcript" };
-        const refused = try inspectCall(&name, "read_action".len, &arguments, &excluded);
+        const refused = try inspectCall(&name, "stop_action".len, &arguments, &excluded);
         try std.testing.expectEqual(@as(?protocol.ProposalRejection, .unknown_tool), classifyCall(&refused));
     }
 }

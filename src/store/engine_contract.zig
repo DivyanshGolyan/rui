@@ -2131,7 +2131,7 @@ fn stopTurn(case: *store_testing.Case, meter: *RoundMeter, replies: *store_testi
     defer meter.storage = previous_storage;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var configure = try completeConfiguration("budget-action-stop", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
-    configure.configuration.tools = try .of(&.{ "bash", "read_action", "stop_action" });
+    configure.configuration.tools = try .of(&.{ "bash", "stop_action" });
     configure.configuration.permission_mode.state = .value;
     try configure.configuration.permission_mode.value.set("bypass");
     const session = (try replies.keep(storage.configure(&configure, .{}))).accepted.session;

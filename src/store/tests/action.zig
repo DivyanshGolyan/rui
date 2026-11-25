@@ -260,10 +260,7 @@ test "core tool table routes every built-in and promotion excludes the full core
                 defer storage.close() catch unreachable;
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 var command = try completeConfiguration("table-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
-                command.configuration.tools = if (tool == .stop_action)
-                    try .of(&.{ "read_action", "stop_action" })
-                else
-                    try .of(&.{@tagName(tool)});
+                command.configuration.tools = try .of(&.{@tagName(tool)});
                 const configured = try storage.configure(&command, .{});
                 try std.testing.expect(configured == .accepted);
                 const session = configured.accepted.session;

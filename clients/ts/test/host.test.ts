@@ -320,7 +320,7 @@ test("closing Rui rejects a parked watch and leaves its signal alone", { skip, t
 	t.mock.method(rui, "exchange", async () => {
 		read();
 		return Buffer.from(JSON.stringify({
-			delta: "full", since: null, items: [], more: false, end: "0", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle" } },
+			delta: "full", since: null, items: [], more: false, end: "0", queued: { count: "0" }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle" } },
 		}));
 	});
 	const watch = rui.getSession("k7m2qx").watch({ signal: controller.signal });

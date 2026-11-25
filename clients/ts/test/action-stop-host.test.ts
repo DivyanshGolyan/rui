@@ -78,12 +78,10 @@ test("stopAction reaches the native owner and recovers its original answer", { s
 		const waiting = await currentReport(rui, session.id);
 		assert.deepEqual(observation.work, {
 			state: waiting.work.state, first_action: waiting.work.first_action,
-			attention: waiting.work.attention, group: waiting.work.group, actions: waiting.work.actions,
+			actions: waiting.work.actions,
 		});
 		assert.equal(observation.work.state.kind, "approval");
 		assert.equal(observation.work.first_action, action);
-		assert.equal(observation.work.attention?.kind, "approval");
-		assert.equal(observation.work.group, "needs_you");
 		assert.deepEqual(observation.work.actions, { stop: true, interrupt: null, decide: action });
 		assert.deepEqual(waiting.actionable_permissions.map((permission) => permission.action), [action]);
 		assert.equal(await session.stopAction(action, { idempotencyKey: "stop" }), null);
