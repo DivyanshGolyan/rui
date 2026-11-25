@@ -111,8 +111,8 @@ fn expectHistory(storage: *core.Store, binding: core.AttemptBinding, parts: []co
                 try expectBytes(&view, result.call_id, "parts-call");
                 if (background) {
                     try std.testing.expect(result.input == null);
-                    var bytes: [160]u8 = undefined;
-                    const receipt = try std.fmt.bufPrint(&bytes, "{{\"action\":\"{d}\",\"execution\":\"background\",\"accepted\":true}}", .{action_id});
+                    var bytes: @import("../../action_receipt.zig").Bytes = undefined;
+                    const receipt = @import("../../action_receipt.zig").format(action_id, &bytes);
                     try expectBytes(&view, result.output.?, receipt);
                 } else if (compound) {
                     try std.testing.expect(result.input != null);

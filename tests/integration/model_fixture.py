@@ -16,6 +16,7 @@ from host_process import dispose_all
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
+BACKGROUND_RECEIPT_NOTE = re.search(r'pub const note = "(.*)";', (pathlib.Path(__file__).resolve().parents[2] / "src" / "action_receipt.zig").read_text()).group(1)
 
 
 def request_system_prompt(request):
