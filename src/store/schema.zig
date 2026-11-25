@@ -4019,8 +4019,8 @@ test "schema 83 and 97 migrations rebuild canonical input tables" {
     for (comptime objects(.sqlite)) |object| {
         if (!std.mem.eql(u8, object.name, "message_admission") and !std.mem.eql(u8, object.name, "conversation_entry")) continue;
         var found = false;
-        // message_admission last took its canonical form at 97, when it dropped sender_position.
-        const step = if (std.mem.eql(u8, object.name, "message_admission")) migrations[95 - migration_baseline] else migrations[82 - migration_baseline];
+        // message_admission last took its canonical form at 97 (the step from 96), when it dropped sender_position.
+        const step = if (std.mem.eql(u8, object.name, "message_admission")) migrations[96 - migration_baseline] else migrations[82 - migration_baseline];
         for (step.sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
         try std.testing.expect(found);
     }
