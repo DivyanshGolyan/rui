@@ -17,15 +17,18 @@ pub const tools = blk: {
 /// A fresh Session allows and loads every built-in tool (Divyansh, 2026-11-23); only a model
 /// known not to take images, or a Host that can't read them, leaves out `read_image`.
 pub fn creationTools(accepts_images: bool, can_read_images: bool) []const u8 {
-    return if (accepts_images and can_read_images) tools else comptime withoutImages(tools);
+    return if (accepts_images and can_read_images) default_tools else comptime without(default_tools, "read_image");
 }
 
-fn withoutImages(comptime names: []const u8) []const u8 {
+// The Host runner for `watch_github_pr` is not wired yet, so no fresh Session loads it; `--tools` still selects it.
+const default_tools = without(tools, "watch_github_pr");
+
+fn without(comptime names: []const u8, comptime excluded: []const u8) []const u8 {
     return comptime blk: {
         var selected: []const u8 = "";
         var parts = std.mem.splitScalar(u8, names, ',');
         while (parts.next()) |name| {
-            if (std.mem.eql(u8, name, "read_image")) continue;
+            if (std.mem.eql(u8, name, excluded)) continue;
             selected = selected ++ (if (selected.len == 0) "" else ",") ++ name;
         }
         break :blk selected;
@@ -88,7 +91,7 @@ test "approved product defaults" {
     try std.testing.expectEqual(@as(u64, 0), output_reservation);
 }
 
-test "creation tool profiles require model image support and an available opener" {
+test "creation tool profiles require model image support and an available opener and leave out the unwired watcher" {
     for ([_]bool{ false, true }) |accepts_images| {
         for ([_]bool{ false, true }) |can_read_images| {
             const images = accepts_images and can_read_images;
@@ -96,6 +99,7 @@ test "creation tool profiles require model image support and an available opener
             var allowed = std.mem.splitScalar(u8, profile, ',');
             for (std.meta.fieldNames(@import("built_in_tool.zig").BuiltInTool)) |name| {
                 if (!images and std.mem.eql(u8, name, "read_image")) continue;
+                if (std.mem.eql(u8, name, "watch_github_pr")) continue;
                 try std.testing.expectEqualStrings(name, allowed.next().?);
             }
             try std.testing.expect(allowed.next() == null);

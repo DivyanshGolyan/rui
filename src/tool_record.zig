@@ -454,6 +454,13 @@ pub const start_agent_record: Record = .{
 
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
+pub const watch_github_pr_record: Record = .{
+    .name = "watch_github_pr",
+    .owner = .rui,
+    .description = "Watch one GitHub.com pull request until it meaningfully changes. Returns a typed snapshot of the head, lifecycle, checks and observed reviews when the head changes, checks settle, a review decision appears, or the pull request is closed or merged, and after at most one hour without change. Call it again to keep watching. Select a stored GitHub CLI account with account; when omitted, the only authenticated account is used, several return account_required with their names, and none return auth_required.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"maxLength\":256},\"account\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":39}},\"required\":[\"url\"],\"additionalProperties\":false}",
+};
+
 pub const read_image_record: Record = .{
     .name = "read_image",
     .owner = .rui,
@@ -469,6 +476,7 @@ pub const Profile = struct { excerpt_bytes: u32, retain: bool };
 pub const Runner = enum {
     bash,
     read_image,
+    github_pr_watch,
     core,
     mcp,
     provider,
@@ -480,6 +488,7 @@ pub const Runner = enum {
             .bash => .{ .excerpt_bytes = max_result_excerpt_bytes, .retain = true },
             .mcp => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
             .read_image => .{ .excerpt_bytes = 0, .retain = false },
+            .github_pr_watch => .{ .excerpt_bytes = 10_000, .retain = true },
             .core => .{ .excerpt_bytes = 0, .retain = false }, // Core pagers own their already-shaped windows.
             // An app result is model-facing text from the app, shaped like an MCP result.
             .app => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
@@ -490,7 +499,7 @@ pub const Runner = enum {
     pub fn beforeAdmissionStopText(self: Runner) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
-            .read_image => @import("action_text.zig").stopped_before_admission,
+            .read_image, .github_pr_watch => @import("action_text.zig").stopped_before_admission,
             .mcp => @import("mcp/action_text.zig").stopped_before_admission,
             .app => @import("action_text.zig").stopped_before_admission,
             .core => @import("action_text.zig").stopped_before_admission,
@@ -502,6 +511,7 @@ pub const Runner = enum {
         return switch (self) {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
             .read_image => "Stopped before this image read completed.",
+            .github_pr_watch => "Stopped before this pull request watch completed.",
             .mcp => result,
             .app => "Stopped before the app returned a result.",
             .core, .provider => unreachable,
@@ -512,6 +522,7 @@ pub const Runner = enum {
         return switch (self) {
             .bash => @import("bash_action_text.zig").indeterminate,
             .read_image => "The Host stopped before saving this image read result. The read may have completed; it was not automatically repeated.",
+            .github_pr_watch => "The Host stopped while watching this pull request. The watch was not automatically repeated.",
             .mcp => @import("mcp/action_text.zig").indeterminate,
             .app => "The Host stopped while this app call was running. The app may have run it; it was not automatically repeated.",
             .core, .provider => unreachable,
@@ -652,6 +663,7 @@ pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
     .skill = .{ .record = &skill_record, .runner = .core },
     .start_agent = .{ .record = &start_agent_record, .runner = .core },
     .stop_action = .{ .record = &stop_action_record, .runner = .core },
+    .watch_github_pr = .{ .record = &watch_github_pr_record, .runner = .github_pr_watch },
     .web_search = .{ .record = &web_search_record, .runner = .provider },
 });
 
@@ -940,7 +952,7 @@ test "all result profiles fit the shared excerpt maximum" {
     inline for (std.meta.tags(Runner)) |runner| {
         switch (runner) {
             .provider => {}, // Provider calls do not use the Result route.
-            .bash, .mcp, .app, .read_image, .core => {
+            .bash, .mcp, .app, .read_image, .github_pr_watch, .core => {
                 for ([_]bool{ false, true }) |offer| {
                     try std.testing.expect(runner.resultProfile(offer).excerpt_bytes <= max_result_excerpt_bytes);
                 }
@@ -1165,4 +1177,20 @@ pub const app_tools = struct {
 
 test {
     _ = app_tools;
+}
+
+test "PRW-40 watcher catalog registers a Host Action with a bounded schema and indeterminate texts" {
+    const row = built_in_rows.get(.watch_github_pr);
+    try std.testing.expectEqual(Runner.github_pr_watch, row.runner);
+    try std.testing.expectEqual(Owner.rui, row.record.owner);
+    try std.testing.expectEqualStrings("watch_github_pr", row.record.name);
+    try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 10_000, .retain = true }, Runner.github_pr_watch.resultProfile(false));
+    try std.testing.expectEqualStrings("Stopped before this pull request watch completed.", Runner.github_pr_watch.stoppedText(false, ""));
+    try std.testing.expectEqualStrings("The Host stopped while watching this pull request. The watch was not automatically repeated.", Runner.github_pr_watch.indeterminateText());
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const schema = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), row.record.input_schema, .{});
+    try std.testing.expectEqual(false, schema.object.get("additionalProperties").?.bool);
+    try std.testing.expectEqualStrings("url", schema.object.get("required").?.array.items[0].string);
+    try std.testing.expectEqual(@as(usize, 1), schema.object.get("required").?.array.items.len);
 }
