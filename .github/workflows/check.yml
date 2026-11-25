@@ -238,11 +238,11 @@ jobs:
           python3 - <<'PY'
           import json, os, sys
           sys.path.insert(0, 'tests/ci')
-          from docs_only import classify
+          from docs_only import ChangeKind, classify
           from ci_plan import plan
           selection = json.load(open('selection.json'))
           # While main is red, a PR selects nothing, as a documentation change does; admission fails it.
-          kind = 'documentation' if os.environ.get('MAIN_RED') else classify(selection['base'], selection['head'])
+          kind = ChangeKind.DOCUMENTATION if os.environ.get('MAIN_RED') else classify(selection['base'], selection['head'])
           native = {'native_targets': json.loads(os.environ['NATIVE_TARGETS'])} if os.environ.get('NATIVE_TARGETS') else {}
           result = plan(selection, event_name=os.environ['EVENT_NAME'],
                         draft=os.environ['DRAFT'] == 'true', promotion=os.environ['PROMOTION'] == 'true',
