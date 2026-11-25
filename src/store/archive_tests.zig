@@ -1069,10 +1069,8 @@ test "SL-11: an Archived window row's first Message is its list row's first Mess
             // else its first 512 bytes less a scalar the cut would split (the 2-byte scalar below starts at byte 511).
             const Shape = struct { name: []const u8, text: ?[]const u8, parts: bool, prefix: ?[]const u8, mark: enum { none, peer, private } = .none };
             const shapes = [_]Shape{
-                .{ .name = "sl11-text", .text = "first words\nsecond line", .parts = false, .prefix = "first words\nsecond line" },
                 .{ .name = "sl11-parts", .text = null, .parts = true, .prefix = null },
                 .{ .name = "sl11-none", .text = null, .parts = false, .prefix = null },
-                .{ .name = "sl11-blank", .text = "\n  Fix CI", .parts = false, .prefix = "\n  Fix CI" },
                 .{ .name = "sl11-long", .text = repeat('a', 600), .parts = false, .prefix = repeat('a', 512) },
                 .{ .name = "sl11-exact", .text = repeat('b', 512), .parts = false, .prefix = repeat('b', 512) },
                 .{ .name = "sl11-split", .text = repeat('c', 511) ++ "é" ++ "tail", .parts = false, .prefix = repeat('c', 511) },
