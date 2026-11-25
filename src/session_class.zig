@@ -149,7 +149,7 @@ const probes = [_]Probe{
     .{ .work = .{ .stopped = .{ .since = 1, .cause = .stop } }, .group = .done },
 };
 
-test "SUI-168 a Session's class follows its work, archive state, listing and the viewer's inputs" {
+test "SUI-169 a Session's class follows its work, archive state, listing and the viewer's inputs" {
     var cases: usize = 0;
     for (probes) |probe| for (std.enums.values(session_archive.State)) |archive| for (std.enums.values(session_archive.Filter)) |filter| {
         for (0..1 << 7) |bits| {
