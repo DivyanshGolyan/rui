@@ -284,7 +284,7 @@ pub fn retry(raw: *anyopaque, task: *Task) !void {
     try job.files.scratch.setLength(task.io, 0);
     const newest = switch (try requests.activityPage(job.store, job.session, .{
         .direction = .backward,
-        .kinds = drawn_kinds,
+        .kinds = .full,
         .limit = 1,
     })) {
         .page => |page| page,
@@ -459,20 +459,11 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
     return scanWorker(raw, task, true);
 }
 
-/// Every Activity kind the Session reads. A peer send draws on its own tool row, so the separate send entries
-/// are never requested; slice 3 deletes the two kinds.
-const drawn_kinds: protocol.ActivityPage.Kinds = blk: {
-    var kinds: protocol.ActivityPage.Kinds = .full;
-    kinds.remove(.sent);
-    kinds.remove(.send_failed);
-    break :blk kinds;
-};
-
 fn pageCursor(job: *const Job, plan: FeedPolicy.Page) protocol_reply.ActivityCursor {
     var cursor: protocol_reply.ActivityCursor = .{
         .direction = if (plan.direction == .backward) .backward else .forward,
         .limit = plan.limit,
-        .kinds = if (plan.kinds == .all) drawn_kinds else activity_read.conversation,
+        .kinds = if (plan.kinds == .all) .full else activity_read.conversation,
         .end = if (plan.kinds == .all and plan.continuing) job.cursor.end else null,
     };
     if (plan.from) |from| {
@@ -1503,7 +1494,6 @@ test "SUI-49 Message placement preserves provenance across pages" {
         const user = TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ View.Mark.body ++ "please wait\n  for the build" ++ View.Mark.reset ++ "\n";
         const link = TerminalText.link_open ++ TerminalText.session_link ++ "9f8e7d" ++ TerminalText.link_end ++ "\x1b[4mPeer" ++ TerminalText.link_close ++ View.Mark.reset ++ View.Mark.summary;
         const received = View.Mark.summary ++ "← Received message from " ++ link ++ View.Mark.reset ++ "\n";
-        const sent = View.Mark.summary ++ "→ Messaged " ++ link ++ View.Mark.reset ++ "\n";
         const Sink = struct {
             out: *std.Io.Writer,
             lowest: ?u64 = null,
@@ -1568,7 +1558,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
                         const expected = [_]Expected{
                             .{ .text = if (source == .session) received else "" },
                             .{ .text = received },
-                            .{ .text = sent },
+                            .{ .text = "" },
                             .{ .text = if (state == .applied and source != .session) user else "" },
                         };
                         const queued: protocol.Queued = if (state == .queued and source != .session) .{ .count = if (oldest) 1 else 2, .oldest_position = if (oldest) 2 else 1, .newest_admission = 1, .newest_position = 2 } else .{};
@@ -2006,11 +1996,9 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
     const content: content_value.Value = .{ .text = .{ .length = 3, .digest = @splat(0xab) } };
     const Kind = struct { value: protocol.ActivityItem.Value, line: []const u8, packed_: bool };
     const kinds = [_]Kind{
-        .{ .value = .{ .sent = .{ .admission = 4, .target = peer, .content = content, .admitted_at = std.math.maxInt(u64) } }, .line = "→ Messaged 9f8e7d", .packed_ = true },
         .{ .value = .{ .received = .{ .admission = 5, .key = .{}, .turn = 3, .state = .applied, .content = content, .admitted_at = std.math.maxInt(u64), .sender = peer } }, .line = "← Received message from 9f8e7d", .packed_ = true },
         .{ .value = .{ .hosted_call = .{ .line = search, .code = .succeeded, .sign = .finished, .publication_position = null } }, .line = "✓ Search", .packed_ = true },
         .{ .value = .{ .hosted_call = .{ .line = find, .code = .failed, .sign = .failed, .publication_position = null } }, .line = "× Find", .packed_ = false },
-        .{ .value = .{ .send_failed = .{ .key = .{}, .target = null, .code = .{} } }, .line = "× Message not delivered", .packed_ = false },
         .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 0, .completion = .completed } }, .line = "▪ Stopped", .packed_ = false },
     };
     var documents: [kinds.len]Viewport.Sized(512, true) = undefined;
@@ -2067,7 +2055,7 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
             var row: u16 = 0;
             for (order, 0..) |kind, at| {
                 if (at != 0 and !((kinds[order[at - 1]].packed_ and kinds[kind].packed_) or
-                    ((order[at - 1] == 2 or order[at - 1] == 3) and (kind == 2 or kind == 3))))
+                    ((order[at - 1] == 1 or order[at - 1] == 2) and (kind == 1 or kind == 2))))
                 {
                     try testing.expectEqualStrings("", Rows.at(&screen, row, &buffer));
                     row += 1;
@@ -2103,25 +2091,20 @@ test "session_reads policy cursor is inclusive only for a fresh provisional repl
     try std.testing.expect(!above.kinds.contains(.session_changed));
     try std.testing.expect(!above.kinds.contains(.compacted));
     try std.testing.expect(above.kinds.eql(activity_read.conversation));
-    // A peer send draws on its own tool row; the Session never reads the separate send entries.
-    try std.testing.expect(!above.kinds.contains(.sent));
-    try std.testing.expect(!above.kinds.contains(.send_failed));
 }
 
-test "SUI-51 an opening read never requests the retired send entries, so a peer send draws only on its tool row" {
+test "SUI-51 a stored send entry draws nothing, so a peer send shows only on its tool row" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     const tail = [_]FakeHost.Tail{
         .{ .value = .{ .sent = .{ .admission = 1, .target = peer, .content = FakeHost.textValue(), .admitted_at = 1 } } },
-        .{ .value = .{ .send_failed = .{ .key = .{}, .target = peer, .code = .{} } } },
-        .{ .value = FakeHost.message(3) },
+        .{ .value = .{ .received = FakeHost.received(2, peer) } },
     };
-    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 3 };
-    var job: Job = .{ .opening = true, .session = "k7m2qx", .line_read = .{ .revision = 1, .end = 3 } };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 2 };
+    var job: Job = .{ .opening = true, .session = "k7m2qx", .line_read = .{ .revision = 1, .end = 2 } };
     try host.read(&job);
-    try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Received message"));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "Messaged"));
-    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "not delivered"));
 }
 
 test "SUI-51 opening reads expose ordered rows and scan boundaries" {
