@@ -94,6 +94,14 @@ def git(*args):
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def body_refusal(pr, repo, changes=None):
+    """Why admission would reject this open PR's body judged against its own base, or None."""
+    base = f"origin/{pr['base']['ref']}"
+    paths, _ = (changes or branch_changes)(base)
+    reason = shape_ready_refusal(paths, pr["body"] or "", base=base, repo=repo, number=pr["number"])
+    return f"PR #{pr['number']} would fail admission on its body: {reason}" if reason else None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -165,9 +173,8 @@ def main():
         if refusal := ready_refusal(pr, head, bool(git("status", "--porcelain"))):
             print(refusal, file=sys.stderr)
             return 1
-        paths, _ = branch_changes("origin/main")
-        if refusal := shape_ready_refusal(paths, pr["body"] or "", base="origin/main", repo=repo, number=pr["number"]):
-            print(f"PR #{pr['number']} would fail admission on its body: {refusal}", file=sys.stderr)
+        if refusal := body_refusal(pr, repo):
+            print(refusal, file=sys.stderr)
             return 1
         # GitHub's REST API has no ready-for-review endpoint, so this one step stays on GraphQL.
         gh("pr", "ready", str(pr["number"]), "--repo", repo)

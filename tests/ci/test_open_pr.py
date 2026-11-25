@@ -167,7 +167,8 @@ class OpenPrTest(unittest.TestCase):
 
     def test_ready_finds_the_pr_over_rest(self):
         head = "c" * 40
-        draft = {"number": 9, "draft": True, "head": {"sha": head}, "body": "No issue: a test body"}
+        draft = {"number": 9, "draft": True, "head": {"sha": head}, "base": {"ref": "main"},
+                 "body": "No issue: a test body"}
         stdout = io.StringIO()
         with patch("sys.argv", ["open_pr.py", "ready"]), \
              patch.object(open_pr, "branch_changes", return_value=(["docs/a.md"], [])), \
@@ -216,6 +217,15 @@ class OpenPrTest(unittest.TestCase):
                 code, message = open_pr.post_review(lambda *call: posted.append(call), "example/rui", pr, args, lambda: last)
                 self.assertEqual((code, posted), (1, []))
                 self.assertTrue(message)
+
+    def test_ready_judges_the_body_against_the_prs_own_base(self):
+        asked = []
+        pr = {"number": 9, "base": {"ref": "parent"}, "body": "no goal here"}
+        reason = open_pr.body_refusal(pr, "example/rui", changes=lambda base: asked.append(base) or (["docs/a.md"], []))
+        self.assertEqual(asked, ["origin/parent"])
+        self.assertIn("PR #9 would fail admission on its body", reason)
+        pr["body"] = "No issue: a docs-only change for the test"
+        self.assertIsNone(open_pr.body_refusal(pr, "example/rui", changes=lambda base: (["docs/a.md"], [])))
 
     def test_a_ui_pr_opens_or_turns_ready_only_with_its_screens_on_hand(self):
         # #2277, #2297, #2299, #2305 and #2306 changed UI with no screens; only admission, last, said so.

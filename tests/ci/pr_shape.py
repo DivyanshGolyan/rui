@@ -162,6 +162,8 @@ def ready_refusal(changed_paths, body, *, base=None, repo=None, number=None, fra
     if needs(changed_paths, base=base) and (reason := screen_refusal(body)):
         if frames_captured(frames) or (number and sticky(repo, number)):
             return None
+        if number:
+            return f"{reason} Screens are stale or missing for this head: re-run verify-rui publish DIR --pr {number}."
         return (f"{reason} A PR opens with its screens already captured: run verify-rui frames before "
                 "opening and pass `open_pr.py open --frames DIR`, or state 'No screen change: <reason>'.")
     return None

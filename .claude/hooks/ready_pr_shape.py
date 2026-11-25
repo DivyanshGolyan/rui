@@ -18,29 +18,31 @@ REPO = "DivyanshGolyan/rui"
 
 
 def ready_call(payload):
-    """(number or None, head, body override) when this call opens a Rui PR or makes it ready for review, else None."""
+    """(number or None, head, body override, base branch or None) when this call opens a Rui PR or makes it ready for review, else None."""
     tool, args = payload.get("tool_name", ""), payload.get("tool_input", {})
     if f"{args.get('owner')}/{args.get('repo')}" != REPO:
         return None
     if tool == "mcp__github__create_pull_request":
-        return None, args.get("head"), args.get("body")
+        return None, args.get("head"), args.get("body"), args.get("base") or "main"
     if tool == "mcp__github__update_pull_request" and args.get("draft") is False:
-        return args.get("pullNumber"), None, args.get("body")
+        return args.get("pullNumber"), None, args.get("body"), None
     return None
 
 
 def refusal(call, api, judge=None):
     from pr_shape import ready_refusal
     judge = judge or ready_refusal
-    number, head, body = call
+    from conflict_alert import pages
+    number, head, body, base = call
     if number:
         pr = api("GET", f"repos/{REPO}/pulls/{number}")
-        files = api("GET", f"repos/{REPO}/pulls/{number}/files?per_page=100")
+        files = list(pages(api, f"repos/{REPO}/pulls/{number}/files?"))
         body = pr["body"] or "" if body is None else body
+        base = pr["base"]["ref"]
     else:
-        files = api("GET", f"repos/{REPO}/compare/main...{head}")["files"]
+        files = api("GET", f"repos/{REPO}/compare/{base}...{head}")["files"]
         body = body or ""
-    reason = judge([row["filename"] for row in files], body, base="origin/main", repo=REPO, number=number)
+    reason = judge([row["filename"] for row in files], body, base=f"origin/{base}", repo=REPO, number=number)
     return f"Refused: this PR would fail admission on its body. {reason}" if reason else None
 
 
