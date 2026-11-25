@@ -108,6 +108,45 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
     try std.testing.expect(!try view.nextTool(&tool));
 }
 
+test "a Session saved with a retired built-in is offered, listed and resaved without it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "retired-first");
+    var command: wire_request.ConfigureCommand = .{};
+    try command.key.set("retired-tools");
+    command.session = session;
+    command.configuration.tools = try .of(&.{ "bash", "stop_action" });
+    try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
+
+    // A Store written before read_action was removed: this Session's saved set also names it.
+    const sqlite_only = store_testing.sqlite_only;
+    try sqlite_only.exec(&storage, "INSERT INTO tool_record(name,remote_name,owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id) " ++
+        "SELECT 'read_action','read_action',owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id FROM tool_record WHERE name='stop_action'", .{});
+    try sqlite_only.exec(&storage, "INSERT INTO tool_set(digest,member_count) VALUES(zeroblob(32),3)", .{});
+    inline for (.{ "bash", "read_action", "stop_action" }, 0..) |name, ordinal| {
+        try sqlite_only.exec(&storage, "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) " ++
+            "SELECT (SELECT tool_set_id FROM tool_set WHERE digest=zeroblob(32)),?1,tool_record_id FROM tool_record WHERE name=?2", .{ @as(u64, ordinal), name });
+    }
+    try sqlite_only.exec(&storage, "UPDATE session SET tool_set_id=(SELECT tool_set_id FROM tool_set WHERE digest=zeroblob(32)),loaded_tool_set_id=NULL WHERE session_ref=?1", .{session.slice()});
+    try sqlite_only.exec(&storage, "UPDATE session_revision SET tool_set_id=(SELECT tool_set_id FROM tool_set WHERE digest=zeroblob(32)),loaded_tool_set_id=NULL WHERE session_ref=?1", .{session.slice()});
+
+    // The saved names the Store reads back leave it out, so a loaded subset naming the others needs no find_tools.
+    try command.key.set("retired-loaded");
+    command.configuration = .{};
+    command.configuration.loaded_tools = try .of(&.{ "bash", "stop_action" });
+    try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
+
+    // The next offer is rebuilt without it, and so is the set frozen for the Operation.
+    try submitTestMessage(&storage, &tmp, "retired-input", "retired-input", session.slice(), "hello");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const frozen = "(SELECT tool_set_id FROM model_operation WHERE operation_id=?1)";
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE m.tool_set_id=" ++ frozen ++ " AND t.name='read_action'", .{binding.operation_id}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m WHERE m.tool_set_id=" ++ frozen, .{binding.operation_id}));
+}
+
 test "persisted settings survive reopen and corrupt canonical provider fences current and historical reads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

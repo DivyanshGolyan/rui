@@ -7,7 +7,7 @@ const host_reply = @import("host_reply.zig");
 const protocol = @import("protocol.zig");
 
 pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storage.CoreActionInput, faults: storage.Faults) !void {
-    if (input.arguments.length > core.read_action_max_argument_bytes) return fail(store, arena, input, "arguments exceed 4096 bytes", faults);
+    if (input.arguments.length > core.stop_action_max_argument_bytes) return fail(store, arena, input, "arguments exceed 4096 bytes", faults);
     const bytes = try arena.alloc(u8, @intCast(input.arguments.length));
     try store.readCoreArguments(input, bytes);
     const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
@@ -15,8 +15,8 @@ pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storag
         else => return fail(store, arena, input, "expected an object containing only action", faults),
     };
     if (root != .object or root.object.count() != 1 or !root.object.contains("action")) return fail(store, arena, input, "expected an object containing only action", faults);
-    var arguments: core.ReadAction = undefined;
-    const check = try core.checkReadAction(arena, bytes, &arguments);
+    var arguments: core.StopAction = undefined;
+    const check = try core.checkStopAction(arena, bytes, &arguments);
     if (check == .rejected) return fail(store, arena, input, check.rejected, faults);
     const stopped = try store.stopAction(input.binding, arguments.action, faults);
     switch (stopped) {
@@ -63,7 +63,7 @@ test "stop_action settles owned Actions once and suppresses background input" {
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 const workspace = try storage.testingCanonicalCwd(std.testing.io, &workspace_buffer);
                 var configure = try storage.testingCompleteConfiguration("stop-test", "", workspace, "model-a");
-                configure.configuration.tools = try .of(&.{ "bash", "read_action", "stop_action" });
+                configure.configuration.tools = try .of(&.{ "bash", "stop_action" });
                 configure.configuration.permission_mode.state = .value;
                 try configure.configuration.permission_mode.value.set(if (mode == .waiting) "ask" else "bypass");
                 const session = (try database.configure(&configure, .{})).accepted.session;
@@ -115,7 +115,7 @@ test "stop_action refuses another Session's Action" {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try storage.testingCanonicalCwd(std.testing.io, &workspace_buffer);
             var configure = try storage.testingCompleteConfiguration("stop-owner", "", workspace, "model-a");
-            configure.configuration.tools = try .of(&.{ "bash", "read_action", "stop_action" });
+            configure.configuration.tools = try .of(&.{ "bash", "stop_action" });
             configure.configuration.permission_mode.state = .value;
             try configure.configuration.permission_mode.value.set("bypass");
             const owner = (try database.configure(&configure, .{})).accepted.session;
@@ -155,7 +155,7 @@ test "stop_action cancellation races do not fence the Store" {
                     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                     const workspace = try storage.testingCanonicalCwd(std.testing.io, &workspace_buffer);
                     var configure = try storage.testingCompleteConfiguration("stale-stop", "", workspace, "model-a");
-                    configure.configuration.tools = try .of(&.{ "bash", "read_action", "stop_action" });
+                    configure.configuration.tools = try .of(&.{ "bash", "stop_action" });
                     configure.configuration.permission_mode.state = .value;
                     try configure.configuration.permission_mode.value.set("bypass");
                     const session = (try database.configure(&configure, .{})).accepted.session;
@@ -207,89 +207,74 @@ test "stop_action cancellation races do not fence the Store" {
     }.check);
 }
 
-test "read_action and stop_action return verified typed Resolution references without fencing" {
+test "stop_action returns a verified typed Resolution reference without fencing" {
     try storage.testing.forEachEngine(struct {
         fn check(case: *storage.testing.Case) !void {
             const png = @embedFile("codecs/fixtures/image-input/pixel.png");
-            const choices = [_]enum { read, stop, read_offset }{ .read, .stop, .read_offset };
-            for (choices) |choice| {
-                for ([_]bool{ false, true }) |reopen| {
-                    var tmp = std.testing.tmpDir(.{});
-                    defer tmp.cleanup();
-                    var database: storage.Store = undefined;
+            for ([_]bool{ false, true }) |reopen| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var database: storage.Store = undefined;
+                try storage.testing.testingStore(case, &database, &tmp, std.testing.io);
+                var opened = true;
+                defer if (opened) database.close() catch unreachable;
+                var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena_state.deinit();
+                const arena = arena_state.allocator();
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try storage.testingCompleteConfiguration("typed-control", "", try storage.testingCanonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                configure.configuration.tools = try .of(&.{ "read_image", "stop_action" });
+                const session = (try database.configure(&configure, .{})).accepted.session;
+                try storage.testingSubmitMessage(&database, &tmp, "typed-task", "typed-task", session.slice(), "inspect");
+                const first = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+                try queueCallsForTesting(&database, &tmp, arena, first, "typed-target", "read_image", &.{"{\"path\":\"image.png\"}"});
+                const selected = (try database.nextAction(.read_image, .fromFree(1, false))).?;
+                const effect = (try database.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
+                try storage.testing.settleTestActionParts(&database, &tmp, effect, &.{
+                    .{ .bytes = png, .kind = .{ .image = .{} } },
+                });
+                const content_id = try storage.testing.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{selected.action_id});
+                if (reopen) {
+                    try database.close();
+                    opened = false;
                     try storage.testing.testingStore(case, &database, &tmp, std.testing.io);
-                    var opened = true;
-                    defer if (opened) database.close() catch unreachable;
-                    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
-                    defer arena_state.deinit();
-                    const arena = arena_state.allocator();
-                    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-                    var configure = try storage.testingCompleteConfiguration("typed-control", "", try storage.testingCanonicalCwd(std.testing.io, &workspace_buffer), "model-a");
-                    configure.configuration.tools = try .of(&.{ "read_action", "read_image", "stop_action" });
-                    const session = (try database.configure(&configure, .{})).accepted.session;
-                    try storage.testingSubmitMessage(&database, &tmp, "typed-task", "typed-task", session.slice(), "inspect");
-                    const first = (try database.admitNextModelAttempt(.{})).?.permit.binding;
-                    try queueCallsForTesting(&database, &tmp, arena, first, "typed-target", "read_image", &.{"{\"path\":\"image.png\"}"});
-                    const selected = (try database.nextAction(.read_image, .fromFree(1, false))).?;
-                    const effect = (try database.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
-                    try storage.testing.settleTestActionParts(&database, &tmp, effect, &.{
-                        .{ .bytes = png, .kind = .{ .image = .{} } },
-                    });
-                    const content_id = try storage.testing.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{selected.action_id});
-                    if (reopen) {
-                        try database.close();
-                        opened = false;
-                        try storage.testing.testingStore(case, &database, &tmp, std.testing.io);
-                        opened = true;
-                    }
-                    const request: action_read.Request = .{ .session = session, .action_id = selected.action_id };
-                    const original_position = try storage.testing.queryU64(&database, "SELECT acceptance_position FROM action_operation WHERE action_id=?1", .{selected.action_id});
-                    const original_length = try storage.testing.queryU64(&database, "SELECT byte_length FROM content WHERE content_id=?1", .{content_id});
-                    const next = (try database.admitNextModelAttempt(.{})).?.permit.binding;
-                    const args = if (choice == .read_offset)
-                        try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\",\"offset\":\"1\"}}", .{selected.action_id})
-                    else
-                        try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\"}}", .{selected.action_id});
-                    try queueCallsForTesting(&database, &tmp, arena, next, "typed-reader", if (choice == .stop) "stop_action" else "read_action", &.{args});
-                    const input = (try database.nextCoreWork(.fromFree(1, false))).?.action;
-                    const outcome = if (choice == .stop) run(&database, arena, &input, .{}) else @import("read_action_tool.zig").run(&database, arena, &input, .{});
-                    try std.testing.expect(if (outcome) |_| true else |err| failed: {
-                        std.debug.print("typed {s} propagated {s}\n", .{ @tagName(choice), @errorName(err) });
-                        break :failed false;
-                    });
-                    try std.testing.expect(!database.isFenced());
-                    var result: action_read.Read = undefined;
-                    try database.readAction(&.{ .session = session, .action_id = input.binding.action_id }, &result);
-                    try std.testing.expect(result.status == .resolved);
-                    const text = result.status.resolved.window.text.slice();
-                    var retained: action_read.Read = undefined;
-                    try database.readAction(&request, &retained);
-                    try std.testing.expect(retained.status == .resolved_parts);
-                    const resolution = retained.status.resolved_parts;
-                    try std.testing.expectEqualStrings("succeeded", resolution.code.slice());
-                    try std.testing.expectEqual(original_position, resolution.position);
-                    try std.testing.expectEqual(original_length, resolution.content.parts.identity.length);
-                    if (choice == .read_offset) {
-                        try std.testing.expectEqualStrings("failed", result.status.resolved.resolution.code.slice());
-                        try std.testing.expect(std.mem.indexOf(u8, text, "offset") != null);
-                    } else {
-                        try std.testing.expectEqualStrings("succeeded", result.status.resolved.resolution.code.slice());
-                        const json = try std.json.parseFromSlice(std.json.Value, arena, text, .{});
-                        defer json.deinit();
-                        const final = json.value.object.get("final").?.object;
-                        try std.testing.expectEqualStrings("resolved", json.value.object.get("state").?.string);
-                        try std.testing.expect(final.get("window").? == .null);
-                        try std.testing.expectEqualStrings("parts", final.get("content").?.object.get("type").?.string);
-                        try std.testing.expectEqualStrings("succeeded", final.get("code").?.string);
-                        try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{resolution.position}), final.get("position").?.string);
-                        try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{resolution.content.parts.identity.length}), final.get("content").?.object.get("bytes").?.string);
-                        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(resolution.content.parts.identity.digest, .lower), final.get("content").?.object.get("sha256").?.string);
-                        try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{selected.action_id}), final.get("content").?.object.get("owner").?.object.get("action").?.string);
-                    }
-                    try std.testing.expectEqual(content_id, try storage.testing.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{selected.action_id}));
-                    try std.testing.expectEqual(@as(u64, 0), try storage.testing.queryU64(&database, "SELECT count(*) FROM action_stop WHERE target_action_id=?1", .{selected.action_id}));
-                    try std.testing.expect(!database.isFenced());
+                    opened = true;
                 }
+                const request: action_read.Request = .{ .session = session, .action_id = selected.action_id };
+                const original_position = try storage.testing.queryU64(&database, "SELECT acceptance_position FROM action_operation WHERE action_id=?1", .{selected.action_id});
+                const original_length = try storage.testing.queryU64(&database, "SELECT byte_length FROM content WHERE content_id=?1", .{content_id});
+                const next = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+                const args = try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\"}}", .{selected.action_id});
+                try queueCallsForTesting(&database, &tmp, arena, next, "typed-reader", "stop_action", &.{args});
+                const input = (try database.nextCoreWork(.fromFree(1, false))).?.action;
+                try run(&database, arena, &input, .{});
+                try std.testing.expect(!database.isFenced());
+                var result: action_read.Read = undefined;
+                try database.readAction(&.{ .session = session, .action_id = input.binding.action_id }, &result);
+                try std.testing.expect(result.status == .resolved);
+                const text = result.status.resolved.window.text.slice();
+                var retained: action_read.Read = undefined;
+                try database.readAction(&request, &retained);
+                try std.testing.expect(retained.status == .resolved_parts);
+                const resolution = retained.status.resolved_parts;
+                try std.testing.expectEqualStrings("succeeded", resolution.code.slice());
+                try std.testing.expectEqual(original_position, resolution.position);
+                try std.testing.expectEqual(original_length, resolution.content.parts.identity.length);
+                try std.testing.expectEqualStrings("succeeded", result.status.resolved.resolution.code.slice());
+                const json = try std.json.parseFromSlice(std.json.Value, arena, text, .{});
+                defer json.deinit();
+                const final = json.value.object.get("final").?.object;
+                try std.testing.expectEqualStrings("resolved", json.value.object.get("state").?.string);
+                try std.testing.expect(final.get("window").? == .null);
+                try std.testing.expectEqualStrings("parts", final.get("content").?.object.get("type").?.string);
+                try std.testing.expectEqualStrings("succeeded", final.get("code").?.string);
+                try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{resolution.position}), final.get("position").?.string);
+                try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{resolution.content.parts.identity.length}), final.get("content").?.object.get("bytes").?.string);
+                try std.testing.expectEqualStrings(&std.fmt.bytesToHex(resolution.content.parts.identity.digest, .lower), final.get("content").?.object.get("sha256").?.string);
+                try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{selected.action_id}), final.get("content").?.object.get("owner").?.object.get("action").?.string);
+                try std.testing.expectEqual(content_id, try storage.testing.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{selected.action_id}));
+                try std.testing.expectEqual(@as(u64, 0), try storage.testing.queryU64(&database, "SELECT count(*) FROM action_stop WHERE target_action_id=?1", .{selected.action_id}));
+                try std.testing.expect(!database.isFenced());
             }
         }
     }.check);

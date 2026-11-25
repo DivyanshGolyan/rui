@@ -18,7 +18,6 @@ pub const Call = union(enum) {
     find_tools,
     /// The id of the Session the message is for.
     message_agent: []const u8,
-    read_action,
     read_image,
     read_transcript: ?Bounded(session_id.bytes),
     skill,
@@ -56,11 +55,6 @@ pub fn describe(call: Call) Description {
         .read_image => blk: {
             var out: Description = .{};
             out.set("Read an image") catch unreachable;
-            break :blk out;
-        },
-        .read_action => blk: {
-            var out: Description = .{};
-            out.set("Read an Action") catch unreachable;
             break :blk out;
         },
         .read_transcript => |id| blk: {
@@ -247,7 +241,6 @@ test "TPR-4 every tool call has fixed words, or the words of what it names" {
         .{ .call = .{ .message_agent = id }, .expected = "Message abc123" },
         .{ .call = .find_tools, .expected = "Find tools" },
         .{ .call = .read_image, .expected = "Read an image" },
-        .{ .call = .read_action, .expected = "Read an Action" },
         .{ .call = .{ .read_transcript = own }, .expected = "Read own transcript" },
         .{ .call = .{ .read_transcript = other }, .expected = "Read zzzzzz's transcript" },
         .{ .call = .skill, .expected = "Use skills" },

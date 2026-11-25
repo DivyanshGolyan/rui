@@ -39,7 +39,7 @@ pub fn deliver(database: *store.Store, delivery: Delivery, code: store.ActionRes
 // Runners may use Store reads and effect transactions, but settlement is owned
 // by this module. Restrict the check to production code above the first test.
 test "core runners use the shared settlement boundary" {
-    const sources = .{ @embedFile("read_action_tool.zig"), @embedFile("read_transcript.zig"), @embedFile("stop_action_tool.zig") };
+    const sources = .{ @embedFile("read_transcript.zig"), @embedFile("stop_action_tool.zig") };
     inline for (sources) |source| {
         const production = source[0..std.mem.indexOf(u8, source, "\ntest ").?];
         inline for (.{ "succeed" ++ "CoreCall", "fail" ++ "CoreCall", "resolve" ++ "CoreCall", "settle" ++ "ActionAttempt" }) |entry| {

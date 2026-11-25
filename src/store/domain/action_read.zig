@@ -115,7 +115,7 @@ pub fn actionRead(a: anytype, request: *const read.Request, out: *read.Read) !vo
     window.more = window.next < reference.length;
 }
 
-/// The sole immutable Resolution, shared by native/model read_action and
+/// The sole immutable Resolution, shared by native `action read`, `stop_action` and
 /// background final input rendering. Both stream its existing content.
 pub const SavedResolution = struct {
     resolution: read.Resolution,

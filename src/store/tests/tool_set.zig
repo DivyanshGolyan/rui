@@ -880,9 +880,9 @@ test "stop_action is offered exactly when it is loaded" {
                 var configure = try completeConfiguration("paired-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
                 configure.configuration.tools = try switch (mask) {
                     0 => @import("../../command_input.zig").ToolsField.of(&.{}),
-                    1 => @import("../../command_input.zig").ToolsField.of(&.{"read_action"}),
+                    1 => @import("../../command_input.zig").ToolsField.of(&.{"read_transcript"}),
                     2 => @import("../../command_input.zig").ToolsField.of(&.{"stop_action"}),
-                    3 => @import("../../command_input.zig").ToolsField.of(&.{ "read_action", "stop_action" }),
+                    3 => @import("../../command_input.zig").ToolsField.of(&.{ "read_transcript", "stop_action" }),
                     else => unreachable,
                 };
                 const session = (try storage.configure(&configure, .{})).accepted.session;
@@ -902,7 +902,7 @@ test "the offer at the settings limit holds exactly the loaded tools" {
             const extras = comptime blk: {
                 @setEvalBranchQuota(10_000_000);
                 var records: [126]tool_defs.Record = undefined;
-                const remaining_bytes = protocol.max_tool_list_name_bytes - "find_tools".len - "read_action".len;
+                const remaining_bytes = protocol.max_tool_list_name_bytes - "find_tools".len - "read_transcript".len;
                 for (&records, 0..) |*record, i| {
                     const prefix = std.fmt.comptimePrint("stub{d:0>3}", .{i});
                     const length = remaining_bytes / records.len + @intFromBool(i < remaining_bytes % records.len);
@@ -935,8 +935,8 @@ test "the offer at the settings limit holds exactly the loaded tools" {
                         var loaded: protocol.ToolsField = .{ .state = .value };
                         try allowed.insert("find_tools");
                         try loaded.insert("find_tools");
-                        try allowed.insert("read_action");
-                        if (loaded_read) try loaded.insert("read_action");
+                        try allowed.insert("read_transcript");
+                        if (loaded_read) try loaded.insert("read_transcript");
                         if (explicit) {
                             try allowed.insert("stop_action");
                             try loaded.insert("stop_action");

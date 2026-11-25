@@ -16,17 +16,10 @@ pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
 pub const find_tools_description = "Find and load tools available to this Session but not yet loaded, or ask every MCP server to list its tools again. Give one to eight space-separated search words, at most 64 bytes each; a tool matches any word in its name or description, ignoring ASCII case. Loads at most eight matches in name order. Loaded tools become available on your next request. Set reload to true, with or without words, to ask every MCP server to list its tools again: the reload returns at once, and a server's new tools can be found with a later find_tools call.";
 pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces; each word is at most 64 bytes. Required unless reload is true.\"},\"reload\":{\"type\":\"boolean\",\"description\":\"true asks every configured MCP server to list its tools again. This call's search uses the tools offered now.\"}},\"additionalProperties\":false}";
 
-pub const read_action_description = "Read an Action in your own Session by its decimal action ID. Pending Actions report waiting_approval, queued or attempted. A resolved Action returns its immutable final Resolution and up to 4096 UTF-8 bytes, with byte offsets and a more flag. Continue with the returned next offset; reading never consumes or stops the Action. Published values are returned in pages; pass the returned values.next as after to continue. This is polling, not a subscription.";
-pub const read_action_schema = "{\"type\":\"object\",\"properties\":{" ++
-    "\"action\":{\"type\":\"string\",\"pattern\":\"^[1-9][0-9]*$\",\"maxLength\":19,\"description\":\"Action ID in your own Session; positive decimal, at most 9223372036854775807.\"}," ++
-    std.fmt.comptimePrint("\"offset\":{{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\",\"maxLength\":10,\"description\":\"UTF-8 byte cursor, at most {d}; omitted means zero. Pending Actions require zero.\"}}", .{@import("content_string.zig").max_bytes}) ++
-    ",\"after\":{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\",\"maxLength\":19,\"description\":\"Return values after this ordinal; omitted means zero.\"}" ++
-    "},\"required\":[\"action\"],\"additionalProperties\":false}";
-
 pub const stop_action_description = "Stop an Action in your own Session by its decimal Action ID. Returns its final Resolution once it has ended.";
 pub const stop_action_schema = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"pattern\":\"^[1-9][0-9]*$\",\"maxLength\":19}},\"required\":[\"action\"],\"additionalProperties\":false}";
 
-pub const read_transcript_description = "Read any Rui Session's public transcript, newest first. Omit id to read your own. Outline lines give entry addresses, kinds, people or tools, call notes, result codes, byte sizes and quoted first-line previews (at most 100 bytes). Use before to page older entries. Open an entry with full and continue its 16 KiB text windows with offset; call entries show the tool name and arguments JSON. Use query for ASCII-case-insensitive word search with quoted snippets; query cannot be combined with full. Private content is never shown.";
+pub const read_transcript_description = "Read any Rui Session's public transcript, newest first. Omit id to read your own. Outline lines give entry addresses, kinds, people or tools, call notes, result codes, byte sizes and quoted first-line previews (at most 100 bytes). Use before to page older entries. An Action's final Resolution and each value it publishes are entries of kind received; reading never consumes or stops the Action. Open an entry with full and continue its 16 KiB text windows with offset; call entries show the tool name and arguments JSON. Use query for ASCII-case-insensitive word search with quoted snippets; query cannot be combined with full. Private content is never shown.";
 const transcript_kind_schema = blk: {
     var names: []const u8 = "";
     for (std.enums.values(@import("activity_read.zig").Kind), 0..) |kind, index| {
@@ -417,13 +410,6 @@ pub const message_agent_record: Record = .{
     .input_schema = message_agent_schema,
 };
 
-pub const read_action_record: Record = .{
-    .name = "read_action",
-    .owner = .rui,
-    .description = read_action_description,
-    .input_schema = read_action_schema,
-};
-
 pub const stop_action_record: Record = .{
     .name = "stop_action",
     .owner = .rui,
@@ -565,9 +551,22 @@ pub fn builtInRunner(name: []const u8) Runner {
     return default_runner;
 }
 
+/// Built-in names that no longer exist. A tool set saved before a removal may still hold the record, so the Store
+/// never offers, lists or resolves one: a Session keeps its saved set and its next offer is rebuilt without the name.
+pub const retired_names = [_][]const u8{"read_action"};
+
 /// SQL predicates over a tool row's `owner` and `name` expressions, generated from the tables above.
 /// A built-in name derives the runner only on a row whose owner has no owner rule, as `Runner.of` does.
 pub const sql = struct {
+    /// True exactly when the row is a retired built-in ([retired_names]): rui-owned, with one of those names.
+    pub fn retired(comptime owner: []const u8, comptime name: []const u8) []const u8 {
+        comptime {
+            var list: []const u8 = "";
+            for (retired_names) |retired_name| list = list ++ (if (list.len == 0) "" else ",") ++ "'" ++ retired_name ++ "'";
+            return "(" ++ owner ++ "='rui' AND " ++ name ++ " IN (" ++ list ++ "))";
+        }
+    }
+
     /// `owner` names an owner with no owner rule, so the row's built-in name decides its runner.
     fn nameRuledOwner(comptime owner: []const u8) []const u8 {
         comptime {
@@ -657,7 +656,6 @@ pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
     .bash = .{ .record = &bash_record, .runner = .bash },
     .find_tools = .{ .record = &find_tools_record, .runner = .core },
     .message_agent = .{ .record = &message_agent_record, .runner = .core },
-    .read_action = .{ .record = &read_action_record, .runner = .core },
     .read_image = .{ .record = &read_image_record, .runner = .read_image },
     .read_transcript = .{ .record = &read_transcript_record, .runner = .core },
     .skill = .{ .record = &skill_record, .runner = .core },
