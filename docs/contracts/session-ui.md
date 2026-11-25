@@ -735,7 +735,7 @@ A link to a Session that no longer exists returns to the Session it was followed
 The label is the complete canonical ID, never an abbreviation or separate identity.
 Pages and Message selection retain that same ID, without abbreviation metadata.
 No colour carries meaning: the glyphs do.
-Activity pages preserve both received and sent peer rows while scrolling in either direction.
+Activity pages preserve received peer rows while scrolling in either direction; a send is drawn once, as the tool row of the call that made it.
 
 In a Session's feed, an ordinary left press followed by a move to another cell starts a drag. Selected cells draw reversed. The user Message marker `›` and margin times keep their original styling.
 On release, Rui clears the highlight and copies the shown text once through OSC 52. Selection resolves keyed rows and offsets, so wrapped rows join. The copy excludes display indents, the user Message marker and its following space, margin times, and link addresses.

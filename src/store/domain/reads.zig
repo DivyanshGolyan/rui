@@ -233,9 +233,7 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
         "SELECT position,ordinal,kind,NULL AS id FROM tool_completions UNION ALL SELECT position,ordinal,kind,id FROM visible_values" ++
             " UNION ALL SELECT outcome_position,0,6,turn_id FROM turn @index(turn_outcome_position) WHERE session_ref=?1 AND outcome_code IS NOT NULL AND " ++ on(6) ++ " AND " ++ range("outcome_position", "0") ++
             " UNION ALL SELECT position,0,7,NULL FROM session_stop @index(session_stop_position) WHERE session_ref=?1 AND " ++ on(7) ++ " AND " ++ range("position", "0") ++ order,
-        "SELECT sender_position AS position,0 AS ordinal,8 AS kind,admission_id AS id FROM message_admission WHERE sender_session_ref=?1 AND " ++ on(8) ++ " AND " ++ range("sender_position", "0") ++
-            " UNION ALL SELECT sender_position,0,9,NULL FROM sent_rejection WHERE sender_session_ref=?1 AND " ++ on(9) ++ " AND " ++ range("sender_position", "0") ++
-            " UNION ALL SELECT session_position,0,10,NULL FROM model_output_item @index(model_output_hosted_history) " ++
+        "SELECT session_position AS position,0 AS ordinal,10 AS kind,NULL AS id FROM model_output_item @index(model_output_hosted_history) " ++
             "WHERE session_ref=?1 AND item_kind=5 AND " ++ on(10) ++ " AND " ++ range("session_position", "0") ++
             " UNION ALL SELECT approval_position,1,12,action_id FROM action_operation @index(action_operation_approval) " ++
             "WHERE session_ref=?1 AND approval_position IS NOT NULL AND " ++ on(12) ++ " AND " ++ range("approval_position", "1") ++ order,
@@ -249,6 +247,7 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
     };
 }
 
+/// Every kind bit. Codes 8 and 9 belonged to the deleted `sent` and `send_failed` kinds; no row carries them, so their bits select nothing.
 const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 18) - 2});
 
 fn activityKindCode(kind: activity_facts.Item.Kind) u5 {
@@ -260,8 +259,6 @@ fn activityKindCode(kind: activity_facts.Item.Kind) u5 {
         .tool_result => 5,
         .turn_ended => 6,
         .stop => 7,
-        .sent => 8,
-        .send_failed => 9,
         .hosted_call => 10,
         .received => 11,
         .approval_requested => 12,
@@ -1063,7 +1060,7 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
     }
     var position = request.before_position orelse end;
     var ordinal = request.before_ordinal orelse if (request.before_position == null) @as(u64, std.math.maxInt(i64)) else 0;
-    const text_kinds = activityKinds(.initMany(&.{ .admission, .user, .assistant, .call, .tool_result, .turn_ended, .sent, .received }));
+    const text_kinds = activityKinds(.initMany(&.{ .admission, .user, .assistant, .call, .tool_result, .turn_ended, .received }));
     const kinds = activityKinds(request.kinds) & text_kinds;
     var budget: usize = activity_search_budget;
     var lower: u64 = 0;
@@ -1411,28 +1408,6 @@ fn checkCallDetails(details: *const call_details.Row, metadata: *const activity_
     } else if (field.length <= activity_read.CallText.max_tool_bytes) return error.CorruptStore;
 }
 
-const sent_message = rsql.Read(.{
-    .sql = "SELECT m.session_ref,m.content_id,m.admitted_at," ++ sourced_input.consistentSql("m", "c") ++ " AS consistent " ++
-        "FROM message_admission m LEFT JOIN core_command c ON c.command_key=m.command_key WHERE m.admission_id=?1 AND m.sender_session_ref=?2 AND m.sender_position=?3",
-    .Args = struct { admission: u64, session: []const u8, position: u64 },
-    .Row = struct { session_ref: SessionText, content_id: rsql.Positive, admitted_at: rsql.Positive, consistent: bool },
-    .cardinality = .each,
-});
-
-const send_failure = rsql.Read(.{
-    .sql = "SELECT s.command_key,c.target,c.code,c.kind=2 AND c.accepted=0 AS consistent,s.rejected_at FROM sent_rejection s " ++
-        "LEFT JOIN core_command c ON c.command_key=s.command_key WHERE s.sender_session_ref=?1 AND s.sender_position=?2",
-    .Args = struct { session: []const u8, position: u64 },
-    .Row = struct {
-        command_key: Bounded(idempotency_key.max_bytes),
-        target: SessionText,
-        code: Bounded(outcome_code.max_bytes),
-        consistent: bool,
-        rejected_at: rsql.Positive,
-    },
-    .cardinality = .each,
-});
-
 const turn_outcome = rsql.Read(.{
     .sql = "SELECT t.session_ref,t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
         "AND o.resolution_code IS NOT NULL AS consistent,o.resolution_content_id,t.outcome_at," ++
@@ -1522,53 +1497,6 @@ const MessageRead = struct {
     }
 };
 
-const SentRead = struct {
-    position: u64,
-    sent: *activity_facts.Item.Sent,
-    content_id: u64 = 0,
-    count: RowCount = .{},
-
-    fn queue(read: *SentRead, a: *ReadAccess, session: []const u8) void {
-        readRow(a, sent_message, .{ .admission = read.sent.admission, .session = session, .position = read.position }, read);
-    }
-
-    pub fn visit(read: *SentRead, row: *const sent_message.Row) bool {
-        return visitRow(read, row);
-    }
-
-    fn keep(read: *SentRead, row: *const sent_message.Row) error{CorruptStore}!void {
-        if (!row.consistent) return error.CorruptStore;
-        read.sent.target = .{ .session = row.session_ref };
-        read.sent.admitted_at = row.admitted_at.get();
-        read.content_id = row.content_id.get();
-    }
-};
-
-const FailureRead = struct {
-    position: u64,
-    failed: *activity_facts.Item.SendFailed,
-    at: u64 = 0,
-    count: RowCount = .{},
-
-    fn queue(read: *FailureRead, a: *ReadAccess, session: []const u8) void {
-        readRow(a, send_failure, .{ .session = session, .position = read.position }, read);
-    }
-
-    pub fn visit(read: *FailureRead, row: *const send_failure.Row) bool {
-        return visitRow(read, row);
-    }
-
-    fn keep(read: *FailureRead, row: *const send_failure.Row) error{CorruptStore}!void {
-        if (!row.consistent) return error.CorruptStore;
-        read.failed.* = .{
-            .key = row.command_key,
-            .target = if (session_id.valid(row.target.slice())) .{ .session = row.target } else null,
-            .code = row.code,
-        };
-        read.at = row.rejected_at.get();
-    }
-};
-
 const OutcomeRead = struct {
     position: u64,
     turn: u64,
@@ -1636,8 +1564,6 @@ const ItemRead = struct {
         content: struct { read: PublicContentRead, presentation: PresentationRead = undefined, answer: answer_entry.Result = null },
         call: struct { proposal: ProposalRead, resolved: call_details.Row = undefined, found: store_access.Found = undefined },
         hosted: HostedRead,
-        sent: struct { read: SentRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined },
-        failure: struct { read: FailureRead, label: LabelRead = undefined },
         outcome: struct { read: OutcomeRead, metadata: content_metadata.Row = undefined },
         stop: StopRead,
         approval: struct { row: approval_request.Result = null, metadata: activity_read.ProposalMetadata = undefined, proposal: ProposalRead = undefined, details: call_details.Row = undefined, found: store_access.Found = undefined },
@@ -1696,21 +1622,6 @@ const ItemRead = struct {
                 }
             },
             10 => read.state.hosted.queue(a, session),
-            8 => {
-                const sent = &read.state.sent;
-                if (read.round == 1) sent.read.queue(a, session) else {
-                    a.read(content_metadata, .{ .content_id = sent.read.content_id }, &sent.metadata);
-                    sent.label = .{ .peer = &item.value.sent.target };
-                    sent.label.queue(a);
-                }
-            },
-            9 => {
-                const failure = &read.state.failure;
-                if (read.round == 1) failure.read.queue(a, session) else if (item.value.send_failed.target) |*peer| {
-                    failure.label = .{ .peer = peer };
-                    failure.label.queue(a);
-                }
-            },
             6 => {
                 const outcome = &read.state.outcome;
                 if (read.round == 1) outcome.read.queue(a, session) else a.read(content_metadata, .{ .content_id = outcome.read.content_id.? }, &outcome.metadata);
@@ -1814,26 +1725,6 @@ const ItemRead = struct {
                 try read.state.hosted.found();
                 item.at = read.state.hosted.at;
             },
-            8 => {
-                const sent = &read.state.sent;
-                if (read.round == 1) {
-                    if (!try sent.read.count.found()) return error.CorruptStore;
-                    item.at = item.value.sent.admitted_at;
-                    return;
-                }
-                item.value.sent.content = try content_parts.publicValue(&sent.metadata, .{ .message = item.value.sent.admission });
-                try sent.label.found();
-                read.exposes(sent.read.content_id, item.value.sent.content);
-            },
-            9 => {
-                const failure = &read.state.failure;
-                if (read.round == 1) {
-                    if (!try failure.read.count.found()) return error.CorruptStore;
-                    item.at = failure.read.at;
-                    return;
-                }
-                if (item.value.send_failed.target != null) try failure.label.found();
-            },
             6 => {
                 const outcome = &read.state.outcome;
                 if (read.round == 1) {
@@ -1920,16 +1811,6 @@ const ItemRead = struct {
             10 => {
                 item.value = .{ .hosted_call = undefined };
                 read.state = .{ .hosted = .{ .position = read.position, .presentation = &item.value.hosted_call } };
-            },
-            8 => {
-                const admission = (row.id orelse return error.CorruptStore).get();
-                item.value = .{ .sent = undefined };
-                item.value.sent.admission = admission;
-                read.state = .{ .sent = .{ .read = .{ .position = read.position, .sent = &item.value.sent } } };
-            },
-            9 => {
-                item.value = .{ .send_failed = undefined };
-                read.state = .{ .failure = .{ .read = .{ .position = read.position, .failed = &item.value.send_failed } } };
             },
             6 => {
                 item.value = .{ .turn_ended = undefined };

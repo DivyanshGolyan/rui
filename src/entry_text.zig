@@ -19,8 +19,6 @@ const skipped = .{
     // Display words, printed by the caller as the row's line.
     .{ "ProposalMetadata", "description" },
     .{ "ApprovalRequested", "description" },
-    // Hidden on purpose: an outline never names the code of a refused send (`read_transcript` tests assert it).
-    .{ "SendFailed", "code" },
 };
 
 const Leaf = enum { integer, flag, tag, quoted, peer, presentation, body };

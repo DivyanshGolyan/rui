@@ -4497,50 +4497,37 @@ test "response framing rejects ambiguous or malformed fields before interpreting
 test "client activity peer boundary rejects noncanonical IDs and owns canonical labels" {
     for ([_][]const u8{ "k7m2qx", "09azvw", "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", "01234567-89ab-4cde-8012-3456789abcde" }, 0..) |session, index| {
         var body: protocol.RequestBuffer = .{};
-        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
+        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"received\":{\"admission\":\"1\",\"key\":\"key\\u0000雪\",\"turn\":null,\"state\":\"queued\",\"admitted_at\":\"1\",\"source_action\":null,\"content\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"abababababababababababababababababababababababababababababababab\"},\"sender\":{\"session\":");
         try body.appendJsonString(session);
-        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\",\"newest_content\":null},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("}}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\",\"newest_content\":null},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (index < 2) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
-            try std.testing.expectEqualStrings(session, page.facts.items[0].value.send_failed.target.?.session.slice());
-            try std.testing.expectEqualStrings("key\x00雪", page.facts.items[0].value.send_failed.key.slice());
+            try std.testing.expectEqualStrings(session, page.facts.items[0].value.received.sender.?.session.slice());
+            try std.testing.expectEqualStrings("key\x00雪", page.facts.items[0].value.received.key.slice());
         } else try std.testing.expectError(error.InvalidResponse, protocol_reply.ActivityPage.parse(body.slice(), .{}));
     }
 }
 
-test "client failed-send target is required and nullable without relaxing peers" {
-    const cases = [_]struct { field: []const u8, failure: ?anyerror }{
-        .{ .field = "\"target\":null,", .failure = null },
-        .{ .field = "\"target\":{\"session\":\"absent\",\"label\":\"Review\"},", .failure = null },
-        .{ .field = "", .failure = error.InvalidActivityPage },
-        .{ .field = "\"target\":\"\",", .failure = error.InvalidActivityPage },
-        .{ .field = "\"target\":false,", .failure = error.InvalidActivityPage },
-        .{ .field = "\"target\":{},", .failure = error.InvalidActivityPage },
-        .{ .field = "\"target\":{\"session\":null},", .failure = error.InvalidActivityPage },
-        .{ .field = "\"target\":{\"session\":\"\",\"label\":null},", .failure = error.InvalidResponse },
-        .{ .field = "\"target\":{\"session\":\"absent\",\"label\":\"bad\\nlabel\"},", .failure = error.InvalidResponse },
-    };
-    for (cases, 0..) |case, index| {
+test "client activity sender labels are canonical or refused" {
+    for ([_]struct { label: []const u8, ok: bool }{
+        .{ .label = "Review the WAL", .ok = true },
+        .{ .label = "peer \\ label \" é", .ok = true },
+        .{ .label = "bad\nlabel", .ok = false },
+    }) |case| {
         var body: protocol.RequestBuffer = .{};
-        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused\",");
-        try body.append(case.field);
-        try body.append("\"code\":\"unsupported_reasoning_effort\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\",\"newest_content\":null},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"revision\":\"1\",\"workspace\":\"/w\"}}");
-        if (case.failure) |failure| {
-            try std.testing.expectError(failure, protocol_reply.ActivityPage.parse(body.slice(), .{}));
-            continue;
-        }
-        const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
-        @memset(body.bytes[0..body.len], 'x');
-        const failed = page.facts.items[0].value.send_failed;
-        try std.testing.expectEqualStrings("refused", failed.key.slice());
-        try std.testing.expectEqualStrings("unsupported_reasoning_effort", failed.code.slice());
-        if (index == 0) {
-            try std.testing.expect(failed.target == null);
-        } else {
-            try std.testing.expectEqualStrings("absent", failed.target.?.session.slice());
-            try std.testing.expectEqualStrings("Review", failed.target.?.label.slice());
-        }
+        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"received\":{\"admission\":\"1\",\"key\":\"key\\u0000雪\",\"turn\":null,\"state\":\"queued\",\"admitted_at\":\"1\",\"source_action\":null,\"content\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"abababababababababababababababababababababababababababababababab\"},\"sender\":{\"session\":");
+        try body.appendJsonString("k7m2qx");
+        try body.append(",\"label\":");
+        try body.appendJsonString(case.label);
+        try body.append("}}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\",\"newest_content\":null},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        if (case.ok) {
+            const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
+            @memset(body.bytes[0..body.len], 'x');
+            const sender = page.facts.items[0].value.received.sender.?;
+            try std.testing.expectEqualStrings(case.label, sender.label.slice());
+            try std.testing.expectEqualStrings(case.label, sender.name());
+        } else try std.testing.expectError(error.InvalidResponse, protocol_reply.ActivityPage.parse(body.slice(), .{}));
     }
 }
 
