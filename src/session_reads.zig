@@ -1001,19 +1001,19 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
 const LastAnswer = struct { position: u64, ordinal: u64, content: protocol_reply.CommandObservation.ContentReference };
 
 fn lastAnswer(requests: client.Requests, store: []const u8, session: []const u8) !?LastAnswer {
-    var cursor: protocol_reply.ConversationCursor = .{ .end = 0 };
-    while (true) {
-        const page = switch (try requests.conversationPage(store, session, cursor)) {
-            .page => |value| value,
-            .failure => |failure| return requests.failRead(failure),
-        };
-        for (page.items[0..page.count]) |item| if (item.kind == .assistant) {
-            // The page decoder refuses an assistant item that is not text.
-            const text = item.content.text;
-            return .{ .position = item.position, .ordinal = item.ordinal, .content = .{ .bytes = text.length, .digest = text.digest } };
-        };
-        cursor = page.continuation() orelse return null;
-    }
+    const page = switch (try requests.activityPage(store, session, .{
+        .direction = .backward,
+        .kinds = .initOne(.assistant),
+        .limit = 1,
+    })) {
+        .page => |value| value,
+        .failure => |failure| return requests.failRead(failure),
+    };
+    if (page.facts.count == 0) return null;
+    const item = page.facts.items[0];
+    // The Store serves an assistant entry's text or fences it, so the content is always a text reference.
+    const text = item.value.assistant.content;
+    return .{ .position = item.position, .ordinal = item.ordinal, .content = .{ .bytes = text.length, .digest = text.digest } };
 }
 
 const ConfigureObservation = enum { resolved, absent, invalid };
