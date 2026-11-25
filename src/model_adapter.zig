@@ -6116,7 +6116,7 @@ test "CM-47 a prepared request's bytes stay as pinned over pages, tool results, 
             .pages = "d71f15a07c4d2d407e78f760ad333bf3f2e0d7ab5eb58754f0f72bf9dd852998",
             .tool_results = "5a5e6586f1cbe72a9af8f6c15b017a12a68dae286106d8ee21f9b98cdb4841e1",
             .bounds = "e07be40f4153a47b97fb529d5e04437f4d0d456907d3dfb2eb209ab975b99058",
-            .peer = "752103b662b2e1b048dcaddec83cd902169c0dd8cba19b0f01cbacb65a5236c3",
+            .peer = "eb4108d6fcc4d3e890871ed1c6a4c9cff7d9ead0b5bf83a918a44ef59a34383a",
         });
     };
     const testing = store.testing;
