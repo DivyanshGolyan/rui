@@ -1078,8 +1078,7 @@ test "SL-11: an Archived window row's first Message is its list row's first Mess
                     .none => {},
                     .peer => {
                         const peer = try testing.configureTestSession(&storage, "sl11-peer-sender");
-                        const position = try testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{peer.slice()});
-                        try testing.exec(&storage, "UPDATE message_admission SET source_kind=2,sender_session_ref=?1,sender_position=?2 WHERE session_ref=?3", .{ peer.slice(), position, session.slice() });
+                        try testing.exec(&storage, "UPDATE message_admission SET source_kind=2,sender_session_ref=?1 WHERE session_ref=?2", .{ peer.slice(), session.slice() });
                     },
                 }
                 var archive_key: [64]u8 = undefined;
