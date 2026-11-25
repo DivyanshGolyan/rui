@@ -30,6 +30,7 @@ const Messages = struct {
     pub const interpretEvent = messages.interpretEvent;
     pub const nextMember = messages.nextMember;
     pub const hostedCall = messages.hostedCall;
+    pub const nextHostedTarget = messages.nextHostedTarget;
     pub const finish = messages.finish;
     pub const compacts = messages.compacts;
     pub const initial = messages.initial;
@@ -54,6 +55,7 @@ fn Responses(comptime version: responses.Version) type {
         pub const interpretEvent = responses.interpretEvent;
         pub const nextMember = responses.nextMember;
         pub const hostedCall = responses.hostedCall;
+        pub const nextHostedTarget = responses.nextHostedTarget;
         pub const finish = responses.finish;
         /// Responses compacts: its compaction Operation and trigger are real.
         pub const compacts = true;
@@ -224,6 +226,12 @@ pub noinline fn nextMember(codec: protocol.Codec, data: []const u8, cursor: *cod
 pub fn hostedCall(codec: protocol.Codec, data: []const u8, item: *const codec_abi.OutputItem) codec_abi.HostedCall {
     return switch (codec) {
         inline else => |tag| module(tag).hostedCall(data, item),
+    };
+}
+
+pub fn nextHostedTarget(codec: protocol.Codec, data: []const u8, call: *const codec_abi.HostedCall, cursor: *codec_abi.HostedCursor) ?codec_abi.Range {
+    return switch (codec) {
+        inline else => |tag| module(tag).nextHostedTarget(data, call, cursor),
     };
 }
 

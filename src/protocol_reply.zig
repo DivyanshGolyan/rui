@@ -13,6 +13,7 @@ const transport_policy = @import("transport_policy.zig");
 const wire_field = @import("wire_field.zig");
 const mutation_answer = @import("mutation_answer.zig");
 const content_value = @import("content_value.zig");
+const hosted_action = @import("hosted_action.zig");
 const skill_reference = @import("skill_reference.zig");
 const input_parts = @import("input_parts.zig");
 comptime {
@@ -151,11 +152,12 @@ pub const ActivityPage = struct {
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
+        const HostedAction = struct { kind: JsonEnum(hosted_action.HostedAction), targets: JsonArray(Ref, protocol.HostedActionJson.max_served), targets_total: JsonString(20), pattern: ?Ref };
         const Instruction = struct { turn: ?JsonString(20), revision: ?JsonString(20), content: Ref };
         const Skill = struct { admission: JsonString(20), turn: JsonString(20), ordinal: JsonString(20), name: JsonString(skill_reference.max_name_bytes), content: Ref };
         const ModelCall = struct { model: JsonString(protocol.max_model_bytes), served_model: ?JsonString(protocol.max_model_bytes), input_tokens: ?JsonString(20), output_tokens: ?JsonString(20), cached_tokens: ?JsonString(20), latency_ms: ?JsonString(20), first_event_ms: ?JsonString(20), status: JsonString(protocol.max_code_bytes), attempts: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction, skill: Skill } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation, action: HostedAction }, turn_ended: TurnEnded, stop: Stop, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction, skill: Skill } };
         const Items = JsonArray(Item, 16);
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
         const Calls = JsonArray(CallEntry, 3);
@@ -244,7 +246,14 @@ pub const ActivityPage = struct {
                 },
                 .hosted_call => |call| {
                     if (call.presentation.value.publication_position != fact.position or call.presentation.value.line == null) return error.InvalidActivityPage;
-                    fact.value = .{ .hosted_call = call.presentation.value };
+                    // An action of none names nothing; every other action holds as many targets as it serves, up to the most it serves.
+                    const total = try id(call.action.targets_total, true);
+                    const served = call.action.targets.slice();
+                    if (call.action.kind.value == .none and (total != 0 or call.action.pattern != null)) return error.InvalidActivityPage;
+                    if (total > hosted_action.max_targets or served.len != @min(total, protocol.HostedActionJson.max_served)) return error.InvalidActivityPage;
+                    var action: Fact.HostedAction = .{ .kind = call.action.kind.value, .targets_total = total, .pattern = if (call.action.pattern) |pattern| try textOf(pattern) else null };
+                    for (served) |target| action.targets.append(try textOf(target)) catch return error.InvalidActivityPage;
+                    fact.value = .{ .hosted_call = .{ .presentation = call.presentation.value, .action = action } };
                 },
                 .call => |call| {
                     var value: Fact.Call = .{ .position = fact.position, .operation = try id(call.operation, false), .turn = try id(call.turn, false), .call_ordinal = try id(call.call_ordinal, true), .action = if (call.action) |action| try id(action, false) else null, .rejection = if (call.rejection) |code| code.value else null, .fields = undefined, .description = if (call.description) |text| text.value else null, .tool = if (call.tool) |text| text.value else null, .server = if (call.server) |text| text.value else null };
@@ -4134,12 +4143,53 @@ test "a hosted call travels as its presentation alone, in the conversation and t
 
     var facts: protocol.ActivityFacts = .{ .end = 9, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
     try facts.work.workspace.set("/w");
-    facts.items[0] = .{ .position = 7, .at = 5, .value = .{ .hosted_call = presentation } };
+    var action: protocol.ActivityItem.HostedAction = .{ .kind = .search, .targets_total = 2, .pattern = .{ .length = 1, .digest = @splat(3) } };
+    try action.targets.append(.{ .length = 4, .digest = @splat(1) });
+    try action.targets.append(.{ .length = 0, .digest = @splat(2) });
+    facts.items[0] = .{ .position = 7, .at = 5, .value = .{ .hosted_call = .{ .presentation = presentation, .action = action } } };
     var activity_buffer: [activity_reply.max_page_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&activity_buffer);
     try activity_reply.writePage(&writer, &facts);
     const activity = try ActivityPage.parse(writer.buffered(), .{});
-    try std.testing.expectEqualDeep(presentation, activity.facts.items[0].value.hosted_call);
+    try std.testing.expectEqualDeep(presentation, activity.facts.items[0].value.hosted_call.presentation);
+    try std.testing.expectEqualDeep(action, activity.facts.items[0].value.hosted_call.action);
+}
+
+test "a hosted call's action names nothing under none and serves as many targets as it holds, up to eight" {
+    const line = try protocol.ToolLine.plain("Search the web");
+    const presentation: protocol.ToolPresentation = .{ .line = line, .code = .succeeded, .sign = .finished, .publication_position = 7 };
+    const Case = struct { kind: @import("hosted_action.zig").HostedAction, served: usize, total: u64, pattern: bool = false, valid: bool };
+    for ([_]Case{
+        .{ .kind = .none, .served = 0, .total = 0, .valid = true },
+        .{ .kind = .none, .served = 0, .total = 1, .valid = false },
+        .{ .kind = .none, .served = 1, .total = 1, .valid = false },
+        .{ .kind = .none, .served = 0, .total = 0, .pattern = true, .valid = false },
+        .{ .kind = .search, .served = 0, .total = 0, .valid = true },
+        .{ .kind = .search, .served = 1, .total = 1, .valid = true },
+        .{ .kind = .search, .served = 8, .total = 8, .valid = true },
+        .{ .kind = .search, .served = 8, .total = 9, .valid = true },
+        .{ .kind = .search, .served = 8, .total = 64, .valid = true },
+        .{ .kind = .search, .served = 8, .total = 65, .valid = false },
+        .{ .kind = .search, .served = 8, .total = 1_000_000, .valid = false },
+        .{ .kind = .search, .served = 7, .total = 9, .valid = false },
+        .{ .kind = .search, .served = 2, .total = 1, .valid = false },
+        .{ .kind = .search, .served = 0, .total = 1, .valid = false },
+        .{ .kind = .find_in_page, .served = 1, .total = 1, .pattern = true, .valid = true },
+        .{ .kind = .open_page, .served = 1, .total = 1, .valid = true },
+    }) |case| {
+        var action: protocol.ActivityItem.HostedAction = .{ .kind = case.kind, .targets_total = case.total, .pattern = if (case.pattern) .{ .length = 2, .digest = @splat(9) } else null };
+        for (0..case.served) |index| try action.targets.append(.{ .length = index, .digest = @splat(1) });
+        var facts: protocol.ActivityFacts = .{ .end = 9, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        try facts.work.workspace.set("/w");
+        facts.items[0] = .{ .position = 7, .at = 5, .value = .{ .hosted_call = .{ .presentation = presentation, .action = action } } };
+        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&writer, &facts);
+        if (case.valid) {
+            const page = try ActivityPage.parse(writer.buffered(), .{});
+            try std.testing.expectEqualDeep(action, page.facts.items[0].value.hosted_call.action);
+        } else try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
+    }
 }
 
 test "session change activity carries refusal text only for a refused later revision" {
