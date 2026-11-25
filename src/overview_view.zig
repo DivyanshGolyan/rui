@@ -701,11 +701,6 @@ pub fn pn(provider: provider_name.Provider) Provider {
     return connection.Name.parse(@tagName(provider)).?;
 }
 
-fn sameProvider(a: ?Provider, b: ?Provider) bool {
-    if (a == null or b == null) return a == null and b == null;
-    return a.?.eql(b.?);
-}
-
 fn shownOf(name: Provider) []const u8 {
     return if (provider_route.builtInOf(name)) |built_in| built_in.shown() else name.slice();
 }
@@ -2601,11 +2596,17 @@ fn factsOf(state: *const State, row: *const Row) session_class.Facts {
         .decidable = row.actions.decide != null,
         .open = if (state.conversing) |open| std.mem.eql(u8, &open, &row.reference) else false,
         .stop_pending = state.stopOverlays(row.reference),
+        .provider = row.provider,
+        .model = row.model.slice(),
     };
 }
 
+fn viewerOf(state: *const State) session_class.Viewer {
+    return .{ .filter = state.archive, .now_ms = state.now_ms, .login_at = state.login_at };
+}
+
 fn classOf(state: *const State, row: *const Row) session_class.Class {
-    return session_class.classify(factsOf(state, row), .{ .filter = state.archive, .now_ms = state.now_ms });
+    return session_class.classify(factsOf(state, row), viewerOf(state));
 }
 
 fn arrange(state: *State) error{OutOfMemory}!void {
@@ -3225,89 +3226,18 @@ fn move(state: *State, action: Action) void {
     else if (target > order.len + 1) .settings else .{ .session = state.rows.items[order[target - 2]].reference };
 }
 
-pub const Trouble = enum { sign_in, api_key, quota, rate_limit };
-pub const Band = struct {
-    trouble: Trouble,
+pub const Band = session_class.Band;
 
-    sessions: u32 = 0,
-
-    resets_at: ?u64 = null,
-
-    provider: ?Provider = null,
-};
-
-const BandRule = struct {
-    trouble: Trouble,
-
-    kind: Kind,
-    matches: *const fn ([]const u8) bool,
-
-    after_login: bool = false,
-
-    until_reset: bool = false,
-};
-
-const band_rules = [_]BandRule{
-    .{ .trouble = .sign_in, .kind = .failed, .matches = signInCode, .after_login = true },
-    .{ .trouble = .api_key, .kind = .failed, .matches = apiKeyCode, .after_login = true },
-    .{ .trouble = .quota, .kind = .failed, .matches = quotaCode, .until_reset = true },
-    .{ .trouble = .rate_limit, .kind = .retrying, .matches = failure_class.rateLimited },
-};
-
-fn signInCode(code: []const u8) bool {
-    return failure_class.of(code) == .sign_in;
-}
-
-fn apiKeyCode(code: []const u8) bool {
-    return failure_class.of(code) == .api_key;
-}
-
-fn quotaCode(code: []const u8) bool {
-    return switch (failure_class.of(code)) {
-        .quota, .plan => true,
-        else => false,
-    };
-}
-
-/// A failure is current until its provider and model answer again: a visible row on both whose answered state (a finished turn, or a tool call it proposed) began at or after it.
-/// Rows on another provider or model say nothing about this one's quota or sign-in.
+/// The provider trouble the visible Sessions share, if any; `session_class.trouble` decides it.
 pub fn band(state: *const State) ?Band {
-    var newest: [band_rules.len]?struct { failed: WorkState.Failed, row: *const Row } = @splat(null);
-    var retrying: [band_rules.len]u32 = @splat(0);
-    for (state.rows.items) |*row| {
-        if (!classOf(state, row).visible or row.archive_state == .archived) continue;
-        const work = (&row.state).asOf(state.now_ms);
-        switch (work) {
-            .failed => |failed| for (band_rules, &newest) |rule, *held| {
-                if (rule.kind == .failed and rule.matches(failed.code.slice()) and (held.* == null or held.*.?.failed.since < failed.since)) held.* = .{ .failed = failed, .row = row };
-            },
-            .retrying => |retry| for (band_rules, &retrying) |rule, *count| {
-                if (rule.kind == .retrying and rule.matches(retry.cause.slice())) count.* += 1;
-            },
-            else => {},
+    const Reader = struct {
+        fn at(context: *const anyopaque, index: usize) session_class.Facts {
+            const owner: *const State = @ptrCast(@alignCast(context));
+            return factsOf(owner, &owner.rows.items[index]);
         }
-    }
-    for (band_rules, newest, retrying) |rule, held, count| {
-        if (rule.kind == .retrying) {
-            if (count != 0) return .{ .trouble = rule.trouble, .sessions = count };
-            continue;
-        }
-        const failed = (held orelse continue).failed;
-        if (reachedSince(state, held.?.row, failed.since)) continue;
-        if (rule.after_login) if (state.login_at) |at| if (failed.since <= at) continue;
-        if (rule.until_reset) if (failed.resets_at) |at| if (at <= state.now_ms / 1000) continue;
-        return .{ .trouble = rule.trouble, .resets_at = failed.resets_at, .provider = held.?.row.provider.? };
-    }
-    return null;
-}
-
-fn reachedSince(state: *const State, failed: *const Row, since: u64) bool {
-    for (state.rows.items) |*row| {
-        if (!classOf(state, row).visible or row.archive_state == .archived or !sameProvider(row.provider, failed.provider) or !std.mem.eql(u8, row.model.slice(), failed.model.slice())) continue;
-        const work = (&row.state).asOf(state.now_ms);
-        if (std.meta.activeTag(work).answered() and work.since() >= since) return true;
-    }
-    return false;
+    };
+    const rows: session_class.Rows = .{ .context = state, .count = state.rows.items.len, .at = Reader.at };
+    return session_class.trouble(rows, viewerOf(state));
 }
 
 pub const Rgb = @import("theme.zig").Rgb;
@@ -4065,7 +3995,7 @@ pub fn newestEmpty(rows: []const Row, binding: ?Default) ?Reference {
     var newest: ?*const Row = null;
     for (rows) |*row| {
         if (!row.listed or row.archive_state == .archived or row.first != null) continue;
-        if (binding) |want| if (!sameProvider(row.provider, want.provider) or !row.model.eql(want.model.slice())) continue;
+        if (binding) |want| if (!Provider.eqlOptional(row.provider, want.provider) or !row.model.eql(want.model.slice())) continue;
         if (newest == null or row.created_at > newest.?.created_at or
             (row.created_at == newest.?.created_at and std.mem.order(u8, &row.reference, &newest.?.reference) == .gt)) newest = row;
     }
@@ -6084,13 +6014,10 @@ fn projectionCase3() !void {
 test "the band derives provider trouble from rows, in priority order" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Done" });
     for ([_][]const u8{ "provider_http_401", "provider_sign_in_required", "provider_sign_in_refresh_token_expired" }) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
-    try std.testing.expect(signInCode("provider_sign_in_refresh_token_expired") and signInCode("provider_http_401") and signInCode("provider_sign_in_required"));
-    try std.testing.expect(!signInCode("provider_authentication_backend_failed"));
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ session("ffffff", .{ .finished = ago(30) }, .{}), failedRow("aaaaaa", 60, "provider_http_401", null) }, null));
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_http_401", null) }, test_now_s - 30));
     try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 10, "provider_http_401", null) }, test_now_s - 30)).?);
     try std.testing.expectEqual(Band{ .trouble = .api_key, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, failure_class.api_key_rejected, null) }, null)).?);
-    try std.testing.expect(!signInCode(failure_class.api_key_rejected));
     try std.testing.expectEqual(Band{ .trouble = .quota, .resets_at = test_now_s + 1200, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 1200) }, null)).?);
     try std.testing.expectEqual(Band{ .trouble = .quota, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", null) }, null)).?);
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_plan", test_now_s) }, null));
@@ -6100,8 +6027,8 @@ test "the band derives provider trouble from rows, in priority order" {
     defer state.deinit();
     state.now_ms = (test_now_s + 10) * 1000;
     try std.testing.expectEqual(@as(?Band, null), band(&state));
-    try std.testing.expectEqual(Trouble.sign_in, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), failedRow("bbbbbb", 90, "provider_http_401", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
-    try std.testing.expectEqual(Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
+    try std.testing.expectEqual(failure_class.Trouble.sign_in, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), failedRow("bbbbbb", 90, "provider_http_401", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
+    try std.testing.expectEqual(failure_class.Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
 }
 
 test "a failure band clears only when its own provider and model are reached after it" {
