@@ -560,6 +560,7 @@ fn configureOpenApi(b: *std.Build, compile: *std.Build.Step.Compile) void {
     compile.root_module.addAnonymousImport("openapi.json", .{ .root_source_file = b.path("openapi.json") });
     compile.root_module.addAnonymousImport("rejections.ts", .{ .root_source_file = b.path("clients/ts/src/rejections.ts") });
     compile.root_module.addAnonymousImport("host-environment.ts", .{ .root_source_file = b.path("clients/ts/src/host-environment.ts") });
+    compile.root_module.addAnonymousImport("turn-endings.ts", .{ .root_source_file = b.path("clients/ts/src/turn-endings.ts") });
     const linked = if (compile.root_module.import_table.get("tls_client")) |tls_client| tls_client.import_table.get("transport_environment") else null;
     compile.root_module.addImport("transport_environment", linked orelse addTransportEnvironment(b));
 }

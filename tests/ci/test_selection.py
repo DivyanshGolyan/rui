@@ -839,7 +839,7 @@ class SelectionTest(unittest.TestCase):
                     self.assertIn("measurement-check", result[family])
 
     def test_generated_ts_files_select_their_staleness_test(self):
-        for path in ("clients/ts/src/rejections.ts", "clients/ts/src/host-environment.ts"):
+        for path in ("clients/ts/src/rejections.ts", "clients/ts/src/host-environment.ts", "clients/ts/src/turn-endings.ts"):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertIn("test", result["targets"])
