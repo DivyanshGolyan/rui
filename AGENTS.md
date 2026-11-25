@@ -87,6 +87,16 @@ Fix a repeat at the enforcing owner, not here; drop a row once its mistake can n
 | A CLI rename that changes help text keeps the upgrade check's `Dialect` reading this build as the newest release. | `Dialect.assert_newest` in [previous_release_upgrade.py](tests/integration/previous_release_upgrade.py); Promote only, so a judgment call on CLI PRs. |
 | A fake Host that serves a derived endpoint holds its interface directory's lock. | `host_process.claimed_endpoint` is the shared owner; nothing fails a hand-rolled bind, so a judgment call. |
 
+## Rules from agent corrections
+
+Each rule here is one the operator corrected an agent on more than once.
+Fix a repeat at the enforcing owner, not here; drop a row once its mistake can no longer be written.
+
+| Rule | Enforced by |
+| --- | --- |
+| A PR opens, and turns ready, only with a body admission accepts: Goal line, Summary sketch for `src/` changes, and for UI files either `No screen change: <reason>` or screens already captured (`open_pr.py open --frames DIR`). | `open_pr.py open` and `open_pr.py ready` call `pr_shape.ready_refusal`; `.claude/hooks/ready_pr_shape.py` asks it for MCP create and ready calls; `gh pr create` and `gh pr ready` typed by hand are not covered. |
+| A PR merges only after its latest completed review is clean (Codex's, or while Codex is out the `pr-reviewer` agent's). | `.claude/hooks/review_before_merge.py` refuses the merge; it reads reviews through `tests/ci/merge_review.py`; [Review evidence](docs/agents/landing.md#review-evidence). |
+
 ## Status updates and reports
 
 Report progress, blockers and verification results relevant to the requested task.
@@ -97,7 +107,7 @@ Say of each claim whether you ran it, read it in source or inferred it ([Evidenc
 
 ## Landing
 
-Standing grant: merge each small, coherent change once its PR is green, without further approval, lane completion or review signoff.
+Standing grant: merge each small, coherent change once its PR is green and its latest review is clean ([Review evidence](docs/agents/landing.md#review-evidence)), without further approval or lane completion.
 The same grant covers promoting `main` to a release when [Promote](docs/agents/landing.md#promote) says to.
 Changes reach `main` only by merging their PR; the admin bypass is allowed only under the conditions in [Landing procedures](docs/agents/landing.md#publish-and-merge).
 For PR publication, stacking, renaming a shared name, the admin bypass, landing or CI-failure ownership, read [Landing procedures](docs/agents/landing.md).

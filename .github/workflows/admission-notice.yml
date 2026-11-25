@@ -1,0 +1,48 @@
+name: Admission notice
+on:
+  # Name a failed admission's reasons on the PR.
+  workflow_run:
+    workflows: [Selected checks]
+    types: [completed]
+  # A body edit reruns a failed admission, which reads the live body. Runs main's code only.
+  pull_request_target:
+    types: [edited]
+permissions:
+  contents: read
+  pull-requests: write
+  actions: write
+  checks: read
+jobs:
+  comment:
+    if: ${{ !github.event.repository.private && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: tests/ci
+          persist-credentials: false
+      - name: Comment the admission's errors on the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: python3 -B tests/ci/admission_notice.py comment
+  rerun:
+    if: ${{ github.event_name == 'pull_request_target' && !github.event.pull_request.draft && github.event.changes.body != null }}
+    concurrency:
+      group: admission-rerun-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: tests/ci
+          persist-credentials: false
+      - name: Rerun a run that failed only on the PR body
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 -B tests/ci/admission_notice.py rerun

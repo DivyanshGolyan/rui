@@ -2,7 +2,7 @@ const std = @import("std");
 const document = @import("document.zig");
 
 pub const description_property = "rui_call_description";
-pub const description_max_bytes = 200;
+pub const description_max_bytes = @import("../tool_line.zig").max_bytes;
 
 pub const Error = std.Io.Writer.Error || error{
     NameTaken,

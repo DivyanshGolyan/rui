@@ -4716,7 +4716,7 @@ test "read_action uses the frozen configured offer and returns one provider tool
     var configure: wire_request.ConfigureCommand = .{};
     configure.session = session;
     try configure.key.set("read-action-offer");
-    configure.configuration.tools = try .of(&.{"read_action"});
+    configure.configuration.tools = try .of(&.{ "read_action", "stop_action" });
     try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
     try setup.submit("read-action-input", "read-action-input", session.slice(), "read your Action");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -4776,7 +4776,7 @@ test "core reader failures retain exact bytes in provider continuation" {
     var configure: wire_request.ConfigureCommand = .{};
     configure.session = session;
     try configure.key.set("reader-errors-offer");
-    configure.configuration.tools = try .of(&.{ "read_action", "read_transcript" });
+    configure.configuration.tools = try .of(&.{ "read_action", "read_transcript", "stop_action" });
     try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
     try setup.submit("reader-errors-input", "reader-errors-input", session.slice(), "inspect");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -4832,7 +4832,7 @@ test "successful reader pages and final stop preserve bytes in provider continua
     var configure: wire_request.ConfigureCommand = .{};
     configure.session = session;
     try configure.key.set("reader-pages-tools");
-    configure.configuration.tools = try .of(&.{ "bash", "read_action", "read_transcript" });
+    configure.configuration.tools = try .of(&.{ "bash", "read_action", "read_transcript", "stop_action" });
     try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
     try setup.submit("reader-pages-input", "reader-pages-input", session.slice(), "run and read");
     const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -4941,7 +4941,7 @@ test "late completion after stop preserves cancelled bytes in provider continuat
     var configure: wire_request.ConfigureCommand = .{};
     configure.session = session;
     try configure.key.set("stop-race-tools");
-    configure.configuration.tools = try .of(&.{ "bash", "read_action" });
+    configure.configuration.tools = try .of(&.{ "bash", "read_action", "stop_action" });
     try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
     try setup.submit("stop-race-input", "stop-race-input", session.slice(), "run and stop");
     const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;

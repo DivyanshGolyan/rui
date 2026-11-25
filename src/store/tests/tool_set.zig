@@ -867,7 +867,7 @@ test "a model admission freezes an offer the Host's tool set no longer holds, an
     }.run);
 }
 
-test "stop_action follows the frozen read_action offer" {
+test "stop_action is offered exactly when it is loaded" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             for (0..4) |mask| {
@@ -890,13 +890,13 @@ test "stop_action follows the frozen read_action offer" {
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 const frozen = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM model_operation WHERE operation_id=?1", .{model.operation_id});
                 const count = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE m.tool_set_id=?1 AND t.name='stop_action'", .{frozen});
-                try std.testing.expectEqual(@as(u64, if (mask & 1 != 0) 1 else 0), count);
+                try std.testing.expectEqual(@as(u64, if (mask & 2 != 0) 1 else 0), count);
             }
         }
     }.run);
 }
 
-test "stop_action effective offer preserves the historical settings limit" {
+test "the offer at the settings limit holds exactly the loaded tools" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const extras = comptime blk: {
@@ -960,7 +960,7 @@ test "stop_action effective offer preserves the historical settings limit" {
                         defer page.close();
                         var settings: historical_domain.HistoricalSettings = undefined;
                         try page.settings(&settings);
-                        const expected = count - @as(usize, @intFromBool(!loaded_read)) - @as(usize, @intFromBool(explicit and !loaded_read)) + @as(usize, @intFromBool(!explicit and loaded_read));
+                        const expected = count - @as(usize, @intFromBool(!loaded_read));
                         try std.testing.expectEqual(@as(u64, @intCast(expected)), settings.tool_count);
                         for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
                             const bytes = try shared_fixtures.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, profile);
@@ -986,9 +986,7 @@ test "stop_action effective offer preserves the historical settings limit" {
                                 for (offered) |item| {
                                     const name = item.string;
                                     try std.testing.expect(std.mem.lessThan(u8, previous, name));
-                                    if (std.mem.eql(u8, name, "stop_action")) {
-                                        try std.testing.expect(loaded_read);
-                                    } else try std.testing.expect(loaded.contains(name));
+                                    try std.testing.expect(loaded.contains(name));
                                     try std.testing.expect(try page.nextTool(&tool));
                                     try std.testing.expectEqualStrings(name, tool.name.slice());
                                     previous = name;
@@ -996,7 +994,7 @@ test "stop_action effective offer preserves the historical settings limit" {
                                 }
                                 try std.testing.expect(!try page.nextTool(&tool));
                                 if (count == protocol.max_tools and !explicit and loaded_read) {
-                                    try std.testing.expectEqual(@import("../../tool_name.zig").max_list_name_bytes + "stop_action".len, name_bytes);
+                                    try std.testing.expectEqual(@import("../../tool_name.zig").max_list_name_bytes, name_bytes);
                                 }
                             }
                         }
@@ -1847,7 +1845,7 @@ test "SH-173 an app tool never shares a name with a Host tool: a clashing declar
 }
 
 // SH-174: a request's offer holds the Host's whole tool set beside every app tool a lane declares, with each app name at
-// the full 64 bytes. The offer is sized from max_offered_tools, which counts the Host tools (stop_action among them) and
+// the full 64 bytes. The offer is sized from max_offered_tools, which counts the Host tools and
 // the app records, so this is the largest offer the owner admits.
 test "SH-174 a request offers the Host's full tool set beside every app tool a lane declares, at the largest name sizes" {
     try store_testing.forEachEngine(struct {
@@ -1857,12 +1855,10 @@ test "SH-174 a request offers the Host's full tool set beside every app tool a l
                 @setEvalBranchQuota(10_000_000);
                 const count = tool_name.max_offered_tools - app_tools.max_records - tool_defs.built_in_tool_set.records.len;
                 var records: [count]tool_defs.Record = undefined;
-                // The root names every Host tool but stop_action, which the offer adds itself: those names and the stubs fill
-                // the configurable list's bytes (its separators counted once).
+                // The root names every Host tool: those names and the stubs fill the configurable list's bytes (its separators counted once).
                 var builtin_bytes: usize = 0;
                 var builtin_count: usize = 0;
                 for (tool_defs.built_in_tool_set.records) |record| {
-                    if (std.mem.eql(u8, record.name, "stop_action")) continue;
                     builtin_bytes += record.name.len;
                     builtin_count += 1;
                 }
@@ -1883,12 +1879,11 @@ test "SH-174 a request offers the Host's full tool set beside every app tool a l
                 break :blk records;
             };
             const records = comptime testingHostToolRecords(&host_extras);
-            // The names the root configures: the Host's built-ins but stop_action, then every stub.
+            // The names the root configures: the Host's built-ins, then every stub.
             const configured_names = comptime blk: {
-                var names: [tool_defs.built_in_tool_set.records.len - 1 + host_extras.len][]const u8 = undefined;
+                var names: [tool_defs.built_in_tool_set.records.len + host_extras.len][]const u8 = undefined;
                 var at: usize = 0;
                 for (tool_defs.built_in_tool_set.records) |record| {
-                    if (std.mem.eql(u8, record.name, "stop_action")) continue;
                     names[at] = record.name;
                     at += 1;
                 }

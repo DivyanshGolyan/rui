@@ -511,7 +511,9 @@ class AdmissionTest(unittest.TestCase):
                     expected = '${{ github.sha }}' if name in ('plan', 'policy', 'mac_runner') else '${{ needs.plan.outputs.candidate_ref }}'
                     self.assertIn('ref: ' + expected, checkout)
         self.assertIn('candidate_ref: ${{ steps.select.outputs.candidate_ref }}', job(text, 'plan'))
-        self.assertIn('CANDIDATE_REF: ${{ github.sha }}', job(text, 'plan'))
+        # A PR checks GitHub's merge only once it is rebuilt on main's current head.
+        self.assertIn('CANDIDATE_REF: ${{ steps.fresh.outputs.ref || github.sha }}', job(text, 'plan'))
+        self.assertIn('python3 -B tests/ci/fresh_candidate.py', job(text, 'plan'))
         self.assertNotIn('refs/pull/', text)
 
     def test_upgrade_runs_both_platforms_in_promotion_and_never_on_prs(self):
@@ -804,7 +806,7 @@ class CandidatePlanTest(unittest.TestCase):
         with PlanFixture() as fixture:
             fixture.write('tests/ci/ci_plan.py', """from types import SimpleNamespace
 
-def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
+def plan(selection, *, event_name, draft, promotion, change_kind, compile_only, main_red=False):
     return SimpleNamespace(outputs=dict(owner='called', event=event_name, draft=draft,
         promotion=promotion, kind=change_kind.value, base=selection['base'], compile_only=compile_only),
         selection=dict(summary='from owner'))

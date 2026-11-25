@@ -139,7 +139,33 @@ def screens_required(changed_paths, *, base=None) -> bool:
 def screen_refusal(body) -> str | None:
     if not screen_evidence(body):
         return ("UI PRs need a visible user-attachments image/video line or a line 'No screen change: <reason>'. "
-                "Run verify-rui frames HEAD --before BASE, then verify-rui publish DIR --pr PR (gh 2.104.0+ and a classic PAT or gh OAuth token with push access); re-run the failed admission job after updating the body.")
+                "Run verify-rui frames HEAD --before BASE, then verify-rui publish DIR --pr PR (gh 2.104.0+ and a classic PAT or gh OAuth token with push access); editing the body reruns admission.")
+    return None
+
+
+def frames_captured(directory) -> bool:
+    """verify-rui frames wrote this directory's ordered index.html."""
+    return bool(directory) and os.path.isfile(os.path.join(directory, "index.html"))
+
+
+def ready_refusal(changed_paths, body, *, base=None, repo=None, number=None, frames=None,
+                  needs=None, sticky=None) -> str | None:
+    """Everything admission will say about a PR's body, asked when the PR opens and when it turns ready.
+
+    Screens are on hand when verify-rui captured frames for this head (`frames`, checked at open) or the
+    bot's screenshot comment is on the PR (checked at ready). `needs` and `sticky` are the owners' functions,
+    replaceable so a test need not patch them.
+    """
+    if reason := refusal(changed_paths, body, base=base):
+        return reason
+    needs, sticky = needs or screens_required, sticky or sticky_screen_evidence
+    if needs(changed_paths, base=base) and (reason := screen_refusal(body)):
+        if frames_captured(frames) or (number and sticky(repo, number)):
+            return None
+        if number:
+            return f"{reason} Screens are stale or missing for this head: re-run verify-rui publish DIR --pr {number}."
+        return (f"{reason} A PR opens with its screens already captured: run verify-rui frames before "
+                "opening and pass `open_pr.py open --frames DIR`, or state 'No screen change: <reason>'.")
     return None
 
 
@@ -159,9 +185,9 @@ def live_body(env_body) -> str:
     return body
 
 
-def sticky_screen_evidence() -> bool:
+def sticky_screen_evidence(repo=None, number=None) -> bool:
     """Accept a bot screenshot comment only for the current PR head."""
-    repo, number = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("PR_NUMBER")
+    repo, number = repo or os.environ.get("GITHUB_REPOSITORY"), number or os.environ.get("PR_NUMBER")
     if not repo or not number:
         return False
     try:
@@ -203,7 +229,8 @@ def main():
                 print(f"screens_required={str(required).lower()}", file=f)
         reason = refusal(paths, body, base=base)
     if reason:
-        print(reason, file=sys.stderr)
+        # The annotation is what admission_notice.py comments on the PR.
+        print("::error::" + reason.replace("%", "%25").replace("\n", "%0A"), file=sys.stderr)
         return 1
     return 0
 
