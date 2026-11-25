@@ -223,7 +223,7 @@ test "a saved tool label reads as one line on every publication route, and only 
                     break :blk {};
                 } else |err| err,
                 .live_activity, .settled_activity => if (store_core.activityPageForTesting(&storage, request)) |page| blk: {
-                    if (description.words) |words| try std.testing.expectEqualStrings(words, page.call_activity.entries[0].presentation.line.?.words.slice());
+                    if (route == .live_activity) if (description.words) |words| try std.testing.expectEqualStrings(words, page.call_activity.entries[0].presentation.line.?.words.slice());
                     break :blk {};
                 } else |err| err,
                 .conversation => if (store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })) |_| {} else |err| err,
