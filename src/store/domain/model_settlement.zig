@@ -2,6 +2,7 @@ const std = @import("std");
 const model_attempt = @import("model_attempt.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
 const FieldCertificate = @import("../../activity_read.zig").FieldCertificate;
+const citation_marker = @import("../../citation_marker.zig");
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -1834,7 +1835,7 @@ noinline fn streamMessageText(io: std.Io, output: *const ValidatedOutput, text: 
     var written: u64 = 0;
     while (try parts.next()) |part| {
         if (part.tag != .part or (part.part_kind != .output_text and part.part_kind != .refusal)) continue;
-        try writeDecoded(io, output, sink, &decoded, part, &written, text.decoded_length);
+        try writeMessageText(io, output, sink, &decoded, part, &written, text.decoded_length);
         if (faults.output_import) return error.InjectedOutputImportFailure;
     }
     if (written != text.decoded_length or !std.mem.eql(u8, &decoded.hash.finalResult(), &text.content_digest)) return error.OutputSourceChanged;
@@ -1862,6 +1863,40 @@ fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.C
     }
     try writeChecked(sink, &decoded.hash, decoded.window[0..count], written, length);
 }
+
+/// Writes a message part's text without the provider's citation markers: the text its metadata
+/// record certified (`output_decode.Decoded.message`), through the same `citation_marker.Filter`.
+fn writeMessageText(io: std.Io, output: *const ValidatedOutput, sink: store_access.ContentSink, decoded: *content_domain.HashedWindow(import_window_bytes), part: OutputMetadataRecord, written: *u64, length: u64) !void {
+    if (try part.end() > output.source_length) return error.CorruptOutputMetadata;
+    var text: output_format.EncodedStringWindow(import_window_bytes) = .{ .io = io, .file = output.source, .position = part.start, .end = try part.end() };
+    var out: MessageWindow = .{ .sink = sink, .decoded = decoded, .written = written, .length = length };
+    var filter: citation_marker.Filter = .{};
+    while (try text.next()) |byte| filter.feedByte(byte, &out) catch |err| return corruptText(err);
+    filter.finish(&out) catch |err| return corruptText(err);
+    try out.flush();
+}
+
+fn corruptText(err: anyerror) anyerror {
+    return if (err == error.InvalidUtf8) error.CorruptOutputMetadata else err;
+}
+
+const MessageWindow = struct {
+    sink: store_access.ContentSink,
+    decoded: *content_domain.HashedWindow(import_window_bytes),
+    written: *u64,
+    length: u64,
+    count: usize = 0,
+
+    pub fn put(self: *MessageWindow, scalar: u21) !void {
+        if (self.count + 4 > self.decoded.window.len) try self.flush();
+        self.count += std.unicode.utf8Encode(scalar, self.decoded.window[self.count..]) catch return error.CorruptOutputMetadata;
+    }
+
+    fn flush(self: *MessageWindow) !void {
+        try writeChecked(self.sink, &self.decoded.hash, self.decoded.window[0..self.count], self.written, self.length);
+        self.count = 0;
+    }
+};
 
 noinline fn callDescription(facts: *const tool_defs.CallFacts, io: std.Io, file: std.Io.File, arguments: OutputMetadataRecord) !?tool_record.Description {
     if (facts.tool) |*tool| if (tool.runner() == .mcp) {
