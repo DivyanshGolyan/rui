@@ -24,7 +24,8 @@ def _load():
     catalog = (_ROOT / "src" / "built_in_tool.zig").read_text()
     names = re.search(r"pub const BuiltInTool = enum \{([^}]+)\};", catalog)
     assert names, "built-in tool catalog missing"
-    values["tools"] = ",".join(name.strip() for name in names.group(1).split(","))
+    withheld = re.findall(r'^const default_tools = without\(tools, "(\w+)"\);$', source, re.MULTILINE)
+    values["tools"] = ",".join(name.strip() for name in names.group(1).split(",") if name.strip() not in withheld)
     declared = set(re.findall(r"^pub const (\w+)", source, re.MULTILINE))
     assert set(values) == declared, f"{_SOURCE}: teach this reader {sorted(declared - set(values))}"
     return SimpleNamespace(**values)
