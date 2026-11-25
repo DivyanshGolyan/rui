@@ -33,9 +33,6 @@ pub const Offered = @import("tool_record.zig").Offered;
 
 pub const Description = @import("tool_record.zig").Description;
 
-pub const Call = @import("call_classification.zig").Call;
-pub const WebSearchCall = @import("call_classification.zig").WebSearchCall;
-pub const describe = @import("call_classification.zig").describe;
 pub const BashArguments = @import("call_classification.zig").BashArguments;
 pub const CallFacts = @import("call_classification.zig").CallFacts;
 pub const BashProblem = @import("call_classification.zig").BashProblem;
@@ -52,53 +49,6 @@ pub const checkBashArguments = @import("call_classification.zig").checkBashArgum
 pub const BashParseProgress = @import("call_classification.zig").BashParseProgress;
 pub const BashParser = @import("call_classification.zig").BashParser;
 pub const isBashDescriptorError = @import("call_classification.zig").isBashDescriptorError;
-
-test "a web search call's description says what it did, on one line, within the bound" {
-    @setEvalBranchQuota(10_000);
-    const repeat = struct {
-        fn of(comptime text: []const u8, comptime count: usize) *const [text.len * count]u8 {
-            comptime {
-                var result: [text.len * count]u8 = undefined;
-                for (0..count) |index| @memcpy(result[index * text.len ..][0..text.len], text);
-                const final = result;
-                return &final;
-            }
-        }
-    }.of;
-    const Case = struct { action: codec_abi.HostedAction, target: ?[]const u8 = null, pattern: ?[]const u8 = null, expected: []const u8 };
-    const long = (comptime repeat("a", 220));
-    for ([_]Case{
-        .{ .action = .search, .target = "zig 0.17 release notes", .expected = "Search “zig 0.17 release notes”" },
-        .{ .action = .search, .target = " \n\t ", .expected = "Search the web" },
-        .{ .action = .search, .expected = "Search the web" },
-        .{ .action = .search, .target = (comptime repeat("a", 183)) ++ " bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .expected = "Search “" ++ (comptime repeat("a", 183)) ++ "…”" },
-        .{ .action = .none, .target = "ignored", .expected = "Search the web" },
-        .{ .action = .search, .target = "  two\r\nlines\u{2028}here  ", .expected = "Search “two lines here”" },
-        .{ .action = .open_page, .target = "https://www.ziglang.org/download/", .expected = "Open ziglang.org/download/" },
-        .{ .action = .open_page, .target = "HTTP://example.com", .expected = "Open example.com" },
-        .{ .action = .open_page, .expected = "Open a page" },
-        .{ .action = .find_in_page, .target = "https://ziglang.org/notes", .pattern = "Io.Writer", .expected = "Find “Io.Writer” in ziglang.org/notes" },
-        .{ .action = .find_in_page, .pattern = "Io.Writer", .expected = "Find “Io.Writer”" },
-        .{ .action = .find_in_page, .target = "ziglang.org", .expected = "Find in ziglang.org" },
-        .{ .action = .find_in_page, .expected = "Find in a page" },
-        .{ .action = .search, .target = long, .expected = "Search “" ++ (comptime repeat("a", 184)) ++ "…”" },
-        .{ .action = .search, .target = "a" ++ (comptime repeat("é", 110)), .expected = "Search “a" ++ (comptime repeat("é", 91)) ++ "…”" },
-        .{ .action = .find_in_page, .target = long, .pattern = long, .expected = "Find “" ++ (comptime repeat("a", 90)) ++ "…” in " ++ (comptime repeat("a", 89)) ++ "…" },
-        .{ .action = .find_in_page, .target = long, .pattern = "x", .expected = "Find “x” in " ++ (comptime repeat("a", 181)) ++ "…" },
-        .{ .action = .search, .target = "\xff\xfe\xfd\xfc", .expected = "Search the web" },
-        .{ .action = .search, .target = "q\xe2\x82", .expected = "Search “q”" },
-    }) |case| {
-        const description = describe(.{ .web_search = .{ .action = case.action, .target = case.target orelse "", .pattern = case.pattern orelse "" } });
-        try std.testing.expectEqualStrings(case.expected, description.slice());
-        try std.testing.expect(description.slice().len <= protocol.max_tool_description_bytes);
-    }
-}
-
-test "a Bash call is described by the description its arguments carry" {
-    var arguments: BashArguments = .{};
-    try arguments.description.set("Run parser tests");
-    try std.testing.expectEqualStrings("Run parser tests", describe(.{ .bash = &arguments }).slice());
-}
 
 pub const Tool = @import("tool_record.zig").Tool;
 pub const builtIn = @import("tool_record.zig").builtIn;
