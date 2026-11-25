@@ -13,6 +13,7 @@ const transport_policy = @import("transport_policy.zig");
 const wire_field = @import("wire_field.zig");
 const mutation_answer = @import("mutation_answer.zig");
 const content_value = @import("content_value.zig");
+const hosted_action = @import("hosted_action.zig");
 const skill_reference = @import("skill_reference.zig");
 const input_parts = @import("input_parts.zig");
 comptime {
@@ -151,7 +152,7 @@ pub const ActivityPage = struct {
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
-        const HostedAction = struct { kind: JsonEnum(@import("hosted_action.zig").HostedAction), targets: JsonArray(Ref, protocol.HostedActionJson.max_served), targets_total: JsonString(20), pattern: ?Ref };
+        const HostedAction = struct { kind: JsonEnum(hosted_action.HostedAction), targets: JsonArray(Ref, protocol.HostedActionJson.max_served), targets_total: JsonString(20), pattern: ?Ref };
         const Instruction = struct { turn: ?JsonString(20), revision: ?JsonString(20), content: Ref };
         const Skill = struct { admission: JsonString(20), turn: JsonString(20), ordinal: JsonString(20), name: JsonString(skill_reference.max_name_bytes), content: Ref };
         const ModelCall = struct { model: JsonString(protocol.max_model_bytes), served_model: ?JsonString(protocol.max_model_bytes), input_tokens: ?JsonString(20), output_tokens: ?JsonString(20), cached_tokens: ?JsonString(20), latency_ms: ?JsonString(20), first_event_ms: ?JsonString(20), status: JsonString(protocol.max_code_bytes), attempts: JsonString(20) };
@@ -249,7 +250,7 @@ pub const ActivityPage = struct {
                     const total = try id(call.action.targets_total, true);
                     const served = call.action.targets.slice();
                     if (call.action.kind.value == .none and (total != 0 or call.action.pattern != null)) return error.InvalidActivityPage;
-                    if (served.len != @min(total, protocol.HostedActionJson.max_served)) return error.InvalidActivityPage;
+                    if (total > hosted_action.max_targets or served.len != @min(total, protocol.HostedActionJson.max_served)) return error.InvalidActivityPage;
                     var action: Fact.HostedAction = .{ .kind = call.action.kind.value, .targets_total = total, .pattern = if (call.action.pattern) |pattern| try textOf(pattern) else null };
                     for (served) |target| action.targets.append(try textOf(target)) catch return error.InvalidActivityPage;
                     fact.value = .{ .hosted_call = .{ .presentation = call.presentation.value, .action = action } };
@@ -4178,6 +4179,8 @@ test "a hosted call's action names nothing under none and serves as many targets
         .{ .kind = .search, .served = 8, .total = 8, .valid = true },
         .{ .kind = .search, .served = 8, .total = 9, .valid = true },
         .{ .kind = .search, .served = 8, .total = 64, .valid = true },
+        .{ .kind = .search, .served = 8, .total = 65, .valid = false },
+        .{ .kind = .search, .served = 8, .total = 1_000_000, .valid = false },
         .{ .kind = .search, .served = 7, .total = 9, .valid = false },
         .{ .kind = .search, .served = 2, .total = 1, .valid = false },
         .{ .kind = .search, .served = 0, .total = 1, .valid = false },

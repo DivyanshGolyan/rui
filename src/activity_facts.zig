@@ -61,7 +61,11 @@ pub const Item = struct {
             .call => |call| .{ .call = .{ .name = call.fields[@backingInt(tool_proposal.Field.name)], .arguments = call.fields[@backingInt(tool_proposal.Field.arguments)] } },
             .tool_result => |result| .{ .value = result.content },
             .turn_ended => |ended| if (ended.content) |reference| .{ .value = .{ .text = reference } } else .none,
-            .hosted_call => |hosted| .{ .hosted = hosted.action.body() },
+            .hosted_call => |hosted| blk: {
+                // A search that saved nothing to open (a Store older than its facts) has no text, like any row without one.
+                const text = hosted.action.body();
+                break :blk if (text.len == 0) .none else .{ .hosted = text };
+            },
             .stop, .approval_requested, .session_changed, .compacted, .model_call => .none,
         };
     }

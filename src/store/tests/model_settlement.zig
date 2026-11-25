@@ -399,10 +399,12 @@ const OversizedItem = struct {
                         @intFromBool(item == .failed_search),
                     }));
                     // The facts are saved as public content, never as the line: one target, and the pattern only for a find.
+                    const target_digest = protocol.contentDigest(if (item == .find_in_page) "ziglang.org" else "zig");
                     try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM hosted_target t JOIN content c ON c.content_id=t.content_id " ++
-                        "WHERE t.operation_id=?1 AND t.item_ordinal=?2 AND t.target_ordinal=0 AND c.private=0 AND c.payload=?3", .{ operation, ordinal, store_testing.Blob{ .bytes = if (item == .find_in_page) "ziglang.org" else "zig" } }));
+                        "WHERE t.operation_id=?1 AND t.item_ordinal=?2 AND t.target_ordinal=0 AND c.private=0 AND c.digest=?3", .{ operation, ordinal, store_testing.Blob{ .bytes = &target_digest } }));
+                    const pattern_digest = protocol.contentDigest("Io");
                     try std.testing.expectEqual(@as(u64, if (item == .find_in_page) 1 else 0), try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item i JOIN content c ON c.content_id=i.hosted_pattern_content_id " ++
-                        "WHERE i.operation_id=?1 AND i.item_ordinal=?2 AND c.private=0 AND c.payload=?3", .{ operation, ordinal, store_testing.Blob{ .bytes = "Io" } }));
+                        "WHERE i.operation_id=?1 AND i.item_ordinal=?2 AND c.private=0 AND c.digest=?3", .{ operation, ordinal, store_testing.Blob{ .bytes = &pattern_digest } }));
                 },
                 .message, .done => {
                     messages += 1;

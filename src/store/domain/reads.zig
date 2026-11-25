@@ -997,6 +997,8 @@ const HostedRead = struct {
         const kind = std.enums.fromInt(hosted_action.HostedAction, row.hosted_action) orelse return error.CorruptStore;
         // An action of none names nothing, so a row that holds targets under it was not written by a settlement.
         if (kind == .none and (row.targets_total != 0 or row.pattern_content_id != null)) return error.CorruptStore;
+        // A settlement keeps at most `max_targets`, so a count past it was written by something else.
+        if (row.targets_total > hosted_action.max_targets) return error.CorruptStore;
         const target: []const u8 = if (row.target_prefix) |*prefix| prefix.slice() else "";
         const pattern: []const u8 = if (row.pattern_prefix) |*prefix| prefix.slice() else "";
         const line = try plainLine(tool_line.ofHosted(kind, target, pattern));

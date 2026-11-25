@@ -361,9 +361,8 @@ pub const OutputItem = struct {
 };
 
 pub const HostedAction = @import("hosted_action.zig").HostedAction;
-/// The most targets one hosted call keeps as public facts. A provider that names more keeps the rest only in the
-/// private item bag, which replay reads, so a long list can neither fail a settlement nor outgrow a content batch.
-pub const max_hosted_targets = 64;
+/// The most targets one hosted call keeps as public facts; `hosted_action` owns the number.
+pub const max_hosted_targets = @import("hosted_action.zig").max_targets;
 
 /// What a hosted call says it did. A search's targets are its `query` and then each string of `queries` (a first one
 /// equal to `query` is the same search and is not repeated); an open or find names its url. `target` is the single

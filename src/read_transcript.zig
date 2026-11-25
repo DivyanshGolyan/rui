@@ -840,6 +840,45 @@ test "read_transcript hosted call uses its recorded provider presentation" {
     }.check);
 }
 
+test "read_transcript reads a hosted call with nothing to open as its outline, not as an empty text" {
+    try storage.testing.forEachEngine(struct {
+        fn check(case: *storage.testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var database: storage.Store = undefined;
+            try storage.testing.testingStore(case, &database, &tmp, std.testing.io);
+            defer database.close() catch unreachable;
+            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer memory.deinit();
+            const arena = memory.allocator();
+            const session = try storage.testing.configureTestSession(&database, "hosted-bare-transcript");
+            try storage.testingSubmitMessage(&database, &tmp, "hosted-bare-input", "hosted-bare-input", session.slice(), "search");
+            const model = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+            // A provider that says nothing of what the search did leaves an action of none: no target, no pattern.
+            try storage.settleAnswerItemsForTesting(&database, &tmp, model, &.{
+                "{\"type\":\"web_search_call\",\"id\":\"bare\",\"status\":\"completed\"}",
+                "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}",
+            }, "answer");
+            const page = try arena.create(protocol.ActivityFacts);
+            try database.activityPage(&.{ .session = session, .kinds = .initOne(.hosted_call) }, page);
+            try std.testing.expectEqual(@as(usize, 1), page.count);
+            const item = &page.items[0];
+            try std.testing.expect(item.value.hosted_call.action.kind == .none);
+            try std.testing.expect(item.body() == .none);
+            var outlined: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer outlined.deinit();
+            try outline(&database, arena, session.slice(), item, &outlined.writer);
+            var opened: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer opened.deinit();
+            try full(&database, arena, session.slice(), item, 0, &opened.writer);
+            try std.testing.expectEqualStrings(outlined.written(), opened.written());
+            var late: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer late.deinit();
+            try std.testing.expectError(error.InvalidOffset, full(&database, arena, session.slice(), item, 1, &late.writer));
+        }
+    }.check);
+}
+
 test "read_transcript lists instruction rows with their text and first line" {
     try storage.testing.forEachEngine(struct {
         fn check(case: *storage.testing.Case) !void {

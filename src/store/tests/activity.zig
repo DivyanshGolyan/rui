@@ -696,12 +696,154 @@ test "a web search call shows as its line, in the conversation and the activity,
     }.run);
 }
 
+/// Settles `items` as one Operation's output and returns the Session.
+fn settleHostedItems(storage: *Store, tmp: *std.testing.TmpDir, items: []const []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+    const session = try configureTestSession(storage, "hosted-config");
+    try submitTestMessage(storage, tmp, "hosted-input", "hosted-key", session.slice(), "search");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var all: [4][]const u8 = undefined;
+    @memcpy(all[0..items.len], items);
+    all[items.len] = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}";
+    try settleItemsForTesting(storage, tmp, binding, all[0 .. items.len + 1], "done");
+    return session;
+}
+
+fn manyQueries(arena: std.mem.Allocator, count: usize) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try out.writer.writeAll("{\"type\":\"web_search_call\",\"id\":\"many");
+    try out.writer.print("{d}", .{count});
+    try out.writer.writeAll("\",\"action\":{\"type\":\"search\",\"queries\":[");
+    for (0..count) |index| try out.writer.print("{s}\"q{d}\"", .{ if (index == 0) "" else ",", index });
+    try out.writer.writeAll("]}}");
+    return out.written();
+}
+
+test "a web search that names many targets serves the first eight, keeps up to sixty-four and opens only what it serves" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer memory.deinit();
+            const arena = memory.allocator();
+            // Nine and sixty-four queries are kept whole; seventy keep sixty-four, the most one item holds.
+            const counts = [_]usize{ 9, 64, 70 };
+            const kept = [_]u64{ 9, 64, 64 };
+            var items: [counts.len][]const u8 = undefined;
+            for (counts, &items) |count, *item| item.* = try manyQueries(arena, count);
+            const session = try settleHostedItems(&storage, &tmp, &items);
+            try std.testing.expectEqual(@as(u64, 9 + 64 + 64), try store_testing.queryU64(&storage, "SELECT count(*) FROM hosted_target", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM hosted_target WHERE target_ordinal>=64", .{}));
+            const activity = try store_core.activityPageForTesting(&storage, .{ .session = session, .direction = .backward });
+            var seen: usize = 0;
+            for (activity.items[0..activity.count]) |item| switch (item.value) {
+                .hosted_call => |hosted| {
+                    // The page is newest first, so the last item settled comes first.
+                    const which = counts.len - 1 - seen;
+                    try std.testing.expectEqual(kept[which], hosted.action.targets_total);
+                    try std.testing.expectEqual(@as(usize, 8), hosted.action.targets.served().len);
+                    try std.testing.expectEqual(@as(usize, 8), item.body().hosted.refs().len);
+                    for ([_]u8{ 0, 7 }) |field| {
+                        var expected: [8]u8 = undefined;
+                        const text = try std.fmt.bufPrint(&expected, "q{d}", .{field});
+                        var reader: content_domain.ContentReader = undefined;
+                        reader.open(try storage.openActivityContent(&.{ .session = session, .position = item.position, .field = field }));
+                        defer reader.close();
+                        var bytes: [8]u8 = undefined;
+                        const count = try reader.read(0, &bytes);
+                        try std.testing.expectEqualStrings(text, bytes[0..count]);
+                    }
+                    // The ninth target is held but not served, and a search has no pattern, so field 8 names nothing, as `body` says.
+                    try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = session, .position = item.position, .field = 8 }));
+                    seen += 1;
+                },
+                .assistant => {
+                    // Only a hosted row holds more than one exact text: a field past the first names nothing on any other row.
+                    try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = session, .position = item.position, .ordinal = item.ordinal, .field = 1 }));
+                    var reader: content_domain.ContentReader = undefined;
+                    reader.open(try storage.openActivityContent(&.{ .session = session, .position = item.position, .ordinal = item.ordinal }));
+                    defer reader.close();
+                    var bytes: [8]u8 = undefined;
+                    try std.testing.expectEqualStrings("done", bytes[0..try reader.read(0, &bytes)]);
+                },
+                else => {},
+            };
+            try std.testing.expectEqual(counts.len, seen);
+        }
+    }.run);
+}
+
+test "a hosted search whose saved facts cannot have come from a settlement reads as a corrupt Store" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Corruption = struct { name: []const u8, sql: [:0]const u8, count: ?u64 = null };
+            // Item 0 is a search with two targets; item 1 is a find in a page, with one target and a pattern.
+            const mutations = [_]Corruption{
+                .{ .name = "an action of none that holds targets", .sql = "UPDATE model_output_item SET hosted_action=0 WHERE item_ordinal=0 AND item_kind=5" },
+                .{ .name = "an action of none that holds a pattern", .sql = "UPDATE model_output_item SET hosted_action=0 WHERE item_ordinal=1 AND item_kind=5" },
+                .{ .name = "a gap before the first target", .sql = "UPDATE hosted_target SET target_ordinal=3 WHERE item_ordinal=0 AND target_ordinal=0" },
+                .{ .name = "a gap between targets", .sql = "UPDATE hosted_target SET target_ordinal=5 WHERE item_ordinal=0 AND target_ordinal=1" },
+                .{ .name = "a private first target", .sql = "UPDATE content SET private=1 WHERE content_id IN (SELECT content_id FROM hosted_target WHERE item_ordinal=0 AND target_ordinal=0)" },
+                .{ .name = "a private later target", .sql = "UPDATE content SET private=1 WHERE content_id IN (SELECT content_id FROM hosted_target WHERE item_ordinal=0 AND target_ordinal=1)" },
+                .{ .name = "a non-inline first target", .sql = "UPDATE content SET form=1 WHERE content_id IN (SELECT content_id FROM hosted_target WHERE item_ordinal=0 AND target_ordinal=0)" },
+                .{ .name = "a non-inline later target", .sql = "UPDATE content SET form=1 WHERE content_id IN (SELECT content_id FROM hosted_target WHERE item_ordinal=0 AND target_ordinal=1)" },
+                .{ .name = "a private pattern", .sql = "UPDATE content SET private=1 WHERE content_id IN (SELECT hosted_pattern_content_id FROM model_output_item WHERE item_ordinal=1 AND item_kind=5)" },
+                .{ .name = "a non-inline pattern", .sql = "UPDATE content SET form=1 WHERE content_id IN (SELECT hosted_pattern_content_id FROM model_output_item WHERE item_ordinal=1 AND item_kind=5)" },
+                .{ .name = "more targets than an item may hold", .sql = "INSERT INTO hosted_target(operation_id,item_ordinal,target_ordinal,content_id) " ++ sequence_to_first_argument ++
+                    "SELECT t.operation_id,t.item_ordinal,value,t.content_id FROM hosted_target t CROSS JOIN sequence WHERE t.item_ordinal=0 AND t.target_ordinal=0 AND value>=2", .count = 65 },
+            };
+            inline for (mutations) |mutation| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try settleHostedItems(&storage, &tmp, &.{
+                    "{\"type\":\"web_search_call\",\"id\":\"ws1\",\"action\":{\"type\":\"search\",\"queries\":[\"first-target\",\"second-target\"]}}",
+                    "{\"type\":\"web_search_call\",\"id\":\"ws2\",\"action\":{\"type\":\"find_in_page\",\"url\":\"site.example\",\"pattern\":\"the-pattern\"}}",
+                });
+                // Whole before the damage: both searches read.
+                const whole = try store_core.activityPageForTesting(&storage, .{ .session = session, .direction = .backward });
+                try std.testing.expect(whole.count >= 3);
+                if (mutation.count) |count| {
+                    try store_testing.withoutForeignKeys(&storage, mutation.sql, .{count});
+                } else try store_testing.withoutForeignKeys(&storage, mutation.sql, .{});
+                std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, .{ .session = session, .direction = .backward })) catch |err| {
+                    std.debug.print("corruption not refused: {s}\n", .{mutation.name});
+                    return err;
+                };
+            }
+        }
+    }.run);
+}
+
+test "a hosted action outside the four kinds cannot be saved" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            _ = try settleHostedItems(&storage, &tmp, &.{"{\"type\":\"web_search_call\",\"id\":\"ws1\",\"action\":{\"type\":\"search\",\"query\":\"zig\"}}"});
+            // The CHECK on the column refuses it on both engines, so the read's own refusal of such a value is a second line, not a reachable state.
+            const refused = if (store_testing.exec(&storage, "UPDATE model_output_item SET hosted_action=4 WHERE item_kind=5", .{})) |_| false else |_| true;
+            try std.testing.expect(refused);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT hosted_action FROM model_output_item WHERE item_kind=5", .{}));
+        }
+    }.run);
+}
+
 fn hostedBefore96() old_format.Start {
     @setEvalBranchQuota(100_000);
     return .{ .format = 95, .sql = old_format.FormatSql.neutral(
-        "UPDATE session SET next_position=7 WHERE session_ref='d8mv7p';" ++
+        "UPDATE session SET next_position=8 WHERE session_ref='d8mv7p';" ++
             "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) " ++
-            "VALUES(1,1,'d8mv7p',6,5,1,X'0000000000000000000000000000000000000000000000000000000000000001',0,0,4,0,'Search the old sentence',0);",
+            "VALUES(1,1,'d8mv7p',6,5,1,X'0000000000000000000000000000000000000000000000000000000000000001',0,0,4,0,'Search the old sentence',0)," ++
+            "(1,2,'d8mv7p',7,5,1,X'0000000000000000000000000000000000000000000000000000000000000002',0,0,4,0,'Search the old failed sentence',1);",
     ) };
 }
 
@@ -720,16 +862,22 @@ test "the step to format 96 reads a search saved as a sentence as a search with 
             var request: protocol.ConversationPage = .{};
             try request.session.set("d8mv7p");
             const page = try store_core.activityPageForTesting(&storage, .{ .session = request.session, .direction = .backward });
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item WHERE item_kind=5 AND hosted_action=0", .{}));
+            // The failed search stays failed through the step, and neither row has anything to open.
             var seen: usize = 0;
             for (page.items[0..page.count]) |item| if (item.value == .hosted_call) {
                 const hosted = item.value.hosted_call;
                 try std.testing.expectEqualStrings("Search the web", hosted.presentation.line.?.words.slice());
+                try std.testing.expectEqual(if (item.position == 7) protocol.ToolPresentation.Code.failed else .succeeded, hosted.presentation.code);
                 try std.testing.expect(hosted.action.kind == .none);
                 try std.testing.expectEqual(@as(u64, 0), hosted.action.targets_total);
+                try std.testing.expectEqual(@as(usize, 0), hosted.action.targets.served().len);
                 try std.testing.expect(hosted.action.pattern == null);
+                try std.testing.expect(item.body() == .none);
+                try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = request.session, .position = item.position }));
                 seen += 1;
             };
-            try std.testing.expectEqual(@as(usize, 1), seen);
+            try std.testing.expectEqual(@as(usize, 2), seen);
         }
     }.run);
 }
