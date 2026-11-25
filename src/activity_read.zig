@@ -28,7 +28,7 @@ pub const conversation: ActivityPage.Kinds = blk: {
     break :blk set;
 };
 
-test "SUI-168 a conversation asks the feed for exactly the kinds whose role is conversation" {
+test "SUI-180 a conversation asks the feed for exactly the kinds whose role is conversation" {
     // The literal is a deliberate pin of what the conversation requested before the table existed: reclassifying a kind edits both.
     const listed = ActivityPage.Kinds.initMany(&.{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed });
     try std.testing.expect(conversation.eql(listed));
