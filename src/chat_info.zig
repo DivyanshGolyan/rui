@@ -9,6 +9,7 @@ const status = @import("status_page.zig");
 const catalog = @import("model_catalog.zig");
 const capability = @import("model_capability.zig");
 const tools = @import("built_in_tool.zig");
+const session_line = @import("session_line.zig");
 const ModelChoice = @import("model_choice.zig");
 const keymap = @import("keymap.zig");
 const keypress = @import("keypress.zig");
@@ -183,7 +184,7 @@ fn bind(self: *Self) void {
         .{ .label = "Allowed tools", .value = "", .tail = self.failures[2] },
         .{ .label = "Folder", .value = if (self.ready) self.session.workspace.slice() else "unavailable", .selectable = false },
         .{ .label = "Model", .value = if (self.ready) self.session.model.slice() else "unavailable", .tail = self.failures[4] },
-        .{ .label = "Context", .value = "", .selectable = false, .visible = self.ready and self.session.context_estimate != null },
+        .{ .label = "Context", .value = "", .selectable = false, .visible = self.ready and self.contextReading() != null },
     };
     if (self.pending) |row| if (row < self.fields.len) {
         self.fields[row].tail = " · saving";
@@ -278,6 +279,10 @@ fn openModel(self: *Self) void {
 fn pickModel(raw: *anyopaque, ctx: *vxfw.EventContext, model: []const u8) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.save(ctx, 4, .{ .model = model });
+}
+
+fn contextReading(self: *const Self) ?session_line.Context {
+    return session_line.Context.of(self.session.context_estimate, self.session.compaction_trigger);
 }
 
 fn updateTools(self: *Self) void {
@@ -516,13 +521,13 @@ fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.
         self.fields[3].value = try self.folderValue(ctx, Panel.valueWidth(size.width));
         self.fields[4].value = try safe(ctx.arena, self.session.model.slice());
         // Without a trigger (a codec that does not compact) the context row is omitted.
-        if (self.session.context_estimate) |tokens| if (self.session.compaction_trigger) |trigger| {
+        if (self.contextReading()) |reading| {
             var context: std.Io.Writer.Allocating = .init(ctx.arena);
-            try status.writeGrouped(&context.writer, tokens);
+            try status.writeGrouped(&context.writer, reading.estimate);
             try context.writer.writeAll(" of ");
-            try status.writeGrouped(&context.writer, trigger);
+            try status.writeGrouped(&context.writer, reading.trigger);
             self.fields[5].value = context.written();
-        };
+        }
     }
     const actions = try ctx.arena.alloc([]const u8, 3);
     var action_width: usize = 3 + 2 * 5;
@@ -1309,6 +1314,8 @@ test "Chat info Context shows the Host reported threshold" {
     const cases = [_]struct { estimate: ?u64, trigger: ?u64, value: ?[]const u8 }{
         .{ .estimate = null, .trigger = null, .value = null },
         .{ .estimate = null, .trigger = 244_800, .value = null },
+        .{ .estimate = 18, .trigger = null, .value = null },
+        .{ .estimate = 18, .trigger = 0, .value = null },
         .{ .estimate = 0, .trigger = 115_200, .value = "0 of 115,200" },
         .{ .estimate = 18, .trigger = 244_800, .value = "18 of 244,800" },
         .{ .estimate = 31_200, .trigger = 12_345, .value = "31,200 of 12,345" },
