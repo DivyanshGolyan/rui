@@ -73,7 +73,7 @@ class PlanTest(unittest.TestCase):
         normal_linux = ['check', 'test-native', 'transport-h2-integration']
         # CI-69: promotion, scheduled or by hand, runs every check the PR tier skips, whatever the batch touched.
         promoted_linux = ['admission-debug-integration', 'check-full', 'deep-modules', 'host-status-integration',
-                          'mysql-wire-integration', 'rsql-table', 'test-logic', 'transport-h2-integration']
+                          'mysql-wire-integration', 'test-logic', 'transport-h2-integration']
         promoted_mac = ['admission-debug-integration', 'check-full', 'test-logic', 'transport-h2-integration']
         expected_targets = {
             ('draft', False): ([], []), ('draft', True): ([], []),
@@ -163,7 +163,7 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(output['quarantine'], 'admission' if retry else 'off')
                 promoted = plan(original, event_name='workflow_dispatch', draft=False,
                                 promotion=True, change_kind=ChangeKind.NORMAL).outputs
-                for target in ('rsql-table', 'mysql-wire-integration', 'check-full', 'test-logic',
+                for target in ('mysql-wire-integration', 'check-full', 'test-logic',
                                'admission-debug-integration'):
                     self.assertIn(target, promoted['targets'])
                 self.assertEqual(promoted['native_targets'],
@@ -249,7 +249,7 @@ class PlanTest(unittest.TestCase):
                  change_kind=ChangeKind.NORMAL, compile_only=True)
 
     def test_ready_pr_runs_the_fast_tier_and_every_other_event_the_full_selection(self):
-        for targets, fast in ((['check'], ['test-logic', 'test-native']), (['rsql-table'], []),
+        for targets, fast in ((['check'], ['test-logic', 'test-native']),
                               (['check-full', 'test-store'], ['test-logic', 'test-native', 'test-store']),
                               (['test-logic'], ['test-logic']), ([], [])):
             with self.subTest(targets=targets):
@@ -262,7 +262,8 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(manual['targets'], targets)
                 promoted = plan(source, event_name='workflow_dispatch',
                                 draft=False, promotion=True, change_kind=ChangeKind.NORMAL).outputs
-                self.assertTrue({'check-full', 'rsql-table'} <= set(promoted['targets']))
+                self.assertIn('check-full', promoted['targets'])
+                self.assertNotIn('rsql-table', promoted['targets'])
 
 
 class PrMySqlMigrationTest(unittest.TestCase):
