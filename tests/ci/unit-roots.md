@@ -84,12 +84,15 @@ between native and every Store shard. The fixed-name MySQL session tests stay to
 conformance accounts are named per process too. The existing MySQL test
 allocator uses server-side locks to prevent different processes from leasing
 the same conformance database. Each Store shard writes its own dialect record;
-the launcher merges their counters into `RUI_TEST_MYSQL_RECORD` after all shards
-pass, preserving `live_engine_step.py verify mysql` as the acceptance owner.
+the launcher merges their counters into `RUI_TEST_MYSQL_RECORD.accepted`
+(`live_engines.accepted`) after all shards pass, and only that file decides
+`live_engine_step.py verify mysql`. Any other process that inherits the variable
+writes `RUI_TEST_MYSQL_RECORD` itself, which verify ignores.
 Each native shard writes `RUI_TEST_MYSQL_RECORD.native-<i>`, which is informational
 only: a shard that never opens MySQL writes none, so the launcher does not merge native records
 into the acceptance record and cannot let them replace Store evidence.
-Filtered aggregate runs keep the original record path and a unique namespace.
+Filtered aggregate runs keep the original record path and a unique namespace, so
+they write no accepted record.
 
 Compiler filters reduce sema/codegen, but Zig always includes anonymous tests
 and matches filter substrings anywhere in a name. A generated adaptation of the
