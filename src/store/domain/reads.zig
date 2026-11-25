@@ -1459,10 +1459,9 @@ const LabelRead = struct {
     }
 
     fn keep(read: *LabelRead, row: *const peer_label.Row) error{CorruptStore}!void {
-        if (row.label) |*label| {
-            try configuration_domain.checkLabel(label.slice());
-            read.peer.label = label.*;
-        }
+        if (row.label) |*label| if (tool_presentation.readLabel(label.slice())) |shown| {
+            read.peer.label = shown;
+        };
     }
 
     fn found(read: *const LabelRead) !void {

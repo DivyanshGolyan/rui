@@ -353,10 +353,10 @@ test "a list page whose settings read fails reports SessionReadFailed before any
     const first = try configureTestSession(&storage, "render-order-first");
     const second = try configureTestSession(&storage, "render-order-second");
     try submitTestMessage(&storage, &tmp, "render-order-input", "render-order-message", second.slice(), "q");
-    var update: [160]u8 = undefined;
-    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
-    try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='two'||char(10)||'lines' WHERE session_ref='{s}'", .{first.slice()}, 0));
-    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
+    _ = first;
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+    try store_testing.sqlite_only.exec(&storage, "DELETE FROM content WHERE content_id IN (SELECT content_id FROM message_admission WHERE session_ref=?1)", .{second.slice()});
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
     var used = std.atomic.Value(u64).init(0);
     var fault: TestingStatementFault = .{ .sql = listStatementForTesting(error.SessionReadFailed, "SELECT session.session_ref,session.archive_seq,session.parent_ref") };
     fault.arm(storage.sqliteDatabase());
@@ -364,6 +364,34 @@ test "a list page whose settings read fails reports SessionReadFailed before any
     // The settings rows are read in the page's first round, so a failed read there wins over a later row's render error.
     try std.testing.expectError(error.SessionReadFailed, testingSessionList(&storage, &tmp, .{}, &used, 5));
     try std.testing.expect(fault.failed > 0);
+}
+
+test "TPR-3 a saved Session Label reads as one tidy line on a list page and never fences" {
+    const cases = [_]struct { sql: []const u8, shown: ?[]const u8 }{
+        .{ .sql = "'two'||char(10)||'lines'", .shown = "two lines" },
+        .{ .sql = "'  two   lines  '", .shown = "two lines" },
+        .{ .sql = "'two'||char(8232)||'lines'", .shown = "two lines" },
+        .{ .sql = "char(10)", .shown = null },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "label-list-config");
+        try submitTestMessage(&storage, &tmp, "label-list-input", "label-list-message", session.slice(), "q");
+        var update: [160]u8 = undefined;
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+        try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label={s} WHERE session_ref='{s}'", .{ case.sql, session.slice() }, 0));
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
+        var used = std.atomic.Value(u64).init(0);
+        const bytes = try testingSessionList(&storage, &tmp, .{}, &used, 5);
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expect(!storage.isFenced());
+        const found = std.mem.indexOf(u8, bytes, "two lines") != null;
+        try std.testing.expectEqual(case.shown != null, found);
+    }
 }
 
 test "a list row whose first Message is missing is CorruptStore" {
