@@ -189,17 +189,28 @@ UNASKED_CHECKLIST = ("TUI internals (U group of #2282)\n\n✓ U10 Tool picker na
                      "○ Later: U4, U5, U7 (wait on other PRs), U2 (waits on Divyansh's yes)")
 
 
-def transcript(*turns):
-    """A Claude Code transcript file: each turn is the tool names the assistant called after a person's message."""
+def transcript(*turns, refused=False):
+    """A Claude Code transcript file: each turn is the tool names the assistant called after a person's message.
+
+    `refused` makes every tool call of the last turn come back as an error, as a hook's refusal does.
+    """
     lines = []
-    for tools in turns:
+    for number, tools in enumerate(turns):
+        failed = refused and number == len(turns) - 1
         lines.append({"type": "user", "message": {"role": "user", "content": "wake"}})
         lines.append({"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "tool_use", "name": name, "input": {}} for name in tools]}})
-        lines.append({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]}})
-    path = Path(tempfile.mkdtemp()) / "transcript.jsonl"
+            {"type": "tool_use", "id": f"t{number}-{i}", "name": name, "input": {}} for i, name in enumerate(tools)]}})
+        lines.append({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": f"t{number}-{i}", "content": "ok", "is_error": failed}
+            for i, _ in enumerate(tools)]}})
+    directory = tempfile.TemporaryDirectory()
+    transcript.directories.append(directory)
+    path = Path(directory.name) / "transcript.jsonl"
     path.write_text("\n".join(json.dumps(line) for line in lines))
     return str(path)
+
+
+transcript.directories = []
 
 
 def run_waiting(tool, text, transcript_path=None):
@@ -207,6 +218,49 @@ def run_waiting(tool, text, transcript_path=None):
     payload = {"tool_name": "mcp__hearthbot__" + tool, "tool_input": args, "transcript_path": transcript_path}
     return subprocess.run([sys.executable, "-B", str(WAITING_HOOK)], input=json.dumps(payload),
                           text=True, capture_output=True)
+
+
+def tearDownModule():
+    for directory in transcript.directories:
+        directory.cleanup()
+
+
+class WaitingDomainTest(unittest.TestCase):
+    """The hook's whole input domain for a post_message that mentions the person."""
+
+    def verdict(self, text, path=None):
+        return run_waiting("post_message", text, path or transcript([])).returncode
+
+    def test_claims_are_refused_and_everything_else_passes(self):
+        cases = (
+            ("Still waiting on your yes. I did not open a card.", 2),
+            ("U2 waits on your yes. https://example.com/y?z=1", 2),
+            ("Waiting on CI and on main being green.", 0),
+            ("No decision is waiting on you.", 0),
+            ("U2 doesn't wait on you.", 0),
+            ('He wrote "waiting on you" earlier, which I answered.', 0),
+            ("Do you want U2 first? I'm waiting on your yes.", 0),
+            ("The card above asks; waiting on your yes.", 2),
+        )
+        for text, code in cases:
+            with self.subTest(text=text):
+                self.assertEqual(self.verdict(text), code)
+
+    def test_a_refused_card_does_not_count_as_an_open_question(self):
+        claim = "Waiting on your yes for U2."
+        self.assertEqual(self.verdict(claim, transcript(["mcp__hearthbot__request_decision"])), 0)
+        self.assertEqual(self.verdict(claim, transcript(["mcp__hearthbot__request_decision"], refused=True)), 2)
+
+    def test_an_oddly_shaped_transcript_counts_as_asked(self):
+        claim = "Waiting on your yes for U2."
+        with tempfile.TemporaryDirectory() as directory:
+            for name, content in (("array", "[1]\n"), ("string_message", json.dumps({"type": "user", "message": "x"}) + "\n"),
+                                  ("garbage", "not json\n")):
+                path = Path(directory, name)
+                path.write_text(content)
+                with self.subTest(shape=name):
+                    self.assertEqual(self.verdict(claim, str(path)), 0)
+        self.assertEqual(self.verdict(claim, "/no/such/transcript"), 0)
 
 
 class WaitingNeedsAQuestionTest(unittest.TestCase):
@@ -224,10 +278,9 @@ class WaitingNeedsAQuestionTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("never lists what the person must do", result.stderr)
 
-    def test_a_question_this_turn_or_a_named_card_lets_the_message_through(self):
+    def test_a_question_this_turn_lets_the_message_through(self):
         waits = UNASKED_MESSAGES[1]
         for text, path in ((waits, transcript(["mcp__hearthbot__request_decision", "mcp__hearthbot__post_message"])),
-                           (waits + " The card above has the question.", transcript([])),
                            ("Should U2 stop the quote bar? It waits on your yes.", transcript([]))):
             with self.subTest(text=text[-40:]):
                 self.assertEqual(run_waiting("post_message", text, path).returncode, 0)
