@@ -33,16 +33,17 @@ pub const Clock = union(enum) {
     retry: struct { attempt: u64, seconds: u64 },
 };
 
-const Look = struct { mark: []const u8, tone: Tone = .normal, words: []const u8, clock: std.meta.Tag(Clock) };
+/// `marked` is false for the one line that draws no glyph; otherwise the mark is the work kind's sign.
+const Look = struct { marked: bool = true, tone: Tone = .normal, words: []const u8, clock: std.meta.Tag(Clock) };
 
 const looks = std.enums.EnumArray(session_work.Kind, ?Look).init(.{
     .idle = null,
-    .pending = .{ .mark = marks.marks.get(.queued).unicode, .words = "Queued", .clock = .elapsed },
-    .working = .{ .mark = marks.marks.get(.active).unicode, .words = "Thinking", .clock = .elapsed },
-    .retrying = .{ .mark = marks.marks.get(.active).unicode, .tone = .attention, .words = "Provider error", .clock = .retry },
-    .bash = .{ .mark = marks.marks.get(.active).unicode, .words = "Running a command", .clock = .elapsed },
-    .approval = .{ .mark = marks.marks.get(.needs_you).unicode, .tone = .attention, .words = "Needs approval", .clock = .elapsed },
-    .stopping = .{ .mark = "", .tone = .quiet, .words = "Stopping", .clock = .ellipsis },
+    .pending = .{ .words = "Queued", .clock = .elapsed },
+    .working = .{ .words = "Thinking", .clock = .elapsed },
+    .retrying = .{ .tone = .attention, .words = "Provider error", .clock = .retry },
+    .bash = .{ .words = "Running a command", .clock = .elapsed },
+    .approval = .{ .tone = .attention, .words = "Needs approval", .clock = .elapsed },
+    .stopping = .{ .marked = false, .tone = .quiet, .words = "Stopping", .clock = .ellipsis },
     .finished = null,
     .failed = null,
     .stopped = null,
@@ -57,9 +58,13 @@ pub const max_words_bytes = max: {
     break :max bytes;
 };
 
+fn markOf(kind: session_work.Kind, look: Look) []const u8 {
+    return if (look.marked) marks.marks.get(kind.sign()).unicode else "";
+}
+
 pub const stopping: Line = line: {
     const look = looks.get(.stopping).?;
-    break :line .{ .mark = look.mark, .tone = look.tone, .words = look.words, .clock = .ellipsis };
+    break :line .{ .mark = markOf(.stopping, look), .tone = look.tone, .words = look.words, .clock = .ellipsis };
 };
 
 pub fn of(words: *[max_words_bytes]u8, state: *const WorkState, operation: ?u64, now_ms: u64) ?Line {
@@ -67,7 +72,7 @@ pub fn of(words: *[max_words_bytes]u8, state: *const WorkState, operation: ?u64,
     if (state.* == .stopping) return stopping;
     const look = looks.get(state.*) orelse return null;
     return .{
-        .mark = look.mark,
+        .mark = markOf(state.*, look),
         .tone = look.tone,
         .words = switch (state.*) {
             .working => |working| if (working.compaction) compacting else look.words,
