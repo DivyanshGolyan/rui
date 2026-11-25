@@ -424,8 +424,15 @@ test "SUI-124 successful message_agent receipts are opt-in while raw Activity an
             const taken_result = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{action_ids[7]});
             try expectContent(&storage, try testingContentReference(&storage, taken_result), "Rui could not send this Message: its command key is already taken. Nothing was sent.");
             try std.testing.expectEqual(@as(u64, 6), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE sender_session_ref=?1", .{sender.slice()}));
-            const sender_order_sql = "SELECT count(*) FROM message_admission WHERE sender_session_ref=?1 AND sender_position<(SELECT acceptance_position FROM action_operation a WHERE message_admission.command_key=@concat('" ++ idempotency_key.agent_message_prefix ++ "',a.action_id))";
-            try std.testing.expectEqual(@as(u64, 6), try store_testing.queryU64(&storage, sender_order_sql, .{sender.slice()}));
+            // store_testing.queryU64 sends its text to SQLite unrendered, so rsql macros such as @concat
+            // are not available here; each delivered key is built in Zig instead.
+            var ordered: u64 = 0;
+            for (action_ids[0..6]) |action_id| {
+                var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "{s}{d}", .{ idempotency_key.agent_message_prefix, action_id });
+                ordered += try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE sender_session_ref=?1 AND command_key=?2 AND sender_position<(SELECT acceptance_position FROM action_operation WHERE action_id=?3)", .{ sender.slice(), key, action_id });
+            }
+            try std.testing.expectEqual(@as(u64, 6), ordered);
 
             var conversation_request: @import("../../conversation_read.zig").ConversationPage = .{};
             try conversation_request.session.set(sender.slice());
