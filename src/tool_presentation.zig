@@ -342,6 +342,11 @@ test "TPR-3 a saved label always reads as a valid tool row line" {
         .{ .saved = "a\r\n\u{2028}b", .words = "a b" },
         .{ .saved = "\xff\xfe", .words = "\u{FFFD}\u{FFFD}" },
         .{ .saved = "a\x00b", .words = "a\u{FFFD}b" },
+        .{ .saved = "Run  tests", .words = "Run tests" },
+        .{ .saved = "a\tb", .words = "a b" },
+        .{ .saved = " read x ", .words = "read x" },
+        .{ .saved = "a\u{a0}b", .words = "a b" },
+        .{ .saved = "read src/main.zig", .words = "read src/main.zig" },
     };
     for (cases) |case| {
         const line = Line.ofSaved(case.saved);
