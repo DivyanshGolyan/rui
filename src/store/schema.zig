@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 95;
+pub const schema_version: u32 = 96;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -75,6 +75,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 93, .digest = 0x0028c239ba46341d },
     .{ .schema_version = 94, .digest = 0x9803d541a1a4945e },
     .{ .schema_version = 95, .digest = 0x09bff41030bad2a0 },
+    .{ .schema_version = 96, .digest = 0x3c118fb5fc591e54 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -1067,6 +1068,35 @@ pub const migrations = [_]Migration{
             "UPDATE action_operation SET outcome_text='Started ',outcome_link_at=8,outcome_link_session=(SELECT c.target FROM core_command c WHERE c.command_key=CONCAT('rui.core/start_agent/',action_operation.action_id)),outcome_completion=1 WHERE resolution_code='succeeded' AND EXISTS(SELECT 1 FROM core_command c WHERE c.command_key=CONCAT('rui.core/start_agent/',action_operation.action_id))",
         },
     },
+    // A hosted web search keeps the facts its provider reported (the action, each target, the pattern) and no sentence: a reader
+    // derives the line when it reads. A search saved before format 96 kept only its sentence, so it reads as an action of none
+    // with no targets, and its line is "Search the web" (Divyansh, 2026-11-25, #2282 open question 4).
+    .{
+        .from = 95,
+        .sqlite = &.{
+            "ALTER TABLE model_output_item RENAME TO model_output_item_before_96",
+            "CREATE TABLE model_output_item(\n operation_id INTEGER NOT NULL REFERENCES model_operation(operation_id),\n item_ordinal INTEGER NOT NULL CHECK(item_ordinal>=0),\n session_ref TEXT NOT NULL,\n session_position INTEGER NOT NULL CHECK(session_position>0),\n item_kind INTEGER NOT NULL CHECK(item_kind BETWEEN 1 AND 5),\n message_content_id INTEGER REFERENCES content(content_id) CHECK((message_content_id IS NOT NULL)=(item_kind=2)),\n attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal>0),\n item_id_digest BLOB NOT NULL CHECK(length(item_id_digest)=32),\n replay_omits_reasoning_text INTEGER NOT NULL CHECK(replay_omits_reasoning_text IN (0,1) AND (replay_omits_reasoning_text=0 OR item_kind=1)),\n phase INTEGER NOT NULL DEFAULT 0 CHECK(phase IN (0,1,2) AND (phase=0 OR item_kind=2)),\n extras_content_id INTEGER NOT NULL REFERENCES content(content_id),\n part_count INTEGER NOT NULL CHECK(part_count>=0 AND (part_count=0 OR item_kind IN (1,2))),\n hosted_action INTEGER CHECK(hosted_action IN (0,1,2,3) AND (hosted_action IS NOT NULL)=(item_kind=5)),\n hosted_pattern_content_id INTEGER REFERENCES content(content_id) CHECK(hosted_pattern_content_id IS NULL OR item_kind=5),\n call_failed INTEGER NOT NULL DEFAULT 0 CHECK(call_failed IN (0,1) AND (call_failed=0 OR item_kind=5)),\n PRIMARY KEY(operation_id,item_ordinal),\n UNIQUE(session_ref,session_position),\n UNIQUE(operation_id,item_id_digest)\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,hosted_action,call_failed) SELECT operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,CASE WHEN item_kind=5 THEN 0 END,call_failed FROM model_output_item_before_96",
+            "DROP TABLE model_output_item_before_96",
+            "CREATE INDEX model_output_history ON model_output_item(session_ref,session_position)",
+            "CREATE INDEX model_output_call_history ON model_output_item(session_ref,session_position) WHERE item_kind=3",
+            "CREATE INDEX model_output_hosted_history ON model_output_item(session_ref,session_position) WHERE item_kind=5",
+            "CREATE INDEX model_output_compaction_history ON model_output_item(session_ref,session_position) WHERE item_kind=4",
+            "CREATE INDEX model_output_compaction_anchor ON model_output_item(operation_id,item_ordinal) WHERE item_kind=4",
+            "CREATE TABLE hosted_target(\n operation_id INTEGER NOT NULL,\n item_ordinal INTEGER NOT NULL,\n target_ordinal INTEGER NOT NULL CHECK(target_ordinal>=0),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n PRIMARY KEY(operation_id,item_ordinal,target_ordinal),\n FOREIGN KEY(operation_id,item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal)\n) STRICT, WITHOUT ROWID",
+        },
+        .mysql = &.{
+            "ALTER TABLE model_output_item ADD COLUMN hosted_action BIGINT AFTER part_count, ADD COLUMN hosted_pattern_content_id BIGINT AFTER hosted_action, ADD FOREIGN KEY(hosted_pattern_content_id) REFERENCES content(content_id)",
+            "UPDATE model_output_item SET hosted_action=0 WHERE item_kind=5",
+            "ALTER TABLE model_output_item ADD CHECK(hosted_action IN (0,1,2,3) AND (hosted_action IS NOT NULL)=(item_kind=5)), ADD CHECK(hosted_pattern_content_id IS NULL OR item_kind=5)",
+            "SET @rui_hosted_ddl=(SELECT CONCAT('ALTER TABLE model_output_item ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') SEPARATOR ', '),', DROP COLUMN description') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='model_output_item' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('description',cc.CHECK_CLAUSE)>0)",
+            "PREPARE rui_hosted FROM @rui_hosted_ddl",
+            "EXECUTE rui_hosted",
+            "DEALLOCATE PREPARE rui_hosted",
+            "SET @rui_hosted_ddl=NULL",
+            "CREATE TABLE hosted_target(\n operation_id BIGINT NOT NULL,\n item_ordinal BIGINT NOT NULL,\n target_ordinal BIGINT NOT NULL,\n content_id BIGINT NOT NULL,\n PRIMARY KEY(operation_id,item_ordinal,target_ordinal),\n FOREIGN KEY(operation_id,item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n CHECK(target_ordinal>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        },
+    },
 };
 
 comptime {
@@ -1954,7 +1984,8 @@ pub const tables = [_]Table{
             .{ .name = "phase", .type = .int, .default = "0", .check = "phase IN (0,1,2) AND (phase=0 OR item_kind=2)" },
             .{ .name = "extras_content_id", .type = .int },
             .{ .name = "part_count", .type = .int, .check = "part_count>=0 AND (part_count=0 OR item_kind IN (1,2))" },
-            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 200 } }, .nullable = true, .check = "(description IS NOT NULL)=(item_kind=5)" },
+            .{ .name = "hosted_action", .type = .int, .nullable = true, .check = "hosted_action IN (0,1,2,3) AND (hosted_action IS NOT NULL)=(item_kind=5)" },
+            .{ .name = "hosted_pattern_content_id", .type = .int, .nullable = true, .check = "hosted_pattern_content_id IS NULL OR item_kind=5" },
             .{ .name = "call_failed", .type = .flag, .default = "0", .check = "(call_failed=0 OR item_kind=5)" },
         },
         .primary_key = &.{ "operation_id", "item_ordinal" },
@@ -1963,6 +1994,24 @@ pub const tables = [_]Table{
             references("operation_id", "model_operation", &.{"operation_id"}),
             references("message_content_id", "content", content_reference),
             references("extras_content_id", "content", content_reference),
+            references("hosted_pattern_content_id", "content", content_reference),
+        },
+        .without_rowid = true,
+    },
+    // One string a hosted call named, in provider order: a search's query, each of its `queries`, or the url of an open or find.
+    // The strings are public content; the line a reader shows is derived from them and never stored.
+    .{
+        .name = "hosted_target",
+        .columns = &.{
+            .{ .name = "operation_id", .type = .int },
+            .{ .name = "item_ordinal", .type = .int },
+            .{ .name = "target_ordinal", .type = .int, .check = "target_ordinal>=0" },
+            .{ .name = "content_id", .type = .int },
+        },
+        .primary_key = &.{ "operation_id", "item_ordinal", "target_ordinal" },
+        .foreign_keys = &.{
+            .{ .columns = &.{ "operation_id", "item_ordinal" }, .references = "model_output_item", .referenced = &.{ "operation_id", "item_ordinal" } },
+            references("content_id", "content", content_reference),
         },
         .without_rowid = true,
     },
@@ -3628,7 +3677,6 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     const utf8_overlong = utf8_line ++ "a";
     const updates = .{
         "UPDATE model_tool_call SET description=?1 WHERE operation_id=2 AND call_ordinal=0",
-        "UPDATE model_output_item SET description=?1 WHERE operation_id=2 AND item_ordinal=2",
     };
     inline for (updates) |sql| {
         const statement = try sqlite.prepare(database, sql);
@@ -3647,8 +3695,14 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
         const columns_read = try sqlite.prepare(database, "SELECT group_concat('\"'||replace(name,'\"','\"\"')||'\"',',') FROM pragma_table_info('original_" ++ name ++ "')");
         defer _ = c.sqlite3_finalize(columns_read);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(columns_read));
-        const columns = try columnText(columns_read, 0);
-        try std.testing.expect(columns.len > 0);
+        const read_columns = try columnText(columns_read, 0);
+        try std.testing.expect(read_columns.len > 0);
+        // Format 96 drops the sentence a hosted search kept: every other column of the item must come through the steps unchanged.
+        const columns = if (comptime std.mem.eql(u8, name, "model_output_item")) dropped: {
+            try std.testing.expect(std.mem.indexOf(u8, read_columns, "\"description\",") != null);
+            break :dropped try std.mem.replaceOwned(u8, std.testing.allocator, read_columns, "\"description\",", "");
+        } else try std.testing.allocator.dupe(u8, read_columns);
+        defer std.testing.allocator.free(columns);
         const current_columns = if (comptime std.mem.eql(u8, name, "action_operation")) columns: {
             try std.testing.expect(std.mem.indexOf(u8, columns, "\"bash_timeout_ms\"") != null);
             break :columns try std.mem.replaceOwned(u8, std.testing.allocator, columns, "\"bash_timeout_ms\"", "\"attempt_timeout_ms\"");
@@ -3677,7 +3731,9 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
         }
     }
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_tool_call WHERE operation_id=2 AND call_ordinal=0 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
-    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_output_item WHERE operation_id=2 AND item_ordinal=2 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
+    // The hosted item the step carried reads as an action of none: its old sentence is not kept.
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_output_item WHERE operation_id=2 AND item_ordinal=2 AND hosted_action=0 AND hosted_pattern_content_id IS NULL"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM hosted_target"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
     try openExisting(std.testing.io, database, root, null, null);
 }

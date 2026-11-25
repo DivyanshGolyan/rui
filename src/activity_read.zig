@@ -85,6 +85,8 @@ pub const ReadActivityContent = struct {
     session: Bounded(session_id.max_reference_bytes) = .{},
     position: u64 = 0,
     ordinal: u64 = 0,
+    /// Which exact text of the row to open. A hosted call holds several (its targets, then its pattern); every other row has one, field 0.
+    field: u8 = 0,
 };
 
 pub const ProposalFieldReference = struct { length: u64, digest: [32]u8 };

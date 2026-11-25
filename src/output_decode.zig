@@ -729,10 +729,16 @@ const Grammar = struct {
             },
             .web_search_call => {
                 const call = codecs.hostedCall(self.codec, data, item);
-                const target = call.target orelse codec_abi.Range{ .start = 0, .length = 0 };
-                const decoded = Decoded.of(data, target, null, null);
-                record = .{ .tag = .action, .kind = kind, .ordinal = ordinal, .start = if (call.target != null) self.base + target.start else 0, .length = target.length, .decoded_length = decoded.length, .content_digest = decoded.digest, .action = call.action, .call_failed = call.failed };
+                record = .{ .tag = .action, .kind = kind, .ordinal = ordinal, .start = 0, .length = 0, .action = call.action, .call_failed = call.failed };
                 try metadata.append(&record);
+                var targets: codec_abi.HostedCursor = .{};
+                var stored: usize = 0;
+                while (stored < codec_abi.max_hosted_targets) : (stored += 1) {
+                    const target = codecs.nextHostedTarget(self.codec, data, &call, &targets) orelse break;
+                    const field = Decoded.of(data, target, null, null);
+                    record = .{ .tag = .target, .kind = kind, .ordinal = ordinal, .start = self.base + target.start, .length = target.length, .decoded_length = field.length, .content_digest = field.digest };
+                    try metadata.append(&record);
+                }
                 if (call.pattern) |pattern| {
                     const field = Decoded.of(data, pattern, null, null);
                     record = .{ .tag = .pattern, .kind = kind, .ordinal = ordinal, .start = self.base + pattern.start, .length = pattern.length, .decoded_length = field.length, .content_digest = field.digest };
@@ -998,10 +1004,7 @@ pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, sourc
     while (try reader.next()) |record| {
         var moved = record;
         switch (record.tag) {
-            .member, .part, .name, .call_id, .arguments, .item, .pattern => moved.start = record.start - testing_item_event.len + start,
-            .action => if (record.length != 0) {
-                moved.start = record.start - testing_item_event.len + start;
-            },
+            .member, .part, .name, .call_id, .arguments, .item, .pattern, .target => moved.start = record.start - testing_item_event.len + start,
             else => {},
         }
         try metadata.append(&moved);

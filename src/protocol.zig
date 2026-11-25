@@ -404,6 +404,41 @@ pub const ToolPresentationJson = struct {
     }
 };
 
+/// The exact text of a stored string, by its length and digest: the reference a hosted call's targets and pattern are served as.
+pub const ContentTextJson = struct {
+    reference: content_value.Reference,
+
+    pub const openapi_name = "ContentText";
+    pub const openapi_shape = content_reference_shape;
+    pub const max_json_bytes = shapeBytes(content_reference_shape);
+
+    pub fn writeJson(self: *const ContentTextJson, out: *std.Io.Writer) !void {
+        try writeShape(out, content_reference_shape, .{ self.reference.length, self.reference.digest });
+    }
+};
+
+/// A hosted call's action as the wire carries it: what it did, the first targets' exact texts, how many targets the Store holds,
+/// and the pattern. The line a reader shows is not here: it is derived from these, and a client may derive its own.
+pub const HostedActionJson = struct {
+    value: activity_facts.Item.HostedAction,
+
+    pub const openapi_name = "HostedAction";
+    pub const head = .{ "{\"kind\":\"", Hole{ .tag = @import("hosted_action.zig").HostedAction }, "\",\"targets\":[" };
+    pub const tail = .{ "],\"targets_total\":\"", Hole.decimal, "\",\"pattern\":", Hole{ .optional_json = ContentTextJson }, "}" };
+    pub const max_served = activity_facts.Item.HostedAction.Targets.max_served;
+    pub const max_json_bytes = shapeBytes(head) + jsonListBytes(max_served, ContentTextJson.max_json_bytes) + shapeBytes(tail);
+
+    pub fn writeJson(self: *const HostedActionJson, out: *std.Io.Writer) !void {
+        const action = &self.value;
+        try writeShape(out, head, .{action.kind});
+        for (action.targets.served(), 0..) |reference, index| {
+            if (index != 0) try out.writeByte(',');
+            try (ContentTextJson{ .reference = reference }).writeJson(out);
+        }
+        try writeShape(out, tail, .{ action.targets_total, if (action.pattern) |reference| ContentTextJson{ .reference = reference } else null });
+    }
+};
+
 pub const Peer = struct {
     session: Bounded(max_session_bytes),
 
@@ -1774,12 +1809,13 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseActivityContent(self: *Parser, out: *ReadActivityContent, members: *Members) !void {
-            const Field = enum { session, position, ordinal };
+            const Field = enum { session, position, ordinal, field };
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
                 .position => out.position = try self.readCanonicalU64(),
                 .ordinal => out.ordinal = try self.readCanonicalU64(),
+                .field => out.field = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor,
             };
             try require(Field, seen, &.{ .session, .position, .ordinal });
             if (out.position == 0 or out.position > std.math.maxInt(i64) or out.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
@@ -2447,7 +2483,13 @@ pub const public_parts_reply = struct {
         try capture.append(out.buffered());
     }
 };
-pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
+pub const activity_content_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"" };
+    /// Which of the row's exact texts to open; omitted is the first, which is the only one of every row but a hosted call.
+    pub const field = .{ ",\"field\":\"", Hole.decimal, "\"" };
+    pub const tail = .{"}"};
+    pub const all = head ++ field ++ tail;
+};
 pub const configure_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"configuration\":" };
     pub const reload_skills = .{",\"reload_skills\":true"};
@@ -2497,13 +2539,13 @@ pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id
 pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request.all);
 pub const max_conversation_page_request_bytes = shapeBytes(conversation_page_request);
 pub const max_activity_page_request_bytes = shapeBytes(activity_page_request.all);
-pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
+pub const max_activity_content_request_bytes = shapeBytes(activity_content_request.all);
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
     observe_command_request.all,       host_info_request,                   host_stop_request,
     host_drain_request,                host_pause_request,                  read_result_request,
     list_sessions_request.all,         read_action_request.all,             read_action_arguments_request,
     read_action_call_id_request,       conversation_content_request.all,    conversation_page_request,
-    activity_search_request.all,       activity_page_request.all,           activity_content_request,
+    activity_search_request.all,       activity_page_request.all,           activity_content_request.all,
     skill_suggestions_session_request, skill_suggestions_workspace_request, model_list_request,
     public_parts_request,              public_part_content_request.all,     tools_reload_request.all,
     tools_reload_request.named,        tools_status_request,
