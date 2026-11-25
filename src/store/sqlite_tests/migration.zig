@@ -426,7 +426,7 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
             try store_testing.sqliteExec(raw, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,'brhkcj',?2,?3)", .{ case.key, 6 + index, 1793781800 + index });
         }
         try sqlite.exec(raw, "UPDATE session SET next_position=9 WHERE session_ref='brhkcj'");
-        try Legacy.expectCommands(raw, commands);
+        try Legacy.expectSaved(raw, commands);
         try std.testing.expectEqual(@as(u32, 57), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='9'", .{}));
         try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_foreign_key_check"));

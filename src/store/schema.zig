@@ -1090,7 +1090,7 @@ pub const migrations = [_]Migration{
         },
         .mysql = &.{
             "DROP TABLE sent_rejection",
-            "SET @rui_sender_ddl=(SELECT CONCAT('ALTER TABLE message_admission DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='message_admission' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('sender_position',cc.CHECK_CLAUSE)>0 AND LOCATE('sender_session_ref',cc.CHECK_CLAUSE)>0)",
+            "SET @rui_sender_ddl=(SELECT CONCAT('ALTER TABLE message_admission ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') SEPARATOR ', ')) FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='message_admission' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('sender_position',cc.CHECK_CLAUSE)>0)",
             "PREPARE rui_sender_check FROM @rui_sender_ddl",
             "EXECUTE rui_sender_check",
             "DEALLOCATE PREPARE rui_sender_check",
