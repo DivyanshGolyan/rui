@@ -86,8 +86,8 @@ pub const Work = struct {
 pub fn archiveBadge(state: ArchiveState) ?[]const u8 {
     return switch (state) {
         .active => null,
-        .archiving => "Stopping and archiving",
-        .archived => "Archived · /unarchive",
+        .archiving => ArchiveState.archiving.badge(),
+        .archived => comptime ArchiveState.archived.badge().? ++ " · /unarchive",
     };
 }
 
