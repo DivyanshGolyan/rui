@@ -2046,7 +2046,7 @@ def main(selected="all"):
         finally:
             dispose_all(temp.unlink)
         codex_fixture.credentials(credential)
-        saved.write_text(f"version=1\nstore={store.resolve()}\nconnection=retired\nmodel=old-model\n")
+        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         stale = defaults(preferences_home)
         assert stale["local_credentials"]["codex"] == "configured" and stale["next_session"] == {"status": "unsupported_provider"}, stale
         assert saved_fields(saved, "connection", "model") == ("retired", "old-model")
@@ -2054,9 +2054,9 @@ def main(selected="all"):
         assert saved_fields(saved, "connection", "model") == ("retired", "old-model")
         defaults(preferences_home, "--connection", "codex")
         assert saved_fields(saved, "connection", "model") == ("codex", "")
-        saved.write_text(f"version=1\nstore={store.resolve()}\nconnection=retired\nmodel=old-model\n")
+        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         defaults(preferences_home, "--connection", "codex", "--model", "gpt-6-luna")
-        saved.write_text(f"version=1\nstore={store.resolve()}\nconnection=codex\nmodel=old-model\n")
+        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=old-model\n")
         prospective = defaults(preferences_home)["next_session"]
         assert prospective["status"] == "selected" and prospective["model"] == "old-model", prospective
         assert defaults(preferences_home)["model"] == "old-model", "inspection rewrote the stale pin"
@@ -2095,7 +2095,7 @@ def main(selected="all"):
             assert "Copy last answer" in chat_info_frame(master)
             terminal_step(master, "\x03", "Your chats keep working")
             assert entered.wait(timeout=5) == 0
-        saved.write_text(f"version=1\nstore={state / 'missing'}\nconnection=codex\nmodel=gpt-6-luna\n")
+        saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
         saved.chmod(0o600)
         assert run(preferences_home, "session", "inspect", "--session", session, success=False) == ""
         before_missing = run(preferences_home, "request", "list")
@@ -2110,7 +2110,7 @@ def main(selected="all"):
         assert entered.returncode == 6 and b"[store_unavailable]" in entered.stderr, entered.stderr
         assert not (state / "missing").exists()
         assert run(preferences_home, "request", "list") == before_missing
-        saved.write_text(f"version=1\nstore={store.resolve()}\nconnection=codex\nmodel=gpt-6-luna\n")
+        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
         assert json.loads(run(home, "session", "inspect", "--store", store, "--session", session))["work"]["state"]["kind"] == "idle"
         no_tty_home = state / "no-tty-home"
         no_tty_home.mkdir()
@@ -2291,7 +2291,7 @@ def main(selected="all"):
         blocked_config = blocked_home / ".config/rui"
         blocked_config.mkdir(parents=True, mode=0o700)
         (blocked_config / "preferences").write_text(
-            f"version=1\nstore={store.resolve()}\nconnection=codex\nmodel=gpt-6-luna\n")
+            f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
         (blocked_config / "preferences").chmod(0o600)
         (blocked_config / "requests").write_text("not a directory")
         codex_fixture.credentials(blocked_config / "codex.json")
@@ -2984,7 +2984,8 @@ def main(selected="all"):
             terminal_gate(entered, master, observation_held, "accepted Message before activity loss", timeout=8)
             optimistic = await_screen(master, "observe after Host loss", composer=True)
             assert "Sending" not in optimistic, optimistic
-            assert conversation_text(optimistic).count("› observe after Host loss") == 1, optimistic
+            assert conversation_text(optimistic).count("◌ observe after Host loss") == 1, optimistic
+            assert "› observe after Host loss" not in conversation_text(optimistic), optimistic
             after = set(json.loads(run(home, "request", "list")))
             assert len(after - before) == 1, (before, after)
             saved_key = (after - before).pop()

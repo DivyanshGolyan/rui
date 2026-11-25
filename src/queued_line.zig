@@ -11,6 +11,16 @@ pub const Shown = struct { admission: u64, line: Line };
 
 pub const Waiting = struct { line: []const u8, count: u64 };
 
+pub fn local(text: []const u8, has_image: bool) Line {
+    const first = session_line.plain(session_line.max_line_bytes, session_line.firstLine(text));
+    if (!has_image) return first;
+    const image = @import("part_text.zig").first_image;
+    if (first.len == 0) return session_line.plain(session_line.max_line_bytes, image);
+    var buffer: [session_line.max_line_bytes + image.len + 1]u8 = undefined;
+    const joined = std.fmt.bufPrint(&buffer, "{s} {s}", .{ image, first.slice() }) catch unreachable;
+    return session_line.plain(session_line.max_line_bytes, joined);
+}
+
 pub const waiting_mark = marks.marks.get(.queued).unicode;
 pub const waiting_capacity = waiting_mark.len + std.fmt.count(" {d} ·", .{std.math.maxInt(u64)}) + 1 + session_line.max_line_bytes + session_line.ellipsis.len;
 

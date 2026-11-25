@@ -25,7 +25,6 @@ const protocol = @import("protocol.zig");
 const content_value = @import("content_value.zig");
 const Input = @import("SessionInput.zig");
 const clipboard_image = @import("os/clipboard_image.zig");
-const image_label = @import("part_text.zig").first_image;
 const Submission = @import("SessionSubmission.zig");
 const original_state = @import("submission_state.zig");
 const Task = @import("ClientTask.zig");
@@ -62,6 +61,7 @@ const slash_commands = slash_commands_shared.conversation;
 const model_capability = @import("model_capability.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
+const queue_lifecycle = @import("queue_lifecycle.zig");
 const status_page = @import("status_page.zig");
 const ChatInfo = @import("chat_info.zig");
 const info_save = @import("chat_info_save.zig");
@@ -200,6 +200,7 @@ fn freeze(self: *Self, phase: ReadPhase) *Job {
     self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .unicode_script = self.app_caps.unicode, .width_method = self.screen.vx.caps.unicode, .command = self.command, .configure = self.app_hooks.configure, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread, .opened = self.screen.feed.opened };
 
     const job = &self.job;
+    job.local_message_key = self.submission.messageKey() orelse self.submission.lastMessageKey();
     job.latest_ending = self.live.latest_ending;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -1176,7 +1177,12 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_content.welcome_quiet = quiet;
     const original_presentation = session_notice.presentation(self.reading.opening, self.app_consent.request != null, self.heldOriginal());
     const message_note = original_presentation.note;
+    const at_latest = screen.feed.at_end or (self.reading.opening and screen.anchor.following());
+    const presentation = self.submission.queueView(self.queueFacts(), at_latest);
+    const held_preview = presentation.held;
+    const local_preview = held_preview and at_latest;
     const queued_note: ?[]const u8 = if (message_note) |note| note: {
+        if (local_preview) break :note null;
         const key = self.submission.messageKey() orelse break :note null;
         for (screen.feed.entries[0..screen.feed.count]) |entry| {
             const entry_key = entry.message_key orelse continue;
@@ -1185,10 +1191,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         break :note null;
     } else null;
     self.app_content.message_note = if (message_note) |note| .{ .key = self.submission.messageKey().?, .text = note } else null;
-    self.app_content.pending = if (self.submission.messageText()) |text|
-        (if (!self.submission.messageProjected() and (screen.feed.at_end or (self.reading.opening and screen.anchor.following()))) .{ .text = if (self.submission.messageHasImage()) (if (text.len == 0) image_label else try std.fmt.allocPrint(ctx.arena, "{s}\n{s}", .{ image_label, text })) else text, .note = message_note } else null)
-    else
-        null;
     self.app_document.style = normal;
     self.app_document.colours = colours;
     self.app_document.hover_style = hover;
@@ -1211,12 +1213,20 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const browsing = screen.view != .feed or !screen.anchor.following();
     if (screen.anchor.following()) self.new_below = 0;
     const chrome = &self.chrome;
-    chrome.activity.live = self.live.view;
-    chrome.activity.work = if (self.app_consent.request != null) null else work_line.of(try ctx.arena.create([work_line.max_words_bytes]u8), &self.live.work.state, self.live.work.operation, now_ms);
-    const queued = self.queuedRow();
-    chrome.activity.queued = if (queued) |row| row.waiting else null;
-    chrome.activity.method = self.app_caps.width;
-    chrome.activity.styles = .{ .ink = style.of(self.app_caps, .{ .colour = .ink }), .normal = normal, .quiet = quiet, .attention = attention, .failure = failure };
+    const local_waiting: ?queued_line.Waiting = if (presentation.local) preview: {
+        const line = try ctx.arena.create(queued_line.Line);
+        line.* = queued_line.local(self.submission.messageText().?, self.submission.messageHasImage());
+        break :preview .{ .line = line.slice(), .count = 1 };
+    } else null;
+    chrome.activity.present(.{
+        .live = self.live.view,
+        .work = if (self.app_consent.request != null) null else work_line.of(try ctx.arena.create([work_line.max_words_bytes]u8), &self.live.work.state, self.live.work.operation, now_ms),
+        .queued = self.queueWaiting(presentation.durable),
+        .local_queued = local_waiting,
+        .queued_note = if (local_preview) message_note else null,
+        .method = self.app_caps.width,
+        .styles = .{ .ink = style.of(self.app_caps, .{ .colour = .ink }), .normal = normal, .quiet = quiet, .attention = attention, .failure = failure },
+    });
     self.app_content.tail = chrome.activity.widget();
     self.app_content.latest_ending = self.live.latest_ending;
     self.app_content.retry_actionable = self.retryable() != null;
@@ -1232,7 +1242,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const send = session_chrome.send(original_presentation.status, original_presentation.in_flight);
     const list_visible = self.app_hooks.root.listVisible();
     self.app_screen.content_gutter = if (list_visible) 2 else 1;
-    chrome.place(&self.app_screen, &self.app_input, .{
+    var chrome_view: SessionChrome.View = .{
         .list_visible = list_visible,
         .choice = if (!self.app_info.standaloneOpen()) .closed else if (self.app_info.hasChoice()) .pick else .retry,
         .browsing = browsing,
@@ -1246,6 +1256,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .facts = .{ .current = self.line.facts(self.home), .archive = self.line.archive_state },
         .notice = self.shown_notice.current(now_ms) orelse queued_note orelse said.notice,
         .overview = said.text,
+        .info_footer = if (self.info_open) self.app_info.footerWidget() else null,
 
         .overlay = if (self.info_open)
             .{ .full = self.app_info.bodyWidget() }
@@ -1257,12 +1268,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
             null,
 
         .width = ctx.max.width.?,
-    });
+    };
+    chrome.place(&self.app_screen, &self.app_input, chrome_view);
     self.app_info.narrow = !list_visible;
-    if (self.info_open) {
-        self.app_input.facts = self.app_info.footerWidget();
-        self.app_input.status = null;
-    }
     self.app_preview.size = .{};
     self.app_content.size = .{};
     self.app_screen.host = if (self.app_hooks.host) |host| host.notice(host.context) else null;
@@ -1274,6 +1282,18 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.chrome.status.key.focused = focused == .needs;
     self.chrome.status.stop.focused = focused == .stop;
     var surface = try self.app_screen.widget().draw(ctx);
+    if (held_preview and message_note != null and screen.view == .feed and (!local_preview or !chrome.activity.noteVisible() or browsing)) {
+        if (self.heldOriginal()) |original| if (session_notice.key(original)) |action| {
+            chrome_view.notice_priority = .recovery;
+            chrome_view.notice = switch (action) {
+                .retry => "ctrl+r retries",
+                .discard => "/discard",
+                .status => "alt+d details",
+            };
+            chrome.place(&self.app_screen, &self.app_input, chrome_view);
+            surface = try self.app_screen.widget().draw(ctx);
+        };
+    }
     if (screen.view == .feed) self.feed_origin = surfaceOrigin(surface, self.app_content.widget(), 0, 0) orelse .{};
     const size = if (self.app_consent.request != null) self.app_preview.size else if (screen.view == .feed) self.app_content.size else self.app_document.size;
     screen.height = size.height;
@@ -3026,7 +3046,8 @@ fn beginSubmission(self: *Self, intent: Submission.Intent) !bool {
         return false;
     }
     self.submission.retain_message = true;
-    try self.submission.begin(intent);
+    const before = if (self.queuedRow() != null) self.queueFacts() else null;
+    try self.submission.begin(intent, before);
     return true;
 }
 
@@ -3149,13 +3170,25 @@ fn readInspection(self: *const Self) reader_policy.Inspection {
     };
 }
 
-pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
+fn queueFacts(self: *const Self) ?queue_lifecycle.Queue {
     const queued = self.live.queued;
-    const count = queued.count;
-    if (count == 0) return null;
-    const shown = if (self.live.queued_line) |*shown| shown else return null;
-    if (shown.admission != queued.newest_admission) return null;
-    return .{ .newest = queued.newest_admission, .waiting = .{ .line = shown.line.slice(), .count = count } };
+    if (queued.count == 0) return null;
+    const shown = self.live.queued_line;
+    return .{ .count = queued.count, .oldest = queued.oldest_position, .newest = queued.newest_admission, .position = queued.newest_position, .line_matches = shown != null and shown.?.admission == queued.newest_admission };
+}
+
+fn queueWaiting(self: *const Self, durable: queue_lifecycle.Durable) ?queued_line.Waiting {
+    return switch (durable) {
+        .none => null,
+        .line => .{ .line = self.live.queued_line.?.line.slice(), .count = self.live.queued.count },
+        .summary => |count| .{ .line = "in Host queue", .count = count },
+    };
+}
+
+pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
+    const queue = self.queueFacts() orelse return null;
+    const waiting = self.queueWaiting(self.submission.queueView(queue, false).durable) orelse return null;
+    return .{ .newest = queue.newest, .waiting = waiting };
 }
 
 fn showStaged(self: *Self) !void {
@@ -3201,7 +3234,17 @@ fn showStaged(self: *Self) !void {
             complete = false;
             break;
         }
-        if (entry.message_key) |key| self.submission.observeMessage(key);
+        if (row.excluded_key) |key| {
+            if (self.submission.observe(.{ .excluded = key }).stopped) self.shown_notice.show("! Stopped before it ran · send it again to run it", self.nowMs());
+        }
+        if (entry.message_key) |key| {
+            if (entry.text.bytes.len != 0) {
+                _ = self.submission.observe(.{ .applied = key });
+            } else if (entry.provisional) {
+                const seen = self.submission.observe(.{ .pending = .{ .key = key, .position = entry.key.position, .page_all = page.kinds == .all, .adopted = false } });
+                if (seen.await_adoption) result.attached_pending = .{ .key = key, .row = entry.key };
+            }
+        }
         inserted += 1;
     }
     if (!complete and inserted == 0) self.reading.fills = self.reading.fills.failed(read, page);
@@ -3403,6 +3446,9 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             self.live.work = .fromCore(result.work.work);
             self.live.queued = result.queued;
             if (result.queued_line) |shown| self.live.queued_line = shown;
+            if (result.attached_pending) |pending| if (self.screen.feed.indexOf(pending.row) != null) {
+                _ = self.submission.observe(.{ .pending = .{ .key = pending.key, .position = pending.row.position, .page_all = true, .adopted = true, .queue = self.queueFacts() } });
+            };
             if (self.job.open_status or self.job.watch_status) try self.applyStatus();
             if (result.line) |*line| self.line = line.*;
             if (result.hint) |*hint| self.hint = hint.*;
@@ -3474,6 +3520,7 @@ fn queuedProjection() !void {
             .files = undefined,
             .command = undefined,
             .colour = false,
+            .submission = .{ .io = undefined, .store = "unused", .session = "unused", .directory = "unused", .input = undefined, .environment = .empty },
             .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .queued_line = if (case.line) |admission| .{ .admission = admission, .line = line } else null },
         };
         const row = self.queuedRow() orelse {
@@ -3554,6 +3601,12 @@ const TestHost = struct {
         return false;
     }
 };
+
+fn testEnsureQueue(self: *Self) void {
+    const key = self.submission.messageKey() orelse return;
+    if (self.submission.lastMessageKey()) |current| if (std.mem.eql(u8, &current, &key)) return;
+    _ = self.submission.observe(.{ .begin = .{ .key = key, .before = null } });
+}
 
 const HeldFrontend = struct {
     self: Self,
@@ -3645,6 +3698,7 @@ const HeldFrontend = struct {
     }
 
     fn deliver(held: *HeldFrontend, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+        testEnsureQueue(&held.self);
         ctx.consume_event = false;
         ctx.phase = .capturing;
         try held.root.widget().captureEvent(ctx, event);
@@ -3690,6 +3744,7 @@ const HeldFrontend = struct {
     }
 
     fn draw(held: *HeldFrontend) !vxfw.Surface {
+        testEnsureQueue(&held.self);
         return held.self.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
     }
 
@@ -3713,6 +3768,7 @@ const HeldFrontend = struct {
 
     /// The whole frame as App draws it through Root, dialogs included.
     fn shownThroughRoot(held: *HeldFrontend) ![]const u8 {
+        testEnsureQueue(&held.self);
         return held.rendered(try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} }));
     }
 
@@ -6645,6 +6701,7 @@ const ChromeFixture = struct {
     }
 
     fn press(fixture: *ChromeFixture, key: vaxis.Key) !void {
+        testEnsureQueue(fixture.self);
         fixture.root.session = fixture.widget;
         fixture.root.session_keys = fixture.self.keyOwner();
         fixture.ctx.consume_event = false;
@@ -6667,6 +6724,7 @@ const ChromeFixture = struct {
     }
 
     fn rowsAtWidth(fixture: *ChromeFixture, width: u16) ![24][]const u8 {
+        testEnsureQueue(fixture.self);
         const arena = fixture.arena.allocator();
         const surface = try fixture.widget.draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
         var screen: vaxis.Screen = try .init(arena, .{ .rows = 24, .cols = width, .x_pixel = 0, .y_pixel = 0 });
@@ -6815,7 +6873,7 @@ fn optimisticInputRows() !void {
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .submitting, .key = @splat('K') };
         defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         const pending = try fixture.rowsAtWidth(width);
-        try std.testing.expect(ChromeFixture.find(&pending, "› original model input") != null);
+        try std.testing.expect(ChromeFixture.find(&pending, "◌ original model input") != null);
         var messages: usize = 0;
         for (pending) |line| {
             messages += std.mem.count(u8, line, "original model input");
@@ -6827,19 +6885,18 @@ fn optimisticInputRows() !void {
         self.submission.state = .unconfirmed;
         const unconfirmed = try fixture.rowsAtWidth(width);
         errdefer for (unconfirmed, 0..) |line, row| std.debug.print("optimistic width={d} row={d}: {s}\n", .{ width, row, line });
-        const message_row = ChromeFixture.find(&unconfirmed, "› original model input");
+        const message_row = ChromeFixture.find(&unconfirmed, "◌ original model input");
         const note_row = ChromeFixture.find(&unconfirmed, "Not confirmed · ctrl+r retries original");
         try std.testing.expect(message_row != null);
         try std.testing.expect(note_row != null);
-        try std.testing.expect(note_row.? > message_row.? and note_row.? < 20);
+        try std.testing.expect(note_row.? > message_row.?);
         for (idle[20..23], unconfirmed[20..23]) |before, after| try std.testing.expectEqualStrings(before, after);
         try std.testing.expectEqualStrings("original model input", try self.input.message(original));
         self.submission.state = .rejected;
         const rejected = try fixture.rowsAtWidth(width);
-        try std.testing.expect(ChromeFixture.find(&rejected, "› original model input") != null);
+        try std.testing.expect(ChromeFixture.find(&rejected, "◌ original model input") != null);
         const rejected_note = ChromeFixture.find(&rejected, "Rejected · /discard");
         try std.testing.expect(rejected_note != null);
-        try std.testing.expect(rejected_note.? < 20);
         for (idle[20..23], rejected[20..23]) |before, after| try std.testing.expectEqualStrings(before, after);
         _ = self.input.append("next draft");
         _ = try fixture.rowsAtWidth(width);
@@ -6854,7 +6911,7 @@ test "App Session accepted message refresh keeps the next draft intact without p
     defer fixture.deinit();
     const self = fixture.self;
     const original = self.input.submitText("accepted original");
-    self.submission.settled_message = .{ .ticket = original, .key = @splat('K') };
+    self.submission.holdAccepted(original, @splat('K'));
     self.submission.accepted = .{ .kind = .message, .key = @splat('K') };
     defer self.submission.disposeMessage();
     _ = self.input.append("next draft");
@@ -6872,7 +6929,7 @@ test "App Session accepted message refresh keeps the next draft intact without p
     try std.testing.expectEqualStrings("accepted original", self.submission.messageText().?);
     try std.testing.expect(self.submission.retry == null);
     const shown = try fixture.rows();
-    try std.testing.expect(ChromeFixture.find(&shown, "› accepted original") != null);
+    try std.testing.expect(ChromeFixture.find(&shown, "◌ accepted original") != null);
 }
 
 fn optimisticEnteredFrame() !void {
@@ -6893,7 +6950,7 @@ fn optimisticEnteredFrame() !void {
     try fixture.press(.{ .codepoint = vaxis.Key.enter });
     const shown = try fixture.rows();
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
-    try std.testing.expect(ChromeFixture.find(&shown, "› hi") != null);
+    try std.testing.expect(ChromeFixture.find(&shown, "◌ hi") != null);
     for (shown) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Sending") == null);
     try std.testing.expectEqual(session_chrome.Tone.quiet, self.chrome.status.bar.tone);
 }
@@ -7128,7 +7185,7 @@ test "SessionFrontend submission presentation domain keeps Message notes separat
             .rejected => "Rejected",
         };
         if (kind == .message) {
-            const message_row = ChromeFixture.find(&shown, "› matrix original");
+            const message_row = ChromeFixture.find(&shown, "◌ matrix original");
             try std.testing.expect(message_row != null);
             var copies: usize = 0;
             for (shown) |line| {
@@ -7141,11 +7198,10 @@ test "SessionFrontend submission presentation domain keeps Message notes separat
             if (expected) |prefix| {
                 const note_row = ChromeFixture.find(&shown, prefix);
                 try std.testing.expect(note_row != null);
-                try std.testing.expect(note_row.? > message_row.? and note_row.? < 20);
-            } else try std.testing.expect(self.app_content.pending.?.note == null);
+                try std.testing.expect(note_row.? > message_row.?);
+            }
         } else {
             for (shown) |line| try std.testing.expect(std.mem.indexOf(u8, line, "matrix original") == null);
-            try std.testing.expect(self.app_content.pending == null);
             if (expected) |prefix| {
                 var found = false;
                 for (shown) |line| if (std.mem.indexOf(u8, line, prefix) != null) {
@@ -7553,7 +7609,7 @@ test "SessionFrontend failed historical fills retain the edge while scans approv
 const FeedFixture = struct {
     held: *HeldFrontend,
     file: std.Io.File,
-    const Row = struct { key: u64, text: []const u8, provisional: bool = false, target: ?View.Collapsed = null, message_key: ?[36]u8 = null };
+    const Row = struct { key: u64, text: []const u8, provisional: bool = false, target: ?View.Collapsed = null, message_key: ?[36]u8 = null, excluded_key: ?[36]u8 = null };
 
     fn create() !FeedFixture {
         return createWithDrafts("unused", null);
@@ -7570,12 +7626,20 @@ const FeedFixture = struct {
         self.file.close(std.testing.io);
     }
     fn page(self: FeedFixture, read: feed_reads.Read, rows: []const Row, start: bool, end: bool) !void {
+        try self.pageWithQueue(read, rows, start, end, null);
+    }
+    fn pageWithQueue(self: FeedFixture, read: feed_reads.Read, rows: []const Row, start: bool, end: bool, snapshot: ?struct { queued: protocol.Queued, shown: queued_line.Shown }) !void {
         const frontend = &self.held.self;
+        testEnsureQueue(frontend);
         if (read == .opening) frontend.reading.opening = true;
         const job = frontend.freeze(if (read == .fill_above or read == .fill_below) .fill else .activity);
         frontend.reading.feed_read = read;
         job.feed_page = FeedPolicy.request(read, frontend.feedState());
         frontend.job.result.row_count = rows.len;
+        if (snapshot) |value| {
+            frontend.job.result.queued = value.queued;
+            frontend.job.result.queued_line = value.shown;
+        }
         frontend.job.result.at_start = start;
         frontend.job.result.at_end = end;
         frontend.job.result.low = if (rows.len == 0) null else .{ .position = rows[0].key };
@@ -7584,7 +7648,7 @@ const FeedFixture = struct {
         var offset: u64 = 0;
         for (rows, 0..) |row, i| {
             try self.file.writePositionalAll(std.testing.io, row.text, offset);
-            frontend.job.result.rows[i] = .{ .key = .{ .position = row.key }, .offset = offset, .length = row.text.len, .tight = false, .provisional = row.provisional, .message_key = row.message_key };
+            frontend.job.result.rows[i] = .{ .key = .{ .position = row.key }, .offset = offset, .length = row.text.len, .tight = false, .provisional = row.provisional, .message_key = row.message_key, .excluded_key = row.excluded_key };
             if (row.target) |target| {
                 frontend.job.result.rows[i].collapsed_targets[0] = target;
                 frontend.job.result.rows[i].collapsed_count = 1;
@@ -7615,7 +7679,7 @@ fn firstRows(text: []const u8, count: usize) []const u8 {
     return text[0..end];
 }
 
-test "SUI-17 SessionFrontend draws queued and taken Messages once across work" {
+fn queuedAndTakenAcrossWork() !void {
     for ([_]u16{ 46, 140 }) |width| {
         const fixture = try FeedFixture.create();
         defer fixture.destroy();
@@ -7627,14 +7691,16 @@ test "SUI-17 SessionFrontend draws queued and taken Messages once across work" {
         try std.testing.expect(std.mem.indexOf(u8, working, "› first request") != null);
         try std.testing.expect(std.mem.indexOf(u8, working, "Thinking") != null);
         const ticket = self.input.submitText("waiting one");
-        self.submission.settled_message = .{ .ticket = ticket, .key = @splat('K') };
+        self.submission.holdAccepted(ticket, @splat('K'));
         defer self.submission.disposeMessage();
-        try fixture.page(.scan, &.{.{ .key = 10, .text = "", .provisional = true, .message_key = @splat('K') }}, true, true);
+        var first_line: queued_line.Line = .{};
+        try first_line.set("waiting one");
+        try fixture.pageWithQueue(.scan, &.{.{ .key = 10, .text = "", .provisional = true, .message_key = @splat('K') }}, true, true, .{
+            .queued = .{ .count = 1, .oldest_position = 10, .newest_admission = 1, .newest_position = 10 },
+            .shown = .{ .admission = 1, .line = first_line },
+        });
         try std.testing.expect(!self.submission.messageHeld());
         self.live.work.state = .{ .working = .{ .since = 1 } };
-        self.live.queued = .{ .count = 1, .oldest_position = 10, .newest_admission = 1, .newest_position = 10 };
-        self.live.queued_line = .{ .admission = 1, .line = .{} };
-        try self.live.queued_line.?.line.set("waiting one");
         const queued = try fixture.held.shown();
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, queued, "waiting one"));
         try std.testing.expect(std.mem.indexOf(u8, queued, "◌ waiting one") != null);
@@ -7745,7 +7811,216 @@ test "SUI-17 SessionFrontend draws queued and taken Messages once across work" {
     };
 }
 
-test "SessionFrontend keeps recovery visible beside an invisible queued Admission" {
+fn localQueueHandoff() !void {
+    for ([_]u16{ 46, 140 }) |width| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        const self = &held.self;
+        held.size.width = width;
+        const ticket = self.input.submitText("queued original");
+        self.submission.intent = .{ .message = ticket };
+        self.submission.key = @splat('K');
+        self.submission.state = .submitting;
+        defer {
+            self.submission.intent = null;
+            self.input.release(ticket) catch unreachable;
+        }
+        try fixture.page(.opening, &.{.{ .key = 1, .text = "› first\n" }}, true, true);
+        self.live.work.state = .{ .working = .{ .since = 1 } };
+        self.live.queued = .{ .count = 1, .oldest_position = 1, .newest_admission = 8, .newest_position = 1 };
+        self.live.queued_line = .{ .admission = 8, .line = .{} };
+        try self.live.queued_line.?.line.set("unrelated queued");
+        _ = self.submission.observe(.{ .begin = .{ .key = @splat('K'), .before = self.queueFacts() } });
+        const local = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, local, "◌ unrelated queued") != null);
+        try std.testing.expect(std.mem.indexOf(u8, local, "◌ 2 ·") == null);
+        try std.testing.expect(std.mem.indexOf(u8, local, "◌ queued original") != null);
+        try std.testing.expect(std.mem.indexOf(u8, local, "› queued original") == null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, local, "queued original"));
+        self.live.queued = .{ .count = 2, .oldest_position = 1, .newest_admission = 9, .newest_position = 2 };
+        self.live.queued_line = .{ .admission = 9, .line = .{} };
+        try self.live.queued_line.?.line.set("queued original");
+        const ambiguous = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, ambiguous, "◌ 2 · in Host queue") != null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, ambiguous, "queued original"));
+        try fixture.page(.scan, &.{.{ .key = 2, .text = "", .provisional = true, .message_key = @splat('K') }}, true, true);
+        const partial = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, partial, "◌ queued original") != null);
+        try std.testing.expect(self.submission.queueView(null, true).held);
+        self.live.queued = .{ .count = 1, .oldest_position = 2, .newest_admission = 9, .newest_position = 2 };
+        self.live.queued_line = .{ .admission = 9, .line = .{} };
+        try self.live.queued_line.?.line.set("queued original");
+        const pending = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, pending, "◌ queued original") != null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pending, "queued original"));
+        self.live.queued = .{};
+        try fixture.page(.opening, &.{.{ .key = 3, .text = "› queued original\n", .message_key = @splat('K') }}, true, true);
+        const applied = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, applied, "◌ queued original") == null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, applied, "› queued original"));
+    }
+}
+
+fn localAppliedFill() !void {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const ticket = self.input.submitText("local input");
+    _ = self.submission.observe(.{ .begin = .{ .key = @splat('K'), .before = null } });
+    _ = self.submission.observe(.{ .receipt = .{ .key = @splat('K'), .admission = 7 } });
+    self.submission.holdAccepted(ticket, @splat('K'));
+    defer self.submission.disposeMessage();
+    try fixture.page(.opening, &.{}, true, true);
+    self.live.queued = .{ .count = 2, .oldest_position = 1, .newest_admission = 7, .newest_position = 2 };
+    self.live.queued_line = .{ .admission = 7, .line = .{} };
+    try self.live.queued_line.?.line.set("local input");
+    self.screen.feed.at_end = false;
+    try fixture.page(.fill_below, &.{.{ .key = 3, .text = "› local input\n", .message_key = @splat('K') }}, false, true);
+    const shown = try fixture.held.shown();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "local input"));
+    try std.testing.expect(std.mem.indexOf(u8, shown, "› local input") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "◌ in Host queue") != null);
+}
+
+fn constrainedQueueRecovery() !void {
+    for ([_]Submission.State{ .unconfirmed, .rejected }) |state| {
+        var fixture: ChromeFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const self = fixture.self;
+        const ticket = self.input.submitText("original");
+        self.submission.intent = .{ .message = ticket };
+        self.submission.key = @splat('K');
+        self.submission.state = state;
+        defer {
+            self.submission.intent = null;
+            self.input.release(ticket) catch unreachable;
+        }
+        testEnsureQueue(self);
+        const entered = self.input.typed("\x1b[200~a\nb\nc\nd\ne\nf\x1b[201~");
+        try std.testing.expect(entered == .editor and entered.editor != .refused);
+        try std.testing.expectEqualStrings("a\nb\nc\nd\ne\nf", self.input.composition().bytes);
+        const arena = fixture.arena.allocator();
+        const surface = try fixture.widget.draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = 20, .height = 8 }, .cell_size = .{} });
+        const action = if (state == .rejected) "/discard" else "ctrl+r retries";
+        try std.testing.expectEqualStrings(action, self.chrome.status.bar.notice.?);
+        var screen: vaxis.Screen = try .init(arena, .{ .rows = 8, .cols = 20, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 20, .height = 8, .screen = &screen };
+        try surface.render(window, self.app_input.composer.widget());
+        var found = false;
+        for (0..8) |row| {
+            var output: std.Io.Writer.Allocating = .init(arena);
+            for (0..20) |column| {
+                const cell = screen.readCell(@intCast(column), @intCast(row)) orelse continue;
+                try output.writer.writeAll(cell.char.grapheme);
+            }
+            if (std.mem.indexOf(u8, output.written(), action) != null) found = true;
+        }
+        try std.testing.expect(found);
+        try std.testing.expectEqualStrings("a\nb\nc\nd\ne\nf", self.input.composition().bytes);
+    }
+}
+
+fn scrollbackQueueRecovery() !void {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    _ = try fixture.rows();
+    try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
+    try std.testing.expect(!self.screen.anchor.following());
+    const ticket = self.input.submitText("original");
+    self.submission.intent = .{ .message = ticket };
+    self.submission.key = @splat('K');
+    self.submission.state = .unconfirmed;
+    defer {
+        self.submission.intent = null;
+        self.input.release(ticket) catch unreachable;
+    }
+    const shown = try fixture.rows();
+    try std.testing.expect(ChromeFixture.findEnding(&shown, "ctrl+r retries") != null);
+    self.screen.feed.at_end = false;
+    for ([_]Submission.State{ .unconfirmed, .rejected }) |state| {
+        self.submission.state = state;
+        const historical = try fixture.rows();
+        const action = if (state == .rejected) "/discard" else "ctrl+r retries";
+        try std.testing.expect(ChromeFixture.findEnding(&historical, action) != null);
+    }
+}
+
+fn localQueueImage() !void {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const image = try Input.Image.validate(@embedFile("codecs/fixtures/image-input/pixel.png"));
+    self.input.setImage(try image.clone());
+    const ticket = self.input.submitText("caption");
+    self.submission.intent = .{ .message = ticket };
+    self.submission.key = @splat('K');
+    self.submission.state = .submitting;
+    defer {
+        self.submission.intent = null;
+        self.input.release(ticket) catch unreachable;
+    }
+    try fixture.page(.opening, &.{}, true, true);
+    const shown = try fixture.held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, shown, "◌ [Image 1] caption") != null);
+    _ = self.input.append("next draft");
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+    try std.testing.expect((try self.input.messageImage(ticket)) != null);
+}
+
+fn newerQueueHandoff() !void {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const original = self.input.submitText("local original");
+    _ = self.submission.observe(.{ .begin = .{ .key = @splat('K'), .before = null } });
+    _ = self.submission.observe(.{ .receipt = .{ .key = @splat('K'), .admission = 7 } });
+    self.submission.holdAccepted(original, @splat('K'));
+    defer self.submission.disposeMessage();
+    try fixture.page(.opening, &.{}, true, true);
+    const before = try fixture.held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, before, "◌ local original") != null);
+    var other: queued_line.Line = .{};
+    try other.set("newer input");
+    try fixture.pageWithQueue(.scan, &.{
+        .{ .key = 2, .text = "", .provisional = true, .message_key = @splat('K') },
+        .{ .key = 4, .text = "", .provisional = true, .message_key = @splat('J') },
+    }, true, true, .{
+        .queued = .{ .count = 2, .oldest_position = 2, .newest_admission = 8, .newest_position = 4 },
+        .shown = .{ .admission = 8, .line = other },
+    });
+    try std.testing.expect(!self.submission.messageHeld());
+    const after = try fixture.held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, after, "◌ 2 · newer input") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, "local original") == null);
+    _ = self.input.append("next draft");
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+}
+
+fn stoppedQueueHandoff() !void {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const ticket = self.input.submitText("stopped original");
+    self.submission.holdAccepted(ticket, @splat('K'));
+    defer self.submission.disposeMessage();
+    try fixture.page(.opening, &.{}, true, true);
+    try fixture.page(.scan, &.{.{ .key = 2, .text = "◌ not sent\nother\n", .excluded_key = @splat('J') }}, true, true);
+    try std.testing.expect(self.submission.messageHeld());
+    try fixture.page(.scan, &.{.{ .key = 3, .text = "◌ not sent\nstopped original\n", .excluded_key = @splat('K') }}, true, true);
+    try std.testing.expect(!self.submission.messageHeld());
+    try std.testing.expectEqualStrings("! Stopped before it ran · send it again to run it", self.shown_notice.current(self.nowMs()).?);
+    const shown = try fixture.held.shown();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "stopped original"));
+    self.shown_notice.dismiss();
+    try fixture.page(.opening, &.{.{ .key = 3, .text = "◌ not sent\nstopped original\n", .excluded_key = @splat('K') }}, true, true);
+    try std.testing.expect(self.shown_notice.current(self.nowMs()) == null);
+}
+
+fn queuedAdmissionRecovery() !void {
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
     const self = &fixture.held.self;
@@ -7753,7 +8028,7 @@ test "SessionFrontend keeps recovery visible beside an invisible queued Admissio
     self.submission.intent = .{ .message = ticket };
     self.submission.key = @splat('K');
     self.submission.state = .unconfirmed;
-    self.submission.publication = .published;
+    self.submission.markPublished();
     defer {
         self.submission.intent = null;
         self.input.release(ticket) catch unreachable;
@@ -7770,12 +8045,12 @@ test "SessionFrontend keeps recovery visible beside an invisible queued Admissio
     try std.testing.expectEqualStrings("uncertain queued input", self.submission.messageText().?);
 }
 
-test "SessionFrontend canonical insertion retires accepted message custody only for its key" {
+fn keyedAcceptedHandoff() !void {
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
     const self = &fixture.held.self;
     const original = self.input.submitText("accepted keyed original");
-    self.submission.settled_message = .{ .ticket = original, .key = @splat('K') };
+    self.submission.holdAccepted(original, @splat('K'));
     defer self.submission.disposeMessage();
     _ = self.input.append("next draft");
     try fixture.page(.opening, &.{.{ .key = 10, .text = "other message\n", .message_key = @splat('J') }}, true, true);
@@ -7789,7 +8064,7 @@ test "SessionFrontend canonical insertion retires accepted message custody only 
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "accepted keyed original"));
 }
 
-test "SessionFrontend canonical message replaces unknown echo while preserving attached recovery" {
+fn uncertainAppliedHandoff() !void {
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
     const self = &fixture.held.self;
@@ -7797,13 +8072,13 @@ test "SessionFrontend canonical message replaces unknown echo while preserving a
     self.submission.intent = .{ .message = original };
     self.submission.key = @splat('K');
     self.submission.state = .unconfirmed;
-    self.submission.publication = .published;
+    self.submission.markPublished();
     defer {
         self.submission.intent = null;
         self.input.release(original) catch unreachable;
     }
     try fixture.page(.opening, &.{.{ .key = 10, .text = "› keyed original\n", .message_key = @splat('K') }}, true, true);
-    try std.testing.expect(self.submission.messageProjected());
+    try std.testing.expect(!self.submission.queueView(null, true).held);
     try std.testing.expect(self.submission.view() != null);
     const shown = try fixture.held.shown();
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "keyed original"));
@@ -7846,7 +8121,7 @@ fn idleRead(self: *Self) ?feed_reads.Read {
     return FeedPolicy.nextRead(state);
 }
 
-test "SUI-17 fresh conversation scroll keeps each Message once in order" {
+fn freshQueueScroll() !void {
     for ([_]u16{ 46, 140 }) |width| {
         const fixture = try FeedFixture.create();
         defer fixture.destroy();
@@ -9923,7 +10198,7 @@ test "Enter while the Host line or opening holds sending keeps the draft, names 
         defer held.self.app_hooks.host = null;
         held.self.reading.opening = opening;
         defer held.self.reading.opening = false;
-        if (accepted) held.self.submission.settled_message = .{ .ticket = held.self.input.submitText("accepted earlier"), .key = @splat('K') };
+        if (accepted) held.self.submission.holdAccepted(held.self.input.submitText("accepted earlier"), @splat('K'));
         defer if (accepted) held.self.submission.disposeMessage();
         try held.keys("sent right after a restart\r");
         try std.testing.expect(held.self.submission.intent == null);
@@ -11996,6 +12271,14 @@ pub fn sui4DraftHandoff() !void {
 test "SUI-17 activity tail and new-entry projection" {
     const cases = [_]*const fn () anyerror!void{
         FeedView.testActivityTail,
+        @import("ActivityBlock.zig").testActivityDomain,
+        queuedAndTakenAcrossWork,
+        localQueueHandoff,
+        localAppliedFill,
+        localQueueImage,
+        newerQueueHandoff,
+        stoppedQueueHandoff,
+        freshQueueScroll,
         queuedProjection,
         queuedPresentation,
         heldScrollArrivals,
@@ -12012,6 +12295,11 @@ test "SUI-19 message and composer layout" {
         @import("Composer.zig").testMessageLayout,
         optimisticInputRows,
         optimisticEnteredFrame,
+        constrainedQueueRecovery,
+        scrollbackQueueRecovery,
+        queuedAdmissionRecovery,
+        keyedAcceptedHandoff,
+        uncertainAppliedHandoff,
     };
     for (cases) |case| try case();
 }

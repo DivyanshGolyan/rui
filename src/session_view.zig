@@ -1571,6 +1571,7 @@ fn excludedAtStop(reads: client.SessionReads, scratch: std.Io.File, stop: protoc
             if (wrote) try sink.feed("\n");
             wrote = true;
             try messageWith(reads, scratch, item, value, .lasting(false), sink, colour);
+            if (@hasDecl(std.meta.Child(@TypeOf(sink)), "excludedMessage")) sink.excludedMessage(value.key.slice());
         }
         cursor = page.continuation() orelse return wrote;
     }

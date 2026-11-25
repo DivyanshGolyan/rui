@@ -151,6 +151,14 @@ def composing(screen, draft):
             and shown[bounds[0] + 1].rstrip() in expected)
 
 
+def composing_lines(screen, first, second):
+    bounds = composer_bounds(screen)
+    if bounds is None:
+        return False
+    lines = [composer_line(screen, index).strip() for index in range(bounds[0] + 1, bounds[1])]
+    return len(lines) >= 2 and lines[0] in ("› " + first, "> " + first) and lines[1] == second
+
+
 def latest(screen, text):
     return text in "\n".join(transcript_rows(screen)) and marker(screen) is None
 
@@ -198,14 +206,24 @@ def activity_case():
             assert tail[-1].removeprefix("◝ Held call · ").rstrip("s").isdigit(), running
             last = footer(running)
             assert last.strip().startswith("‹ ") and last.endswith("ctrl+x stop") and len(last.rstrip()) == 80, running
+            admissions = []
             for index in range(3):
-                os.write(master, f"WAITING-{index}\nsecond line {index}\r".encode())
+                text = f"WAITING-{index}\nsecond line {index}"
+                sent = admit(chrome.home, "session", "send", "--store", chrome.store,
+                    "--session", session, input=text)
+                report = json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+                    "--session", session, "--profile", "full"))
+                matching = [message for message in report["full"]["messages"] if message["command_key"] == sent["request"]]
+                assert len(matching) == 1 and matching[0]["content"].get("text") == text, report
+                assert matching[0]["application"] == "pending" and matching[0]["turn"] is None, matching[0]
+                admissions.append(int(matching[0]["admission"]))
                 count = f"{index + 1} · " if index else ""
                 waiting = chrome.frame(master, b"", lambda screen, count=count, index=index:
                     f"◌ {count}WAITING-{index}" in screen and composing(screen, "")
                     and all(f"› WAITING-{i}" not in screen
                         and f"second line {i}" not in screen for i in range(index + 1)))
                 assert "Sending" not in waiting, waiting
+            assert admissions == sorted(admissions) and len(set(admissions)) == 3, admissions
             bottom = feed_bottom(waiting)
             tail = transcript_rows(waiting)[bottom - 2:bottom]
             assert [line for line in transcript_rows(waiting)[:bottom] if line.startswith(("◝", "◌"))] == tail, waiting
@@ -223,6 +241,8 @@ def activity_case():
             assert footer(done).strip().startswith("‹ ") and "ctrl+x stop" not in footer(done), done
             order = [done.count(f"› WAITING-{i}") for i in range(3)]
             assert order == [1, 1, 1], done
+            positions = [done.index(f"› WAITING-{i}") for i in range(3)]
+            assert positions == sorted(positions), done
             assert [done.count(f"second line {i}") for i in range(3)] == [1, 1, 1], done
             assert done.index("› WAITING-0") < done.index("› WAITING-1") < done.index("› WAITING-2"), done
             chrome.leave(master, caller)
@@ -245,14 +265,43 @@ def thinking_queue_case():
                 working = chrome.frame(master, b"FIRST-QUESTION\r", lambda screen:
                     "Thinking" in screen and "FIRST-QUESTION" in screen)
                 assert "MIDTURN-HI" not in working, working
-                queued = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
-                    "◌ MIDTURN-HI" in screen and composing(screen, ""))
-                assert "Thinking" in queued, queued
-                assert queued.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in queued, queued
+                send_started, send_release = threading.Event(), threading.Event()
+
+                def gate_send(_record):
+                    send_started.set()
+                    assert send_release.wait(15), "local submission gate watchdog"
+                    return True
+
+                proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/message", lambda response: response,
+                    before_forward=gate_send)
+                try:
+                    queued = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
+                        "◌ MIDTURN-HI" in screen and composing(screen, ""))
+                    assert send_started.wait(8), "local submission never reached the gate"
+                    assert "Thinking" in queued, queued
+                    assert queued.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in queued, queued
+                    def inspect():
+                        return json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+                            "--session", session, "--profile", "full"))
+                    before = inspect()
+                    assert not [m for m in before["full"]["messages"] if m["content"].get("text") == "MIDTURN-HI"], before
+                    send_release.set()
+                    pending = fixture.wait_for(inspect, "follow-up admitted while first model response is held", timeout=15,
+                        ready=lambda state: any(m["content"].get("text") == "MIDTURN-HI" for m in state["full"]["messages"]))
+                    original = next(m for m in pending["full"]["messages"] if m["content"].get("text") == "MIDTURN-HI")
+                    assert original["application"] == "pending" and original["turn"] is None, original
+                    queued = chrome.frame(master, b"", lambda screen: "◌ MIDTURN-HI" in screen)
+                    assert queued.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in queued, queued
+                finally:
+                    send_release.set()
+                    proxy.close()
                 first_release.set()
                 taken = chrome.frame(master, b"", lambda screen:
                     "FIRST-DONE" in screen and "› MIDTURN-HI" in screen and "Thinking" in screen, timeout=30)
                 assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
+                applied = inspect()
+                matched = next(m for m in applied["full"]["messages"] if m["command_key"] == original["command_key"])
+                assert matched["admission"] == original["admission"] and matched["application"] == "applied", matched
                 next_release.set()
                 done = chrome.frame(master, b"", lambda screen: "SECOND-DONE" in screen, timeout=30)
                 assert done.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in done, done
@@ -261,6 +310,136 @@ def thinking_queue_case():
                 first_release.set()
                 next_release.set()
     print("session chrome: a mid-Thinking submission is queued once, then shown once as a taken Message at both sizes", flush=True)
+
+
+def pending_second_enter_case():
+    first_release, second_release, send_started, send_release = (threading.Event() for _ in range(4))
+    first = fixture.sse_answer("held-first", "held-r1", "held-m1", "FIRST-DONE")[0]
+    second = fixture.sse_answer("held-second", "held-r2", "held-m2", "SECOND-DONE")[0]
+    third = fixture.sse_answer("held-third", "held-r3", "held-m3", "THIRD-DONE")[0]
+    with Chrome("rui-held-second-enter.", [(first, first_release), (second, second_release), third]) as chrome:
+        session = chrome.session()
+        master, caller, _ = chrome.open(session, lambda screen: True)
+        proxy = None
+        try:
+            chrome.frame(master, b"FIRST-QUESTION\r", lambda screen: "Thinking" in screen and "FIRST-QUESTION" in screen)
+
+            def gate_send(_record):
+                send_started.set()
+                assert send_release.wait(45), "first local submission gate watchdog"
+                return True
+
+            proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/message", lambda response: response,
+                before_forward=gate_send)
+            local = chrome.frame(master, b"ORIGINAL-HELD\r", lambda screen:
+                "◌ ORIGINAL-HELD" in screen and composing(screen, ""))
+            assert send_started.wait(8), "original submission never reached the gate"
+            assert local.count("ORIGINAL-HELD") == 1 and "› ORIGINAL-HELD" not in local, local
+            draft = chrome.frame(master, b"NEXT-ONE\nNEXT-TWO", lambda screen: composing_lines(screen, "NEXT-ONE", "NEXT-TWO"))
+            assert composing_lines(draft, "NEXT-ONE", "NEXT-TWO"), draft
+            refused = chrome.frame(master, b"\r", lambda screen: "Input still pending" in screen and
+                composing_lines(screen, "NEXT-ONE", "NEXT-TWO"))
+            assert "Ctrl-R retries the original" in refused, refused
+
+            def inspect():
+                return json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+                    "--session", session, "--profile", "full"))
+
+            before = inspect()
+            assert not [m for m in before["full"]["messages"] if m["content"].get("text") in ("ORIGINAL-HELD", "NEXT-ONE\nNEXT-TWO")], before
+            assert len(proxy.mutations) == 1, proxy.mutations
+            send_release.set()
+            admitted = fixture.wait_for(inspect, "original input admitted", timeout=15,
+                ready=lambda state: any(m["content"].get("text") == "ORIGINAL-HELD" for m in state["full"]["messages"]))
+            original = next(m for m in admitted["full"]["messages"] if m["content"].get("text") == "ORIGINAL-HELD")
+            assert original["application"] == "pending" and original["turn"] is None, original
+            first_release.set()
+            applied_frame = chrome.frame(master, b"", lambda screen: "› ORIGINAL-HELD" in screen and
+                composing_lines(screen, "NEXT-ONE", "NEXT-TWO"), timeout=30)
+            assert applied_frame.count("ORIGINAL-HELD") == 1, applied_frame
+            applied = inspect()
+            matched = next(m for m in applied["full"]["messages"] if m["command_key"] == original["command_key"])
+            assert matched["admission"] == original["admission"] and matched["application"] == "applied", matched
+            assert not [m for m in applied["full"]["messages"] if m["content"].get("text") == "NEXT-ONE\nNEXT-TWO"], applied
+            chrome.frame(master, b"\r", lambda screen: composing(screen, ""))
+            final = fixture.wait_for(inspect, "explicit next input admitted", timeout=15,
+                ready=lambda state: any(m["content"].get("text") == "NEXT-ONE\nNEXT-TWO" for m in state["full"]["messages"]))
+            originals = [m for m in final["full"]["messages"] if m["content"].get("text") == "ORIGINAL-HELD"]
+            subsequent = [m for m in final["full"]["messages"] if m["content"].get("text") == "NEXT-ONE\nNEXT-TWO"]
+            assert len(originals) == 1 and originals[0]["command_key"] == original["command_key"], final
+            assert len(subsequent) == 1 and int(subsequent[0]["admission"]) > int(original["admission"]), final
+            assert len(proxy.mutations) == 2, proxy.mutations
+            assert json.loads(proxy.mutations[0][1])["key"] == original["command_key"]
+            assert json.loads(proxy.mutations[1][1])["key"] == subsequent[0]["command_key"]
+            chrome.leave(master, caller)
+        finally:
+            send_release.set()
+            first_release.set()
+            second_release.set()
+            if proxy is not None:
+                proxy.close()
+    print("session chrome: a second Enter during capture keeps its exact multiline draft and requires one explicit retry", flush=True)
+
+
+def stopped_local_input_case():
+    for capped in (False, True):
+        model_release, read_release, read_started = threading.Event(), threading.Event(), threading.Event()
+        busy = fixture.sse_answer("stopped-busy", "stopped-reason", "stopped-message", "BUSY-DONE")[0]
+        following = fixture.sse_answer("stopped-next", "stopped-next-reason", "stopped-next-message", "NEXT-DONE")[0]
+        with Chrome("rui-stopped-local.", [(busy, model_release), (following, model_release)]) as chrome:
+            session = chrome.session()
+            run(chrome.home, "session", "send", "--store", chrome.store, "--session", session, input="busy")
+            fixture.wait_for(lambda: len(chrome.endpoint.requests) == 1, "first model request held")
+            for index in range(20):
+                run(chrome.home, "session", "send", "--store", chrome.store, "--session", session,
+                    input=f"OLDER-{index:02d} " + "x" * 2200)
+            master, caller, _ = chrome.open(session, lambda screen: "OLDER-19" in screen, columns=120, height=36)
+            read_started.clear()
+
+            def hold_activity(response):
+                if not read_started.is_set():
+                    read_started.set()
+                    assert read_release.wait(45), "Activity response gate watchdog"
+                return response
+
+            proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/activity-page", hold_activity)
+            try:
+                assert read_started.wait(8), "Activity response was not gated"
+                chrome.frame(master, b"LOCAL-EXCLUDED-UNIQUE\r", lambda screen:
+                    "◌ LOCAL-EXCLUDED-UNIQUE" in screen and composing(screen, ""))
+                def inspect():
+                    return json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+                        "--session", session, "--profile", "full"))
+                admitted = fixture.wait_for(inspect, "local input admitted", timeout=10,
+                    ready=lambda state: any(m["content"].get("text") == "LOCAL-EXCLUDED-UNIQUE" for m in state["full"]["messages"]))
+                original = next(m for m in admitted["full"]["messages"] if m["content"].get("text") == "LOCAL-EXCLUDED-UNIQUE")
+                assert original["application"] == "pending" and original["turn"] is None, original
+                if capped:
+                    for index in range(20):
+                        run(chrome.home, "session", "send", "--store", chrome.store, "--session", session,
+                            input=f"LATER-{index:02d} " + "y" * 2200)
+                run(chrome.home, "session", "stop", "--store", chrome.store, "--session", session)
+                excluded = fixture.wait_for(inspect, "original excluded by stop", timeout=10,
+                    ready=lambda state: any(m["command_key"] == original["command_key"] and m["application"] == "excluded" for m in state["full"]["messages"]))
+                stopped = next(m for m in excluded["full"]["messages"] if m["command_key"] == original["command_key"])
+                assert stopped["admission"] == original["admission"] and stopped["exclusion"]["code"] == "session_stopped", stopped
+                read_release.set()
+                frame = chrome.frame(master, b"", lambda screen: "Stopped before it ran" in screen and
+                    ("more summaries" in screen if capped else "LOCAL-EXCLUDED-UNIQUE" in screen), timeout=20)
+                assert "› LOCAL-EXCLUDED-UNIQUE" not in frame or frame.count("LOCAL-EXCLUDED-UNIQUE") == 1, frame
+                if not capped:
+                    assert frame.count("LOCAL-EXCLUDED-UNIQUE") == 1, frame
+                chrome.frame(master, b"NEXT-DRAFT-UNIQUE", lambda screen: composing(screen, "NEXT-DRAFT-UNIQUE"))
+                chrome.frame(master, b"\r", lambda screen: composing(screen, ""), timeout=15)
+                final = fixture.wait_for(inspect, "next input admitted once", timeout=15,
+                    ready=lambda state: len([m for m in state["full"]["messages"] if m["content"].get("text") == "NEXT-DRAFT-UNIQUE"]) == 1)
+                assert len([m for m in final["full"]["messages"] if m["content"].get("text") == "NEXT-DRAFT-UNIQUE"]) == 1, final
+                chrome.leave(master, caller)
+            finally:
+                read_release.set()
+                model_release.set()
+                proxy.close()
+    print("session chrome: exact stopped local input releases custody, preserves the next draft and admits it once, including bounded stop output", flush=True)
 
 
 def send_recovery_case():
@@ -279,8 +458,8 @@ def send_recovery_case():
             note = "Not confirmed · ctrl+r retries original"
             failed = chrome.frame(master, b"RECOVER-ME\r", lambda screen: note in screen)
             transcript = "\n".join(transcript_rows(failed))
-            assert transcript.count("› RECOVER-ME") == 1 and transcript.count(note) == 1, failed
-            assert transcript.index("› RECOVER-ME") < transcript.index(note), failed
+            assert transcript.count("◌ RECOVER-ME") == 1 and transcript.count(note) == 1, failed
+            assert transcript.index("◌ RECOVER-ME") < transcript.index(note), failed
             assert note not in footer(failed) and note not in status(failed), failed
             assert "Sending" not in failed and composing(failed, ""), failed
             original = attempts[0]
@@ -539,13 +718,15 @@ def opening_case():
         finally:
             release.set()
             (chrome.workspace / "release").write_text("")
-    print("session chrome: a reopened Session shows ◌ 2 · the newest waiting Message under the running call; Ctrl-O selects the lowest tool or Message, and reopening keeps tools folded", flush=True)
+    print("session chrome: Host-admitted waiting Messages preserve aggregate and FIFO; Ctrl-O selects the lowest tool or Message, and reopening keeps tools folded", flush=True)
 
 
 def main():
     send_recovery_case()
     activity_case()
     thinking_queue_case()
+    pending_second_enter_case()
+    stopped_local_input_case()
     pages_case()
     info_natural_height_case()
     approval_glyph_domain()
