@@ -3301,7 +3301,7 @@ test "Archived window wire: the window and its row limit decode both ways, refus
         .{ .json = head ++ ",\"window\":\"head\",\"limit\":\"0\"}", .failure = error.InvalidCursor },
         .{ .json = head ++ ",\"window\":\"head\",\"limit\":\"41\"}", .failure = error.InvalidCursor },
         .{ .json = head ++ ",\"window\":\"head\",\"limit\":\"256\"}", .failure = error.InvalidCursor },
-        .{ .json = head ++ ",\"window\":\"head\",\"limit\":\"012\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"head\",\"limit\":\"012\"}", .failure = error.InvalidIdentity },
         .{ .json = head ++ ",\"window\":\"head\"}", .failure = error.InvalidCursor },
         .{ .json = head ++ ",\"limit\":\"12\"}", .failure = error.InvalidCursor },
         .{ .json = head ++ ",\"window\":\"tail\",\"limit\":\"12\"}", .window = .{ .cursor = .tail, .rows = 12 } },
