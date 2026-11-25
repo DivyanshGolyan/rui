@@ -612,6 +612,8 @@ A no-op or cancelled choice preserves both sets; invalid membership or reachabil
 The allowed set and loaded intent are distinct from each model Operation’s frozen effective offer; an edit does not rewrite an admitted Operation.
 Model opens that shared inline editor and compact match list for this Session’s provider, with type-to-filter, Up/Down and Enter to save.
 A change applies to subsequent model requests through the existing typed Session configure request; it does not send composer text or change the Session's provider.
+A Configure whose reply is unconfirmed keeps its original saved request key. The field says it is not confirmed and Enter retries that same captured request; closing the choice cannot turn a later Current observation into a receipt or authorize a replacement configuration. Leaving the Session with an unresolved Configure prints the recovery command for that original key.
+Until a post-Configure Current read arrives, the chat footer says `Updating…` instead of showing the previous model and effort as current. The composer can still send; the Host applies its current Session configuration to the subsequent model request. After an unconfirmed Configure, the footer says `Config not confirmed` while the original receipt remains unresolved.
 Esc closes only the topmost edit or choice first, then the panel.
 
 `chat_info.zig` owns only the widget and its borrowed typed backend; it never imports `SessionFrontend`.

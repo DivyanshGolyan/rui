@@ -19,7 +19,7 @@ const widget_style = @import("widget_style.zig");
 const Self = @This();
 const focus = @import("chat_info_focus.zig");
 
-pub const SaveState = enum { idle, pending, saved, failed };
+pub const SaveState = enum { idle, pending, saved, failed, unconfirmed };
 pub const Edit = union(enum) {
     effort: ?catalog.ReasoningEffort,
     permission: @FieldType(status.Session, "permission"),
@@ -32,6 +32,7 @@ pub const Backend = struct {
     context: *anyopaque,
     read: *const fn (*anyopaque, *status.Session) anyerror!void,
     configure: *const fn (*anyopaque, Edit) anyerror!void,
+    retry: ?*const fn (*anyopaque) anyerror!void = null,
     archive: *const fn (*anyopaque) anyerror!view.IntentAdmission,
     copy_last_answer: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     state: *const fn (*anyopaque) SaveState,
@@ -57,6 +58,7 @@ fields: [6]Panel.Field = undefined,
 actions: [3][]const u8 = undefined,
 failures: [9]?[]const u8 = @splat(null),
 pending: ?usize = null,
+uncertain_row: ?usize = null,
 effort_labels: [std.enums.values(catalog.ReasoningEffort).len + 1][]const u8 = undefined,
 effort_count: usize = 0,
 tool_draft: ?tools.Selection = null,
@@ -86,7 +88,9 @@ pub fn openStandaloneChoice(self: *Self, ctx: *vxfw.EventContext, row: Row) !voi
     const index: usize = if (row == .model) 4 else 0;
     self.bind();
     self.panel.selected = index;
-    try activate(self, ctx, index);
+    if (self.uncertain_row == index) {
+        self.standalone.?.phase = .failed;
+    } else try activate(self, ctx, index);
 }
 
 pub fn standaloneOpen(self: *const Self) bool {
@@ -207,9 +211,26 @@ fn bind(self: *Self) void {
     self.panel.custom_choice = if (self.model_choice.active) self.model_choice.field(4) else null;
 }
 
+fn retryOriginal(self: *Self, ctx: *vxfw.EventContext, row: usize) void {
+    const retry = self.backend.retry orelse return;
+    retry(self.backend.context) catch {
+        ctx.consumeAndRedraw();
+        return;
+    };
+    self.pending = row;
+    if (self.standalone) |*shown| shown.phase = .pending;
+    self.uncertain_row = null;
+    self.failures[row] = null;
+    ctx.consumeAndRedraw();
+}
+
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.pending != null) return;
+    if (self.uncertain_row == row) {
+        self.retryOriginal(ctx, row);
+        return;
+    }
     defer if (self.standalone) |*shown| {
         if (self.pending == null) shown.phase = if (self.failures[row] != null) .failed else .open;
     };
@@ -319,12 +340,13 @@ fn poll(self: *Self) void {
     const state = self.backend.state(self.backend.context);
     if (state == .idle or state == .pending) return;
     self.readSession();
-    if (state == .failed or self.read_failed) {
+    if (state == .failed or state == .unconfirmed or self.read_failed) {
         if (self.standalone) |*shown| shown.phase = .failed;
     } else {
         self.closeStandaloneChoice();
     }
-    self.failures[row] = if (state == .failed) switch (row) {
+    if (row <= 6) self.uncertain_row = if (state == .unconfirmed) row else null;
+    self.failures[row] = if (state == .unconfirmed) " · unconfirmed · enter retry" else if (state == .failed) switch (row) {
         7 => " · couldn't archive",
         8 => " · couldn't copy",
         else => " · couldn't save",
@@ -334,6 +356,13 @@ fn poll(self: *Self) void {
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.uncertain_row) |row| if (!self.hasChoice() and !self.renaming and input == .key_press and input.key_press.matches(vaxis.Key.enter, .{})) {
+        const selected = if (self.standalone) |shown| if (shown.row == .model) @as(usize, 4) else 0 else @as(usize, @intCast(self.panel.selected));
+        if (selected == row) {
+            self.retryOriginal(ctx, row);
+            return;
+        }
+    };
     if (self.model_choice.active and !self.model_choice.validate()) {
         if (self.standalone != null) self.closeStandaloneChoice();
         self.panel.custom_choice = null;
@@ -597,6 +626,7 @@ const Fixture = struct {
     background: ?view.Rgb = null,
     read_calls: usize = 0,
     save_calls: usize = 0,
+    retry_calls: usize = 0,
     session: status.Session = undefined,
     state_value: SaveState = .idle,
     fail_read: bool = false,
@@ -617,7 +647,7 @@ const Fixture = struct {
         self.session.context_estimate = 18;
     }
     fn backend(self: *Fixture) Backend {
-        return .{ .context = self, .read = read, .configure = configure, .archive = archive, .copy_last_answer = copy, .state = state, .models = models, .caps = caps, .copied = copied };
+        return .{ .context = self, .read = read, .configure = configure, .retry = retry, .archive = archive, .copy_last_answer = copy, .state = state, .models = models, .caps = caps, .copied = copied };
     }
     fn read(raw: *anyopaque, out: *status.Session) !void {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -636,6 +666,11 @@ const Fixture = struct {
             },
             else => edit,
         };
+        self.state_value = .pending;
+    }
+    fn retry(raw: *anyopaque) !void {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        self.retry_calls += 1;
         self.state_value = .pending;
     }
     fn archive(raw: *anyopaque) !view.IntentAdmission {
@@ -1728,6 +1763,33 @@ test "Chat info standalone effort checks the actual Session effort without chang
             const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (actual == row) "✓" else " ", drawn.readCell(3, @intCast(row + 1)).char.grapheme);
         }
+    };
+}
+
+test "SUI-136 unconfirmed fields retry by keyboard or pointer without reopening their editor" {
+    for ([_]usize{ 0, 1, 2, 4, 6 }) |row| for ([_]bool{ false, true }) |pointer| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        var page: Self = .{ .backend = fixture.backend() };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        page.refresh();
+        page.pending = row;
+        fixture.state_value = .unconfirmed;
+        page.poll();
+        page.panel.selected = row;
+        if (pointer) {
+            _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
+            for (page.panel.targets) |target| if (!target.choice and target.index == row and target.end > target.start) {
+                try page.widget().handleEvent(&ctx, .{ .mouse = .{ .row = target.row, .col = target.start, .button = .left, .type = .press, .mods = .{} } });
+                break;
+            };
+        } else try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(@as(usize, 1), fixture.retry_calls);
+        try std.testing.expectEqual(@as(usize, 0), fixture.save_calls);
+        try std.testing.expectEqual(@as(?usize, row), page.pending);
+        try std.testing.expect(!page.renaming and !page.hasChoice());
     };
 }
 

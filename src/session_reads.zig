@@ -42,7 +42,8 @@ pub const RenderedRow = struct {
     message_key: ?[36]u8 = null,
 };
 
-pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ChatInfo.Edit) anyerror!bool;
+pub const ConfigureAttempt = union(enum) { edit: ChatInfo.Edit, recover: [36]u8 };
+pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ConfigureAttempt) anyerror!@import("configure_outcome.zig").Outcome;
 pub const Command = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, []u8) anyerror!void;
 pub const Requests = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, *std.Io.Writer, *SavedRequests) anyerror!void;
 pub const SavedRequests = slash_commands.Requests(protocol.max_key_bytes);
@@ -188,6 +189,7 @@ pub const Job = struct {
     command: Command = undefined,
     configure: ?Configure = null,
     info_edit: ?ChatInfo.Edit = null,
+    info_recover: ?[36]u8 = null,
     requests: Requests = undefined,
     status: Status = undefined,
     phase: ReadPhase = .activity,
@@ -233,7 +235,7 @@ pub const Job = struct {
         cursor: protocol_reply.ActivityCursor = .{},
         rendering: bool = false,
         command_stderr_restored: bool = false,
-        info_saved: bool = false,
+        info_outcome: ?@import("configure_outcome.zig").Outcome = null,
         action: ?u64 = null,
         output_length: u64 = 0,
         copied: Copied = .no_answer,
@@ -401,7 +403,7 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     var read = task.readContext();
     read.cancellation = job.interrupted;
-    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = read, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length], .configure = job.configure, .edit = job.info_edit, .saved = &job.result.info_saved };
+    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = read, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length], .configure = job.configure, .edit = job.info_edit, .recover = job.info_recover, .outcome = &job.result.info_outcome };
     const ended = run.into(job.files.inspection);
     job.result.rendering = ended.rendering;
     job.result.command_stderr_restored = ended.stderr_restored;
@@ -417,12 +419,14 @@ pub const CommandRun = struct {
     line: []u8,
     configure: ?Configure = null,
     edit: ?ChatInfo.Edit = null,
-    saved: ?*bool = null,
+    recover: ?[36]u8 = null,
+    outcome: ?*?@import("configure_outcome.zig").Outcome = null,
 
     fn execute(self: CommandRun) !void {
-        if (self.edit) |edit| {
+        if (self.edit != null or self.recover != null) {
             const configure = self.configure orelse return error.ConfigureUnavailable;
-            self.saved.?.* = try configure(self.init, self.requests, self.store, self.session, edit);
+            const attempt: ConfigureAttempt = if (self.recover) |key| .{ .recover = key } else .{ .edit = self.edit.? };
+            self.outcome.?.* = try configure(self.init, self.requests, self.store, self.session, attempt);
         } else try self.command(self.init, self.requests, self.store, self.session, self.line);
     }
 
@@ -506,7 +510,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         const line_stale = Line.stale(job.line_read, &page.facts);
         if (job.open_status or job.watch_status or line_stale) {
             const current = try View.current(requests, job.store, job.session, job.files.scratch);
-            if (line_stale) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
+            if (line_stale or job.open_status) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
             if (job.open_status or job.watch_status) {
                 job.result.status = try job.status(task.io, &current, job.files.scratch, job.status_taken, if (job.open_status) null else job.status_shown, job.status_actions);
             }

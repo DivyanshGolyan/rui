@@ -96,6 +96,9 @@ app_palette: Palette = .{ .menu = undefined },
 app_info: ChatInfo = undefined,
 info_open: bool = false,
 info_effect: info_save.Effect = .idle,
+info_uncertain: ?[36]u8 = null,
+info_retry: ?[36]u8 = null,
+info_refresh: bool = false,
 info_edit: ?ChatInfo.Edit = null,
 info_bytes: [@max(status_page.max_label_bytes, status_page.max_model_bytes)]u8 = undefined,
 app_hooks: AppHooks = .{ .root = undefined, .context = undefined, .leave = undefined, .copy = undefined, .on_open = undefined },
@@ -482,6 +485,13 @@ fn openFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
 fn footerFacts(self: *const Self) ?@import("session_line.zig").Facts {
     var facts = self.line.facts(&self.hint, self.session) orelse return null;
     facts.home = self.home;
+    if (self.info_effect == .configure or self.info_refresh) {
+        facts.model = "Updating…";
+        facts.effort = null;
+    } else if (self.info_uncertain != null) {
+        facts.model = "Config not confirmed";
+        facts.effort = null;
+    }
     return facts;
 }
 
@@ -497,6 +507,7 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
         }
         fn configure(raw: *anyopaque, edit: ChatInfo.Edit) !void {
             const frontend = owner(raw);
+            if (frontend.info_uncertain != null or frontend.info_refresh) return error.Busy;
             try frontend.infoMaySave();
             var held = edit;
             switch (edit) {
@@ -511,8 +522,17 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
             frontend.info_effect = info_save.step(frontend.info_effect, .{ .started = .edit });
             frontend.dirty = true;
         }
+        fn retry(raw: *anyopaque) !void {
+            const frontend = owner(raw);
+            const key = frontend.info_uncertain orelse return error.NoOriginal;
+            try frontend.infoMaySave();
+            frontend.info_retry = key;
+            frontend.info_effect = .configure;
+            frontend.dirty = true;
+        }
         fn archive(raw: *anyopaque) !overview_view.IntentAdmission {
             const frontend = owner(raw);
+            if (frontend.app_info.pending != null) return .refused;
             frontend.infoMaySave() catch return .refused;
             const admission = try frontend.archive();
             if (admission == .admitted) frontend.info_effect = info_save.step(frontend.info_effect, .{ .started = .archive });
@@ -520,6 +540,7 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
         }
         fn copy(raw: *anyopaque, _: *vxfw.EventContext) !void {
             const frontend = owner(raw);
+            if (frontend.app_info.pending != null) return error.Busy;
             try frontend.infoMaySave();
             try frontend.clickCommand("/copy");
             frontend.info_effect = info_save.step(frontend.info_effect, .{ .started = .copy });
@@ -529,8 +550,11 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
             if (frontend.info_effect == .archive) return if (frontend.lender.archive_state) |read_state| switch (read_state(frontend.lender.context)) {
                 .idle, .pending => .pending,
                 .saved => .saved,
-                .failed => .failed,
+                .failed, .unconfirmed => .failed,
             } else .pending;
+            if (frontend.info_uncertain != null and frontend.info_effect == .failed) {
+                if (frontend.app_info.pending) |row| if (row <= 6) return .unconfirmed;
+            }
             return switch (info_save.saveState(frontend.info_effect)) {
                 .idle => .idle,
                 .pending => .pending,
@@ -550,7 +574,7 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
             return owner(raw).app_caps;
         }
     };
-    return .{ .context = self, .read = Backend.read, .configure = Backend.configure, .archive = Backend.archive, .copy_last_answer = Backend.copy, .state = Backend.state, .models = Backend.models, .caps = Backend.caps, .copied = Backend.copied };
+    return .{ .context = self, .read = Backend.read, .configure = Backend.configure, .retry = Backend.retry, .archive = Backend.archive, .copy_last_answer = Backend.copy, .state = Backend.state, .models = Backend.models, .caps = Backend.caps, .copied = Backend.copied };
 }
 
 pub fn archiveAnswered(self: *Self, result: overview_view.ArchiveResult) void {
@@ -720,6 +744,11 @@ pub fn openPeer(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
 
 fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
     if (self.leaving != null or id.len != session_id.bytes or !session_id.valid(id) or std.mem.eql(u8, id, self.session)) return;
+    if (self.info_uncertain != null or self.info_effect == .configure) {
+        self.notice = "! Resolve the configuration or detach to recover it.";
+        ctx.redraw = true;
+        return;
+    }
     const screen = self.screen;
     const action = screen.action_view != null or self.live.work.first_action != null or self.reading.prepared_action != null;
     const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
@@ -1670,7 +1699,7 @@ pub fn back(self: *Self, room: bool) Back {
     std.debug.assert(self.leaving == .returned or self.leaving == .new_session);
     const plan = departure.exit(self.settle({}), null, false);
     if (plan.failure) |err| return .{ .ended = err };
-    if (self.reading.pending_diagnostic != null) return .{ .ended = .detached };
+    if (self.reading.pending_diagnostic != null or self.info_uncertain != null) return .{ .ended = .detached };
     if (self.submission.view()) |held| if (held.state == .rejected) self.submission.discardRejected() catch unreachable;
     const recovery: original_state.Recovery = if (self.submission.view() != null) self.submission.recovery() else .none;
     if (recovery != .none and !room) return .{ .ended = .detached };
@@ -1712,11 +1741,12 @@ pub fn settleDeparture(self: *Self, ended: anyerror!Outcome, restored: anyerror!
 }
 
 pub fn hasDepartureGuidance(self: *const Self) bool {
-    return self.reading.pending_diagnostic != null or self.submission.view() != null or
+    return self.reading.pending_diagnostic != null or self.submission.view() != null or self.info_uncertain != null or
         self.inspection.command_running or self.screen.action_view != null;
 }
 
 pub fn writeDeparture(self: *Self, result: Departure) void {
+    if (self.info_uncertain) |key| stderr.diagnostic("rui: Configuration not confirmed. Use rui request recover {s} to retry the original.\n", .{&key});
     if (self.reading.pending_diagnostic != null) {
         var bytes: [1024]u8 = undefined;
         var out = std.Io.Writer.fixed(&bytes);
@@ -1743,6 +1773,8 @@ pub fn stop(self: *Self) void {
 fn settle(self: *Self, restored: anyerror!void) Settled {
     const skills_error = self.dropSkills();
     const reader = self.joinReader();
+    if (reader != .absent and self.reading.phase == .inspection and self.info_effect == .configure and
+        (self.job.info_edit != null or self.job.info_recover != null)) self.settleConfigure();
     var admission = self.submission.join();
     self.followAdmission(admission) catch |err| {
         admission = .{ .failed = .{ .err = err } };
@@ -1900,6 +1932,18 @@ fn parse(text: []const u8) Slash {
 }
 
 fn slashCommand(self: *Self, text: []const u8) !void {
+    if (self.info_uncertain != null or self.info_effect == .configure or self.info_refresh) {
+        switch (slash_commands.parse(text)) {
+            .command => |command| switch (command.name) {
+                .effort, .rename, .@"reload-skills" => {
+                    self.notice = "! Resolve the configuration before changing it.";
+                    return;
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
     const parsed = parse(text);
     const admitted_elsewhere = switch (parsed) {
         .archive, .unarchive, .pin => true,
@@ -1947,6 +1991,10 @@ pub fn newSession(self: *Self, ctx: *vxfw.EventContext) !void {
 
 fn newChat(self: *Self) void {
     if (self.leaving != null) return;
+    if (self.info_uncertain != null or self.info_effect == .configure) {
+        self.notice = "! Resolve the configuration or detach to recover it.";
+        return;
+    }
     const action = self.screen.action_view != null or self.live.work.first_action != null or self.reading.prepared_action != null;
     const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
     switch (session_notice.follow(original, self.submission.published(), self.draftSafeToLeave(), action, self.commandActive())) {
@@ -2378,6 +2426,15 @@ fn quiesceUpgrade(self: *Self) !void {
 }
 
 fn startQueuedCommand(self: *Self) !void {
+    if (self.reader.thread == null) if (self.info_retry) |key| {
+        self.inspection.kind = .command;
+        const job = self.freeze(.inspection);
+        job.info_recover = key;
+        self.info_retry = null;
+        try self.launch(job, reads.runInfoConfigure);
+        self.inspection.command_running = true;
+        return;
+    };
     if (self.reader.thread == null) if (self.info_edit) |edit| {
         self.inspection.kind = .command;
         const job = self.freeze(.inspection);
@@ -2396,7 +2453,7 @@ fn startQueuedCommand(self: *Self) !void {
         job.command_text_length = text.len;
         job.inspection_submission = self.submission.view();
 
-        if (!self.info_open) self.inspection.status_requested = false;
+        if (!self.info_open and !self.info_refresh) self.inspection.status_requested = false;
 
         try self.launch(job, switch (kind) {
             .command => reads.runCommand,
@@ -2664,14 +2721,14 @@ fn beginMessage(self: *Self, intent: Submission.Intent) !void {
     };
     if (!begun) return;
     self.admission.sent += 1;
-    self.inspection.status_requested = false;
+    if (!self.info_refresh) self.inspection.status_requested = false;
     self.dropMessageRequest();
     try self.jumpToEnd();
     self.screen.anchor.follow();
 }
 
 fn inspectionQueued(self: *const Self) bool {
-    return self.info_edit != null or self.input.queuedCommand() != null;
+    return self.info_edit != null or self.info_retry != null or self.input.queuedCommand() != null;
 }
 
 fn commandActive(self: *const Self) bool {
@@ -2717,6 +2774,11 @@ fn perform(self: *Self, action: ConversationAction) !void {
             self.dropMessageRequest();
             screen.moveRow(.selector);
             if (action == .close and self.settledView()) {
+                if (self.info_uncertain != null or self.info_effect == .configure) {
+                    self.notice = "! Resolve the configuration or detach to recover it.";
+                    self.dirty = true;
+                    return;
+                }
                 const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
                 switch (session_notice.close(original, self.submission.published(), self.draftSafeToLeave())) {
                     .leave => {
@@ -3030,6 +3092,31 @@ fn heldFailure(self: *const Self) ?@TypeOf(self.failure.?) {
     return if (failure.state == held.state and std.mem.eql(u8, &failure.key, &held.key)) failure else null;
 }
 
+fn settleConfigure(self: *Self) void {
+    var outcome = self.job.result.info_outcome orelse @import("configure_outcome.zig").Outcome.not_sent;
+    if (outcome == .not_sent) if (self.job.info_recover) |key| {
+        outcome = .{ .unconfirmed = key };
+    };
+    switch (outcome) {
+        .accepted => {
+            self.info_uncertain = null;
+            self.info_effect = .refreshing;
+        },
+        .rejected, .not_sent => {
+            self.info_uncertain = null;
+            self.info_effect = .failed;
+        },
+        .unconfirmed => |key| {
+            self.info_uncertain = key;
+            self.info_effect = .failed;
+        },
+    }
+    self.info_refresh = true;
+    self.inspection.status_requested = true;
+    self.poll_at = 0;
+    self.dirty = true;
+}
+
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
     const fenced = if (self.reading.pending_diagnostic) |pending|
@@ -3040,12 +3127,8 @@ fn settleReader(self: *Self) !void {
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     const phase = self.reading.phase;
     const panel_copy = phase == .inspection and self.info_effect == .copy;
-    if (phase == .inspection and self.info_effect == .configure and self.job.info_edit != null) {
-        self.info_effect = info_save.step(self.info_effect, .{ .worker_done = .{ .kind = .edit, .ok = end == .complete and self.job.result.info_saved } });
-        if (self.info_effect == .refreshing) {
-            self.inspection.status_requested = true;
-            self.poll_at = 0;
-        }
+    if (phase == .inspection and self.info_effect == .configure and (self.job.info_edit != null or self.job.info_recover != null)) {
+        self.settleConfigure();
     } else if (panel_copy) {
         self.info_effect = info_save.step(self.info_effect, .{ .worker_done = .{ .kind = .copy, .ok = end == .complete and self.job.result.copied == .clipboard } });
     }
@@ -3079,10 +3162,10 @@ fn settleReader(self: *Self) !void {
         .retried => try self.finishRetry(),
         .staged => try self.showStaged(),
         .copy => try self.showCopy(if (panel_copy) .panel_copy else .other),
-        .page => try self.showInspection(),
+        .page => if (self.job.info_recover == null) try self.showInspection(),
     };
     if (reader_policy.commandSettled(end == .complete, phase)) self.inspection.command_running = false;
-    if (end == .complete and phase == .inspection and inspection == .command and self.job.info_edit == null) switch (slash_commands.parse(self.job.command_text[0..self.job.command_text_length])) {
+    if (end == .complete and phase == .inspection and inspection == .command and self.job.info_edit == null and self.job.info_recover == null) switch (slash_commands.parse(self.job.command_text[0..self.job.command_text_length])) {
         .command => |command| if (command.name == .@"reload-skills") if (self.dropSkills()) |err| return err,
         else => {},
     };
@@ -3481,8 +3564,11 @@ fn showCopy(self: *Self, answers: session_chrome.NoticeAnswers) !void {
 fn applyStatus(self: *Self) !void {
     if (!self.job.result.status and self.inspection.status == null) return;
     if (self.job.result.status) self.inspection.status = @intFromBool(self.job.status_taken == &self.inspection.sessions[1]);
-    self.inspection.status_requested = false;
-    self.info_effect = info_save.step(self.info_effect, .status_refreshed);
+    if (!self.info_refresh or self.job.open_status) {
+        self.inspection.status_requested = false;
+        self.info_refresh = false;
+        self.info_effect = info_save.step(self.info_effect, .status_refreshed);
+    }
     if ((self.info_open or self.footer.pending != null) and !self.app_info.hasChoice() and self.app_info.pending == null) self.app_info.refresh();
     self.dirty = true;
 }
@@ -3492,7 +3578,7 @@ fn leaveFor(self: *Self, _: Inspection) !void {
 }
 
 fn statusShown(self: *const Self) bool {
-    return self.info_open or self.footer.pending != null or self.info_effect == .refreshing;
+    return self.info_open or self.footer.pending != null or self.info_refresh or self.info_effect == .refreshing;
 }
 
 const TestHost = struct {
@@ -9667,13 +9753,82 @@ test "chat info Configure and Copy admission either owns work or refuses before 
     };
 }
 
+test "SUI-136 configure receipt and Current preserve an uncertain original across refresh and departure" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    const ConfigOutcome = @import("configure_outcome.zig").Outcome;
+    const cases = [_]ConfigOutcome{ .accepted, .rejected, .not_sent, .{ .unconfirmed = key } };
+    for (cases) |outcome| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        self.line.read = .{ .revision = 1, .end = 1 };
+        try self.line.model.set("old-model");
+        self.line.effort = .high;
+        try held.keys("next draft");
+        self.job = .{};
+        self.job.result.info_outcome = outcome;
+        self.info_effect = .configure;
+        self.settleConfigure();
+        try std.testing.expectEqualStrings("Updating…", self.footerFacts().?.model);
+        try std.testing.expect(self.info_refresh and self.inspection.status_requested);
+        try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+        try std.testing.expectEqual(outcome == .unconfirmed, self.info_uncertain != null);
+        // A later Current is a separate observation, not a command receipt.
+        self.job.result.status = true;
+        self.job.open_status = true;
+        self.job.status_taken = &self.inspection.sessions[1];
+        try self.applyStatus();
+        try std.testing.expectEqual(outcome == .unconfirmed, self.info_uncertain != null);
+        if (outcome == .unconfirmed) {
+            try std.testing.expectEqualStrings("Config not confirmed", self.footerFacts().?.model);
+            const backend = self.infoBackend();
+            try std.testing.expectError(error.Busy, backend.configure(backend.context, .{ .effort = .low }));
+            try backend.retry.?(backend.context);
+            try std.testing.expectEqual(key, self.info_retry.?);
+            try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+            self.info_retry = null;
+            self.leaving = .returned;
+            const departed = self.back(true);
+            try std.testing.expect(departed == .ended);
+            try std.testing.expectEqual(@as(Self.Outcome, .detached), try departed.ended);
+            try std.testing.expectEqual(key, self.info_uncertain.?);
+            try std.testing.expect(self.hasDepartureGuidance());
+        }
+    }
+}
+
+test "SUI-136 unresolved Configure keeps the next draft when navigation is requested" {
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    for ([_]bool{ false, true }) |unknown| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try held.keys("next draft");
+        if (unknown) self.info_uncertain = key else self.info_effect = .configure;
+        self.newChat();
+        try std.testing.expectEqual(@as(?Outcome, null), self.leaving);
+        try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+        var ctx = held.context();
+        try self.follow(&ctx, "m3n4p5");
+        try std.testing.expectEqual(@as(?Outcome, null), self.leaving);
+        try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+        try std.testing.expect(self.notice != null);
+        for ([_][]const u8{ "/effort high", "/rename other", "/reload-skills" }) |command| {
+            try self.slashCommand(command);
+            try std.testing.expectEqual(@as(?[]const u8, null), self.input.queuedCommand());
+            try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+        }
+    }
+}
+
 test "chat info typed configure completion never parses a slash line and retains definite failure" {
     const Configure = struct {
         var accepted: bool = false;
-        fn run(init: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, edit: ChatInfo.Edit) !bool {
-            try std.testing.expectEqual(ChatInfo.Edit{ .permission = .ask }, edit);
+        fn run(init: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, attempt: reads.ConfigureAttempt) !@import("configure_outcome.zig").Outcome {
+            try std.testing.expectEqual(ChatInfo.Edit{ .permission = .ask }, attempt.edit);
             if (!accepted) try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Configuration not confirmed; inspect the saved request before retrying.\n");
-            return accepted;
+            return if (accepted) .accepted else .rejected;
         }
     };
     for ([_]bool{ true, false }) |accepted| {
@@ -9766,10 +9921,10 @@ test "chat info retains Session stop and archive bindings in full-page and stand
 test "chat info typed configure supersedes every cancellable read without making cancellation fatal" {
     const Configure = struct {
         var calls: usize = 0;
-        fn run(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, edit: ChatInfo.Edit) !bool {
-            try std.testing.expectEqual(ChatInfo.Edit{ .permission = .ask }, edit);
+        fn run(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, attempt: reads.ConfigureAttempt) !@import("configure_outcome.zig").Outcome {
+            try std.testing.expectEqual(ChatInfo.Edit{ .permission = .ask }, attempt.edit);
             calls += 1;
-            return false;
+            return .rejected;
         }
         fn settled(self: *Self) !bool {
             _ = try self.update();
@@ -10479,8 +10634,8 @@ test "chat footer drawn model and effort clicks configure only this Session afte
         }
         try std.testing.expectEqual(.configure, self.info_effect);
         try std.testing.expect(!self.app_info.standaloneOpen());
-        try std.testing.expectEqualStrings("gpt-5.5", self.footerFacts().?.model);
-        try std.testing.expectEqual(model_capability.ReasoningEffort.high, self.footerFacts().?.effort.?);
+        try std.testing.expectEqualStrings("Updating…", self.footerFacts().?.model);
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, null), self.footerFacts().?.effort);
         self.info_effect = .failed;
         try self.app_info.widget().handleEvent(&ctx, .tick);
         try std.testing.expect(self.app_info.standaloneOpen());

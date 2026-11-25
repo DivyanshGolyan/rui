@@ -2364,12 +2364,12 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         return false;
     }
     var step: ?client.Step = .store;
-    return configureCaptured(init, requester, parsed, live, input, &step) catch |err| {
+    return configureCaptured(init, requester, parsed, live, input, &step, null) catch |err| {
         return if (step == .store) storeFailure(err) else err;
     };
 }
 
-fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, configuration: configure_input.ConfigureInput, step: *?client.Step) !bool {
+fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, configuration: configure_input.ConfigureInput, step: *?client.Step, observed: ?*@import("configure_outcome.zig").Outcome) !bool {
     const io = init.io;
     const interactive = live != null;
     var input = configuration;
@@ -2391,9 +2391,21 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
         if (!interactive) try announceCapture(io, &captured);
         break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), &captured);
     } catch |err| {
+        if (observed) |outcome| {
+            const key: [36]u8 = saved.key.slice()[0..36].*;
+            outcome.* = @import("configure_outcome.zig").failed(key, if (step.*) |where| where.mayHaveReachedHost() else false, false);
+        }
         if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
+    if (observed) |outcome| {
+        const key: [36]u8 = saved.key.slice()[0..36].*;
+        outcome.* = if (reply.answer) |answer| switch (answer.result) {
+            .accepted => .accepted,
+            .rejected => .rejected,
+            .conflict => .{ .unconfirmed = key },
+        } else |_| .{ .unconfirmed = key };
+    }
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
     writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .json, replay) catch |err| {
         if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
@@ -2737,16 +2749,45 @@ fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?
     });
 }
 
-pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, edit: ChatInfo.Edit) !bool {
-    var tools_buffer: InfoTools = undefined;
-    const input = try infoConfiguration(destination, reference, &edit, &tools_buffer);
-    const parsed: cli_args.Parsed = .{ .definition = cli_args.live_configure };
-    var step: ?client.Step = .store;
-    return configureCaptured(init, read.requests(), &parsed, .{ .store = destination, .session = reference }, input, &step) catch |err| {
-        if (err == error.CanonicalStoreFailure) return err;
-        stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@tagName(caller_error.of(err))});
-        return false;
-    };
+pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, attempt: @import("session_reads.zig").ConfigureAttempt) !@import("configure_outcome.zig").Outcome {
+    const Outcome = @import("configure_outcome.zig").Outcome;
+    switch (attempt) {
+        .edit => |edit| {
+            var tools_buffer: InfoTools = undefined;
+            const input = try infoConfiguration(destination, reference, &edit, &tools_buffer);
+            const parsed: cli_args.Parsed = .{ .definition = cli_args.live_configure };
+            var step: ?client.Step = .store;
+            var outcome: Outcome = .not_sent;
+            _ = configureCaptured(init, read.requests(), &parsed, .{ .store = destination, .session = reference }, input, &step, &outcome) catch |err| {
+                if (err == error.CanonicalStoreFailure and outcome == .not_sent) return err;
+                stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@tagName(caller_error.of(err))});
+                return outcome;
+            };
+            return outcome;
+        },
+        .recover => |key| {
+            var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const directory = try requestDirectory(init, &directory_buffer);
+            var captured = client.openCaptured(init.io, .{ .generated = .{ .directory = directory, .handle = &key } }) catch return .{ .unconfirmed = key };
+            defer captured.close(init.io);
+            const paths = client.resolveClientPaths(init.io, destination) catch return .{ .unconfirmed = key };
+            const expected: client.Binding = .{ .store = paths.store_identity.slice(), .session = reference, .key = &key, .kind = .configure };
+            if (!expected.matches(captured.identity(), captured.target)) return .{ .unconfirmed = key };
+            captured.paths = paths;
+            var buffer: client.ReplyBuffer = .{};
+            const sent = read.requests().sendCaptured(&captured, .{ .map = init.environ_map }, &buffer);
+            const reply = switch (sent) {
+                .done => |value| value,
+                .failed => return .{ .unconfirmed = key },
+            };
+            const answer = reply.answer catch return .{ .unconfirmed = key };
+            return switch (answer.result) {
+                .accepted => .accepted,
+                .rejected => .rejected,
+                .conflict => .{ .unconfirmed = key },
+            };
+        },
+    }
 }
 
 const InfoTools = struct {

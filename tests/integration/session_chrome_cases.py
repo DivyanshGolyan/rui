@@ -102,9 +102,10 @@ class Chrome:
         if kind is None:
             shutil.rmtree(self.state)
 
-    def session(self, permission="bypass"):
+    def session(self, permission="bypass", model="gpt-6-sol"):
+        flags = ("--reasoning-effort", "high") if model == "gpt-6.1-terra" else ()
         reply = json.loads(run(self.home, "session", "configure", "--workspace", self.workspace,
-            "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", permission))
+            "--provider", "codex", "--model", model, "--permission-mode", permission, *flags))
         return reply["answer"]["session"]
 
     def answered(self, session, *inputs):
@@ -542,7 +543,90 @@ def opening_case():
     print("session chrome: a reopened Session shows ◌ 2 · the newest waiting Message under the running call; Ctrl-O selects the lowest tool or Message, and reopening keeps tools folded", flush=True)
 
 
+
+
+def configure_refresh_case():
+    # SUI-136: a delayed Current never leaves stale settings on an actionable footer.
+    for field in ("effort", "model"):
+        release = threading.Event()
+        captured = threading.Event()
+        statuses = []
+        with Chrome("rui-chrome-configure-refresh.", [fixture.sse_answer("r", "q", "m", "DONE")[0]]) as chrome:
+            session = chrome.session(model="gpt-6.1-terra")
+            master, caller, opened = chrome.open(session, lambda frame: "gpt-6.1-terra" in frame,
+                                                 columns=120, height=36)
+            marker = "high" if field == "effort" else "gpt-6.1-terra"
+            chrome.frame(master, footer_click(opened, marker=marker),
+                         lambda frame: "✓" in frame)
+            def hold_current(response):
+                statuses.append(json.loads(response.split(b"\r\n\r\n", 1)[1]))
+                captured.set()
+                assert release.wait(15), "Current gate not released"
+                return response
+            proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/inspect-session", hold_current)
+            try:
+                os.write(master, b"\x1b[A\r" if field == "effort" else b"gpt-5.5\r")
+                assert captured.wait(10), "accepted Current was not requested"
+                expected_model = "gpt-6.1-terra" if field == "effort" else "gpt-5.5"
+                expected_effort = "medium" if field == "effort" else "high"
+                assert statuses[0]["session"]["model"] == expected_model, statuses
+                assert statuses[0]["session"]["reasoning_effort"] == expected_effort, statuses
+                shown = chrome.frame(master, b"config probe\r", lambda frame:
+                                     "config probe" in frame and "Updating" in frame)
+                assert "gpt-6.1-terra · high" not in footer(shown), shown
+                fixture.wait_for(lambda: len(chrome.endpoint.requests) == 1, "configured provider request")
+                request = json.loads(chrome.endpoint.requests[0])
+                assert request["model"] == expected_model and request["reasoning"]["effort"] == expected_effort, request
+            finally:
+                release.set()
+                proxy.close()
+            chrome.frame(master, b"", lambda frame: f"{expected_model} · {expected_effort}" in frame)
+            chrome.leave(master, caller)
+    print("session chrome: a pending Current refresh does not display stale settings for a send", flush=True)
+
+
+def configure_recovery_case():
+    # SUI-136: an uncertain receipt remains separate from a fresh Current.
+    for depart in (False, True):
+        with Chrome("rui-chrome-configure-recovery.", []) as chrome:
+            session = chrome.session(model="gpt-6.1-terra")
+            master, caller, opened = chrome.open(session, lambda frame: "gpt-6.1-terra" in frame,
+                                                 columns=120, height=36)
+            draft = chrome.frame(master, b"next draft", lambda frame: composing(frame, "next draft"))
+            choice = chrome.frame(master, footer_click(draft, marker="high"),
+                                  lambda frame: "Effort" in frame and "✓" in frame)
+            proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/configure",
+                lambda response: None if len(proxy.exchanges) == 1 else response)
+            try:
+                failed = chrome.frame(master, b"\x1b[A\r", lambda frame:
+                                      "not confirmed" in frame.lower(), timeout=20)
+                fixture.wait_for(lambda: len(proxy.exchanges) == 1, "original configure receipt")
+                original = proxy.exchanges[0][0]
+                key = json.loads(original)["key"]
+                saved = json.loads(run(chrome.home, "session", "inspect", "--session", session))
+                assert saved["session"]["reasoning_effort"] == "medium", saved
+                assert composing(failed, "next draft"), failed
+                if depart:
+                    os.write(master, b"\x03")
+                    _, errors = terminal_exit(caller, master)
+                    assert key.encode() in errors and b"request recover" in errors, errors
+                else:
+                    ready = chrome.frame(master, b"", lambda frame:
+                                         "Config not confirmed" in frame and "not confirmed" in frame.lower())
+                    assert composing(ready, "next draft"), ready
+                    recovered = chrome.frame(master, b"\r", lambda frame:
+                                             "gpt-6.1-terra · medium" in frame and "not confirmed" not in frame.lower(), timeout=20)
+                    fixture.wait_for(lambda: len(proxy.exchanges) == 2, "original configure replay")
+                    assert proxy.exchanges[1][0] == original, proxy.exchanges
+                    assert composing(recovered, "next draft"), recovered
+                    chrome.leave(master, caller)
+            finally:
+                proxy.close()
+    print("session chrome: unconfirmed Configure keeps its original key through Current refresh, retry and departure", flush=True)
+
 def main():
+    configure_refresh_case()
+    configure_recovery_case()
     send_recovery_case()
     activity_case()
     thinking_queue_case()

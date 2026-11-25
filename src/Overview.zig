@@ -7474,7 +7474,8 @@ const EmptySessionOwner = struct {
         unreachable;
     }
 
-    fn configure(_: std.process.Init, _: client.ReadContext, _: []const u8, reference: []const u8, edit: @import("chat_info.zig").Edit) !bool {
+    fn configure(_: std.process.Init, _: client.ReadContext, _: []const u8, reference: []const u8, attempt: session_reads.ConfigureAttempt) !@import("configure_outcome.zig").Outcome {
+        const edit = attempt.edit;
         const row = canonical(reference);
         switch (edit) {
             .model => |model| try row.model.set(model),
@@ -7488,7 +7489,7 @@ const EmptySessionOwner = struct {
         }
         row.revision += 1;
         configurations += 1;
-        return true;
+        return .accepted;
     }
 
     fn frontend(self: *EmptySessionOwner) *SessionFrontend {
