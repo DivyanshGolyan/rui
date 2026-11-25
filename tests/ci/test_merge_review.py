@@ -41,11 +41,21 @@ class MergeReviewTest(unittest.TestCase):
         forged = verdict(False, "2026-11-25T10:00:00Z", association="NONE", login="stranger")
         self.assertIn("has no completed review", refusal([forged]))
 
-    def test_codex_clean_receipt_passes(self):
+    def test_a_bare_codex_receipt_is_not_a_review(self):
+        # landing.md: a "no major issues" receipt alone is not clean.
         receipt = {"user": {"login": "chatgpt-codex-connector[bot]"}, "author_association": "NONE",
                    "created_at": "2026-11-25T10:00:00Z",
                    "body": "<!-- codex-review-receipt:v1 -->\n**Reviewed commit:** `7ba38bdf89`"}
-        self.assertIsNone(refusal([receipt]))
+        self.assertIn("has no completed review", refusal([receipt]))
+
+    def test_a_malformed_marker_is_named_in_the_refusal(self):
+        broken = verdict(False, "2026-11-25T10:00:00Z")
+        broken["body"] = broken["body"].replace('"has_unresolved_findings": false', '"has_unresolved_findings": <true|false>')
+        ignored = []
+        outcomes = review_outcomes([broken], [], 7, warn=ignored.append)
+        reason = merge_review.refusal(7, outcomes, ignored)
+        self.assertIn("has no completed review", reason)
+        self.assertIn("Ignored a malformed marker", reason)
 
 
 if __name__ == "__main__":

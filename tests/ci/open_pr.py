@@ -9,7 +9,7 @@ current-candidate admission and the Codex evidence in CODING_STANDARDS.md.
 
   open_pr.py open --title TITLE --body-file FILE [--base main] [--ready]
   open_pr.py ready
-  open_pr.py review [--pr N] [--findings FILE | --fixed]
+  open_pr.py review [--pr N] (--head SHA [--findings FILE] | --fixed)
 
 `review` posts the pr-reviewer agent's verdict as the sonnet-review-state:v1 comment that
 merge_review.py and the merge hook read while Codex is out of allowance
@@ -89,9 +89,9 @@ def main():
     commands.add_parser("ready", help="mark this branch's draft ready to run its full selected suite")
     review = commands.add_parser("review", help="post the pr-reviewer agent's verdict on a PR (default: this branch's)")
     review.add_argument("--pr", type=int)
-    verdict = review.add_mutually_exclusive_group()
-    verdict.add_argument("--findings", help="file holding the reviewer's findings; omit when it found none")
-    verdict.add_argument("--fixed", action="store_true", help="every finding of the last review is fixed")
+    review.add_argument("--head", help="the head sha the reviewer reported (not the PR's head at posting time)")
+    review.add_argument("--findings", help="file holding the reviewer's findings; omit when it found none")
+    review.add_argument("--fixed", action="store_true", help="every finding of the last review is fixed")
     args = parser.parse_args()
     branch, head = git("branch", "--show-current"), git("rev-parse", "HEAD")
     try:
@@ -134,10 +134,24 @@ def main():
             if pr is None:
                 print("This branch has no open PR; pass --pr N.", file=sys.stderr)
                 return 1
-            findings = Path(args.findings).read_text(encoding="utf-8") if args.findings else None
+            if args.fixed == bool(args.head) or (args.fixed and args.findings):
+                print("Pass --head SHA (with --findings FILE when it found some) for a verdict, or --fixed alone.", file=sys.stderr)
+                return 1
+            if args.fixed:
+                from merge_review import pr_outcomes, verdicts
+                last = verdicts(pr_outcomes(pr["number"], repo)[0])[-1:]
+                if not last or last[0]["clean"]:
+                    print(f"PR #{pr['number']} has no unresolved review findings to mark fixed.", file=sys.stderr)
+                    return 1
+            try:
+                findings = Path(args.findings).read_text(encoding="utf-8") if args.findings else None
+            except (OSError, UnicodeError) as error:
+                print(f"Cannot read findings: {error}", file=sys.stderr)
+                return 1
+            reviewed = args.head or pr["head"]["sha"]
             github("POST", f"repos/{repo}/issues/{pr['number']}/comments",
-                   [("body", review_comment(pr["head"]["sha"], findings, args.fixed))])
-            print(f"Posted the review verdict on PR #{pr['number']} at {pr['head']['sha'][:10]}.")
+                   [("body", review_comment(reviewed, findings, args.fixed))])
+            print(f"Posted the review verdict on PR #{pr['number']} at {reviewed[:10]}.")
             return 0
         if refusal := ready_refusal(pr, head, bool(git("status", "--porcelain"))):
             print(refusal, file=sys.stderr)

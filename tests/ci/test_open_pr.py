@@ -180,7 +180,8 @@ class OpenPrTest(unittest.TestCase):
     def test_review_posts_the_verdict_on_the_named_pr(self):
         head = "c" * 40
         stdout = io.StringIO()
-        with patch("sys.argv", ["open_pr.py", "review", "--pr", "9", "--fixed"]), \
+        reviewed = "d" * 40
+        with patch("sys.argv", ["open_pr.py", "review", "--pr", "9", "--head", reviewed]), \
              patch.object(open_pr, "git", side_effect=["fix/x", head]), \
              patch.object(open_pr, "origin_repo", return_value="example/rui"), \
              patch.object(open_pr, "github", side_effect=[{"number": 9, "head": {"sha": head}}, {}]) as github, \
@@ -188,7 +189,25 @@ class OpenPrTest(unittest.TestCase):
             self.assertEqual(open_pr.main(), 0)
         method, path, fields = github.call_args_list[1].args
         self.assertEqual((method, path), ("POST", "repos/example/rui/issues/9/comments"))
+        self.assertIn(reviewed, fields[0][1])
         self.assertIn('"has_unresolved_findings": false', fields[0][1])
+
+    def test_review_refuses_a_verdict_without_the_reviewed_head_and_a_fix_with_nothing_to_fix(self):
+        head = "c" * 40
+        pr = {"number": 9, "head": {"sha": head}}
+        for argv, outcomes in ((["--pr", "9"], None), (["--pr", "9", "--fixed"], []),
+                               (["--pr", "9", "--fixed"], [{"source": "interim", "clean": True, "when": "t", "head": head}]),
+                               (["--pr", "9", "--head", head, "--findings", "/nonexistent"], None)):
+            with self.subTest(argv=argv):
+                stderr = io.StringIO()
+                with patch("sys.argv", ["open_pr.py", "review", *argv]), \
+                     patch.object(open_pr, "git", side_effect=["fix/x", head]), \
+                     patch.object(open_pr, "origin_repo", return_value="example/rui"), \
+                     patch.object(open_pr, "github", return_value=pr) as github, \
+                     patch("merge_review.pr_outcomes", return_value=(outcomes, [])), redirect_stderr(stderr):
+                    self.assertEqual(open_pr.main(), 1)
+                self.assertEqual(github.call_count, 1)
+                self.assertTrue(stderr.getvalue())
 
     def test_opens_only_a_pushed_head(self):
         self.assertIsNone(open_pr.open_refusal("a" * 40, "a" * 40))
