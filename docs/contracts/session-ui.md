@@ -410,6 +410,7 @@ Exit cancels both borrowers; the caller restores the terminal; then the frontend
 It retains the pinned saved-record reader for recovery.
 Acceptance or explicit rejected-intent discard releases the original; final invocation cleanup closes any remaining reader.
 Joining alone is not final disposal.
+A refresh that reopens the latest conversation while an accepted Message still holds its presentation loan also asks the Host one question about that Message's key, on the canonical Store that took it: a Turn took it, it still waits, or it was cancelled before any Turn. A Turn that took it releases the loan even when its row lies outside the loaded page, and the notice says it was sent earlier in the conversation; a Message cancelled before any Turn releases it as stopped. A waiting, absent, mismatched or unavailable answer, and a selector that now names a different Store, release nothing and the notice says so. The next draft is never touched.
 
 The caller owns the sealed Message or selected Decision before fallible reservation and reserves one key before asynchronous canonical capture.
 If reservation or the first worker launch fails, or initial cancellation wins before capture entry, that intent remains definitely unsent; after restoration the caller says it may be submitted again, without stale accepted guidance or an unpublished recovery handle.
