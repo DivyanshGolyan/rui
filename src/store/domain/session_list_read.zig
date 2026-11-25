@@ -285,7 +285,7 @@ pub fn retryCrossings(a: *ReadAccess, from: u64, now: u64, crossings: *RetryCros
 // Message's first display line (first_line.firstLine, the rule the overview's first-line read uses),
 // read from the first 512 bytes and only when the Message is inline Text. Parts-form first Messages leave
 // the line NULL; their line comes from the overview's parts read.
-const archived_window_limit = session_list.archived_window_size + 1;
+const archived_page_capacity = session_list.max_window_rows + 1;
 
 const archived_columns = "session.archive_seq,session.session_ref,ostop.stopped_at,session.label," ++
     report_domain.first_pick_position_columns ++ "," ++ report_domain.first_pick_content_columns ++ "," ++
@@ -312,27 +312,27 @@ const archived_window_join = " FROM session @index(session_tab) LEFT JOIN core_c
 /// The statement sources, with `@index` marks as written (the MySQL plan test renders them).
 pub const archived_newest_source = "SELECT " ++ archived_columns ++ archived_window_join ++
     "WHERE session.archive_seq<?1 AND (" ++ archive_membership.stateSql("session") ++ ")='archived' " ++
-    "ORDER BY session.archive_seq DESC LIMIT " ++ std.fmt.comptimePrint("{d}", .{archived_window_limit});
+    "ORDER BY session.archive_seq DESC LIMIT ?2";
 pub const archived_oldest_source = "SELECT " ++ archived_columns ++ archived_window_join ++
     "WHERE session.archive_seq>?1 AND (" ++ archive_membership.stateSql("session") ++ ")='archived' " ++
-    "ORDER BY session.archive_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{archived_window_limit});
+    "ORDER BY session.archive_seq LIMIT ?2";
 
 pub const archived_newest_page = rsql.Read(.{
     .sql = archived_newest_source,
-    .Args = struct { below: u64 },
+    .Args = struct { below: u64, limit: u64 },
     .Row = ArchivedWindowRow,
     .cardinality = .each,
 });
 
 pub const archived_oldest_page = rsql.Read(.{
     .sql = archived_oldest_source,
-    .Args = struct { above: u64 },
+    .Args = struct { above: u64, limit: u64 },
     .Row = ArchivedWindowRow,
     .cardinality = .each,
 });
 
 const ArchivedPage = struct {
-    rows: [archived_window_limit]ArchivedWindowRow = undefined,
+    rows: [archived_page_capacity]ArchivedWindowRow = undefined,
     count: usize = 0,
     failure: ?error{CorruptStore} = null,
 
@@ -359,11 +359,12 @@ fn archivedLine(prefix: ?*const rsql.Blob(512), text: *Bounded(first_line.max_li
 
 /// Reads one Archived window page in one round. `head` and `below` read newest first; `above` and `tail`
 /// read oldest first from their key and are returned newest first.
-fn readArchivedWindow(a: *ReadAccess, cursor: session_list.ArchivedCursor, generation: u64, page: *ArchivedPage, visitor: anytype) !void {
+fn readArchivedWindow(a: *ReadAccess, window: session_list.ArchivedWindow, generation: u64, page: *ArchivedPage, visitor: anytype) !void {
     // Resets the small fields only: a whole-struct store would write all 37 KB of rows.
     page.count = 0;
     page.failure = null;
-    const size = session_list.archived_window_size;
+    const cursor = window.cursor;
+    const size: usize = window.rows;
     var more_above = false;
     var more_below = false;
     const newest_below: ?u64 = switch (cursor) {
@@ -377,14 +378,14 @@ fn readArchivedWindow(a: *ReadAccess, cursor: session_list.ArchivedCursor, gener
         .head, .below => null,
     };
     if (newest_below) |below| {
-        a.readEach(archived_newest_page, .{ .below = below }, archived_window_limit, page);
+        a.readEach(archived_newest_page, .{ .below = below, .limit = size + 1 }, size + 1, page);
         try store_access.runAs(a, error.SessionReadFailed);
         if (page.failure) |err| return err;
         more_below = page.count > size;
         more_above = std.meta.activeTag(cursor) == .below;
         page.count = @min(page.count, size);
     } else if (oldest_above) |above| {
-        a.readEach(archived_oldest_page, .{ .above = above }, archived_window_limit, page);
+        a.readEach(archived_oldest_page, .{ .above = above, .limit = size + 1 }, size + 1, page);
         try store_access.runAs(a, error.SessionReadFailed);
         if (page.failure) |err| return err;
         // The oldest-first read keeps the rows nearest the cursor; the extra row is further away.
@@ -449,7 +450,7 @@ pub const Scratch = struct {
 pub fn readSessionList(a: *ReadAccess, request: *const session_list.ListSessions, scratch: *Scratch, visitor: anytype) !void {
     const self = a.store;
     const generation = self.commit_generation.load(.acquire);
-    if (request.window) |cursor| return readArchivedWindow(a, cursor, generation, &scratch.archived, visitor);
+    if (request.window) |window| return readArchivedWindow(a, window, generation, &scratch.archived, visitor);
     if (request.since) |since| {
         const through = if (request.changed) |changed| changed.through else generation;
         if (std.mem.eql(u8, &since.instance, &self.instance) and through <= generation and self.changes.covers(since.generation))
@@ -721,7 +722,7 @@ const SubtreeFold = struct {
         const total = &self.totals[index];
         total.subtree_state_change_at = @max(total.subtree_state_change_at, try stateChangeAt(.of(row), &self.work, work));
         total.descendant_count = std.math.add(u64, total.descendant_count, 1) catch return error.CorruptStore;
-        if (session_work.group(work) == .needs_you) total.descendant_needs_you_count = std.math.add(u64, total.descendant_needs_you_count, 1) catch return error.CorruptStore;
+        if (session_work.standing(work.state) == .needs_you) total.descendant_needs_you_count = std.math.add(u64, total.descendant_needs_you_count, 1) catch return error.CorruptStore;
     }
 };
 

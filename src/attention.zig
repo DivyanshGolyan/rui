@@ -10,7 +10,7 @@ fn attentionAfter(self: Attention, other: Attention) bool {
 }
 
 pub fn observe(seen: *?Attention, work: session_work.Work) ?Kind {
-    const now = work.served_attention orelse return null;
+    const now = session_work.attention(work) orelse return null;
     if (seen.*) |held| if (!attentionAfter(now, held)) return null;
     seen.* = now;
     return now.kind;
@@ -26,7 +26,7 @@ pub const Status = enum {
     failed,
 
     pub fn of(work: session_work.Work) Status {
-        return statusFromServed(work.served_group.?, work.served_attention);
+        return statusOf(session_work.standing(work.state), session_work.attention(work));
     }
 
     pub fn next(held: ?Status, was: ?Reading, now: Reading, opening: bool) ?Status {
@@ -42,15 +42,12 @@ pub const Status = enum {
     }
 };
 
-fn statusFromServed(group: session_work.Group, served: ?Attention) Status {
-    return switch (group) {
+fn statusOf(standing: session_work.Standing, attention: ?Attention) Status {
+    return switch (standing) {
         .needs_you => .blocked,
         .working, .queued => .working,
-        .done => if (served) |value| switch (value.kind) {
-            .failed => .failed,
-            .finished => .done,
-            .approval => .idle,
-        } else .idle,
+        .failed => .failed,
+        .done => if (attention) |value| (if (value.kind == .finished) .done else .idle) else .idle,
     };
 }
 
@@ -60,7 +57,7 @@ pub const Reading = struct {
 
     pub fn of(work: session_work.Work, acknowledged: ?Attention) Reading {
         const status: Status = .of(work);
-        const now = work.served_attention;
+        const now = session_work.attention(work);
         const seen = if (now) |reached| if (acknowledged) |opened| !attentionAfter(reached, opened) else false else false;
         return .{ .status = if (seen and (status == .done or status == .failed)) .idle else status, .attention = now };
     }
@@ -121,17 +118,10 @@ fn printable(buffer: []u8, bytes: []const u8) []const u8 {
 
 const Work = session_work.Work;
 
-fn fixture(work: Work) Work {
-    var result = work;
-    result.served_attention = session_work.attention(work);
-    result.served_group = session_work.group(work);
-    return result;
-}
-
 fn news(before: ?Work, next: Work) ?Kind {
     var seen: ?Attention = null;
-    if (before) |read| _ = observe(&seen, fixture(read));
-    return observe(&seen, fixture(next));
+    if (before) |read| _ = observe(&seen, read);
+    return observe(&seen, next);
 }
 
 fn statusCase0() !void {
@@ -153,21 +143,21 @@ fn statusCase0() !void {
     try std.testing.expectEqual(Kind.approval, news(.{ .state = .{ .approval = .{ .since = 6 } }, .first_action = 7 }, .{ .state = .{ .approval = .{ .since = 6 } }, .first_action = 8 }).?);
     try std.testing.expectEqual(Kind.approval, news(beside, .{ .state = .{ .approval = .{ .since = 9 } }, .first_action = 8 }).?);
     var seen: ?Attention = null;
-    try std.testing.expectEqual(Kind.finished, observe(&seen, fixture(finished)).?);
-    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, fixture(.{ .state = .{ .working = .{ .since = 5 } }, .turn = 1 })));
-    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, fixture(finished)));
+    try std.testing.expectEqual(Kind.finished, observe(&seen, finished).?);
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, .{ .state = .{ .working = .{ .since = 5 } }, .turn = 1 }));
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, finished));
 }
 
 fn statusCase1() !void {
     const waiting: Work = .{ .state = .{ .approval = .{ .since = 4 } }, .turn = 3, .first_action = 7 };
     const finished: Work = .{ .state = .{ .finished = .{ .since = 9 } }, .turn = 3 };
     var seen: ?Attention = null;
-    try std.testing.expectEqual(Kind.approval, observe(&seen, fixture(waiting)).?);
-    try std.testing.expectEqual(Kind.finished, observe(&seen, fixture(finished)).?);
-    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, fixture(waiting)));
-    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, fixture(finished)));
-    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, fixture(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 2 })));
-    try std.testing.expectEqual(Kind.approval, observe(&seen, fixture(.{ .state = .{ .approval = .{ .since = 10 } }, .turn = 4, .first_action = 9 })).?);
+    try std.testing.expectEqual(Kind.approval, observe(&seen, waiting).?);
+    try std.testing.expectEqual(Kind.finished, observe(&seen, finished).?);
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, waiting));
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, finished));
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, .{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 2 }));
+    try std.testing.expectEqual(Kind.approval, observe(&seen, .{ .state = .{ .approval = .{ .since = 10 } }, .turn = 4, .first_action = 9 }).?);
 }
 
 fn statusCase2() !void {
@@ -193,20 +183,28 @@ fn statusCase2() !void {
         const seen: Work = .{ .state = state, .turn = 1, .first_action = if (expected == .approval) 1 else null };
         try std.testing.expectEqual(expected, news(null, seen));
         try std.testing.expectEqual(@as(?Kind, null), news(seen, seen));
+        const status: Status = switch (tag) {
+            .idle, .stopped => .idle,
+            .pending, .working, .retrying, .stopping => .working,
+            .bash, .approval => .blocked,
+            .finished => .done,
+            .failed => .failed,
+        };
+        try std.testing.expectEqual(status, Status.of(seen));
     }
     try std.testing.expectEqual(@as(?Kind, null), news(null, .{ .state = .{ .bash = .{ .since = 1, .call = 0, .description = null, .running = 1, .approvals = 0 } } }));
 }
 
 fn statusCase3() !void {
-    const working: Reading = .of(fixture(.{ .state = .{ .working = .{ .since = 1 } }, .turn = 1 }), null);
-    const finished: Reading = .of(fixture(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 }), null);
-    const failed: Reading = .of(fixture(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 1 }), null);
-    const waiting: Reading = .of(fixture(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 4 }), null);
-    const beside: Reading = .of(fixture(.{ .state = .{ .bash = .{ .since = 2, .call = 0, .description = null, .running = 1, .approvals = 1 } }, .turn = 1, .first_action = 4 }), null);
-    const stopped: Reading = .of(fixture(.{ .state = .{ .stopped = .{ .since = 3, .cause = .stop } }, .turn = 1 }), null);
-    const idle: Reading = .of(fixture(.{ .state = .{ .idle = .{ .since = 1 } } }), null);
-    const next_turn: Reading = .of(fixture(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 }), null);
-    const next_wait: Reading = .of(fixture(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 5 }), null);
+    const working: Reading = .of(.{ .state = .{ .working = .{ .since = 1 } }, .turn = 1 }, null);
+    const finished: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 }, null);
+    const failed: Reading = .of(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 1 }, null);
+    const waiting: Reading = .of(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 4 }, null);
+    const beside: Reading = .of(.{ .state = .{ .bash = .{ .since = 2, .call = 0, .description = null, .running = 1, .approvals = 1 } }, .turn = 1, .first_action = 4 }, null);
+    const stopped: Reading = .of(.{ .state = .{ .stopped = .{ .since = 3, .cause = .stop } }, .turn = 1 }, null);
+    const idle: Reading = .of(.{ .state = .{ .idle = .{ .since = 1 } } }, null);
+    const next_turn: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 }, null);
+    const next_wait: Reading = .of(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 5 }, null);
     try std.testing.expectEqual(Status.working, Status.next(null, null, working, true).?);
     try std.testing.expectEqual(Status.blocked, Status.next(null, null, waiting, true).?);
     try std.testing.expectEqual(Status.blocked, Status.next(null, null, beside, true).?);
@@ -224,11 +222,11 @@ fn statusCase3() !void {
     try std.testing.expectEqual(Status.done, Status.next(null, finished, next_turn, false).?);
     try std.testing.expectEqual(Status.blocked, Status.next(.blocked, waiting, next_wait, false).?);
     const opened_on: Attention = .{ .kind = .finished, .turn = 1, .step = std.math.maxInt(u64) };
-    const seen_finish: Reading = .of(fixture(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 }), opened_on);
+    const seen_finish: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 }, opened_on);
     try std.testing.expectEqual(Status.idle, Status.next(.working, working, seen_finish, false).?);
     try std.testing.expectEqual(Status.idle, Status.next(.idle, seen_finish, seen_finish, false).?);
-    try std.testing.expectEqual(Status.done, Status.next(.idle, seen_finish, .of(fixture(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 }), opened_on), false).?);
-    try std.testing.expectEqual(Status.failed, Status.next(.idle, seen_finish, .of(fixture(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 2 }), opened_on), false).?);
+    try std.testing.expectEqual(Status.done, Status.next(.idle, seen_finish, .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 }, opened_on), false).?);
+    try std.testing.expectEqual(Status.failed, Status.next(.idle, seen_finish, .of(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 2 }, opened_on), false).?);
     try std.testing.expectEqual(Status.idle, Status.opened(.done).?);
     try std.testing.expectEqual(Status.idle, Status.opened(.failed).?);
     try std.testing.expectEqual(Status.blocked, Status.opened(.blocked).?);
@@ -266,8 +264,9 @@ test "SUI-21 status_delivery" {
     try statusCase2();
     try statusCase3();
     try statusCase4();
+    // Only the work's own state decides, so a Session whose state asks for an approval is blocked.
     var seen: ?Attention = null;
-    const served: Work = .{ .state = .{ .approval = .{ .since = 1 } }, .served_attention = null, .served_group = .working };
-    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, served));
-    try std.testing.expectEqual(Status.working, Status.next(null, null, .of(served, null), true).?);
+    const asking: Work = .{ .state = .{ .approval = .{ .since = 1 } }, .first_action = 1 };
+    try std.testing.expectEqual(Kind.approval, observe(&seen, asking).?);
+    try std.testing.expectEqual(Status.blocked, Status.next(null, null, .of(asking, null), true).?);
 }

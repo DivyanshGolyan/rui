@@ -17,6 +17,7 @@ const DraftEditor = @import("DraftEditor.zig");
 const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
 const TerminalText = @import("TerminalText.zig");
+const row_text = @import("testing/row_text.zig");
 const Viewport = @import("ConversationViewport.zig");
 const session_line = @import("session_line.zig");
 const slash_commands = @import("slash_commands.zig");
@@ -1491,7 +1492,7 @@ test "SUI-164 one observation read settles an accepted Message on the Store that
 
 test "SUI-49 Message placement preserves provenance across pages" {
     const Domain = struct {
-        const user = TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ View.Mark.body ++ "please wait\n  for the build" ++ View.Mark.reset ++ "\n";
+        const user = TerminalText.user_marker ++ View.Mark.body ++ "please wait\n  for the build" ++ View.Mark.reset ++ "\n";
         const link = TerminalText.link_open ++ TerminalText.session_link ++ "9f8e7d" ++ TerminalText.link_end ++ "\x1b[4mPeer" ++ TerminalText.link_close ++ View.Mark.reset ++ View.Mark.summary;
         const received = View.Mark.summary ++ "← Received message from " ++ link ++ View.Mark.reset ++ "\n";
         const Sink = struct {
@@ -1522,7 +1523,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
                             var out = std.Io.Writer.fixed(&buffer);
                             var sink: Sink = .{ .out = &out };
                             const provisional = try View.render(requests, root, "k7m2qx", undefined, null, rows[index], queued, held, &sink, false, "", .{ .viewport = .wcwidth }, .none);
-                            try std.testing.expectEqualStrings(expected[index].text, out.buffered());
+                            try row_text.expectVisible(expected[index].text, out.buffered());
                             try std.testing.expectEqual(expected[index].provisional, provisional);
                             try std.testing.expectEqual(expected[index].lowest, sink.lowest);
                         }
@@ -1577,7 +1578,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
             var clock_buffer: [5]u8 = undefined;
             const time = View.clock(1, &clock_buffer).?;
             var prefix_buffer: [64]u8 = undefined;
-            const prefix = try std.fmt.bufPrint(&prefix_buffer, TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ View.Mark.sidenote ++ "{s}" ++ View.Mark.reset ++ View.Mark.body, .{time});
+            const prefix = try std.fmt.bufPrint(&prefix_buffer, TerminalText.user_marker ++ View.Mark.sidenote ++ "{s}" ++ View.Mark.reset ++ View.Mark.body, .{time});
             for ([_]usize{ 0, 1, protocol.ActivityPage.items * 2 + 1 }) |excluded| {
                 for ([_]bool{ false, true }) |applied_boundary| {
                     const stop_at = excluded + 5;
@@ -1955,7 +1956,7 @@ test "activity golden stop with interrupted ending draws one line across pages" 
                         _ = try View.render(undefined, "unused", session.slice(), undefined, null, item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
                     }
                 }
-                try std.testing.expectEqualStrings(if (colour) "\x1b[39m▪\x1b[39m Stopped\n" else "▪ Stopped\n", out.buffered());
+                try std.testing.expectEqualStrings(if (colour) "\x1b[39m▪\x1b[39m Stopped\n" else "▪ Stopped\n", row_text.visible(out.buffered()));
             }
         }
     }
@@ -1966,7 +1967,7 @@ test "activity golden stop with interrupted ending draws one line across pages" 
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
     _ = try View.render(undefined, "unused", session.slice(), undefined, null, page.facts.items[0], .{}, false, &sink, true, "", .{ .viewport = .wcwidth }, .none);
-    try std.testing.expectEqualStrings("\x1b[39m▪\x1b[39m Stopped\n", out.buffered());
+    try std.testing.expectEqualStrings("\x1b[39m▪\x1b[39m Stopped\n", row_text.visible(out.buffered()));
 }
 
 test "session_reads rendered row kinds keep their own text and feed_window draws the gap from adjacency in every order" {
@@ -2199,7 +2200,7 @@ test "SUI-53 replay replaces queued rows and counts only new rows" {
             try std.testing.expectEqualDeep(if (end == 23) @as(?Key, .{ .position = 21 }) else null, firstProvisional(&job.result));
             if (end == 24) {
                 try std.testing.expect(std.mem.indexOf(u8, host.shown, "Received message").? < std.mem.indexOf(u8, host.shown, "please wait").?);
-                try std.testing.expectEqual(@as(usize, @intFromBool(excluded)), std.mem.count(u8, host.shown, "◌ not sent"));
+                try std.testing.expectEqual(@as(usize, @intFromBool(excluded)), std.mem.count(u8, row_text.visible(host.shown), "◌ not sent"));
             }
         }
     }

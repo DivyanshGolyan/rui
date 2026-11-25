@@ -13,6 +13,7 @@ const transport_policy = @import("transport_policy.zig");
 const wire_field = @import("wire_field.zig");
 const mutation_answer = @import("mutation_answer.zig");
 const content_value = @import("content_value.zig");
+const skill_reference = @import("skill_reference.zig");
 const input_parts = @import("input_parts.zig");
 comptime {
     std.debug.assert(mutation_answer.max_code_bytes == protocol.max_code_bytes);
@@ -153,9 +154,10 @@ pub const ActivityPage = struct {
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
         const Instruction = struct { turn: ?JsonString(20), revision: ?JsonString(20), content: Ref };
+        const Skill = struct { admission: JsonString(20), turn: JsonString(20), ordinal: JsonString(20), name: JsonString(skill_reference.max_name_bytes), content: Ref };
         const ModelCall = struct { model: JsonString(protocol.max_model_bytes), served_model: ?JsonString(protocol.max_model_bytes), input_tokens: ?JsonString(20), output_tokens: ?JsonString(20), cached_tokens: ?JsonString(20), latency_ms: ?JsonString(20), first_event_ms: ?JsonString(20), status: JsonString(protocol.max_code_bytes), attempts: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall, instruction: Instruction, skill: Skill } };
         const Items = JsonArray(Item, 16);
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
         const Calls = JsonArray(CallEntry, 3);
@@ -219,6 +221,12 @@ pub const ActivityPage = struct {
                     // The skill-catalog instruction has neither a Turn nor an authored revision; every other one has both.
                     if ((instruction.turn == null) != (instruction.revision == null)) return error.InvalidActivityPage;
                     fact.value = .{ .instruction = .{ .turn = if (instruction.turn) |turn| try id(turn, false) else null, .revision = if (instruction.revision) |revision| try id(revision, false) else null, .content = try textOf(instruction.content) } };
+                },
+                .skill => |skill| {
+                    // A skill is bound to a Message and its Turn, at a position of its own among the Message's skills; its text is a whole SKILL.md.
+                    const content = try textOf(skill.content);
+                    if (!skill_reference.validName(skill.name.slice()) or content.length > skill_reference.max_skill_bytes) return error.InvalidActivityPage;
+                    fact.value = .{ .skill = .{ .admission = try id(skill.admission, false), .turn = try id(skill.turn, false), .ordinal = try id(skill.ordinal, false), .name = skill.name.value, .content = content } };
                 },
                 .compacted => |compacted| fact.value = .{ .compacted = .{ .operation = try id(compacted.operation, false), .dropped = try id(compacted.dropped, true) } },
                 .model_call => |call| {
@@ -1625,9 +1633,9 @@ pub const ArchivedWindowPage = struct {
     /// One slim row: the same decoder the wire shape is tested through (`ArchivedRowRead`).
     pub const Row = ArchivedRowRead;
 
-    const Rows = JsonArray(ArchivedRowRead, session_list.archived_window_size);
+    const Rows = JsonArray(ArchivedRowRead, session_list.max_window_rows);
 
-    rows: [session_list.archived_window_size]Row = undefined,
+    rows: [session_list.max_window_rows]Row = undefined,
     count: usize = 0,
     since: protocol.SinceToken = .{ .instance = @splat(0), .generation = 0 },
     first: ?u64 = null,
@@ -1636,7 +1644,7 @@ pub const ArchivedWindowPage = struct {
     more_below: bool = false,
 
     /// Reads the reply to `window` and refuses anything the Host could not have answered for that cursor.
-    pub fn read(io: std.Io, file: std.Io.File, bytes: u64, cursor: session_list.ArchivedCursor) !ArchivedWindowPage {
+    pub fn read(io: std.Io, file: std.Io.File, bytes: u64, window: session_list.ArchivedWindow) !ArchivedWindowPage {
         if (bytes == 0 or bytes > protocol.session_list_reply.max_bytes) return error.InvalidSessionPage;
         const Wire = struct {
             version: JsonString(8),
@@ -1684,7 +1692,8 @@ pub const ArchivedWindowPage = struct {
         if (next.last) |last| if (try ActivityPage.id(last, false) != result.last.?) return error.InvalidSessionPage;
         // The page's side is fixed by the cursor: head has nothing above it, tail nothing below, and a keyed
         // read keeps every row on its own side of the key.
-        switch (cursor) {
+        if (result.count > window.rows) return error.InvalidSessionPage;
+        switch (window.cursor) {
             .head => if (result.more_above) return error.InvalidSessionPage,
             .tail => if (result.more_below) return error.InvalidSessionPage,
             .below => |key| {
@@ -1704,9 +1713,9 @@ pub const ArchivedWindowReply = union(enum) {
     page: ArchivedWindowPage,
     failure: ReadFailure,
 
-    pub fn decode(io: std.Io, file: std.Io.File, cursor: session_list.ArchivedCursor, reply: ReportReply) !ArchivedWindowReply {
+    pub fn decode(io: std.Io, file: std.Io.File, window: session_list.ArchivedWindow, reply: ReportReply) !ArchivedWindowReply {
         return switch (reply) {
-            .report => |report| .{ .page = try ArchivedWindowPage.read(io, file, report.bytes, cursor) },
+            .report => |report| .{ .page = try ArchivedWindowPage.read(io, file, report.bytes, window) },
             .command => |command| .{ .failure = try decodeReadFailure(command, false) },
         };
     }
@@ -2473,6 +2482,37 @@ test "an instruction row carries a Turn and a revision together, or neither" {
         const instruction = parsed.facts.items[0].value.instruction;
         try std.testing.expectEqual(row.turn, instruction.turn);
         try std.testing.expectEqual(row.revision, instruction.revision);
+    }
+}
+
+test "a skill row carries a valid name and a text no larger than a SKILL.md may be" {
+    var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try facts.work.workspace.set("/work");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    const largest = @import("skill_reference.zig").max_skill_bytes;
+    for ([_]struct { name: []const u8, length: u64, valid: bool }{
+        .{ .name = "release-notes", .length = 3, .valid = true },
+        .{ .name = "a", .length = largest, .valid = true },
+        .{ .name = "release-notes", .length = largest + 1, .valid = false },
+        .{ .name = "Release", .length = 3, .valid = false },
+        .{ .name = "a--b", .length = 3, .valid = false },
+        .{ .name = "", .length = 3, .valid = false },
+    }) |row| {
+        var skill: @import("activity_facts.zig").Item.Skill = .{ .admission = 4, .turn = 2, .ordinal = 1, .name = .{}, .content = .{ .length = row.length, .digest = @splat(0xab) } };
+        try skill.name.set(row.name);
+        facts.items[0] = .{ .position = 1, .ordinal = 0, .at = 5, .value = .{ .skill = skill } };
+        var out = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&out, &facts);
+        if (!row.valid) {
+            try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(out.buffered(), .{}));
+            continue;
+        }
+        const parsed = try ActivityPage.parse(out.buffered(), .{});
+        const read = parsed.facts.items[0].value.skill;
+        try std.testing.expectEqualStrings(row.name, read.name.slice());
+        try std.testing.expectEqual(@as(u64, 4), read.admission);
+        try std.testing.expectEqual(@as(u64, 2), read.turn);
+        try std.testing.expectEqual(row.length, read.content.length);
     }
 }
 
@@ -4655,6 +4695,64 @@ test "WIR-4 a public parts reply reads back as the Host writes it and refuses an
     identity.length = 119;
     try file.writePositionalAll(io, wire, 0);
     try std.testing.expectError(error.InvalidPartList, PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = wire.len } }, .{ .session = "k7m2qx", .owner = .{ .action = 9 }, .identity = identity }));
+}
+
+/// One Archived window reply for `count` rows whose archive keys run down from `top`, as a Host would write it.
+fn archivedWindowWire(out: *std.Io.Writer.Allocating, top: u64, count: usize, more_above: bool, more_below: bool) ![]const u8 {
+    try out.writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
+    for (0..count) |index| {
+        if (index != 0) try out.writer.writeAll(",");
+        var reference: [6]u8 = undefined;
+        const row: protocol.ArchivedRow.Fields = .{ .reference = try std.fmt.bufPrint(&reference, "r{d:0>5}", .{index}), .archive_seq = top - index, .stopped_at = 1700, .label = null, .first = null };
+        try row.writeJson(&out.writer);
+    }
+    try out.writer.writeAll("],\"delta\":\"window\",\"since\":\"abababababababababababababababab.42\",\"next\":{\"first\":");
+    if (count == 0) try out.writer.writeAll("null,\"last\":null") else try out.writer.print("\"{d}\",\"last\":\"{d}\"", .{ top, top - (count - 1) });
+    try out.writer.print(",\"more_above\":{},\"more_below\":{}}}}}", .{ more_above, more_below });
+    return out.written();
+}
+
+test "Archived window reply: a page is accepted only within the rows asked for and on the cursor's side" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer file.close(io);
+    const Case = struct { window: session_list.ArchivedWindow, count: usize, more_above: bool, more_below: bool, accepted: bool };
+    const cases = [_]Case{
+        // The page size is the request's: exactly `rows` is read, one more is refused, at the small, the typical and the largest size.
+        .{ .window = .{ .cursor = .head, .rows = 1 }, .count = 1, .more_above = false, .more_below = true, .accepted = true },
+        .{ .window = .{ .cursor = .head, .rows = 1 }, .count = 2, .more_above = false, .more_below = true, .accepted = false },
+        .{ .window = .{ .cursor = .head, .rows = 12 }, .count = 12, .more_above = false, .more_below = true, .accepted = true },
+        .{ .window = .{ .cursor = .head, .rows = 12 }, .count = 13, .more_above = false, .more_below = true, .accepted = false },
+        .{ .window = .{ .cursor = .head, .rows = 12 }, .count = 40, .more_above = false, .more_below = true, .accepted = false },
+        .{ .window = .{ .cursor = .head, .rows = 40 }, .count = 40, .more_above = false, .more_below = true, .accepted = true },
+        .{ .window = .{ .cursor = .head, .rows = 12 }, .count = 0, .more_above = false, .more_below = false, .accepted = true },
+        // The cursor fixes the side: head has nothing above, tail nothing below, a keyed read stays on its side of the key.
+        .{ .window = .{ .cursor = .head, .rows = 12 }, .count = 3, .more_above = true, .more_below = false, .accepted = false },
+        .{ .window = .{ .cursor = .tail, .rows = 12 }, .count = 3, .more_above = true, .more_below = true, .accepted = false },
+        .{ .window = .{ .cursor = .tail, .rows = 12 }, .count = 3, .more_above = true, .more_below = false, .accepted = true },
+        .{ .window = .{ .cursor = .{ .below = 1001 }, .rows = 12 }, .count = 3, .more_above = true, .more_below = true, .accepted = true },
+        .{ .window = .{ .cursor = .{ .below = 1001 }, .rows = 12 }, .count = 3, .more_above = false, .more_below = true, .accepted = false },
+        .{ .window = .{ .cursor = .{ .below = 1000 }, .rows = 12 }, .count = 3, .more_above = true, .more_below = true, .accepted = false },
+        .{ .window = .{ .cursor = .{ .above = 997 }, .rows = 12 }, .count = 3, .more_above = true, .more_below = true, .accepted = true },
+        .{ .window = .{ .cursor = .{ .above = 997 }, .rows = 12 }, .count = 3, .more_above = true, .more_below = false, .accepted = false },
+        .{ .window = .{ .cursor = .{ .above = 998 }, .rows = 12 }, .count = 3, .more_above = true, .more_below = true, .accepted = false },
+    };
+    for (cases) |case| {
+        var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer out.deinit();
+        const wire = try archivedWindowWire(&out, 1000, case.count, case.more_above, case.more_below);
+        try file.writePositionalAll(io, wire, 0);
+        if (case.accepted) {
+            const page = try ArchivedWindowPage.read(io, file, wire.len, case.window);
+            try std.testing.expectEqual(case.count, page.count);
+            const decoded = try ArchivedWindowReply.decode(io, file, case.window, .{ .report = .{ .bytes = wire.len } });
+            try std.testing.expectEqual(case.count, decoded.page.count);
+        } else {
+            try std.testing.expectError(error.InvalidSessionPage, ArchivedWindowPage.read(io, file, wire.len, case.window));
+        }
+    }
 }
 
 test "Archived window wire: a slim row reads back with its position, admission, content and line" {
