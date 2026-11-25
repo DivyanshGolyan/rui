@@ -3274,6 +3274,70 @@
             ],
             "additionalProperties": false,
             "description": "One resolved model Operation at its admission position. Timings describe the FINAL attempt only: latency_ms is request sent to resolution; first_event_ms is request sent to the first HTTP response event (including an interim head), not the first token. Missing evidence, usage or timings is null. A resolution may become visible within a previously captured end (D219)."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "position": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "ordinal": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "at": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "value": {
+                "type": "object",
+                "properties": {
+                  "instruction": {
+                    "type": "object",
+                    "properties": {
+                      "turn": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "revision": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "content": {
+                        "$ref": "#/components/schemas/ContentValue"
+                      }
+                    },
+                    "required": [
+                      "turn",
+                      "revision",
+                      "content"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "instruction"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "position",
+              "ordinal",
+              "at",
+              "value"
+            ],
+            "additionalProperties": false
           }
         ]
       },
@@ -3443,7 +3507,8 @@
                 "approval_requested",
                 "session_changed",
                 "compacted",
-                "model_call"
+                "model_call",
+                "instruction"
               ]
             },
             "uniqueItems": true,
@@ -3554,7 +3619,8 @@
               "approval_requested",
               "session_changed",
               "compacted",
-              "model_call"
+              "model_call",
+              "instruction"
             ]
           },
           "hits": {
@@ -3649,7 +3715,8 @@
                 "approval_requested",
                 "session_changed",
                 "compacted",
-                "model_call"
+                "model_call",
+                "instruction"
               ]
             },
             "uniqueItems": true,
@@ -16195,9 +16262,9 @@
               "type": "string",
               "pattern": "^[A-Za-z0-9_-]{1,64}$"
             },
-            "maxItems": 145,
+            "maxItems": 144,
             "uniqueItems": true,
-            "x-rui-max-bytes": 5147,
+            "x-rui-max-bytes": 5136,
             "description": "None repeated; the names' bytes total at most x-rui-max-bytes. The effective tool offer frozen at this Operation's admission."
           }
         },

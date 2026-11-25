@@ -7,12 +7,17 @@ const watch = @import("github_pr_watch.zig");
 pub const Budget = struct {
     io: std.Io,
     next_ns: std.atomic.Value(i64) = .init(0),
-    const interval: i64 = std.time.ns_per_s;
+    interval: i64,
     const burst: i64 = 40;
 
     pub fn init(io: std.Io) Budget {
+        return initEvery(io, std.time.ns_per_s);
+    }
+
+    /// A budget that refills one request every `interval` nanoseconds; a loopback fixture shortens it.
+    pub fn initEvery(io: std.Io, interval: i64) Budget {
         const now: i64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds);
-        return .{ .io = io, .next_ns = .init(now -| (burst - 1) * interval) };
+        return .{ .io = io, .next_ns = .init(now -| (burst - 1) * interval), .interval = interval };
     }
     pub fn acquireOpaque(context: *anyopaque) bool {
         const self: *Budget = @ptrCast(@alignCast(context));
@@ -22,9 +27,9 @@ pub const Budget = struct {
         const now: i64 = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds);
         var next = self.next_ns.load(.monotonic);
         while (true) {
-            const base = @max(next, now -| (burst - 1) * interval);
+            const base = @max(next, now -| (burst - 1) * self.interval);
             if (base > now) return false;
-            const updated = base +| interval;
+            const updated = base +| self.interval;
             if (self.next_ns.cmpxchgWeak(next, updated, .monotonic, .monotonic)) |observed| {
                 next = observed;
             } else return true;

@@ -92,6 +92,7 @@ The example keeps the Host alive until its Session's `turn_ended` entry and repo
 The feed yields saved activity entries, not token-by-token text.
 Its `model_call` entries summarize resolved model Operations at admission positions, with nullable usage and final-attempt timings (first HTTP response event, not first token).
 A late resolution can reveal such a row within an earlier captured end (D219); a follower already past it must reread that range to see it.
+Its `instruction` entries carry the instruction text a Turn was given (`turn` and `revision`, both null for the Skill catalog's), which `readContent` opens like assistant text.
 `readContent` retrieves the whole entry rather than only its inline excerpt.
 
 The random keys create a fresh Session and Message each time this example runs.

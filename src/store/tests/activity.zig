@@ -3,7 +3,9 @@ const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
+const content_domain = @import("../domain/content.zig");
 const historical_domain = @import("../domain/historical.zig");
+const skills_domain = @import("../domain/skills.zig");
 const reads_domain = @import("../domain/reads.zig");
 const store_testing = @import("../testing.zig");
 const HistoricalEntryKind = historical_domain.HistoricalEntryKind;
@@ -19,6 +21,7 @@ const submitTestMessage = store_testing.submitTestMessage;
 const TestingCall = shared_fixtures.TestingCall;
 const TwinRounds = shared_fixtures.TwinRounds;
 const completeSessionStop = shared_fixtures.completeSessionStop;
+const testingBytesContent = shared_fixtures.testingBytesContent;
 const configureTestSessionAsk = shared_fixtures.configureTestSessionAsk;
 const configureTestSessionWithMode = shared_fixtures.configureTestSessionWithMode;
 const expectActivityArguments = shared_fixtures.expectActivityArguments;
@@ -250,7 +253,7 @@ test "every activity row is dated by the fact that owns it" {
                     .turn_ended => 107,
                     .stop => 108,
                     .approval_requested => 104,
-                    .hosted_call, .sent, .send_failed, .received, .session_changed, .compacted => unreachable,
+                    .hosted_call, .sent, .send_failed, .received, .session_changed, .compacted, .instruction => unreachable,
                 };
                 try std.testing.expectEqual(expected, item.at);
                 seen.insert(item.value);
@@ -892,6 +895,132 @@ test "each setting a revision changes is one session_changed row at the position
             try std.testing.expectEqual(@as(usize, 2), backward.count);
             try std.testing.expectEqual(protocol.SessionField.label, backward.items[0].value.session_changed.field);
             try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "instruction rows serve each entry that gave the model its instructions, at its own position" {
+    try store_testing.forEachEngine(struct {
+        const first = "Instruction text A: be brief.";
+        const second = "Instruction text B: be thorough.";
+        const catalog = skills_domain.Initial{ .ready = .{
+            .encoded = "{\"entries\":[{\"name\":\"audit\",\"description\":\"Audit a change\",\"path\":\"/skills/audit/SKILL.md\"}]}",
+            .instruction = "Available skills: audit at /skills/audit/SKILL.md",
+        } };
+        /// The entries in position order: the catalog's, then each update after the revision-one baseline, which a Turn was given. `revision` is null exactly for the catalog.
+        const Expected = struct { text: []const u8, revision: ?u64 };
+        const rows = blk: {
+            var table: [17]Expected = undefined;
+            table[0] = .{ .text = catalog.ready.instruction.?, .revision = null };
+            for (table[1..], 2..) |*row, revision| row.* = .{ .text = if (revision % 2 == 0) second else first, .revision = revision };
+            break :blk table;
+        };
+
+        fn readText(storage: *Store, session: anytype, position: u64, out: []u8) ![]const u8 {
+            var reader: content_domain.ContentReader = undefined;
+            reader.open(try storage.openActivityContent(&.{ .session = session, .position = position }));
+            defer reader.close();
+            const count = try reader.read(0, out);
+            try std.testing.expectEqual(@as(usize, 0), try reader.read(count, out[count..]));
+            return out[0..count];
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("instruction-create", "", workspace, "model-a");
+            create.configuration.instructions = .{ .state = .value, .borrowed = first.ptr, .length = first.len, .digest = protocol.contentDigest(first) };
+            const session = (try storage.configureWithInitialSkills(&create, null, &catalog, .{})).accepted.session;
+            const answer = [_]TestingAnswerPart{.{ .encoded = "ok", .decoded = "ok" }};
+            try answerTestTurn(&storage, &tmp, session.slice(), "instruction-turn-0", &answer);
+            inline for (1..17) |index| {
+                const name = std.fmt.comptimePrint("instruction-turn-{d}", .{index});
+                var update = try completeConfiguration(name ++ "-config", session.slice(), workspace, "model-a");
+                update.configuration.instructions = try testingBytesContent(&tmp, name ++ "-text", rows[index].text);
+                try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+                try answerTestTurn(&storage, &tmp, session.slice(), name, &answer);
+            }
+
+            // Only instruction rows, across the 16-row page boundary.
+            var request: protocol.ActivityPage = .{ .kinds = .initOne(.instruction) };
+            try request.session.set(session.slice());
+            var seen: usize = 0;
+            var pages: usize = 0;
+            while (true) {
+                const page = try store_core.activityPageForTesting(&storage, request);
+                pages += 1;
+                for (page.items[0..page.count]) |item| {
+                    const expected = rows[seen];
+                    const position = try store_testing.queryU64(&storage, "SELECT session_position FROM conversation_entry WHERE session_ref=?1 AND entry_kind=2 ORDER BY session_position LIMIT 1 OFFSET ?2", .{ session.slice(), @as(u64, seen) });
+                    try std.testing.expectEqual(position, item.position);
+                    try std.testing.expectEqual(@as(u64, 0), item.ordinal);
+                    try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT recorded_at FROM conversation_entry WHERE session_ref=?1 AND session_position=?2", .{ session.slice(), position }), item.at);
+                    const turn = try store_testing.queryU64(&storage, "SELECT coalesce(turn_id,0) FROM conversation_entry WHERE session_ref=?1 AND session_position=?2", .{ session.slice(), position });
+                    try std.testing.expectEqual(if (expected.revision == null) null else @as(?u64, turn), item.value.instruction.turn);
+                    try std.testing.expectEqual(expected.revision, item.value.instruction.revision);
+                    try std.testing.expectEqual(@as(u64, expected.text.len), item.value.instruction.content.length);
+                    var buffer: [128]u8 = undefined;
+                    try std.testing.expectEqualStrings(expected.text, try readText(&storage, session, position, &buffer));
+                    seen += 1;
+                }
+                if (!page.more) break;
+                request.position = page.items[page.count - 1].position;
+                request.ordinal = page.items[page.count - 1].ordinal;
+            }
+            try std.testing.expectEqual(rows.len, seen);
+            try std.testing.expectEqual(@as(usize, 2), pages);
+
+            // Every kind, in position order: instruction rows sit among the user and assistant rows.
+            var all: protocol.ActivityPage = .{};
+            try all.session.set(session.slice());
+            var previous: ?struct { position: u64, ordinal: u64 } = null;
+            var counts: [3]usize = @splat(0);
+            while (true) {
+                const page = try store_core.activityPageForTesting(&storage, all);
+                for (page.items[0..page.count]) |item| {
+                    if (previous) |before| try std.testing.expect(item.position > before.position or (item.position == before.position and item.ordinal > before.ordinal));
+                    previous = .{ .position = item.position, .ordinal = item.ordinal };
+                    switch (item.value) {
+                        .instruction => counts[0] += 1,
+                        .user => counts[1] += 1,
+                        .assistant => counts[2] += 1,
+                        else => {},
+                    }
+                }
+                if (!page.more) break;
+                all.position = page.items[page.count - 1].position;
+                all.ordinal = page.items[page.count - 1].ordinal;
+            }
+            try std.testing.expectEqualSlices(usize, &.{ rows.len, 17, 17 }, &counts);
+
+            // Backward paging serves the newest instruction first, and a filter that omits the kind serves none.
+            var backward: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.instruction), .limit = 1 };
+            try backward.session.set(session.slice());
+            const newest = try store_core.activityPageForTesting(&storage, backward);
+            try std.testing.expectEqual(@as(usize, 1), newest.count);
+            try std.testing.expectEqual(rows[rows.len - 1].revision, newest.items[0].value.instruction.revision);
+            try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT max(session_position) FROM conversation_entry WHERE session_ref=?1 AND entry_kind=2", .{session.slice()}), newest.items[0].position);
+            var others: protocol.ActivityPage = .{ .kinds = .full };
+            others.kinds.remove(.instruction);
+            try others.session.set(session.slice());
+            while (true) {
+                const page = try store_core.activityPageForTesting(&storage, others);
+                for (page.items[0..page.count]) |item| try std.testing.expect(item.value != .instruction);
+                if (!page.more) break;
+                others.position = page.items[page.count - 1].position;
+                others.ordinal = page.items[page.count - 1].ordinal;
+            }
+
+            // A private instruction is refused, not served.
+            const refused = try store_testing.queryU64(&storage, "SELECT session_position FROM conversation_entry WHERE session_ref=?1 AND entry_kind=2 ORDER BY session_position LIMIT 1 OFFSET 3", .{session.slice()});
+            try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND session_position=?2)", .{ session.slice(), refused });
+            try std.testing.expectError(error.CorruptStore, storage.openActivityContent(&.{ .session = session, .position = refused }));
+            try std.testing.expect(storage.isFenced());
         }
     }.run);
 }

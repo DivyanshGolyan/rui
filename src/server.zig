@@ -1117,6 +1117,7 @@ pub noinline fn serve(
         settings.tools.bash.path.slice(),
         settings.tools.bash.timeout_ms.value,
         tuning.home,
+        tuning.github_environment,
         settings,
         if (mcp_servers.len != 0) mcp_relist else null,
         mcp_servers,
@@ -1201,6 +1202,7 @@ fn serveOpened(
     bash_path: []const u8,
     bash_timeout_ms: u64,
     home: ?[]const u8,
+    github_environment: ?*const std.process.Environ.Map,
     settings: *const host_settings.Settings,
     mcp_relist: ?*server_mcp_relist.Relist,
     mcp_servers: []const server_mcp_settings.Server,
@@ -1333,6 +1335,7 @@ fn serveOpened(
         .model_lists = &model_lists,
         .environments = environments,
         .allowance_diagnostic = &allowance_diagnostic,
+        .github_environment = github_environment,
     };
     const execution_settings: server_execution.Settings = .{
         .bash_path = bash_path,

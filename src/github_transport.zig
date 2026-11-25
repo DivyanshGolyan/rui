@@ -141,11 +141,8 @@ pub const Accounts = struct {
     }
 };
 
-pub fn discover(allocator: std.mem.Allocator, io: std.Io, source: *const std.process.Environ.Map, deadline: Deadline, cancel: Cancel) !Accounts {
-    return discoverWithGh(allocator, io, source, deadline, cancel, "gh");
-}
-
-fn discoverWithGh(allocator: std.mem.Allocator, io: std.Io, source: *const std.process.Environ.Map, deadline: Deadline, cancel: Cancel, gh: []const u8) !Accounts {
+/// `gh` is the executable to run: the Host passes `"gh"`, found on its own PATH; a test names a fake by path.
+pub fn discover(allocator: std.mem.Allocator, io: std.Io, source: *const std.process.Environ.Map, deadline: Deadline, cancel: Cancel, gh: []const u8) !Accounts {
     var env = try environment(allocator, source);
     defer env.deinit();
     const bytes = try allocator.alloc(u8, max_helper_output);
@@ -206,11 +203,7 @@ pub const Secret = struct {
     }
 };
 
-pub fn token(allocator: std.mem.Allocator, io: std.Io, source: *const std.process.Environ.Map, login: []const u8, deadline: Deadline, cancel: Cancel) !Secret {
-    return tokenWithGh(allocator, io, source, login, deadline, cancel, "gh");
-}
-
-fn tokenWithGh(allocator: std.mem.Allocator, io: std.Io, source: *const std.process.Environ.Map, login: []const u8, deadline: Deadline, cancel: Cancel, gh: []const u8) !Secret {
+pub fn token(allocator: std.mem.Allocator, io: std.Io, source: *const std.process.Environ.Map, login: []const u8, deadline: Deadline, cancel: Cancel, gh: []const u8) !Secret {
     if (!descriptor.validLogin(login)) return error.InvalidAccount;
     var env = try environment(allocator, source);
     defer env.deinit();
@@ -410,19 +403,19 @@ test "PRW-8 gh discovery and exact account token use a scrubbed noninteractive e
     inline for (.{ "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN" }) |key| try env.put(key, "synthetic-ambient-secret");
     var stopped: std.atomic.Value(bool) = .init(false);
     const deadline: Deadline = .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake });
-    var accounts = try discoverWithGh(a, io, &env, deadline, &stopped, executable);
+    var accounts = try discover(a, io, &env, deadline, &stopped, executable);
     defer accounts.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), accounts.names.len);
     try std.testing.expectEqualStrings("alice", accounts.names[0]);
-    var credential = try tokenWithGh(a, io, &env, "alice", deadline, &stopped, executable);
+    var credential = try token(a, io, &env, "alice", deadline, &stopped, executable);
     defer credential.deinit(a);
     try std.testing.expectEqualStrings("synthetic-token", credential.bytes);
-    try std.testing.expectError(error.GhFailed, tokenWithGh(a, io, &env, "other", deadline, &stopped, executable));
+    try std.testing.expectError(error.GhFailed, token(a, io, &env, "other", deadline, &stopped, executable));
     stopped.store(true, .release);
-    try std.testing.expectError(error.Cancelled, discoverWithGh(a, io, &env, deadline, &stopped, executable));
+    try std.testing.expectError(error.Cancelled, discover(a, io, &env, deadline, &stopped, executable));
     stopped.store(false, .release);
     const expired: Deadline = .fromNow(io, .{ .raw = .fromMilliseconds(0), .clock = .awake });
-    try std.testing.expectError(error.Timeout, tokenWithGh(a, io, &env, "alice", expired, &stopped, executable));
+    try std.testing.expectError(error.Timeout, token(a, io, &env, "alice", expired, &stopped, executable));
 }
 
 test "PRW-32 cancelled request never opens a connection" {

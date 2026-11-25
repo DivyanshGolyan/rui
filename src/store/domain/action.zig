@@ -1,6 +1,7 @@
 const std = @import("std");
 pub const Capacity = @import("../../execution.zig").DispatchCapacity;
 const attempt = @import("../../attempt.zig");
+const tool_presentation = @import("../../tool_presentation.zig");
 const turn_ending = @import("../../turn_ending.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
 const workspace_path = @import("../../workspace_path.zig");
@@ -259,6 +260,10 @@ const next_core_action = rsql.Read(.{
         "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE " ++ LocalSelection(.read_image).ready_sql ++ " AND " ++ capacity_sql ++ " " ++
+        "UNION ALL SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session,action.background_position IS NOT NULL AS background,0 AS auto_deny,'github_pr_watch' AS tool " ++
+        "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
+        "WHERE " ++ LocalSelection(.github_pr_watch).ready_sql ++ " AND " ++ capacity_sql ++ " " ++
         "ORDER BY auto_deny DESC,action_id LIMIT 1",
     .Args = CoreNames.Args(struct { foreground: bool, background: bool }),
     .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: Bounded(session_id.max_reference_bytes), background: bool, auto_deny: bool, tool: SelectionTool },
@@ -269,11 +274,16 @@ pub const CoreTool = tool_defs.CoreTool;
 
 const SelectionTool = blk: {
     const core_names = @typeInfo(CoreTool).@"enum".field_names;
-    const names = core_names ++ &[_][]const u8{"read_image"};
+    const names = core_names ++ &[_][]const u8{ "read_image", "github_pr_watch" };
     var values: [names.len]u8 = undefined;
     for (&values, 0..) |*value, i| value.* = @intCast(i);
     break :blk @Enum(u8, .exhaustive, names, &values);
 };
+
+/// The built-in runners that execute on the Host, in the same lane as MCP calls: they take a credit and are not Core tools.
+fn isLocalTool(tool: SelectionTool) bool {
+    return tool == .read_image or tool == .github_pr_watch;
+}
 
 pub const CoreActionInput = struct {
     binding: ActionAttemptBinding,
@@ -304,6 +314,7 @@ pub const CoreWork = union(enum) {
     action: CoreActionInput,
     mcp: ReadyAction,
     read_image: ReadyAction,
+    github_pr_watch: ReadyAction,
 };
 
 pub const ending_stop_sql = "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.source_id) AS stopped," ++
@@ -373,11 +384,11 @@ pub const WorkProbe = struct {
 
     pub fn core(probe: *const WorkProbe) bool {
         const found = &probe.selection;
-        return found.stop != null or found.ending != null or found.forward != null or (found.action != null and found.action.?.tool != .read_image);
+        return found.stop != null or found.ending != null or found.forward != null or (found.action != null and !isLocalTool(found.action.?.tool));
     }
 
     pub fn mcp(probe: *const WorkProbe) bool {
-        return probe.selection.mcp != null or (probe.selection.action != null and probe.selection.action.?.tool == .read_image);
+        return probe.selection.mcp != null or (probe.selection.action != null and isLocalTool(probe.selection.action.?.tool));
     }
 
     pub fn bash(probe: *const WorkProbe) bool {
@@ -419,6 +430,7 @@ pub fn nextCoreWork(a: anytype, capacity: Capacity) !?CoreWork {
     const found = next orelse return null;
     if (found.auto_deny) return .{ .auto_deny = .{ .action_id = found.action_id.get(), .session = found.session } };
     if (found.tool == .read_image) return .{ .read_image = .{ .action_id = found.action_id.get(), .runner = .read_image, .background = found.background } };
+    if (found.tool == .github_pr_watch) return .{ .github_pr_watch = .{ .action_id = found.action_id.get(), .runner = .github_pr_watch, .background = found.background } };
     return .{ .action = .{
         .binding = .{ .turn_id = found.turn_id.get(), .parent_operation_id = found.parent_operation_id.get(), .action_id = found.action_id.get() },
         .tool = std.meta.stringToEnum(CoreTool, @tagName(found.tool)) orelse unreachable,
@@ -641,13 +653,54 @@ pub const core_facts = rsql.Read(.{
 });
 
 const resolve_unattempted_action = rsql.Write(.{
-    .sql = "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,resolved_at=@now " ++
+    .sql = "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,resolved_at=@now," ++
+        "outcome_text=?7,outcome_link_at=?8,outcome_link_session=?9,outcome_completion=?10 " ++
         "WHERE action_id=?1 AND parent_operation_id=?5 AND session_ref=@session(?6) AND attempt_ordinal=0 AND resolution_code IS NULL",
-    .Args = struct { action_id: u64, code: ActionResolutionCode, content_id: u64, position: u64, parent_operation_id: u64, session: rsql.SessionHead },
+    .Args = struct {
+        action_id: u64,
+        code: ActionResolutionCode,
+        content_id: u64,
+        position: u64,
+        parent_operation_id: u64,
+        session: rsql.SessionHead,
+        outcome_text: ?[]const u8,
+        outcome_link_at: ?u64,
+        outcome_link_session: ?[]const u8,
+        outcome_completion: ?u8,
+    },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-pub fn queueResolution(a: anytype, binding: ActionAttemptBinding, session: rsql.SessionHead, code: ActionResolutionCode, content_id: u64) !void {
+/// What the row of a resolved call shows beyond its call line. Every resolver answers it, so a tool
+/// that has something to say about how its call went cannot forget to: the compiler lists the callers.
+pub const Shown = union(enum) {
+    /// Nothing more than the call line saved at settlement.
+    call_line,
+    /// The words that say what running the call did, and how a success finishes. The write reads the slices inside
+    /// in place, so they point into the caller's transition, not into a copy.
+    outcome: ShownOutcome,
+};
+
+/// The outcome line of a call that handed work to another Session: fixed words, then the Session it reached.
+/// Both slices are read in place by the queued write, so they point into storage the caller keeps until it commits
+/// (a string constant and the Session reference its transition already holds).
+pub const ShownOutcome = struct {
+    words: []const u8,
+    session: []const u8,
+    completion: tool_presentation.Completion,
+
+    /// The words must be a valid line around that Session; a caller's constant or its own Session reference cannot fail this.
+    pub fn sent(words: []const u8, session: []const u8) ShownOutcome {
+        _ = tool_presentation.Line.linked(words, session, "") catch unreachable;
+        return .{ .words = words, .session = session, .completion = .sent };
+    }
+};
+
+pub fn queueResolution(a: anytype, binding: ActionAttemptBinding, session: rsql.SessionHead, code: ActionResolutionCode, content_id: u64, shown: Shown) !void {
+    const outcome: ?ShownOutcome = switch (shown) {
+        .call_line => null,
+        .outcome => |value| value,
+    };
     a.write(resolve_unattempted_action, .{
         .action_id = binding.action_id,
         .code = code,
@@ -655,6 +708,10 @@ pub fn queueResolution(a: anytype, binding: ActionAttemptBinding, session: rsql.
         .position = try (try a.positions(session)).take(1),
         .parent_operation_id = binding.parent_operation_id,
         .session = session,
+        .outcome_text = if (outcome) |value| value.words else null,
+        .outcome_link_at = if (outcome) |value| value.words.len else null,
+        .outcome_link_session = if (outcome) |value| value.session else null,
+        .outcome_completion = if (outcome) |value| @backingInt(value.completion) else null,
     });
     turn_domain.queueContinuation(a, binding.turn_id, session);
 }
@@ -1091,7 +1148,7 @@ pub const ResolveSelected = struct {
         const found = if (t.facts) |*row| row else return .commit;
         if (r.faults().content_import) return error.InjectedContentImportFailure;
         const content_id = try content_domain.importBytes(r, &t.content, t.input.text);
-        try queueResolution(r, .{ .action_id = t.input.selected.action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() }, found.session, t.input.code, content_id);
+        try queueResolution(r, .{ .action_id = t.input.selected.action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() }, found.session, t.input.code, content_id, .call_line);
         try t.final_input.admit(r, &found.session, t.input.selected.action_id, content_id, .{ .background = found.background, .stopped = false });
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;

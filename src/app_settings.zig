@@ -1,6 +1,7 @@
 const std = @import("std");
 const connection_names = @import("connection_names.zig");
 const provider_route = @import("provider_route.zig");
+const setting_words = @import("setting_words.zig");
 const connection = @import("connection.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -138,21 +139,14 @@ fn permissionMode(self: *const Self) protocol.PermissionMode {
     return self.values.permission_mode orelse std.meta.stringToEnum(protocol.PermissionMode, defaults.permission_mode).?;
 }
 
-fn permissionText(mode: protocol.PermissionMode) []const u8 {
-    return switch (mode) {
-        .bypass => "run without asking",
-        .ask => "ask first",
-    };
-}
-
 fn value(self: *const Self, row: Row) []const u8 {
     if (row == .keys or row == .memory) return "";
     if (row == .version) return self.version;
     if (self.read_failed) return "unavailable";
     return switch (row) {
         .model => self.model(),
-        .effort => if (self.choiceEffort()) |shown| @tagName(shown) else "model default",
-        .permissions => permissionText(self.permissionMode()),
+        .effort => setting_words.effort(self.choiceEffort()),
+        .permissions => setting_words.permission(self.permissionMode()),
         .notifications => if (self.values.notifications) "on" else "off",
         .sign_in => if (self.provider()) |saved| provider_route.signInOf(saved) orelse "unavailable" else "unavailable",
         .version, .memory, .keys => unreachable,
@@ -260,19 +254,19 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
             if (!self.model_choice.active) self.failures.set(.model, " · models unavailable");
         },
         .effort => {
-            self.effort_choices[0] = "model default";
+            self.effort_choices[0] = setting_words.effort_default;
             self.effort_count = 1;
             const shown = self.choiceEffort();
             var current: ?usize = if (shown == null) 0 else null;
             for (std.enums.values(catalog.ReasoningEffort)) |effort| {
                 if (!capability.supportsReasoningEffort(catalog.shipped, self.model(), effort)) continue;
                 if (shown == effort) current = self.effort_count;
-                self.effort_choices[self.effort_count] = @tagName(effort);
+                self.effort_choices[self.effort_count] = setting_words.effort(effort);
                 self.effort_count += 1;
             }
             self.panel.openChoice(self.effort_choices[0..self.effort_count], current);
         },
-        .permissions => self.panel.openChoice(&.{ "run without asking", "ask first" }, if (self.permissionMode() == .bypass) 0 else 1),
+        .permissions => self.panel.openChoice(&setting_words.permission_labels, setting_words.permissionChoice(self.permissionMode())),
         .notifications => try self.save(ctx, row, .{ .notifications = !self.values.notifications }),
         .sign_in, .version, .memory, .keys => {},
     }
@@ -288,7 +282,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, field: usize, choice: usize) !
                 .set = std.meta.stringToEnum(catalog.ReasoningEffort, self.effort_choices[choice]).?,
             },
         },
-        .permissions => .{ .permission_mode = .{ .set = if (choice == 0) .bypass else .ask } },
+        .permissions => .{ .permission_mode = .{ .set = setting_words.permissionAt(choice) } },
         .model, .notifications, .sign_in, .version, .memory, .keys => unreachable,
     });
 }
@@ -758,7 +752,7 @@ test "App settings Permissions choices save both modes and display the saved wor
     try page.refresh();
     page.bind();
     try std.testing.expectEqualStrings("Permissions", page.fields[@backingInt(Row.permissions)].label);
-    try std.testing.expectEqualStrings(permissionText(std.meta.stringToEnum(protocol.PermissionMode, defaults.permission_mode).?), page.fields[@backingInt(Row.permissions)].value);
+    try std.testing.expectEqualStrings(setting_words.permission(std.meta.stringToEnum(protocol.PermissionMode, defaults.permission_mode).?), page.fields[@backingInt(Row.permissions)].value);
     page.select(.permissions);
     for ([_]protocol.PermissionMode{ .ask, .bypass }) |mode| {
         try press(&page, &ctx, vaxis.Key.enter);

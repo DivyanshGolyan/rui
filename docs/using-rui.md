@@ -334,8 +334,8 @@ Rui does not compact unchanged input again.
 
 ### Loading tools on demand
 
-The built-in catalog, in name order, is `bash`, `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent`, `stop_action`, `web_search`.
-Fresh CLI and TUI Sessions allow and load every built-in tool.
+The built-in catalog, in name order, is `bash`, `find_tools`, `message_agent`, `read_action`, `read_image`, `read_transcript`, `skill`, `start_agent`, `stop_action`, `watch_github_pr`, `web_search`.
+Fresh CLI and TUI Sessions allow and load every built-in tool, except `read_image` when the model does not support images or the Host cannot read them.
 
 Set `--tools` to the tools a Session may use, and `--loaded-tools` to offer its model a smaller
 initial subset.

@@ -1,6 +1,7 @@
 const std = @import("std");
 const provider_route = @import("../../provider_route.zig");
 const tool_fulfillment = @import("tool_fulfillment.zig");
+const session_id = @import("../../session_id.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const built_in_tool = @import("../../built_in_tool.zig");
 const cli_value = @import("../../cli_value.zig");
@@ -175,13 +176,13 @@ const publications_sql = "WITH publications AS (SELECT operation.operation_id," 
 
 const resolved_actions = rsql.Read(.{
     .sql = publications_sql ++ "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolution_code,a.acceptance_position," ++
-        "result.byte_length AS result_length,result.digest AS result_digest,result.content_id AS result_id,result.private AS result_private,result.form AS result_form,tool_call.description," ++ tool_fulfillment.resolutionPublicationSql("a", "publications.publication") ++ " AS publication " ++
+        "result.byte_length AS result_length,result.digest AS result_digest,result.content_id AS result_id,result.private AS result_private,result.form AS result_form,tool_call.description," ++ reads_domain.outcome_columns ++ "," ++ tool_fulfillment.resolutionPublicationSql("a", "publications.publication") ++ " AS publication " ++
         "FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
         "CROSS JOIN action_operation a ON a.parent_operation_id=operation.operation_id " ++
         "CROSS JOIN content result ON result.content_id=a.resolution_content_id " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
-        "LEFT JOIN publications ON publications.operation_id=operation.operation_id " ++
+        reads_domain.outcome_join ++ " LEFT JOIN publications ON publications.operation_id=operation.operation_id " ++
         "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND a.resolution_code IS NOT NULL ORDER BY a.action_id",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -196,6 +197,11 @@ const resolved_actions = rsql.Read(.{
         result_private: bool,
         result_form: u8,
         description: ?Description,
+        outcome_text: ?Bounded(tool_presentation.max_description_bytes),
+        outcome_link_at: ?u64,
+        outcome_link_session: ?Bounded(session_id.max_reference_bytes),
+        outcome_label: ?Bounded(tool_presentation.max_label_bytes),
+        outcome_completion: ?u8,
         publication: ?rsql.Positive,
     },
     .cardinality = .each,
@@ -480,7 +486,7 @@ fn unresolvedRow(row: *const unresolved_actions.Row) ValuesError!session_report.
             .call_id = .{ .length = row.call_id_length, .digest = row.call_id_digest },
             .server = server,
             .arguments = .{ .length = row.arguments_length, .digest = row.arguments_digest },
-            .presentation = try reads_domain.presentationOf(row.description, null, row.authorized, null),
+            .presentation = try reads_domain.presentationOf(row.description, .{}, null, row.authorized, null),
         },
     };
 }
@@ -502,7 +508,7 @@ fn resolvedRow(row: *const resolved_actions.Row) ValuesError!session_report.Row 
             .code = row.resolution_code.slice(),
             .acceptance_position = row.acceptance_position.get(),
             .result = try @import("content_parts.zig").publicValue(&.{ .byte_length = row.result_length, .digest = row.result_digest, .private = row.result_private, .form = row.result_form }, .{ .action = row.action_id.get() }),
-            .presentation = try reads_domain.presentationOf(row.description, try presentedCode(row.resolution_code.slice()), null, optional(row.publication)),
+            .presentation = try reads_domain.presentationOf(row.description, .{ .text = row.outcome_text, .link_at = row.outcome_link_at, .link_session = row.outcome_link_session, .label = row.outcome_label, .completion = row.outcome_completion }, try presentedCode(row.resolution_code.slice()), null, optional(row.publication)),
         },
     };
 }
@@ -518,7 +524,7 @@ fn rejectedRow(row: *const rejected_calls.Row) ValuesError!session_report.Row {
             .name = .{ .length = row.name_length, .digest = row.name_digest },
             .call_id = .{ .length = row.call_id_length, .digest = row.call_id_digest },
             .arguments = .{ .length = row.arguments_length, .digest = row.arguments_digest },
-            .presentation = try reads_domain.presentationOf(row.description, try presentedCode(row.rejection_code.slice()), null, optional(row.publication)),
+            .presentation = try reads_domain.presentationOf(row.description, .{}, try presentedCode(row.rejection_code.slice()), null, optional(row.publication)),
         },
     };
 }
