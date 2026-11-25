@@ -1710,7 +1710,7 @@ fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !v
 fn observed(raw: *anyopaque, read: session_list.Snapshot, opening: bool) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
-    const next = try self.event(.{ .observed = .{ .reference = self.opened, .read_version = read.read_version, .work = read.work, .last_line = read.last_line, .opening = opening } });
+    const next = try self.event(.{ .observed = .{ .reference = self.opened, .read_version = read.read_version, .work = read.work, .opening = opening } });
     std.debug.assert(next == null);
 }
 

@@ -668,7 +668,6 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .creator = .{ .bytes = @splat(1), .len = protocol.session_id_bytes },
         .read_version = .{ .instance = @splat(255), .generation = std.math.maxInt(u64) },
         .work = .{ .state = longest_state, .turn = max, .operation = max, .first_action = max, .actions = .{ .stop = false, .interrupt = .{ .turn = max, .operation = max }, .decide = max }, .served_attention = .{ .kind = .approval, .turn = max, .step = max }, .served_group = .needs_you },
-        .last_line = .{ .position = max, .text = .{ .bytes = @splat(1), .len = @import("session_list.zig").max_last_line_bytes } },
         .revision = max,
     };
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);

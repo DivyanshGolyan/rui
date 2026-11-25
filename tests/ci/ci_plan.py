@@ -103,6 +103,8 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         pr_job=pr_job,
         # The ready PR runs the live MySQL migration check on a MySQL 8.4 server it starts itself (check.yml pr_linux).
         pr_mysql_migration=pr_job and bool(p.get('mysql_migration', False)),
+        # The Store tests that run on MySQL in that check; the rest of test-store runs on SQLite (store_shards.py).
+        pr_mysql_tests=' '.join(p.get('mysql_tests', [])) if pr_job and p.get('mysql_migration', False) else '',
         pr_setup_targets=sorted(set(p['targets']) | set(compile_targets)) if pr_job else [],
         change_kind=kind.value,
         draft_run=draft_run,

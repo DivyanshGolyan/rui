@@ -17,7 +17,6 @@ pub const session_list_page_size: usize = 8;
 /// (about 88 KiB), inside the list reply bound that a live page already allows (8 full rows at 36 KiB
 /// each, 288 KiB).
 pub const archived_window_size: usize = 40;
-pub const max_last_line_bytes = 200;
 /// The longest first Message line an Archived row carries: the overview's display cut (first_line).
 pub const max_first_line_bytes = first_line.max_line_bytes;
 pub const ListDelta = enum { not_modified, changed, full, window };
@@ -78,22 +77,13 @@ pub const Row = struct {
     revision: u64,
     end: u64,
     first_message: ?FirstMessage,
-    last_line: ?LastLine,
     work: session_work.Work,
     peers: Peers,
-};
-
-pub const LastLine = struct { position: u64, text: ?[]const u8 };
-
-pub const SavedLastLine = struct {
-    position: u64,
-    text: ?Bounded(max_last_line_bytes) = null,
 };
 
 pub const Snapshot = struct {
     read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     work: session_work.Work,
-    last_line: ?SavedLastLine = null,
 };
 
 pub const FirstMessage = struct {

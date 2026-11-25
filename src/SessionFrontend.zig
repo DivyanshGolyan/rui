@@ -3565,7 +3565,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         const read = self.reading.feed_read;
         if (read == .opening or read == .scan or phase == .permission) {
             const result = &self.job.result;
-            observed = .{ .snapshot = .{ .read_version = result.work.read_version, .work = result.work.work, .last_line = result.work.last_line }, .opening = read == .opening };
+            observed = .{ .snapshot = .{ .read_version = result.work.read_version, .work = result.work.work }, .opening = read == .opening };
             self.live.work = .fromCore(result.work.work);
             if (if (result.queue_cutoff) |cutoff| self.queue_horizon.adopt(cutoff) else false) {
                 self.live.queued = result.queued;
@@ -5890,7 +5890,7 @@ const ArchiveOverview = struct {
 
     fn observed(raw: *anyopaque, snapshot: session_list.Snapshot, opening: bool) !void {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
-        const effects = try overview_view.step(&self.state, .{ .observed = .{ .reference = "k7m2qx".*, .read_version = snapshot.read_version, .work = snapshot.work, .last_line = snapshot.last_line, .opening = opening } });
+        const effects = try overview_view.step(&self.state, .{ .observed = .{ .reference = "k7m2qx".*, .read_version = snapshot.read_version, .work = snapshot.work, .opening = opening } });
         try std.testing.expectEqual(@as(usize, 0), effects.len);
     }
 
@@ -5913,7 +5913,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7, .served_group = .done };
     _ = try overview_view.step(&overview.state, .{ .tick = 1000 });
     _ = try overview_view.step(&overview.state, .{ .list = .{ .page = .{
-        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = @import("connection.zig").Name.parse("codex").?, .label = "Stop the slow job", .state = stopping, .state_change_at = 1, .subtree_state_change_at = 1, .descendant_count = 0, .descendant_needs_you_count = 0, .group = .working, .turn = 7, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
+        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = @import("connection.zig").Name.parse("codex").?, .label = "Stop the slow job", .state = stopping, .state_change_at = 1, .subtree_state_change_at = 1, .descendant_count = 0, .descendant_needs_you_count = 0, .group = .working, .turn = 7 }},
         .answer = .{ .delta = .full, .since = .{ .instance = @splat(0xab), .generation = 1 } },
     } } });
     _ = try overview_view.step(&overview.state, .{ .conversation = ref });
@@ -5923,7 +5923,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     const text = "▪ Stopped\n";
     try fixture.file.writePositionalAll(std.testing.io, text, 0);
     job.result = .{
-        .work = .{ .read_version = .{ .instance = @splat(0xab), .generation = 2 }, .work = stopped, .last_line = .{ .position = 2 } },
+        .work = .{ .read_version = .{ .instance = @splat(0xab), .generation = 2 }, .work = stopped },
         .row_count = 1,
         .new_rows = 1,
         .at_start = true,
@@ -12420,7 +12420,7 @@ test "consent and full panels compose across adoption, nested choices, and draft
                 .settings => {
                     _ = try held.shownThroughRoot();
                     held.root.settings_page.select(.permissions);
-                    held.root.settings_page.panel.openChoice(&.{ "run without asking", "ask first" }, 0);
+                    held.root.settings_page.panel.openChoice(&@import("setting_words.zig").permission_labels, 0);
                     try std.testing.expect(held.root.settings_page.hasChoice());
                 },
                 .info => {

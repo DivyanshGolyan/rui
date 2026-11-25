@@ -229,7 +229,6 @@ pub const Listed = struct {
     first: ?First = null,
 
     from_person_at: ?u64 = null,
-    last_line: ?session_list.LastLine = null,
 
     pub fn of(row: anytype) Listed {
         return .{
@@ -262,7 +261,6 @@ pub const Listed = struct {
                 .content = message.content,
             } else null,
             .from_person_at = row.peers.from_person_at,
-            .last_line = if (row.last_line) |*last| .{ .position = last.position, .text = if (last.text) |*text| text.slice() else null } else null,
         };
     }
 
@@ -643,7 +641,7 @@ pub const ModelsRead = union(enum) {
 
 const ReasoningEffort = model_capability.ReasoningEffort;
 
-pub const Observed = struct { read_version: Token, reference: Reference, work: session_work.Work, last_line: ?session_list.SavedLastLine = null, opening: bool };
+pub const Observed = struct { read_version: Token, reference: Reference, work: session_work.Work, opening: bool };
 
 pub const ConversationInput = union(enum) {
     other,
@@ -898,7 +896,6 @@ pub const Row = struct {
     actions: session_work.Actions = .{},
     first: ?First,
     from_person_at: ?u64,
-    last_line: ?session_list.SavedLastLine = null,
     line: FirstLineRead = .unread,
 
     fn adoptArchived(self: *Row, incoming: *const Row) void {
@@ -913,7 +910,6 @@ pub const Row = struct {
             self.attention = was.attention;
             self.group = was.group;
             self.actions = was.actions;
-            self.last_line = was.last_line;
             self.clock_version = was.clock_version;
             self.state_change_at = was.state_change_at;
             self.subtree_state_change_at = was.subtree_state_change_at;
@@ -1295,7 +1291,7 @@ pub const State = struct {
             }
             const row = &self.rows.items[at.?];
             const before = RowPresentation.of(self, row);
-            settleRow(self, row, .{ .read_version = read.read_version, .work = read.work, .last_line = read.last_line });
+            settleRow(self, row, .{ .read_version = read.read_version, .work = read.work });
             const after = RowPresentation.of(self, row);
             if (position(self, row.reference) != null and !before.eql(&after)) self.presentation_revision +%= 1;
             try arrange(self);
@@ -2050,7 +2046,7 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
         }
         if (row.archive_state == .archived) continue;
         const was = std.meta.activeTag(row.state);
-        if (row.read_version) |version| settleRow(state, row, .{ .read_version = version, .work = row.work(), .last_line = row.last_line });
+        if (row.read_version) |version| settleRow(state, row, .{ .read_version = version, .work = row.work() });
         const settled = was != std.meta.activeTag(row.state);
         changed = changed or settled;
         redraw = redraw or (settled and classOf(state, row).visible);
@@ -2180,7 +2176,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
             if (lookup(state.by_reference.items, incoming.reference)) |at| {
                 const row = &state.rows.items[at];
                 const before = RowPresentation.of(state, row);
-                settleRow(state, row, .{ .read_version = incoming.read_version.?, .work = incoming.work(), .last_line = incoming.last_line });
+                settleRow(state, row, .{ .read_version = incoming.read_version.?, .work = incoming.work() });
                 const after = RowPresentation.of(state, row);
                 if (classOf(state, row).visible and !before.eql(&after)) state.presentation_revision +%= 1;
             }
@@ -2214,7 +2210,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         row.from_person_at = incoming.from_person_at;
         if (!same) row.line = .unread;
         row.listed = true;
-        settleRow(state, row, .{ .read_version = incoming.read_version.?, .work = incoming.work(), .last_line = incoming.last_line });
+        settleRow(state, row, .{ .read_version = incoming.read_version.?, .work = incoming.work() });
         retitle(state, row, title(state, &was).text);
         const after = RowPresentation.of(state, row);
         if (was_visible and classOf(state, row).visible and !before.eql(&after)) state.presentation_revision +%= 1;
@@ -2553,7 +2549,6 @@ fn settleRow(state: *State, row: *Row, read: session_list.Snapshot) void {
     row.attention = read.work.served_attention;
     row.group = read.work.served_group.?;
     row.actions = read.work.actions;
-    row.last_line = read.last_line;
 }
 
 fn retainRows(state: *State) error{OutOfMemory}!void {
@@ -2660,7 +2655,6 @@ fn pendingRow(state: *State, input: Listed) error{OutOfMemory}!Row {
         .actions = listed.actions,
         .first = listed.first,
         .from_person_at = listed.from_person_at,
-        .last_line = if (listed.last_line) |last| .{ .position = last.position, .text = if (last.text) |text| bounded(session_list.max_last_line_bytes, text) else null } else null,
     };
     row.setArchivedSince(listed.state.since());
     return row;
@@ -5254,12 +5248,10 @@ test "listing and activity settle one row by source revision in every state and 
         var listed = session(&ref, listed_state, .{ .label = "Same Session", .turn = if (activity_newer) 2 else 3 });
         listed.operation = listed.turn;
         listed.read_version = testToken(if (activity_newer) 2 else 3);
-        listed.last_line = .{ .position = listed.read_version.generation, .text = if (activity_newer) "Older answer" else "Newest answer" };
         const observed: Observed = .{
             .read_version = testToken(if (activity_newer) 3 else 2),
             .reference = ref,
             .work = fixtureWork(.{ .state = if (activity_newer) latest else older, .turn = if (activity_newer) 3 else 2, .operation = if (activity_newer) 3 else 2 }),
-            .last_line = .{ .position = if (activity_newer) 3 else 2, .text = bounded(session_list.max_last_line_bytes, if (activity_newer) "Newest answer" else "Older answer") },
             .opening = false,
         };
         if (activity_first) _ = try step(&state, .{ .observed = observed });
@@ -5271,7 +5263,6 @@ test "listing and activity settle one row by source revision in every state and 
             try std.testing.expectEqualDeep(latest, row.state);
             try std.testing.expectEqual(@as(?u64, 3), row.turn);
             try std.testing.expectEqual(@as(?u64, 3), row.operation);
-            try std.testing.expectEqualStrings("Newest answer", row.last_line.?.text.?.slice());
             try std.testing.expectEqual(latest.since(), shownSince(&state, row));
             try std.testing.expectEqualDeep(testToken(3), row.read_version.?);
         }
@@ -5295,7 +5286,6 @@ test "older and newer activity reads settle by revision in either order before d
                 .read_version = testToken(if (is_newer) 3 else 2),
                 .reference = ref,
                 .work = fixtureWork(.{ .state = if (is_newer) latest else older }),
-                .last_line = .{ .position = if (is_newer) 3 else 2, .text = bounded(session_list.max_last_line_bytes, if (is_newer) "Newest answer" else "Older answer") },
                 .opening = false,
             } });
         }
@@ -5303,7 +5293,6 @@ test "older and newer activity reads settle by revision in either order before d
         _ = try respond(&state, delta, testToken(2), &.{session(&ref, older, .{})});
         const row = state.find(ref).?;
         try std.testing.expectEqualDeep(latest, row.state);
-        try std.testing.expectEqualStrings("Newest answer", row.last_line.?.text.?.slice());
         try std.testing.expectEqual(latest.since(), shownSince(&state, row));
     };
 }
@@ -5317,37 +5306,33 @@ fn stopCase3() !void {
         _ = try step(&state, .{ .conversation = ref });
         _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
         const stopped: session_work.Work = fixtureWork(.{ .state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .turn = 7 });
-        _ = try step(&state, .{ .observed = .{ .read_version = testToken(3), .reference = ref, .work = stopped, .last_line = .{ .position = 4 }, .opening = false } });
+        _ = try step(&state, .{ .observed = .{ .read_version = testToken(3), .reference = ref, .work = stopped, .opening = false } });
         _ = try step(&state, .{ .conversation = null });
         _ = try respond(&state, delta, testToken(2), &.{old});
         _ = try refresh(&state, .not_modified, testToken(3), &.{});
         try std.testing.expect(std.meta.eql(stopped, state.workOf(state.find(ref).?)));
         try std.testing.expectEqual(Kind.stopped, classOf(&state, state.find(ref).?).kind);
         try std.testing.expectEqual(@as(u64, test_now_s), shownSince(&state, state.find(ref).?));
-        var finished = session(&ref, .{ .finished = ago(0) }, .{ .label = "Same Session", .turn = 8 });
-        finished.last_line = .{ .position = 5, .text = "Later listing answer" };
+        const finished = session(&ref, .{ .finished = ago(0) }, .{ .label = "Same Session", .turn = 8 });
         _ = try refresh(&state, delta, testToken(4), &.{finished});
         try std.testing.expectEqual(Kind.finished, classOf(&state, state.find(ref).?).kind);
-        try std.testing.expectEqualStrings("Later listing answer", state.find(ref).?.last_line.?.text.?.slice());
     }
 }
 
 test "snapshot and listing rows render identical stopped failed and done endings" {
     const ref = "k7m2qx".*;
-    const cases = [_]struct { state: WorkState, text: ?[]const u8 }{
-        .{ .state = .{ .stopped = .{ .since = test_now_s - 5, .cause = .stop } }, .text = null },
-        .{ .state = .{ .failed = .{ .since = test_now_s - 5, .code = bounded(session_work.max_code_bytes, "malformed_provider_output"), .resets_at = null } }, .text = null },
-        .{ .state = .{ .finished = ago(5) }, .text = "New completed answer" },
+    const cases = [_]struct { state: WorkState }{
+        .{ .state = .{ .stopped = .{ .since = test_now_s - 5, .cause = .stop } } },
+        .{ .state = .{ .failed = .{ .since = test_now_s - 5, .code = bounded(session_work.max_code_bytes, "malformed_provider_output"), .resets_at = null } } },
+        .{ .state = .{ .finished = ago(5) } },
     };
     for (cases) |case| {
-        var initial = session(&ref, .{ .working = ago(10) }, .{ .label = "Same Session", .turn = 7 });
-        initial.last_line = .{ .position = 2, .text = "Old completed answer" };
+        const initial = session(&ref, .{ .working = ago(10) }, .{ .label = "Same Session", .turn = 7 });
         var state = try opened(&.{initial});
         defer state.deinit();
         _ = try step(&state, .{ .conversation = ref });
         _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
-        const line: session_list.SavedLastLine = .{ .position = 4, .text = if (case.text) |text| bounded(session_list.max_last_line_bytes, text) else null };
-        _ = try step(&state, .{ .observed = .{ .read_version = testToken(2), .reference = ref, .work = fixtureWork(.{ .state = case.state, .turn = 8 }), .last_line = line, .opening = false } });
+        _ = try step(&state, .{ .observed = .{ .read_version = testToken(2), .reference = ref, .work = fixtureWork(.{ .state = case.state, .turn = 8 }), .opening = false } });
         try std.testing.expectEqualDeep(case.state, state.find(ref).?.state);
         const snapshot = try screenText(&state, 80, 24, .{});
         defer std.testing.allocator.free(snapshot);
@@ -5355,8 +5340,7 @@ test "snapshot and listing rows render identical stopped failed and done endings
         defer from_list.deinit();
         _ = try step(&from_list, .{ .conversation = ref });
         _ = try step(&from_list, .{ .tick = state.now_ms });
-        var listed = session(&ref, case.state, .{ .label = "Same Session", .turn = 8 });
-        listed.last_line = .{ .position = 4, .text = case.text };
+        const listed = session(&ref, case.state, .{ .label = "Same Session", .turn = 8 });
         _ = try respond(&from_list, .changed, testToken(2), &.{listed});
         const listing = try screenText(&from_list, 80, 24, .{});
         defer std.testing.allocator.free(listing);
@@ -5386,7 +5370,7 @@ test "activity before metadata and an omitted open row use the same bounded row 
     var state = try testState();
     defer state.deinit();
     _ = try step(&state, .{ .conversation = ref });
-    const settled: Observed = .{ .read_version = testToken(3), .reference = ref, .work = fixtureWork(.{ .state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } } }), .last_line = .{ .position = 4 }, .opening = false };
+    const settled: Observed = .{ .read_version = testToken(3), .reference = ref, .work = fixtureWork(.{ .state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } } }), .opening = false };
     _ = try step(&state, .{ .observed = settled });
     try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
     try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
@@ -5419,7 +5403,6 @@ test "full and changed metadata supply every provider without replacing newer ac
             .reference = ref,
             .read_version = testToken(3),
             .work = fixtureWork(.{ .state = .{ .failed = .{ .since = test_now_s, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .turn = 8 }),
-            .last_line = .{ .position = 9 },
             .opening = false,
         };
         _ = try step(&state, .{ .observed = latest });
@@ -5430,19 +5413,16 @@ test "full and changed metadata supply every provider without replacing newer ac
         _ = try respond(&state, delta, testToken(2), &.{metadata});
         try std.testing.expectEqual(@as(?Provider, pn(provider)), state.find(ref).?.provider);
         try std.testing.expectEqualDeep(latest.work, state.find(ref).?.work());
-        try std.testing.expectEqualDeep(latest.last_line, state.find(ref).?.last_line);
         try std.testing.expectEqual(testToken(3), state.find(ref).?.read_version.?);
         try std.testing.expectEqual(test_now_s, shownSince(&state, state.find(ref).?));
         try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = pn(provider) }, band(&state).?);
         _ = try step(&state, .{ .conversation = null });
         try std.testing.expectEqualDeep(latest.work, state.find(ref).?.work());
         try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = pn(provider) }, band(&state).?);
-        var changed = session(&ref, latest.work.state, .{ .provider = pn(other), .turn = 8 });
-        changed.last_line = .{ .position = 9, .text = null };
+        const changed = session(&ref, latest.work.state, .{ .provider = pn(other), .turn = 8 });
         _ = try refresh(&state, delta, testToken(4), &.{changed});
         try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = pn(other) }, band(&state).?);
         try std.testing.expectEqualDeep(latest.work, state.find(ref).?.work());
-        try std.testing.expectEqualDeep(latest.last_line, state.find(ref).?.last_line);
     };
 }
 
@@ -5464,12 +5444,11 @@ test "only a Host handshake rebases read revisions and rejects old traversals an
     try std.testing.expectEqualDeep(stopped, state.workOf(state.find(ref).?));
     try std.testing.expect(state.token == null);
     const finished: session_work.Work = fixtureWork(.{ .state = .{ .finished = ago(0) } });
-    _ = try step(&state, .{ .observed = .{ .read_version = next, .reference = ref, .work = finished, .last_line = .{ .position = 5, .text = bounded(session_list.max_last_line_bytes, "New Host answer") }, .opening = false } });
+    _ = try step(&state, .{ .observed = .{ .read_version = next, .reference = ref, .work = finished, .opening = false } });
     _ = try step(&state, .{ .observed = .{ .read_version = testToken(200), .reference = ref, .work = stopped, .opening = false } });
     _ = try respond(&state, .not_modified, testToken(200), &.{});
     try std.testing.expect(state.token == null);
     try std.testing.expectEqualDeep(finished, state.workOf(state.find(ref).?));
-    try std.testing.expectEqualStrings("New Host answer", state.find(ref).?.last_line.?.text.?.slice());
     _ = try step(&state, .{ .tick = state.next_list_ms });
     _ = try respond(&state, .full, next, &.{session(&ref, finished.state, .{})});
     try std.testing.expectEqualDeep(next, state.token.?);
@@ -8073,30 +8052,6 @@ fn projectionCase2() !void {
     try std.testing.expect(std.meta.eql(observed, row.work()));
 }
 
-test "overview Listed copies last line into bounded owned rows and refresh replaces it" {
-    const protocol = @import("protocol.zig");
-    var source: protocol.SessionRow = .{};
-    try source.reference.set("k7m2qx");
-    try source.workspace.set("/work/rui/");
-    source.last_line = .{ .position = 19, .text = bounded(session_list.max_last_line_bytes, "Done") };
-    var state = try opened(&.{Listed.of(&source)});
-    defer state.deinit();
-    source.last_line.?.text.?.bytes[0] = 'X';
-    const row = state.find("k7m2qx".*).?;
-    try std.testing.expectEqualStrings("Done", row.last_line.?.text.?.slice());
-    const longest: [session_list.max_last_line_bytes]u8 = @splat('z');
-    source.last_line = .{ .position = 20, .text = bounded(session_list.max_last_line_bytes, &longest) };
-    _ = try refresh(&state, .changed, testToken(2), &.{Listed.of(&source)});
-    try std.testing.expectEqualStrings(&longest, state.find("k7m2qx".*).?.last_line.?.text.?.slice());
-    source.last_line = .{ .position = 20, .text = null };
-    _ = try refresh(&state, .changed, testToken(3), &.{Listed.of(&source)});
-    try std.testing.expectEqual(@as(u64, 20), state.find("k7m2qx".*).?.last_line.?.position);
-    try std.testing.expectEqual(null, state.find("k7m2qx".*).?.last_line.?.text);
-    source.last_line = null;
-    _ = try refresh(&state, .changed, testToken(4), &.{Listed.of(&source)});
-    try std.testing.expectEqual(null, state.find("k7m2qx".*).?.last_line);
-}
-
 test "overview quiet rows: a chat never written in recedes unless it needs you, in every kind, stop, selection, width and depth" {
     const Stop = enum { none, pending, unconfirmed };
     const cases = .{
@@ -8148,8 +8103,7 @@ test "overview quiet rows: a chat never written in recedes unless it needs you, 
 
 test "overview long name truncates while mark and state age remain visible" {
     const name = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
-    var listed = session("k7m2qx", .{ .finished = ago(19) }, .{ .label = name, .workspace = "/work/drift" });
-    listed.last_line = .{ .position = 1, .text = "A very long result that must be cut before the folder starts" };
+    const listed = session("k7m2qx", .{ .finished = ago(19) }, .{ .label = name, .workspace = "/work/drift" });
     var state = try opened(&.{listed});
     defer state.deinit();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -9597,7 +9551,6 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
     {
         for (kind_cases, 0..) |case, index| for ([_]u16{ 40, 140 }) |width| {
             var listed = session("k7m2qx", case.state, .{ .label = "A useful Session name", .first_action = 7, .workspace = "/work/drift" });
-            if (index == 7) listed.last_line = .{ .position = 1, .text = "All tests pass." };
             var state = try opened(&.{listed});
             defer state.deinit();
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
