@@ -9,7 +9,6 @@ const cli_value = @import("cli_value.zig");
 const connection = @import("connection.zig");
 const session_work = @import("session_work.zig");
 const content_value = @import("content_value.zig");
-const first_line = @import("first_line.zig");
 
 pub const session_list_page_size: usize = 8;
 /// The most Archived rows one window page serves: a reply cost bound, not a screen size. A slim row is
@@ -17,8 +16,9 @@ pub const session_list_page_size: usize = 8;
 /// (about 88 KiB), inside the list reply bound that a live page already allows (8 full rows at 36 KiB
 /// each, 288 KiB). A request asks for 1 to this many.
 pub const max_window_rows: usize = 40;
-/// The longest first Message line an Archived row carries: the overview's display cut (first_line).
-pub const max_first_line_bytes = first_line.max_line_bytes;
+/// The leading bytes of an inline Text first Message an Archived row carries, raw: the bytes the Store
+/// reads. What a screen makes of them (the first line, a cut) is the screen's.
+pub const max_first_prefix_bytes: usize = 512;
 pub const ListDelta = enum { not_modified, changed, full, window };
 
 pub const ListSessions = struct {
@@ -143,32 +143,23 @@ pub fn parseArchivedCursor(text: []const u8) error{InvalidCursor}!ArchivedCursor
     return error.InvalidCursor;
 }
 
-/// A slim Archived row: only what the Archived tab draws. `name` is `session_line.name(label, first
-/// line, reference)`, and the age is `stopped_at`.
+/// A slim Archived row: what the Archived tab reads, as facts. Its first Message is the live row's
+/// (`FirstMessage`), so the window and the list name it by one owner; the age is `stopped_at`.
 pub const ArchivedRow = struct {
     reference: []const u8,
     archive_seq: ArchiveSeq,
     stopped_at: u64,
     label: ?[]const u8,
-    /// Null when the Session has no first Message (the name is the new-Session name).
-    first: ?ArchivedFirst,
+    /// Null when the Session has no first Message.
+    first: ?FirstMessage,
+    /// The first `max_first_prefix_bytes` of an inline Text first Message, raw, whole UTF-8 scalars only. Null for
+    /// a parts-form or private first Message, or none. A prefix shorter than the Message's own length is a cut.
+    first_prefix: ?[]const u8,
 
-    /// Bytes of JSON for one slim row at its worst case: the protocol shape computes 2538 (reference, label,
-    /// position and admission ids, the parts content reference with its owner, the line at
-    /// `max_first_line_bytes`, the fixed fields). protocol.zig asserts it.
-    pub const max_json_bytes: usize = 2538;
-};
-
-/// The first Message of an Archived Session: what the overview's first-line read needs (position, admission
-/// and content reference, as the live row's FirstMessage gives it), and the line when it is inline Text.
-pub const ArchivedFirst = struct {
-    admission: u64,
-    position: u64,
-    content: content_value.Value,
-    /// The first display line (first_line.firstLine), cut to `max_first_line_bytes`: the same line the
-    /// overview's first-line read gives. Null when the first Message is parts-form (its line comes from the
-    /// overview's own first-line read) or its first line is blank.
-    line: ?[]const u8,
+    /// Bytes of JSON for one slim row at its worst case: the protocol shape computes it (reference, label,
+    /// the first Message with its sender and parts content reference, the prefix at `max_first_prefix_bytes`,
+    /// the fixed fields). protocol.zig asserts it.
+    pub const max_json_bytes: usize = 4000;
 };
 
 pub const Tail = union(enum) {

@@ -2107,21 +2107,15 @@ pub const JsonContentValue = struct {
     }
 };
 
-/// One slim Archived row as the window reply sends it (protocol.ArchivedRow.Fields): the first Message's
-/// position, admission and content reference, and its inline line when it has one.
+/// One slim Archived row as the window reply sends it (protocol.ArchivedRow.Fields): the first Message as
+/// the live row names it, and the raw prefix of an inline Text one.
 pub const ArchivedRowRead = struct {
     reference: JsonString(protocol.max_session_bytes),
     archive_seq: u64,
     stopped_at: u64,
     label: ?JsonString(protocol.max_label_bytes),
-    first: ?ArchivedFirstRead,
-
-    pub const ArchivedFirstRead = struct {
-        position: u64,
-        admission: u64,
-        content: content_value.Value,
-        line: ?JsonString(session_list.max_first_line_bytes),
-    };
+    first: ?protocol.FirstMessage,
+    first_prefix: ?JsonString(session_list.max_first_prefix_bytes),
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
         const Wire = struct {
@@ -2129,23 +2123,19 @@ pub const ArchivedRowRead = struct {
             archive_seq: JsonString(20),
             stopped_at: JsonString(20),
             label: ?JsonString(protocol.max_label_bytes),
-            first: ?struct { position: JsonString(20), admission: JsonString(20), content: JsonContentValue, line: ?JsonString(session_list.max_first_line_bytes) },
+            first: ?JsonFirstMessage,
+            first_prefix: ?JsonString(session_list.max_first_prefix_bytes),
         };
         const wire = try std.json.innerParse(Wire, allocator, source, options);
         if (!protocol.validSessionId(wire.reference.slice())) return error.InvalidCharacter;
         if (wire.label) |label| if (!protocol.validLabel(label.slice())) return error.InvalidCharacter;
-        const first: ?ArchivedFirstRead = if (wire.first) |first| .{
-            .position = ActivityPage.id(first.position, false) catch return error.InvalidCharacter,
-            .admission = ActivityPage.id(first.admission, false) catch return error.InvalidCharacter,
-            .content = first.content.value,
-            .line = first.line,
-        } else null;
         return .{
             .reference = wire.reference,
             .archive_seq = ActivityPage.id(wire.archive_seq, false) catch return error.InvalidCharacter,
             .stopped_at = ActivityPage.id(wire.stopped_at, false) catch return error.InvalidCharacter,
             .label = wire.label,
-            .first = first,
+            .first = if (wire.first) |first| first.value else null,
+            .first_prefix = wire.first_prefix,
         };
     }
 };

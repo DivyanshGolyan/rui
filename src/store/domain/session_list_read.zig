@@ -9,7 +9,6 @@ const provider_route = @import("../../provider_route.zig");
 const session_archive = @import("../../session_archive.zig");
 const session_id = @import("../../session_id.zig");
 const session_list = @import("../../session_list.zig");
-const first_line = @import("../../first_line.zig");
 const session_work = @import("../../session_work.zig");
 const tool_name = @import("../../tool_name.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
@@ -281,15 +280,14 @@ pub fn retryCrossings(a: *ReadAccess, from: u64, now: u64, crossings: *RetryCros
 
 // The Archived window: one statement per page, newest archive first. The page is the keyed range of
 // session_tab, bounded by LIMIT N+1, so `more` is exact in the direction read. Each row joins its first
-// Message once (report.zig's first_admission_join: the same rule as FirstCandidates). The line is that
-// Message's first display line (first_line.firstLine, the rule the overview's first-line read uses),
-// read from the first 512 bytes and only when the Message is inline Text. Parts-form first Messages leave
-// the line NULL; their line comes from the overview's parts read.
+// Message once (report.zig's first_admission_join: the same rule as FirstCandidates) and names it as the
+// live row does (report.zig's firstMessage). The prefix is that Message's first 512 bytes, raw, and only when it
+// is inline Text; a parts-form first Message leaves it NULL and its line comes from the overview's parts read.
 const archived_page_capacity = session_list.max_window_rows + 1;
 
 const archived_columns = "session.archive_seq,session.session_ref,ostop.stopped_at,session.label," ++
-    report_domain.first_pick_position_columns ++ "," ++ report_domain.first_pick_content_columns ++ "," ++
-    "CASE WHEN first_content.private=0 AND first_content.form=0 THEN substr(@payload(first_content),1,512) END AS first_line";
+    report_domain.first_pick_columns ++ "," ++
+    "CASE WHEN first_content.private=0 AND first_content.form=0 THEN substr(@payload(first_content),1,512) END AS first_prefix";
 
 const ArchivedWindowRow = struct {
     archive_seq: rsql.Positive,
@@ -298,11 +296,13 @@ const ArchivedWindowRow = struct {
     label: ?Bounded(tool_presentation.max_label_bytes),
     first_admission: ?rsql.Positive,
     first_position: ?rsql.Positive,
+    first_admitted_at: ?rsql.Positive,
+    first_sender: ?SessionText,
     first_length: ?u64,
     first_digest: ?[32]u8,
     first_private: ?bool,
     first_form: ?u8,
-    first_line: ?rsql.Blob(512),
+    first_prefix: ?rsql.Blob(session_list.max_first_prefix_bytes),
 };
 
 const archived_window_join = " FROM session @index(session_tab) LEFT JOIN core_command ocmd ON ocmd.command_seq=session.archive_seq " ++
@@ -347,14 +347,11 @@ const ArchivedPage = struct {
     }
 };
 
-/// The first display line of an inline first Message: first_line.firstLine, cut to the line bound. The client
-/// escapes it for the terminal exactly as it does a line it reads itself.
-fn archivedLine(prefix: ?*const rsql.Blob(512), text: *Bounded(first_line.max_line_bytes)) ?[]const u8 {
-    const bytes = utf8_validation.completePrefix((prefix orelse return null).slice());
-    const line = first_line.firstLine(bytes);
-    if (line.len == 0) return null;
-    text.* = first_line.cut(first_line.max_line_bytes, line);
-    return text.slice();
+/// The raw leading bytes of an inline Text first Message, whole UTF-8 scalars only. A screen's line rule is the
+/// screen's.
+fn firstPrefix(blob: ?*const rsql.Blob(session_list.max_first_prefix_bytes)) ?[]const u8 {
+    const bytes = utf8_validation.completePrefix((blob orelse return null).slice());
+    return if (bytes.len == 0) null else bytes;
 }
 
 /// Reads one Archived window page in one round. `head` and `below` read newest first; `above` and `tail`
@@ -395,26 +392,15 @@ fn readArchivedWindow(a: *ReadAccess, window: session_list.ArchivedWindow, gener
         std.mem.reverse(ArchivedWindowRow, page.rows[0..page.count]);
     }
     try visitor.head();
-    var text: Bounded(first_line.max_line_bytes) = undefined;
     for (page.rows[0..page.count]) |*row| {
         if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
-        const first: ?session_list.ArchivedFirst = if (row.first_admission) |admission| .{
-            .admission = admission.get(),
-            .position = (row.first_position orelse return error.CorruptStore).get(),
-            .content = try content_parts.publicValue(&.{
-                .byte_length = row.first_length orelse return error.CorruptStore,
-                .digest = row.first_digest orelse return error.CorruptStore,
-                .private = row.first_private orelse return error.CorruptStore,
-                .form = row.first_form orelse return error.CorruptStore,
-            }, .{ .message = admission.get() }),
-            .line = archivedLine(if (row.first_line) |*prefix| prefix else null, &text),
-        } else null;
         var values: session_list.ArchivedRow = .{
             .reference = row.session_ref.slice(),
             .archive_seq = row.archive_seq.get(),
             .stopped_at = row.stopped_at.get(),
             .label = if (row.label) |*label| label.slice() else null,
-            .first = first,
+            .first = try report_domain.firstMessage(row, if (row.first_admission) |admission| admission.get() else 0),
+            .first_prefix = firstPrefix(if (row.first_prefix) |*prefix| prefix else null),
         };
         try visitor.archivedRow(&values);
     }

@@ -707,34 +707,20 @@ pub const SessionRow = struct {
     }
 };
 
-/// The slim Archived row (ArchivedRow in session_list.zig): the Archived tab's name and age only.
-pub const ArchivedFirstFields = struct {
-    position: u64,
-    admission: u64,
-    content: content_value.Value,
-    line: ?[]const u8,
-
-    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"content\":", Hole{ .json = ContentValueJson }, ",\"line\":", Hole{ .optional_string = session_list.max_first_line_bytes }, "}" };
-    pub const max_json_bytes = shapeBytes(json_shape);
-
-    pub fn writeJson(self: *const ArchivedFirstFields, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.position, self.admission, ContentValueJson{ .value = self.content }, self.line });
-    }
-};
-
 pub const ArchivedRow = struct {
     pub const Fields = struct {
         reference: []const u8,
         archive_seq: u64,
         stopped_at: u64,
         label: ?[]const u8,
-        first: ?ArchivedFirstFields,
+        first: ?FirstMessage,
+        first_prefix: ?[]const u8,
 
-        pub const json_shape = .{ "{\"reference\":", Hole{ .string = session_id_bytes }, ",\"archive_seq\":\"", Hole.decimal, "\",\"stopped_at\":\"", Hole.decimal, "\",\"label\":", Hole{ .optional_string = max_label_bytes }, ",\"first\":", Hole{ .optional_json = ArchivedFirstFields }, "}" };
+        pub const json_shape = .{ "{\"reference\":", Hole{ .string = session_id_bytes }, ",\"archive_seq\":\"", Hole.decimal, "\",\"stopped_at\":\"", Hole.decimal, "\",\"label\":", Hole{ .optional_string = max_label_bytes }, ",\"first\":", Hole{ .optional_json = FirstMessage }, ",\"first_prefix\":", Hole{ .optional_string = session_list.max_first_prefix_bytes }, "}" };
         pub const max_json_bytes = shapeBytes(json_shape);
 
         pub fn writeJson(self: *const Fields, out: *std.Io.Writer) !void {
-            try writeShape(out, json_shape, .{ self.reference, self.archive_seq, self.stopped_at, self.label, self.first });
+            try writeShape(out, json_shape, .{ self.reference, self.archive_seq, self.stopped_at, self.label, self.first, self.first_prefix });
         }
     };
     comptime {
