@@ -15,13 +15,16 @@ class FakeGitHub:
         self.prs, self.comments, self.failing = prs, comments or {}, set(failing)
         self.failing_after = failing_after
         self.stale = dict.fromkeys(prs, stale)
-        self.runs, self.cancelled = {}, []
+        self.runs, self.cancelled, self.cancel_error = {}, [], None
         self.posted, self.listed, self.reads = [], [], dict.fromkeys(prs, 0)
 
     def __call__(self, method, path, fields=()):
         route, _, query = path.partition("?")
         parts = route.split("/")
         if method == "POST" and parts[-1] == "cancel":
+            if self.cancel_error:
+                error, self.cancel_error = self.cancel_error, None
+                raise subprocess.CalledProcessError(1, "gh", stderr=error)
             self.cancelled.append(int(parts[-2]))
             return {}
         if method == "POST":
@@ -74,8 +77,20 @@ class ConflictAlertTest(unittest.TestCase):
                                                run_(23, event="push"), run_(24, status="completed")]}
         run(github)
         self.assertEqual(sorted(github.cancelled), [20, 21])
+        github.cancelled.clear()
+        github.runs["h2"][0]["status"] = "completed"
         run(github)
-        self.assertEqual(sorted(github.cancelled), [20, 21], "an already alerted head is not cancelled again")
+        self.assertEqual(github.cancelled, [21], "an alerted head's checks that still run are cancelled on the next pass")
+
+    def test_a_finished_run_is_not_a_failure_and_a_failed_cancel_is_retried(self):
+        github = FakeGitHub({2: ("h2", False, MAIN)})
+        github.runs = {"h2": [{"id": 20, "name": "Selected checks", "event": "pull_request", "status": "in_progress"}]}
+        github.cancel_error = "HTTP 409"
+        self.assertEqual(run(github), ([2], [], []))
+        github.cancel_error = "HTTP 502"
+        self.assertEqual(run(github), ([], [], [2]))
+        self.assertEqual(run(github), ([], [], []))
+        self.assertEqual(github.cancelled, [20])
 
     def test_one_comment_per_head_however_many_moves(self):
         github = FakeGitHub({2: ("h2", False, MAIN)})
