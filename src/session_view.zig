@@ -7,6 +7,7 @@ const activity_read = @import("activity_read.zig");
 const content_value = @import("content_value.zig");
 const value_reads = @import("value_reads.zig");
 const Text = @import("TerminalText.zig");
+const row_text = @import("testing/row_text.zig");
 const Renderer = @import("AnswerRenderer.zig");
 pub const Destination = Renderer.Destination;
 const tools = @import("tools.zig");
@@ -950,7 +951,7 @@ test "APPROVAL-1 permission headings use the shared glyph and tone in both scrip
             if (unicode_script) "●" else "?",
             if (colour) "\x1b[39m" else "",
         });
-        try std.testing.expect(std.mem.startsWith(u8, sink.bytes[0..sink.len], prefix));
+        try std.testing.expect(std.mem.startsWith(u8, row_text.visible(sink.bytes[0..sink.len]), prefix));
     };
 }
 
@@ -986,7 +987,7 @@ test "an Action's command and stdin lines carry the content mark, so neither can
         try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
         var sink: Sink = .{};
         _ = try request(std.testing.io, scratch, &sink, false, true);
-        try std.testing.expectEqualStrings(case.expected, sink.bytes[0..sink.length]);
+        try std.testing.expectEqualStrings(case.expected, row_text.visible(sink.bytes[0..sink.length]));
     }
 }
 
@@ -1291,7 +1292,7 @@ test "SUI-125 a tool heading draws its line's words, a linked Session and the ma
         const presentation = try tool_presentation.ToolPresentation.of(line, case.code, case.completion, null);
         var sink: Sink = .{};
         try toolResult(presentation, &sink, false);
-        try std.testing.expectEqualStrings(case.expected ++ "\n", sink.bytes[0..sink.length]);
+        try std.testing.expectEqualStrings(case.expected ++ "\n", row_text.visible(sink.bytes[0..sink.length]));
     }
 }
 
@@ -1339,7 +1340,7 @@ test "SUI-125 tool headings show each outcome without exit fields" {
             if (colour) try expected.feed("\x1b[39m");
             try expected.feed(case[1][glyph_end..]);
             try expected.feed("\n");
-            try std.testing.expectEqualStrings(expected.bytes[0..expected.length], sink.bytes[0..sink.length]);
+            try std.testing.expectEqualStrings(expected.bytes[0..expected.length], row_text.visible(sink.bytes[0..sink.length]));
             try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .tool_result = .{ .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .presentation = presentation } }));
             try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .hosted_call = presentation }));
         }
@@ -1399,7 +1400,7 @@ test "a descendant's ending names the agent without codes or advice" {
     try agentEnded(&sink, "9f8e7d", .provider_refused, "provider_http_401", false);
     try agentEnded(&sink, "9f8e7d", .interrupted, "cancelled", false);
     try agentEnded(&sink, "bad\x1b[2J", .failed, "malformed_provider_output", false);
-    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n▪ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · The model's reply didn't come through\n", out.buffered());
+    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n▪ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · The model's reply didn't come through\n", row_text.visible(out.buffered()));
 }
 
 test "an ended Turn shows one plain cause line for every failure class, and its provider's usage place for quota" {
@@ -1436,7 +1437,7 @@ test "an ended Turn shows one plain cause line for every failure class, and its 
         var out = std.Io.Writer.fixed(&buffer);
         var sink: Sink = .{ .out = &out };
         try workEnded(&sink, if (comptime std.mem.eql(u8, case[0], "cancelled")) .interrupted else .failed, case[0], case[1], false);
-        try std.testing.expectEqualStrings(case[2] ++ "\n", out.buffered());
+        try std.testing.expectEqualStrings(case[2] ++ "\n", row_text.visible(out.buffered()));
     }
     try std.testing.expect(seen.eql(.full));
 }
@@ -1458,7 +1459,7 @@ test "turn and agent ending marks use their table tones" {
     try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m The model's reply didn't come through\n" ++
         "\x1b[39m▪\x1b[39m Stopped\n" ++
         "\x1b[91m×\x1b[39m Agent 9f8e7d · The model's reply didn't come through\n" ++
-        "\x1b[39m▪\x1b[39m Agent 9f8e7d stopped\n", out.buffered());
+        "\x1b[39m▪\x1b[39m Agent 9f8e7d stopped\n", row_text.visible(out.buffered()));
 }
 
 test "ending tails are quiet and joined in destination then key order" {
@@ -1472,13 +1473,13 @@ test "ending tails are quiet and joined in destination then key order" {
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
     try workEnded(&sink, .provider_refused, "provider_http_401", null, true);
-    try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Sign-in expired\x1b[90m · Settings\x1b[39m\n", out.buffered());
+    try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Sign-in expired\x1b[90m · Settings\x1b[39m\n", row_text.visible(out.buffered()));
     out.end = 0;
     try ending(&sink, .{ .mark = .failed, .words = "Cause", .place = "Place", .key = "Key" }, false);
-    try std.testing.expectEqualStrings("× Cause · Place · Key\n", out.buffered());
+    try std.testing.expectEqualStrings("× Cause · Place · Key\n", row_text.visible(out.buffered()));
     out.end = 0;
     try ending(&sink, .{ .mark = .failed, .words = "Cause", .key = "Key" }, false);
-    try std.testing.expectEqualStrings("× Cause · Key\n", out.buffered());
+    try std.testing.expectEqualStrings("× Cause · Key\n", row_text.visible(out.buffered()));
 }
 
 pub const Fold = union(enum) { none, closed, open: *tool_fold.Output };
@@ -1628,7 +1629,7 @@ test "hosted calls draw as adjacent tool rows across outcomes" {
         const presentation: protocol.ToolPresentation = .{ .line = try protocol.ToolLine.plain(call[0]), .code = call[1], .sign = tool_presentation.signOf(call[1], .done), .publication_position = 1 };
         var row: Sink = .{};
         try toolResult(presentation, &row, false);
-        try std.testing.expectEqualStrings(call[2], row.bytes[0..row.length]);
+        try std.testing.expectEqualStrings(call[2], row_text.visible(row.bytes[0..row.length]));
         const below = tight(.{ .hosted_call = presentation });
         if (above) |value| if (gap(value, below, true)) try joined.feed("\n");
         try joined.feed(row.bytes[0..row.length]);
@@ -1715,10 +1716,11 @@ test "MCP approval uses the saved description and renders exact arguments with A
         var rendered: [2048]u8 = undefined;
         const count = try action.readPositionalAll(std.testing.io, &rendered, 0);
         var heading: [256]u8 = undefined;
-        try std.testing.expect(std.mem.startsWith(u8, rendered[0..count], try std.fmt.bufPrint(&heading, "\n● {s}\n", .{case.description})));
-        try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], "\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ ") != null);
-        try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], case.arguments) != null);
-        try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], "\n  $ ") == null);
+        const visible = row_text.visible(rendered[0..count]);
+        try std.testing.expect(std.mem.startsWith(u8, visible, try std.fmt.bufPrint(&heading, "\n● {s}\n", .{case.description})));
+        try std.testing.expect(std.mem.indexOf(u8, visible, "\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ ") != null);
+        try std.testing.expect(std.mem.indexOf(u8, visible, case.arguments) != null);
+        try std.testing.expect(std.mem.indexOf(u8, visible, "\n  $ ") == null);
         screen.releaseAction();
         screen.consent = null;
         try screen.adopt(std.testing.io, action, 7, true);
@@ -1796,7 +1798,7 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     try renderPermissionArguments(std.testing.io, scratch, &sink, false, true, &tool);
     var beginning: [512]u8 = undefined;
     const count = try action.readPositionalAll(std.testing.io, &beginning, 0);
-    const shown = beginning[0..count];
+    const shown = row_text.visible(beginning[0..count]);
     try std.testing.expect(std.mem.startsWith(u8, shown, "\n● Saved \\x1b[2J\n"));
     try std.testing.expect(std.mem.indexOf(u8, shown, "\x1b") == null);
     try std.testing.expect(std.mem.indexOf(u8, shown, "‮") == null);
@@ -1807,4 +1809,77 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     const projection = Consent.project(screen.consent, .{ .action_page = true, .read = true }, false);
     try std.testing.expect(projection.approval == .preview);
     try std.testing.expect(Consent.offered(screen.consent, projection.approval) == null);
+}
+
+test "SUI-176 every row that starts with a glyph tags it, and only a row that asks the person or shows command text is quoted" {
+    const vaxis = @import("vaxis");
+    const Viewport = @import("ConversationViewport.zig");
+    const Document = Viewport.Sized(1024, true);
+    const Sink = struct {
+        document: *Document,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.document.append(bytes);
+        }
+    };
+    const words = "one two three four five six";
+    const Check = struct {
+        fn wraps(document: *Document, quoted: bool, name: []const u8) !void {
+            errdefer std.debug.print("row: {s}\n", .{name});
+            try document.append("\n");
+            try document.prepare();
+            var cells: [16 * 8]vaxis.Cell = @splat(.{});
+            var screen: vaxis.Screen = .{ .width = 16, .height = 8, .width_method = .unicode, .buf = &cells };
+            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 16, .height = 8, .screen = &screen };
+            const drawn = document.draw(window, .{}, true, false, .{}, .{});
+            try std.testing.expect(drawn.rows > 1);
+            for (1..drawn.rows) |row| {
+                const first = screen.readCell(0, @intCast(row)).?.char.grapheme;
+                const second = screen.readCell(1, @intCast(row)).?.char.grapheme;
+                try std.testing.expectEqualStrings(if (quoted) "┆" else " ", first);
+                try std.testing.expectEqualStrings(" ", second);
+            }
+        }
+    };
+    for (std.enums.values(protocol.ToolPresentation.Sign)) |sign| {
+        var document: Document = .{ .quotes = true };
+        var sink: Sink = .{ .document = &document };
+        try toolHeading(.{ .line = try protocol.ToolLine.plain(words), .code = .succeeded, .sign = sign, .publication_position = 1 }, &sink, false);
+        try Check.wraps(&document, markOf(sign) == .needs_you, @tagName(sign));
+    }
+    for (std.enums.values(marks.Mark)) |mark| {
+        if (mark == .none) continue;
+        var document: Document = .{ .quotes = true };
+        var sink: Sink = .{ .document = &document };
+        try ending(&sink, .{ .mark = mark, .words = words }, false);
+        try Check.wraps(&document, mark == .needs_you, @tagName(mark));
+    }
+    for ([_]bool{ false, true }) |unicode_script| {
+        var document: Document = .{ .quotes = true };
+        var sink: Sink = .{ .document = &document };
+        try permissionMark(&sink, false, unicode_script);
+        try sink.feed(" " ++ words);
+        try Check.wraps(&document, true, "permission");
+    }
+    for ([_][]const u8{ content_mark, command_mark }) |mark| {
+        var document: Document = .{ .quotes = true };
+        var sink: Sink = .{ .document = &document };
+        try sink.feed(mark ++ words);
+        try Check.wraps(&document, true, "command text");
+    }
+    var document: Document = .{ .quotes = true };
+    var sink: Sink = .{ .document = &document };
+    try userMarker(&sink, false);
+    try sink.feed(words);
+    try Check.wraps(&document, false, "user");
+    var raw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer raw.deinit();
+    const Raw = struct {
+        writer: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.writer.writeAll(bytes);
+        }
+    };
+    var recorder: Raw = .{ .writer = &raw.writer };
+    try userMarker(&recorder, false);
+    try std.testing.expectEqualStrings(Text.user_marker, raw.written());
 }

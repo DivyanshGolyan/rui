@@ -17,6 +17,7 @@ const DraftEditor = @import("DraftEditor.zig");
 const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
 const TerminalText = @import("TerminalText.zig");
+const row_text = @import("testing/row_text.zig");
 const Viewport = @import("ConversationViewport.zig");
 const session_line = @import("session_line.zig");
 const slash_commands = @import("slash_commands.zig");
@@ -1522,7 +1523,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
                             var out = std.Io.Writer.fixed(&buffer);
                             var sink: Sink = .{ .out = &out };
                             const provisional = try View.render(requests, root, "k7m2qx", undefined, null, rows[index], queued, held, &sink, false, "", .{ .viewport = .wcwidth }, .none);
-                            try std.testing.expectEqualStrings(expected[index].text, out.buffered());
+                            try std.testing.expectEqualStrings(expected[index].text, row_text.visible(out.buffered()));
                             try std.testing.expectEqual(expected[index].provisional, provisional);
                             try std.testing.expectEqual(expected[index].lowest, sink.lowest);
                         }
@@ -1955,7 +1956,7 @@ test "activity golden stop with interrupted ending draws one line across pages" 
                         _ = try View.render(undefined, "unused", session.slice(), undefined, null, item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
                     }
                 }
-                try std.testing.expectEqualStrings(if (colour) "\x1b[39m▪\x1b[39m Stopped\n" else "▪ Stopped\n", out.buffered());
+                try std.testing.expectEqualStrings(if (colour) "\x1b[39m▪\x1b[39m Stopped\n" else "▪ Stopped\n", row_text.visible(out.buffered()));
             }
         }
     }
