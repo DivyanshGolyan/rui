@@ -731,7 +731,7 @@ const Grammar = struct {
                 const call = codecs.hostedCall(self.codec, data, item);
                 const target = call.target orelse codec_abi.Range{ .start = 0, .length = 0 };
                 const decoded = Decoded.of(data, target, null, null);
-                record = .{ .tag = .action, .kind = kind, .ordinal = ordinal, .start = if (call.target != null) self.base + target.start else 0, .length = target.length, .decoded_length = decoded.length, .content_digest = decoded.digest, .action = @fromBackingInt(@backingInt(call.action)), .call_failed = call.failed };
+                record = .{ .tag = .action, .kind = kind, .ordinal = ordinal, .start = if (call.target != null) self.base + target.start else 0, .length = target.length, .decoded_length = decoded.length, .content_digest = decoded.digest, .action = call.action, .call_failed = call.failed };
                 try metadata.append(&record);
                 if (call.pattern) |pattern| {
                     const field = Decoded.of(data, pattern, null, null);

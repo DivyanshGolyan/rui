@@ -1,5 +1,6 @@
 const std = @import("std");
 const session_archive = @import("session_archive.zig");
+const session_class = @import("session_class.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const session_line = @import("session_line.zig");
 const attention = @import("attention.zig");
@@ -61,8 +62,6 @@ const configure_departure_prefix = "rui: Configure for {s} in Store ";
 const configure_departure_suffix = " is not confirmed: {s}. Original: ~/.config/rui/requests/{s}.json. Recovery with rui request recover {s} may apply this older setting.\n";
 pub const max_departure_entry_bytes = @max(512, configure_departure_prefix.len + configure_departure_suffix.len + @sizeOf(Reference) + TerminalText.max_bytes_per_byte * @import("store_path.zig").max_bytes + max_configure_intent_bytes + 2 * @max(max_handle_bytes, session_work.max_code_bytes));
 pub const max_departure_bytes = @as(usize, max_requests) * max_departure_entry_bytes;
-
-const OrderClass = enum { needs_you, working, done, queued };
 
 pub const Selection = union(enum) { none, new_session, sessions, archived, session: Reference, settings };
 pub const Mark = state_marks.Mark;
@@ -745,11 +744,6 @@ pub fn pn(provider: provider_name.Provider) Provider {
     return connection.Name.parse(@tagName(provider)).?;
 }
 
-fn sameProvider(a: ?Provider, b: ?Provider) bool {
-    if (a == null or b == null) return a == null and b == null;
-    return a.?.eql(b.?);
-}
-
 fn shownOf(name: Provider) []const u8 {
     return if (provider_route.builtInOf(name)) |built_in| built_in.shown() else name.slice();
 }
@@ -883,7 +877,8 @@ pub const Row = struct {
     subtree_state_change_at: u64 = 0,
     descendant_count: u64 = 0,
     descendant_needs_you_count: u64 = 0,
-    list_group: session_work.Group = .done,
+    /// Whether the list answer that carried `descendant_needs_you_count` found this Session needing a decision; the count and this fact share one snapshot.
+    list_needs_you: bool = false,
     clock_version: ?Token = null,
     sibling_rank: u64 = std.math.maxInt(u64),
     born_held: bool = false,
@@ -924,7 +919,7 @@ pub const Row = struct {
             self.subtree_state_change_at = was.subtree_state_change_at;
             self.descendant_count = was.descendant_count;
             self.descendant_needs_you_count = was.descendant_needs_you_count;
-            self.list_group = was.list_group;
+            self.list_needs_you = was.list_needs_you;
         }
     }
 
@@ -1478,7 +1473,7 @@ pub const State = struct {
     }
 };
 
-pub const Counts = struct { needs_you: usize = 0, working: usize = 0, queued: usize = 0, failed: usize = 0 };
+pub const Counts = session_class.Counts;
 
 pub const Summary = struct { counts: Counts = .{} };
 
@@ -1607,14 +1602,15 @@ const RowPresentation = struct {
     quiet: bool,
 
     fn of(state: *const State, row: *const Row) RowPresentation {
+        const class = classOf(state, row);
         return .{
             .name = Bounded(@max(max_label_bytes, max_line_bytes)).from(title(state, row).text) catch unreachable,
-            .kind = shownKind(state, row),
+            .kind = class.kind,
             .since = shownSince(state, row),
             .archive = row.archive_state,
             .pin = row.pin_order,
-            .yours = yours(row),
-            .quiet = rowQuiet(state, row),
+            .yours = class.yours,
+            .quiet = class.quiet,
         };
     }
 
@@ -2057,7 +2053,7 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
         if (row.read_version) |version| settleRow(state, row, .{ .read_version = version, .work = row.work(), .last_line = row.last_line });
         const settled = was != std.meta.activeTag(row.state);
         changed = changed or settled;
-        redraw = redraw or (settled and visible(state, row));
+        redraw = redraw or (settled and classOf(state, row).visible);
     }
     if (changed and !released) try arrange(state);
     if (redraw or !std.meta.eql(trouble, band(state))) state.presentation_revision +%= 1;
@@ -2171,7 +2167,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
             row.read_version = null;
             row.born_held = holding(state);
             try state.rows.append(state.gpa, row);
-            if (visible(state, &row)) state.presentation_revision +%= 1;
+            if (classOf(state, &row).visible) state.presentation_revision +%= 1;
         };
         if (before != state.rows.items.len) try reindex(state);
     }
@@ -2186,7 +2182,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
                 const before = RowPresentation.of(state, row);
                 settleRow(state, row, .{ .read_version = incoming.read_version.?, .work = incoming.work(), .last_line = incoming.last_line });
                 const after = RowPresentation.of(state, row);
-                if (visible(state, row) and !before.eql(&after)) state.presentation_revision +%= 1;
+                if (classOf(state, row).visible and !before.eql(&after)) state.presentation_revision +%= 1;
             }
             continue;
         }
@@ -2207,7 +2203,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
             row.subtree_state_change_at = incoming.subtree_state_change_at;
             row.descendant_count = incoming.descendant_count;
             row.descendant_needs_you_count = incoming.descendant_needs_you_count;
-            row.list_group = incoming.list_group;
+            row.list_needs_you = incoming.list_needs_you;
             row.clock_version = incoming.read_version;
         }
         row.workspace = incoming.workspace;
@@ -2221,7 +2217,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         settleRow(state, row, .{ .read_version = incoming.read_version.?, .work = incoming.work(), .last_line = incoming.last_line });
         retitle(state, row, title(state, &was).text);
         const after = RowPresentation.of(state, row);
-        if (was_visible and visible(state, row) and !before.eql(&after)) state.presentation_revision +%= 1;
+        if (was_visible and classOf(state, row).visible and !before.eql(&after)) state.presentation_revision +%= 1;
     };
     for (state.rows.items) |row| if (!row.listed) {
         if (state.entryOf(row.reference)) |entry| {
@@ -2298,7 +2294,7 @@ fn applyArchived(state: *State, row: *Row, incoming: *const Row) error{OutOfMemo
     row.line = line;
     retitle(state, row, before.name.slice());
     const after = RowPresentation.of(state, row);
-    if (visible(state, row) and !before.eql(&after)) state.presentation_revision +%= 1;
+    if (classOf(state, row).visible and !before.eql(&after)) state.presentation_revision +%= 1;
 }
 
 /// A changed Session that is archived leaves the roster. Its archive is not synthesized into the window: when its
@@ -2651,7 +2647,7 @@ fn pendingRow(state: *State, input: Listed) error{OutOfMemory}!Row {
         .subtree_state_change_at = listed.subtree_state_change_at,
         .descendant_count = listed.descendant_count,
         .descendant_needs_you_count = listed.descendant_needs_you_count,
-        .list_group = listed.group,
+        .list_needs_you = session_class.standing(listed.state) == .needs_you,
         .workspace = try state.intern(listed.workspace),
         .provider = listed.provider,
         .model = bounded(model_capability.max_model_bytes, listed.model),
@@ -2670,8 +2666,29 @@ fn pendingRow(state: *State, input: Listed) error{OutOfMemory}!Row {
     return row;
 }
 
-fn visible(state: *const State, row: *const Row) bool {
-    return row.listed and state.archive.includes(row.archive_state) and (row.creator != null or row.pin_order != null or row.first != null or if (state.conversing) |open| std.mem.eql(u8, &open, &row.reference) else false);
+fn factsOf(state: *const State, row: *const Row) session_class.Facts {
+    return .{
+        .state = &row.state,
+        .archive = row.archive_state,
+        .in_list = row.listed,
+        .creator = row.creator != null,
+        .pinned = row.pin_order != null,
+        .first_message = row.first != null,
+        .from_person = row.from_person_at != null,
+        .decidable = row.actions.decide != null,
+        .open = if (state.conversing) |open| std.mem.eql(u8, &open, &row.reference) else false,
+        .stop_pending = state.stopOverlays(row.reference),
+        .provider = row.provider,
+        .model = row.model.slice(),
+    };
+}
+
+fn viewerOf(state: *const State) session_class.Viewer {
+    return .{ .filter = state.archive, .now_ms = state.now_ms, .login_at = state.login_at };
+}
+
+fn classOf(state: *const State, row: *const Row) session_class.Class {
+    return session_class.classify(factsOf(state, row), viewerOf(state));
 }
 
 fn arrange(state: *State) error{OutOfMemory}!void {
@@ -2686,7 +2703,7 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     const nodes = state.nodes.items;
     for (rows, 0..) |*row, i| {
         nodes[i] = .{
-            .included = visible(state, row),
+            .included = classOf(state, row).visible,
             .descendants = if (row.archive_state == .archived) 0 else row.descendant_count,
             .attention = if (row.archive_state == .archived) 0 else row.descendant_needs_you_count,
         };
@@ -2796,7 +2813,7 @@ fn arrange(state: *State) error{OutOfMemory}!void {
         const index = key.index;
         if (rows[index].pin_order == null) continue;
         const hidden_count = rows[index].descendant_count +| 1;
-        const question_count = rows[index].descendant_needs_you_count +| @as(u64, @intFromBool(rows[index].list_group == .needs_you));
+        const question_count = rows[index].descendant_needs_you_count +| @as(u64, @intFromBool(rows[index].list_needs_you));
         var ancestor = nodes[index].logical_parent;
         while (ancestor) |parent| {
             nodes[parent].descendants -|= hidden_count;
@@ -2889,26 +2906,8 @@ fn foldSelected(state: *State, folded: bool) error{OutOfMemory}!void {
 
 fn counts(state: *const State) Counts {
     var result: Counts = .{};
-    for (state.rows.items) |*row| if (visible(state, row) and row.archive_state != .archived) switch (ordering(state, row)) {
-        .needs_you => result.needs_you += 1,
-        .working => result.working += 1,
-        .queued => result.queued += 1,
-        .done => if (row.state == .failed) {
-            result.failed += 1;
-        },
-    };
+    for (state.rows.items) |*row| result.add(classOf(state, row));
     return result;
-}
-
-// Only this viewer's unanswered stop overlays the Host's group.
-fn ordering(state: *const State, row: *const Row) OrderClass {
-    const group = if (state.stopOverlays(row.reference)) session_work.Group.working else row.group;
-    return switch (group) {
-        .needs_you => .needs_you,
-        .working => .working,
-        .queued => .queued,
-        .done => .done,
-    };
 }
 
 /// A Session's place in the drawn order. A Session hidden in a collapsed
@@ -2957,7 +2956,7 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
     row.line = .{ .read = @intCast(state.lines.items.len - 1) };
     retitle(state, row, before.name.slice());
     const after = RowPresentation.of(state, row);
-    if (visible(state, row) and !before.eql(&after)) state.presentation_revision +%= 1;
+    if (classOf(state, row).visible and !before.eql(&after)) state.presentation_revision +%= 1;
 }
 
 const StopTarget = struct { reference: Reference, work: Kind, can_stop: bool };
@@ -2970,7 +2969,7 @@ fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
         break :selected StopTarget{ .reference = row.reference, .work = if (row.archive_state == .archived) .stopped else (&row.state).asOf(state.now_ms), .can_stop = row.archive_state != .archived and row.actions.stop };
     };
     const ref = target.reference;
-    const kind = kindShown(state, ref, target.work);
+    const kind = session_class.withStop(target.work, state.stopOverlays(ref));
     if (!target.can_stop or state.openStop(ref) != null) return refuseStop(state, ref, kind);
     if (state.request(.stop, ref)) {
         if (state.find(ref)) |row| if (row.read_version) |version| {
@@ -2986,16 +2985,6 @@ fn refuseStop(state: *State, ref: Reference, kind: Kind) void {
     if (rules.get(kind).word) |word_| return state.say(.quiet, "{s} is already {s}.", .{ &ref, word_ });
     if (kind == .stopping) return state.say(.quiet, "{s}: {s}", .{ &ref, work_line.stopping.words });
     state.say(.quiet, "{s} cannot be stopped now.", .{&ref});
-}
-
-fn kindShown(state: *const State, ref: Reference, work: Kind) Kind {
-    return if (state.stopOverlays(ref)) .stopping else work;
-}
-
-fn shownKind(state: *const State, row: *const Row) Kind {
-    if (row.archive_state == .archived) return .stopped;
-    if (!state.stopOverlays(row.reference) and row.actions.decide != null) return .approval;
-    return kindShown(state, row.reference, (&row.state).asOf(state.now_ms));
 }
 
 fn shownSince(state: *const State, row: *const Row) u64 {
@@ -3097,7 +3086,7 @@ fn nextQuestion(state: *State, effects: *Effects) error{OutOfMemory}!void {
     };
     for (0..order.len) |offset| {
         const row = &state.rows.items[order[(start + offset) % order.len]];
-        if (!row.listed or !needsPersonAction(row)) continue;
+        if (!row.listed or classOf(state, row).standing != .needs_you) continue;
         state.selected = .{ .session = row.reference };
         state.last_question = row.reference;
         try enterSelected(state, effects);
@@ -3319,89 +3308,18 @@ fn move(state: *State, action: Action) void {
     else if (target > order.len + 1) .settings else .{ .session = state.rows.items[order[target - 2]].reference };
 }
 
-pub const Trouble = enum { sign_in, api_key, quota, rate_limit };
-pub const Band = struct {
-    trouble: Trouble,
+pub const Band = session_class.Band;
 
-    sessions: u32 = 0,
-
-    resets_at: ?u64 = null,
-
-    provider: ?Provider = null,
-};
-
-const BandRule = struct {
-    trouble: Trouble,
-
-    kind: Kind,
-    matches: *const fn ([]const u8) bool,
-
-    after_login: bool = false,
-
-    until_reset: bool = false,
-};
-
-const band_rules = [_]BandRule{
-    .{ .trouble = .sign_in, .kind = .failed, .matches = signInCode, .after_login = true },
-    .{ .trouble = .api_key, .kind = .failed, .matches = apiKeyCode, .after_login = true },
-    .{ .trouble = .quota, .kind = .failed, .matches = quotaCode, .until_reset = true },
-    .{ .trouble = .rate_limit, .kind = .retrying, .matches = failure_class.rateLimited },
-};
-
-fn signInCode(code: []const u8) bool {
-    return failure_class.of(code) == .sign_in;
-}
-
-fn apiKeyCode(code: []const u8) bool {
-    return failure_class.of(code) == .api_key;
-}
-
-fn quotaCode(code: []const u8) bool {
-    return switch (failure_class.of(code)) {
-        .quota, .plan => true,
-        else => false,
-    };
-}
-
-/// A failure is current until its provider and model answer again: a visible row on both whose answered state (a finished turn, or a tool call it proposed) began at or after it.
-/// Rows on another provider or model say nothing about this one's quota or sign-in.
+/// The provider trouble the visible Sessions share, if any; `session_class.trouble` decides it.
 pub fn band(state: *const State) ?Band {
-    var newest: [band_rules.len]?struct { failed: WorkState.Failed, row: *const Row } = @splat(null);
-    var retrying: [band_rules.len]u32 = @splat(0);
-    for (state.rows.items) |*row| {
-        if (!visible(state, row) or row.archive_state == .archived) continue;
-        const work = (&row.state).asOf(state.now_ms);
-        switch (work) {
-            .failed => |failed| for (band_rules, &newest) |rule, *held| {
-                if (rule.kind == .failed and rule.matches(failed.code.slice()) and (held.* == null or held.*.?.failed.since < failed.since)) held.* = .{ .failed = failed, .row = row };
-            },
-            .retrying => |retry| for (band_rules, &retrying) |rule, *count| {
-                if (rule.kind == .retrying and rule.matches(retry.cause.slice())) count.* += 1;
-            },
-            else => {},
+    const Reader = struct {
+        fn at(context: *const anyopaque, index: usize) session_class.Facts {
+            const owner: *const State = @ptrCast(@alignCast(context));
+            return factsOf(owner, &owner.rows.items[index]);
         }
-    }
-    for (band_rules, newest, retrying) |rule, held, count| {
-        if (rule.kind == .retrying) {
-            if (count != 0) return .{ .trouble = rule.trouble, .sessions = count };
-            continue;
-        }
-        const failed = (held orelse continue).failed;
-        if (reachedSince(state, held.?.row, failed.since)) continue;
-        if (rule.after_login) if (state.login_at) |at| if (failed.since <= at) continue;
-        if (rule.until_reset) if (failed.resets_at) |at| if (at <= state.now_ms / 1000) continue;
-        return .{ .trouble = rule.trouble, .resets_at = failed.resets_at, .provider = held.?.row.provider.? };
-    }
-    return null;
-}
-
-fn reachedSince(state: *const State, failed: *const Row, since: u64) bool {
-    for (state.rows.items) |*row| {
-        if (!visible(state, row) or row.archive_state == .archived or !sameProvider(row.provider, failed.provider) or !std.mem.eql(u8, row.model.slice(), failed.model.slice())) continue;
-        const work = (&row.state).asOf(state.now_ms);
-        if (std.meta.activeTag(work).answered() and work.since() >= since) return true;
-    }
-    return false;
+    };
+    const rows: session_class.Rows = .{ .context = state, .count = state.rows.items.len, .at = Reader.at };
+    return session_class.trouble(rows, viewerOf(state));
 }
 
 pub const Rgb = @import("theme.zig").Rgb;
@@ -3920,7 +3838,7 @@ pub fn edgeAttention(state: *const State, edge: Edge, first: usize, end: usize) 
     for (state.order.items) |index| {
         const row = &state.rows.items[index];
         const node = state.nodes.items[index];
-        if (!needsPersonAction(row) and !(row.archive_state != .archived and isFolded(state, row.reference) and node.attention != 0)) continue;
+        if (classOf(state, row).standing != .needs_you and !(row.archive_state != .archived and isFolded(state, row.reference) and node.attention != 0)) continue;
         const line = node.line orelse continue;
         if (switch (edge) {
             .above => line < first,
@@ -3957,12 +3875,12 @@ const no_work_rule: Rule = .{ .colour = .normal };
 /// The mark a row wears: its shown work kind's sign; an Archived window row has no work state, so no mark.
 fn rowMark(state: *const State, row: *const Row) Mark {
     if (row.archive_state == .archived) return .none;
-    return shownKind(state, row).sign();
+    return classOf(state, row).kind.sign();
 }
 
 fn markRule(state: *const State, row: *const Row) Rule {
     if (row.archive_state == .archived) return no_work_rule;
-    return rules.get(shownKind(state, row));
+    return rules.get(classOf(state, row).kind);
 }
 
 fn rowActivity(state: *const State, at: usize, caps: Caps) Activity {
@@ -3978,7 +3896,7 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
     const index = state.order.items[at];
     const row = &state.rows.items[index];
     const node = state.nodes.items[index];
-    const quiet = rowQuiet(state, row);
+    const quiet = classOf(state, row).quiet;
     const rule = markRule(state, row);
     const flash = row.flash_until_ms > state.now_ms;
     const background: Background = if (flash) .hover else .ground;
@@ -4087,23 +4005,6 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
     return segmentsOf(arena, try built.finish(), width, .{ .background = background, .dim = quiet });
 }
 
-fn yours(row: *const Row) bool {
-    return row.first == null or row.from_person_at != null;
-}
-
-fn needsPersonAction(row: *const Row) bool {
-    return row.archive_state != .archived and row.group == .needs_you;
-}
-
-fn needsPerson(state: *const State, row: *const Row) bool {
-    _ = state;
-    return needsPersonAction(row) or (row.archive_state != .archived and row.state == .failed);
-}
-
-fn rowQuiet(state: *const State, row: *const Row) bool {
-    return !yours(row) and !needsPerson(state, row);
-}
-
 pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
     const trouble = band(state) orelse return &.{};
     var built: Spans = .of(arena, caps, width);
@@ -4176,7 +4077,7 @@ pub fn newestEmpty(rows: []const Row, binding: ?Default) ?Reference {
     var newest: ?*const Row = null;
     for (rows) |*row| {
         if (!row.listed or row.archive_state == .archived or row.first != null) continue;
-        if (binding) |want| if (!sameProvider(row.provider, want.provider) or !row.model.eql(want.model.slice())) continue;
+        if (binding) |want| if (!Provider.eqlOptional(row.provider, want.provider) or !row.model.eql(want.model.slice())) continue;
         if (newest == null or row.created_at > newest.?.created_at or
             (row.created_at == newest.?.created_at and std.mem.order(u8, &row.reference, &newest.?.reference) == .gt)) newest = row;
     }
@@ -5191,7 +5092,7 @@ test "OVM-5 a working row spins while live, and every other active row holds its
         var state = try opened(&.{session("aaaaaa", case.state, .{ .label = "Write the notes", .yours = is_yours })});
         defer state.deinit();
         state.list_stale = stale;
-        const kind = shownKind(&state, &state.rows.items[0]);
+        const kind = classOf(&state, &state.rows.items[0]).kind;
         const held_word: ?[]const u8 = switch (kind) {
             .working, .bash => "working",
             .retrying => "retrying",
@@ -5264,7 +5165,7 @@ test "OVM-4 stop gestures follow the work state" {
         try expectNotice(&state, null);
         const text = try screenText(&state, 80, 24, .{});
         defer std.testing.allocator.free(text);
-        try std.testing.expectEqual(Kind.stopping, shownKind(&state, state.find("k7m2qx".*).?));
+        try std.testing.expectEqual(Kind.stopping, classOf(&state, state.find("k7m2qx".*).?).kind);
         try std.testing.expect(std.mem.indexOf(u8, text, "ctrl+x yes") == null);
         try expectEffects(&.{}, try press(&state, .stop));
         try expectNotice(&state, "k7m2qx: Stopping");
@@ -5421,12 +5322,12 @@ fn stopCase3() !void {
         _ = try respond(&state, delta, testToken(2), &.{old});
         _ = try refresh(&state, .not_modified, testToken(3), &.{});
         try std.testing.expect(std.meta.eql(stopped, state.workOf(state.find(ref).?)));
-        try std.testing.expectEqual(Kind.stopped, shownKind(&state, state.find(ref).?));
+        try std.testing.expectEqual(Kind.stopped, classOf(&state, state.find(ref).?).kind);
         try std.testing.expectEqual(@as(u64, test_now_s), shownSince(&state, state.find(ref).?));
         var finished = session(&ref, .{ .finished = ago(0) }, .{ .label = "Same Session", .turn = 8 });
         finished.last_line = .{ .position = 5, .text = "Later listing answer" };
         _ = try refresh(&state, delta, testToken(4), &.{finished});
-        try std.testing.expectEqual(Kind.finished, shownKind(&state, state.find(ref).?));
+        try std.testing.expectEqual(Kind.finished, classOf(&state, state.find(ref).?).kind);
         try std.testing.expectEqualStrings("Later listing answer", state.find(ref).?.last_line.?.text.?.slice());
     }
 }
@@ -5471,11 +5372,11 @@ fn projectionCase6() !void {
         defer state.deinit();
         _ = try step(&state, .{ .conversation = ref });
         _ = try step(&state, .{ .tick = (test_now_s + 5) * 1000 });
-        try std.testing.expectEqual(Kind.pending, shownKind(&state, state.find(ref).?));
+        try std.testing.expectEqual(Kind.pending, classOf(&state, state.find(ref).?).kind);
         _ = try step(&state, .{ .observed = .{ .read_version = testToken(1), .reference = ref, .work = fixtureWork(.{ .state = retry.state }), .opening = false } });
         _ = try respond(&state, delta, testToken(1), &.{retry});
         _ = try step(&state, .{ .conversation = null });
-        try std.testing.expectEqual(Kind.pending, shownKind(&state, state.find(ref).?));
+        try std.testing.expectEqual(Kind.pending, classOf(&state, state.find(ref).?).kind);
         try std.testing.expectEqual(test_now_s + 5, shownSince(&state, state.find(ref).?));
     }
 }
@@ -5746,7 +5647,7 @@ fn stopCase2() !void {
         try expectEffects(&.{.{ .stop = ref.* }}, try press(&state, .stop));
         try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref.*, .outcome = .{ .unconfirmed = handle } } }));
         try expectNotice(&state, recover);
-        try std.testing.expectEqual(Kind.stopping, shownKind(&state, state.find(ref.*).?));
+        try std.testing.expectEqual(Kind.stopping, classOf(&state, state.find(ref.*).?).kind);
         state.notice = null;
         try expectEffects(&.{}, try press(&state, .stop));
         try expectEffects(&.{}, try press(&state, .stop));
@@ -5906,7 +5807,7 @@ test "the selection stays on its Session when it moves from active to finished" 
     try expectSelected(&state, "e5f6g7");
     _ = try refresh(&state, .changed, testToken(2), &.{session("e5f6g7", .{ .finished = ago(0) }, .{ .label = "List unused build steps" })});
     try expectSelected(&state, "e5f6g7");
-    try std.testing.expectEqual(OrderClass.done, ordering(&state, state.find("e5f6g7".*).?));
+    try std.testing.expectEqual(session_class.Standing.done, classOf(&state, state.find("e5f6g7".*).?).standing);
     try expectEffects(&.{ .{ .open = "e5f6g7".* }, .list_models }, try submit(&state));
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
@@ -6286,12 +6187,14 @@ fn projectionCase3() !void {
         _ = try step(&state, .{ .host = .{ .instance = testToken(0).instance, .started_at = test_now_s, .slots = 2, .slots_in_use = occupied } });
         _ = try step(&state, .{ .conversation = ref });
         _ = try step(&state, .{ .tick = (test_now_s + 5) * 1000 });
-        try std.testing.expectEqual(Kind.pending, shownKind(&state, state.find(ref).?));
+        try std.testing.expectEqual(Kind.pending, classOf(&state, state.find(ref).?).kind);
         // An equal revision cannot replace the old snapshot before the Host publishes the crossing.
         const due = retry.state.asOf(state.now_ms);
         _ = try step(&state, .{ .observed = .{ .read_version = testToken(1), .reference = ref, .work = fixtureWork(.{ .state = due }), .opening = false } });
         _ = try respond(&state, .changed, testToken(1), &.{retry});
-        try std.testing.expectEqual(@as(u32, 1), state.summary.counts.working);
+        // The row's work is the one observed fact: it reads pending in its mark, its count and its order alike.
+        try std.testing.expectEqual(@as(u32, 1), state.summary.counts.queued);
+        try std.testing.expectEqual(@as(u32, 0), state.summary.counts.working);
         const served: WorkState = if (started) .{ .working = .{ .since = test_now_s + 5 } } else due;
         if (activity) {
             _ = try step(&state, .{ .observed = .{ .read_version = testToken(2), .reference = ref, .work = fixtureWork(.{ .state = served }), .opening = false } });
@@ -6308,20 +6211,17 @@ fn projectionCase3() !void {
             try std.testing.expectEqualStrings("aaaaaa", &state.rows.items[state.order.items[0]].reference);
         }
         _ = try step(&state, .{ .conversation = null });
-        try std.testing.expectEqual(if (started) Kind.working else Kind.pending, shownKind(&state, state.find(ref).?));
+        try std.testing.expectEqual(if (started) Kind.working else Kind.pending, classOf(&state, state.find(ref).?).kind);
     };
 }
 
 test "the band derives provider trouble from rows, in priority order" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Done" });
     for ([_][]const u8{ "provider_http_401", "provider_sign_in_required", "provider_sign_in_refresh_token_expired" }) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
-    try std.testing.expect(signInCode("provider_sign_in_refresh_token_expired") and signInCode("provider_http_401") and signInCode("provider_sign_in_required"));
-    try std.testing.expect(!signInCode("provider_authentication_backend_failed"));
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ session("ffffff", .{ .finished = ago(30) }, .{}), failedRow("aaaaaa", 60, "provider_http_401", null) }, null));
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_http_401", null) }, test_now_s - 30));
     try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 10, "provider_http_401", null) }, test_now_s - 30)).?);
     try std.testing.expectEqual(Band{ .trouble = .api_key, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, failure_class.api_key_rejected, null) }, null)).?);
-    try std.testing.expect(!signInCode(failure_class.api_key_rejected));
     try std.testing.expectEqual(Band{ .trouble = .quota, .resets_at = test_now_s + 1200, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 1200) }, null)).?);
     try std.testing.expectEqual(Band{ .trouble = .quota, .provider = pn(.codex) }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", null) }, null)).?);
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_plan", test_now_s) }, null));
@@ -6331,8 +6231,8 @@ test "the band derives provider trouble from rows, in priority order" {
     defer state.deinit();
     state.now_ms = (test_now_s + 10) * 1000;
     try std.testing.expectEqual(@as(?Band, null), band(&state));
-    try std.testing.expectEqual(Trouble.sign_in, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), failedRow("bbbbbb", 90, "provider_http_401", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
-    try std.testing.expectEqual(Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
+    try std.testing.expectEqual(failure_class.Trouble.sign_in, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), failedRow("bbbbbb", 90, "provider_http_401", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
+    try std.testing.expectEqual(failure_class.Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
 }
 
 test "a failure band clears only when its own provider and model are reached after it" {
@@ -8231,7 +8131,7 @@ test "overview quiet rows: a chat never written in recedes unless it needs you, 
         }
         state.selected = if (selected) .{ .session = listed.reference } else .new_session;
         const quiet = !wrote and !case[1];
-        try std.testing.expectEqual(quiet, rowQuiet(&state, state.find(listed.reference).?));
+        try std.testing.expectEqual(quiet, classOf(&state, state.find(listed.reference).?).quiet);
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, caps, 0)).?;
@@ -8243,7 +8143,7 @@ test "overview quiet rows: a chat never written in recedes unless it needs you, 
     var empty = try opened(&.{session("newone", .{ .idle = ago(0) }, .{ .first = null })});
     defer empty.deinit();
     _ = try step(&empty, .{ .conversation = "newone".* });
-    try std.testing.expect(!rowQuiet(&empty, empty.find("newone".*).?));
+    try std.testing.expect(!classOf(&empty, empty.find("newone".*).?).quiet);
 }
 
 test "overview long name truncates while mark and state age remain visible" {
@@ -9705,7 +9605,7 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
             const first = (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, .{}, 0)).?.segments;
             const prefix = try std.fmt.allocPrint(arena.allocator(), "{s}A useful Session name", .{([_][]const u8{ "○ ", "◌ ", "◜ ", "◝ ", "◜ ", "● ", "◝ ", "", "× ", "▪ " })[index]});
             var buffer: [8]u8 = undefined;
-            const shown = rules.get(shownKind(&state, &state.rows.items[0]));
+            const shown = rules.get(classOf(&state, &state.rows.items[0]).kind);
             const age_text = if (shown.spins) "" else shown.held orelse (Age{ .elapsed = listed.state.since() }).text(&buffer, state.now_ms);
             const expected = [_][]const u8{ prefix, age_text };
             try expectLine(first, width, if (age_text.len == 0) expected[0..1] else expected[0..]);

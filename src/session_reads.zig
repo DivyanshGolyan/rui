@@ -25,6 +25,7 @@ const Bounded = @import("bounded.zig").Bounded;
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const status_page = @import("status_page.zig");
 const ChatInfo = @import("chat_info.zig");
+const activity_read = @import("activity_read.zig");
 const ReadPhase = departure.ReadPhase;
 const feed_reads = @import("feed_reads.zig");
 const feed_window = @import("feed_window.zig");
@@ -462,7 +463,7 @@ fn pageCursor(job: *const Job, plan: FeedPolicy.Page) protocol_reply.ActivityCur
     var cursor: protocol_reply.ActivityCursor = .{
         .direction = if (plan.direction == .backward) .backward else .forward,
         .limit = plan.limit,
-        .kinds = if (plan.kinds == .all) .full else .initMany(&.{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed }),
+        .kinds = if (plan.kinds == .all) .full else activity_read.conversation,
         .end = if (plan.kinds == .all and plan.continuing) job.cursor.end else null,
     };
     if (plan.from) |from| {
@@ -623,8 +624,8 @@ fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: [
     if (latest.*) |old| if (key.order(old.key) != .gt) return;
     const marks = @import("marks.zig");
     const cause: marks.Cause = switch (item.value) {
-        .turn_ended => |ended| if (!std.mem.eql(u8, ended.session.slice(), session)) return else if (ended.ending == .done) .{ .words = "Finished" } else marks.cause(ended.code.slice(), provider),
-        .stop => |stop| if (stop.turn == null) marks.cause("cancelled", provider) else return,
+        .turn_ended => |ended| if (!std.mem.eql(u8, ended.session.slice(), session)) return else if (ended.ending.words()) |words| .{ .words = words } else marks.cause(ended.code.slice(), provider),
+        .stop => |stop| if (stop.turn == null) .{ .words = protocol.TurnEnding.stopped.words().? } else return,
         else => return,
     };
     latest.* = .{ .key = key, .cause = cause };
@@ -2085,7 +2086,7 @@ test "session_reads policy cursor is inclusive only for a fresh provisional repl
     try std.testing.expect(!above.kinds.contains(.approval_requested));
     try std.testing.expect(!above.kinds.contains(.session_changed));
     try std.testing.expect(!above.kinds.contains(.compacted));
-    for ([_]protocol.ActivityItem.Kind{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed }) |kind| try std.testing.expect(above.kinds.contains(kind));
+    try std.testing.expect(above.kinds.eql(activity_read.conversation));
 }
 
 test "SUI-51 opening reads expose ordered rows and scan boundaries" {
