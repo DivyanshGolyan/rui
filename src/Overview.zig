@@ -394,6 +394,8 @@ walk_since: bool = false,
 scratch: ?std.Io.File = null,
 
 opened: view.Reference = undefined,
+/// The notice the next Session opens with; set only while a followed link returns to the Session it left.
+opening_notice: ?[]const u8 = null,
 lent_failed: bool = false,
 started: ?view.Reference = null,
 screen_fresh: bool = true,
@@ -732,8 +734,9 @@ fn openOrReturn(self: *Self, ctx: *vxfw.EventContext, reference: view.Reference)
         self.follow.return_to = null;
         try self.dropFailedOpen(ctx);
         self.opened = back;
+        self.opening_notice = "That Session no longer exists.";
+        defer self.opening_notice = null;
         self.ops.open(self, ctx) catch |reopen_err| return self.endFailedOpen(ctx, back, reopen_err);
-        self.app_session.?.frontend.?.notice = "That Session no longer exists.";
     };
 }
 
@@ -771,7 +774,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     const frontend = try self.init.gpa.create(SessionFrontend);
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .startable = hostStartable, .start = requestHostStart, .notice = hostNotice } }, self.caps);
+    const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .notice = self.opening_notice, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .startable = hostStartable, .start = requestHostStart, .notice = hostNotice } }, self.caps);
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
     count = 0;
     _ = try self.event(.{ .conversation = reference });
@@ -5159,7 +5162,8 @@ test "a Session link that no longer opens returns to the Session it left with a 
     try std.testing.expect(!ctx.quit);
     const reopened = overview.app_session.?;
     try std.testing.expectEqualStrings("k7m2qx", &reopened.session);
-    try std.testing.expectEqualStrings("That Session no longer exists.", reopened.frontend.?.notice.?);
+    const shown = &reopened.frontend.?.shown_notice;
+    try std.testing.expectEqualStrings("That Session no longer exists.", shown.current(shown.shown_ms.?).?);
     try std.testing.expectEqual(@as(?view.Reference, null), overview.follow.return_to);
     try std.testing.expectEqual(@as(?view.Reference, null), overview.follow.pending);
 }

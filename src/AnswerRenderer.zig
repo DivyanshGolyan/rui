@@ -1,5 +1,6 @@
 const std = @import("std");
 const TerminalText = @import("TerminalText.zig");
+const session_id = @import("session_id.zig");
 const gwidth = @import("terminal_width");
 const display_text = @import("display_text.zig");
 const Renderer = @This();
@@ -732,7 +733,7 @@ fn linkByte(self: *Renderer, byte: u8) !void {
             ')' => if (self.link_depth == 0) {
                 const target = self.held[self.link_text_end + 2 .. self.link_len];
                 if (!TerminalText.linkTarget(target) and self.markdownLocalParts(target) == null and
-                    !(self.destination == .viewport and TerminalText.sessionTarget(target) != null)) return self.dropLink(byte);
+                    !(self.destination == .viewport and session_id.fromLink(target) != null)) return self.dropLink(byte);
                 return self.showText();
             } else {
                 self.link_depth -= 1;

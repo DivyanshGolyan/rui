@@ -16,16 +16,7 @@ pub const link_open = "\x1b]8;;";
 pub const link_end = "\x1b\\";
 pub const link_close = link_open ++ link_end;
 pub const max_link_bytes = 2048;
-pub const session_link = "rui-session:";
-
-/// Returns the Session ID of a canonical `rui-session:` destination. This checks
-/// form only; whether that Session exists in the current Store is decided when
-/// the link is followed.
-pub fn sessionTarget(uri: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, uri, session_link)) return null;
-    const id = uri[session_link.len..];
-    return if (@import("session_id.zig").valid(id)) id else null;
-}
+pub const session_link = @import("session_id.zig").link_prefix;
 
 pub const user_message_on = "\x1b[202m";
 pub const user_message_off = "\x1b[203m";
