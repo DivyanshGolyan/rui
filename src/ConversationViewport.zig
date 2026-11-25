@@ -1718,7 +1718,7 @@ test "Document rows answer down within measure for every row from every first ro
     const document = try std.testing.allocator.create(Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{ .sidenotes = true };
-    try document.append("› a long user line that wraps \x1b[8m14:20\x1b[0m\n\n" ++ tool_fold.heading_marker ++ "$ Bash done\n  wide 漢字漢字漢字 cells wrap\n\x1b[2;8m┄ 9 more lines\x1b[0m\nlast");
+    try document.append(TerminalText.user_leader ++ "a long user line that wraps \x1b[8m14:20\x1b[0m\n\n" ++ tool_fold.heading_marker ++ "$ Bash done\n  wide 漢字漢字漢字 cells wrap\n\x1b[2;8m┄ 9 more lines\x1b[0m\nlast");
     try document.prepare();
     for ([_]u16{ 1, 3, 7, 16, 80 }) |width| {
         const layout: Layout = .{ .width = width, .method = .unicode };
@@ -1800,13 +1800,13 @@ fn timestampChanges() !void {
     for (cases) |case| {
         var document: Sized(512, true) = .{ .sidenotes = true };
         if (case.previous) |previous| {
-            try document.append("› \x1b[8m");
+            try document.append(TerminalText.user_leader ++ "\x1b[8m");
             try document.append(previous);
             try document.append("\x1b[0m\x1b[2mfirst\x1b[0m\n");
         }
         if (case.tool) try document.append("  Ran tool\n");
         const offset = document.length;
-        try document.append("› \x1b[8m");
+        try document.append(TerminalText.user_leader ++ "\x1b[8m");
         const start = document.length;
         try document.append(case.current);
         const end = document.length;
@@ -1867,11 +1867,11 @@ fn bandProvenance() !void {
 
 fn bandLines() !void {
     const cases = [_]struct { body: []const u8, lines: usize, wraps: bool }{
-        .{ .body = "› \n", .lines = 1, .wraps = false },
+        .{ .body = TerminalText.user_leader ++ "\n", .lines = 1, .wraps = false },
         .{ .body = "\n", .lines = 1, .wraps = false },
-        .{ .body = "› first\n\n  second\n", .lines = 3, .wraps = false },
-        .{ .body = "› first\n   \n  second\n", .lines = 3, .wraps = false },
-        .{ .body = "› a deliberately long message that wraps over several visual rows\n", .lines = 1, .wraps = true },
+        .{ .body = TerminalText.user_leader ++ "first\n\n  second\n", .lines = 3, .wraps = false },
+        .{ .body = TerminalText.user_leader ++ "first\n   \n  second\n", .lines = 3, .wraps = false },
+        .{ .body = TerminalText.user_leader ++ "a deliberately long message that wraps over several visual rows\n", .lines = 1, .wraps = true },
     };
     for (cases) |case| for ([_]u16{ 20, 46 }) |width| for ([_]bool{ false, true }) |colour| {
         var document: Sized(512, true) = .{};
@@ -1911,8 +1911,8 @@ pub fn testBandPadding() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
         const method: Method = if (unicode_caps) .unicode else .wcwidth;
         var document: Sized(1024, true) = .{ .sidenotes = true, .width_method = method };
-        try document.append(TerminalText.user_message_on ++ "› \x1b[8m14:20\x1b[0mshort\n" ++ TerminalText.user_message_off ++
-            TerminalText.user_message_on ++ "› ");
+        try document.append(TerminalText.user_message_on ++ TerminalText.user_leader ++ "\x1b[8m14:20\x1b[0mshort\n" ++ TerminalText.user_message_off ++
+            TerminalText.user_message_on ++ TerminalText.user_leader);
         const count: usize = if (width == 46) 75 else 265;
         for (0..count) |_| try document.append("x");
         try document.append("\n" ++ TerminalText.user_message_off);

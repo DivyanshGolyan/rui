@@ -1826,7 +1826,7 @@ test "SUI-176 every row that starts with a glyph tags it, and only a row that as
     const Check = struct {
         fn wraps(document: *Document, quoted: bool, name: []const u8) !void {
             errdefer std.debug.print("row: {s}\n", .{name});
-            try document.append("\n");
+            if (std.mem.indexOfScalar(u8, document.text(), '\n') == null) try document.append("\n");
             try document.prepare();
             var cells: [16 * 8]vaxis.Cell = @splat(.{});
             var screen: vaxis.Screen = .{ .width = 16, .height = 8, .width_method = .unicode, .buf = &cells };

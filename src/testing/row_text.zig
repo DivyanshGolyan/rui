@@ -3,7 +3,7 @@ const std = @import("std");
 const Text = @import("../TerminalText.zig");
 
 /// A user line's leading `›` as production tags it, without the decoration that keeps it out of copies.
-pub const user_line = Text.leader_on ++ "›" ++ Text.leader_off ++ " ";
+pub const user_line = Text.user_leader;
 
 var storage: [16 * 1024]u8 = undefined;
 

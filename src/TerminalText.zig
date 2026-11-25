@@ -34,8 +34,10 @@ pub const leader_on = "\x1b[208m";
 pub const quoted_leader_on = "\x1b[210m";
 pub const leader_off = "\x1b[209m";
 
-/// The user's `›`, as `session_view.userMarker` writes it without colour; fixtures spell it here.
-pub const user_marker = decoration_on ++ leader_on ++ "›" ++ leader_off ++ " " ++ decoration_off;
+/// The user's `›` as `session_view.userMarker` writes it without colour, with and without the decoration that
+/// keeps it out of copies; fixtures spell it here.
+pub const user_leader = leader_on ++ "›" ++ leader_off ++ " ";
+pub const user_marker = decoration_on ++ user_leader ++ decoration_off;
 
 pub const body_on = "\x1b[200m";
 pub const body_off = "\x1b[201m";
