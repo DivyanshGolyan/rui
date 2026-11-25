@@ -1120,7 +1120,7 @@ test "SL-11: an Archived window row's first Message is its list row's first Mess
                 } else return error.TestUnexpectedResult;
                 if (shapes[shape_at].prefix) |want| {
                     const got = row.first orelse return error.TestUnexpectedResult;
-                    try std.testing.expectEqualStrings(want, got.prefix_buf[0..got.prefix_len orelse return error.TestUnexpectedResult]);
+                    try std.testing.expectEqualStrings(want, got.prefix_buf[0 .. got.prefix_len orelse return error.TestUnexpectedResult]);
                 } else if (row.first) |got| try std.testing.expect(got.prefix_len == null);
                 if (live == null) try std.testing.expect(row.first == null);
             }
