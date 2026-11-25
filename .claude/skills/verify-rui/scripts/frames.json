@@ -4826,6 +4826,9 @@
         "The retry draft is ready.",
         "› keep this retry draft"
       ],
+      "expect_regex": [
+        "Context +[0-9,]+ of [0-9,]+"
+      ],
       "absent": [
         "unknown of",
         "alt+i info",
@@ -4888,6 +4891,9 @@
         "Backoff stays within time left.",
         "The retry draft is ready.",
         "› keep this retry draft"
+      ],
+      "expect_regex": [
+        "Context +[0-9,]+ of [0-9,]+"
       ],
       "absent": [
         "unknown of",
