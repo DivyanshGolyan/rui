@@ -21,7 +21,9 @@ pub const validate = document.validate;
 const validateSaved = document.validateSaved;
 const PermissionMode = @import("cli_value.zig").PermissionMode;
 
-fn read(dir: std.Io.Dir) !Values {
+const Loaded = struct { values: Values = .{}, migrated: bool = false };
+
+fn read(dir: std.Io.Dir) !Loaded {
     const file = openPreferenceFile(dir, "preferences") catch |err| switch (err) {
         error.FileNotFound => return .{},
         else => return err,
@@ -33,9 +35,12 @@ fn read(dir: std.Io.Dir) !Values {
     var bytes: [max_file_bytes + 1]u8 = undefined;
     const count = try file.readPositionalAll(io, bytes[0..@intCast(stat.size + 1)], 0);
     if (count != stat.size) return error.InvalidPreferences;
-    return document.decode(bytes[0..count]);
+    var current: [max_file_bytes]u8 = undefined;
+    const migrated = try document.migrate(bytes[0..count], &current);
+    return .{ .values = try document.decode(migrated orelse bytes[0..count]), .migrated = migrated != null };
 }
 
+/// Reads the saved defaults; a file an earlier release wrote is saved once as the current document.
 pub fn load(home: []const u8) !Values {
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = try directoryPath(home, &path);
@@ -44,9 +49,13 @@ pub fn load(home: []const u8) !Values {
         else => return err,
     };
     defer dir.close(io);
-    const values = try read(dir);
-    try validateSaved(&values);
-    return values;
+    const saved = try read(dir);
+    try validateSaved(&saved.values);
+    if (saved.migrated) {
+        const readiness: Readinesses = .initFill(.configured);
+        return update(home, .{}, &readiness);
+    }
+    return saved.values;
 }
 
 pub const Readinesses = provider_selection.Readinesses;
@@ -171,7 +180,7 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, log
     };
     defer lock.close(io);
     try privateFile(lock);
-    const saved = try read(dir);
+    const saved = (try read(dir)).values;
     try validateSaved(&saved);
     if (login) |provider| {
         if (!loginMayReplace(saved.provider.slice(), provider)) return .{ .values = saved, .login = loginOutcome(&saved, false, provider) };
@@ -326,7 +335,7 @@ test "login fills only a missing provider under the preference lock" {
     var config = try tmp.dir.openDir(io, ".config/rui", .{});
     defer config.close(io);
     var file = try config.createFile(io, "preferences.tmp", .{ .permissions = .fromMode(0o600) });
-    try file.writeStreamingAll(io, "version=1\nstore=\nconnection=legacy\nmodel=legacy-model\n");
+    try file.writeStreamingAll(io, "version=1\nstore=\nprovider=legacy\nmodel=legacy-model\n");
     file.close(io);
     try config.rename("preferences.tmp", config, "preferences", io);
     try std.testing.expectEqual(LoginDefault.kept, try fillProviderAfterLogin(home, .codex));
@@ -384,7 +393,7 @@ test "a login fills an unset default, replaces the other sign-in to its account 
     try std.testing.expectEqual(5 * std.enums.values(protocol.Provider).len * 2, cases.len);
     for (cases) |case| {
         var text_buffer: [256]u8 = undefined;
-        const text = try std.fmt.bufPrint(&text_buffer, "version=3\nstore=\nconnection={s}\nmodel={s}\nnotifications=off\nreasoning_effort=high\n", .{ case.saved, if (case.pinned) pin else "" });
+        const text = try std.fmt.bufPrint(&text_buffer, "version=3\nstore=\nprovider={s}\nmodel={s}\nnotifications=off\nreasoning_effort=high\n", .{ case.saved, if (case.pinned) pin else "" });
         const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
         try file.writeStreamingAll(io, text);
         file.close(io);
@@ -480,7 +489,7 @@ test "notifications stay on until turned off, and a version 1 file reads as on" 
     var config = try tmp.dir.openDir(io, ".config/rui", .{});
     defer config.close(io);
     const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
-    try file.writeStreamingAll(io, "version=1\nstore=\nconnection=codex\nmodel=pin\n");
+    try file.writeStreamingAll(io, "version=1\nstore=\nprovider=codex\nmodel=pin\n");
     file.close(io);
     try std.testing.expect((try load(home)).notifications);
     const off = try update(home, .{ .notifications = false }, &codexOnly(.configured));
@@ -491,7 +500,7 @@ test "notifications stay on until turned off, and a version 1 file reads as on" 
     try std.testing.expectEqualStrings("version=4\nstore=\nconnection=codex\nmodel=\nnotifications=off\nreasoning_effort=\npermission_mode=\n", try savedFile(config, &bytes));
     try std.testing.expect((try update(home, .{ .notifications = true }, &codexOnly(.configured))).notifications);
     try std.testing.expectEqualStrings("version=4\nstore=\nconnection=codex\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=\n", try savedFile(config, &bytes));
-    for ([_][]const u8{ "version=2\nstore=\nconnection=codex\nmodel=\n", "version=2\nstore=\nconnection=codex\nmodel=\nnotifications=yes\n" }) |invalid| {
+    for ([_][]const u8{ "version=2\nstore=\nprovider=codex\nmodel=\n", "version=2\nstore=\nprovider=codex\nmodel=\nnotifications=yes\n" }) |invalid| {
         const bad = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
         try bad.writeStreamingAll(io, invalid);
         bad.close(io);
@@ -516,7 +525,7 @@ test "a saved effort is kept across other edits, read back, and always written a
     try std.testing.expectEqualStrings("version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=\n", try savedFile(config, &bytes));
     _ = try update(home, .{ .reasoning_effort = .clear, .notifications = true }, &codexOnly(.configured));
     try std.testing.expectEqualStrings("version=4\nstore=\nconnection=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\n", try savedFile(config, &bytes));
-    for ([_][]const u8{ "version=3\nstore=\nconnection=codex\nmodel=\nnotifications=on\n", "version=3\nstore=\nconnection=codex\nmodel=\nnotifications=on\nreasoning_effort=\n", "version=3\nstore=\nconnection=codex\nmodel=\nnotifications=on\nreasoning_effort=fast\n" }) |invalid| {
+    for ([_][]const u8{ "version=3\nstore=\nprovider=codex\nmodel=\nnotifications=on\n", "version=3\nstore=\nprovider=codex\nmodel=\nnotifications=on\nreasoning_effort=\n", "version=3\nstore=\nprovider=codex\nmodel=\nnotifications=on\nreasoning_effort=fast\n" }) |invalid| {
         const bad = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
         try bad.writeStreamingAll(io, invalid);
         bad.close(io);
@@ -556,7 +565,7 @@ test "saved permissions round trip in version 4 and clearing leaves the permissi
     }
 }
 
-test "saved permissions are absent in old versions and malformed version 4 is rejected" {
+test "CLI-38 reading defaults an earlier release saved returns them and leaves the current document in the file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -564,29 +573,30 @@ test "saved permissions are absent in old versions and malformed version 4 is re
     _ = try update(home, .{}, &.initFill(.configured));
     var config = try tmp.dir.openDir(io, ".config/rui", .{});
     defer config.close(io);
-    const old_files = [_][]const u8{
-        "version=1\nstore=\nconnection=\nmodel=\n",
-        "version=2\nstore=\nconnection=\nmodel=\nnotifications=off\n",
-        "version=3\nstore=\nconnection=\nmodel=\nnotifications=on\nreasoning_effort=high\n",
+    const Case = struct { text: []const u8, after: []const u8, outcome: anyerror!void = {} };
+    const current = "version=4\nstore=\nconnection=chatgpt\nmodel=gpt-6.2-sol\nnotifications=on\nreasoning_effort=medium\npermission_mode=\n";
+    const cases = [_]Case{
+        .{ .text = "version=3\nstore=\nprovider=chatgpt\nmodel=gpt-6.2-sol\nnotifications=on\nreasoning_effort=medium\n", .after = current },
+        .{ .text = "version=4\nstore=\nprovider=chatgpt\nmodel=gpt-6.2-sol\nnotifications=on\nreasoning_effort=medium\npermission_mode=\n", .after = current },
+        .{ .text = current, .after = current },
+        .{ .text = "version=1\nstore=\nprovider=\nmodel=pin\n", .after = "version=1\nstore=\nprovider=\nmodel=pin\n", .outcome = error.SavedPreferenceProviderRequired },
+        .{ .text = "version=1\nstore=relative\nprovider=codex\nmodel=\n", .after = "version=1\nstore=relative\nprovider=codex\nmodel=\n", .outcome = error.SavedPreferenceStoreInvalid },
+        .{ .text = "version=3\nstore=\nconnection=chatgpt\nmodel=gpt-6.2-sol\nnotifications=on\nreasoning_effort=medium\n", .after = current },
+        .{ .text = "version=2\nstore=\nprovider=codex\nmodel=\n", .after = "version=2\nstore=\nprovider=codex\nmodel=\n", .outcome = error.InvalidPreferences },
+        .{ .text = "version=9\n", .after = "version=9\n", .outcome = error.UnsupportedPreferencesVersion },
     };
-    for (old_files, 0..) |text, index| {
+    for (cases) |case| {
         const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
-        try file.writeStreamingAll(io, text);
+        try file.writeStreamingAll(io, case.text);
         file.close(io);
-        const loaded = try load(home);
-        try std.testing.expectEqual(@as(?PermissionMode, null), loaded.permission_mode);
-        try std.testing.expectEqual(index != 1, loaded.notifications);
-        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, if (index == 2) .high else null), loaded.reasoning_effort);
-        _ = try update(home, .{}, &.initFill(.configured));
-        var bytes: [256]u8 = undefined;
-        try std.testing.expect(std.mem.startsWith(u8, try savedFile(config, &bytes), "version=4\n"));
-    }
-    const prefix = "version=4\nstore=\nconnection=\nmodel=\nnotifications=on\nreasoning_effort=";
-    for ([_][]const u8{ prefix ++ "\n", prefix ++ "\npermission_mode=plan\n", prefix ++ "fast\npermission_mode=ask\n", prefix ++ "\npermissions=ask\n", prefix ++ "\npermission_mode=ask\nextra\n" }) |text| {
-        const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
-        try file.writeStreamingAll(io, text);
-        file.close(io);
-        try std.testing.expectError(error.InvalidPreferences, load(home));
+        for (0..2) |_| {
+            if (case.outcome) |_| {
+                const loaded = try load(home);
+                try std.testing.expect(loaded.provider.eql("chatgpt") and loaded.model.eql("gpt-6.2-sol") and loaded.reasoning_effort == .medium and loaded.notifications);
+            } else |expected| try std.testing.expectError(expected, load(home));
+            var bytes: [256]u8 = undefined;
+            try std.testing.expectEqualStrings(case.after, try savedFile(config, &bytes));
+        }
     }
 }
 
@@ -641,7 +651,7 @@ test "preference edits persist explicit choices rather than recommendations" {
     };
     inline for (cases) |case| {
         const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
-        try file.writeStreamingAll(io, "version=1\nstore=\nconnection=" ++ case[0] ++ "\nmodel=" ++ case[1] ++ "\n");
+        try file.writeStreamingAll(io, "version=1\nstore=\nprovider=" ++ case[0] ++ "\nmodel=" ++ case[1] ++ "\n");
         file.close(io);
         const result = try update(home, case[2], &codexOnly(.configured));
         try std.testing.expectEqualStrings(case[3], result.provider.slice());
@@ -801,10 +811,10 @@ test "saved invalid preference fields are environment failures and never get ove
     defer config.close(io);
     const Case = struct { text: []const u8, err: anyerror, legacy: []const u8 };
     const cases = [_]Case{
-        .{ .text = "version=1\nstore=relative\nconnection=codex\nmodel=\n", .err = error.SavedPreferenceStoreInvalid, .legacy = "InvalidPreferenceStore" },
-        .{ .text = "version=1\nstore=\nconnection=bad provider\nmodel=\n", .err = error.SavedPreferenceProviderInvalid, .legacy = "InvalidPreferenceProvider" },
-        .{ .text = "version=1\nstore=\nconnection=codex\nmodel=two words\n", .err = error.SavedPreferenceModelInvalid, .legacy = "InvalidPreferenceModel" },
-        .{ .text = "version=1\nstore=\nconnection=\nmodel=pin\n", .err = error.SavedPreferenceProviderRequired, .legacy = "PreferenceProviderRequired" },
+        .{ .text = "version=1\nstore=relative\nprovider=codex\nmodel=\n", .err = error.SavedPreferenceStoreInvalid, .legacy = "InvalidPreferenceStore" },
+        .{ .text = "version=1\nstore=\nprovider=bad provider\nmodel=\n", .err = error.SavedPreferenceProviderInvalid, .legacy = "InvalidPreferenceProvider" },
+        .{ .text = "version=1\nstore=\nprovider=codex\nmodel=two words\n", .err = error.SavedPreferenceModelInvalid, .legacy = "InvalidPreferenceModel" },
+        .{ .text = "version=1\nstore=\nprovider=\nmodel=pin\n", .err = error.SavedPreferenceProviderRequired, .legacy = "PreferenceProviderRequired" },
     };
     for (cases) |case| {
         const invalid = case.text;
