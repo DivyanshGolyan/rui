@@ -43,6 +43,18 @@ class InvariantCatalogTest(unittest.TestCase):
         duplicates = duplicate_ids('\n'.join(path.read_text() for path in catalogs))
         self.assertEqual(duplicates, [], f'duplicate invariant IDs: {", ".join(duplicates)}')
 
+    def test_catalog_rows_stay_inside_their_table(self):
+        """A blank line ends a Markdown table, so a row after one renders as loose text."""
+        def detached(text):
+            lines = text.splitlines()
+            return [number for number, line in enumerate(lines, 1)
+                    if ROW.match(line) and (number == 1 or not lines[number - 2].startswith('|'))]
+        self.assertEqual(detached('| ID | Owner |\n| --- | --- |\n| CI-1 | a |\n| CI-2 | b |\n'), [])
+        self.assertEqual(detached('| ID | Owner |\n| --- | --- |\n| CI-1 | a |\n\n| CI-2 | b |\n'), [5])
+        found = [f'{path.relative_to(ROOT)}:{number}' for path in sorted(CATALOGS.rglob('*.md'))
+                 for number in detached(path.read_text())]
+        self.assertEqual(found, [], f'catalog rows outside their table: {", ".join(found)}')
+
     def assert_external_owners_require_the_pin_and_exact_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
