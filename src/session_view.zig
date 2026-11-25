@@ -64,8 +64,10 @@ pub fn clock(second: u64, buffer: *[5]u8) ?[]const u8 {
 
 pub fn userMarker(sink: anytype, colour: bool) !void {
     try sink.feed(Text.decoration_on);
+    try sink.feed(Text.leader_on);
     try sink.feed(Style.quiet.code(colour));
     try sink.feed("›");
+    try sink.feed(Text.leader_off);
     try sink.feed(Style.normal.code(colour));
     try sink.feed(" ");
     try sink.feed(Text.decoration_off);
@@ -422,7 +424,7 @@ test "a long user Message shows two non-blank lines and what it hides" {
 
 /// The mark comes from the row's Sign, which the Store already decided; the words after it are this
 /// surface's own copy, so no other reader repeats them.
-fn toolState(presentation: protocol.ToolPresentation) struct { glyph: []const u8, suffix: []const u8, style: Style } {
+fn toolState(presentation: protocol.ToolPresentation) struct { mark: marks.Mark, glyph: []const u8, suffix: []const u8, style: Style } {
     const suffix: []const u8 = switch (presentation.code) {
         .unresolved, .succeeded, .failed, .cancelled => "",
         .background => " · background",
@@ -434,8 +436,9 @@ fn toolState(presentation: protocol.ToolPresentation) struct { glyph: []const u8
         .storage_failed => " · output lost",
         .spawn_failed => " · could not start",
     };
-    const shown = marks.marks.get(markOf(presentation.sign));
-    return .{ .glyph = shown.unicode, .suffix = suffix, .style = Style.fromTone(shown.tone) };
+    const mark = markOf(presentation.sign);
+    const shown = marks.marks.get(mark);
+    return .{ .mark = mark, .glyph = shown.unicode, .suffix = suffix, .style = Style.fromTone(shown.tone) };
 }
 
 fn markOf(sign: protocol.ToolPresentation.Sign) marks.Mark {
@@ -515,6 +518,17 @@ test "list rows share chat heading marks except unmarked finished Sessions" {
     try std.testing.expect(seen.eql(states));
 }
 
+/// The glyph that leads a row, tagged so the viewport hangs the row's wrapped lines under its text. A mark that
+/// needs the person is quoted: its wrapped lines draw the bar, so what follows it, command text included,
+/// cannot pass for Rui's own label.
+fn leader(sink: anytype, mark: marks.Mark, glyph: []const u8, colour: bool) !void {
+    try sink.feed(if (mark == .needs_you) Text.quoted_leader_on else Text.leader_on);
+    try sink.feed(Style.fromTone(marks.marks.get(mark).tone).code(colour));
+    try sink.feed(glyph);
+    try sink.feed(Text.leader_off);
+    try sink.feed(Style.normal.code(colour));
+}
+
 pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colour: bool) !void {
     return toolHeadingWith(presentation, sink, colour, false);
 }
@@ -522,9 +536,7 @@ pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colou
 fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, foldable: bool) !void {
     const state = toolState(presentation);
     if (foldable) try sink.feed(tool_fold.heading_marker);
-    try sink.feed(state.style.code(colour));
-    try sink.feed(state.glyph);
-    try sink.feed(Style.normal.code(colour));
+    try leader(sink, state.mark, state.glyph, colour);
     try sink.feed(" ");
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
     try writeLine(&indented, presentation.line, Mark.summary);
@@ -695,7 +707,8 @@ test "a time limit shows in its largest whole unit, never rounded" {
     }
 }
 
-pub const content_mark = "│ ";
+pub const content_mark = Text.quoted_leader_on ++ "│" ++ Text.leader_off ++ " ";
+const command_mark = Text.quoted_leader_on ++ "$" ++ Text.leader_off ++ " ";
 
 pub const ActionTool = struct {
     name: protocol.Bounded(protocol.max_tool_name_bytes),
@@ -825,9 +838,7 @@ pub fn bashCommand(io: std.Io, scratch: std.Io.File, tool: *const ActionTool, bu
 
 fn permissionMark(sink: anytype, colour: bool, unicode_script: bool) !void {
     const mark = marks.marks.get(.needs_you);
-    try sink.feed(Style.fromTone(mark.tone).code(colour));
-    try sink.feed(if (unicode_script) mark.unicode else mark.ascii);
-    try sink.feed(Style.normal.code(colour));
+    try leader(sink, .needs_you, if (unicode_script) mark.unicode else mark.ascii, colour);
 }
 
 fn toolRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, unicode_script: bool, tool: *const ActionTool) !void {
@@ -880,7 +891,7 @@ fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, unicod
         try label.feed(arguments.description.slice());
         try label.finish();
     }
-    try indented.feed("\n$ ");
+    try indented.feed("\n" ++ command_mark);
     var command: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true };
     var escaped: Escaped(@TypeOf(&command)) = .{ .sink = &command, .text = .{ .mode = .multiline } };
     if (!try tools.writeBashCommand(&source, &escaped)) return error.InvalidBashArguments;
@@ -1344,11 +1355,7 @@ const Ending = struct {
 };
 
 fn ending(sink: anytype, end: Ending, colour: bool) !void {
-    const mark = marks.marks.get(end.mark);
-    const style = Style.fromTone(mark.tone);
-    try sink.feed(style.code(colour));
-    try sink.feed(mark.unicode);
-    try sink.feed(Style.normal.code(colour));
+    try leader(sink, end.mark, marks.marks.get(end.mark).unicode, colour);
     try sink.feed(" ");
     if (end.agent) |agent| {
         try sink.feed("Agent ");

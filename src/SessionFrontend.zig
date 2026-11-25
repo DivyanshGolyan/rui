@@ -4150,7 +4150,7 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
     held.size = .{ .width = 140, .height = 25 };
     const url = "https://example.com/selection";
     const link = TerminalText.link_open ++ url ++ TerminalText.link_end ++ "LinkText" ++ TerminalText.link_close;
-    const shown = TerminalText.user_message_on ++ TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ TerminalText.body_on ++ "UserAlpha" ++ TerminalText.body_off ++ TerminalText.user_message_off ++
+    const shown = TerminalText.user_message_on ++ TerminalText.user_marker ++ TerminalText.body_on ++ "UserAlpha" ++ TerminalText.body_off ++ TerminalText.user_message_off ++
         "\n" ++ TerminalText.body_on ++ link ++ TerminalText.body_off ++ "\n";
     try seedFeed(held.screen, shown);
     var actions: Actions = .{ .frontend = &held.self };
@@ -4277,7 +4277,7 @@ test "SUI-144 SessionFrontend cancels copy selection when its feed context is co
         defer held.destroy();
         const initial_width: u16 = if (context == .focus) 140 else 46;
         held.size = .{ .width = initial_width, .height = 30 };
-        const text = TerminalText.user_message_on ++ TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ "UserAlpha" ++ TerminalText.user_message_off;
+        const text = TerminalText.user_message_on ++ TerminalText.user_marker ++ "UserAlpha" ++ TerminalText.user_message_off;
         try seedFeed(held.screen, text);
         const frame = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
         const user = screenTextPoint(frame, "UserAlpha", 0, 0) orelse return error.MissingUserCell;

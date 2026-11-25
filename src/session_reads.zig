@@ -1491,7 +1491,7 @@ test "SUI-164 one observation read settles an accepted Message on the Store that
 
 test "SUI-49 Message placement preserves provenance across pages" {
     const Domain = struct {
-        const user = TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ View.Mark.body ++ "please wait\n  for the build" ++ View.Mark.reset ++ "\n";
+        const user = TerminalText.user_marker ++ View.Mark.body ++ "please wait\n  for the build" ++ View.Mark.reset ++ "\n";
         const link = TerminalText.link_open ++ TerminalText.session_link ++ "9f8e7d" ++ TerminalText.link_end ++ "\x1b[4mPeer" ++ TerminalText.link_close ++ View.Mark.reset ++ View.Mark.summary;
         const received = View.Mark.summary ++ "← Received message from " ++ link ++ View.Mark.reset ++ "\n";
         const Sink = struct {
@@ -1577,7 +1577,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
             var clock_buffer: [5]u8 = undefined;
             const time = View.clock(1, &clock_buffer).?;
             var prefix_buffer: [64]u8 = undefined;
-            const prefix = try std.fmt.bufPrint(&prefix_buffer, TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ View.Mark.sidenote ++ "{s}" ++ View.Mark.reset ++ View.Mark.body, .{time});
+            const prefix = try std.fmt.bufPrint(&prefix_buffer, TerminalText.user_marker ++ View.Mark.sidenote ++ "{s}" ++ View.Mark.reset ++ View.Mark.body, .{time});
             for ([_]usize{ 0, 1, protocol.ActivityPage.items * 2 + 1 }) |excluded| {
                 for ([_]bool{ false, true }) |applied_boundary| {
                     const stop_at = excluded + 5;
