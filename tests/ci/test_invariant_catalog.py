@@ -16,8 +16,13 @@ ROW = re.compile(r"^\|\s*([A-Z]+-\d+)\s*\|")
 TEST = re.compile(r'^\s*test\s*[\( ]\s*"([^"\n]+)"', re.MULTILINE)
 
 
+def catalogs():
+    """Every invariant catalog document; the README indexes them and holds no rows."""
+    return sorted(path for path in CATALOGS.rglob('*.md') if path.name != 'README.md')
+
+
 def catalog_rows():
-    for path in sorted(CATALOGS.glob('*.md')):
+    for path in catalogs():
         for number, line in enumerate(path.read_text().splitlines(), 1):
             if ROW.match(line):
                 yield path, number, [cell.strip() for cell in line.split('|')]
@@ -39,8 +44,7 @@ class InvariantCatalogTest(unittest.TestCase):
         for name, text, expected in cases:
             with self.subTest(case=name):
                 self.assertEqual(duplicate_ids(text), expected)
-        catalogs = sorted(path for path in CATALOGS.rglob('*.md') if path.name != 'README.md')
-        duplicates = duplicate_ids('\n'.join(path.read_text() for path in catalogs))
+        duplicates = duplicate_ids('\n'.join(path.read_text() for path in catalogs()))
         self.assertEqual(duplicates, [], f'duplicate invariant IDs: {", ".join(duplicates)}')
 
     def test_catalog_rows_stay_inside_their_table(self):
@@ -51,7 +55,7 @@ class InvariantCatalogTest(unittest.TestCase):
                     if ROW.match(line) and (number == 1 or not lines[number - 2].startswith('|'))]
         self.assertEqual(detached('| ID | Owner |\n| --- | --- |\n| CI-1 | a |\n| CI-2 | b |\n'), [])
         self.assertEqual(detached('| ID | Owner |\n| --- | --- |\n| CI-1 | a |\n\n| CI-2 | b |\n'), [5])
-        found = [f'{path.relative_to(ROOT)}:{number}' for path in sorted(CATALOGS.rglob('*.md'))
+        found = [f'{path.relative_to(ROOT)}:{number}' for path in catalogs()
                  for number in detached(path.read_text())]
         self.assertEqual(found, [], f'catalog rows outside their table: {", ".join(found)}')
 
