@@ -130,7 +130,7 @@ function narrowed(entry: FeedEntry): void {
 test("feed entry types narrow to each generated kind", () => { void narrowed; });
 
 test("feed camelCases only row keys, preserving nested wire values and content references", async () => {
-	const presentation = { description: "tool", code: "succeeded", publication_position: "7" };
+	const presentation = { line: { before: "tool", peer: null, after: null }, code: "succeeded", sign: "finished", publication_position: "7" };
 	const content = { type: "text", bytes: "2", sha256: "hash" } as const;
 	const rows = [
 		{ position: "1", ordinal: "0", at: "1", value: { tool_result: { content, presentation } } },

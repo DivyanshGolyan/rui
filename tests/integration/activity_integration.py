@@ -148,7 +148,7 @@ def main():
             live = page(store)["page"]["call_activity"]
             assert live["total"] == "18" and [int(e["ordinal"]) for e in live["entries"]] == [0, 1, 2], live
             assert live["entries"][0]["presentation"]["code"] == "pending_permission", live
-            assert live["entries"][0]["presentation"]["description"] == "Exit with success", live
+            assert live["entries"][0]["presentation"]["line"] == {"before": "Exit with success", "peer": None, "after": None}, live
             assert history(store, calls[1]["position"])[1][-1] == calls[1], "interior end changed immutable rejection classification"
             for i, row in enumerate(calls):
                 for field, reference, expected in zip(("name", "call_id", "arguments"), row["value"]["call"]["fields"], CALLS[i]):
@@ -275,7 +275,7 @@ def main():
                 wire = copy.deepcopy(valid)
                 if fault == "missing": del wire["call_activity"]
                 else:
-                    entry = {"operation": "1", "ordinal": "0", "presentation": {"description": "Inspect local files", "code": "unresolved", "publication_position": None}}
+                    entry = {"operation": "1", "ordinal": "0", "presentation": {"line": {"before": "Inspect local files", "peer": None, "after": None}, "code": "unresolved", "sign": "active", "publication_position": None}}
                     entries = [entry]
                     if fault == "count": wire["call_activity"]["total"] = "2"
                     else:
@@ -284,7 +284,7 @@ def main():
                             if fault == "order": entries[0]["ordinal"] = "1"
                             if fault == "overflow": entries += [copy.deepcopy(entry), copy.deepcopy(entry)]
                         wire["call_activity"]["total"] = str(len(entries))
-                        if fault == "retired": entry["presentation"].update(code="succeeded", publication_position="1")
+                        if fault == "retired": entry["presentation"].update(code="succeeded", sign="finished", publication_position="1")
                     wire["call_activity"]["entries"] = entries
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             for work, ok in (({"turn": "1", "operation": "2", "first_action": "3", "state": {"kind": "approval", "since": "1"}}, True),
@@ -453,7 +453,7 @@ def performance_case(item_bytes):
                 (b"bash", b"performance-call")):
             assert reference == {"type": "text", "bytes": str(len(identity)), "sha256": digest(identity).hex()}, reference
         expected = first["page"]["call_activity"]
-        assert expected["total"] == "1" and expected["entries"][0]["presentation"]["description"] == label, expected
+        assert expected["total"] == "1" and expected["entries"][0]["presentation"]["line"] == {"before": label, "peer": None, "after": None}, expected
         assert expected["entries"][0]["presentation"]["code"] == "pending_permission", expected
         print(json.dumps({"admission_seconds": time.monotonic() - admitted_start, "call": calls[0], "activity": expected}), flush=True)
         errors = []

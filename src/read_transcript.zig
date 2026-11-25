@@ -315,11 +315,13 @@ noinline fn outlineHeader(store: *storage.Store, arena: std.mem.Allocator, sessi
             const name = try nameText(store, arena, tool.name);
             try out.print(" {s}", .{name});
             if (name.len < tool.name.length) try out.writeAll("…");
-            if (tool.presentation.description) |description| note = try arena.dupe(u8, description.slice());
+            if (tool.presentation.line) |line| if (line.description()) |description| {
+                note = try arena.dupe(u8, description.slice());
+            };
             if (item.value == .tool_result) try out.print(" {s}", .{@tagName(item.value.tool_result.presentation.code)});
         },
-        .hosted_call => |*presentation| if (presentation.description) |*description| {
-            note = description.slice();
+        .hosted_call => |*presentation| if (presentation.line) |*line| {
+            note = try arena.dupe(u8, (line.description() orelse return error.CorruptStore).slice());
         },
         .turn_ended => |ended| {
             try out.print(" {s}", .{@tagName(ended.ending)});

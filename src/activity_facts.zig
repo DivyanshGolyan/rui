@@ -17,14 +17,8 @@ const content_value = @import("content_value.zig");
 
 const ToolPresentation = tool_presentation.ToolPresentation;
 
-pub const NamedPeer = struct {
-    session: Bounded(session_id.max_reference_bytes),
-    label: Bounded(tool_presentation.max_label_bytes) = .{},
-
-    pub fn name(self: *const NamedPeer) []const u8 {
-        return if (self.label.len == 0) self.session.slice() else self.label.slice();
-    }
-};
+/// A Session a row points at, owned by `tool_presentation` so a tool row and a peer row name one type.
+pub const NamedPeer = tool_presentation.NamedPeer;
 
 pub const Item = struct {
     position: u64,

@@ -2029,12 +2029,11 @@ fn publishedReplyExamples() !void {
     out.clearRetainingCapacity();
     var facts: protocol.ActivityFacts = .{ .end = 9, .count = 4 };
     const three: protocol.content_value.Reference = .{ .length = 3, .digest = @splat(1) };
-    var read_image: @FieldType(protocol.ToolPresentation, "description") = .{};
-    try read_image.?.set("Read image");
+    const read_image = try protocol.ToolLine.plain("Read image");
     facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = .{ .text = three }, .admitted_at = 7 } } };
     facts.items[1] = .{ .position = 2, .ordinal = 1, .at = 8, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = @fromBackingInt(@intCast(0)), .code = .{}, .content = null } } };
     facts.items[2] = .{ .position = 3, .at = 8, .value = .{ .user = .{ .admission = 2, .key = .{}, .turn = 2, .state = .applied, .content = .{ .parts = .{ .identity = three, .owner = .{ .message = 2 } } }, .admitted_at = 8 } } };
-    facts.items[3] = .{ .position = 4, .ordinal = 1, .at = 8, .value = .{ .tool_result = .{ .content = .{ .parts = .{ .identity = three, .owner = .{ .action = std.math.maxInt(i64) } } }, .presentation = .{ .description = read_image, .code = .succeeded, .publication_position = 4 } } } };
+    facts.items[3] = .{ .position = 4, .ordinal = 1, .at = 8, .value = .{ .tool_result = .{ .content = .{ .parts = .{ .identity = three, .owner = .{ .action = std.math.maxInt(i64) } } }, .presentation = .{ .line = read_image, .code = .succeeded, .sign = .finished, .publication_position = 4 } } } };
     facts.work.work.state = .{ .failed = .{ .since = 3, .code = .{}, .resets_at = 4 } };
     try activity_reply.writePage(&out.writer, &facts);
     try Case.check(schemas, "ActivityPageReply", out.written(), a);
