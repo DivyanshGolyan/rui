@@ -3,13 +3,46 @@ const Bounded = @import("bounded.zig").Bounded;
 const turn_policy = @import("turn_policy.zig");
 const transport_policy = @import("transport_policy.zig");
 const retry_policy = @import("retry_policy.zig");
+const marks = @import("marks.zig");
 
 pub const max_code_bytes = 96;
 pub const max_description_bytes = @import("tool_presentation.zig").max_description_bytes;
 
 pub const max_retried_attempt = retry_policy.maximum_attempts - 1;
 
-pub const Kind = enum { idle, pending, working, retrying, bash, approval, stopping, finished, failed, stopped };
+pub const Kind = enum {
+    idle,
+    pending,
+    working,
+    retrying,
+    bash,
+    approval,
+    stopping,
+    finished,
+    failed,
+    stopped,
+
+    /// The status mark a work state shows in the overview and the work line.
+    pub fn sign(self: Kind) marks.Mark {
+        return switch (self) {
+            .idle => .waiting,
+            .pending => .queued,
+            .working, .retrying, .bash, .stopping => .active,
+            .approval => .needs_you,
+            .finished => .none,
+            .failed => .failed,
+            .stopped => .stopped,
+        };
+    }
+
+    /// Whether a work state counts as answered: the agent has handed back a result the user can read.
+    pub fn answered(self: Kind) bool {
+        return switch (self) {
+            .idle, .pending, .working, .retrying, .stopping, .failed, .stopped => false,
+            .bash, .approval, .finished => true,
+        };
+    }
+};
 
 pub const StopCause = enum {
     stop,
@@ -526,6 +559,37 @@ test "progress follows the work table" {
         try std.testing.expectEqual(@as(u64, 1), state.since());
         try std.testing.expectEqual(kind == .retrying, std.meta.activeTag(state.asOf(5_000)) != kind);
         try std.testing.expectEqual(kind, std.meta.activeTag(state.asOf(4_999)));
+    }
+}
+
+test "every work Kind has one sign and one answered meaning" {
+    const expected_sign = std.enums.EnumArray(Kind, marks.Mark).init(.{
+        .idle = .waiting,
+        .pending = .queued,
+        .working = .active,
+        .retrying = .active,
+        .bash = .active,
+        .approval = .needs_you,
+        .stopping = .active,
+        .finished = .none,
+        .failed = .failed,
+        .stopped = .stopped,
+    });
+    const expected_answered = std.enums.EnumArray(Kind, bool).init(.{
+        .idle = false,
+        .pending = false,
+        .working = false,
+        .retrying = false,
+        .bash = true,
+        .approval = true,
+        .stopping = false,
+        .finished = true,
+        .failed = false,
+        .stopped = false,
+    });
+    inline for (comptime std.enums.values(Kind)) |kind| {
+        try std.testing.expectEqual(expected_sign.get(kind), kind.sign());
+        try std.testing.expectEqual(expected_answered.get(kind), kind.answered());
     }
 }
 
