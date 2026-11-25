@@ -296,6 +296,7 @@ pub const Listed = struct {
 
 /// One Archived window page as the overview reads it: rows newest archive first, and the page's edge keys.
 pub const ArchivedPage = struct {
+    since: Token,
     rows: []const Listed,
     first: ?u64,
     last: ?u64,
@@ -304,7 +305,7 @@ pub const ArchivedPage = struct {
 
     pub fn of(page: anytype, buffer: []Listed) ArchivedPage {
         for (page.rows[0..page.count], buffer[0..page.count]) |*row, *listed| listed.* = Listed.archived(row);
-        return .{ .rows = buffer[0..page.count], .first = page.first, .last = page.last, .more_above = page.more_above, .more_below = page.more_below };
+        return .{ .since = page.since, .rows = buffer[0..page.count], .first = page.first, .last = page.last, .more_above = page.more_above, .more_below = page.more_below };
     }
 };
 
@@ -825,6 +826,7 @@ const FirstLineRead = union(enum) { unread, requested, unavailable, read: u32 };
 const archived_sort_bit: u128 = 1 << 127;
 
 pub const Row = struct {
+    membership_superseded: bool = false,
     reference: Reference,
     creator: ?Reference = null,
     listed: bool = true,
@@ -832,6 +834,7 @@ pub const Row = struct {
     operation: ?u64 = null,
     archive_state: ArchiveState = .active,
     archive_seq: ?u64 = null,
+    archived_since: ?u64 = null,
     pin_order: ?@import("session_pin.zig").PinOrder = null,
     created_at: u64 = 0,
     state_change_at: u64 = 0,
@@ -860,6 +863,52 @@ pub const Row = struct {
     from_person_at: ?u64,
     last_line: ?session_list.SavedLastLine = null,
     line: FirstLineRead = .unread,
+
+    fn adoptArchived(self: *Row, incoming: *const Row) void {
+        const was = self.*;
+        self.* = incoming.*;
+        if (was.read_version != null) {
+            self.read_version = was.read_version;
+            self.state = was.state;
+            self.turn = was.turn;
+            self.operation = was.operation;
+            self.first_action = was.first_action;
+            self.attention = was.attention;
+            self.group = was.group;
+            self.actions = was.actions;
+            self.last_line = was.last_line;
+            self.clock_version = was.clock_version;
+            self.state_change_at = was.state_change_at;
+            self.subtree_state_change_at = was.subtree_state_change_at;
+            self.descendant_count = was.descendant_count;
+            self.descendant_needs_you_count = was.descendant_needs_you_count;
+            self.list_group = was.list_group;
+        }
+    }
+
+    fn setArchivedSince(self: *Row, since: u64) void {
+        self.archived_since = if (self.archive_state == .archived) since else null;
+    }
+
+    fn adoptMembership(self: *Row, incoming: *const Row) void {
+        self.archive_state = incoming.archive_state;
+        self.archive_seq = incoming.archive_seq;
+        self.archived_since = incoming.archived_since;
+    }
+
+    fn sinceAsOf(self: *const Row, now_ms: u64) u64 {
+        if (self.archive_state == .archived) if (self.archived_since) |since| return since;
+        return self.state.asOf(now_ms).since();
+    }
+
+    fn supersedeMembership(self: *Row, reference: Reference, version: Token) void {
+        const read = self.read_version orelse return;
+        if (std.mem.eql(u8, &self.reference, &reference) and std.mem.eql(u8, &read.instance, &version.instance) and read.generation < version.generation) self.membership_superseded = true;
+    }
+
+    fn hasMembership(self: *const Row) bool {
+        return !self.membership_superseded;
+    }
 
     fn work(self: *const Row) session_work.Work {
         return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action, .served_attention = self.attention, .served_group = self.group, .actions = self.actions };
@@ -1078,6 +1127,7 @@ pub const State = struct {
         for (self.rows.items) |*row| {
             if (!row.listed) continue;
             if (row.flash_until_ms > self.now_ms) at = @min(at orelse row.flash_until_ms, row.flash_until_ms);
+            if (row.archive_state == .archived) continue;
             const work = (&row.state);
             if (work.* == .retrying) at = @min(at orelse work.retrying.due_at_ms, work.retrying.due_at_ms);
         }
@@ -1923,6 +1973,7 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
             if (index < state.nodes.items.len and state.nodes.items[index].line != null) redraw = true;
             row.flash_until_ms = 0;
         }
+        if (row.archive_state == .archived) continue;
         const was = std.meta.activeTag(row.state);
         if (row.read_version) |version| settleRow(state, row, .{ .read_version = version, .work = row.work(), .last_line = row.last_line });
         const settled = was != std.meta.activeTag(row.state);
@@ -2012,7 +2063,7 @@ fn readListing(state: *State) error{OutOfMemory}!void {
     const opening = state.token == null;
     state.arrivals.items.len = 0;
     for (state.pending.items) |*incoming| {
-        if (incoming.archive_state == .archived) continue;
+        if (!incoming.hasMembership() or incoming.archive_state == .archived) continue;
         try state.readListed(incoming.reference, incoming.work(), opening);
     }
     try state.settleArrivals();
@@ -2036,7 +2087,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     };
     if (answer.delta != .not_modified) {
         const before = state.rows.items.len;
-        for (state.pending.items) |incoming| if (incoming.archive_state != .archived and lookup(state.by_reference.items, incoming.reference) == null) {
+        for (state.pending.items) |incoming| if (incoming.hasMembership() and incoming.archive_state != .archived and lookup(state.by_reference.items, incoming.reference) == null) {
             var row = incoming;
             row.read_version = null;
             row.born_held = holding(state);
@@ -2047,9 +2098,19 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     }
     // Archived Sessions never enter the roster. A changed one leaves it, and the window re-reads its archive from the Host.
     if (answer.delta != .not_modified) for (state.pending.items) |*incoming| {
-        if (incoming.archive_state == .archived) try routeArchived(state, incoming);
+        if (incoming.hasMembership() and incoming.archive_state == .archived) try routeArchived(state, incoming);
     };
     if (answer.delta != .not_modified) for (state.pending.items) |*incoming| {
+        if (!incoming.hasMembership()) {
+            if (lookup(state.by_reference.items, incoming.reference)) |at| {
+                const row = &state.rows.items[at];
+                const before = RowPresentation.of(state, row);
+                settleRow(state, row, .{ .read_version = incoming.read_version.?, .work = incoming.work(), .last_line = incoming.last_line });
+                const after = RowPresentation.of(state, row);
+                if (visible(state, row) and !before.eql(&after)) state.presentation_revision +%= 1;
+            }
+            continue;
+        }
         if (incoming.archive_state == .archived) continue;
         const at = lookup(state.by_reference.items, incoming.reference).?;
         const row = &state.rows.items[at];
@@ -2059,8 +2120,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         const was_visible = at < state.nodes.items.len and state.nodes.items[at].line != null;
         const same = if (incoming.first) |first| if (row.first) |known| first.admission == known.admission else false else false;
         row.creator = incoming.creator;
-        row.archive_state = incoming.archive_state;
-        row.archive_seq = incoming.archive_seq;
+        row.adoptMembership(incoming);
         row.pin_order = incoming.pin_order;
         row.created_at = incoming.created_at;
         if (row.clock_version == null or !std.mem.eql(u8, &row.clock_version.?.instance, &incoming.read_version.?.instance) or incoming.read_version.?.generation > row.clock_version.?.generation) {
@@ -2151,14 +2211,13 @@ fn selectedAt(state: *const State) usize {
 
 /// Replaces an archived row with the incoming one. A row whose first Message is unchanged keeps its line.
 fn applyArchived(state: *State, row: *Row, incoming: *const Row) error{OutOfMemory}!void {
-    const was = row.*;
     const before = RowPresentation.of(state, row);
-    const same = if (incoming.first) |first| if (was.first) |known| first.admission == known.admission else false else false;
-    const line = if (same) was.line else try readableLine(state, incoming.first);
-    row.* = incoming.*;
+    const same = if (incoming.first) |first| if (row.first) |known| first.admission == known.admission else false else false;
+    const line = if (same) row.line else try readableLine(state, incoming.first);
+    row.adoptArchived(incoming);
     row.listed = true;
     row.line = line;
-    retitle(state, row, title(state, &was).text);
+    retitle(state, row, before.name.slice());
     const after = RowPresentation.of(state, row);
     if (visible(state, row) and !before.eql(&after)) state.presentation_revision +%= 1;
 }
@@ -2210,6 +2269,7 @@ fn placeArchived(state: *State, read: ArchivedRead, page: ArchivedPage) error{Ou
         row.listed = false;
     }
     for (page.rows) |listed| {
+        for (state.pending.items) |*staged| staged.supersedeMembership(listed.reference, page.since);
         var incoming = try pendingRow(state, listed);
         incoming.read_version = null;
         if (lookup(state.by_reference.items, listed.reference)) |index| {
@@ -2218,6 +2278,10 @@ fn placeArchived(state: *State, read: ArchivedRead, page: ArchivedPage) error{Ou
             incoming.line = try readableLine(state, incoming.first);
             try state.rows.append(state.gpa, incoming);
             try reindex(state);
+        }
+        if (state.entryOf(listed.reference)) |entry| {
+            state.want(entry, null, false);
+            entry.listed = null;
         }
     }
     switch (read.from) {
@@ -2242,13 +2306,14 @@ fn archivedAnswer(state: *State, answer: ArchivedAnswer, effects: *Effects) erro
     // Any answer clears the one read in flight. A stale-epoch answer is dropped, and archivedReads decides again.
     state.archived.inflight = false;
     if (answer.read.epoch != state.archived.epoch) return;
-    const page = answer.page orelse {
+    if (answer.page == null or !state.accepts(answer.page.?.since)) {
         state.archived.failed = true;
         state.archived.retry_ms = state.now_ms + list_interval_ms;
         // A failed refresh is owed again. A failed re-anchor stays owed: `reanchor` clears only when a head is placed.
         if (!state.archived.reanchor and state.archived.refresh == null) state.archived.refresh = answer.read.from;
         return;
-    };
+    }
+    const page = answer.page.?;
     // A page with no rows (no first or last key) off the head is a restored or stale anchor: re-read the
     // head in a new epoch rather than trust the flags beside it (inspection.md, Archived window).
     if (page.rows.len == 0 and answer.read.from != .head) {
@@ -2494,7 +2559,7 @@ fn reindex(state: *State) error{OutOfMemory}!void {
 fn pendingRow(state: *State, input: Listed) error{OutOfMemory}!Row {
     const listed = input;
     const shown = listed.state.asOf(state.now_ms);
-    return .{
+    var row: Row = .{
         .reference = listed.reference,
         .creator = listed.creator,
         .read_version = listed.read_version,
@@ -2522,6 +2587,8 @@ fn pendingRow(state: *State, input: Listed) error{OutOfMemory}!Row {
         .from_person_at = listed.from_person_at,
         .last_line = if (listed.last_line) |last| .{ .position = last.position, .text = if (last.text) |text| bounded(session_list.max_last_line_bytes, text) else null } else null,
     };
+    row.setArchivedSince(listed.state.since());
+    return row;
 }
 
 fn visible(state: *const State, row: *const Row) bool {
@@ -2539,7 +2606,11 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     try state.full_order.ensure(state.gpa, rows.len);
     const nodes = state.nodes.items;
     for (rows, 0..) |*row, i| {
-        nodes[i] = .{ .included = visible(state, row), .descendants = row.descendant_count, .attention = row.descendant_needs_you_count };
+        nodes[i] = .{
+            .included = visible(state, row),
+            .descendants = if (row.archive_state == .archived) 0 else row.descendant_count,
+            .attention = if (row.archive_state == .archived) 0 else row.descendant_needs_you_count,
+        };
         // Archived rows are never nested: they come from the window in the Host's order.
         if (!row.listed or row.archive_state == .archived) continue;
         if (row.creator) |creator| if (lookup(state.by_reference.items, creator)) |parent| {
@@ -2817,7 +2888,7 @@ fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
     state.notice = null;
     const target = exact orelse selected: {
         const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-        break :selected StopTarget{ .reference = row.reference, .work = (&row.state).asOf(state.now_ms), .can_stop = row.actions.stop };
+        break :selected StopTarget{ .reference = row.reference, .work = if (row.archive_state == .archived) .stopped else (&row.state).asOf(state.now_ms), .can_stop = row.archive_state != .archived and row.actions.stop };
     };
     const ref = target.reference;
     const kind = kindShown(state, ref, target.work);
@@ -2843,12 +2914,13 @@ fn kindShown(state: *const State, ref: Reference, work: Kind) Kind {
 }
 
 fn shownKind(state: *const State, row: *const Row) Kind {
+    if (row.archive_state == .archived) return .stopped;
     if (!state.stopOverlays(row.reference) and row.actions.decide != null) return .approval;
     return kindShown(state, row.reference, (&row.state).asOf(state.now_ms));
 }
 
 fn shownSince(state: *const State, row: *const Row) u64 {
-    return (&row.state).asOf(state.now_ms).since();
+    return row.sinceAsOf(state.now_ms);
 }
 
 fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *const Row) ?work_line.Line {
@@ -2946,7 +3018,7 @@ fn nextQuestion(state: *State, effects: *Effects) error{OutOfMemory}!void {
     };
     for (0..order.len) |offset| {
         const row = &state.rows.items[order[(start + offset) % order.len]];
-        if (!row.listed or row.group != .needs_you) continue;
+        if (!row.listed or !needsPersonAction(row)) continue;
         state.selected = .{ .session = row.reference };
         state.last_question = row.reference;
         try enterSelected(state, effects);
@@ -3218,7 +3290,7 @@ pub fn band(state: *const State) ?Band {
     var newest: [band_rules.len]?struct { failed: WorkState.Failed, row: *const Row } = @splat(null);
     var retrying: [band_rules.len]u32 = @splat(0);
     for (state.rows.items) |*row| {
-        if (!visible(state, row)) continue;
+        if (!visible(state, row) or row.archive_state == .archived) continue;
         const work = (&row.state).asOf(state.now_ms);
         switch (work) {
             .failed => |failed| for (band_rules, &newest) |rule, *held| {
@@ -3246,7 +3318,7 @@ pub fn band(state: *const State) ?Band {
 
 fn reachedSince(state: *const State, failed: *const Row, since: u64) bool {
     for (state.rows.items) |*row| {
-        if (!visible(state, row) or !sameProvider(row.provider, failed.provider) or !std.mem.eql(u8, row.model.slice(), failed.model.slice())) continue;
+        if (!visible(state, row) or row.archive_state == .archived or !sameProvider(row.provider, failed.provider) or !std.mem.eql(u8, row.model.slice(), failed.model.slice())) continue;
         const work = (&row.state).asOf(state.now_ms);
         const answered = switch (work) {
             .idle, .pending, .working, .retrying, .stopping, .failed, .stopped => false,
@@ -3773,7 +3845,7 @@ pub fn edgeAttention(state: *const State, edge: Edge, first: usize, end: usize) 
     for (state.order.items) |index| {
         const row = &state.rows.items[index];
         const node = state.nodes.items[index];
-        if (row.group != .needs_you and !(isFolded(state, row.reference) and node.attention != 0)) continue;
+        if (!needsPersonAction(row) and !(row.archive_state != .archived and isFolded(state, row.reference) and node.attention != 0)) continue;
         const line = node.line orelse continue;
         if (switch (edge) {
             .above => line < first,
@@ -3938,9 +4010,13 @@ fn yours(row: *const Row) bool {
     return row.first == null or row.from_person_at != null;
 }
 
+fn needsPersonAction(row: *const Row) bool {
+    return row.archive_state != .archived and row.group == .needs_you;
+}
+
 fn needsPerson(state: *const State, row: *const Row) bool {
     _ = state;
-    return row.group == .needs_you or row.state == .failed;
+    return needsPersonAction(row) or (row.archive_state != .archived and row.state == .failed);
 }
 
 fn rowQuiet(state: *const State, row: *const Row) bool {
@@ -5662,6 +5738,41 @@ fn expectRecords(expected: []const StatusRecord, actual: []const StatusRecord) !
     }
 }
 
+test "SUI-139 Archived window withdraws its prior program status" {
+    const ref = "b4n8wd".*;
+    for ([_]bool{ false, true }) |delivered| for ([_]bool{ false, true }) |current_host| {
+        var state = try opened(&.{session(&ref, .{ .working = ago(10) }, .{ .label = "Busy", .turn = 1 })});
+        defer state.deinit();
+        if (delivered) {
+            var before: [8]StatusRecord = undefined;
+            const sent = sentRecords(&state, &before);
+            try std.testing.expectEqual(@as(usize, 1), sent.len);
+            try std.testing.expectEqualStrings(&ref, &sent[0].reference);
+            try std.testing.expectEqual(attention.Status.working, sent[0].status.?);
+        }
+        var effects: Effects = .{};
+        try changeArchiveView(&state, .archived, &effects);
+        const read = effects.slice()[0].read_archived;
+        const archived = session(&ref, .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .{ .label = "Busy", .archive_state = .archived, .archive_seq = 10 });
+        var version = testToken(2);
+        if (!current_host) version.instance = @splat(0xcd);
+        _ = try step(&state, .{ .archived = .{ .read = read, .page = .{ .since = version, .rows = &.{archived}, .first = 10, .last = 10, .more_above = false, .more_below = false } } });
+        var after: [8]StatusRecord = undefined;
+        const records = sentRecords(&state, &after);
+        const changed = delivered == current_host;
+        try std.testing.expectEqual(@as(usize, @intFromBool(changed)), records.len);
+        if (changed) {
+            try std.testing.expectEqualStrings(&ref, &records[0].reference);
+            if (current_host) {
+                try std.testing.expectEqual(null, records[0].status);
+            } else {
+                try std.testing.expectEqual(attention.Status.working, records[0].status.?);
+            }
+        }
+        try std.testing.expect(state.statusesSettled());
+    };
+}
+
 test "listings give each Session one program status record that follows its changes, and clear it once unlisted" {
     const listed = [_]Listed{
         session("m2j7fs", .{ .finished = ago(0) }, .{ .label = "Old finish", .turn = 1 }),
@@ -6377,7 +6488,7 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     var effects: Effects = .{};
     try changeArchiveView(&views, .archived, &effects);
     const read = effects.slice()[0].read_archived;
-    _ = try step(&views, .{ .archived = .{ .read = read, .page = .{ .rows = &.{archived}, .first = archived.archive_seq, .last = archived.archive_seq, .more_above = false, .more_below = false } } });
+    _ = try step(&views, .{ .archived = .{ .read = read, .page = .{ .since = testToken(0), .rows = &.{archived}, .first = archived.archive_seq, .last = archived.archive_seq, .more_above = false, .more_below = false } } });
     try std.testing.expect(views.find(archived.reference) != null);
     try std.testing.expect(views.selected == .new_session);
 
@@ -6392,7 +6503,7 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     readArchived(&views, &reanchor_effects, .head);
     const reanchor = reanchor_effects.slice()[0].read_archived;
     try std.testing.expect(reanchor.from == .head);
-    _ = try step(&views, .{ .archived = .{ .read = reanchor, .page = .{ .rows = &.{newer}, .first = 20, .last = 20, .more_above = false, .more_below = true } } });
+    _ = try step(&views, .{ .archived = .{ .read = reanchor, .page = .{ .since = testToken(0), .rows = &.{newer}, .first = 20, .last = 20, .more_above = false, .more_below = true } } });
     try std.testing.expectEqualStrings(&archived.reference, &views.selected.session);
     try std.testing.expect(views.find(archived.reference) != null);
 
@@ -6413,7 +6524,7 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     try std.testing.expect(next_page.items[0].read_archived.from == .below);
     try std.testing.expectEqual(@as(u64, 20), next_page.items[0].read_archived.from.below);
     const below_read = next_page.items[0].read_archived;
-    _ = try step(&views, .{ .archived = .{ .read = below_read, .page = .{ .rows = &.{ middle, tail }, .first = 14, .last = 11, .more_above = false, .more_below = false } } });
+    _ = try step(&views, .{ .archived = .{ .read = below_read, .page = .{ .since = testToken(0), .rows = &.{ middle, tail }, .first = 14, .last = 11, .more_above = false, .more_below = false } } });
     try std.testing.expect(views.selected == .none);
     try std.testing.expectEqualStrings("aaaaaa", &views.conversing.?);
     try expectEffects(&.{}, try submit(&views));
@@ -6428,13 +6539,13 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     try changeArchiveView(&above, .archived, &above_effects);
     const initial_read = above_effects.slice()[0].read_archived;
     const selected_archived = session("zz0001", .{ .finished = ago(1) }, .{ .archive_state = .archived, .archive_seq = 30 });
-    _ = try step(&above, .{ .archived = .{ .read = initial_read, .page = .{ .rows = &.{selected_archived}, .first = 30, .last = 30, .more_above = false, .more_below = false } } });
+    _ = try step(&above, .{ .archived = .{ .read = initial_read, .page = .{ .since = testToken(0), .rows = &.{selected_archived}, .first = 30, .last = 30, .more_above = false, .more_below = false } } });
     above.selected = .{ .session = selected_archived.reference };
     const above_page_row = session("zz0002", .{ .finished = ago(2) }, .{ .archive_state = .archived, .archive_seq = 25 });
     above_effects = .{};
     readArchived(&above, &above_effects, .{ .above = 20 });
     const above_read = above_effects.slice()[0].read_archived;
-    _ = try step(&above, .{ .archived = .{ .read = above_read, .page = .{ .rows = &.{above_page_row}, .first = 25, .last = 25, .more_above = false, .more_below = true } } });
+    _ = try step(&above, .{ .archived = .{ .read = above_read, .page = .{ .since = testToken(0), .rows = &.{above_page_row}, .first = 25, .last = 25, .more_above = false, .more_below = true } } });
     try std.testing.expect(above.selected == .none);
 
     _ = try press(&views, .previous);
@@ -6621,6 +6732,7 @@ fn hostPage(host: []const Listed, cursor: session_list.ArchivedCursor, rows: []L
     const count = to - from;
     @memcpy(rows[0..count], host[from..to]);
     return .{
+        .since = testToken(0),
         .rows = rows[0..count],
         .first = if (count != 0) host[from].archive_seq else null,
         .last = if (count != 0) host[to - 1].archive_seq else null,
@@ -6841,7 +6953,7 @@ test "archived window names a row by the same line the first-line read gives: co
         var window_effects: Effects = .{};
         try changeArchiveView(&window, .archived, &window_effects);
         var window_row = [_]Listed{session("w00009", .{ .stopped = .{ .since = test_now_s - 9, .cause = .stop } }, .{ .archive_state = .archived, .archive_seq = 9, .first = .{ .position = 0, .admission = 9, .sender = null, .content = null, .line = sent.slice() } })};
-        _ = try step(&window, .{ .archived = .{ .read = window_effects.slice()[0].read_archived, .page = .{ .rows = &window_row, .first = 9, .last = 9, .more_above = false, .more_below = false } } });
+        _ = try step(&window, .{ .archived = .{ .read = window_effects.slice()[0].read_archived, .page = .{ .since = testToken(0), .rows = &window_row, .first = 9, .last = 9, .more_above = false, .more_below = false } } });
 
         // The first-line read of the same Message: the worker's raw line, then the overview's own rule.
         var read = try opened(&.{});
@@ -6850,7 +6962,7 @@ test "archived window names a row by the same line the first-line read gives: co
         var read_effects: Effects = .{};
         try changeArchiveView(&read, .archived, &read_effects);
         var read_row = [_]Listed{session("w00009", .{ .stopped = .{ .since = test_now_s - 9, .cause = .stop } }, .{ .archive_state = .archived, .archive_seq = 9, .first = .{ .position = 3, .admission = 9, .sender = null, .content = test_first } })};
-        _ = try step(&read, .{ .archived = .{ .read = read_effects.slice()[0].read_archived, .page = .{ .rows = &read_row, .first = 9, .last = 9, .more_above = false, .more_below = false } } });
+        _ = try step(&read, .{ .archived = .{ .read = read_effects.slice()[0].read_archived, .page = .{ .since = testToken(0), .rows = &read_row, .first = 9, .last = 9, .more_above = false, .more_below = false } } });
         _ = try step(&read, .{ .first_line = .{ .reference = "w00009".*, .admission = 9, .line = raw } });
 
         const window_name = window.lineOf(window.find("w00009".*).?).?;
@@ -6878,7 +6990,7 @@ test "an empty Archived page off the head re-reads the head in a new epoch" {
     const epoch = state.archived.epoch;
 
     // A stale anchor below the window answers with no rows: the Host has nothing for it.
-    const stale = try step(&state, .{ .archived = .{ .read = .{ .from = .{ .below = 28 }, .rows = session_list.archived_window_size, .epoch = epoch }, .page = .{ .rows = &.{}, .first = null, .last = null, .more_above = true, .more_below = false } } });
+    const stale = try step(&state, .{ .archived = .{ .read = .{ .from = .{ .below = 28 }, .rows = session_list.archived_window_size, .epoch = epoch }, .page = .{ .since = testToken(0), .rows = &.{}, .first = null, .last = null, .more_above = true, .more_below = false } } });
     try std.testing.expectEqual(@as(usize, 1), stale.slice().len);
     const restart = stale.slice()[0].read_archived;
     try std.testing.expectEqual(session_list.ArchivedCursor.head, restart.from);
@@ -6886,7 +6998,7 @@ test "an empty Archived page off the head re-reads the head in a new epoch" {
     try std.testing.expect(state.archived.inflight);
 
     // An empty head answer is taken as the Archived list being empty: no further read.
-    const empty_head = try step(&state, .{ .archived = .{ .read = restart, .page = .{ .rows = &.{}, .first = null, .last = null, .more_above = false, .more_below = false } } });
+    const empty_head = try step(&state, .{ .archived = .{ .read = restart, .page = .{ .since = testToken(0), .rows = &.{}, .first = null, .last = null, .more_above = false, .more_below = false } } });
     try std.testing.expectEqual(@as(usize, 0), empty_head.slice().len);
     try std.testing.expect(!state.archived.inflight);
     try std.testing.expect(state.archived.at_head);
@@ -6988,13 +7100,13 @@ test "archive filter switch keeps the roster and reads the window once per entry
     try std.testing.expect(state.archived.inflight);
     var stale = read;
     stale.epoch +%= 1;
-    const retry = try step(&state, .{ .archived = .{ .read = stale, .page = .{ .rows = &.{archived}, .first = 7, .last = 7, .more_above = false, .more_below = false } } });
+    const retry = try step(&state, .{ .archived = .{ .read = stale, .page = .{ .since = testToken(0), .rows = &.{archived}, .first = 7, .last = 7, .more_above = false, .more_below = false } } });
     try std.testing.expect(state.find(archived.reference) == null);
     try std.testing.expectEqual(@as(usize, 1), retry.slice().len);
     const again = retry.slice()[0].read_archived;
     try std.testing.expect(again.from == .head and again.epoch == read.epoch);
     try std.testing.expect(state.archived.inflight);
-    _ = try step(&state, .{ .archived = .{ .read = again, .page = .{ .rows = &.{archived}, .first = 7, .last = 7, .more_above = false, .more_below = false } } });
+    _ = try step(&state, .{ .archived = .{ .read = again, .page = .{ .since = testToken(0), .rows = &.{archived}, .first = 7, .last = 7, .more_above = false, .more_below = false } } });
     try std.testing.expect(state.find(archived.reference) != null);
     try std.testing.expect(!state.archived.inflight);
     effects = .{};
@@ -7540,6 +7652,7 @@ fn sUI132ArchivedTrimCase() !void {
     readArchived(&state, &effects, .head);
     const read = effects.slice()[0].read_archived;
     const head = ArchivedPage{
+        .since = testToken(0),
         .rows = head_rows[0..head_count],
         .first = head_rows[0].archive_seq,
         .last = head_rows[head_count - 1].archive_seq,
@@ -8291,7 +8404,7 @@ test "archive admission reports only a new ledger request across every surface c
             _ = try step(&state, .{ .tick = test_now_s * 1000 });
             if (archive == .archived) {
                 _ = try respond(&state, .full, testToken(1), &.{});
-                _ = try step(&state, .{ .archived = .{ .read = .{ .from = .head, .rows = 40, .epoch = state.archived.epoch }, .page = .{ .rows = &.{session(&ref, .{ .working = ago(1) }, .{ .archive_state = .archived, .archive_seq = 5 })}, .first = 5, .last = 5, .more_above = false, .more_below = false } } });
+                _ = try step(&state, .{ .archived = .{ .read = .{ .from = .head, .rows = 40, .epoch = state.archived.epoch }, .page = .{ .since = testToken(0), .rows = &.{session(&ref, .{ .working = ago(1) }, .{ .archive_state = .archived, .archive_seq = 5 })}, .first = 5, .last = 5, .more_above = false, .more_below = false } } });
                 state.selected = .{ .session = ref };
             } else _ = try respond(&state, .full, testToken(1), &.{session(&ref, .{ .working = ago(1) }, .{ .archive_state = archive })});
             if (held != .none) {
@@ -8602,6 +8715,7 @@ test "empty Session projection keeps archive membership independent of the open 
     try changeArchiveView(&state, .archived, &effects);
     const read = effects.slice()[0].read_archived;
     _ = try step(&state, .{ .archived = .{ .read = read, .page = .{
+        .since = testToken(0),
         .rows = &.{
             session("empty2", .{ .stopped = .{ .since = test_now_s - 2, .cause = .stop } }, .{ .first = null, .label = "Archived empty", .archive_state = .archived, .archive_seq = 9 }),
             session("filled", .{ .stopped = .{ .since = test_now_s - 3, .cause = .stop } }, .{ .label = "Archived admitted", .archive_state = .archived, .archive_seq = 8 }),
@@ -10535,7 +10649,50 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
     try std.testing.expectEqual(@as(u64, 0x55abcd8ea50af260), bytes_and_styles);
 }
 
+fn projectionArchivedFullWalkCase() !void {
+    const ref = "b4n8wd".*;
+    var state = try testState();
+    defer state.deinit();
+    _ = try step(&state, .{ .tick = test_now_s * 1000 });
+    const active = session(&ref, .{ .working = ago(10) }, .{ .label = "Archive target", .read_version = testToken(10) });
+    _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{active}, .answer = null } } });
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    const read = effects.slice()[0].read_archived;
+    const archived = session(&ref, .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .{ .label = "Archive target", .archive_state = .archived, .archive_seq = 10 });
+    _ = try step(&state, .{ .archived = .{ .read = read, .page = .{ .since = testToken(11), .rows = &.{archived}, .first = 10, .last = 10, .more_above = false, .more_below = false } } });
+    _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{}, .answer = .{ .delta = .full, .since = testToken(10) } } } });
+    const row = state.find(ref).?;
+    try std.testing.expectEqual(ArchiveState.archived, row.archive_state);
+    try std.testing.expectEqual(@as(?u64, 10), row.archive_seq);
+    try std.testing.expect(std.meta.eql(testToken(10), row.read_version.?));
+    try std.testing.expectEqual(Kind.working, std.meta.activeTag(row.state));
+}
+
+fn projectionArchivedFoldCase() !void {
+    const ref = "b4n8wd".*;
+    var state = try opened(&.{session(&ref, .{ .working = ago(10) }, .{ .label = "Archive target", .descendant_count = 2, .descendant_needs_you_count = 1 })});
+    defer state.deinit();
+    try expectEffects(&.{}, try press(&state, .collapse_tree));
+    const before = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(before);
+    try std.testing.expect(std.mem.indexOf(u8, before, "▸ 2") != null);
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    const read = effects.slice()[0].read_archived;
+    const archived = session(&ref, .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .{ .label = "Archive target", .archive_state = .archived, .archive_seq = 10 });
+    _ = try step(&state, .{ .archived = .{ .read = read, .page = .{ .since = testToken(2), .rows = &.{archived}, .first = 10, .last = 10, .more_above = false, .more_below = false } } });
+    const after = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "Archive target") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, "▸") == null);
+    try std.testing.expect(std.mem.indexOf(u8, after, "1 ?") == null);
+    try expectEffects(&.{}, try press(&state, .next_question));
+}
+
 test "SUI-3 overview_projection" {
+    try projectionArchivedFullWalkCase();
+    try projectionArchivedFoldCase();
     try projectionCase4();
     try projectionCase5();
     try projectionCase6();
