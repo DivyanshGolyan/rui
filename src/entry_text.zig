@@ -3,6 +3,7 @@
 //! `writeFacts` walks the row's payload by reflection and prints each field as ` name=value`, so a field added to
 //! an Activity row prints without an edit here, and a field of a type this module has not classified is a compile
 //! error naming it. A caller that wants a field in different words lists it in `skipped` with the reason.
+//! An integer field whose name ends in `_at` is an instant in seconds and prints as RFC 3339 UTC; the row's own time is `at`.
 const std = @import("std");
 const activity_read = @import("activity_read.zig");
 const bounded = @import("bounded.zig");
@@ -90,7 +91,7 @@ fn writeField(out: *std.Io.Writer, comptime Owner: type, comptime name: []const 
     const Field = @FieldType(Owner, name);
     const present = if (comptime @typeInfo(Field) == .optional) (value orelse return) else value;
     switch (comptime leaf(Owner, name, Field)) {
-        .integer => if (comptime std.mem.eql(u8, name, "admitted_at")) {
+        .integer => if (comptime std.mem.endsWith(u8, name, "_at")) {
             try out.print(" {s}=", .{name});
             try writeInstant(out, present);
         } else try out.print(" {s}={d}", .{ name, present }),
@@ -100,14 +101,17 @@ fn writeField(out: *std.Io.Writer, comptime Owner: type, comptime name: []const 
             try out.print(" {s}=", .{name});
             try std.json.Stringify.value(present.slice(), .{}, out);
         },
-        .peer => try out.print(" {s}={s}", .{ name, present.session.slice() }),
+        .peer => {
+            try out.print(" {s}=", .{name});
+            try std.json.Stringify.value(present.session.slice(), .{}, out);
+        },
         .presentation => try writePresentation(out, present),
         .body => {},
     }
 }
 
 fn writePresentation(out: *std.Io.Writer, presentation: tool_presentation.ToolPresentation) std.Io.Writer.Error!void {
-    try out.print(" code={s} sign={s}", .{ @tagName(presentation.code), @tagName(presentation.sign) });
+    try out.print(" code={s}", .{@tagName(presentation.code)});
     if (presentation.publication_position) |position| try out.print(" publication_position={d}", .{position});
 }
 
@@ -136,7 +140,7 @@ fn writeInstant(out: *std.Io.Writer, seconds: u64) std.Io.Writer.Error!void {
     });
 }
 
-test "an instant prints as RFC 3339 UTC" {
+test "INS-14 an instant prints as RFC 3339 UTC" {
     var buffer: [128]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     try writeInstant(&out, 0);
@@ -179,7 +183,7 @@ fn filled(comptime T: type) T {
     }
 }
 
-test "entry text prints every fact of every Activity row" {
+test "INS-14 entry text prints every fact of every Activity row" {
     @setEvalBranchQuota(100_000);
     inline for (comptime std.meta.tags(facts.Item.Kind)) |kind| {
         const payload = filled(@FieldType(facts.Item.Value, @tagName(kind)));
@@ -206,7 +210,7 @@ test "entry text prints every fact of every Activity row" {
     }
 }
 
-test "a message row prints its admission facts and keeps the origin to the caller" {
+test "INS-14 a message row prints its admission facts and keeps the origin to the caller" {
     const message: facts.Item.Message = .{
         .admission = 7,
         .key = try .from("k1"),

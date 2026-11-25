@@ -545,6 +545,7 @@ test "EXR-66 read_transcript renders parts entries" {
     const Case = struct { arguments: []const u8, expected: []const u8, whole: bool = false };
     const cases = [_]Case{
         .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1,\"before\":\"{d}.0\"}}", .{ other.slice(), long_position }), .expected = " 3 parts, 1 images: \"before\"\n" },
+        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1,\"before\":\"{d}.0\"}}", .{ other.slice(), long_position }), .expected = try std.fmt.allocPrint(arena, "{d}.0 admission person at=", .{position}) },
         .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), position }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to {d} of {d}:\n{s}", .{ position, display.len, display.len, display }) },
         // Starts inside the placeholder, then on the separator before it.
         .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":10}}", .{ other.slice(), position }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 10 to {d} of {d}:\n{s}", .{ position, display.len, display.len, display[10..] }) },
@@ -778,7 +779,7 @@ fn expectRefusalLine(arena: std.mem.Allocator, bytes: []const u8, address: u64, 
     if (no_target) {
         try std.testing.expect(std.mem.indexOf(u8, line, " target=") == null);
     } else {
-        try std.testing.expect(std.mem.endsWith(u8, line, try std.fmt.allocPrint(arena, " target={s}", .{target})));
+        try std.testing.expect(std.mem.endsWith(u8, line, try std.fmt.allocPrint(arena, " target=\"{s}\"", .{target})));
     }
 }
 
@@ -873,7 +874,7 @@ test "read_transcript hosted call uses its recorded provider presentation" {
             try outline(&database, arena, session.slice(), item, &output.writer);
             const prefix = try std.fmt.allocPrint(arena, "{d}.0 hosted_call at=", .{item.position});
             try std.testing.expect(std.mem.startsWith(u8, output.written(), prefix));
-            try std.testing.expect(std.mem.indexOf(u8, output.written(), " code=succeeded sign=finished ") != null);
+            try std.testing.expect(std.mem.indexOf(u8, output.written(), " code=succeeded ") != null);
             try std.testing.expect(std.mem.endsWith(u8, output.written(), ": Search “recorded provider query”\n"));
         }
     }.check);
