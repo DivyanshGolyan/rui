@@ -255,7 +255,7 @@ def excerpt_lines(name, failed):
     excerpt = failed.get("excerpt") or []
     if not excerpt:
         return []
-    return [f"{EXCERPT_PREFIX}{name}: last {len(excerpt)} lines of the failed step's output:",
+    return [f"{EXCERPT_PREFIX}{name}: {len(excerpt)} lines of the failed step's output, its failure lines first:",
             *(f"{EXCERPT_PREFIX}{name}: {line}" for line in excerpt),
             f"{EXCERPT_PREFIX}{name}: end of excerpt"]
 

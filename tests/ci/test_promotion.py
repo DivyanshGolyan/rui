@@ -457,7 +457,7 @@ class SuspectReportTest(unittest.TestCase):
         self.assertEqual(lines[0], f"Promotion suspects: deep-modules: 1. {self.SHA} PR #8, tier b (import or rule): "
                                    "Change (#8); touched alpha")
         self.assertEqual(lines[1:5], [
-            "Promotion excerpt: deep-modules: last 2 lines of the failed step's output:",
+            "Promotion excerpt: deep-modules: 2 lines of the failed step's output, its failure lines first:",
             "Promotion excerpt: deep-modules: boom", "Promotion excerpt: deep-modules: last line",
             "Promotion excerpt: deep-modules: end of excerpt"])
         self.assertEqual(lines[5], "Promotion suspects: rsql-table: none of the 1 batch commits selects rsql-table; "
@@ -502,6 +502,18 @@ class RecordedExcerptTest(unittest.TestCase):
         self.assertEqual(len(entry_["excerpt"]), steps.EXCERPT_LINES)
         self.assertEqual(entry_["excerpt"][-1], "x" * steps.EXCERPT_WIDTH)
         self.assertEqual(entry_["excerpt"][0], "line 11")
+
+    def test_the_record_leads_with_the_failing_tests_named_above_the_tail(self):
+        # Run 77's full-execution log: the failed Store tests, then 200 lines of build tree and other output.
+        failing = ["error: 'store.history.test.a Store built at every format' failed (MysqlRefusedMigration)",
+                   "failed command: .zig-cache/o/ci-compiled/unit-store-tests"]
+        output = "\n".join(["passing line"] * 5 + failing * 2 + ["build tree line"] * 200)
+        with tempfile.TemporaryDirectory() as scratch:
+            runner = self.runner(scratch)
+            steps.record_failure("check-full", ["zig"], output)
+            [entry_] = steps.failures(runner / "rui-failed-steps.jsonl")
+        self.assertEqual(entry_["excerpt"][:2], [failing[0], "..."], "one copy of the failing test, then the tail")
+        self.assertEqual(entry_["excerpt"][2:], ["build tree line"] * steps.EXCERPT_LINES)
 
     def test_a_failure_without_output_records_no_excerpt(self):
         with tempfile.TemporaryDirectory() as scratch:

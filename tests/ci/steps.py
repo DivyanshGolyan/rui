@@ -13,6 +13,7 @@ import argparse
 from collections import deque
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -27,13 +28,26 @@ def record_path():
 # The last lines of a failed step's output that the record keeps for promotion's suspects report.
 EXCERPT_LINES = 30
 EXCERPT_WIDTH = 300
+# A failing test or command names itself early and the build summary fills the tail (run 77 named its failed
+# Store tests 200 lines above the end), so the excerpt leads with the first lines shaped like a failure.
+FAILURE_MARK = re.compile(r"^(?:error: |FAIL\b|Traceback \(|thread \d+ panic|[\w.]*(?:Error|Exception): |.*\bfailed: exit=)")
+FAILURE_MARKS = 10
+
+
+def excerpt_of(output):
+    """The step's first distinct failure-shaped lines above its tail, then its last EXCERPT_LINES lines."""
+    lines = output.splitlines()
+    tail = lines[-EXCERPT_LINES:]
+    marks = list(dict.fromkeys(line for line in lines[:len(lines) - len(tail)] if FAILURE_MARK.match(line)))
+    marks = marks[:FAILURE_MARKS]
+    return [line[:EXCERPT_WIDTH] for line in (*marks, *(["..."] if marks else []), *tail)]
 
 
 def record_failure(name, argv, output=""):
-    """Append a failed step: what promotion.py replays and ranks suspects for, with the tail of its output."""
+    """Append a failed step: what promotion.py replays and ranks suspects for, with its failure lines and tail."""
     if path := record_path():
         entry = dict(name=name, argv=argv)
-        if excerpt := [line[:EXCERPT_WIDTH] for line in output.splitlines()[-EXCERPT_LINES:]]:
+        if excerpt := excerpt_of(output):
             entry["excerpt"] = excerpt
         with open(path, "a") as record:
             print(json.dumps(entry), file=record)
