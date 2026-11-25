@@ -132,6 +132,7 @@ pub fn Notice(comptime capacity: usize) type {
 
 /// What the footer draws for `say`: its sign for attention, then its words flattened to one line and escaped.
 pub fn noticeLine(arena: std.mem.Allocator, say: Say) std.mem.Allocator.Error![]const u8 {
+    std.debug.assert(!std.mem.startsWith(u8, say.words, "!")); // the sign is written here, from the tone
     const sign = say.sign();
     const capacity = std.math.add(usize, sign.len, std.math.mul(usize, say.words.len, TerminalText.max_bytes_per_byte) catch return error.OutOfMemory) catch return error.OutOfMemory;
     var out: std.Io.Writer = .fixed(try arena.alloc(u8, capacity));

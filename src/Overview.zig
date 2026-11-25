@@ -4515,7 +4515,7 @@ test "Footer notice domain uses production clipping sanitization and colour" {
         .{ .raw = "Saved.\nNext", .displayed = "Saved. Next" },
         .{ .raw = "Saved.\rNext", .displayed = "Saved. Next" },
         .{ .raw = "First\nSecond\rThird\x1b", .displayed = "First Second Third\\x1b" },
-        .{ .raw = "! Not created: model_required", .displayed = "! Not created: model_required" },
+        .{ .raw = "Not created: model_required", .displayed = "Not created: model_required" },
         .{ .raw = "Configured.\n! label saved locally only", .displayed = "Configured. ! label saved locally only" },
     };
     const rig = try openListed();

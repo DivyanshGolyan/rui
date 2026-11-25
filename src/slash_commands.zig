@@ -141,6 +141,7 @@ pub fn resultNotice(buffer: *[short_result_bytes]u8, output: []const u8) ?Say {
     if (text.len == 0) return no_output;
     if (std.mem.indexOfScalar(u8, text, '\n') != null) return null;
     const said: Say = if (std.mem.startsWith(u8, text, "rui: ")) .attention(text[5..]) else if (std.mem.startsWith(u8, text, "Rui: ")) .quiet(text[5..]) else .quiet(text);
+    if (said.words.len == 0) return no_output;
     @memcpy(buffer[0..said.words.len], said.words);
     return .{ .words = buffer[0..said.words.len], .tone = said.tone };
 }
@@ -788,6 +789,10 @@ test "a command's one-line output is a conversation notice, and anything longer 
     try say_text.expect("Configured.", resultNotice(&buffer, "Rui: Configured.\n").?);
     try say_text.expect("! Host unavailable", resultNotice(&buffer, "rui: Host unavailable\n").?);
     try say_text.expect("Saved.", resultNotice(&buffer, "Saved.").?);
+    try say_text.expect(no_output, resultNotice(&buffer, "rui: ").?);
+    try say_text.expect(no_output, resultNotice(&buffer, "Rui: \n").?);
+    try say_text.expect("rui:x", resultNotice(&buffer, "rui:x").?);
+    try say_text.expect("RUI: x", resultNotice(&buffer, "RUI: x").?);
     try say_text.expect(no_output, resultNotice(&buffer, "").?);
     try say_text.expect(no_output, resultNotice(&buffer, "\n").?);
     try std.testing.expect(resultNotice(&buffer, "Saved.\nrui: Host unavailable\n") == null);
