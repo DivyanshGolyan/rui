@@ -44,11 +44,12 @@ sys.exit(1 if str(len(rows) - 1) == os.environ["FAIL_BATCH"] else 0)
                 with self.subTest(failed=failed):
                     log = root / "batches.json"
                     log.unlink(missing_ok=True)
+                    record = root / "rui-failed-steps.jsonl"
+                    record.unlink(missing_ok=True)
                     env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
                                BATCH_LOG=str(log), FAIL_BATCH=str(failed), RUNNER_TEMP=str(root))
                     env.pop("GITHUB_STEP_SUMMARY", None)
                     env.pop("GITHUB_EVENT_NAME", None)  # a pull_request event adds -Dpr-ci=true on Linux
-                    env.pop("RUNNER_TEMP", None)
                     result = subprocess.run([sys.executable, "-B", "tests/ci/run_selected.py",
                                              json.dumps(targets), "--check-part", "both",
                                              "--ci-artifacts", "compiled"],
@@ -58,7 +59,11 @@ sys.exit(1 if str(len(rows) - 1) == os.environ["FAIL_BATCH"] else 0)
                     expected = batches if failed is None else batches[:failed + 1]
                     self.assertEqual(actual, [["build", *batch, "-Dci-artifacts=compiled", "--summary", "all",
                                                "--test-timeout", "5m"] for batch in expected])
-                    self.assertFalse((root / "rui-failed-steps.jsonl").exists())
+                    if failed is None:
+                        self.assertFalse(record.exists())
+                    else:
+                        rows = [json.loads(line) for line in record.read_text().splitlines() if line.strip()]
+                        self.assertEqual([row["name"] for row in rows], [" ".join(batches[failed])], rows)
             result = subprocess.run([sys.executable, "-B", "tests/ci/run_selected.py",
                                      json.dumps(["test-logic"]), "--check-part", "both"],
                                     capture_output=True, text=True, timeout=20)
