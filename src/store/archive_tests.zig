@@ -1067,7 +1067,7 @@ test "SL-11: an Archived window row's first Message is its list row's first Mess
 
             // `prefix` is the leading bytes the window must serve, written out by hand: the Message whole when it fits,
             // else its first 512 bytes less a scalar the cut would split (the 2-byte scalar below starts at byte 511).
-            const Shape = struct { name: []const u8, text: ?[]const u8, parts: bool, prefix: ?[]const u8, mark: enum { none, peer, private } = .none };
+            const Shape = struct { name: []const u8, text: ?[]const u8, parts: bool, prefix: ?[]const u8, mark: enum { none, peer } = .none };
             const shapes = [_]Shape{
                 .{ .name = "sl11-parts", .text = null, .parts = true, .prefix = null },
                 .{ .name = "sl11-none", .text = null, .parts = false, .prefix = null },
@@ -1075,9 +1075,8 @@ test "SL-11: an Archived window row's first Message is its list row's first Mess
                 .{ .name = "sl11-exact", .text = repeat('b', 512), .parts = false, .prefix = repeat('b', 512) },
                 .{ .name = "sl11-split", .text = repeat('c', 511) ++ "é" ++ "tail", .parts = false, .prefix = repeat('c', 511) },
                 .{ .name = "sl11-whole", .text = repeat('d', 510) ++ "é" ++ "tail", .parts = false, .prefix = repeat('d', 510) ++ "é" },
-                // A Message from another Session carries its sender; a private Message serves no prefix.
+                // A Message from another Session carries its sender. (A private first Message is a corrupt Store, which the live row and the window both refuse.)
                 .{ .name = "sl11-peer", .text = "from a peer", .parts = false, .prefix = "from a peer", .mark = .peer },
-                .{ .name = "sl11-private", .text = "private words", .parts = false, .prefix = null, .mark = .private },
             };
             var made: [shapes.len][6]u8 = undefined;
             for (shapes, 0..) |shape, shape_index| {
@@ -1094,7 +1093,6 @@ test "SL-11: an Archived window row's first Message is its list row's first Mess
                         const position = try testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{peer.slice()});
                         try testing.exec(&storage, "UPDATE message_admission SET source_kind=2,sender_session_ref=?1,sender_position=?2 WHERE session_ref=?3", .{ peer.slice(), position, session.slice() });
                     },
-                    .private => try testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM message_admission WHERE session_ref=?1)", .{session.slice()}),
                 }
                 var archive_key: [64]u8 = undefined;
                 var archive = try archiveCommand(try std.fmt.bufPrint(&archive_key, "{s}-archive", .{shape.name}), session.slice(), true);
@@ -1125,9 +1123,9 @@ test "SL-11: an Archived window row's first Message is its list row's first Mess
                     try std.testing.expectEqualDeep(want.content, got.content);
                     try std.testing.expectEqualDeep(want.sender, got.sender);
                     try std.testing.expectEqual(shapes[shape_at].mark == .peer, got.sender != null);
-                    // The prefix is the Message's own leading bytes, raw, for inline Text, and nothing for parts or private Text.
+                    // The prefix is the Message's own leading bytes, raw, for inline Text, and nothing for parts.
                     switch (got.content) {
-                        .text => try std.testing.expectEqual(shapes[shape_at].mark != .private, got.has_prefix),
+                        .text => try std.testing.expect(got.has_prefix),
                         .parts => try std.testing.expect(!got.has_prefix),
                     }
                 }
