@@ -20,7 +20,8 @@ pub fn parseUrl(url: []const u8) error{InvalidUrl}!PrKey {
     if (parts.next() != null or !std.mem.eql(u8, pull, "pull")) return error.InvalidUrl;
     if (!validOwner(owner) or !validRepo(repo) or number_text.len == 0 or number_text.len > 20) return error.InvalidUrl;
     for (number_text) |c| if (!std.ascii.isDigit(c)) return error.InvalidUrl;
-    // A unique spelling ensures the approval and the API path name the same PR.
+    // One numeric spelling per pull request number; owner and repository keep the
+    // caller's case, which GitHub treats as the same pull request.
     if (number_text[0] == '0') return error.InvalidUrl;
     const number = std.fmt.parseInt(u64, number_text, 10) catch return error.InvalidUrl;
     return .{ .owner = owner, .repo = repo, .number = number };
@@ -105,6 +106,17 @@ pub const Reduction = struct {
     coverage: Coverage,
 };
 
+/// The dimensions of `current` that differ from `previous`; everything differs from no previous snapshot.
+pub fn changesBetween(previous: ?Snapshot, current: Snapshot) Changes {
+    const old = previous orelse return .{ .head = true, .lifecycle = true, .checks = true, .reviews = true };
+    return .{
+        .head = !std.mem.eql(u8, &old.head, &current.head),
+        .lifecycle = old.lifecycle != current.lifecycle,
+        .checks = old.checks != current.checks,
+        .reviews = old.reviews != current.reviews,
+    };
+}
+
 /// The transport must collect checks for head_before, re-read head_after,
 /// bound each input slice, and mark truncated or unavailable sources partial.
 /// A head race invalidates the entire observation; nothing stale is emitted.
@@ -117,12 +129,7 @@ pub fn reduce(previous: ?Snapshot, observation: Observation) error{HeadChanged}!
         .checks = reduceChecks(observation.checks, observation.checks_coverage),
         .reviews = reduceReviews(observation.reviews, observation.reviews_coverage, observation.review_requested),
     };
-    const changed: Changes = if (previous) |old| .{
-        .head = !std.mem.eql(u8, &old.head, &snapshot.head),
-        .lifecycle = old.lifecycle != snapshot.lifecycle,
-        .checks = old.checks != snapshot.checks,
-        .reviews = old.reviews != snapshot.reviews,
-    } else .{ .head = true, .lifecycle = true, .checks = true, .reviews = true };
+    const changed = changesBetween(previous, snapshot);
     return .{
         .snapshot = snapshot,
         .changed = changed,

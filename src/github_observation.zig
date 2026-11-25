@@ -131,9 +131,10 @@ pub fn reviews(root: Value, head: watch.Digest, out: *Reviews) !Page {
         // Pending reviews have no submission timestamp and carry no decision.
         if (std.mem.eql(u8, state, "PENDING")) continue;
         const decision: watch.ReviewDecision = if (std.mem.eql(u8, state, "APPROVED")) .approved else if (std.mem.eql(u8, state, "CHANGES_REQUESTED")) .changes_requested else if (std.mem.eql(u8, state, "DISMISSED")) .dismissed else if (std.mem.eql(u8, state, "COMMENTED")) .comment else return error.InvalidResponse;
-        const user_id = try number(try field(try field(item, "user"), "id"));
+        // GitHub reports a deleted account's review with a null user.
+        const user_value = try field(item, "user");
         var buf: [20]u8 = undefined;
-        const user = std.fmt.bufPrint(&buf, "{d}", .{user_id}) catch unreachable;
+        const user = if (user_value == .null) "ghost" else std.fmt.bufPrint(&buf, "{d}", .{try number(try field(user_value, "id"))}) catch unreachable;
         const commit = try digest(try field(item, "commit_id"));
         try out.append(.{ .reviewer = identity("reviewer", user), .submitted_at = try timestamp(try field(item, "submitted_at")), .id = try number(try field(item, "id")), .decision = decision, .applicable = std.mem.eql(u8, &commit, &head) });
     }
@@ -200,6 +201,12 @@ test "PRW-5 remote responses normalize to typed checks and reviews" {
     result.len = 0;
     _ = try reviews(review_doc.value, @splat(0xbb), &result);
     try std.testing.expect(!result.items[0].applicable);
+    // A review by a deleted account has a null user and must not fail the observation.
+    var ghost_doc = try std.json.parseFromSlice(Value, a, "[{\"id\":4,\"user\":null,\"state\":\"APPROVED\",\"commit_id\":\"" ++ sha ++ "\",\"submitted_at\":\"2026-01-01T00:00:00Z\"}]", .{});
+    defer ghost_doc.deinit();
+    result.len = 0;
+    _ = try reviews(ghost_doc.value, @splat(0xaa), &result);
+    try std.testing.expect(result.items[0].applicable);
     var malformed = try std.json.parseFromSlice(Value, a, "{\"total_count\":1,\"statuses\":[{\"state\":\"success\"}]}", .{});
     defer malformed.deinit();
     try std.testing.expectError(error.InvalidResponse, statuses(malformed.value, @splat(0xaa), &out));

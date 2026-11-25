@@ -33,7 +33,7 @@ pub const Delivery = struct {
         if (latest.snapshot.lifecycle == .closed or latest.snapshot.lifecycle == .merged) return null;
         if (self.frozen) |value| return value;
         if (!self.hasUnpublished()) return null;
-        const changed = changes(self.accepted, latest.snapshot);
+        const changed = watch.changesBetween(self.accepted, latest.snapshot);
         const value: Value = .{
             .sequence = self.next_sequence,
             .snapshot = latest.snapshot,
@@ -48,7 +48,7 @@ pub const Delivery = struct {
     /// Only an accepted or replayed write advances the sequence. A definite
     /// refusal may be replaced by a newer aggregate with the same key.
     pub fn acceptedValue(self: *Delivery) void {
-        const value = self.frozen orelse unreachable;
+        const value = self.frozen orelse return;
         self.accepted = value.snapshot;
         self.next_sequence += 1;
         self.frozen = null;
@@ -68,16 +68,6 @@ pub const Delivery = struct {
 
 fn sameState(a: watch.Snapshot, b: watch.Snapshot) bool {
     return std.mem.eql(u8, &a.head, &b.head) and a.lifecycle == b.lifecycle and a.checks == b.checks and a.reviews == b.reviews;
-}
-
-fn changes(previous: ?watch.Snapshot, current: watch.Snapshot) watch.Changes {
-    const old = previous orelse return .{ .head = true, .lifecycle = true, .checks = true, .reviews = true };
-    return .{
-        .head = !std.mem.eql(u8, &old.head, &current.head),
-        .lifecycle = old.lifecycle != current.lifecycle,
-        .checks = old.checks != current.checks,
-        .reviews = old.reviews != current.reviews,
-    };
 }
 
 fn fixture(checks: watch.Checks, lifecycle: watch.Lifecycle) watch.Reduction {
@@ -174,6 +164,21 @@ test "PRW-37 terminal outcome includes the latest unpublished observation" {
     const snapshot = parsed.value.object.get("last_snapshot").?.object;
     try std.testing.expectEqualStrings("failing", snapshot.get("checks").?.string);
     try std.testing.expect(parsed.value.object.get("delivery_coalesced").?.bool);
+}
+
+test "PRW-37 an unpublished open observation marks a failed end as coalesced" {
+    var buffer: [1024]u8 = undefined;
+    for ([_]bool{ true, false }) |unpublished| {
+        var delivery: Delivery = .{};
+        delivery.observe(fixture(.pending, .open));
+        _ = delivery.candidate();
+        delivery.acceptedValue();
+        if (unpublished) delivery.observe(fixture(.failing, .open));
+        const encoded = try encodeEnd(&delivery, .network_failure, null, &buffer);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, encoded, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(unpublished, parsed.value.object.get("delivery_coalesced").?.bool);
+    }
 }
 
 test "PRW-38 a terminal-only observation is not a dropped update" {
