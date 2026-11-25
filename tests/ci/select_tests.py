@@ -1101,7 +1101,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     fast_targets = fast_tier(targets, paths, bootstrap_only, linked or set(), unclassified,
                              shared_helper_importers(paths, graph))
     # A Store migration step or migration input runs the live MySQL migration check on the PR (ci_plan's
-    # pr_mysql_migration), which lives in test-store. So does test code with a MySQL leg: the PR is otherwise
+    # pr_mysql_migration), which lives in test-store. So does Zig code with a MySQL leg: the PR is otherwise
     # SQLite-only, and #2179 (history.zig) first met MySQL in Promote.
     mysql_legs = mysql_leg_tests(changed, contents)
     mysql_migration = touches_mysql_migration(changed, contents) or bool(mysql_legs)
@@ -1160,14 +1160,15 @@ def revision_text(commit, path):
     return shown.stdout if shown.returncode == 0 else None
 
 
-# What marks test code as having a MySQL leg: the engine loop, or the live MySQL fixture owner itself.
-MYSQL_LEG = re.compile(r"\bforEachEngine\b|@import\(\"(?:[./]*store/)?mysql_testing\.zig\"\)")
+# What marks Zig code as running a MySQL leg: a call of the engine loop (a test file or a production file's inline
+# tests, as read_transcript.zig has), or an import of the live MySQL fixture owner itself.
+MYSQL_LEG = re.compile(r"\bforEachEngine\(|@import\(\"(?:[./]*store/)?mysql_testing\.zig\"\)")
 
 
 def mysql_leg_tests(paths, contents):
-    """The changed test sources whose new text runs a MySQL leg; contents maps a path to its (base, head) text."""
+    """The changed Zig sources whose new text runs a MySQL leg; contents maps a path to its (base, head) text."""
     return sorted(path for path in paths
-                  if matches(path, TEST_CODE)
+                  if path.startswith("src/") and path.endswith(".zig")
                   and MYSQL_LEG.search((contents or {}).get(path, ("", ""))[1] or ""))
 
 

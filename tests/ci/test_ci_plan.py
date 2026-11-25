@@ -321,7 +321,8 @@ pub const migrations = [_]Migration{
             (['src/store/history.zig'], {'src/store/history.zig': ('', 'const mysql_testing = @import("mysql_testing.zig");')}, True),
             (['src/store/tests/agent.zig'], {'src/store/tests/agent.zig': ('', 'try store_testing.forEachEngine(run);')}, True),
             (['src/store/tests/agent.zig'], {'src/store/tests/agent.zig': ('', 'test "sqlite only" {}')}, False),
-            # Production code that names the loop is not a MySQL leg.
+            # A production file's inline engine test is a MySQL leg; a comment naming the loop is not.
+            (['src/read_transcript.zig'], {'src/read_transcript.zig': ('', 'try storage.testing.forEachEngine(run);')}, True),
             (['src/store/Store.zig'], {'src/store/Store.zig': ('', '// forEachEngine runs both')}, False),
         )
         for paths, contents, expected in cases:
