@@ -144,7 +144,7 @@ Proposal metadata grants no authorization: a later approval still binds the fres
 ### Public Session activity
 
 Session activity is a separate projection with a row kind for each `Kind` in `src/activity_read.zig`, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), a sourced input (`received`, naming either its peer `sender` or its background `source_action`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
-The remaining kinds are `approval_requested` (a call whose Action was saved under an `ask` revision, D115), `session_changed` (a settings revision's change, D138), `compacted` (a successful compaction, D217) `model_call` (a resolved model Operation, D179) and `instruction`.
+The remaining kinds are `approval_requested` (a call whose Action was saved under an `ask` revision, D115), `session_changed` (a settings revision's change, D138), `compacted` (a successful compaction, D217), `model_call` (a resolved model Operation, D179) and `instruction`.
 An `instruction` row is the text a Turn was given as its System Instruction entry (Conversation entry kind `instruction`): `turn` and `revision` name the Turn and the authored revision, and `content` is the entry's text reference.
 The Skill catalog's instruction has no Turn and no authored revision, so both are null exactly for it.
 The row sits at the entry's own Session position, dated its `recorded_at`, so a model or client re-reading the Session sees what it was told; the `session_changed` row for `instructions` stays beside it, because configuring the text and giving it to a Turn are two facts at two positions.

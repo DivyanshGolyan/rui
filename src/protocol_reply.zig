@@ -2464,6 +2464,31 @@ test "CLI-17 activity_served_work" {
     }
 }
 
+test "an instruction row carries a Turn and a revision together, or neither" {
+    var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try facts.work.workspace.set("/work");
+    const content: @import("content_value.zig").Reference = .{ .length = 3, .digest = @splat(0xab) };
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    for ([_]struct { turn: ?u64, revision: ?u64, valid: bool }{
+        .{ .turn = 2, .revision = 3, .valid = true },
+        .{ .turn = null, .revision = null, .valid = true },
+        .{ .turn = 2, .revision = null, .valid = false },
+        .{ .turn = null, .revision = 3, .valid = false },
+    }) |row| {
+        facts.items[0] = .{ .position = 1, .ordinal = 0, .at = 5, .value = .{ .instruction = .{ .turn = row.turn, .revision = row.revision, .content = content } } };
+        var out = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&out, &facts);
+        if (!row.valid) {
+            try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(out.buffered(), .{}));
+            continue;
+        }
+        const parsed = try ActivityPage.parse(out.buffered(), .{});
+        const instruction = parsed.facts.items[0].value.instruction;
+        try std.testing.expectEqual(row.turn, instruction.turn);
+        try std.testing.expectEqual(row.revision, instruction.revision);
+    }
+}
+
 test "activity page creator is required nullable canonical provenance" {
     var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/work");

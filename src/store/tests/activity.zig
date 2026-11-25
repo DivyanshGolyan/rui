@@ -998,6 +998,24 @@ test "instruction rows serve each entry that gave the model its instructions, at
             }
             try std.testing.expectEqualSlices(usize, &.{ rows.len, 17, 17 }, &counts);
 
+            // Backward paging serves the newest instruction first, and a filter that omits the kind serves none.
+            var backward: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.instruction), .limit = 1 };
+            try backward.session.set(session.slice());
+            const newest = try store_core.activityPageForTesting(&storage, backward);
+            try std.testing.expectEqual(@as(usize, 1), newest.count);
+            try std.testing.expectEqual(rows[rows.len - 1].revision, newest.items[0].value.instruction.revision);
+            try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT max(session_position) FROM conversation_entry WHERE session_ref=?1 AND entry_kind=2", .{session.slice()}), newest.items[0].position);
+            var others: protocol.ActivityPage = .{ .kinds = .full, .limit = 255 };
+            others.kinds.remove(.instruction);
+            try others.session.set(session.slice());
+            while (true) {
+                const page = try store_core.activityPageForTesting(&storage, others);
+                for (page.items[0..page.count]) |item| try std.testing.expect(item.value != .instruction);
+                if (!page.more) break;
+                others.position = page.items[page.count - 1].position;
+                others.ordinal = page.items[page.count - 1].ordinal;
+            }
+
             // A private instruction is refused, not served.
             const refused = try store_testing.queryU64(&storage, "SELECT session_position FROM conversation_entry WHERE session_ref=?1 AND entry_kind=2 ORDER BY session_position LIMIT 1 OFFSET 3", .{session.slice()});
             try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND session_position=?2)", .{ session.slice(), refused });
