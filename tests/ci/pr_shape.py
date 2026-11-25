@@ -143,6 +143,32 @@ def screen_refusal(body) -> str | None:
     return None
 
 
+def frames_captured(directory) -> bool:
+    """verify-rui frames wrote this directory's ordered index.html."""
+    return bool(directory) and os.path.isfile(os.path.join(directory, "index.html"))
+
+
+def ready_refusal(changed_paths, body, *, base=None, repo=None, number=None, frames=None,
+                  needs=None, sticky=None) -> str | None:
+    """Everything admission will say about a PR's body, asked when the PR opens and when it turns ready.
+
+    Screens are on hand when verify-rui captured frames for this head (`frames`, checked at open) or the
+    bot's screenshot comment is on the PR (checked at ready). `needs` and `sticky` are the owners' functions,
+    replaceable so a test need not patch them.
+    """
+    if reason := refusal(changed_paths, body, base=base):
+        return reason
+    needs, sticky = needs or screens_required, sticky or sticky_screen_evidence
+    if needs(changed_paths, base=base) and (reason := screen_refusal(body)):
+        if frames_captured(frames) or (number and sticky(repo, number)):
+            return None
+        if number:
+            return f"{reason} Screens are stale or missing for this head: re-run verify-rui publish DIR --pr {number}."
+        return (f"{reason} A PR opens with its screens already captured: run verify-rui frames before "
+                "opening and pass `open_pr.py open --frames DIR`, or state 'No screen change: <reason>'.")
+    return None
+
+
 def live_body(env_body) -> str:
     body = env_body
     repo, number = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("PR_NUMBER")
@@ -159,9 +185,9 @@ def live_body(env_body) -> str:
     return body
 
 
-def sticky_screen_evidence() -> bool:
+def sticky_screen_evidence(repo=None, number=None) -> bool:
     """Accept a bot screenshot comment only for the current PR head."""
-    repo, number = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("PR_NUMBER")
+    repo, number = repo or os.environ.get("GITHUB_REPOSITORY"), number or os.environ.get("PR_NUMBER")
     if not repo or not number:
         return False
     try:

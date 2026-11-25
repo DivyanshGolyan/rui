@@ -94,6 +94,7 @@ Fix a repeat at the enforcing owner, not here; drop a row once its mistake can n
 
 | Rule | Enforced by |
 | --- | --- |
+| A PR opens, and turns ready, only with a body admission accepts: Goal line, Summary sketch for `src/` changes, and for UI files either `No screen change: <reason>` or screens already captured (`open_pr.py open --frames DIR`). | `open_pr.py open` and `open_pr.py ready` call `pr_shape.ready_refusal`; `.claude/hooks/ready_pr_shape.py` asks it for MCP create and ready calls; `gh pr create` and `gh pr ready` typed by hand are not covered. |
 | A PR merges only after its latest completed review is clean (Codex's, or while Codex is out the `pr-reviewer` agent's). | `.claude/hooks/review_before_merge.py` refuses the merge; it reads reviews through `tests/ci/merge_review.py`; [Review evidence](docs/agents/landing.md#review-evidence). |
 
 ## Status updates and reports
