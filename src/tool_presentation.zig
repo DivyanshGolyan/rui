@@ -163,7 +163,7 @@ pub const ToolPresentation = struct {
     code: Code,
     /// The mark this row shows, decided once by `signOf` where the row is read. Every surface maps a
     /// Sign to its own glyph, so none of them repeats that rule.
-    sign: Sign = .finished,
+    sign: Sign,
     publication_position: ?u64,
 
     pub const Code = enum { unresolved, pending_permission, background, succeeded, failed, timed_out, indeterminate, storage_failed, spawn_failed, cancelled, infrastructure_shutdown, denied, unknown_tool, invalid_arguments };
