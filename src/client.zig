@@ -151,6 +151,7 @@ pub const Requests = struct {
     }
 
     pub fn observeMessage(self: Requests, address: *const protocol_reply.MessageAddress) !protocol_reply.ObservationReply {
+        try self.check();
         const paths = try resolveClientPaths(self.io, address.store.slice());
         return self.observeMessageAt(&paths, address);
     }
