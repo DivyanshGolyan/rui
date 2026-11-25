@@ -923,7 +923,7 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     const lower = if (forward) request.position + 1 else if (boundary) |item| item.position else 0;
     const upper = if (forward) (if (boundary) |item| item.position else end) else if (request.position == 0) end else @min(end, request.position - @intFromBool((request.ordinal orelse 0) == 0));
     const last = if (forward) boundary else null;
-    const call_position = if (last) |item| item.position else end;
+    const call_position = activity_facts.queueCutoff(end, forward, page.more, if (last) |item| item.position else null);
     var missing: missing_assistant_entry.Result = null;
     var calls: CallRows = .{ .activity = &page.call_activity, .args = .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null } };
     var waiting: QueuedMessages = .{};
