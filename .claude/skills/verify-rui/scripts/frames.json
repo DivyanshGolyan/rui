@@ -4793,7 +4793,7 @@
     },
     {
       "name": "chat-info",
-      "note": "Natural-height info leaves completed feed above retained input; null Context; one bottom footer",
+      "note": "Natural-height info leaves completed feed above retained input; numeric Context; one bottom footer",
       "open": "Retry deadline info",
       "steps": [
         {
@@ -4817,6 +4817,7 @@
         "Allowed tools",
         "Folder",
         "Model",
+        "Context",
         "Copy last answer",
         "Retry deadline info",
         "esc",
@@ -4826,7 +4827,6 @@
         "› keep this retry draft"
       ],
       "absent": [
-        "Context",
         "unknown of",
         "alt+i info",
         "esc close",
@@ -4849,7 +4849,7 @@
     },
     {
       "name": "chat-info-model",
-      "note": "Inline Model grows into feed, not input; completed feed remains above; null Context; one bottom footer",
+      "note": "Inline Model grows into feed, not input; completed feed remains above; numeric Context; one bottom footer",
       "open": "Retry deadline info",
       "steps": [
         {
@@ -4880,6 +4880,7 @@
       ],
       "expect": [
         "Model",
+        "Context",
         "gpt-6.1-sol",
         "Retry deadline info",
         "esc",
@@ -4889,7 +4890,6 @@
         "› keep this retry draft"
       ],
       "absent": [
-        "Context",
         "unknown of",
         "alt+i info",
         "Filter:",
