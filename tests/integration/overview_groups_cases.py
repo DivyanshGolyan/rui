@@ -8,6 +8,7 @@ import time
 import model_fixture as fixture
 from host_process import wait_for
 from overview_fixture import world
+from terminal_screen import chat_footer_shown, names_chat
 
 PEER_PREFIX = (pathlib.Path(__file__).resolve().parents[2] / "src" / "peer_message.txt").read_text().split("{}", 1)[0]
 
@@ -80,7 +81,8 @@ def needs_you():
             assert mark.fg is not None and mark.fg != ordinary.fg, (mark, ordinary)
             assert screen.style("Asks before running").bold, frame
             screen.keys(b"\r")
-            opened = screen.contains("Asks before running · gpt-6-luna")
+            opened = screen.wait(lambda frame: names_chat(screen.title, "Asks before running") and chat_footer_shown(frame)
+                                 and "gpt-6-luna" in frame, "the Session that asks opens, the terminal title naming it")
             assert "Answered already" not in opened, opened
     print("overview groups: an Action's wait leads the flat list, `●` in the attention colour, selected, with minute-scale state age", flush=True)
 

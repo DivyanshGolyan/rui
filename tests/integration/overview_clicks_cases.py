@@ -8,6 +8,7 @@ import threading
 import model_fixture as fixture
 from host_process import wait_for
 from overview_fixture import world
+from terminal_screen import chat_footer_shown, names_chat
 
 MODEL = "gpt-6-luna"
 WIDTH = 99
@@ -66,11 +67,12 @@ def click_label(screen, frame, label):
 
 
 def is_overview(frame):
-    return "+ New chat" in frame and "Settings" in frame and "enter open" not in frame and "What shall we work on?" not in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
+    return "+ New chat" in frame and "Settings" in frame and "enter open" not in frame and "What shall we work on?" not in frame and not chat_footer_shown(frame)
 
 
-def conversation_of(label):
-    return lambda frame: any(line.startswith(f" ‹ {label} · {MODEL}") for line in frame.split("\n")) and not is_overview(frame)
+def conversation_of(screen, label):
+    """The chat `label` is open: the terminal title names it and the chat footer, which never does, is drawn."""
+    return lambda frame: names_chat(screen.title, label) and chat_footer_shown(frame)
 
 
 def back_to_overview(screen, *markers):
@@ -93,22 +95,22 @@ def opening_and_views():
         with w.overview(columns=WIDTH, rows=30) as screen:
             screen.wait(lambda frame: "   alpha" in frame and "   bravo" in frame, "both answered rows")
             screen.keys(b"\r")
-            opened = screen.wait(lambda frame: conversation_of("alpha")(frame) or conversation_of("bravo")(frame),
+            opened = screen.wait(lambda frame: conversation_of(screen, "alpha")(frame) or conversation_of(screen, "bravo")(frame),
                                  "Enter opens the selected Session")
-            selected = "alpha" if conversation_of("alpha")(opened) else "bravo"
+            selected = "alpha" if names_chat(screen.title, "alpha") else "bravo"
             other = "bravo" if selected == "alpha" else "alpha"
             assert f"answer from {selected}" in opened and f"answer from {other}" not in opened, opened
             listed = back_to_overview(screen, "   alpha", "   bravo")
 
             click_label(screen, listed, other)
-            screen.wait(conversation_of(other), f"a click opens {other}")
+            screen.wait(conversation_of(screen, other), f"a click opens {other}")
             screen.wait(lambda frame: f"answer from {other}" in frame, f"{other}'s answer")
             assert f"answer from {selected}" not in screen.text, screen.text
             assert f"ask {other}" in screen.text, screen.text
             listed = back_to_overview(screen, "   alpha", "   bravo")
 
             click_label(screen, listed, other)
-            screen.wait(lambda frame: conversation_of(other)(frame) and f"answer from {other}" in frame,
+            screen.wait(lambda frame: conversation_of(screen, other)(frame) and f"answer from {other}" in frame,
                         f"a click on selected {other} opens it")
             back_to_overview(screen, "   alpha", "   bravo")
         print("overview clicks: a click on a Session row other than the selected one opens the clicked Session's "
@@ -168,7 +170,7 @@ def flat_list():
             assert all(re.match(r"   [│╰]   peer-[0-6] ", lines[row_of(listed, peer) - 1]) for peer in peers_by_label), listed
             label = max(peers_by_label, key=lambda peer: row_of(listed, peer))
             click_label(screen, listed, label)
-            screen.wait(lambda frame: conversation_of(label)(frame) and "peer done" in frame,
+            screen.wait(lambda frame: conversation_of(screen, label)(frame) and "peer done" in frame,
                         f"a click opens the last peer {label}")
             back_to_overview(screen, f"   {label}")
         print("overview clicks: all finished rows remain visible under their lead without headings or folds, and the last opens directly", flush=True)
@@ -281,7 +283,7 @@ def new_chat_aliases():
             for alias in ("/new", "/clear"):
                 listed = screen.contains("Old unchanged")
                 click_label(screen, listed, "Old unchanged")
-                screen.wait(conversation_of("Old unchanged"), "open the old chat")
+                screen.wait(conversation_of(screen, "Old unchanged"), "open the old chat")
                 screen.keys(alias + " foo\r")
                 screen.contains("! Usage:")
                 assert_inspection_unchanged(before, settled_inspection(w, old))

@@ -203,6 +203,7 @@ fn freeze(self: *Self, phase: ReadPhase) *Job {
 
     const job = &self.job;
     job.local_message_key = self.submission.messageKey() orelse self.submission.lastMessageKey();
+    if (phase == .activity and self.reading.opening) job.accepted = self.submission.acceptedProbe();
     job.latest_ending = self.live.latest_ending;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -452,7 +453,7 @@ fn footerKeyFacts(self: *const Self) session_keys.FooterFacts {
 }
 
 fn hasEffort(self: *const Self) bool {
-    return if (self.footerFacts()) |value| value.effort != null else false;
+    return if (self.line.facts(self.home)) |value| value.effort != null else false;
 }
 
 fn prepareFooterChoice(self: *Self) void {
@@ -490,12 +491,6 @@ fn openFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
         .effort => .effort,
     });
     self.footer.pending = null;
-}
-
-fn footerFacts(self: *const Self) ?@import("session_line.zig").Facts {
-    var facts = self.line.facts(&self.hint, self.session) orelse return null;
-    facts.home = self.home;
-    return facts;
 }
 
 fn infoBackend(self: *Self) ChatInfo.Backend {
@@ -671,7 +666,7 @@ fn sayBusy(self: *Self, action: ?session_notice.Action, letter: bool) void {
 }
 
 pub fn titleName(self: *const Self) []const u8 {
-    return if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session;
+    return self.line.title(&self.hint, self.session);
 }
 
 fn nowMs(self: *const Self) u64 {
@@ -1261,7 +1256,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .stoppable = said.stoppable,
         .details = original_presentation.details,
         .repair_details = original_presentation.repair_details,
-        .facts = .{ .current = self.footerFacts(), .name = self.session, .archive = self.line.archive_state },
+        .facts = .{ .current = self.line.facts(self.home), .archive = self.line.archive_state },
         .notice = self.shown_notice.current(now_ms) orelse queued_note orelse said.notice,
         .overview = said.text,
         .info_footer = if (self.info_open) self.app_info.footerWidget() else null,
@@ -2630,6 +2625,20 @@ fn refreshAcceptedMessage(self: *Self) void {
     self.dirty = true;
 }
 
+/// The refresh also asked the Host what became of the held accepted Message, which the loaded page
+/// may not hold. A row the page did show has already settled it, and the answer then adds nothing.
+fn settleAccepted(self: *Self, key: [36]u8, verdict: Submission.Verdict) void {
+    if (!self.submission.settleAccepted(key, verdict)) return;
+    switch (verdict) {
+        .taken => self.notice = "Message sent earlier in the conversation",
+        .queued => self.notice = "Message accepted and still queued",
+        .stopped => self.shown_notice.show("! Stopped before it ran · send it again to run it", self.nowMs()),
+        .unverified => self.notice = "Message accepted; could not confirm it yet · Enter asks again",
+        .elsewhere => self.notice = "Message accepted on another Store; reopen that Store to settle it",
+    }
+    self.dirty = true;
+}
+
 fn retryable(self: *const Self) ?RetryFence {
     const ending = self.live.latest_ending orelse return null;
     if (ending.cause.key == null or self.hostHeld()) return null;
@@ -3462,6 +3471,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             if (result.attached_pending) |pending| if (self.screen.feed.indexOf(pending.row) != null) {
                 _ = self.submission.observe(.{ .pending = .{ .key = pending.key, .position = pending.row.position, .page_all = true, .adopted = true, .queue = self.queueFacts() } });
             };
+            if (self.job.accepted) |probe| if (result.accepted) |verdict| self.settleAccepted(probe.key, verdict);
             if (self.job.open_status or self.job.watch_status) try self.applyStatus();
             if (result.line) |*line| self.line = line.*;
             if (result.hint) |*hint| self.hint = hint.*;
@@ -6812,7 +6822,7 @@ test "SUI-33 App Session shell gutter and back control follow list visibility th
         try std.testing.expectEqualStrings(if (wide) "g" else "‹", screen.readCell(start + 1, 24).?.char.grapheme);
         var facts: std.Io.Writer.Allocating = .init(arena);
         for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 24).?.char.grapheme);
-        try std.testing.expectEqualStrings(if (wide) " gpt-5.5 · low" else " ‹ demo · gpt-5.5 · low", std.mem.trimEnd(u8, facts.written(), " "));
+        try std.testing.expectEqualStrings(if (wide) " gpt-5.5 · low" else " ‹ gpt-5.5 · low", std.mem.trimEnd(u8, facts.written(), " "));
         try std.testing.expect(fixture.root.session.?.eql(fixture.widget));
         try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
         try std.testing.expectEqualDeep(anchor, fixture.screen.anchor);
@@ -6924,7 +6934,7 @@ test "App Session accepted message refresh keeps the next draft intact without p
     defer fixture.deinit();
     const self = fixture.self;
     const original = self.input.submitText("accepted original");
-    self.submission.holdAccepted(original, @splat('K'));
+    self.submission.holdAccepted(original, @splat('K'), .{});
     self.submission.accepted = .{ .kind = .message, .key = @splat('K') };
     defer self.submission.disposeMessage();
     _ = self.input.append("next draft");
@@ -6943,6 +6953,48 @@ test "App Session accepted message refresh keeps the next draft intact without p
     try std.testing.expect(self.submission.retry == null);
     const shown = try fixture.rows();
     try std.testing.expect(ChromeFixture.find(&shown, "◌ accepted original") != null);
+}
+
+test "SUI-165 a refresh asks the Host about a held accepted Message and settles it on the answer" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    for (std.enums.values(Submission.Verdict), 0..) |verdict, round| {
+        const key: [36]u8 = @splat(@intCast('A' + round));
+        _ = self.submission.observe(.{ .begin = .{ .key = key, .before = null } });
+        var store: protocol.Bounded(protocol.max_store_bytes) = .{};
+        try store.set("/canonical-store");
+        self.submission.holdAccepted(self.input.submitText("accepted original"), key, store);
+        defer self.submission.disposeMessage();
+        _ = self.input.append("next draft");
+        self.reading.opening = false;
+        try std.testing.expect(self.freeze(.activity).accepted == null);
+        self.reading.opening = true;
+        try std.testing.expectEqual(key, self.freeze(.activity).accepted.?.key);
+        try std.testing.expectEqualStrings("/canonical-store", self.job.accepted.?.store.slice());
+        self.notice = null;
+        self.settleAccepted(key, verdict);
+        const released = verdict == .taken or verdict == .stopped;
+        try std.testing.expectEqual(!released, self.submission.messageHeld());
+        const said: []const u8 = switch (verdict) {
+            .taken => "Message sent earlier in the conversation",
+            .queued => "Message accepted and still queued",
+            .unverified => "Message accepted; could not confirm it yet · Enter asks again",
+            .elsewhere => "Message accepted on another Store; reopen that Store to settle it",
+            .stopped => "! Stopped before it ran · send it again to run it",
+        };
+        if (verdict == .stopped) {
+            try std.testing.expectEqualStrings(said, self.shown_notice.bytes[0..self.shown_notice.len]);
+            self.shown_notice.len = 0;
+        } else try std.testing.expectEqualStrings(said, self.notice.?);
+        try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+        // A page that already accounted for the Message leaves nothing for the answer to say.
+        self.notice = null;
+        self.settleAccepted(key, verdict);
+        try std.testing.expectEqual(released, self.notice == null and self.shown_notice.len == 0);
+        self.input.clear();
+    }
 }
 
 fn optimisticEnteredFrame() !void {
@@ -6973,7 +7025,8 @@ test "App Session's status bar never says Sent: an accepted Message's row is its
     try fixture.init();
     defer fixture.deinit();
     const self = fixture.self;
-    try std.testing.expect(std.mem.startsWith(u8, (try fixture.rows())[23], "‹ k7m2qx"));
+    try std.testing.expect(std.mem.startsWith(u8, (try fixture.rows())[23], "‹"));
+    try std.testing.expect(std.mem.indexOf(u8, (try fixture.rows())[23], "k7m2qx") == null);
     try std.testing.expect(std.mem.indexOf(u8, (try fixture.rows())[23], "alt+i info") == null);
     ChromeFixture.overview_says = "Port overview to vxfw finished";
     defer ChromeFixture.overview_says = null;
@@ -7036,20 +7089,21 @@ test "App Session's facts row ends with the archive badge while the Session is a
             return shown[ChromeFixture.find(shown, "‹").?];
         }
     }.row;
-    try std.testing.expect(std.mem.startsWith(u8, facts(&try fixture.rows()), "‹ k7m2qx"));
+    const active = facts(&try fixture.rows());
+    try std.testing.expect(std.mem.indexOf(u8, active, "k7m2qx") == null);
     self.line.archive_state = .archived;
     const archived = facts(&try fixture.rows());
-    try std.testing.expect(std.mem.startsWith(u8, archived, "‹ k7m2qx · Archived"));
+    try std.testing.expect(std.mem.startsWith(u8, archived, "‹ Archived"));
     try std.testing.expect(std.mem.indexOf(u8, archived, "/unarchive") == null);
     self.line.archive_state = .archiving;
-    try std.testing.expect(std.mem.startsWith(u8, facts(&try fixture.rows()), "‹ k7m2qx · Stopping and archiving"));
+    try std.testing.expect(std.mem.startsWith(u8, facts(&try fixture.rows()), "‹ Stopping and archiving"));
     self.shown_notice.show("Copied 3 lines", ChromeFixture.now());
     const shown = try fixture.rows();
-    try std.testing.expect(std.mem.startsWith(u8, facts(&shown), "‹ k7m2qx · Stopping and archiving"));
+    try std.testing.expect(std.mem.startsWith(u8, facts(&shown), "‹ Stopping and archiving"));
     try std.testing.expect(ChromeFixture.findEnding(&shown, "Copied 3 lines") != null);
 }
 
-test "App Session Footer clips identity in terminal cells" {
+test "App Session Footer never shows the chat name and clips its facts in terminal cells" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -7058,8 +7112,9 @@ test "App Session Footer clips identity in terminal cells" {
     try self.line.label.?.set("Port the overview to vxfw and keep its key table");
     try self.line.model.set("gpt-6-sol");
     const shown = try fixture.rows();
-    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ Port the overview to vxfw and keep its key table · gpt-6-sol · low"));
-    try std.testing.expectEqualStrings("Port the overview to vxfw and keep its key table", self.line.label.?.slice());
+    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ gpt-6-sol · low"));
+    try std.testing.expect(std.mem.indexOf(u8, shown[23], "Port the overview") == null);
+    try std.testing.expectEqualStrings("Port the overview to vxfw and keep its key table", self.titleName());
     try std.testing.expect(session_line.cells(shown[23], .unicode) <= 80);
 }
 
@@ -7074,7 +7129,8 @@ test "App Session Footer notice replaces the stop hint without changing stoppabi
     defer ChromeFixture.overview_says = null;
     const shown = try fixture.rows();
     try std.testing.expect(ChromeFixture.findEnding(&shown, "Port overview to vxfw finished") != null);
-    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ k7m2qx"));
+    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹"));
+    try std.testing.expect(std.mem.indexOf(u8, shown[23], "k7m2qx") == null);
     try std.testing.expect(std.mem.endsWith(u8, shown[23], "Port overview to vxfw finished"));
     try std.testing.expect(std.mem.indexOf(u8, shown[23], "ctrl+x stop") == null);
     try std.testing.expect(self.chrome.stoppable);
@@ -7547,7 +7603,7 @@ test "App Session footer takes list visibility from Root across desktop and phon
         var row: std.Io.Writer.Allocating = .init(arena);
         for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 28).?.char.grapheme);
         try std.testing.expectEqual(@as(usize, if (case.list) 0 else 1), std.mem.count(u8, row.written(), "‹"));
-        try std.testing.expectEqual(!case.list, std.mem.indexOf(u8, row.written(), "k7m2qx") != null);
+        try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, row.written(), "k7m2qx"));
         try std.testing.expectEqualStrings("┄", screen.readCell(chat_col, 27).?.char.grapheme);
         try std.testing.expectEqual(!case.list, std.mem.trim(u8, row.written(), " ").len != 0);
     }
@@ -7689,7 +7745,7 @@ fn firstRows(text: []const u8, count: usize) []const u8 {
     return text[0..end];
 }
 
-test "SUI-163 attached terminal rows fence older queue aggregates without losing newer ones" {
+test "SUI-166 attached terminal rows fence older queue aggregates without losing newer ones" {
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
     const self = &fixture.held.self;
@@ -7722,7 +7778,7 @@ test "SUI-163 attached terminal rows fence older queue aggregates without losing
     try std.testing.expectEqualStrings("newer queued Message", newer.waiting.line);
 }
 
-test "SUI-163 a newer aggregate reuses its unchanged queued preview after another Message is taken" {
+test "SUI-166 a newer aggregate reuses its unchanged queued preview after another Message is taken" {
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
     const self = &fixture.held.self;
@@ -7745,14 +7801,14 @@ test "SUI-163 a newer aggregate reuses its unchanged queued preview after anothe
     try std.testing.expectEqualStrings("still waiting", waiting.waiting.line);
 }
 
-test "SUI-163 a replay page whose aggregate is refused still hands off the keyed pending Message" {
+test "SUI-166 a replay page whose aggregate is refused still hands off the keyed pending Message" {
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
     const self = &fixture.held.self;
     const ticket = self.input.submitText("local input");
     _ = self.submission.observe(.{ .begin = .{ .key = @splat('K'), .before = null } });
     _ = self.submission.observe(.{ .receipt = .{ .key = @splat('K'), .admission = 7 } });
-    self.submission.holdAccepted(ticket, @splat('K'));
+    self.submission.holdAccepted(ticket, @splat('K'), .{});
     defer self.submission.disposeMessage();
     try fixture.page(.opening, &.{.{ .key = 1, .text = "earlier\n" }}, true, true);
     // A newer aggregate is held: the replay's first page below is partial, so its cutoff is older.
@@ -7761,7 +7817,7 @@ test "SUI-163 a replay page whose aggregate is refused still hands off the keyed
     self.live.queued_line = .{ .admission = 7, .line = .{} };
     try self.live.queued_line.?.line.set("local input");
     try fixture.page(.scan, &.{.{ .key = 3, .text = "", .provisional = true, .message_key = @splat('K') }}, false, false);
-    try std.testing.expect(self.queue_horizon.roster.? == 100);
+    try std.testing.expect(self.queue_horizon.through == 100);
     try std.testing.expectEqual(queue_lifecycle.Phase.represented, self.submission.queue.message.?.phase);
 }
 
@@ -7777,7 +7833,7 @@ fn queuedAndTakenAcrossWork() !void {
         try std.testing.expect(std.mem.indexOf(u8, working, "› first request") != null);
         try std.testing.expect(std.mem.indexOf(u8, working, "Thinking") != null);
         const ticket = self.input.submitText("waiting one");
-        self.submission.holdAccepted(ticket, @splat('K'));
+        self.submission.holdAccepted(ticket, @splat('K'), .{});
         defer self.submission.disposeMessage();
         var first_line: queued_line.Line = .{};
         try first_line.set("waiting one");
@@ -7955,7 +8011,7 @@ fn localAppliedFill() !void {
     const ticket = self.input.submitText("local input");
     _ = self.submission.observe(.{ .begin = .{ .key = @splat('K'), .before = null } });
     _ = self.submission.observe(.{ .receipt = .{ .key = @splat('K'), .admission = 7 } });
-    self.submission.holdAccepted(ticket, @splat('K'));
+    self.submission.holdAccepted(ticket, @splat('K'), .{});
     defer self.submission.disposeMessage();
     try fixture.page(.opening, &.{}, true, true);
     self.live.queued = .{ .count = 2, .oldest_position = 1, .newest_admission = 7, .newest_position = 2 };
@@ -8064,7 +8120,7 @@ fn newerQueueHandoff() !void {
     const original = self.input.submitText("local original");
     _ = self.submission.observe(.{ .begin = .{ .key = @splat('K'), .before = null } });
     _ = self.submission.observe(.{ .receipt = .{ .key = @splat('K'), .admission = 7 } });
-    self.submission.holdAccepted(original, @splat('K'));
+    self.submission.holdAccepted(original, @splat('K'), .{});
     defer self.submission.disposeMessage();
     try fixture.page(.opening, &.{}, true, true);
     const before = try fixture.held.shown();
@@ -8091,7 +8147,7 @@ fn stoppedQueueHandoff() !void {
     defer fixture.destroy();
     const self = &fixture.held.self;
     const ticket = self.input.submitText("stopped original");
-    self.submission.holdAccepted(ticket, @splat('K'));
+    self.submission.holdAccepted(ticket, @splat('K'), .{});
     defer self.submission.disposeMessage();
     try fixture.page(.opening, &.{}, true, true);
     try fixture.page(.scan, &.{.{ .key = 2, .text = "◌ not sent\nother\n", .excluded_key = @splat('J') }}, true, true);
@@ -8136,7 +8192,7 @@ fn keyedAcceptedHandoff() !void {
     defer fixture.destroy();
     const self = &fixture.held.self;
     const original = self.input.submitText("accepted keyed original");
-    self.submission.holdAccepted(original, @splat('K'));
+    self.submission.holdAccepted(original, @splat('K'), .{});
     defer self.submission.disposeMessage();
     _ = self.input.append("next draft");
     try fixture.page(.opening, &.{.{ .key = 10, .text = "other message\n", .message_key = @splat('J') }}, true, true);
@@ -10284,7 +10340,7 @@ test "Enter while the Host line or opening holds sending keeps the draft, names 
         defer held.self.app_hooks.host = null;
         held.self.reading.opening = opening;
         defer held.self.reading.opening = false;
-        if (accepted) held.self.submission.holdAccepted(held.self.input.submitText("accepted earlier"), @splat('K'));
+        if (accepted) held.self.submission.holdAccepted(held.self.input.submitText("accepted earlier"), @splat('K'), .{});
         defer if (accepted) held.self.submission.disposeMessage();
         try held.keys("sent right after a restart\r");
         try std.testing.expect(held.self.submission.intent == null);
@@ -11180,8 +11236,8 @@ test "chat footer drawn model and effort clicks configure only this Session afte
         }
         try std.testing.expectEqual(.configure, self.info_effect);
         try std.testing.expect(!self.app_info.standaloneOpen());
-        try std.testing.expectEqualStrings("gpt-5.5", self.footerFacts().?.model);
-        try std.testing.expectEqual(model_capability.ReasoningEffort.high, self.footerFacts().?.effort.?);
+        try std.testing.expectEqualStrings("gpt-5.5", self.line.facts(self.home).?.model);
+        try std.testing.expectEqual(model_capability.ReasoningEffort.high, self.line.facts(self.home).?.effort.?);
         self.info_effect = .failed;
         try self.app_info.widget().handleEvent(&ctx, .tick);
         try std.testing.expect(self.app_info.standaloneOpen());
@@ -11210,9 +11266,10 @@ test "chat footer facts use current Session permission and applied default or ex
         self.line.effort = inspected.effort;
         self.line.left = 62;
         var buffer: [session_chrome.facts_bytes]u8 = undefined;
-        const text = session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode);
-        const want = if (explicit) "Chat · model · low" else "Chat · model · high";
+        const text = session_chrome.factsRow(&buffer, self.line.facts(self.home), null, width, .unicode);
+        const want = if (explicit) "model · low" else "model · high";
         try std.testing.expectEqualStrings(want, text);
+        try std.testing.expectEqualStrings("Chat", self.titleName());
     };
 }
 
@@ -11417,23 +11474,24 @@ test "chat footer permission transitions follow the current line with absent cur
         for ([_]bool{ before, !before }) |ask| {
             self.line.read.?.revision += 1;
             if (inspection == .current) self.inspection.sessions[self.inspection.status.?].permission = if (ask) .ask else .bypass;
-            const facts = self.footerFacts().?;
-            try std.testing.expectEqualStrings("Chat", facts.name);
+            const facts = self.line.facts(self.home).?;
+            try std.testing.expectEqualStrings("Chat", self.titleName());
             try std.testing.expectEqualStrings("model", facts.model);
             try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), facts.effort);
             try std.testing.expectEqual(@as(?u8, 62), facts.left);
             for ([_]u16{ 140, 46 }) |width| {
                 var buffer: [session_chrome.facts_bytes]u8 = undefined;
-                const text = session_chrome.factsRow(&buffer, facts, "ref", null, width, .unicode);
-                try std.testing.expectEqualStrings("Chat · model · low", text);
+                const text = session_chrome.factsRow(&buffer, facts, null, width, .unicode);
+                try std.testing.expectEqualStrings("model · low", text);
             }
         }
         self.line.read = null;
         if (self.inspection.status) |index| self.inspection.sessions[index].permission = .ask;
-        try std.testing.expect(self.footerFacts() == null);
+        try std.testing.expect(self.line.facts(self.home) == null);
         for ([_]u16{ 140, 46 }) |width| {
             var buffer: [session_chrome.facts_bytes]u8 = undefined;
-            try std.testing.expectEqualStrings("ref", session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode));
+            try std.testing.expectEqualStrings("", session_chrome.factsRow(&buffer, self.line.facts(self.home), null, width, .unicode));
+            try std.testing.expectEqualStrings(self.session, self.titleName());
         }
         var ctx = held.context();
         defer ctx.cmds.deinit(std.testing.allocator);
@@ -11720,12 +11778,12 @@ test "empty chat footer folder comes from current line with frontend home" {
     try self.line.folder.?.set("/home/u/code/rui");
     for ([_]usize{ 46, 140 }) |width| {
         var buffer: [session_chrome.facts_bytes]u8 = undefined;
-        try std.testing.expectEqualStrings("gpt-6.1-sol · low · ~/code/rui", session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode));
+        try std.testing.expectEqualStrings("gpt-6.1-sol · low · ~/code/rui", session_chrome.factsRow(&buffer, self.line.facts(self.home), null, width, .unicode));
     }
     self.line.folder = null;
-    try std.testing.expect(self.footerFacts().?.folder == null);
+    try std.testing.expect(self.line.facts(self.home).?.folder == null);
     self.line.read = null;
-    try std.testing.expect(self.footerFacts() == null);
+    try std.testing.expect(self.line.facts(self.home) == null);
 }
 
 test "empty chat composer placeholder follows current no-message facts" {
