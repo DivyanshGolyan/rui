@@ -716,14 +716,38 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
             if (self.root.session != null) {
                 try self.app_session.?.frontend.?.openPeer(ctx, &reference);
             } else {
-                self.opened = reference;
-                self.ops.open(self, ctx) catch |err| {
-                    if (self.app_session == null) self.app_session = .{ .session = reference, .frontend = null, .files = null, .ended = err };
-                    ctx.quit = true;
-                };
+                try self.openOrReturn(ctx, reference);
             }
             if (opening.browse) _ = try self.root.focusList(ctx);
         },
+    }
+}
+
+/// Opens the Session the overview chose. A followed link to a Session that no longer exists returns to the Session it was followed from, with a notice; any other failed open ends the app.
+fn openOrReturn(self: *Self, ctx: *vxfw.EventContext, reference: view.Reference) !void {
+    self.opened = reference;
+    self.ops.open(self, ctx) catch |err| {
+        const back = self.follow.return_to orelse return self.endFailedOpen(ctx, reference, err);
+        if (err != error.SessionNotFound) return self.endFailedOpen(ctx, reference, err);
+        self.follow.return_to = null;
+        try self.dropFailedOpen(ctx);
+        self.opened = back;
+        self.ops.open(self, ctx) catch |reopen_err| return self.endFailedOpen(ctx, back, reopen_err);
+        self.app_session.?.frontend.?.notice = "That Session no longer exists.";
+    };
+}
+
+fn endFailedOpen(self: *Self, ctx: *vxfw.EventContext, reference: view.Reference, err: anyerror) void {
+    if (self.app_session == null) self.app_session = .{ .session = reference, .frontend = null, .files = null, .ended = err };
+    ctx.quit = true;
+}
+
+/// Clears what a failed open left behind, so the Session it returns to opens as a normal open.
+fn dropFailedOpen(self: *Self, ctx: *vxfw.EventContext) !void {
+    if (self.root.session != null) try self.root.closeSession(ctx);
+    if (self.app_session) |left| {
+        self.app_session = null;
+        self.disposeSession(left);
     }
 }
 
@@ -5100,11 +5124,51 @@ test "a followed Session link opens the peer, Esc reopens the Session it left, t
     try std.testing.expect(!ctx.quit);
 }
 
-test "a Session link that no longer opens ends as any failed open, naming that Session" {
+test "a Session link that no longer opens returns to the Session it left with a notice" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    const Scratch = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    Scratch.dir = tmp.dir;
+    Scratch.count = 0;
+    var ops = fake_operations;
+    ops.open = struct {
+        fn open(self: *Self, ctx: *vxfw.EventContext) !void {
+            if (std.mem.eql(u8, &self.opened, "m3n4p5")) return error.SessionNotFound;
+            return openSession(self, ctx);
+        }
+    }.open;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6-luna" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.hooks.scratch = Scratch.scratch;
+    defer if (overview.app_session) |left| overview.disposeSession(left);
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    overview.follow.pending = "m3n4p5".*;
+    try overview.followNext(&ctx, "k7m2qx".*);
+    try std.testing.expect(!ctx.quit);
+    const reopened = overview.app_session.?;
+    try std.testing.expectEqualStrings("k7m2qx", &reopened.session);
+    try std.testing.expectEqualStrings("That Session no longer exists.", reopened.frontend.?.notice.?);
+    try std.testing.expectEqual(@as(?view.Reference, null), overview.follow.return_to);
+    try std.testing.expectEqual(@as(?view.Reference, null), overview.follow.pending);
+}
+
+test "a Session link that fails to open for another reason still ends the app, naming that Session" {
     var ops = fake_operations;
     ops.open = struct {
         fn open(_: *Self, _: *vxfw.EventContext) !void {
-            return error.SessionNotFound;
+            return error.Unexpected;
         }
     }.open;
     var cancellation: client.Cancellation = .{};
@@ -5118,7 +5182,7 @@ test "a Session link that no longer opens ends as any failed open, naming that S
     try std.testing.expect(ctx.quit);
     const unopened = overview.app_session.?;
     try std.testing.expectEqualStrings("m3n4p5", &unopened.session);
-    try std.testing.expectError(error.SessionNotFound, unopened.ended);
+    try std.testing.expectError(error.Unexpected, unopened.ended);
     try std.testing.expectEqualStrings("k7m2qx", &overview.follow.return_to.?);
     try std.testing.expectEqual(@as(?view.Reference, null), overview.follow.pending);
     overview.app_session = null;

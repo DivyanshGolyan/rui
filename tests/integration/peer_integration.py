@@ -261,14 +261,14 @@ def assistant_session_link_journey(installed, store, home, workspace, session_a,
         frame = keyed_frame(master, b"", lambda screen, x, y: showing(A_LABEL)(screen, x, y) and "Open worker" in screen)
         keyed_frame(master, pointer(frame, "Open worker"), showing(B_LABEL))
         frame = keyed_frame(master, b"\x1b", showing(A_LABEL))
-        os.write(master, pointer(frame, "Open missing"))
-        wait_for(lambda: caller.poll() is not None, "missing linked Session ends the terminal")
-        linked_status = caller.returncode
+        returned = keyed_frame(master, pointer(frame, "Open missing"), lambda screen, x, y:
+                               showing(A_LABEL)(screen, x, y) and "That Session no longer exists" in screen)
+        assert caller.poll() is None, returned
 
     with terminal_process([str(installed), "session", "resume", "--store", str(store), missing], env=env) as (caller, master):
         terminal_capture(master)
         wait_for(lambda: caller.poll() is not None, "direct missing Session ends the terminal")
-        assert linked_status == caller.returncode and linked_status != 0, (linked_status, caller.returncode)
+        assert caller.returncode != 0, caller.returncode
 
     assert {session: messages(session) for session in before_messages} == before_messages
     assert len(endpoint.requests) == before_requests, endpoint.requests
