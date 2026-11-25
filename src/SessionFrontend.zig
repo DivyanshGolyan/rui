@@ -1,4 +1,5 @@
 const std = @import("std");
+const row_text = @import("testing/row_text.zig");
 const connection_names = @import("connection_names.zig");
 const provider_route = @import("provider_route.zig");
 const host_endpoint = @import("host_endpoint.zig");
@@ -4150,7 +4151,7 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
     held.size = .{ .width = 140, .height = 25 };
     const url = "https://example.com/selection";
     const link = TerminalText.link_open ++ url ++ TerminalText.link_end ++ "LinkText" ++ TerminalText.link_close;
-    const shown = TerminalText.user_message_on ++ TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ TerminalText.body_on ++ "UserAlpha" ++ TerminalText.body_off ++ TerminalText.user_message_off ++
+    const shown = TerminalText.user_message_on ++ TerminalText.user_marker ++ TerminalText.body_on ++ "UserAlpha" ++ TerminalText.body_off ++ TerminalText.user_message_off ++
         "\n" ++ TerminalText.body_on ++ link ++ TerminalText.body_off ++ "\n";
     try seedFeed(held.screen, shown);
     var actions: Actions = .{ .frontend = &held.self };
@@ -4277,7 +4278,7 @@ test "SUI-144 SessionFrontend cancels copy selection when its feed context is co
         defer held.destroy();
         const initial_width: u16 = if (context == .focus) 140 else 46;
         held.size = .{ .width = initial_width, .height = 30 };
-        const text = TerminalText.user_message_on ++ TerminalText.decoration_on ++ "› " ++ TerminalText.decoration_off ++ "UserAlpha" ++ TerminalText.user_message_off;
+        const text = TerminalText.user_message_on ++ TerminalText.user_marker ++ "UserAlpha" ++ TerminalText.user_message_off;
         try seedFeed(held.screen, text);
         const frame = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
         const user = screenTextPoint(frame, "UserAlpha", 0, 0) orelse return error.MissingUserCell;
@@ -6909,7 +6910,7 @@ test "SUI-33 App Session shell gutter and back control follow list visibility th
     try self.line.label.?.set("demo");
     try self.line.model.set("gpt-5.5");
     _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
-    try seedFeed(fixture.screen, "› Build the docs…\n✓ Build the docs\n");
+    try seedFeed(fixture.screen, row_text.user_line ++ "Build the docs…\n✓ Build the docs\n");
     const anchor = fixture.screen.anchor;
     try fixture.root.openSession(&fixture.ctx, fixture.widget, fixture.self.keyOwner());
     const arena = fixture.arena.allocator();
@@ -7866,7 +7867,7 @@ test "SUI-166 attached terminal rows fence older queue aggregates without losing
     self.live.queued_line = .{ .admission = 21, .line = .{} };
     try self.live.queued_line.?.line.set("queued-19");
     try std.testing.expect(self.queuedRow() != null);
-    try fixture.page(.fill_below, &.{.{ .key = 45, .text = "› queued-19\n", .queue_terminal = true }}, false, true);
+    try fixture.page(.fill_below, &.{.{ .key = 45, .text = row_text.user_line ++ "queued-19\n", .queue_terminal = true }}, false, true);
     try std.testing.expect(self.queuedRow() == null);
     try std.testing.expect(std.mem.indexOf(u8, try fixture.held.shown(), "queued-19") != null);
     // A frozen catch-up page read before that row attached cannot repaint the Message as waiting.
@@ -7898,7 +7899,7 @@ test "SUI-166 a newer aggregate reuses its unchanged queued preview after anothe
     self.live.queued = .{ .count = 2, .oldest_position = 5, .newest_admission = 22, .newest_position = 24 };
     self.live.queued_line = .{ .admission = 22, .line = .{} };
     try self.live.queued_line.?.line.set("still waiting");
-    try fixture.page(.fill_below, &.{.{ .key = 45, .text = "› taken earlier\n", .queue_terminal = true }}, false, true);
+    try fixture.page(.fill_below, &.{.{ .key = 45, .text = row_text.user_line ++ "taken earlier\n", .queue_terminal = true }}, false, true);
     try std.testing.expect(self.queuedRow() == null);
     try std.testing.expectEqual(@as(u64, 22), self.live.queued_line.?.admission);
     self.reading.phase = .activity;
@@ -7939,7 +7940,7 @@ fn queuedAndTakenAcrossWork() !void {
         defer fixture.destroy();
         const self = &fixture.held.self;
         fixture.held.size.width = width;
-        try fixture.page(.opening, &.{.{ .key = 9, .text = "› first request\n" }}, true, true);
+        try fixture.page(.opening, &.{.{ .key = 9, .text = row_text.user_line ++ "first request\n" }}, true, true);
         self.live.work.state = .{ .working = .{ .since = 1 } };
         const working = try fixture.held.shown();
         try std.testing.expect(std.mem.indexOf(u8, working, "› first request") != null);
@@ -7972,7 +7973,7 @@ fn queuedAndTakenAcrossWork() !void {
         try std.testing.expect(std.mem.indexOf(u8, rejected, "Tool call · rejected") != null);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rejected, "waiting one"));
         try std.testing.expect(std.mem.indexOf(u8, rejected, "◌ waiting one") != null);
-        try fixture.page(.scan, &.{.{ .key = 12, .text = "› waiting one\n", .message_key = @splat('K') }}, true, true);
+        try fixture.page(.scan, &.{.{ .key = 12, .text = row_text.user_line ++ "waiting one\n", .message_key = @splat('K') }}, true, true);
         self.live.work.state = .{ .working = .{ .since = 1 } };
         self.live.queued = .{ .count = 1, .oldest_position = 13, .newest_admission = 2, .newest_position = 13 };
         self.live.queued_line = .{ .admission = 2, .line = .{} };
@@ -8008,7 +8009,7 @@ fn queuedAndTakenAcrossWork() !void {
         const self = &held.self;
         held.size.width = width;
         held.size.height = if (width == 46) 30 else 40;
-        try fixture.page(.opening, &.{.{ .key = 9, .text = "› FIRST-QUESTION\n" }}, true, true);
+        try fixture.page(.opening, &.{.{ .key = 9, .text = row_text.user_line ++ "FIRST-QUESTION\n" }}, true, true);
         self.live.work.state = .{ .working = .{ .since = 1 } };
         if (rejection_first) {
             try fixture.page(.scan, &.{.{ .key = 10, .text = "× Tool call · rejected\n" }}, true, true);
@@ -8033,7 +8034,7 @@ fn queuedAndTakenAcrossWork() !void {
         if (!rejection_first) {
             try fixture.page(.scan, &.{
                 .{ .key = 12, .text = "× Tool call · rejected\n" },
-                .{ .key = 13, .text = "› MIDTURN-HI\n" },
+                .{ .key = 13, .text = row_text.user_line ++ "MIDTURN-HI\n" },
             }, true, true);
             self.live.queued = .{};
             self.live.queued_line = null;
@@ -8053,7 +8054,7 @@ fn queuedAndTakenAcrossWork() !void {
         if (rejection_first) {
             try fixture.page(.scan, &.{
                 .{ .key = 12, .text = "AFTER-REJECTION\n" },
-                .{ .key = 13, .text = "› MIDTURN-HI\n" },
+                .{ .key = 13, .text = row_text.user_line ++ "MIDTURN-HI\n" },
             }, true, true);
             self.live.queued = .{};
             self.live.queued_line = null;
@@ -8080,7 +8081,7 @@ fn localQueueHandoff() !void {
             self.submission.intent = null;
             self.input.release(ticket) catch unreachable;
         }
-        try fixture.page(.opening, &.{.{ .key = 1, .text = "› first\n" }}, true, true);
+        try fixture.page(.opening, &.{.{ .key = 1, .text = row_text.user_line ++ "first\n" }}, true, true);
         self.live.work.state = .{ .working = .{ .since = 1 } };
         self.live.queued = .{ .count = 1, .oldest_position = 1, .newest_admission = 8, .newest_position = 1 };
         self.live.queued_line = .{ .admission = 8, .line = .{} };
@@ -8109,7 +8110,7 @@ fn localQueueHandoff() !void {
         try std.testing.expect(std.mem.indexOf(u8, pending, "◌ queued original") != null);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pending, "queued original"));
         self.live.queued = .{};
-        try fixture.page(.opening, &.{.{ .key = 3, .text = "› queued original\n", .message_key = @splat('K') }}, true, true);
+        try fixture.page(.opening, &.{.{ .key = 3, .text = row_text.user_line ++ "queued original\n", .message_key = @splat('K') }}, true, true);
         const applied = try held.shown();
         try std.testing.expect(std.mem.indexOf(u8, applied, "◌ queued original") == null);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, applied, "› queued original"));
@@ -8130,7 +8131,7 @@ fn localAppliedFill() !void {
     self.live.queued_line = .{ .admission = 7, .line = .{} };
     try self.live.queued_line.?.line.set("local input");
     self.screen.feed.at_end = false;
-    try fixture.page(.fill_below, &.{.{ .key = 3, .text = "› local input\n", .message_key = @splat('K') }}, false, true);
+    try fixture.page(.fill_below, &.{.{ .key = 3, .text = row_text.user_line ++ "local input\n", .message_key = @splat('K') }}, false, true);
     const shown = try fixture.held.shown();
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "local input"));
     try std.testing.expect(std.mem.indexOf(u8, shown, "› local input") != null);
@@ -8310,7 +8311,7 @@ fn keyedAcceptedHandoff() !void {
     try fixture.page(.opening, &.{.{ .key = 10, .text = "other message\n", .message_key = @splat('J') }}, true, true);
     try std.testing.expect(self.submission.messageHeld());
     try std.testing.expectEqualStrings("accepted keyed original", self.submission.messageText().?);
-    try fixture.page(.opening, &.{.{ .key = 11, .text = "› accepted keyed original\n", .message_key = @splat('K') }}, true, true);
+    try fixture.page(.opening, &.{.{ .key = 11, .text = row_text.user_line ++ "accepted keyed original\n", .message_key = @splat('K') }}, true, true);
     try std.testing.expect(!self.submission.messageHeld());
     try std.testing.expect(self.input.submitted == null);
     try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
@@ -8331,7 +8332,7 @@ fn uncertainAppliedHandoff() !void {
         self.submission.intent = null;
         self.input.release(original) catch unreachable;
     }
-    try fixture.page(.opening, &.{.{ .key = 10, .text = "› keyed original\n", .message_key = @splat('K') }}, true, true);
+    try fixture.page(.opening, &.{.{ .key = 10, .text = row_text.user_line ++ "keyed original\n", .message_key = @splat('K') }}, true, true);
     try std.testing.expect(!self.submission.queueView(null, true).held);
     try std.testing.expect(self.submission.view() != null);
     const shown = try fixture.held.shown();
@@ -8382,7 +8383,7 @@ fn freshQueueScroll() !void {
         const held = fixture.held;
         held.size = .{ .width = width, .height = 30 };
         try fixture.page(.opening, &.{
-            .{ .key = 1, .text = "› fresh start\n" },
+            .{ .key = 1, .text = row_text.user_line ++ "fresh start\n" },
             .{ .key = 2, .text = "renderer answer fresh start\n" },
         }, true, true);
         for (0..3) |_| {
@@ -8526,7 +8527,7 @@ test "SessionFrontend feed reload restores keyed Ctrl-O target and replaces a pr
     defer fixture.destroy();
     const held = fixture.held;
     const target: View.Collapsed = .{ .source = .activity, .position = 40, .ordinal = 0, .content = .{ .text = .{ .length = 2000, .digest = @splat(7) } }, .row = false };
-    const summary = "› preview\n  " ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n";
+    const summary = row_text.user_line ++ "preview\n  " ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n";
     try fixture.page(.opening, &.{ .{ .key = 40, .text = summary, .target = target }, .{ .key = 50, .text = "settled\n" } }, true, true);
     _ = try held.draw();
     _ = try held.self.expand();
@@ -8540,8 +8541,8 @@ test "SessionFrontend feed reload restores keyed Ctrl-O target and replaces a pr
     _ = try held.self.expand();
     try std.testing.expectEqualDeep(target, held.self.expansion.queued.ready.target.message);
     try std.testing.expect(held.screen.feed.opened.has(.{ .position = 40 }));
-    try fixture.page(.scan, &.{ .{ .key = 60, .text = "› provisional\n", .provisional = true }, .{ .key = 61, .text = "between\n" } }, false, true);
-    try fixture.page(.scan, &.{ .{ .key = 61, .text = "between\n" }, .{ .key = 62, .text = "› applied\n" } }, false, true);
+    try fixture.page(.scan, &.{ .{ .key = 60, .text = row_text.user_line ++ "provisional\n", .provisional = true }, .{ .key = 61, .text = "between\n" } }, false, true);
+    try fixture.page(.scan, &.{ .{ .key = 61, .text = "between\n" }, .{ .key = 62, .text = row_text.user_line ++ "applied\n" } }, false, true);
     try std.testing.expect(held.screen.feed.firstProvisional() == null);
     try std.testing.expectEqual(@as(usize, 4), held.screen.feed.count);
     try std.testing.expect(std.mem.indexOf(u8, held.screen.feed.document.text(), "provisional") == null);
@@ -8832,7 +8833,7 @@ test "failed reply stale pre-admission scan must not authorize a fresh Ctrl-R af
     try self.settleReader();
     try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
     try std.testing.expect(self.live.work.state == .idle and self.live.queued.count == 0);
-    try fixture.page(.fill_below, &.{.{ .key = 37, .text = "› new Message\n", .message_key = admitted_key }}, false, true);
+    try fixture.page(.fill_below, &.{.{ .key = 37, .text = row_text.user_line ++ "new Message\n", .message_key = admitted_key }}, false, true);
     try std.testing.expect(!self.submission.messageHeld());
     try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
     const io = self.init.io;
@@ -9150,7 +9151,7 @@ test "failed reply retry gesture waits behind a reader and drops every supersede
 }
 
 fn backwardReplayHandoff() !void {
-    for ([_][]const u8{ "", "› queued\n" }) |pending| {
+    for ([_][]const u8{ "", row_text.user_line ++ "queued\n" }) |pending| {
         const fixture = try FeedFixture.create();
         defer fixture.destroy();
         const held = fixture.held;
@@ -9163,7 +9164,7 @@ fn backwardReplayHandoff() !void {
         const planned = FeedPolicy.request(.scan, held.self.feedState()).?;
         try std.testing.expectEqualDeep(@as(?feed_window.Key, replay), planned.from);
         try std.testing.expectEqualDeep(@as(?feed_window.Key, replay), planned.replace_from);
-        try fixture.page(.scan, &.{ .{ .key = 100, .text = "older answer\n" }, .{ .key = 110, .text = "settled turn\n" }, .{ .key = 120, .text = "› applied\n" }, .{ .key = 130, .text = "new assistant answer\n" } }, true, true);
+        try fixture.page(.scan, &.{ .{ .key = 100, .text = "older answer\n" }, .{ .key = 110, .text = "settled turn\n" }, .{ .key = 120, .text = row_text.user_line ++ "applied\n" }, .{ .key = 130, .text = "new assistant answer\n" } }, true, true);
         try std.testing.expect(held.screen.feed.firstProvisional() == null);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, held.screen.feed.document.text(), "older answer"));
         try std.testing.expectEqual(@as(usize, 4), held.screen.feed.count);
