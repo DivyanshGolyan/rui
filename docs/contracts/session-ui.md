@@ -772,7 +772,7 @@ Other outcome suffixes retain their existing inline wording and placement.
 They show no stdout/stderr snippets, warning body lines, omission/export notices or automatic inspection-command hints, including after success, timeout or failure.
 Capture and cleanup warnings remain in the unchanged saved result, available in the opened tool row or full raw Conversation export.
 
-Live and historical content share streaming hanging indentation for multiline fields; libvaxis wraps at draw time, so resize reflows without rereading.
+Live and historical content share streaming hanging indentation for multiline fields; libvaxis wraps at draw time, so resize reflows without rereading. A row's wrapped lines hang under its text, and draw the `┆` bar where the row is quoted, only when its producer tagged the leading glyph as the row's leader (a status mark, `$`, `│`, `›` or a list bullet); the viewport never infers a leader from what the text starts with, so prose that begins with a glyph and a space wraps flush and carries no bar.
 Intentional permission denial is a neutral settled outcome, not a failed Bash execution or a reason to inspect nonexistent output.
 Opened tool rows show saved Tool Results independently of whether a command executed.
 

@@ -41,35 +41,6 @@ fn rowsUsed(result: vaxis.Window.PrintResult) u16 {
     return if (result.col == 0 and result.row != 0 and !result.overflow) result.row else result.row +| 1;
 }
 
-fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cells: u16, quoted: bool = false } {
-    var bytes: usize = 0;
-    while (bytes < line.len and line[bytes] == ' ') bytes += 1;
-    var cells: usize = bytes;
-    var quoted = false;
-    const state_glyphs = comptime glyphs: {
-        var all: [state_marks.marks.values.len * 2][]const u8 = undefined;
-        for (state_marks.marks.values, 0..) |mark, index| {
-            all[index * 2] = mark.unicode;
-            all[index * 2 + 1] = mark.ascii;
-        }
-        break :glyphs all;
-    };
-    for ([_][]const u8{ "›", "•", "◦", "!", "-", "$", "│" } ++ state_glyphs) |glyph| {
-        if (std.mem.startsWith(u8, line[bytes..], glyph) and std.mem.startsWith(u8, line[bytes + glyph.len ..], " ")) {
-            bytes += glyph.len + 1;
-            cells += 2;
-            const approval = state_marks.marks.get(.needs_you);
-            quoted = std.mem.eql(u8, glyph, approval.unicode) or std.mem.eql(u8, glyph, approval.ascii) or std.mem.eql(u8, glyph, "$") or std.mem.eql(u8, glyph, "│");
-            break;
-        }
-    }
-    if (cells * 2 > width) {
-        if (user and width >= 4 and std.mem.startsWith(u8, line, "  ")) return .{ .bytes = 2, .cells = 2 };
-        return .{ .bytes = 0, .cells = 0 };
-    }
-    return .{ .bytes = bytes, .cells = @intCast(cells), .quoted = quoted };
-}
-
 pub const Colours = struct {
     quiet: vaxis.Color = .default,
     user: vaxis.Color = .default,
@@ -90,6 +61,10 @@ const user_start_bit: RetainedStyle = 1 << 11;
 const user_end_bit: RetainedStyle = 1 << 12;
 const full_width_bit: RetainedStyle = 1 << 13;
 const decoration_bit: RetainedStyle = 1 << 14;
+/// The glyph that leads a row, set by the row's producer (`TerminalText.leader_on`); `quoted_bit` marks one whose
+/// wrapped lines draw the bar.
+const leader_bit: RetainedStyle = 1 << 9;
+const quoted_bit: RetainedStyle = 1 << 15;
 const AllText = struct {
     pub fn includes(_: *@This(), _: usize) bool {
         return true;
@@ -102,7 +77,7 @@ const linked_index: u8 = 6;
 const address_index: u8 = 7;
 
 pub fn seamStyle(value: RetainedStyle) RetainedStyle {
-    return (value & (body_bit | user_message_bit | user_start_bit | user_end_bit | full_width_bit | decoration_bit)) | (if (foregroundIndex(value) == code_index) @as(RetainedStyle, code_index) << 3 else 0);
+    return (value & (body_bit | user_message_bit | user_start_bit | user_end_bit | full_width_bit | decoration_bit | leader_bit | quoted_bit)) | (if (foregroundIndex(value) == code_index) @as(RetainedStyle, code_index) << 3 else 0);
 }
 
 fn foregroundIndex(value: RetainedStyle) u8 {
@@ -191,6 +166,12 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                             self.style |= decoration_bit;
                         } else if (std.mem.eql(u8, code, TerminalText.decoration_off)) {
                             self.style &= ~decoration_bit;
+                        } else if (std.mem.eql(u8, code, TerminalText.leader_on)) {
+                            self.style |= leader_bit;
+                        } else if (std.mem.eql(u8, code, TerminalText.quoted_leader_on)) {
+                            self.style |= leader_bit | quoted_bit;
+                        } else if (std.mem.eql(u8, code, TerminalText.leader_off)) {
+                            self.style &= ~(leader_bit | quoted_bit);
                         } else if (std.mem.eql(u8, code, TerminalText.full_width_on)) self.style |= full_width_bit else if (std.mem.eql(u8, code, TerminalText.full_width_off)) self.style &= ~full_width_bit else if (std.mem.eql(u8, code, TerminalText.body_on)) self.style |= body_bit else if (std.mem.eql(u8, code, TerminalText.body_off)) self.style &= ~(body_bit | full_width_bit) else if (std.mem.eql(u8, code, "\x1b[0m")) self.style &= body_bit | user_message_bit | full_width_bit else if (std.mem.eql(u8, code, "\x1b[1m")) self.style |= 1 else if (std.mem.eql(u8, code, "\x1b[3m")) self.style |= 2 else if (std.mem.eql(u8, code, "\x1b[4m")) self.style |= 4 else if (std.mem.eql(u8, code, "\x1b[2m")) self.style |= user_bit else if (std.mem.eql(u8, code, "\x1b[2;8m")) self.style |= user_bit | summary_bit else if (std.mem.eql(u8, code, "\x1b[8m")) self.style = (self.style & ~user_bit) | summary_bit else if (std.mem.eql(u8, code, "\x1b[39m")) self.style &= ~foreground_mask else {
                             const colour_index: u8 = if (std.mem.eql(u8, code, "\x1b[33m")) 1 else if (std.mem.eql(u8, code, "\x1b[90m")) 2 else if (std.mem.eql(u8, code, "\x1b[91m")) 3 else if (std.mem.eql(u8, code, "\x1b[94m")) 4 else if (std.mem.eql(u8, code, "\x1b[40m")) code_index else unreachable;
                             self.style = (self.style & ~foreground_mask) | (@as(RetainedStyle, colour_index) << 3);
@@ -580,14 +561,43 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 return 1;
             }
-            const split = hanging(self.bytes[content_start..end], body.width, user);
+            const split = self.hanging(content_start, end, body.width, user);
             if (commit) _ = self.printRange(body.child(.{ .y_off = row, .height = 1 }), content_start, content_start + split.bytes, .none, false, true, colour, plain, colours);
             const rows = rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), content_start + split.bytes, end, .word, false, commit, colour, plain, colours));
             if (commit and self.quotes and split.quoted) for (1..rows) |index| {
-                const quote_mark = body.child(.{ .x_off = split.cells - 2, .y_off = row + @as(i17, @intCast(index)), .width = 1, .height = 1 });
-                _ = quote_mark.printSegment(.{ .text = "┆", .style = self.segmentStyle(content_start + split.bytes - 2, colour, plain, colours) }, .{ .wrap = .none });
+                const quote_mark = body.child(.{ .x_off = split.mark_column, .y_off = row + @as(i17, @intCast(index)), .width = 1, .height = 1 });
+                _ = quote_mark.printSegment(.{ .text = "┆", .style = self.segmentStyle(split.mark, colour, plain, colours) }, .{ .wrap = .none });
             };
             return rows;
+        }
+
+        const Hang = struct { bytes: usize, cells: u16, quoted: bool = false, mark: usize = 0, mark_column: u16 = 0 };
+
+        /// Where a line's wrapped rows hang. The row's producer tagged its leading glyph (`TerminalText.leader_on`);
+        /// only that tag makes a hang or a bar, so prose that merely starts with a glyph and a space gets neither.
+        fn hanging(self: *const Self, from: usize, end: usize, width: u16, user: bool) Hang {
+            var bytes: usize = 0;
+            while (from + bytes < end and self.bytes[from + bytes] == ' ') bytes += 1;
+            var cells: usize = bytes;
+            var hang: Hang = .{ .bytes = 0, .cells = 0 };
+            if (styled) {
+                const start = from + bytes;
+                var stop = start;
+                while (stop < end and self.styles[stop] & leader_bit != 0) stop += 1;
+                if (stop > start and stop < end and self.bytes[stop] == ' ') {
+                    const glyph = display_text.width(self.bytes[start..stop], .{ .viewport = self.width_method });
+                    hang = .{ .bytes = stop + 1 - from, .cells = 0, .quoted = self.styles[start] & quoted_bit != 0, .mark = start, .mark_column = @intCast(@min(cells, std.math.maxInt(u16))) };
+                    cells += glyph + 1;
+                    bytes = hang.bytes;
+                }
+            }
+            if (cells * 2 > width) {
+                if (user and width >= 4 and std.mem.startsWith(u8, self.bytes[from..end], "  ")) return .{ .bytes = 2, .cells = 2 };
+                return .{ .bytes = 0, .cells = 0 };
+            }
+            hang.bytes = bytes;
+            hang.cells = @intCast(cells);
+            return hang;
         }
 
         fn printTruncated(self: *const Self, line: vaxis.Window, from: usize, end: usize, colour: bool, plain: vaxis.Style, colours: Colours) void {
@@ -623,7 +633,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 var stop = end;
                 if (styled) {
                     stop = start + 1;
-                    const presentation = ~(body_bit | user_start_bit | user_end_bit | decoration_bit);
+                    const presentation = ~(body_bit | user_start_bit | user_end_bit | decoration_bit | leader_bit | quoted_bit);
                     while (stop < end and (self.styles[stop] & presentation) == (self.styles[start] & presentation)) stop += 1;
                 }
                 const shown = !styled or (isSidenote(self.styles[start]) == notes and foregroundIndex(self.styles[start]) != address_index);
@@ -878,15 +888,23 @@ const TestScreen = struct {
     }
 };
 
+fn lead(comptime glyph: []const u8) []const u8 {
+    return TerminalText.leader_on ++ glyph ++ TerminalText.leader_off;
+}
+
+fn lead_quoted(comptime glyph: []const u8) []const u8 {
+    return TerminalText.quoted_leader_on ++ glyph ++ TerminalText.leader_off;
+}
+
 test "an Action's wrapped description, command and stdin rows carry a wrap mark, so none passes for a field or a new line" {
     const pad: [30]u8 = @splat(' ');
-    const text = "? Probe" ++ pad ++ "$ rm -rf x\n  $ echo a" ++ pad ++ "Time limit: 1 min\n  │ x" ++ pad ++ "stdin:\n  Time limit: 5 s\n";
-    const command = std.mem.indexOf(u8, text, "\n  $").? + 1;
+    const text = comptime lead_quoted("?") ++ " Probe" ++ pad ++ "$ rm -rf x\n  " ++ lead_quoted("$") ++ " echo a" ++ pad ++ "Time limit: 1 min\n  " ++ lead_quoted("│") ++ " x" ++ pad ++ "stdin:\n  Time limit: 5 s\n";
     for ([_]bool{ false, true }) |quotes| {
         errdefer std.debug.print("quotes={}\n", .{quotes});
-        var view: Sized(256, false) = .{ .quotes = quotes };
+        var view: Sized(256, true) = .{ .quotes = quotes };
         try view.append(text);
         try view.prepare();
+        const command = std.mem.indexOf(u8, view.bytes[0..view.length], "\n  $").? + 1;
         var test_screen: TestScreen = undefined;
         for ([_]Position{ .{}, .{ .offset = command, .row = 1 } }) |from| {
             const drawn = view.draw(test_screen.window(24, 20), from, true, false, .{}, .{});
@@ -911,9 +929,9 @@ test "APPROVAL-2 wrapped permission headings mark continuation rows in both scri
     const approval = state_marks.marks.get(.needs_you);
     for ([_][]const u8{ approval.unicode, approval.ascii }) |glyph| {
         for ([_]bool{ false, true }) |quotes| {
-            var text: [128]u8 = undefined;
-            const line = try std.fmt.bufPrint(&text, "{s} Approval description continues on another row\n", .{glyph});
-            var view: Sized(256, false) = .{ .quotes = quotes };
+            var text: [160]u8 = undefined;
+            const line = try std.fmt.bufPrint(&text, TerminalText.quoted_leader_on ++ "{s}" ++ TerminalText.leader_off ++ " Approval description continues on another row\n", .{glyph});
+            var view: Sized(256, true) = .{ .quotes = quotes };
             try view.append(line);
             try view.prepare();
             var screen: TestScreen = undefined;
@@ -928,22 +946,48 @@ test "APPROVAL-2 wrapped permission headings mark continuation rows in both scri
     }
 }
 
-test "every state mark hangs continuation text in both scripts" {
+test "SUI-173 only a row's tagged leader hangs and quotes its wrapped lines, whatever glyph the prose starts with" {
+    var glyphs: [state_marks.marks.values.len * 2 + 4][]const u8 = undefined;
+    var count: usize = 0;
     for (state_marks.marks.values) |mark| {
+        if (mark.unicode[0] == ' ') continue;
         for ([_][]const u8{ mark.unicode, mark.ascii }) |glyph| {
-            var buffer: [64]u8 = undefined;
-            const line = try std.fmt.bufPrint(&buffer, "{s} long description", .{glyph});
-            const split = hanging(line, 16, false);
-            try std.testing.expectEqual(glyph.len + 1, split.bytes);
-            try std.testing.expectEqual(@as(u16, 2), split.cells);
-            try std.testing.expectEqualStrings("long description", line[split.bytes..]);
+            glyphs[count] = glyph;
+            count += 1;
         }
     }
+    for ([_][]const u8{ "$", "│", "›", "-" }) |glyph| {
+        glyphs[count] = glyph;
+        count += 1;
+    }
+    for (glyphs[0..count]) |glyph| for ([_]bool{ false, true }) |tagged| for ([_]bool{ false, true }) |quoted| {
+        errdefer std.debug.print("glyph={s} tagged={} quoted={}\n", .{ glyph, tagged, quoted });
+        var view: Sized(256, true) = .{ .quotes = true };
+        var text: [128]u8 = undefined;
+        const line = try std.fmt.bufPrint(&text, "{s}{s}{s} one two three four five\n", .{
+            if (!tagged) "" else if (quoted) TerminalText.quoted_leader_on else TerminalText.leader_on,
+            glyph,
+            if (tagged) TerminalText.leader_off else "",
+        });
+        try view.append(line);
+        try view.prepare();
+        var screen: TestScreen = undefined;
+        const drawn = view.draw(screen.window(16, 8), .{}, true, false, .{}, .{});
+        try std.testing.expect(drawn.rows > 1);
+        var storage: [128]u8 = undefined;
+        try std.testing.expect(std.mem.startsWith(u8, screen.row(0, &storage), glyph));
+        for (1..drawn.rows) |row| {
+            const shown = screen.row(@intCast(row), &storage);
+            if (!tagged) {
+                try std.testing.expect(shown.len != 0 and shown[0] != ' ' and !std.mem.startsWith(u8, shown, "┆"));
+            } else try std.testing.expect(std.mem.startsWith(u8, shown, if (quoted) "┆ " else "  "));
+        }
+    };
 }
 
 test "vaxis wraps reading text at words with hanging indentation" {
-    var view: Sized(256, false) = .{};
-    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n◝ one two three four\n中中中中中中中中Z\n  │ alpha beta gamma");
+    var view: Sized(256, true) = .{};
+    try view.append(comptime "  The plain rui command isn't on PATH\n0123456789abcdef next\n" ++ lead("›") ++ " a longword\n  supercalifragilistic x\n" ++ lead("◝") ++ " one two three four\n中中中中中中中中Z\n  " ++ lead("│") ++ " alpha beta gamma");
     try view.prepare();
     const layout: Layout = .{ .width = 16, .method = .unicode };
     var test_screen: TestScreen = undefined;
@@ -1152,7 +1196,7 @@ test "a sidenote shows in the right margin of its line's first row in wide and n
     const ys: [56]u8 = @splat('y');
     const xs: [60]u8 = @splat('x');
     var view: Sized(256, true) = .{ .sidenotes = true };
-    try view.append("\x1b[94m›\x1b[39m \x1b[8m14:05\x1b[0m\x1b[2m" ++ ys ++ "\x1b[0m\n" ++ xs);
+    try view.append(TerminalText.leader_on ++ "\x1b[94m›" ++ TerminalText.leader_off ++ "\x1b[39m \x1b[8m14:05\x1b[0m\x1b[2m" ++ ys ++ "\x1b[0m\n" ++ xs);
     var test_screen: TestScreen = undefined;
     var storage: [96]u8 = undefined;
     const Case = struct { width: u16, sidenotes: bool, rows: []const []const u8 };
@@ -1674,7 +1718,7 @@ test "Document rows answer down within measure for every row from every first ro
     const document = try std.testing.allocator.create(Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{ .sidenotes = true };
-    try document.append("› a long user line that wraps \x1b[8m14:20\x1b[0m\n\n" ++ tool_fold.heading_marker ++ "$ Bash done\n  wide 漢字漢字漢字 cells wrap\n\x1b[2;8m┄ 9 more lines\x1b[0m\nlast");
+    try document.append(TerminalText.user_leader ++ "a long user line that wraps \x1b[8m14:20\x1b[0m\n\n" ++ tool_fold.heading_marker ++ "$ Bash done\n  wide 漢字漢字漢字 cells wrap\n\x1b[2;8m┄ 9 more lines\x1b[0m\nlast");
     try document.prepare();
     for ([_]u16{ 1, 3, 7, 16, 80 }) |width| {
         const layout: Layout = .{ .width = width, .method = .unicode };
@@ -1756,13 +1800,13 @@ fn timestampChanges() !void {
     for (cases) |case| {
         var document: Sized(512, true) = .{ .sidenotes = true };
         if (case.previous) |previous| {
-            try document.append("› \x1b[8m");
+            try document.append(TerminalText.user_leader ++ "\x1b[8m");
             try document.append(previous);
             try document.append("\x1b[0m\x1b[2mfirst\x1b[0m\n");
         }
         if (case.tool) try document.append("  Ran tool\n");
         const offset = document.length;
-        try document.append("› \x1b[8m");
+        try document.append(TerminalText.user_leader ++ "\x1b[8m");
         const start = document.length;
         try document.append(case.current);
         const end = document.length;
@@ -1823,11 +1867,11 @@ fn bandProvenance() !void {
 
 fn bandLines() !void {
     const cases = [_]struct { body: []const u8, lines: usize, wraps: bool }{
-        .{ .body = "› \n", .lines = 1, .wraps = false },
+        .{ .body = TerminalText.user_leader ++ "\n", .lines = 1, .wraps = false },
         .{ .body = "\n", .lines = 1, .wraps = false },
-        .{ .body = "› first\n\n  second\n", .lines = 3, .wraps = false },
-        .{ .body = "› first\n   \n  second\n", .lines = 3, .wraps = false },
-        .{ .body = "› a deliberately long message that wraps over several visual rows\n", .lines = 1, .wraps = true },
+        .{ .body = TerminalText.user_leader ++ "first\n\n  second\n", .lines = 3, .wraps = false },
+        .{ .body = TerminalText.user_leader ++ "first\n   \n  second\n", .lines = 3, .wraps = false },
+        .{ .body = TerminalText.user_leader ++ "a deliberately long message that wraps over several visual rows\n", .lines = 1, .wraps = true },
     };
     for (cases) |case| for ([_]u16{ 20, 46 }) |width| for ([_]bool{ false, true }) |colour| {
         var document: Sized(512, true) = .{};
@@ -1867,8 +1911,8 @@ pub fn testBandPadding() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
         const method: Method = if (unicode_caps) .unicode else .wcwidth;
         var document: Sized(1024, true) = .{ .sidenotes = true, .width_method = method };
-        try document.append(TerminalText.user_message_on ++ "› \x1b[8m14:20\x1b[0mshort\n" ++ TerminalText.user_message_off ++
-            TerminalText.user_message_on ++ "› ");
+        try document.append(TerminalText.user_message_on ++ TerminalText.user_leader ++ "\x1b[8m14:20\x1b[0mshort\n" ++ TerminalText.user_message_off ++
+            TerminalText.user_message_on ++ TerminalText.user_leader);
         const count: usize = if (width == 46) 75 else 265;
         for (0..count) |_| try document.append("x");
         try document.append("\n" ++ TerminalText.user_message_off);
@@ -1924,8 +1968,8 @@ pub fn testBandPadding() !void {
 fn legacyBandShape() !void {
     for ([_]u16{ 46, 140 }) |width| {
         var document: Sized(1024, true) = .{ .sidenotes = true };
-        try document.append("\x1b[90m›\x1b[39m \x1b[8m14:20\x1b[0mshort\n");
-        try document.append("\x1b[90m›\x1b[39m \x1b[8m14:21\x1b[0m");
+        try document.append(TerminalText.leader_on ++ "\x1b[90m›" ++ TerminalText.leader_off ++ "\x1b[39m \x1b[8m14:20\x1b[0mshort\n");
+        try document.append(TerminalText.leader_on ++ "\x1b[90m›" ++ TerminalText.leader_off ++ "\x1b[39m \x1b[8m14:21\x1b[0m");
         const count: usize = if (width == 46) 75 else 265;
         for (0..count) |_| try document.append("x");
         try document.append("\n");

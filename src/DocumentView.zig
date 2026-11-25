@@ -488,7 +488,7 @@ const Harness = struct {
 };
 
 test "a drag highlights the text it crosses, copies it once on release and clears" {
-    const h = try Harness.init("› \x1b[2mfix the flaky store test\x1b[8m14:20\x1b[0m\n\nnext line\n", .{ .width = 16, .height = 4 });
+    const h = try Harness.init(TerminalText.leader_on ++ "›" ++ TerminalText.leader_off ++ " \x1b[2mfix the flaky store test\x1b[8m14:20\x1b[0m\n\nnext line\n", .{ .width = 16, .height = 4 });
     defer h.deinit();
     var copied: [256]u8 = undefined;
     var row: [16]u8 = undefined;

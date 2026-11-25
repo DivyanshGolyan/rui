@@ -1495,7 +1495,7 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
         },
         .archived => |read| {
             self.answer = .{ .archived = undefined };
-            if (try self.ops.window(self, requests, .{ .cursor = read.from, .rows = @intCast(read.rows) }, &self.answer.archived)) |failure| return failure.err();
+            if (try self.ops.window(self, requests, .{ .cursor = read.from, .rows = read.rows }, &self.answer.archived)) |failure| return failure.err();
         },
         .lines => |reads| {
             self.answer = .{ .lines = @splat(.{}) };
