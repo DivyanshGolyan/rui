@@ -1554,12 +1554,15 @@ test "CLI-36 one Session scan and permission retain their resolved Store route" 
             try dir.symLink(io, ".", "route-alias", .{ .is_directory = true });
             var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/route-alias", .{root});
-            const scratch = try dir.createFile(io, "scan-scratch", .{ .read = true });
-            defer scratch.close(io);
+            // Each role gets its own file: permission reads arguments from scratch while writing its display to action.
+            const names = [_][]const u8{ "scan-scratch", "scan-inspection", "scan-action", "scan-details", "scan-actions-0", "scan-actions-1", "scan-parts" };
+            var files: [names.len]std.Io.File = undefined;
+            for (names, &files) |name, *file| file.* = try dir.createFile(io, name, .{ .read = true });
+            defer for (files) |file| file.close(io);
             host.dir = dir;
             host.root = root;
             var job: Job = .{ .store = alias, .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = if (self.mode == .queued) 1 else 2 } };
-            job.files = .{ .scratch = scratch, .inspection = scratch, .action = scratch, .details = scratch, .actions = .{ scratch, scratch }, .parts = scratch };
+            job.files = .{ .scratch = files[0], .inspection = files[1], .action = files[2], .details = files[3], .actions = .{ files[4], files[5] }, .parts = files[6] };
             var task: Task = .{ .io = io };
             if (host.refuse_content) {
                 try std.testing.expectError(error.HostInvocationFailed, scan(&job, &task));
