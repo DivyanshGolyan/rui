@@ -2,6 +2,7 @@ const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const conversation_read = @import("../../conversation_read.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const content_domain = @import("../domain/content.zig");
@@ -92,7 +93,7 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
     const session = try configureTestSession(&storage, "ordinary-config");
     try submitTestMessage(&storage, &tmp, "ordinary-input", "ordinary-key", session.slice(), "public input");
     _ = (try storage.admitNextModelAttempt(.{})).?;
-    var request = protocol.ConversationPage{};
+    var request = conversation_read.ConversationPage{};
     request.session = session;
     const valid = try store_core.publicConversationPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(usize, 1), valid.count);
@@ -160,7 +161,7 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     };
     try settleCallsForTesting(&storage, &tmp, binding, "tool-output", &calls);
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call", .{}));
-    var request = protocol.ConversationPage{};
+    var request = conversation_read.ConversationPage{};
     try request.session.set(session.slice());
     const valid = try store_core.publicConversationPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(usize, 3), valid.count);
@@ -265,7 +266,7 @@ test "public completed Action sibling corruption fences first Conversation read"
             try sqlite.exec(storage.sqliteDatabase(), fault);
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
             try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
-            var request: protocol.ConversationPage = .{ .end = position };
+            var request: conversation_read.ConversationPage = .{ .end = position };
             try request.session.set(session.slice());
             if (route == .cursor) {
                 request.before_position = position;

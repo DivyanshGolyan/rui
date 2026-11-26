@@ -2,6 +2,7 @@ const connection = @import("../../connection.zig");
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const conversation_read = @import("../../conversation_read.zig");
 const wire_request = @import("../../wire_request.zig");
 const model_catalog = @import("../../model_catalog.zig");
 const model_capability = @import("../../model_capability.zig");
@@ -181,7 +182,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
             try std.testing.expectError(error.InvalidProviderEnvelope, settleCompactionForTesting(&storage, &tmp, compact, &.{ .compaction, .web_search_call }));
             try std.testing.expect(!storage.isFenced());
             try settleCompactionForTesting(&storage, &tmp, compact, &.{ .reasoning, .compaction, .message });
-            var request: protocol.ConversationPage = .{};
+            var request: conversation_read.ConversationPage = .{};
             try request.session.set(session.slice());
             try std.testing.expectEqual(@as(usize, 1), (try store_core.publicConversationPageForTesting(&storage, request)).count);
             try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(session.slice())).action_count);
