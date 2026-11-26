@@ -224,9 +224,9 @@ test "runtime catalog failed publication retains the selected generation for con
             {
                 defer storage.close() catch unreachable;
                 try storage.saveModelFacts(&.{.{ .id = "kept", .context_window = 100, .efforts = .{}, .openai_listed = true }}, "\"old\"");
-                try std.testing.expectError(error.StatementFailed, storage.saveModelFacts(&.{
+                try std.testing.expectError(error.ColumnRuleRefused, storage.saveModelFacts(&.{
                     .{ .id = "kept", .context_window = 200, .efforts = .init(.{ .low = true }), .openai_listed = false },
-                    .{ .id = "kept", .context_window = null, .efforts = .{}, .openai_listed = false },
+                    .{ .id = "", .context_window = null, .efforts = .{}, .openai_listed = false },
                 }, "\"new\""));
                 try std.testing.expect(storage.isFenced());
                 var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
