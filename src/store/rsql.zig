@@ -5,7 +5,7 @@ const schema = @import("schema.zig");
 const provider_name = @import("../provider_name.zig");
 const provider_route = @import("../provider_route.zig");
 
-pub const Dialect = schema.Dialect;
+pub const Dialect = @import("catalog.zig").Dialect;
 
 pub const reserved_names_checked = true;
 

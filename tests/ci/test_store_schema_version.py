@@ -228,6 +228,16 @@ class MySqlMigrationOwnerTest(unittest.TestCase):
         for name, paths, after, expected in cases:
             with self.subTest(case=name):
                 self.assertEqual(touches_mysql_migration(paths, {SCHEMA: (base, after)}), expected)
+        # The catalog states the tables the DDL spells: a code edit there starts MySQL 8.4, a comment edit does not.
+        catalog = 'src/store/catalog.zig'
+        column = 'pub const tables = [_]Table{\n    .{ .name = "a", .columns = &.{.{ .name = "x", .type = .int }} },\n};\n'
+        retyped = column.replace('.type = .int', '.type = .flag')
+        with self.subTest(case='catalog.zig column retyped'):
+            self.assertTrue(touches_mysql_migration([catalog], {catalog: (column, retyped)}))
+        with self.subTest(case='catalog.zig comment only'):
+            self.assertFalse(touches_mysql_migration([catalog], {catalog: (column, column + '// a note\n')}))
+        with self.subTest(case='catalog.zig new'):
+            self.assertTrue(touches_mysql_migration([catalog], {catalog: (None, column)}))
         # Each migration input, and a glob match of a new one, is a MySQL migration change whatever schema.zig did.
         for path in ('src/store/migration_baseline.mysql.sql', 'src/store/migration_baseline.sqlite.sql',
                      'src/store/migration_baseline_rows.sql', 'src/store/migration_expected_content.mysql.sql',

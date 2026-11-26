@@ -1,6 +1,6 @@
 //! The Store's tables, columns and indexes as values, and the rule text that partial indexes carry.
-//! It imports only `std` and other cores, so rules and the schema's renderers can read it without a circle;
-//! `schema.zig` re-exports it and owns how each engine spells it.
+//! It imports no Store file (only `std` and the policy files that bound its values), so rule values and the schema's
+//! renderers can read it without a circle; `schema.zig` re-exports it and owns how each engine spells it.
 const std = @import("std");
 const session_settings = @import("../session_settings.zig");
 const session_id = @import("../session_id.zig");

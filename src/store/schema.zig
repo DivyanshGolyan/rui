@@ -1,14 +1,9 @@
 const std = @import("std");
-const session_settings = @import("../session_settings.zig");
 const session_id = @import("../session_id.zig");
 const store_path = @import("../store_path.zig");
 const validStoreId = @import("../store_id.zig").valid;
 const tool_name = @import("../tool_name.zig");
 const Bounded = @import("../bounded.zig").Bounded;
-const tool_defs = @import("../tool_record.zig");
-const prefix_seal = @import("../prefix_seal.zig");
-const retry_policy = @import("../retry_policy.zig");
-const turn_policy = @import("../turn_policy.zig");
 const rsql = @import("rsql.zig");
 const sqlite = @import("sqlite.zig");
 const c = sqlite.c;
@@ -1257,7 +1252,6 @@ test "SH-8 MySQL schema export emits bootstrap and requested migrations" {
 }
 
 const catalog = @import("catalog.zig");
-pub const Dialect = catalog.Dialect;
 pub const retry_allowance_open_sql = catalog.retry_allowance_open_sql;
 pub const retry_exhausted_sql = catalog.retry_exhausted_sql;
 pub const oneOf = catalog.oneOf;
@@ -1277,7 +1271,6 @@ const references = catalog.references;
 pub const indexes = catalog.indexes;
 
 pub const MetaKey = catalog.MetaKey;
-const meta_keys = catalog.meta_keys;
 pub const MetaPresence = std.EnumSet(MetaKey);
 
 const MetaSeed = struct {

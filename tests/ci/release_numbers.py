@@ -3,6 +3,8 @@ import re
 import subprocess
 
 SCHEMA = "src/store/schema.zig"
+# The files that state the Store schema: how each engine spells it (SCHEMA) and the tables, columns and indexes it spells (catalog.zig).
+SCHEMA_SOURCES = (SCHEMA, "src/store/catalog.zig")
 VERSION = re.compile(r"^pub const schema_version: u32 = (\d+);$", re.MULTILINE)
 ROW = re.compile(r"\.\{ \.schema_version = (\d+), \.digest = 0x([0-9a-fA-F]+) \}")
 MIGRATIONS = re.compile(r"^pub const migrations = \[_\]Migration\{", re.MULTILINE)
@@ -122,18 +124,17 @@ def code_changed(before, after):
 def touches_mysql_migration(paths, contents):
     """Whether a change touches what the live MySQL 8.4 migration check reads, so a ready PR must run it.
 
-    True when a migration input (MIGRATION_INPUTS) changed, or when schema.zig changed in code. schema.zig's MySQL
+    True when a migration input (MIGRATION_INPUTS) changed, or when a schema source (SCHEMA_SOURCES: schema.zig, catalog.zig) changed in code. The MySQL
     DDL is generated from the same tables, indexes and helpers as its SQLite DDL, and its step table is one part of
-    that code, so a comment or layout edit is the only schema.zig change that does not trigger. `contents` maps each
-    changed schema.zig to its (base, head) text, as select_tests.revision_contents does.
+    that code, so a comment or layout edit is the only schema source change that does not trigger. `contents` maps each
+    changed schema source to its (base, head) text, as select_tests.revision_contents does.
     """
     if any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in MIGRATION_INPUTS):
         return True
-    if SCHEMA not in paths:
+    sources = [path for path in SCHEMA_SOURCES if path in paths]
+    if not sources:
         return False
-    if SCHEMA not in contents:
-        return True
-    return code_changed(*contents[SCHEMA])
+    return any(path not in contents or code_changed(*contents[path]) for path in sources)
 
 
 # MySQL migration SQL, not the SQLite text beside it. A search of CHECK_CLAUSE by a needle with a quote character
