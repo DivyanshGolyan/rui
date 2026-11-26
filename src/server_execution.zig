@@ -1,7 +1,6 @@
 const std = @import("std");
 const provider_route = @import("provider_route.zig");
 const connection_names = @import("connection_names.zig");
-const connection = @import("connection.zig");
 const listing_slot = @import("listing_slot.zig");
 const tool_result = @import("tool_result.zig");
 const server_mcp = @import("server_mcp.zig");
@@ -739,9 +738,9 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
         if (kind != .catalog) if (url) |owned| run.shared.allocator.free(owned);
     };
     for (listing_slot.ListingSlot.all) |kind| {
-        const index = kind.connectionIndex() orelse continue;
-        const served = run.settings.providers.liveListAt(index) orelse continue;
-        const name = run.settings.providers.table.names[index];
+        const found = run.settings.providers.listed(kind) orelse continue;
+        const served = found.served;
+        const name = found.name;
         listing_urls.set(kind, std.fmt.allocPrint(run.shared.allocator, "{s}/models", .{providers.responsesBase(served.endpoint).?}) catch |err| {
             run.shared.model_lists.publish(name, err);
             continue;
@@ -1299,8 +1298,7 @@ noinline fn startListings(run: *Run, reactor: *provider.Reactor, works: *listing
 }
 
 fn listingCredential(run: *Run, kind: listing_slot.ListingSlot) ?providers.Credential {
-    const index = kind.connectionIndex() orelse return null;
-    return run.settings.providers.liveListAt(index).?.credential;
+    return run.settings.providers.listed(kind).?.served.credential;
 }
 
 fn startLeasedListing(run: *Run, reactor: *provider.Reactor, kind: listing_slot.ListingSlot, work: *ListingWork, lease: ?*const providers.Lease) void {
@@ -1331,14 +1329,8 @@ noinline fn startListing(run: *Run, reactor: *provider.Reactor, kind: listing_sl
     try reactor.startListing(kind, &work.fetch, request_fields, work.response.?);
 }
 
-/// The connection a listing slot fetches the models of; null for the catalog.
-fn listedName(run: *const Run, kind: listing_slot.ListingSlot) ?connection.Name {
-    const index = kind.connectionIndex() orelse return null;
-    return run.settings.providers.table.names[index];
-}
-
 fn listingFailed(run: *Run, kind: listing_slot.ListingSlot, err: anyerror) void {
-    if (listedName(run, kind)) |name| return run.shared.model_lists.publish(name, err);
+    if (run.settings.providers.listed(kind)) |found| return run.shared.model_lists.publish(found.name, err);
     stderr.print("rui: models.dev catalog unavailable ({s}); the saved catalog stands\n", .{@errorName(err)});
 }
 
@@ -1348,7 +1340,7 @@ noinline fn finishListing(run: *Run, reactor: *provider.Reactor, kind: listing_s
     if (stream.end().?.cause != .complete) return listingFailed(run, kind, error.ListingTransportFailed);
     if (stream.status() != 200 and !(kind == .catalog and stream.status() == 304)) return listingFailed(run, kind, error.ListingRefused);
     const body = work.response.?[0..@intCast(stream.responseLength())];
-    if (listedName(run, kind)) |name| return run.shared.model_lists.publish(name, body);
+    if (run.settings.providers.listed(kind)) |found| return run.shared.model_lists.publish(found.name, body);
     saveCatalogAnswer(run.shared.store, work, stream.status().?, body) catch |err| listingFailed(run, kind, err);
 }
 
@@ -3428,10 +3420,10 @@ test "a leased model list waits behind every model slot, and its lease always go
     try std.testing.expect(!advanceCredentialWork(&run, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(!slots[0].model_authenticating.requested);
     worker.state = .{ .failed = error.FileNotFound };
-    try std.testing.expect(host.model_lists.get(chatgpt) == .pending);
+    try std.testing.expect(host.model_lists.live.get(chatgpt).? == .pending);
     try std.testing.expect(advanceCredentialWork(&run, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(work.auth == .none and worker.state == .idle and !reactor.listingPending());
-    try std.testing.expect(host.model_lists.get(chatgpt) == .catalog_fallback);
+    try std.testing.expect(host.model_lists.live.get(chatgpt).? == .catalog_fallback);
     try std.testing.expect(advanceCredentialWork(&run, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(slots[0].model_authenticating.requested);
     worker.state = .idle;
@@ -3445,7 +3437,7 @@ test "a leased model list waits behind every model slot, and its lease always go
     try std.testing.expect(advanceCredentialWork(&run, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(worker.state == .idle and work.auth == .none);
     try std.testing.expect(reactor.listings.get(kind) != null and work.credential != null);
-    try std.testing.expect(host.model_lists.get(chatgpt) == .pending);
+    try std.testing.expect(host.model_lists.live.get(chatgpt).? == .pending);
     startListings(&run, &reactor, &listings);
     try std.testing.expect(work.auth == .none);
     endListing(&reactor, kind, work);
@@ -3458,7 +3450,7 @@ test "a leased model list waits behind every model slot, and its lease always go
     try std.testing.expect(advanceCredentialWork(&run, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(worker.state == .idle and work.auth == .none and !reactor.listingPending());
     try std.testing.expect(work.credential == null and work.response == null);
-    try std.testing.expect(host.model_lists.get(chatgpt) == .catalog_fallback);
+    try std.testing.expect(host.model_lists.live.get(chatgpt).? == .catalog_fallback);
 }
 
 test "authentication worker answers each job with that job's result" {

@@ -14,6 +14,7 @@ const provider_name = @import("provider_name.zig");
 const secret_value = @import("secret_value.zig");
 const connection = @import("connection.zig");
 const connection_names = @import("connection_names.zig");
+const ListingSlot = @import("listing_slot.zig").ListingSlot;
 
 const Provider = protocol.Provider;
 
@@ -417,28 +418,32 @@ pub const Providers = struct {
         return out;
     }
 
-    /// The served connection at `index` of the table when it lists its own models.
-    pub fn liveListAt(self: *const Providers, index: usize) ?*const Served {
-        if (index >= self.table.len) return null;
-        const entry = &self.table.values[index];
-        if (!entry.live_list or entry.credential.listing() == null or responsesBase(entry.endpoint) == null) return null;
-        return entry;
-    }
+    pub const Listed = struct { name: connection.Name, served: *const Served };
 
     /// Where the served connection `name` fetches its model list: the one owner of the slot a name maps to.
-    pub fn listingSlot(self: *const Providers, name: connection.Name) ?@import("listing_slot.zig").ListingSlot {
+    pub fn listingSlot(self: *const Providers, name: connection.Name) ?ListingSlot {
         for (self.table.names[0..self.table.len], 0..) |one, index| if (one.eql(name)) return .ofConnection(index);
         return null;
     }
 
+    /// The connection a listing slot fetches the models of: the one owner of slot -> connection. Null for the
+    /// catalog, an empty slot, or a connection that does not list its own models.
+    pub fn listed(self: *const Providers, slot: ListingSlot) ?Listed {
+        const index = slot.connectionIndex() orelse return null;
+        if (index >= self.table.len) return null;
+        const entry = &self.table.values[index];
+        if (!entry.live_list or entry.credential.listing() == null or responsesBase(entry.endpoint) == null) return null;
+        return .{ .name = self.table.names[index], .served = entry };
+    }
+
     pub fn liveList(self: *const Providers, name: connection.Name) ?*const Served {
-        for (self.table.names[0..self.table.len], 0..) |one, index| if (one.eql(name)) return self.liveListAt(index);
-        return null;
+        const found = self.listed(self.listingSlot(name) orelse return null) orelse return null;
+        return found.served;
     }
 
     pub fn liveLists(self: *const Providers) usize {
         var count: usize = 0;
-        for (0..self.table.len) |index| count += @intFromBool(self.liveListAt(index) != null);
+        for (0..self.table.len) |index| count += @intFromBool(self.listed(.ofConnection(index)) != null);
         return count;
     }
 
@@ -737,8 +742,8 @@ test "each route says how its model list reads, and a provider's list is live on
     try std.testing.expectEqual(providers.get(alpha).?, providers.liveList(alpha).?);
     try std.testing.expect(providers.liveList(beta) == null);
     try std.testing.expectEqual(@as(usize, 1), providers.liveLists());
-    try std.testing.expectEqual(@as(?@import("listing_slot.zig").ListingSlot, .ofConnection(3)), providers.listingSlot(alpha));
-    try std.testing.expectEqual(@as(?@import("listing_slot.zig").ListingSlot, null), providers.listingSlot(connection.Name.parse("gamma").?));
+    try std.testing.expectEqual(@as(?ListingSlot, .ofConnection(3)), providers.listingSlot(alpha));
+    try std.testing.expectEqual(@as(?ListingSlot, null), providers.listingSlot(connection.Name.parse("gamma").?));
 }
 
 test "fromSettings serves each key connection at its own URL with its own key, and nothing for an absent name" {

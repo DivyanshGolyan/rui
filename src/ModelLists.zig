@@ -18,8 +18,8 @@ asked: std.atomic.Value(bool) = .init(false),
 
 pub fn init(io: std.Io, allocator: std.mem.Allocator, providers: *const providers_module.Providers) Self {
     var lists: Self = .{ .io = io, .allocator = allocator, .providers = providers };
-    for (providers.table.names[0..providers.table.len], 0..) |name, index| {
-        if (providers.liveListAt(index) != null) lists.live.set(name, .pending) catch unreachable;
+    for (0..providers.table.len) |index| {
+        if (providers.listed(.ofConnection(index))) |found| lists.live.set(found.name, .pending) catch unreachable;
     }
     return lists;
 }
@@ -30,13 +30,6 @@ pub fn deinit(self: *Self) void {
         .catalog, .pending, .catalog_fallback => {},
     };
     self.* = .{};
-}
-
-/// The connection's current list: the catalog for a served name that has none of its own.
-pub fn get(self: *Self, name: connection.Name) model_list.List {
-    self.mutex.lockUncancelable(self.io);
-    defer self.mutex.unlock(self.io);
-    return self.live.get(name) orelse .catalog;
 }
 
 pub fn set(self: *Self, name: connection.Name, list: model_list.List) void {
@@ -126,13 +119,13 @@ test "EXR-100 each connection's model list is published and rendered on its own"
         out.buffered(),
     );
     lists.publish(chatgpt, "{\"data\":[{\"id\":\"gpt-6-luna\"}]}");
-    try std.testing.expect(lists.get(chatgpt) == .catalog_fallback);
+    try std.testing.expect(lists.live.get(chatgpt).? == .catalog_fallback);
     lists.publish(openai, "{\"data\":[{\"id\":\"gpt-6-luna\"}]}");
     lists.publish(openai, "{\"data\":[{\"id\":\"gpt-6-mare\"}]}");
-    try std.testing.expectEqualStrings("gpt-6-mare\n", lists.get(openai).live.bytes);
-    try std.testing.expect(lists.get(codex) == .catalog);
-    try std.testing.expect(lists.get(beta) == .catalog);
-    try std.testing.expectEqualStrings("gpt-6-sol\nalpha-only\n", lists.get(alpha).live.bytes);
+    try std.testing.expectEqualStrings("gpt-6-mare\n", lists.live.get(openai).?.live.bytes);
+    try std.testing.expect(lists.live.get(codex).? == .catalog);
+    try std.testing.expect(lists.live.get(beta).? == .catalog);
+    try std.testing.expectEqualStrings("gpt-6-sol\nalpha-only\n", lists.live.get(alpha).?.live.bytes);
 }
 
 test "EXR-100 model-list asks before one take fold into one true take" {
