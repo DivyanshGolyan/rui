@@ -3,6 +3,7 @@ const protocol = @import("protocol.zig");
 const connection = @import("connection.zig");
 const wire_request = @import("wire_request.zig");
 const utf8_validation = @import("utf8_validation.zig");
+const saved_label = @import("saved_label.zig");
 
 pub const Preset = @import("preset_value.zig").Preset;
 pub const max_presets = @import("preset_value.zig").max_presets;
@@ -272,6 +273,7 @@ pub fn checkStartAgentWithPresets(arena: std.mem.Allocator, bytes: []const u8, p
         var fields = overrides.iterator();
         while (fields.next()) |entry| try spec.put(arena, entry.key_ptr.*, entry.value_ptr.*);
     }
+    try tidyLabel(arena, &spec);
     const checked = try parseAgentSpecFor(arena, spec, &out.configuration, true);
     if (checked == .rejected) return checked;
     out.task = task;
@@ -279,6 +281,18 @@ pub fn checkStartAgentWithPresets(arena: std.mem.Allocator, bytes: []const u8, p
     out.instructions = out.configuration.instructions.borrowedBytes();
     out.output_schema = out.configuration.output_schema.borrowedBytes();
     return .accepted;
+}
+
+/// A name the model gives a new agent is advice for the screen: it is saved as one tidy line, or as no name, and never refuses the start.
+fn tidyLabel(arena: std.mem.Allocator, spec: *std.json.ObjectMap) error{OutOfMemory}!void {
+    const entry = spec.getPtr("label") orelse return;
+    entry.* = switch (entry.*) {
+        .string => |text| if (saved_label.readWords(protocol.max_label_bytes, text)) |words|
+            .{ .string = try arena.dupe(u8, words.slice()) }
+        else
+            .null,
+        else => .null,
+    };
 }
 
 pub fn parseAgentSpec(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *wire_request.Configuration) error{OutOfMemory}!StartAgentCheck {
@@ -459,6 +473,34 @@ test "a start_agent call's arguments carry a task and a whole spec without a pro
             try std.testing.expectEqualStrings("bash start_agent", start.configuration.tools.names.slice());
             try std.testing.expect(start.configuration.workspace.state != .value and start.configuration.provider.state != .value and start.configuration.label.state != .value);
         }
+    }
+}
+
+test "TPR-7 a start_agent call's label never refuses the start, and is saved as one tidy line or none" {
+    const Case = struct { label: []const u8, saved: ?[]const u8 };
+    const long: [protocol.max_label_bytes + 20]u8 = @splat('x');
+    for ([_]Case{
+        .{ .label = "\"Review diff\"", .saved = "Review diff" },
+        .{ .label = "\"  Review\\n\\t diff \\u2028 now\\r\\n\"", .saved = "Review diff now" },
+        .{ .label = "\"\\n \\u00a0\"", .saved = null },
+        .{ .label = "\"\"", .saved = null },
+        .{ .label = "\"" ++ &long ++ "\"", .saved = long[0..protocol.max_label_bytes] },
+        .{ .label = "\"caf\\u00e9\"", .saved = "caf\u{e9}" },
+        .{ .label = "7", .saved = null },
+        .{ .label = "{\"a\":1}", .saved = null },
+        .{ .label = "true", .saved = null },
+        .{ .label = "null", .saved = null },
+    }) |case| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const arguments = try std.fmt.allocPrint(arena.allocator(), "{{\"task\":\"read\",\"attached\":true,\"spec\":{{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\",\"label\":{s}}}}}", .{case.label});
+        const start = try arena.allocator().create(StartAgent);
+        const check = try checkStartAgent(arena.allocator(), arguments, start);
+        try std.testing.expect(check == .accepted);
+        if (case.saved) |expected| {
+            try std.testing.expect(start.configuration.label.state == .value);
+            try std.testing.expectEqualStrings(expected, start.configuration.label.value.slice());
+        } else try std.testing.expect(start.configuration.label.state != .value);
     }
 }
 
