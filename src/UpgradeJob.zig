@@ -173,8 +173,18 @@ pub fn writeReceipt(self: *const Self, writer: *std.Io.Writer) !void {
 pub fn relaunchBuild(self: *const Self) ?[]const u8 {
     std.debug.assert(!self.started or self.finished);
     const result = &(self.result orelse return null);
-    if (!upgrade_run.installed(self.facts())) return null;
-    return result.installation.receipt().selected_after;
+    const selected = result.installation.receipt().selected_after;
+    if (upgrade_run.installed(self.facts())) return selected;
+    // A build another terminal or an earlier run already published still replaces this window.
+    const published = self.facts().published orelse return null;
+    if (published != .ok) return null;
+    const checked = self.checked orelse return null;
+    return if (runsFrom(checked.running_executable, selected)) null else selected;
+}
+
+/// Whether the executable lives inside the build directory.
+fn runsFrom(executable: []const u8, build: []const u8) bool {
+    return executable.len > build.len and std.mem.startsWith(u8, executable, build) and executable[build.len] == '/';
 }
 
 pub fn hasGuidance(self: *const Self) bool {
@@ -611,4 +621,11 @@ test "SH-76 Upgrade job adapts joined errors and receipts through the shared own
         try std.testing.expectEqual(@as(usize, 1), value.hosts.?.ok.counts.failed);
         try std.testing.expect(value.hosts.?.ok.guidance);
     };
+}
+
+test "a window outside the selected build still relaunches when the build was already published" {
+    try std.testing.expect(runsFrom("/lib/rui/b2/bin/rui", "/lib/rui/b2"));
+    try std.testing.expect(!runsFrom("/lib/rui/b1/bin/rui", "/lib/rui/b2"));
+    try std.testing.expect(!runsFrom("/lib/rui/b22/bin/rui", "/lib/rui/b2"));
+    try std.testing.expect(!runsFrom("/lib/rui/b2", "/lib/rui/b2"));
 }
