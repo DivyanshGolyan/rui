@@ -51,11 +51,12 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
                 .{ .arguments = "{\"rui_call_description\":null}" },
                 .{ .arguments = "{\"rui_call_description\":\"\"}" },
                 .{ .arguments = "{\"rui_call_description\":\" \\t\\u00a0\"}" },
-                .{ .arguments = "{\"rui_call_description\":\"Fetch\\npage\"}" },
-                .{ .arguments = "{\"rui_call_description\":\"Fetch\\rpage\"}" },
-                .{ .arguments = "{\"rui_call_description\":\"Fetch\\u0085page\"}" },
-                .{ .arguments = "{\"rui_call_description\":\"Fetch\\u2028page\"}" },
-                .{ .arguments = "{\"rui_call_description\":\"Fetch\\u2029page\"}" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\npage\"}", .expected = "Fetch page" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\rpage\"}", .expected = "Fetch page" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\u0085page\"}", .expected = "Fetch page" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\u2028page\"}", .expected = "Fetch page" },
+                .{ .arguments = "{\"rui_call_description\":\"Fetch\\u2029page\"}", .expected = "Fetch page" },
+                .{ .arguments = "{\"rui_call_description\":\"  Fetch \\n\\r\\n  page \\u2028\"}", .expected = "Fetch page" },
                 .{ .arguments = "{\"rui_call_description\":\"Fetch page\",\"broken\":" },
             };
             for (cases) |line| {

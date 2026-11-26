@@ -883,7 +883,7 @@ The runner is derived from the name and owner in the Operation's frozen offer, n
 Current includes the frozen `server` only for unresolved MCP calls; legacy built-in rows omit it.
 Bash displays `? <description>` when it has a label (a call with none shows the bare `?` line), then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one.
 MCP displays `? <saved description>` (at most 200 decoded UTF-8 bytes), `Tool`, `Server` and the original `Arguments` JSON.
-The label is extracted once at settlement from `rui_call_description`: a valid nonblank, single-line UTF-8 string of 1–200 bytes is saved; missing, non-string, blank, multi-line or oversized text saves the tool name instead.
+The label is extracted once at settlement from `rui_call_description`: a string of at most 200 decoded bytes is saved as one tidy line (line breaks and space runs collapse to one space, ends trimmed, bad bytes become U+FFFD); a missing, non-string, blank or oversized one saves the tool name instead, and none of them refuses the call. The property is optional in the schema the model sees.
 The terminal and TypeScript feed show the line the Store derives when it reads (`tool_line.of`) from that saved label, never re-parse arguments for it.
 The client retains that bounded line; it does not interpret the server's schema.
 Raw one-shot `rui action inspect` stays exact.

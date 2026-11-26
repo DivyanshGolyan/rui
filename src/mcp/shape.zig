@@ -19,7 +19,7 @@ pub fn writeSchema(writer: *std.Io.Writer, input_schema: []const u8) Error!void 
     var first = true;
     var members = document.Members.init(input_schema);
     while (members.next()) |found| {
-        if (document.keyIs(found.key, "properties") or document.keyIs(found.key, "required")) continue;
+        if (document.keyIs(found.key, "properties")) continue;
         try writeMember(writer, &first, found.key, found.value);
     }
     try separate(writer, &first);
@@ -28,14 +28,7 @@ pub fn writeSchema(writer: *std.Io.Writer, input_schema: []const u8) Error!void 
         var own = document.Members.init(properties);
         while (own.next()) |found| try writer.print("\"{s}\":{s},", .{ found.key, found.value });
     }
-    try writer.writeAll(property_text ++ "}");
-    try separate(writer, &first);
-    try writer.writeAll("\"required\":[");
-    if (document.member(input_schema, "required")) |required| {
-        var items = document.Items.init(required);
-        while (items.next()) |item| try writer.print("{s},", .{item});
-    }
-    try writer.writeAll("\"" ++ description_property ++ "\"]}");
+    try writer.writeAll(property_text ++ "}}");
 }
 
 pub fn check(input_schema: []const u8) Error!void {
@@ -67,21 +60,21 @@ fn shaped(buffer: []u8, schema: []const u8) Error![]const u8 {
     return writer.buffered();
 }
 
-test "a schema gains the description property and requires it" {
+test "a schema gains the description property and keeps its own required list" {
     var buffer: [512]u8 = undefined;
     const out = try shaped(&buffer, "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}},\"required\":[\"q\"]}");
     try std.testing.expectEqualStrings(
-        "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"},\"rui_call_description\":{\"type\":\"string\",\"maxLength\":200}},\"required\":[\"q\",\"rui_call_description\"]}",
+        "{\"type\":\"object\",\"required\":[\"q\"],\"properties\":{\"q\":{\"type\":\"string\"},\"rui_call_description\":{\"type\":\"string\",\"maxLength\":200}}}",
         out,
     );
     try document.check(out);
 }
 
-test "a schema without properties or required gets both" {
+test "a schema without properties gets the optional description property alone" {
     var buffer: [512]u8 = undefined;
     const out = try shaped(&buffer, "{\"type\":\"object\"}");
     try std.testing.expectEqualStrings(
-        "{\"type\":\"object\",\"properties\":{\"rui_call_description\":{\"type\":\"string\",\"maxLength\":200}},\"required\":[\"rui_call_description\"]}",
+        "{\"type\":\"object\",\"properties\":{\"rui_call_description\":{\"type\":\"string\",\"maxLength\":200}}}",
         out,
     );
     try document.check(out);
