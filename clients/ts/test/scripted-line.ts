@@ -49,7 +49,7 @@ export function fakeFeed(sessions: readonly string[] = ["k7m2qx"]) {
 			version: "24", type: "activity_page", delta: "full", since: token,
 			items: items.map((row) => ({ position: String(row.position), ordinal: "0", at: "1", value: { stop: { key: row.key, turn: null, cutoff: "1", completion: "completed" } } })),
 			more: after.length > items.length, end: String(last),
-			queued: { count: "0" },
+			aggregates: { as_of: String(after.length > items.length ? items.at(-1)?.position ?? last : last), call_activity: { total: "0", entries: [] }, queued: { count: "0" } },
 			work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working", since: "1" } },
 		});
 	};

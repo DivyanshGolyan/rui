@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 96;
+pub const schema_version: u32 = 97;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -76,6 +76,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 94, .digest = 0x9803d541a1a4945e },
     .{ .schema_version = 95, .digest = 0x09bff41030bad2a0 },
     .{ .schema_version = 96, .digest = 0x3c118fb5fc591e54 },
+    .{ .schema_version = 97, .digest = 0x3a4f2e911f30dd94 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -1097,6 +1098,35 @@ pub const migrations = [_]Migration{
             "CREATE TABLE hosted_target(\n operation_id BIGINT NOT NULL,\n item_ordinal BIGINT NOT NULL,\n target_ordinal BIGINT NOT NULL,\n content_id BIGINT NOT NULL,\n PRIMARY KEY(operation_id,item_ordinal,target_ordinal),\n FOREIGN KEY(operation_id,item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n CHECK(target_ordinal>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
+    // A peer send is one record, the tool row of the call that made it (#2269): the sender-side record goes. A Message no
+    // longer takes a position in its sender's feed, so `sender_position`, its unique index and the table of refusals saved
+    // beside it are dropped; `sender_session_ref` still names the sender. A saved sender position was only the order of that
+    // sender's own record, which Activity no longer draws (Divyansh, 2026-11-25).
+    .{
+        .from = 96,
+        .sqlite = &.{
+            "DROP TABLE sent_rejection",
+            "ALTER TABLE message_admission RENAME TO message_admission_before_97",
+            "CREATE TABLE message_admission(\n admission_id INTEGER PRIMARY KEY NOT NULL CHECK(admission_id>0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_position INTEGER CHECK(admission_position>0),\n turn_id INTEGER REFERENCES turn(turn_id),\n admitted_at INTEGER NOT NULL CHECK(admitted_at>0),\n sender_session_ref TEXT REFERENCES session(session_ref),\n source_action_id INTEGER UNIQUE REFERENCES action_operation(action_id),\n source_kind INTEGER NOT NULL CHECK(source_kind BETWEEN 1 AND 5),\n UNIQUE(admission_id,source_kind),\n CHECK(source_action_id IS NULL OR sender_session_ref IS NULL),\n CHECK((source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL))\n) STRICT",
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,source_action_id,source_kind) SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,source_action_id,source_kind FROM message_admission_before_97",
+            "DROP TABLE message_admission_before_97",
+            "CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id)",
+            "CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE source_kind=1",
+            "CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL",
+            "CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position)",
+            "CREATE INDEX message_admission_activity ON message_admission(session_ref,source_kind,admission_position)",
+        },
+        .mysql = &.{
+            "DROP TABLE sent_rejection",
+            "SET @rui_sender_ddl=(SELECT CONCAT('ALTER TABLE message_admission ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') SEPARATOR ', ')) FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='message_admission' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('sender_position',cc.CHECK_CLAUSE)>0)",
+            "PREPARE rui_sender_check FROM @rui_sender_ddl",
+            "EXECUTE rui_sender_check",
+            "DEALLOCATE PREPARE rui_sender_check",
+            "ALTER TABLE message_admission ADD INDEX sender_session_ref(sender_session_ref), DROP INDEX message_admission_sent, DROP COLUMN sender_position",
+        },
+    },
 };
 
 comptime {
@@ -1654,7 +1684,6 @@ pub const tables = [_]Table{
             .{ .name = "turn_id", .type = .int, .nullable = true },
             .{ .name = "admitted_at", .type = .int, .check = "admitted_at>0", .read_by = .both },
             .{ .name = "sender_session_ref", .type = .{ .text = null }, .nullable = true, .read_by = .both },
-            .{ .name = "sender_position", .type = .int, .nullable = true, .check = "sender_position>0", .read_by = .both },
             .{ .name = "source_action_id", .type = .int, .nullable = true },
             .{ .name = "source_kind", .type = .int, .check = "source_kind BETWEEN 1 AND 5" },
         },
@@ -1668,7 +1697,7 @@ pub const tables = [_]Table{
             references("sender_session_ref", "session", session_reference),
             references("source_action_id", "action_operation", &.{"action_id"}),
         },
-        .checks = &.{ "(sender_session_ref IS NULL)=(sender_position IS NULL)", "source_action_id IS NULL OR sender_session_ref IS NULL", "(source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL)" },
+        .checks = &.{ "source_action_id IS NULL OR sender_session_ref IS NULL", "(source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL)" },
     },
     .{
         .name = "action_value",
@@ -1684,22 +1713,6 @@ pub const tables = [_]Table{
         .primary_key = &.{ "action_id", "ordinal" },
         .uniques = &.{ &.{ "handle", "publication_key" }, &.{"admission_id"} },
         .foreign_keys = &.{ references("action_id", "action_operation", &.{"action_id"}), references("content_id", "content", content_reference), references("admission_id", "message_admission", &.{"admission_id"}) },
-        .without_rowid = true,
-    },
-    .{
-        .name = "sent_rejection",
-        .columns = &.{
-            .{ .name = "command_key", .type = .{ .text = null } },
-            .{ .name = "sender_session_ref", .type = .{ .text = null } },
-            .{ .name = "sender_position", .type = .int, .check = "sender_position>0" },
-            .{ .name = "rejected_at", .type = .int, .check = "rejected_at>0" },
-        },
-        .primary_key = &.{"command_key"},
-        .uniques = &.{&.{ "sender_session_ref", "sender_position" }},
-        .foreign_keys = &.{
-            references("command_key", "core_command", command_reference),
-            references("sender_session_ref", "session", session_reference),
-        },
         .without_rowid = true,
     },
     .{
@@ -2202,7 +2215,6 @@ pub const indexes = [_]Index{
     .{ .name = "session_workspace_list", .table = "session", .columns = &.{ "workspace_digest", "created_seq" } },
     .{ .name = "session_creator", .table = "session", .columns = &.{ "creator_ref", "session_ref" } },
     .{ .name = "session_tab", .table = "session", .columns = &.{ "archive_seq", "created_seq" } },
-    .{ .name = "message_admission_sent", .table = "message_admission", .columns = &.{ "sender_session_ref", "sender_position" }, .unique = true, .where = "sender_session_ref IS NOT NULL" },
     .{ .name = "turn_one_active_per_session", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NULL" },
     .{ .name = "turn_tool_continuation", .table = "turn", .columns = &.{"operation_id"}, .where = "outcome_code IS NULL AND continuation_operation_id=operation_id" },
     .{ .name = "message_admission_session_order", .table = "message_admission", .columns = &.{ "session_ref", "turn_id", "admission_id" } },
@@ -4003,11 +4015,13 @@ test "schema 82 backfills input sources and preserves admissions" {
     }
 }
 
-test "schema 83 migration rebuilds canonical input tables" {
+test "schema 83 and 97 migrations rebuild canonical input tables" {
     for (comptime objects(.sqlite)) |object| {
         if (!std.mem.eql(u8, object.name, "message_admission") and !std.mem.eql(u8, object.name, "conversation_entry")) continue;
         var found = false;
-        for (migrations[82 - migration_baseline].sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
+        // message_admission last took its canonical form at 97 (the step from 96), when it dropped sender_position.
+        const step = if (std.mem.eql(u8, object.name, "message_admission")) migrations[96 - migration_baseline] else migrations[82 - migration_baseline];
+        for (step.sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
         try std.testing.expect(found);
     }
 }

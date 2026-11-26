@@ -15,6 +15,7 @@ const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
 const action_domain = @import("action.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
+const saved_label = @import("../../saved_label.zig");
 const tool_line = @import("../../tool_line.zig");
 const hosted_action = @import("../../hosted_action.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
@@ -830,7 +831,7 @@ pub const StoredOutcome = struct {
         const at = std.math.cast(usize, self.link_at orelse return error.CorruptStore) orelse return error.CorruptStore;
         if (at > text.len) return error.CorruptStore;
         var peer: tool_presentation.NamedPeer = .{ .session = session };
-        if (self.label) |label| peer.label = label;
+        if (saved_label.labelWords(self.label)) |label| peer.label = label;
         return tool_presentation.Line.fromParts(text.slice()[0..at], peer, text.slice()[at..]) catch return error.CorruptStore;
     }
 };
@@ -1089,9 +1090,10 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     const lower = if (forward) request.position + 1 else if (boundary) |item| item.position else 0;
     const upper = if (forward) (if (boundary) |item| item.position else end) else if (request.position == 0) end else @min(end, request.position - @intFromBool((request.ordinal orelse 0) == 0));
     const last = if (forward) boundary else null;
-    const call_position = activity_facts.queueCutoff(end, forward, page.more, if (last) |item| item.position else null);
+    const call_position = activity_facts.Aggregates.position(end, forward, page.more, if (last) |item| item.position else null);
     var missing: missing_assistant_entry.Result = null;
-    var calls: CallRows = .{ .activity = &page.call_activity, .args = .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null } };
+    var call_activity_facts: activity_facts.CallActivity = .{};
+    var calls: CallRows = .{ .activity = &call_activity_facts, .args = .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null } };
     var waiting: QueuedMessages = .{};
     if (lower <= upper and request.kinds.contains(.assistant)) a.read(missing_assistant_entry, .{ .session = session_ref, .lower = lower, .upper = upper }, &missing);
     if (request.kinds.eql(.full)) {
@@ -1100,8 +1102,10 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     }
     try readItems(page.items.len, a, session_ref, end, at[0..page.count], page.items[0..page.count], &calls, null);
     if (missing != null) return error.CorruptStore;
-    page.queued = waiting.queued;
-    if (waiting.queued.count != 0) page.queued.newest_content = try content_parts.publicValue(&(waiting.newest orelse return error.CorruptStore), .{ .message = waiting.queued.newest_admission });
+    if (request.kinds.eql(.full)) {
+        page.aggregates = .{ .as_of = call_position, .call_activity = call_activity_facts, .queued = waiting.queued };
+        if (waiting.queued.count != 0) page.aggregates.?.queued.newest_content = try content_parts.publicValue(&(waiting.newest orelse return error.CorruptStore), .{ .message = waiting.queued.newest_admission });
+    } else page.aggregates = null;
     page.work.read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
     page.work.revision = session.revision.get();
     page.work.creator = session.creator_ref;
@@ -1545,10 +1549,7 @@ const LabelRead = struct {
     }
 
     fn keep(read: *LabelRead, row: *const peer_label.Row) error{CorruptStore}!void {
-        if (row.label) |*label| {
-            try configuration_domain.checkLabel(label.slice());
-            read.peer.label = label.*;
-        }
+        if (saved_label.labelWords(row.label)) |shown| read.peer.label = shown;
     }
 
     fn found(read: *const LabelRead) !void {
@@ -1807,6 +1808,7 @@ const ItemRead = struct {
                 }
                 if (!call.found.get()) return error.CorruptStore;
                 try checkCallDetails(&call.resolved, &item.value.call);
+                if (call.resolved.description.*) |*text| text.* = saved_label.callWords(text.slice());
                 item.at = call.resolved.resolved_at.get();
             },
             10 => {
@@ -1852,6 +1854,7 @@ const ItemRead = struct {
                 }
                 if (!approval.found.get()) return error.CorruptStore;
                 try checkCallDetails(&approval.details, &approval.metadata);
+                if (approval.details.description.*) |*text| text.* = saved_label.callWords(text.slice());
             },
             13 => {
                 const change = &read.state.change;

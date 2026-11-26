@@ -17,7 +17,7 @@ function pageOf(rows: [number, string][]): string {
 	return JSON.stringify({
 		version: WIRE_VERSION, type: "activity_page", delta: "full", since: `t${last}`,
 		items: rows.map(([position, key]) => ({ position: String(position), ordinal: "0", at: "1", value: { stop: { key, turn: null, cutoff: "1", completion: "completed" } } })),
-		more: false, end: String(last), queued: { count: "0" },
+		more: false, end: String(last), aggregates: { as_of: String(last), call_activity: { total: "0", entries: [] }, queued: { count: "0" } },
 		work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working", since: "1" } },
 	});
 }

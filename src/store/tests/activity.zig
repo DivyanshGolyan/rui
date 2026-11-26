@@ -148,29 +148,29 @@ test "an activity page reports the queued Messages at its end, until applied or 
             const session = try configureTestSession(&storage, "queued-config");
             var request: protocol.ActivityPage = .{};
             try request.session.set(session.slice());
-            try std.testing.expectEqual(@as(protocol.Queued, .{}), (try store_core.activityPageForTesting(&storage, request)).queued);
+            try std.testing.expectEqual(@as(protocol.Queued, .{}), (try store_core.activityPageForTesting(&storage, request)).aggregates.?.queued);
             try submitTestMessage(&storage, &tmp, "queued-a", "a", session.slice(), "first");
             try submitTestMessage(&storage, &tmp, "queued-b", "b", session.slice(), "second");
             const waiting = try store_core.activityPageForTesting(&storage, request);
             const first = waiting.items[0];
             const second = waiting.items[1];
-            try std.testing.expectEqual(@as(protocol.Queued, .{ .count = 2, .oldest_position = first.position, .newest_admission = second.value.admission.admission, .newest_position = second.position, .newest_content = second.value.admission.content }), waiting.queued);
+            try std.testing.expectEqual(@as(protocol.Queued, .{ .count = 2, .oldest_position = first.position, .newest_admission = second.value.admission.admission, .newest_position = second.position, .newest_content = second.value.admission.content }), waiting.aggregates.?.queued);
             var admitted = (try storage.admitNextModelAttempt(.{})).?;
             _ = try admitted.permit.consume();
-            try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).queued.count);
+            try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).aggregates.?.queued.count);
             var frozen = request;
             frozen.end = waiting.end;
-            try std.testing.expectEqual(waiting.queued, (try store_core.activityPageForTesting(&storage, frozen)).queued);
+            try std.testing.expectEqual(waiting.aggregates.?.queued, (try store_core.activityPageForTesting(&storage, frozen)).aggregates.?.queued);
             try submitTestMessage(&storage, &tmp, "queued-c", "c", session.slice(), "third");
             const behind = try store_core.activityPageForTesting(&storage, request);
-            try std.testing.expectEqual(@as(u64, 1), behind.queued.count);
-            try std.testing.expectEqual(behind.end, behind.queued.oldest_position);
-            try std.testing.expectEqual(behind.end, behind.queued.newest_position);
+            try std.testing.expectEqual(@as(u64, 1), behind.aggregates.?.queued.count);
+            try std.testing.expectEqual(behind.end, behind.aggregates.?.queued.oldest_position);
+            try std.testing.expectEqual(behind.end, behind.aggregates.?.queued.newest_position);
             var stop = try completeSessionStop("queued-stop", session.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).queued.count);
+            try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).aggregates.?.queued.count);
             frozen.end = behind.end;
-            try std.testing.expectEqual(behind.queued, (try store_core.activityPageForTesting(&storage, frozen)).queued);
+            try std.testing.expectEqual(behind.aggregates.?.queued, (try store_core.activityPageForTesting(&storage, frozen)).aggregates.?.queued);
         }
     }.run);
 }
@@ -201,19 +201,19 @@ test "activity queue follows compaction and taken messages" {
             var request: protocol.ActivityPage = .{};
             request.session = session;
             const compacting = try store_core.activityPageForTesting(&storage, request);
-            try std.testing.expectEqual(@as(u64, 1), compacting.queued.count);
+            try std.testing.expectEqual(@as(u64, 1), compacting.aggregates.?.queued.count);
             try std.testing.expect(compacting.work.work.state == .working and compacting.work.work.state.working.compaction);
             try submitTestMessage(&storage, &tmp, "queue-compact-third", "third", session.slice(), "third");
             const behind = try store_core.activityPageForTesting(&storage, request);
-            try std.testing.expectEqual(@as(u64, 2), behind.queued.count);
+            try std.testing.expectEqual(@as(u64, 2), behind.aggregates.?.queued.count);
             try store_testing.settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(historical_domain.ModelOperationKind.assistant_response, try storage.modelOperationKind(successor));
             const answering = try store_core.activityPageForTesting(&storage, request);
-            try std.testing.expectEqual(@as(u64, 0), answering.queued.count);
+            try std.testing.expectEqual(@as(u64, 0), answering.aggregates.?.queued.count);
             try std.testing.expect(answering.work.work.state == .working and !answering.work.work.state.working.compaction);
             try submitTestMessage(&storage, &tmp, "queue-compact-fourth", "fourth", session.slice(), "fourth");
-            try std.testing.expectEqual(@as(u64, 1), (try store_core.activityPageForTesting(&storage, request)).queued.count);
+            try std.testing.expectEqual(@as(u64, 1), (try store_core.activityPageForTesting(&storage, request)).aggregates.?.queued.count);
         }
     }.run);
 }
@@ -398,8 +398,8 @@ test "tool label observation trusts admission over damaged call field bytes" {
                 defer std.testing.allocator.free(report);
                 try std.testing.expect(std.mem.indexOf(u8, report, "Run first command") != null);
                 const after = try store_core.activityPageForTesting(&storage, request);
-                try std.testing.expectEqual(before.call_activity.total, after.call_activity.total);
-                for (before.call_activity.entries[0..before.call_activity.count], after.call_activity.entries[0..after.call_activity.count]) |original, observed| {
+                try std.testing.expectEqual(before.aggregates.?.call_activity.total, after.aggregates.?.call_activity.total);
+                for (before.aggregates.?.call_activity.entries[0..before.aggregates.?.call_activity.count], after.aggregates.?.call_activity.entries[0..after.aggregates.?.call_activity.count]) |original, observed| {
                     try std.testing.expectEqualStrings(original.presentation.line.?.words.slice(), observed.presentation.line.?.words.slice());
                     try std.testing.expectEqual(original.presentation.code, observed.presentation.code);
                 }
@@ -482,10 +482,11 @@ test "live tool activity survives completed Turns and split result pages" {
             try request.session.set(session.slice());
             const page = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expect(page.more);
+            try std.testing.expectEqual(page.items[page.count - 1].position, page.aggregates.?.as_of);
             for (page.items[0..page.count]) |item| try std.testing.expect(item.value != .tool_result);
-            try std.testing.expectEqual(@as(u64, 20), page.call_activity.total);
-            try std.testing.expectEqual(@as(usize, 3), page.call_activity.count);
-            for (page.call_activity.entries, 0..) |entry, index| {
+            try std.testing.expectEqual(@as(u64, 20), page.aggregates.?.call_activity.total);
+            try std.testing.expectEqual(@as(usize, 3), page.aggregates.?.call_activity.count);
+            for (page.aggregates.?.call_activity.entries, 0..) |entry, index| {
                 try std.testing.expectEqual(binding.operation_id, entry.operation);
                 try std.testing.expectEqual(index, entry.ordinal);
                 try std.testing.expect(entry.presentation.code == .unknown_tool);
@@ -496,18 +497,22 @@ test "live tool activity survives completed Turns and split result pages" {
             request.ordinal = last.ordinal;
             const split = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expect(split.more);
-            try std.testing.expectEqual(@as(u64, 11), split.call_activity.total);
-            try std.testing.expectEqual(@as(u64, 9), split.call_activity.entries[0].ordinal);
+            try std.testing.expectEqual(split.items[split.count - 1].position, split.aggregates.?.as_of);
+            try std.testing.expectEqual(@as(u64, 11), split.aggregates.?.call_activity.total);
+            try std.testing.expectEqual(@as(u64, 9), split.aggregates.?.call_activity.entries[0].ordinal);
             const split_last = split.items[split.count - 1];
             request.position = split_last.position;
             request.ordinal = split_last.ordinal;
             const finished = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expect(!finished.more);
-            try std.testing.expectEqual(@as(u64, 0), finished.call_activity.total);
+            try std.testing.expectEqual(finished.end, finished.aggregates.?.as_of);
+            try std.testing.expectEqual(@as(u64, 0), finished.aggregates.?.call_activity.total);
             request.position = 0;
             request.ordinal = null;
             request.direction = .backward;
-            try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).call_activity.total);
+            const opening = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(opening.end, opening.aggregates.?.as_of);
+            try std.testing.expectEqual(@as(u64, 0), opening.aggregates.?.call_activity.total);
 
             try submitTestMessage(&storage, &tmp, "live-new", "new", session.slice(), "propose again");
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -516,8 +521,14 @@ test "live tool activity survives completed Turns and split result pages" {
             request.position = finished.end;
             const frozen = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 0), frozen.count);
-            try std.testing.expectEqual(@as(u64, 2), frozen.call_activity.total);
-            try std.testing.expectEqual(next.operation_id, frozen.call_activity.entries[0].operation);
+            try std.testing.expectEqual(@as(u64, 2), frozen.aggregates.?.call_activity.total);
+            try std.testing.expectEqual(next.operation_id, frozen.aggregates.?.call_activity.entries[0].operation);
+            // INS-7: a page of some kinds does not read the aggregates, so it reports them as not read, never as none waiting.
+            for ([_]protocol.ActivityPage.Kinds{ .initOne(.admission), .initMany(&.{ .admission, .user }) }) |kinds| for ([_]@TypeOf(request.direction){ .forward, .backward }) |direction| {
+                var narrowed: protocol.ActivityPage = .{ .kinds = kinds, .direction = direction, .limit = 1 };
+                try narrowed.session.set(session.slice());
+                try std.testing.expect((try store_core.activityPageForTesting(&storage, narrowed)).aggregates == null);
+            };
         }
     }.run);
 }
@@ -549,9 +560,9 @@ test "live tool activity counts calls past the sixteenth Operation" {
             const page = try store_core.activityPageForTesting(&storage, request);
             const after = try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE acceptance_position>?1", .{page.items[page.count - 1].position});
             try std.testing.expect(after > 16);
-            try std.testing.expectEqual(after, page.call_activity.total);
-            try std.testing.expectEqual(@as(usize, 3), page.call_activity.count);
-            try std.testing.expect(page.call_activity.entries[0].operation > first);
+            try std.testing.expectEqual(after, page.aggregates.?.call_activity.total);
+            try std.testing.expectEqual(@as(usize, 3), page.aggregates.?.call_activity.count);
+            try std.testing.expect(page.aggregates.?.call_activity.entries[0].operation > first);
         }
     }.run);
 }
@@ -967,9 +978,9 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
             try submitTestMessage(&storage, &tmp, "recall-first", "first", session.slice(), "first");
             const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position,source_kind) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,source_kind) " ++
                 sequence_to_first_argument ++
-                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1,?5,value,2 FROM sequence", .{ history, session.slice(), start, content, peer.slice() });
+                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1,?5,2 FROM sequence", .{ history, session.slice(), start, content, peer.slice() });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+?1 WHERE session_ref=?2", .{ history, session.slice() });
             try store_core.reloadIdentitiesForTesting(&storage);
             var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
@@ -1022,7 +1033,7 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
             const page = try store_core.activityPageForTesting(&storage, request);
             const taken = counter.taken();
             try std.testing.expect(page.count == 1 and page.items[0].position > first and page.more);
-            try std.testing.expectEqual(@as(u64, 0), page.call_activity.total);
+            try std.testing.expect(page.aggregates == null);
             return taken;
         }
     }.run);
@@ -1055,7 +1066,7 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
             const page = try store_core.activityPageForTesting(&storage, request);
             const taken = counter.taken();
             try std.testing.expect(page.count == 1 and page.items[0].value.admission.state == .queued and page.more);
-            try std.testing.expectEqual(@as(u64, 0), page.queued.count);
+            try std.testing.expect(page.aggregates == null);
             return taken;
         }
     }.run);

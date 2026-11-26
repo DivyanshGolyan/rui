@@ -186,10 +186,11 @@ Full Session inspection, Action arguments/call-ID inspection, execution input an
 Canonical result content and proposal arguments remain unchanged; descriptions grant neither execution nor permission authority.
 The additional per-call canonical data is at most 200 description bytes plus 120 field-certificate bytes, excluding SQLite row/page overhead; readers retain fixed-size metadata, not commands.
 
-Each Activity page also captures `call_activity` under the same Store lock, with an exact total and at most the three oldest `(operation, ordinal)` identities awaiting presentation.
-A page whose `kinds` are not every kind reads neither `call_activity` nor `queued`, and reports both empty.
-Its boundary is the last returned row for a forward page with `more`, otherwise `(end, null)`, including backward opening.
-At the same boundary the page reports `queued`: how many Messages without a sender were admitted and neither applied nor excluded, the oldest one's Admission position, and the newest one's admission ID, position and `newest_content`, its content value, or `null` when none waits.
+Each Activity page that asks for every kind also carries `aggregates`, read under the same Store lock: `as_of`, the position the counts were taken at, with `call_activity` and `queued` at that position.
+A page whose `kinds` are not every kind reads neither, and its `aggregates` is `null`: not read, never an empty count that reads as none waiting.
+`as_of` is the last returned row's position for a forward page with `more`, otherwise `end`, including backward opening; the page's boundary is that row, or `(end, null)`.
+`call_activity` has an exact total and at most the three oldest `(operation, ordinal)` identities awaiting presentation.
+At the same boundary `queued` reports: how many Messages without a sender were admitted and neither applied nor excluded, the oldest one's Admission position, and the newest one's admission ID, position and `newest_content`, its content value, or `null` when none waits.
 Selection and a stop take admission-order prefixes, and Admission positions follow admission order, so the Store seeks the boundary in the index of those Messages by Admission position and walks down, stopping at the first taken: it reads the waiting Messages and one more, however many Messages precede or follow the boundary.
 Unpublished groups retain all calls, including settled siblings.
 Published calls retire only before that boundary or at its position through the presented one-based result ordinal.

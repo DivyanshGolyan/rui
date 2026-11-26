@@ -5,11 +5,11 @@ const saved_label = @import("saved_label.zig");
 
 pub const max_description_bytes = @import("tool_line.zig").max_bytes;
 
+pub const max_label_bytes = saved_label.max_label_bytes;
+
 comptime {
     std.debug.assert(max_description_bytes == saved_label.max_bytes);
 }
-
-pub const max_label_bytes = 100;
 
 pub const max_session_bytes = session_id.max_reference_bytes;
 
@@ -46,10 +46,9 @@ pub const Line = struct {
         return .{ .words = Bounded(max_description_bytes).from(words) catch return error.InvalidLine };
     }
 
-    /// The line a saved label reads as: its words as one tidy line, or fallback_words when it has none. Total.
+    /// The line a saved label reads as: savedWords as a plain Line. Total.
     pub fn ofSaved(saved: []const u8) Line {
-        const words = saved_label.readWords(max_description_bytes, saved) orelse return plain(saved_label.fallback_words) catch unreachable;
-        return plain(words.slice()) catch unreachable;
+        return plain(saved_label.callWords(saved).slice()) catch unreachable;
     }
 
     /// Words with one Session named between them: `linked("Messaged ", id, "")`.
@@ -177,7 +176,45 @@ pub const ToolPresentation = struct {
     sign: Sign,
     publication_position: ?u64,
 
-    pub const Code = enum { unresolved, pending_permission, background, succeeded, failed, timed_out, indeterminate, storage_failed, spawn_failed, cancelled, infrastructure_shutdown, denied, unknown_tool, invalid_arguments };
+    pub const Code = enum {
+        unresolved,
+        pending_permission,
+        background,
+        succeeded,
+        failed,
+        timed_out,
+        indeterminate,
+        storage_failed,
+        spawn_failed,
+        cancelled,
+        infrastructure_shutdown,
+        denied,
+        unknown_tool,
+        invalid_arguments,
+
+        /// Whether a row of this code sits against the row after it with no blank line between. Only a plain
+        /// success does: a background call has the same mark but is still running work, so it keeps its space.
+        pub fn packs(self: Code) bool {
+            return switch (self) {
+                .succeeded => true,
+                .unresolved, .pending_permission, .background, .failed, .timed_out, .indeterminate, .storage_failed, .spawn_failed, .cancelled, .infrastructure_shutdown, .denied, .unknown_tool, .invalid_arguments => false,
+            };
+        }
+
+        /// The words after a row's mark that its code adds to the call's own words, or null when the mark says it all.
+        pub fn words(self: Code) ?[]const u8 {
+            return switch (self) {
+                .unresolved, .pending_permission, .succeeded, .failed, .cancelled => null,
+                .background => "background",
+                .denied => "denied",
+                .unknown_tool, .invalid_arguments => "rejected",
+                .timed_out => "timed out",
+                .indeterminate, .infrastructure_shutdown => "may have run",
+                .storage_failed => "output lost",
+                .spawn_failed => "could not start",
+            };
+        }
+    };
 
     pub const Sign = enum { needs_you, active, finished, sent, failed, stopped };
 
@@ -214,6 +251,35 @@ pub const ToolPresentation = struct {
         return nonblank;
     }
 };
+
+test "TPR-5 a tool code says once whether its row packs against the next and the words it adds after the mark" {
+    const Case = struct { code: ToolPresentation.Code, packs: bool, words: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .code = .unresolved, .packs = false, .words = null },
+        .{ .code = .pending_permission, .packs = false, .words = null },
+        .{ .code = .background, .packs = false, .words = "background" },
+        .{ .code = .succeeded, .packs = true, .words = null },
+        .{ .code = .failed, .packs = false, .words = null },
+        .{ .code = .timed_out, .packs = false, .words = "timed out" },
+        .{ .code = .indeterminate, .packs = false, .words = "may have run" },
+        .{ .code = .storage_failed, .packs = false, .words = "output lost" },
+        .{ .code = .spawn_failed, .packs = false, .words = "could not start" },
+        .{ .code = .cancelled, .packs = false, .words = null },
+        .{ .code = .infrastructure_shutdown, .packs = false, .words = "may have run" },
+        .{ .code = .denied, .packs = false, .words = "denied" },
+        .{ .code = .unknown_tool, .packs = false, .words = "rejected" },
+        .{ .code = .invalid_arguments, .packs = false, .words = "rejected" },
+    };
+    try std.testing.expectEqual(std.enums.values(ToolPresentation.Code).len, cases.len);
+    for (cases) |case| {
+        try std.testing.expectEqual(case.packs, case.code.packs());
+        if (case.words) |expected| {
+            try std.testing.expectEqualStrings(expected, case.code.words().?);
+        } else {
+            try std.testing.expect(case.code.words() == null);
+        }
+    }
+}
 
 /// What kind of finish a successful call was. Closed: a new member is a wire change.
 /// `sent` means the call handed work to another Session, so the row reads as an arrow, not a tick.
@@ -360,6 +426,16 @@ test "TPR-3 a saved label always reads as a valid tool row line" {
     try std.testing.expect(bounded.link == null);
     try std.testing.expectEqual(max_description_bytes, bounded.words.slice().len);
     try std.testing.expectEqualStrings(long[0..max_description_bytes], bounded.words.slice());
+}
+
+test "TPR-3 a saved label reads the same in every reader" {
+    try std.testing.expectEqualStrings("Run tests then lint", saved_label.callWords("Run  tests\nthen lint").slice());
+    try std.testing.expectEqualStrings("Tool call", saved_label.callWords("").slice());
+    const long: [300]u8 = @splat('x');
+    const inputs = [_][]const u8{ "", "a\tb", &long, "\xff" };
+    for (inputs) |saved| {
+        try std.testing.expectEqualStrings(saved_label.callWords(saved).slice(), Line.ofSaved(saved).words.slice());
+    }
 }
 
 test "TPR-2 a tool chooses how a success reads and never how a failure reads" {

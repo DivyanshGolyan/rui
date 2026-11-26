@@ -91,10 +91,6 @@ pub fn permissionMode(code: u8) error{CorruptStore}!cli_value.PermissionMode {
     };
 }
 
-pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
-    if (!tool_presentation.validLabel(label)) return error.CorruptStore;
-}
-
 pub const CurrentConfiguration = struct {
     workspace: Bounded(workspace_path.max_bytes) = .{},
     provider: connection.Name = undefined,
@@ -639,7 +635,6 @@ pub fn checkSaved(current: *const CurrentConfiguration) error{CorruptStore}!void
     if (instructions == 0 or current.output_schema_id == @as(?i64, 0) or current.revision == 0 or current.next_position == 0 or
         current.compaction_trigger == @as(?u64, 0) or current.created_at == 0 or current.workspace_key == 0 or current.tool_set_id == 0 or current.loaded_tool_set_id == @as(?u64, 0)) return error.CorruptStore;
     _ = try permissionMode(current.permission_mode);
-    if (current.label) |*label| try checkLabel(label.slice());
 }
 
 fn newReference(io: std.Io, reference: *[session_id.bytes]u8) !void {

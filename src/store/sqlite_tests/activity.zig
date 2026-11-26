@@ -18,6 +18,7 @@ const completeSessionStop = tests.completeSessionStop;
 const configureTestSessionAsk = tests.configureTestSessionAsk;
 const settleCallsForTesting = tests.settleCallsForTesting;
 const settleTwoActionsForTesting = tests.settleTwoActionsForTesting;
+const testingSessionList = tests.testingSessionList;
 const testingSessionReport = tests.testingSessionReport;
 const testingSessionReportWithProfile = tests.testingSessionReportWithProfile;
 const testingStore = store_testing.testingSqliteStore;
@@ -207,8 +208,8 @@ test "a saved tool label reads as one line on every publication route, and only 
             try request.session.set(session.slice());
             request.direction = .backward;
             const healthy = try store_core.activityPageForTesting(&storage, request);
-            try std.testing.expectEqual(@as(u64, 2), healthy.call_activity.total);
-            try std.testing.expectEqualStrings("Run first command", healthy.call_activity.entries[0].presentation.line.?.words.slice());
+            try std.testing.expectEqual(@as(u64, 2), healthy.aggregates.?.call_activity.total);
+            try std.testing.expectEqualStrings("Run first command", healthy.aggregates.?.call_activity.entries[0].presentation.line.?.words.slice());
             if (route == .settled_activity or route == .conversation) {
                 var stop = try completeSessionStop("label-stop", session.slice());
                 try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
@@ -223,7 +224,12 @@ test "a saved tool label reads as one line on every publication route, and only 
                     break :blk {};
                 } else |err| err,
                 .live_activity, .settled_activity => if (store_core.activityPageForTesting(&storage, request)) |page| blk: {
-                    if (route == .live_activity) if (description.words) |words| try std.testing.expectEqualStrings(words, page.call_activity.entries[0].presentation.line.?.words.slice());
+                    if (route == .live_activity) if (description.words) |words| try std.testing.expectEqualStrings(words, page.aggregates.?.call_activity.entries[0].presentation.line.?.words.slice());
+                    if (description.words) |words| for (page.items[0..page.count]) |item| switch (item.value) {
+                        .call => |call| if (call.call_ordinal == 0) try std.testing.expectEqualStrings(words, call.description.?.slice()),
+                        .approval_requested => |asked| if (asked.call_ordinal == 0) try std.testing.expectEqualStrings(words, asked.description.?.slice()),
+                        else => {},
+                    };
                     break :blk {};
                 } else |err| err,
                 .conversation => if (store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })) |_| {} else |err| err,
@@ -238,6 +244,64 @@ test "a saved tool label reads as one line on every publication route, and only 
             }
             try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
+        }
+    }
+}
+
+test "TPR-3 a saved Session Label reads as one tidy line on every route that shows it and never fences" {
+    const cases = [_]struct { sql: []const u8, shown: ?[]const u8 }{
+        .{ .sql = "'two'||char(10)||'lines'", .shown = "two lines" },
+        .{ .sql = "'  two   lines  '", .shown = "two lines" },
+        .{ .sql = "'two'||char(8232)||'lines'", .shown = "two lines" },
+        .{ .sql = "char(10)", .shown = null },
+    };
+    const Route = enum { list, report_current, report_full, outcome_peer };
+    for (cases) |label| {
+        for ([_]Route{ .list, .report_current, .report_full, .outcome_peer }) |route| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSessionAsk(&storage, "label-route-config");
+            const peer = try configureTestSession(&storage, "label-route-peer");
+            try submitTestMessage(&storage, &tmp, "label-route-input", "label-route-input", session.slice(), "propose");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, binding, "label-route-calls");
+            var sql: [320]u8 = undefined;
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+            try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE session SET label={s} WHERE session_ref IN ('{s}','{s}')", .{ label.sql, session.slice(), peer.slice() }, 0));
+            try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE session_revision SET label={s} WHERE session_ref='{s}'", .{ label.sql, session.slice() }, 0));
+            try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE action_operation SET outcome_text='Messaged ',outcome_link_at=9,outcome_link_session='{s}',outcome_completion=1 WHERE call_ordinal=0", .{peer.slice()}, 0));
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
+            switch (route) {
+                .list => {
+                    var used = std.atomic.Value(u64).init(0);
+                    const bytes = try testingSessionList(&storage, &tmp, .{}, &used, 5);
+                    defer std.testing.allocator.free(bytes);
+                    try std.testing.expectEqual(label.shown != null, std.mem.indexOf(u8, bytes, "\"label\":\"") != null);
+                    if (label.shown) |words| try std.testing.expect(std.mem.indexOf(u8, bytes, words) != null);
+                },
+                .report_current, .report_full => {
+                    const bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, if (route == .report_full) .full else .current);
+                    defer std.testing.allocator.free(bytes);
+                    if (label.shown) |words| try std.testing.expect(std.mem.indexOf(u8, bytes, words) != null);
+                },
+                .outcome_peer => {
+                    var request: protocol.ActivityPage = .{};
+                    try request.session.set(session.slice());
+                    request.direction = .backward;
+                    const page = try store_core.activityPageForTesting(&storage, request);
+                    var linked: usize = 0;
+                    for (page.aggregates.?.call_activity.entries[0..@intCast(page.aggregates.?.call_activity.total)]) |entry| if (entry.presentation.line.?.link) |link| {
+                        linked += 1;
+                        try std.testing.expectEqualStrings(label.shown orelse "", link.peer.label.slice());
+                    };
+                    try std.testing.expectEqual(@as(usize, 1), linked);
+                },
+            }
+            try std.testing.expect(!storage.isFenced());
         }
     }
 }
@@ -316,8 +380,8 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position,source_kind) " ++
-                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,'{2s}',value,2 FROM history; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,source_kind) " ++
+                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,'{2s}',2 FROM history; " ++
                 "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
             .{ history, session.slice(), peer.slice() },
             0,
@@ -373,7 +437,7 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
         cost.* = try activityPageSteps(&storage, request);
         const page = try store_core.activityPageForTesting(&storage, request);
         try std.testing.expect(page.count == 1 and page.items[0].position > first and page.more);
-        try std.testing.expectEqual(@as(u64, 0), page.call_activity.total);
+        try std.testing.expect(page.aggregates == null);
     }
     try std.testing.expectEqual(steps[0], steps[1]);
 }
@@ -407,7 +471,7 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
         cost.* = try activityPageSteps(&storage, request);
         const page = try store_core.activityPageForTesting(&storage, request);
         try std.testing.expect(page.count == 1 and page.items[0].value.admission.state == .queued and page.more);
-        try std.testing.expectEqual(@as(u64, 0), page.queued.count);
+        try std.testing.expect(page.aggregates == null);
     }
     try std.testing.expectEqual(steps[0], steps[1]);
 }
@@ -463,9 +527,9 @@ test "activity judges every candidate Operation's tool outcomes, not only its ke
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
         const page = try store_core.activityPageForTesting(&storage, request);
-        try std.testing.expectEqual(@as(usize, 3), page.call_activity.count);
-        try std.testing.expect(page.call_activity.total >= 4);
-        if (shape == .many_operations) try std.testing.expect(page.call_activity.total > 32);
+        try std.testing.expectEqual(@as(usize, 3), page.aggregates.?.call_activity.count);
+        try std.testing.expect(page.aggregates.?.call_activity.total >= 4);
+        if (shape == .many_operations) try std.testing.expect(page.aggregates.?.call_activity.total > 32);
         try store_testing.sqlite_only.exec(&storage, "UPDATE model_output_item SET item_kind=1 WHERE (operation_id,item_ordinal)=" ++
             "(SELECT operation_id,item_ordinal FROM model_tool_call ORDER BY operation_id DESC,call_ordinal DESC LIMIT 1)", .{});
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));

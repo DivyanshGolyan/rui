@@ -2069,7 +2069,7 @@ fn publishedReplyExamples() !void {
     try Case.check(schemas, "ModelListReply", out.written(), a);
 
     out.clearRetainingCapacity();
-    var facts: protocol.ActivityFacts = .{ .end = 9, .count = 4 };
+    var facts: protocol.ActivityFacts = .{ .end = 9, .count = 4, .aggregates = .{ .as_of = 9 } };
     const three: protocol.content_value.Reference = .{ .length = 3, .digest = @splat(1) };
     const read_image = try protocol.ToolLine.plain("Read image");
     facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = .{ .text = three }, .admitted_at = 7 } } };
@@ -2082,7 +2082,7 @@ fn publishedReplyExamples() !void {
     for ([_][]const u8{ "{\"type\":\"text\",\"bytes\":\"3\",", "\"owner\":{\"message\":\"2\"}}", "\"owner\":{\"action\":\"9223372036854775807\"}}" }) |member| {
         try std.testing.expect(std.mem.indexOf(u8, out.written(), member) != null);
     }
-    var values: protocol.ActivityFacts = .{ .end = 9, .count = 3, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+    var values: protocol.ActivityFacts = .{ .end = 9, .count = 3, .aggregates = .{ .as_of = 9 }, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
     try values.work.workspace.set("/w");
     values.items[0] = facts.items[0];
     values.items[1] = facts.items[2];

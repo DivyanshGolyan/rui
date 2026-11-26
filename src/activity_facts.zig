@@ -161,17 +161,27 @@ pub const Queued = struct {
     newest_content: ?content_value.Value = null,
 };
 
-/// The position a page's queued aggregate (and call activity) is taken at: the last row of a
-/// forward page that has more, otherwise the page's end. The Store and the client both use it.
-pub fn queueCutoff(end: u64, forward: bool, more: bool, last: ?u64) u64 {
-    return if (forward and more) last.? else end;
-}
+/// What a page says about the Session as a whole, not about its rows: the live calls and the Messages still
+/// queued, counted at `as_of`. A page reads them only when it asks for every kind, so a page of some kinds carries
+/// none; "not read" is null, never an empty count.
+pub const Aggregates = struct {
+    /// The position the counts were taken at: the last row of a forward page that has more, otherwise the page's end.
+    as_of: u64,
+    call_activity: CallActivity = .{},
+    queued: Queued = .{},
 
-test "queueCutoff takes a forward page's aggregate at its last row only while more follows" {
-    try std.testing.expectEqual(@as(u64, 7), queueCutoff(40, true, true, 7));
-    try std.testing.expectEqual(@as(u64, 40), queueCutoff(40, true, false, 7));
-    try std.testing.expectEqual(@as(u64, 40), queueCutoff(40, false, true, 7));
-    try std.testing.expectEqual(@as(u64, 40), queueCutoff(40, false, false, null));
+    /// The one owner of `as_of`: the Store takes the counts there, and the client refuses a page that names another.
+    /// `last` is the position of the page's last row, which a forward page with more must have.
+    pub fn position(end: u64, forward: bool, more: bool, last: ?u64) u64 {
+        return if (forward and more) last.? else end;
+    }
+};
+
+test "aggregates are taken at a forward page's last row only while more follows" {
+    try std.testing.expectEqual(@as(u64, 7), Aggregates.position(40, true, true, 7));
+    try std.testing.expectEqual(@as(u64, 40), Aggregates.position(40, true, false, 7));
+    try std.testing.expectEqual(@as(u64, 40), Aggregates.position(40, false, true, 7));
+    try std.testing.expectEqual(@as(u64, 40), Aggregates.position(40, false, false, null));
 }
 
 pub const PageWork = struct {
@@ -190,8 +200,7 @@ pub const Page = struct {
     items: [activity_read.ActivityPage.items]Item = undefined,
     count: usize = 0,
     more: bool = false,
-    call_activity: CallActivity = .{},
-    queued: Queued = .{},
+    aggregates: ?Aggregates = null,
     work: PageWork = .{},
 };
 
