@@ -32,7 +32,9 @@ pub const Table = struct {
 /// Rows a rule's subqueries read, as a test states them.
 pub const World = struct { tables: []const Table = &.{} };
 
-pub const Error = error{ UnknownColumn, UnknownTable, ScopeTooDeep, MismatchedRow, BadCall };
+/// `TypeMismatch`: an integer compared with a text. SQLite and MySQL answer that differently (a number against a string coerces on MySQL),
+/// so a rule that does it is refused rather than answered one engine's way.
+pub const Error = error{ UnknownColumn, UnknownTable, ScopeTooDeep, MismatchedRow, BadCall, TypeMismatch };
 
 const max_frames = 16;
 
@@ -90,7 +92,7 @@ pub fn eval(expr: *const Expr, scope: Scope) Error!Value {
         .int => |value| return .{ .int = value },
         .text => |value| return .{ .text = value },
         .null_value => return .null,
-        .cmp => |c| return compare(c.op, try eval(c.left, scope), try eval(c.right, scope)),
+        .cmp => |c| return try compare(c.op, try eval(c.left, scope), try eval(c.right, scope)),
         .is_null => |value| return Value.flag((try eval(value, scope)) == .null),
         .is_not_null => |value| return Value.flag((try eval(value, scope)) != .null),
         .not => |value| {
@@ -116,7 +118,8 @@ pub fn eval(expr: *const Expr, scope: Scope) Error!Value {
         .one_of => |s| {
             const subject = try eval(s.value, scope);
             if (subject == .null) return .null;
-            for (s.set) |member| if (subject == .text and std.mem.eql(u8, subject.text, member)) return Value.flag(true);
+            if (subject != .text) return error.TypeMismatch;
+            for (s.set) |member| if (std.mem.eql(u8, subject.text, member)) return Value.flag(true);
             return Value.flag(false);
         },
         .coalesce => |parts| {
@@ -129,15 +132,15 @@ pub fn eval(expr: *const Expr, scope: Scope) Error!Value {
         .group => |inner| return eval(inner, scope),
         .between => |b| {
             const value = try eval(b.value, scope);
-            const low = compare(.ge, value, try eval(b.low, scope));
-            const high = compare(.le, value, try eval(b.high, scope));
+            const low = try compare(.ge, value, try eval(b.low, scope));
+            const high = try compare(.le, value, try eval(b.high, scope));
             return conjunction(low, high);
         },
         .in_list => |l| {
             const subject = try eval(l.value, scope);
             var unknown = subject == .null;
             for (l.items) |*item| {
-                const match = compare(.eq, subject, try eval(item, scope));
+                const match = try compare(.eq, subject, try eval(item, scope));
                 if (match == .null) unknown = true else if (match.isTrue()) return Value.flag(true);
             }
             return if (unknown) .null else Value.flag(false);
@@ -161,7 +164,7 @@ fn callValue(c: Expr.Call, scope: Scope) Error!Value {
         if (c.args.len != 2) return error.BadCall;
         const a = try eval(&c.args[0], scope);
         const b = try eval(&c.args[1], scope);
-        const same = if (a == .null or b == .null) a == .null and b == .null else compare(.eq, a, b).isTrue();
+        const same = if (a == .null or b == .null) a == .null and b == .null else (try compare(.eq, a, b)).isTrue();
         return Value.flag(same == is(u8, c.name, "@same"));
     }
     if (c.args.len == 0) return error.BadCall;
@@ -181,11 +184,11 @@ fn callValue(c: Expr.Call, scope: Scope) Error!Value {
     return error.BadCall;
 }
 
-fn compare(op: Expr.Op, left: Value, right: Value) Value {
+fn compare(op: Expr.Op, left: Value, right: Value) Error!Value {
     if (left == .null or right == .null) return .null;
     const order: std.math.Order = switch (left) {
-        .int => |a| if (right == .int) std.math.order(a, right.int) else return .null,
-        .text => |a| if (right == .text) std.mem.order(u8, a, right.text) else return .null,
+        .int => |a| if (right == .int) std.math.order(a, right.int) else return error.TypeMismatch,
+        .text => |a| if (right == .text) std.mem.order(u8, a, right.text) else return error.TypeMismatch,
         .null => unreachable,
     };
     return Value.flag(switch (op) {
@@ -248,7 +251,7 @@ fn checks(comptime expr: Expr, columns: []const []const u8, row: []const Value) 
     return eval(&expr, Scope.ofRow(.{}, "t", columns, row));
 }
 
-test "a comparison with NULL is unknown, and unknown joins AND and OR as SQL says" {
+test "SH-180 a comparison with NULL is unknown, and unknown joins AND and OR as SQL says" {
     const cols = [_][]const u8{ "a", "b" };
     const a_is_1 = comptime rule.eq(col("t", "a"), int(1));
     const b_is_2 = comptime rule.eq(col("t", "b"), int(2));
@@ -279,7 +282,7 @@ test "a set matches a text exactly and is unknown for NULL" {
     try std.testing.expectEqual(n, try checks(in_set, &cols, &.{n}));
 }
 
-test "exists, not exists and count read correlated rows, and a LEFT JOIN miss binds NULLs" {
+test "SH-180 exists, not exists and count read correlated rows, and a LEFT JOIN miss binds NULLs" {
     const parent_cols = [_][]const u8{"id"};
     const child_cols = [_][]const u8{ "parent", "done" };
     const world: World = .{ .tables = &.{
@@ -334,4 +337,59 @@ test "between, in-list, length and the rsql macros follow SQL's answers for NULL
 
 fn evalRow(comptime expr: Expr, columns: []const []const u8, row: []const Value) !Value {
     return eval(&expr, Scope.ofRow(.{}, "", columns, row));
+}
+
+test "SH-180 an integer against a text is refused, never answered one engine's way" {
+    const cols = [_][]const u8{ "a", "s" };
+    try std.testing.expectError(error.TypeMismatch, checks(comptime rule.eq(col("t", "a"), rule.text("x")), &cols, &.{ i(1), n }));
+    try std.testing.expectError(error.TypeMismatch, checks(comptime rule.oneOf(col("t", "a"), &.{"x"}), &cols, &.{ i(1), n }));
+    // NULL against anything is still unknown, whatever the other side's type.
+    try std.testing.expectEqual(n, try checks(comptime rule.eq(col("t", "a"), rule.text("x")), &cols, &.{ n, n }));
+}
+
+test "SH-180 an inner alias shadows an outer one, a later join reads an earlier miss, and a count sees every joined row" {
+    const owner_cols = [_][]const u8{"id"};
+    const part_cols = [_][]const u8{ "owner", "kind" };
+    const world: World = .{ .tables = &.{
+        .{ .name = "owner", .columns = &owner_cols, .rows = &.{ &.{i(1)}, &.{i(2)} } },
+        .{ .name = "part", .columns = &part_cols, .rows = &.{ &.{ i(1), i(7) }, &.{ i(1), i(7) }, &.{ i(1), i(8) } } },
+    } };
+    // `o` is bound by the checked row and again by the subquery: the inner `o` wins inside it.
+    const inner = comptime rule.Select{ .table = "owner", .alias = "o", .where = rule.eq(col("o", "id"), int(2)) };
+    const outer_row = Scope.ofRow(world, "o", &owner_cols, &.{i(1)});
+    try std.testing.expectEqual(i(1), try eval(&comptime rule.exists(inner), outer_row));
+    // owner 2 has no part: the first join misses and binds NULLs, the second join's ON reading it never matches, so it misses too.
+    const chain = comptime rule.Select{
+        .table = "owner",
+        .alias = "w",
+        .joins = &.{
+            .{ .table = "part", .alias = "p", .on = rule.eq(col("p", "owner"), col("w", "id")) },
+            .{ .table = "part", .alias = "q", .on = rule.eq(col("q", "owner"), col("p", "owner")) },
+        },
+        .where = rule.all(&.{ rule.eq(col("w", "id"), int(2)), rule.isNull(col("p", "kind")), rule.isNull(col("q", "kind")) }),
+    };
+    try std.testing.expectEqual(i(1), try eval(&comptime rule.count(chain), outer_row));
+    // owner 1: three parts, each joined to the three parts of the same owner: nine rows.
+    const fan = comptime rule.Select{
+        .table = "owner",
+        .alias = "w",
+        .joins = &.{
+            .{ .table = "part", .alias = "p", .on = rule.eq(col("p", "owner"), col("w", "id")) },
+            .{ .table = "part", .alias = "q", .on = rule.eq(col("q", "owner"), col("p", "owner")) },
+        },
+        .where = rule.eq(col("w", "id"), int(1)),
+    };
+    try std.testing.expectEqual(i(9), try eval(&comptime rule.count(fan), outer_row));
+}
+
+test "SH-180 NOT, a set and coalesce answer unknown for NULL and nothing else" {
+    const cols = [_][]const u8{ "a", "s" };
+    const negated = comptime rule.not(rule.eq(col("t", "a"), int(1)));
+    const first = comptime rule.coalesce(&.{ col("t", "a"), rule.int(9) });
+    try std.testing.expectEqual(n, try checks(negated, &cols, &.{ n, n }));
+    try std.testing.expectEqual(i(1), try checks(negated, &cols, &.{ i(2), n }));
+    try std.testing.expectEqual(i(0), try checks(negated, &cols, &.{ i(1), n }));
+    try std.testing.expectEqual(i(9), try checks(first, &cols, &.{ n, n }));
+    try std.testing.expectEqual(i(4), try checks(first, &cols, &.{ i(4), n }));
+    try std.testing.expectEqual(n, try checks(comptime rule.oneOf(col("t", "s"), &.{ "x", "y", "z" }), &cols, &.{ n, n }));
 }
