@@ -2726,6 +2726,52 @@ test "an activity row carries its time, and a Message's rows carry its admission
     try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(bytes, .{}));
 }
 
+test "an activity Message's origin travels as one value and its row kind must admit it" {
+    const content: content_value.Value = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } };
+    var peer: protocol.NamedPeer = .{ .session = .{} };
+    try peer.session.set("k7m2qx");
+    try peer.label.set("Review");
+    const origins = [_]protocol.Origin{ .person, .{ .peer = peer }, .{ .action = std.math.maxInt(i64) } };
+    for (origins) |origin| for ([_]protocol.ActivityItem.Kind{ .admission, .user, .received }) |kind| {
+        var message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 7, .origin = origin };
+        if (kind == .user) {
+            message.state = .applied;
+            message.turn = 1;
+        }
+        const value: protocol.ActivityItem.Value = switch (kind) {
+            .admission => .{ .admission = message },
+            .user => .{ .user = message },
+            else => .{ .received = message },
+        };
+        var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        facts.items[0] = .{ .position = 1, .at = 7, .value = value };
+        try facts.work.workspace.set("/w");
+        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&writer, &facts);
+        // An applied User row speaks for any origin; an admission is a person's and a received row anyone else's.
+        const allowed = kind == .user or (kind == .received) == (origin != .person);
+        if (!allowed) {
+            try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
+            continue;
+        }
+        const parsed = (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].value;
+        const read = switch (parsed) {
+            .admission, .user, .received => |one| one.origin,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(std.meta.activeTag(origin), std.meta.activeTag(read));
+        switch (origin) {
+            .person => {},
+            .peer => |named| {
+                try std.testing.expectEqualStrings(named.session.slice(), read.peer.session.slice());
+                try std.testing.expectEqualStrings(named.label.slice(), read.peer.label.slice());
+            },
+            .action => |action| try std.testing.expectEqual(action, read.action),
+        }
+    };
+}
+
 test "SUI-47 work state wire preserves owned facts" {
     var cause: protocol.Bounded(protocol.max_code_bytes) = .{};
     try cause.set("provider_temporary_http_429");
