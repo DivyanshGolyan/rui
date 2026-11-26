@@ -1481,7 +1481,7 @@ fn login(init: std.process.Init, name: []const u8, device_code: bool, connection
     }
     var interrupt = LoginInterrupt.init();
     defer interrupt.deinit();
-    try provider_login.codex(init, record, exchange, struct {
+    provider_login.codex(init, record, exchange, struct {
         fn display(code: []const u8) !void {
             std.debug.print("Open https://auth.openai.com/codex/device and enter code: {s}\n" ++ device_login_guidance ++ "Waiting for you to approve in the browser...\n", .{code});
         }
