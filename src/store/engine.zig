@@ -1,6 +1,7 @@
 const std = @import("std");
 const Sqlite = @import("engine/Sqlite.zig");
 const column_rules = @import("column_rules.zig");
+const connection = @import("../connection.zig");
 const schema = @import("schema.zig");
 const rsql = @import("rsql.zig");
 const isBounded = @import("../bounded.zig").isBounded;
@@ -360,15 +361,14 @@ fn valueOf(comptime T: type, value: *const T) ?column_rules.Value {
     if (T == rsql.Bytes) return .{ .octets = value.bytes };
     if (T == rsql.Positive) return .{ .int = std.math.cast(i64, @backingInt(value.*)) orelse std.math.maxInt(i64) };
     if (T == rsql.SessionHead) return null;
+    if (T == connection.Name) return .{ .octets = value.slice() };
     if (comptime isBounded(T)) return .{ .octets = value.slice() };
-    if (comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "slice")) return .{ .octets = value.slice() };
-    if (comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "blob_capacity")) return .{ .octets = value.bytes[0..value.len] };
     return switch (@typeInfo(T)) {
         .optional => |optional| if (value.*) |*present| valueOf(optional.child, present) else .null,
         .bool => .{ .int = @intFromBool(value.*) },
         .int => .{ .int = std.math.cast(i64, value.*) orelse std.math.maxInt(i64) },
         .@"enum" => .{ .octets = @tagName(value.*) },
-        .array => |array| if (array.child == u8) .{ .octets = value } else null,
-        else => null,
+        .array => |array| if (array.child == u8) .{ .octets = value } else @compileError("rsql: an Args array is [n]u8"),
+        else => @compileError("rsql: " ++ @typeName(T) ++ " is not a typed statement value"),
     };
 }

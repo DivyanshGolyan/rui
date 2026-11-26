@@ -56,13 +56,24 @@ fn candidates(comptime column: schema.Column, out: *std.ArrayList(Value), arena:
                 @memset(bytes, good);
                 if (length > 0) bytes[0] = first;
                 try out.append(arena, .{ .octets = bytes });
-                if (length > 0) {
-                    const stray = try arena.dupe(u8, bytes);
-                    stray[length - 1] = '!';
-                    try out.append(arena, .{ .octets = stray });
-                    const lead = try arena.dupe(u8, bytes);
-                    lead[0] = '!';
-                    try out.append(arena, .{ .octets = lead });
+                if (length > 0 and (column.charset != null or column.initial != null)) {
+                    // Every printable byte at the lead and at the end, so each range edge, literal and neighbour of a set is probed.
+                    var byte: u8 = 32;
+                    while (byte < 127) : (byte += 1) {
+                        if (byte == '\'') continue;
+                        const lead = try arena.dupe(u8, bytes);
+                        lead[0] = byte;
+                        try out.append(arena, .{ .octets = lead });
+                        const tail = try arena.dupe(u8, bytes);
+                        tail[length - 1] = byte;
+                        try out.append(arena, .{ .octets = tail });
+                    }
+                    const accent = try arena.dupe(u8, "\xc3\xa9");
+                    try out.append(arena, .{ .octets = accent });
+                } else if (length > 0) {
+                    const multibyte = try arena.alloc(u8, length);
+                    for (multibyte, 0..) |*byte, at| byte.* = if (at % 2 == 0) 0xc3 else 0xa9;
+                    try out.append(arena, .{ .octets = multibyte });
                 }
             }
         },
@@ -70,11 +81,16 @@ fn candidates(comptime column: schema.Column, out: *std.ArrayList(Value), arena:
             for (values) |value| try out.append(arena, .{ .octets = value });
             try out.append(arena, .{ .octets = "" });
             try out.append(arena, .{ .octets = "unlisted" });
+            for (values) |value| {
+                try out.append(arena, .{ .octets = try std.ascii.allocUpperString(arena, value) });
+                try out.append(arena, .{ .octets = try std.fmt.allocPrint(arena, "{s} ", .{value}) });
+                if (value.len > 1) try out.append(arena, .{ .octets = value[0 .. value.len - 1] });
+            }
         },
     }
 }
 
-test "COL-1 a column's own rules are held by the Host as the engine's CHECK holds them" {
+test "SH-178 a column's own rules are held by the Host as SQLite's CHECK holds them" {
     var database: ?*c.sqlite3 = null;
     try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &database));
     defer _ = c.sqlite3_close(database);
@@ -118,7 +134,7 @@ test "COL-1 a column's own rules are held by the Host as the engine's CHECK hold
 const key_fits: [128]u8 = @splat('k');
 const key_long: [129]u8 = @splat('k');
 
-test "COL-2 a statement binding a value to a column the column refuses fails before anything is sent" {
+test "SH-179 a statement binding a value to a column the column refuses fails before anything is sent" {
     const Command = struct { key: []const u8, kind: u64, target: []const u8 };
     const W = rsql.Write(.{
         .sql = "INSERT INTO core_command(command_key,kind,target) VALUES(?1,?2,?3)",
@@ -146,6 +162,18 @@ test "COL-2 a statement binding a value to a column the column refuses fails bef
     try admit(Update, &update);
     update.label = "";
     try std.testing.expectError(error.ColumnRuleRefused, admit(Update, &update));
+
+    const Owe = rsql.Write(.{
+        .sql = "INSERT INTO session_stop_owed(child_ref,cause_ref,cause_position,settled) SELECT child.session_ref,?1,?2,0 FROM session child " ++
+            "WHERE child.parent_ref=?1 AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=child.session_ref AND owed.settled=0)",
+        .Args = struct { parent: []const u8, position: u64 },
+        .expect = .{ .counted = .{ .otherwise = error.CorruptStore } },
+    });
+    try std.testing.expectEqual(@as(usize, 2), Owe.bound_columns.len);
+    var owed: Owe.Args = .{ .parent = "abcdef", .position = 1 };
+    try admit(Owe, &owed);
+    owed.position = 0;
+    try std.testing.expectError(error.ColumnRuleRefused, admit(Owe, &owed));
 }
 
 fn mysqlRuleSql(comptime table: []const u8, comptime column: schema.Column) ?[]const u8 {
@@ -174,7 +202,7 @@ fn mysqlLiteral(arena: std.mem.Allocator, comptime column: schema.Column, value:
     };
 }
 
-test "COL-3 a column's own rules are held by the Host as MySQL's CHECK holds them" {
+test "SH-178 a column's own rules are held by the Host as MySQL's CHECK holds them" {
     if (!try mysql_testing.available()) return;
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

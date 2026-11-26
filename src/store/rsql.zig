@@ -600,7 +600,9 @@ fn boundOf(comptime statement: Statement) []const BoundColumn {
                 .row => |row| for (insert.columns, row) |column, value| {
                     if (value == .parameter) found = found ++ .{BoundColumn{ .arg = value.parameter, .table = insert.table, .column = column }};
                 },
-                .select => {},
+                .select => |select| for (insert.columns, select.first.results) |column, result| {
+                    if (result.value == .parameter) found = found ++ .{BoundColumn{ .arg = result.value.parameter, .table = insert.table, .column = column }};
+                },
             },
             .update => |update| for (update.assigned, update.values) |column, value| {
                 if (value == .parameter) found = found ++ .{BoundColumn{ .arg = value.parameter, .table = update.table, .column = column }};
