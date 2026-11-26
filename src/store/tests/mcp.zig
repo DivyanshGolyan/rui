@@ -425,14 +425,14 @@ test "TPR-4 a call reads its line from its tool, whether a tool served it and th
             const offered_session = (try storage.configure(&offered, .{})).accepted.session;
             const offered_cases = [_]LineCase{
                 .{ .name = "bash", .arguments = "{\"description\":\"Run the tests\",\"cmd\":\"zig build test\"}", .expected = "Run the tests" },
-                .{ .name = "bash", .arguments = "{\"cmd\":\"zig build test\"}", .expected = null },
+                .{ .name = "bash", .arguments = "{\"cmd\":\"zig build test\"}", .expected = "Tool call" },
                 .{ .name = "find_tools", .arguments = "{}", .expected = "Find tools" },
                 .{ .name = "fetch_page", .arguments = "{\"rui_call_description\":\"Fetch the docs page\"}", .expected = "Fetch the docs page" },
                 .{ .name = "fetch_page", .arguments = "{}", .expected = "fetch_page" },
                 .{ .name = "fetch_page", .arguments = "{\"rui_call_description\":\"Fetch\",\"broken\":", .expected = "fetch_page" },
                 .{ .name = "no_such_tool", .arguments = "{}", .expected = null },
             };
-            const offered_rejected = [_]bool{ false, true, false, false, false, true, true };
+            const offered_rejected = [_]bool{ false, false, false, false, false, true, true };
             try settleLineCases(&storage, &tmp, offered_session.slice(), "line-offered-calls", &offered_cases);
             try expectActivityLines(&storage, offered_session.slice(), &offered_cases, &offered_rejected);
 

@@ -390,6 +390,20 @@ pub const BashParser = struct {
                 self.phase = .after_value;
                 continue;
             }
+            if (self.string_target == .description) switch (self.phase) {
+                // A high surrogate the next byte does not continue is repaired, and that byte is read again as it would have been.
+                .surrogate_backslash => if (next != '\\') {
+                    self.emitString(writer, input, replacement) catch |err| return self.emitFailure(err);
+                    self.phase = .string;
+                    continue;
+                },
+                .surrogate_u => if (next != 'u') {
+                    self.emitString(writer, input, replacement) catch |err| return self.emitFailure(err);
+                    self.phase = .escape;
+                    continue;
+                },
+                else => {},
+            };
             _ = try source.take();
             consumed += 1;
             switch (self.phase) {
@@ -471,14 +485,7 @@ pub const BashParser = struct {
                     self.unicode_value = self.unicode_value * 16 + (std.fmt.charToDigit(next, 16) catch return .{ .invalid = .malformed_json });
                     self.unicode_digits += 1;
                     if (self.unicode_digits == 4) {
-                        if (self.unicode_value >= 0xd800 and self.unicode_value <= 0xdbff) {
-                            self.high_surrogate = self.unicode_value;
-                            self.phase = .surrogate_backslash;
-                        } else {
-                            if (self.unicode_value >= 0xdc00 and self.unicode_value <= 0xdfff) return .{ .invalid = self.stringProblem() };
-                            if (!(self.emitScalar(writer, input, self.unicode_value) catch |err| return self.emitFailure(err))) return .{ .invalid = self.stringProblem() };
-                            self.phase = .string;
-                        }
+                        if (self.unicodeEscapeDone(writer, input) catch |err| return self.emitFailure(err)) |problem| return .{ .invalid = problem };
                     }
                 },
                 .surrogate_backslash => {
@@ -495,7 +502,13 @@ pub const BashParser = struct {
                     self.unicode_value = self.unicode_value * 16 + (std.fmt.charToDigit(next, 16) catch return .{ .invalid = .malformed_json });
                     self.unicode_digits += 1;
                     if (self.unicode_digits == 4) {
-                        if (self.unicode_value < 0xdc00 or self.unicode_value > 0xdfff) return .{ .invalid = self.stringProblem() };
+                        if (self.unicode_value < 0xdc00 or self.unicode_value > 0xdfff) {
+                            if (self.string_target != .description) return .{ .invalid = self.stringProblem() };
+                            // The high surrogate had no partner; the escape that followed it is read as a fresh one.
+                            self.emitString(writer, input, replacement) catch |err| return self.emitFailure(err);
+                            if (self.unicodeEscapeDone(writer, input) catch |err| return self.emitFailure(err)) |problem| return .{ .invalid = problem };
+                            continue;
+                        }
                         const scalar = 0x10000 + ((self.high_surrogate - 0xd800) << 10) +
                             (self.unicode_value - 0xdc00);
                         if (!(self.emitScalar(writer, input, scalar) catch |err| return self.emitFailure(err))) return .{ .invalid = self.stringProblem() };
@@ -617,11 +630,28 @@ pub const BashParser = struct {
                 try input.writeAll(bytes);
             },
             .description => {
-                const room = self.description_text.len - self.description_len;
-                const kept = @min(bytes.len, room);
-                @memcpy(self.description_text[self.description_len..][0..kept], bytes[0..kept]);
-                self.description_len += kept;
-                if (kept < bytes.len) self.description_cut = true;
+                var rest = bytes;
+                while (rest.len != 0) {
+                    if (self.description_len == self.description_text.len) {
+                        // Full. Text with no words yet is only blanks ahead of the words, which never matter: empty the buffer,
+                        // keeping a half-read character. Otherwise the rest is cut.
+                        const held = self.description_text[0..self.description_len];
+                        const tail = incompleteTail(held);
+                        if (saved_label.readWords(max_bash_description_bytes, held[0 .. held.len - tail]) != null) {
+                            self.description_cut = true;
+                            return;
+                        }
+                        var kept: [3]u8 = undefined;
+                        @memcpy(kept[0..tail], held[held.len - tail ..]);
+                        @memcpy(self.description_text[0..tail], kept[0..tail]);
+                        self.description_len = tail;
+                    }
+                    const room = self.description_text.len - self.description_len;
+                    const taken = @min(rest.len, room);
+                    @memcpy(self.description_text[self.description_len..][0..taken], rest[0..taken]);
+                    self.description_len += taken;
+                    rest = rest[taken..];
+                }
             },
         }
     }
@@ -630,16 +660,27 @@ pub const BashParser = struct {
     /// label never ends in a replacement mark; a label with no words left is no label.
     fn finishDescription(self: *BashParser) void {
         var text: []const u8 = self.description_text[0..self.description_len];
-        if (self.description_cut) {
-            var end = text.len;
-            var continuation: usize = 0;
-            while (end > 0 and continuation < 3 and text[end - 1] & 0xc0 == 0x80) : (continuation += 1) end -= 1;
-            if (end > 0) {
-                const length = std.unicode.utf8ByteSequenceLength(text[end - 1]) catch 1;
-                if (length > continuation + 1) text = text[0 .. end - 1];
-            }
-        }
+        if (self.description_cut) text = text[0 .. text.len - incompleteTail(text)];
         self.result.description = saved_label.readWords(max_bash_description_bytes, text) orelse .{};
+    }
+
+    /// A finished `\uXXXX` in `unicode_value`. A high surrogate waits for its partner; a lone low surrogate is invalid, except
+    /// in a `description`, where it is repaired to U+FFFD like every other lone surrogate (the label is advice).
+    fn unicodeEscapeDone(self: *BashParser, writer: anytype, input: anytype) !?BashProblem {
+        const value = self.unicode_value;
+        if (value >= 0xd800 and value <= 0xdbff) {
+            self.high_surrogate = value;
+            self.phase = .surrogate_backslash;
+            return null;
+        }
+        if (value >= 0xdc00 and value <= 0xdfff) {
+            if (self.string_target != .description) return self.stringProblem();
+            try self.emitString(writer, input, replacement);
+        } else if (!(try self.emitScalar(writer, input, value))) {
+            return self.stringProblem();
+        }
+        self.phase = .string;
+        return null;
     }
 
     fn emitScalar(self: *BashParser, writer: anytype, input: anytype, scalar: u21) !bool {
@@ -665,6 +706,18 @@ fn emit(destination: ?*Bounded(16), writer: anytype, bytes: []const u8) !void {
         value.len += bytes.len;
     }
     if (@TypeOf(writer) != @TypeOf(null)) try writer.writeAll(bytes);
+}
+
+const replacement = "\u{fffd}";
+
+/// How many bytes at the end of `text` begin a character that its end cuts short (0 to 3).
+fn incompleteTail(text: []const u8) usize {
+    var continuation: usize = 0;
+    var end = text.len;
+    while (end > 0 and continuation < 3 and text[end - 1] & 0xc0 == 0x80) : (continuation += 1) end -= 1;
+    if (end == 0) return 0;
+    const length = std.unicode.utf8ByteSequenceLength(text[end - 1]) catch return 0;
+    return if (length > continuation + 1) continuation + 1 else 0;
 }
 
 const Discard = struct {

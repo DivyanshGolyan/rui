@@ -301,36 +301,67 @@ test "an invalid-arguments result tells the model what was wrong" {
 }
 
 test "TPR-6 a Bash call is accepted whatever its description says, and saves it as one tidy line or none" {
-    const long_ascii = @as([150]u8, @splat('a'));
-    const cut_at_a_scalar = @as([99]u8, @splat('a')) ++ "\\u00e9\\u00e9";
-    const cases = [_]struct { description: []const u8, label: ?[]const u8 }{
-        .{ .description = "\"Run parser tests\"", .label = "Run parser tests" },
-        .{ .description = "\"  Run   tests\\nnow  \"", .label = "Run tests now" },
-        .{ .description = "\"line\\rnext\\u2028more\"", .label = "line next more" },
-        .{ .description = "\"a\\u0000b\"", .label = "a\u{fffd}b" },
-        .{ .description = "\"\"", .label = null },
-        .{ .description = "\"   \"", .label = null },
-        .{ .description = "null", .label = null },
-        .{ .description = "\"" ++ long_ascii ++ "\"", .label = &@as([100]u8, @splat('a')) },
-        .{ .description = "\"" ++ cut_at_a_scalar ++ "\"", .label = &@as([99]u8, @splat('a')) },
+    const parser = @import("call_classification.zig");
+    const sink = struct {
+        pub fn writeAll(_: *@This(), _: []const u8) !void {}
     };
-    for (cases) |case| {
-        var buffer: [512]u8 = undefined;
-        const arguments = try std.fmt.bufPrint(&buffer, "{{\"cmd\":\"true\",\"description\":{s},\"timeout_ms\":null}}", .{case.description});
-        var source = TestSource{ .bytes = arguments };
-        const check = try checkBashArguments(&source);
-        errdefer std.debug.print("arguments: {s}\n", .{arguments});
-        const facts: CallFacts = .{ .tool = bash_record, .bash = check };
-        try std.testing.expect(check == .accepted);
+    const long_a = @as([250]u8, @splat('a'));
+    const blanks_first = @as([250]u8, @splat(' ')) ++ "Run tests";
+    const split_scalar = @as([199]u8, @splat(' ')) ++ "\xc3\xa9x";
+    const cut_scalar = @as([199]u8, @splat('a')) ++ "\xc3\xa9";
+    const cut_in_blanks = "x" ++ @as([198]u8, @splat(' ')) ++ "\xc3\xa9y";
+    const cases = [_]struct { arguments: []const u8, label: ?[]const u8 = null, problem: ?BashProblem = null }{
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"Run parser tests\",\"timeout_ms\":null}", .label = "Run parser tests" },
+        .{ .arguments = "{\"description\":\"Run parser tests\",\"cmd\":\"true\"}", .label = "Run parser tests" },
+        .{ .arguments = "{\"cmd\":\"true\"}" },
+        .{ .arguments = "{\"timeout_ms\":5,\"cmd\":\"true\"}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":null}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"\"}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"   \"}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"  Run   tests\\nnow  \"}", .label = "Run tests now" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"line\\rnext\\u2028more\"}", .label = "line next more" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"a\\u0000b\"}", .label = "a\u{fffd}b" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"a\xffb\"}", .label = "a\u{fffd}b" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"x\\ud800\"}", .label = "x\u{fffd}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"\\ud800y\"}", .label = "\u{fffd}y" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"\\udc00\"}", .label = "\u{fffd}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"\\ud800\\n\"}", .label = "\u{fffd}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"\\ud800\\ud83d\\ude00\"}", .label = "\u{fffd}\u{1f600}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"\\ud83d\\ude00\"}", .label = "\u{1f600}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"" ++ long_a ++ "\"}", .label = &@as([100]u8, @splat('a')) },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"" ++ blanks_first ++ "\"}", .label = "Run tests" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"" ++ split_scalar ++ "\"}", .label = "\u{e9}x" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"" ++ cut_scalar ++ "\"}", .label = &@as([100]u8, @splat('a')) },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"" ++ cut_in_blanks ++ "\"}", .label = "x" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":42}", .problem = .description_invalid },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":{}}", .problem = .description_invalid },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":true}", .problem = .description_invalid },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":[]}", .problem = .description_invalid },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":null,\"description\":\"x\"}", .problem = .duplicate_field },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"x\",\"description\":null}", .problem = .duplicate_field },
+    };
+    for (cases) |case| for ([_]usize{ 4096, 1 }) |chunk| {
+        var source = TestSource{ .bytes = case.arguments };
+        var machine: parser.BashParser = .{};
+        var discard: sink = .{};
+        errdefer std.debug.print("arguments: {s} chunk: {d}\n", .{ case.arguments, chunk });
+        const progress = while (true) {
+            const step = try machine.advance(&source, &discard, &discard, chunk);
+            if (step != .pending) break step;
+        };
+        if (case.problem) |problem| {
+            try std.testing.expectEqual(BashProblem, @TypeOf(problem));
+            try std.testing.expect(progress == .invalid and progress.invalid == problem);
+            continue;
+        }
+        try std.testing.expect(progress == .complete);
+        const facts: CallFacts = .{ .tool = bash_record, .bash = .{ .accepted = progress.complete } };
         if (case.label) |label| {
             try std.testing.expectEqualStrings(label, facts.label().?);
         } else {
             try std.testing.expect(facts.label() == null);
         }
-    }
-    var omitted = TestSource{ .bytes = "{\"cmd\":\"true\"}" };
-    const none: CallFacts = .{ .tool = bash_record, .bash = try checkBashArguments(&omitted) };
-    try std.testing.expect(none.bash.? == .accepted and none.label() == null);
+    };
 }
 
 test "every provider-run tool the Host offers is run by some provider" {
