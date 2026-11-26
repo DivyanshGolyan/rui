@@ -65,22 +65,20 @@ class ClientLocalityTest(unittest.TestCase):
         self.assertEqual(findings('function modelCallCurrent(row: Row): boolean { return row.modelCallCurrent; }',
                                   "clients/ts/src/sessions.ts"), [])
 
-    def test_origin_and_failure_class_are_read_from_the_host(self):
+    def test_a_message_origin_is_read_from_the_host(self):
         for source, relative in (
             ('const action = message.source_action;', "src/session_view.zig"),
             ('if (item.source_action) |id| use(id);', "src/overview_view.zig"),
-            ('const class = failure_class.of(code);', "src/overview_view.zig"),
-            ('const class = @import("failure_class.zig").of(code);', "src/session_view.zig"),
+            ('const action = message.@"source_action";', "src/session_view.zig"),
+            ('const action = row["source_action"];', "clients/ts/src/feed.ts"),
             ('const action = entry.source_action;', "clients/ts/src/feed.ts"),
         ):
             with self.subTest(source=source):
                 self.assertEqual(findings(source, relative), [(1, ORIGIN_FACT)])
         for source, relative in (
             ('switch (message.origin) { .action => |id| use(id), else => {} }', "src/session_view.zig"),
-            ('const trouble = failure_class.troubleOfFailure(code);', "src/session_class.zig"),
-            ('const class = failure_class.rateLimited(code);', "src/work_line.zig"),
             ('const origin = entry.origin;', "clients/ts/src/feed.ts"),
-            ('test "a fixture names the class" { _ = failure_class.of(code); }', "src/session_view.zig"),
+            ('test "a fixture names the action" { _ = item.source_action; }', "src/session_view.zig"),
         ):
             with self.subTest(source=source):
                 self.assertEqual(findings(source, relative), [])

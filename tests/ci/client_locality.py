@@ -20,7 +20,7 @@ MESSAGE = ("a rule every viewer must agree on belongs to the Host (#1620); "
 DEFAULT_IMPORT = "imports product_defaults.zig"
 CLASSIFIER = "classifies Session work"
 TS_DEFAULT = "hard-codes a Session default"
-ORIGIN_FACT = "re-derives a Message origin or a failure class"
+ORIGIN_FACT = "re-derives a Message origin"
 ISSUES = {DEFAULT_IMPORT: "#1621", CLASSIFIER: "#1622", TS_DEFAULT: "#1621", ORIGIN_FACT: "#2282"}
 
 # Shared dependencies can be in graph.host even though these client entry points
@@ -167,20 +167,14 @@ def default_sites(tokens):
 
 
 def origin_fact_sites(tokens):
-    """Who admitted a Message is the Host's `origin`, and a failure's class is the Host's to name.
+    """Who admitted a Message is the Host's typed `origin`, so a client never rebuilds it from `source_action`.
 
-    A client that reads `source_action` rebuilds the origin from a field the wire no longer carries; one that
-    calls `failure_class.of` classifies a code the Host already classified.
+    The Activity wire carries `origin` only; the public Conversation page still declares `source_action` until
+    #2351 removes it, and `wire.ts` is outside this scan, so a client reading that field today is the finding.
     """
-    names = [token.text for token in tokens]
-    for i, name in enumerate(names):
-        if name == "source_action":
-            yield tokens[i].line, ORIGIN_FACT
-        elif names[i:i + 3] == ["failure_class", ".", "of"]:
-            yield tokens[i].line, ORIGIN_FACT
-        elif (names[i:i + 2] == ["@import", "("] and unquote(names[i + 2]) == "failure_class.zig"
-              and names[i + 3:i + 6] == [")", ".", "of"]):
-            yield tokens[i].line, ORIGIN_FACT
+    for token in tokens:
+        if (unquote(token.text.removeprefix("@")) or token.text) == "source_action":
+            yield token.line, ORIGIN_FACT
 
 
 def findings(source, relative):
