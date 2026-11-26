@@ -73,6 +73,8 @@ pub const Relaunch = struct {
     handoff: []const u8,
     receipt: []const u8,
     open: ?view.Reference,
+    /// The departure already wrote the report and notices; the fallback must not repeat them.
+    departed: bool = false,
 
     pub fn deinit(self: Relaunch, gpa: std.mem.Allocator) void {
         gpa.free(self.executable);
@@ -81,6 +83,7 @@ pub const Relaunch = struct {
     }
 
     pub fn writeFallback(self: Relaunch, store: []const u8) void {
+        if (self.departed) return;
         _ = stderr.writeReceipt(self.receipt);
         TerminalApp.detached(store, if (self.open) |*id| id else null, null);
     }
@@ -962,30 +965,35 @@ noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerro
         (if (departure) |value| value.has_guidance else left != null);
     const outcome: session_upgrade.Outcome = if (self.state.upgrade.run) |stands| if (stands == .ended) stands.ended.outcome else .unchanged else .unchanged;
     if (session_upgrade.relaunch(outcome, guidance) and self.relaunch_build != null) {
-        if (self.makeRelaunch(left)) |request| {
+        if (self.makeRelaunch(left)) |made| {
+            var request = made;
             // A window that cannot continue relaunches even with guidance, so the guidance is
             // written first and stays in the terminal's scrollback beneath the new screen.
+            // The one departure owner writes it; a failure there is reported, never a reason
+            // to stay, and the fallback must not write it again.
             if (guidance) {
-                if (self.upgrade_report) |*report| _ = stderr.writeReceipt(report.written());
-                _ = stderr.write(text.buffered());
-                if (left) |held| try self.leaveFinished(held, departure);
+                self.departGuided(ended, answered, saved, kept, sign_in_ended, left, departure, text.buffered()) catch |err|
+                    stderr.diagnostic("rui: leaving this window: {s}\n", .{@errorName(err)});
+                request.departed = true;
             }
             return request;
         } else |_| {}
     }
+    try self.departGuided(ended, answered, saved, kept, sign_in_ended, left, departure, text.buffered());
+    return null;
+}
+
+/// The ordinary departure: the upgrade report, the departure text, then the first error.
+noinline fn departGuided(self: *Self, ended: anyerror!void, answered: anyerror!?Next, saved: anyerror!void, kept: anyerror!void, sign_in_ended: anyerror!void, left: ?Left, departure: ?SessionFrontend.Departure, text: []const u8) !void {
     if (self.upgrade_report) |*report| _ = stderr.writeReceipt(report.written());
-    _ = stderr.write(text.buffered());
-    if (left) |held| {
-        try self.leaveFinished(held, departure);
-        return null;
-    }
+    _ = stderr.write(text);
+    if (left) |held| return self.leaveFinished(held, departure);
     try sign_in_ended;
     TerminalApp.detached(self.options.store, null, null);
     try ended;
     _ = try answered;
     try saved;
     try kept;
-    return null;
 }
 
 fn makeRelaunch(self: *Self, left: ?Left) !Relaunch {

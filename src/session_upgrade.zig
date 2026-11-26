@@ -135,7 +135,7 @@ test "an unchanged run reads the listing again, and a conversation's failure blo
     try std.testing.expectEqual(Phase.blocked, upgrade.phase(true));
 }
 
-test "relaunch is only an installed outcome without departure guidance" {
+test "an incompatible outcome always relaunches and a compatible one only without guidance" {
     for (std.enums.values(Outcome)) |outcome| {
         for ([_]bool{ false, true }) |guidance| {
             try std.testing.expectEqual(outcome == .incompatible or (outcome == .compatible and !guidance), relaunch(outcome, guidance));
