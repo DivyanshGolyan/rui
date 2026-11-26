@@ -3,6 +3,7 @@ const protocol = @import("protocol.zig");
 const connection = @import("connection.zig");
 const wire_request = @import("wire_request.zig");
 const utf8_validation = @import("utf8_validation.zig");
+const saved_label = @import("saved_label.zig");
 
 pub const Preset = @import("preset_value.zig").Preset;
 pub const max_presets = @import("preset_value.zig").max_presets;
@@ -270,7 +271,11 @@ pub fn checkStartAgentWithPresets(arena: std.mem.Allocator, bytes: []const u8, p
             else => return refused("spec must be an object"),
         };
         var fields = overrides.iterator();
-        while (fields.next()) |entry| try spec.put(arena, entry.key_ptr.*, entry.value_ptr.*);
+        while (fields.next()) |entry| {
+            if (std.mem.eql(u8, entry.key_ptr.*, "label")) {
+                if (try tidyLabel(arena, entry.value_ptr.*)) |label| try spec.put(arena, "label", label);
+            } else try spec.put(arena, entry.key_ptr.*, entry.value_ptr.*);
+        }
     }
     const checked = try parseAgentSpecFor(arena, spec, &out.configuration, true);
     if (checked == .rejected) return checked;
@@ -279,6 +284,19 @@ pub fn checkStartAgentWithPresets(arena: std.mem.Allocator, bytes: []const u8, p
     out.instructions = out.configuration.instructions.borrowedBytes();
     out.output_schema = out.configuration.output_schema.borrowedBytes();
     return .accepted;
+}
+
+/// A name the model gives a new agent is advice for the screen: it is saved as one tidy line, or null when the model clears it, and never refuses the start.
+/// Anything that is not words (blank text, a number, an object) is dropped, so it leaves a preset's own label in place.
+fn tidyLabel(arena: std.mem.Allocator, value: std.json.Value) error{OutOfMemory}!?std.json.Value {
+    switch (value) {
+        .null => return .null,
+        .string => |text| {
+            const words = saved_label.readWords(protocol.max_label_bytes, text) orelse return null;
+            return .{ .string = try arena.dupe(u8, words.slice()) };
+        },
+        else => return null,
+    }
 }
 
 pub fn parseAgentSpec(arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *wire_request.Configuration) error{OutOfMemory}!StartAgentCheck {
@@ -459,6 +477,73 @@ test "a start_agent call's arguments carry a task and a whole spec without a pro
             try std.testing.expectEqualStrings("bash start_agent", start.configuration.tools.names.slice());
             try std.testing.expect(start.configuration.workspace.state != .value and start.configuration.provider.state != .value and start.configuration.label.state != .value);
         }
+    }
+}
+
+test "TPR-7 a start_agent call's label never refuses the start, and is saved as one tidy line or none" {
+    const Case = struct { label: []const u8, saved: ?[]const u8 };
+    const long: [protocol.max_label_bytes + 20]u8 = @splat('x');
+    for ([_]Case{
+        .{ .label = "\"Review diff\"", .saved = "Review diff" },
+        .{ .label = "\"  Review\\n\\t diff \\u2028 now\\r\\n\"", .saved = "Review diff now" },
+        .{ .label = "\"\\n \\u00a0\"", .saved = null },
+        .{ .label = "\"\"", .saved = null },
+        .{ .label = "\"" ++ &long ++ "\"", .saved = long[0..protocol.max_label_bytes] },
+        .{ .label = "\"caf\\u00e9\"", .saved = "caf\u{e9}" },
+        .{ .label = "7", .saved = null },
+        .{ .label = "{\"a\":1}", .saved = null },
+        .{ .label = "true", .saved = null },
+        .{ .label = "null", .saved = null },
+    }) |case| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const arguments = try std.fmt.allocPrint(arena.allocator(), "{{\"task\":\"read\",\"attached\":true,\"spec\":{{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\",\"label\":{s}}}}}", .{case.label});
+        const start = try arena.allocator().create(StartAgent);
+        const check = try checkStartAgent(arena.allocator(), arguments, start);
+        try std.testing.expect(check == .accepted);
+        if (case.saved) |expected| {
+            try std.testing.expect(start.configuration.label.state == .value);
+            try std.testing.expectEqualStrings(expected, start.configuration.label.value.slice());
+        } else try std.testing.expect(start.configuration.label.state != .value);
+    }
+}
+
+test "TPR-7 a preset's label is kept as written, and a model's label that is not words leaves it in place" {
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
+        \\{"model":"model-a","effort":"low","compactAt":1000,"tools":[],"permissionMode":"ask","label":"Review  PR"}
+    , .{})).object;
+    const presets = [_]Preset{.{ .name = "review", .spec = spec }};
+    const Case = struct { override: []const u8, saved: ?[]const u8 };
+    for ([_]Case{
+        .{ .override = "", .saved = "Review  PR" },
+        .{ .override = ",\"label\":7", .saved = "Review  PR" },
+        .{ .override = ",\"label\":\"\\n\"", .saved = "Review  PR" },
+        .{ .override = ",\"label\":\"\"", .saved = "Review  PR" },
+        .{ .override = ",\"label\":\"Own\\nname\"", .saved = "Own name" },
+        .{ .override = ",\"label\":null", .saved = null },
+    }) |case| {
+        const arguments = try std.fmt.allocPrint(arena, "{{\"task\":\"read\",\"attached\":true,\"preset\":\"review\",\"spec\":{{\"model\":\"model-b\"{s}}}}}", .{case.override});
+        const start = try arena.create(StartAgent);
+        const check = try checkStartAgentWithPresets(arena, arguments, &presets, start);
+        try std.testing.expect(check == .accepted);
+        if (case.saved) |expected| {
+            try std.testing.expect(start.configuration.label.state == .value);
+            try std.testing.expectEqualStrings(expected, start.configuration.label.value.slice());
+        } else try std.testing.expect(start.configuration.label.state != .value);
+    }
+}
+
+test "a start_agent label whose JSON string cannot be decoded is the arguments' malformed JSON, not a label problem" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "\"x\\ud800\"", "\"x\xff\"" }) |label| {
+        const arguments = try std.fmt.allocPrint(arena.allocator(), "{{\"task\":\"read\",\"attached\":true,\"spec\":{{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\",\"label\":{s}}}}}", .{label});
+        const start = try arena.allocator().create(StartAgent);
+        const check = try checkStartAgent(arena.allocator(), arguments, start);
+        try std.testing.expectEqualStrings("the arguments are not one well-formed JSON object", check.rejected);
     }
 }
 
