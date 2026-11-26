@@ -130,6 +130,19 @@ pub const QueuedJson = struct {
     }
 };
 
+pub const AggregatesJson = struct {
+    value: *const activity_facts.Aggregates,
+
+    pub const openapi_name = "Aggregates";
+    pub const json_shape = .{ "{\"as_of\":\"", H.decimal, "\",\"call_activity\":", H{ .json = CallActivityJson }, ",\"queued\":", H{ .json = QueuedJson }, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn writeJson(self: *const AggregatesJson, out: *std.Io.Writer) !void {
+        const aggregates = self.value;
+        try writeShape(out, json_shape, .{ aggregates.as_of, CallActivityJson{ .value = &aggregates.call_activity }, QueuedJson{ .value = &aggregates.queued } });
+    }
+};
+
 pub const PageWorkJson = struct {
     value: *const activity_facts.PageWork,
 
@@ -146,7 +159,7 @@ pub const PageWorkJson = struct {
 
 pub const page_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"end\":\"", H.decimal, "\",\"direction\":\"", H{ .tag = @FieldType(activity_read.ActivityPage, "direction") }, "\",\"items\":[" };
-    pub const tail = .{ "],\"more\":", H.boolean, ",\"call_activity\":", H{ .json = CallActivityJson }, ",\"queued\":", H{ .json = QueuedJson }, ",\"work\":", H{ .json = PageWorkJson }, ",\"delta\":\"full\",\"since\":", H{ .optional_string = change_ring.SessionToken.max_bytes }, "}" };
+    pub const tail = .{ "],\"more\":", H.boolean, ",\"aggregates\":", H{ .optional_json = AggregatesJson }, ",\"work\":", H{ .json = PageWorkJson }, ",\"delta\":\"full\",\"since\":", H{ .optional_string = change_ring.SessionToken.max_bytes }, "}" };
     pub const unchanged = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"not_modified\",\"since\":", H{ .string = change_ring.SessionToken.max_bytes }, "}" };
     pub const max_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(Page, "items")).array.len, ItemJson.max_json_bytes) + shapeBytes(tail);
 };
@@ -164,7 +177,7 @@ pub fn writeFullPage(out: *std.Io.Writer, page: *const Page, token: ?[]const u8)
         if (index != 0) try out.writeByte(',');
         try (ItemJson{ .item = item }).writeJson(out);
     }
-    try writeShape(out, page_reply.tail, .{ page.more, CallActivityJson{ .value = &page.call_activity }, QueuedJson{ .value = &page.queued }, PageWorkJson{ .value = &page.work }, token });
+    try writeShape(out, page_reply.tail, .{ page.more, if (page.aggregates) |*aggregates| AggregatesJson{ .value = aggregates } else null, PageWorkJson{ .value = &page.work }, token });
 }
 
 pub const SearchHitJson = struct {

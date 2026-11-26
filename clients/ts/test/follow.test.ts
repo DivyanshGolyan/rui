@@ -248,9 +248,9 @@ test("TS-14 a nudge racing an in-flight page read is not lost", { timeout: 5000 
 test("TS-14 a nudge that finds no change keeps the cursor and moves only the token", { timeout: 5000 }, async () => {
 	const requests: { position: string; since?: string }[] = [];
 	const replies: unknown[] = [
-		{ delta: "full", since: "token-a", items: [], more: false, end: "9", queued: { count: "0" }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } },
+		{ delta: "full", since: "token-a", items: [], more: false, end: "9", aggregates: { as_of: "9", call_activity: { total: "0", entries: [] }, queued: { count: "0" } }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } },
 		{ version: "24", type: "activity_page", delta: "not_modified", since: "token-b" },
-		{ delta: "full", since: "token-c", items: [{ position: "13", ordinal: "2", at: "1", value: { stop: { key: "k13", turn: null, cutoff: "1", completion: "completed" } } }], more: false, end: "14", queued: { count: "0" }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } },
+		{ delta: "full", since: "token-c", items: [{ position: "13", ordinal: "2", at: "1", value: { stop: { key: "k13", turn: null, cutoff: "1", completion: "completed" } } }], more: false, end: "14", aggregates: { as_of: "14", call_activity: { total: "0", entries: [] }, queued: { count: "0" } }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } },
 	];
 	const line = scriptedLink(async (_path, body) => {
 		const request = JSON.parse(body("store")) as { position: string; since?: string };

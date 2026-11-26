@@ -105,7 +105,7 @@ test("follow wakes for two local sends and makes no requests between them while 
 				pages++;
 				const page = JSON.parse(reply.toString("utf8"));
 				if (page.delta === "full") {
-					idle = page.queued.count === "0" && ["idle", "finished", "failed", "stopped"].includes(page.work.state.kind);
+					idle = page.aggregates !== null && page.aggregates.queued.count === "0" && ["idle", "finished", "failed", "stopped"].includes(page.work.state.kind);
 				}
 				if (idle && (page.delta === "not_modified" || page.items.length === 0)) setImmediate(() => events.emit("idle"));
 			}

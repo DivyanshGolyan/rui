@@ -881,7 +881,7 @@ test "INS-12 every public reader projects parts with their owner" {
                     shown += 1;
                 };
                 try std.testing.expectEqual(@as(usize, 1), shown);
-                try std.testing.expectEqualDeep(@as(?content_value.Value, parts_value), page.queued.newest_content);
+                try std.testing.expectEqualDeep(@as(?content_value.Value, parts_value), page.aggregates.?.queued.newest_content);
             }
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             {
