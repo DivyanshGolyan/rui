@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 97;
+pub const schema_version: u32 = 98;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -77,6 +77,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 95, .digest = 0x09bff41030bad2a0 },
     .{ .schema_version = 96, .digest = 0x3c118fb5fc591e54 },
     .{ .schema_version = 97, .digest = 0x3a4f2e911f30dd94 },
+    .{ .schema_version = 98, .digest = 0x33aaf4fc84c93236 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -1127,6 +1128,31 @@ pub const migrations = [_]Migration{
             "ALTER TABLE message_admission ADD INDEX sender_session_ref(sender_session_ref), DROP INDEX message_admission_sent, DROP COLUMN sender_position",
         },
     },
+    // A tool call keeps what the model said about it (a label) and the Session it named (a subject), and no line: a reader derives
+    // the line when it reads, so renaming a peer changes the row that names it. A row saved before 98 keeps its words where SQL can
+    // tell them apart: the saved line of any call that is not a built-in with fixed words (Bash, MCP) becomes its label, and the
+    // Session ID in a saved "Message <id>" or "Read <id>'s transcript" becomes its subject. An app call saved no line and keeps none.
+    .{
+        .from = 97,
+        .sqlite = &.{
+            "ALTER TABLE model_tool_call RENAME TO model_tool_call_before_98",
+            "CREATE TABLE model_tool_call(\n operation_id INTEGER NOT NULL REFERENCES model_operation(operation_id),\n session_ref TEXT NOT NULL,\n call_ordinal INTEGER NOT NULL CHECK(call_ordinal>=0),\n item_ordinal INTEGER NOT NULL CHECK(item_ordinal>=0),\n name_content_id INTEGER NOT NULL REFERENCES content(content_id),\n call_id_content_id INTEGER NOT NULL REFERENCES content(content_id),\n arguments_content_id INTEGER NOT NULL REFERENCES content(content_id),\n label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 200),\n subject TEXT CHECK(subject IS NULL OR length(CAST(subject AS BLOB)) BETWEEN 1 AND 6),\n field_metadata BLOB NOT NULL CHECK(length(field_metadata)=120),\n rejection_code TEXT CHECK(rejection_code IS NULL OR rejection_code IN ('unknown_tool','invalid_arguments')),\n rejection_content_id INTEGER REFERENCES content(content_id),\n acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),\n action_kind INTEGER CHECK(action_kind IS NULL OR action_kind=1),\n PRIMARY KEY(operation_id,call_ordinal),\n UNIQUE(operation_id,item_ordinal),\n UNIQUE(operation_id,call_id_content_id),\n UNIQUE(operation_id,call_ordinal,action_kind),\n FOREIGN KEY(operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),\n CHECK((rejection_code IS NULL AND rejection_content_id IS NULL AND acceptance_position IS NULL AND (action_kind IS 1)) OR (rejection_code IS NOT NULL AND rejection_content_id IS NOT NULL AND acceptance_position IS NOT NULL AND action_kind IS NULL))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,label,subject,field_metadata,rejection_code,rejection_content_id,acceptance_position,action_kind) SELECT old.operation_id,old.session_ref,old.call_ordinal,old.item_ordinal,old.name_content_id,old.call_id_content_id,old.arguments_content_id,CASE WHEN old.description IS NOT NULL AND CAST(name.payload AS TEXT) NOT IN ('find_tools','message_agent','read_image','read_transcript','skill','start_agent','stop_action','watch_github_pr') THEN old.description END,CASE WHEN CAST(name.payload AS TEXT)='message_agent' AND substr(old.description,1,8)='Message ' AND length(CAST(old.description AS BLOB)) BETWEEN 9 AND 14 THEN substr(old.description,9) WHEN CAST(name.payload AS TEXT)='read_transcript' AND substr(old.description,1,5)='Read ' AND substr(old.description,-13)='''s transcript' AND length(CAST(old.description AS BLOB)) BETWEEN 19 AND 24 THEN substr(old.description,6,length(old.description)-18) END,old.field_metadata,old.rejection_code,old.rejection_content_id,old.acceptance_position,old.action_kind FROM model_tool_call_before_98 old JOIN content name ON name.content_id=old.name_content_id",
+            "DROP TABLE model_tool_call_before_98",
+            "CREATE INDEX model_tool_call_session_order ON model_tool_call(session_ref,operation_id,call_ordinal)",
+            "CREATE INDEX model_tool_call_session_results ON model_tool_call(session_ref,operation_id,acceptance_position) WHERE acceptance_position IS NOT NULL",
+            "CREATE INDEX model_tool_call_acceptance ON model_tool_call(session_ref,acceptance_position) WHERE acceptance_position IS NOT NULL",
+        },
+        .mysql = &.{
+            "ALTER TABLE model_tool_call ADD COLUMN label TEXT AFTER arguments_content_id, ADD COLUMN subject TEXT AFTER label, ADD CHECK(label IS NULL OR OCTET_LENGTH(label) BETWEEN 1 AND 200), ADD CHECK(subject IS NULL OR OCTET_LENGTH(subject) BETWEEN 1 AND 6)",
+            "UPDATE model_tool_call tc JOIN content_chunk name ON name.content_id=tc.name_content_id AND name.chunk_index=0 SET tc.label=CASE WHEN tc.description IS NOT NULL AND name.bytes NOT IN ('find_tools','message_agent','read_image','read_transcript','skill','start_agent','stop_action','watch_github_pr') THEN tc.description END,tc.subject=CASE WHEN name.bytes='message_agent' AND SUBSTRING(tc.description,1,8)='Message ' AND OCTET_LENGTH(tc.description) BETWEEN 9 AND 14 THEN SUBSTRING(tc.description,9) WHEN name.bytes='read_transcript' AND SUBSTRING(tc.description,1,5)='Read ' AND RIGHT(tc.description,13)='''s transcript' AND OCTET_LENGTH(tc.description) BETWEEN 19 AND 24 THEN SUBSTRING(tc.description,6,CHAR_LENGTH(tc.description)-18) END",
+            "SET @rui_call_ddl=(SELECT CONCAT('ALTER TABLE model_tool_call ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') SEPARATOR ', '),', DROP COLUMN description') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='model_tool_call' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('description',cc.CHECK_CLAUSE)>0)",
+            "PREPARE rui_call FROM @rui_call_ddl",
+            "EXECUTE rui_call",
+            "DEALLOCATE PREPARE rui_call",
+            "SET @rui_call_ddl=NULL",
+        },
+    },
 };
 
 comptime {
@@ -2058,7 +2084,8 @@ pub const tables = [_]Table{
             .{ .name = "name_content_id", .type = .int },
             .{ .name = "call_id_content_id", .type = .int },
             .{ .name = "arguments_content_id", .type = .int },
-            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 200 } }, .nullable = true },
+            .{ .name = "label", .type = .{ .text = .{ .min = 1, .max = 200 } }, .nullable = true },
+            .{ .name = "subject", .type = .{ .text = .{ .min = 1, .max = 6 } }, .nullable = true },
             .{ .name = "field_metadata", .type = .{ .bytes = .{ .min = 120, .max = 120 } } },
             .{ .name = "rejection_code", .type = .{ .tag = &.{ "unknown_tool", "invalid_arguments" } }, .nullable = true },
             .{ .name = "rejection_content_id", .type = .int, .nullable = true },
@@ -3687,11 +3714,8 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
         break :line bytes;
     };
     const utf8_overlong = utf8_line ++ "a";
-    const updates = .{
-        "UPDATE model_tool_call SET description=?1 WHERE operation_id=2 AND call_ordinal=0",
-    };
-    inline for (updates) |sql| {
-        const statement = try sqlite.prepare(database, sql);
+    {
+        const statement = try sqlite.prepare(database, "UPDATE model_tool_call SET description=?1 WHERE operation_id=2 AND call_ordinal=0");
         defer _ = c.sqlite3_finalize(statement);
         try sqlite.bindText(statement, 1, ascii_overlong[0..101]);
         try std.testing.expectEqual(c.SQLITE_CONSTRAINT, c.sqlite3_step(statement));
@@ -3710,7 +3734,8 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
         const read_columns = try columnText(columns_read, 0);
         try std.testing.expect(read_columns.len > 0);
         // Format 96 drops the sentence a hosted search kept: every other column of the item must come through the steps unchanged.
-        const columns = if (comptime std.mem.eql(u8, name, "model_output_item")) dropped: {
+        // Format 98 drops the line a tool call kept (its label and subject are checked below): every other column must come through unchanged.
+        const columns = if (comptime std.mem.eql(u8, name, "model_output_item") or std.mem.eql(u8, name, "model_tool_call")) dropped: {
             try std.testing.expect(std.mem.indexOf(u8, read_columns, "\"description\",") != null);
             break :dropped try std.mem.replaceOwned(u8, std.testing.allocator, read_columns, "\"description\",", "");
         } else try std.testing.allocator.dupe(u8, read_columns);
@@ -3728,7 +3753,10 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
         try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, reverse));
     }
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM action_operation WHERE background_content_id IS NOT NULL OR background_position IS NOT NULL OR background_at IS NOT NULL"));
-    inline for (updates) |sql| {
+    // The saved Bash line is the call's label, and a call that said nothing has none.
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_tool_call WHERE operation_id=2 AND call_ordinal=0 AND label='Run first command' AND subject IS NULL"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_tool_call WHERE operation_id=2 AND call_ordinal=1 AND label IS NULL AND subject IS NULL"));
+    inline for (.{"UPDATE model_tool_call SET label=?1 WHERE operation_id=2 AND call_ordinal=0"}) |sql| {
         for ([_][]const u8{ &ascii_line, &utf8_line }) |line| {
             const statement = try sqlite.prepare(database, sql);
             defer _ = c.sqlite3_finalize(statement);
@@ -3742,7 +3770,7 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
             try std.testing.expectEqual(c.SQLITE_CONSTRAINT, c.sqlite3_step(statement));
         }
     }
-    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_tool_call WHERE operation_id=2 AND call_ordinal=0 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_tool_call WHERE operation_id=2 AND call_ordinal=0 AND length(CAST(label AS BLOB))=200 AND label='" ++ utf8_line ++ "'"));
     // The hosted item the step carried reads as an action of none: its old sentence is not kept.
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_output_item WHERE operation_id=2 AND item_ordinal=2 AND hosted_action=0 AND hosted_pattern_content_id IS NULL"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM hosted_target"));

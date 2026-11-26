@@ -8,6 +8,7 @@ const session_report = @import("../../session_report.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
+const tool_proposal = @import("../../tool_proposal.zig");
 const saved_label = @import("../../saved_label.zig");
 const tool_name = @import("../../tool_name.zig");
 const app_tools = @import("../../tool_record.zig").app_tools;
@@ -572,8 +573,8 @@ fn latestResolutionAtSql(comptime session: []const u8, comptime operation: []con
 const session_revision_of_action = "session_revision r ON r.session_ref=a.session_ref AND r.revision=a.permission_revision";
 
 /// The oldest Action running on `operation`, joined to its call. The staged WorkOldest and the work_rows probe render it.
-fn oldestRunningSql(comptime columns: []const u8, comptime operation: []const u8) []const u8 {
-    return "SELECT " ++ columns ++ " FROM action_operation a JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
+fn oldestRunningSql(comptime columns: []const u8, comptime joins: []const u8, comptime operation: []const u8) []const u8 {
+    return "SELECT " ++ columns ++ " FROM action_operation a JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++ joins ++
         "WHERE a.parent_operation_id=" ++ operation ++ " AND " ++ running_action ++ " ORDER BY a.attempt_at,a.action_id LIMIT 1";
 }
 
@@ -723,14 +724,22 @@ const work_oldest = WorkOldest(struct { operation: u64 }, "?1");
 
 fn WorkOldest(comptime Args: type, comptime operation: []const u8) type {
     return rsql.Read(.{
-        .sql = oldestRunningSql("a.attempt_at,tool_call.description,a.call_ordinal", operation),
+        .sql = oldestRunningSql("a.attempt_at,a.call_ordinal," ++ reads_domain.call_line_columns("tool_call", "call_name", "call_subject", "call_"), reads_domain.call_line_joins("JOIN", "tool_call", "call_name", "call_subject") ++ " ", operation),
         .Args = Args,
         .Row = WorkOldestRow,
         .cardinality = .each,
     });
 }
 
-const WorkOldestRow = struct { attempt_at: rsql.Positive, description: ?Bounded(tool_presentation.max_description_bytes), call_ordinal: u64 };
+const WorkOldestRow = struct {
+    attempt_at: rsql.Positive,
+    call_ordinal: u64,
+    call_tool: ?reads_domain.CallTool,
+    call_rejection: ?tool_proposal.Rejection,
+    call_label: ?Bounded(tool_presentation.max_description_bytes),
+    call_subject: ?reads_domain.CallSubject,
+    call_subject_label: ?Bounded(tool_presentation.max_label_bytes),
+};
 
 const pending_session_sql = "(SELECT pending.session_ref FROM message_admission pending LEFT JOIN turn own ON own.turn_id=pending.turn_id " ++
     "WHERE pending.command_key=?1 AND own.outcome_code IS NULL)";
@@ -785,7 +794,7 @@ pub const work_columns = latestColumnsSql("work_turn", "work_operation", work_se
     "(SELECT max(a.decided_at) FROM action_operation a JOIN " ++ session_revision_of_action ++ " " ++
     "WHERE a.parent_operation_id=" ++ work_live_operation ++ " AND " ++ decided_action ++ ") AS actions_latest_decision_at," ++
     "work_running.action_id AS running_action,work_running.attempt_at AS running_at," ++
-    "work_running_call.description AS running_description,work_running.call_ordinal AS running_call," ++
+    reads_domain.call_line_columns("work_running_call", "work_running_name", "work_running_subject", "running_") ++ ",work_running.call_ordinal AS running_call," ++
     "(" ++ command_domain.sessionStopCutoffSql(work_session_ref) ++ ") AS stop_cutoff," ++
     "work_queued.admission_id AS queued_admission,work_queued.admitted_at AS queued_at,work_queued.admission_position AS queued_position," ++
     "work_excluded.admission_id AS excluded_admission," ++
@@ -795,9 +804,10 @@ pub const work_columns = latestColumnsSql("work_turn", "work_operation", work_se
 /// The keyed joins work_columns reads, after `FROM session work_session` or a join that names `work_session`.
 pub const work_joins = "LEFT JOIN turn work_turn ON work_turn.turn_id=(SELECT t.turn_id " ++ latestTurnFromSql(work_session_ref) ++ ") " ++
     "LEFT JOIN model_operation work_operation ON work_operation.operation_id=work_turn.operation_id " ++
-    "LEFT JOIN action_operation work_running ON work_running.action_id=(" ++ oldestRunningSql("a.action_id", work_live_operation) ++ ") " ++
+    "LEFT JOIN action_operation work_running ON work_running.action_id=(" ++ oldestRunningSql("a.action_id", "", work_live_operation) ++ ") " ++
     "LEFT JOIN model_tool_call work_running_call ON work_running_call.operation_id=work_running.parent_operation_id " ++
     "AND work_running_call.call_ordinal=work_running.call_ordinal " ++
+    reads_domain.call_line_joins("LEFT JOIN", "work_running_call", "work_running_name", "work_running_subject") ++ " " ++
     "LEFT JOIN message_admission work_queued ON work_queued.admission_id=(" ++ pendingAfterSql("admission_id", work_session_ref, work_cutoff) ++ ") " ++
     "LEFT JOIN message_admission work_excluded ON work_excluded.admission_id=(" ++ excludedByCutoffSql("admission_id", work_session_ref, work_cutoff) ++ ") " ++
     "LEFT JOIN session_stop work_stop ON work_stop.command_key=(" ++ stopAfterSql("command_key", work_session_ref, "work_excluded.admission_id") ++ ") ";
@@ -873,7 +883,11 @@ pub const WorkRow = struct {
     actions_latest_decision_at: ?rsql.Positive,
     running_action: ?rsql.Positive,
     running_at: ?rsql.Positive,
-    running_description: ?Bounded(tool_presentation.max_description_bytes),
+    running_tool: ?reads_domain.CallTool,
+    running_rejection: ?tool_proposal.Rejection,
+    running_label: ?Bounded(tool_presentation.max_description_bytes),
+    running_subject: ?reads_domain.CallSubject,
+    running_subject_label: ?Bounded(tool_presentation.max_label_bytes),
     running_call: ?u64,
     stop_cutoff: ?u64,
     queued_admission: ?u64,
@@ -1052,7 +1066,7 @@ pub const WorkRead = struct {
                 .latest_decision_at = optional(row.latest_decision_at),
             };
         } else if (Row == WorkOldestRow) {
-            w.description = if (row.description) |saved| saved_label.callWords(saved.slice()) else null;
+            w.description = try (reads_domain.StoredCall{ .tool = row.call_tool, .rejection = row.call_rejection, .label = row.call_label, .subject = row.call_subject, .subject_label = row.call_subject_label }).text();
             w.inputs.latest.?.actions.oldest_running = .{ .at = row.attempt_at.get(), .call = row.call_ordinal, .description = null };
         } else if (Row == command_domain.stop_cutoff.Row) {
             w.cutoff = row.admission_cutoff;
@@ -1224,8 +1238,12 @@ pub const WorkRead = struct {
     fn oldestRow(row: anytype) error{CorruptStore}!WorkOldestRow {
         return .{
             .attempt_at = row.running_at orelse return error.CorruptStore,
-            .description = row.running_description,
             .call_ordinal = row.running_call orelse return error.CorruptStore,
+            .call_tool = row.running_tool,
+            .call_rejection = row.running_rejection,
+            .call_label = row.running_label,
+            .call_subject = row.running_subject,
+            .call_subject_label = row.running_subject_label,
         };
     }
 

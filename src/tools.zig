@@ -1,4 +1,5 @@
 const std = @import("std");
+const tool_line = @import("tool_line.zig");
 const protocol = @import("protocol.zig");
 pub const core_tools = @import("core_tools.zig");
 
@@ -79,8 +80,13 @@ test "read_transcript descriptions stream IDs and never reject runtime arguments
         const offered = Offered{ .names = "read_transcript" };
         const facts = try inspectCall(&name, "read_transcript".len, &arguments, &offered);
         try std.testing.expectEqual(@as(?protocol.ProposalRejection, null), classifyCall(&facts));
-        const description = facts.description().?;
-        try std.testing.expectEqualStrings(case.note, description.slice());
+        // The call keeps the Session it named; its line is derived from that.
+        const line = (try tool_line.of(.{ .name = "read_transcript", .subject = facts.subject() })).?;
+        var out: [256]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&out);
+        try line.writePlain(&writer);
+        try std.testing.expectEqualStrings(case.note, writer.buffered());
+        try std.testing.expect(facts.label() == null);
     }
     try std.testing.expectEqual(Runner.core, Runner.of(&read_transcript_record));
 }
@@ -388,7 +394,7 @@ test "find_tools is a core tool and settlement defers its words check" {
         try std.testing.expectEqualStrings(find_tools_record.name, facts.tool.?.name);
         try std.testing.expectEqual(Runner.core, facts.tool.?.runner());
         try std.testing.expect(facts.find_tools and facts.bash == null and facts.message_agent == null);
-        try std.testing.expect(protocol.ToolPresentation.validDescription(facts.description().?.slice()));
+        try std.testing.expect(facts.label() == null and facts.subject() == null);
         name = .{};
         arguments = .{ .bytes = bytes };
         const hidden = Offered{};
@@ -406,8 +412,7 @@ test "stop_action honors the offered core record and defers argument checks" {
         const facts = try inspectCall(&name, "stop_action".len, &arguments, &offered);
         try std.testing.expectEqual(@as(?protocol.ProposalRejection, null), classifyCall(&facts));
         try std.testing.expectEqual(Runner.core, facts.tool.?.runner());
-        const description = facts.description().?;
-        try std.testing.expectEqualStrings("Stop an Action", description.slice());
+        try std.testing.expect(facts.label() == null and facts.subject() == null);
         name = .{ .bytes = "stop_action" };
         arguments = .{ .bytes = text };
         const excluded: Offered = .{ .names = "read_transcript" };
@@ -442,7 +447,7 @@ test "read_image classification uses offered built-in records and typed path arg
         try std.testing.expectEqual(case.rejection, classifyCall(&facts));
         if (case.rejection == null) {
             try std.testing.expectEqual(Runner.read_image, facts.tool.?.runner());
-            try std.testing.expectEqualStrings("Read an image", facts.description().?.slice());
+            try std.testing.expect(facts.label() == null and facts.subject() == null);
         }
     }
 }
@@ -464,7 +469,7 @@ test "PRW-13 watcher classification honors the frozen offer and strict arguments
         try std.testing.expectEqual(case.rejected, classifyCall(&facts));
         if (case.rejected == null) {
             try std.testing.expectEqual(Runner.github_pr_watch, facts.tool.?.runner());
-            try std.testing.expectEqualStrings("Watch a GitHub pull request", facts.description().?.slice());
+            try std.testing.expect(facts.label() == null and facts.subject() == null);
         }
     }
 }

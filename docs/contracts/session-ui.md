@@ -883,9 +883,9 @@ The runner is derived from the name and owner in the Operation's frozen offer, n
 Current includes the frozen `server` only for unresolved MCP calls; legacy built-in rows omit it.
 Bash displays `? <description>`, then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one.
 MCP displays `? <saved description>` (at most 200 decoded UTF-8 bytes), `Tool`, `Server` and the original `Arguments` JSON.
-The description is extracted once at settlement from `rui_call_description`: a valid nonblank, single-line UTF-8 string of 1–200 bytes is saved; missing, non-string, blank, multi-line or oversized text falls back to the tool name.
-The terminal and TypeScript feed read the saved line, never re-parse arguments for it.
-The client retains that bounded saved line; it does not interpret the server's schema.
+The label is extracted once at settlement from `rui_call_description`: a valid nonblank, single-line UTF-8 string of 1–200 bytes is saved; missing, non-string, blank, multi-line or oversized text saves the tool name instead.
+The terminal and TypeScript feed show the line the Store derives when it reads (`tool_line.of`) from that saved label, never re-parse arguments for it.
+The client retains that bounded line; it does not interpret the server's schema.
 Raw one-shot `rui action inspect` stays exact.
 A permission request replaces the composer's two rules and input rows with a focused card.
 The draft stays hidden, with its bytes and caret intact, until the request is answered or withdrawn.

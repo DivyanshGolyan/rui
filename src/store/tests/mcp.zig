@@ -84,11 +84,17 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
                     .decoded_arguments = line.arguments,
                 }});
                 errdefer std.debug.print("MCP arguments: {s}\n", .{line.arguments});
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{line.expected}));
-                if (line.expected.len == 200) {
-                    const page = try store_core.activityPageForTesting(&storage, .{ .session = session });
-                    try std.testing.expectEqual(@as(usize, 1), page.aggregates.?.call_activity.count);
+                // The call keeps the label the model gave, or with none the tool's name, which is what the call has always read as.
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE label=?1 AND subject IS NULL", .{line.expected}));
+                const page = try store_core.activityPageForTesting(&storage, .{ .session = session });
+                // A call whose arguments are not one JSON object is rejected: it is no Action, so Activity counts no call.
+                if (page.aggregates.?.call_activity.count == 1) {
                     try std.testing.expectEqualStrings(line.expected, page.aggregates.?.call_activity.entries[0].presentation.line.?.words.slice());
+                } else {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE rejection_code='invalid_arguments'", .{}));
+                }
+                if (line.expected.len == 200) {
+                    try std.testing.expectEqual(@as(usize, 1), page.aggregates.?.call_activity.count);
                     const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
                     defer std.testing.allocator.free(report);
                     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
@@ -330,6 +336,136 @@ test "MCP promotion keeps old frozen Operations eligible without hiding finite w
             try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(same_binding, .succeeded, "Same-Session result", .{})).outcome);
             try std.testing.expect((try storage.nextAction(.mcp, .fromFree(2, true))) == null);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND attempt_ordinal=1 AND resolution_code='succeeded'", .{old}));
+        }
+    }.run);
+}
+
+/// One saved call of the line matrix: the tool, its arguments and the line every reader derives for it (null: no line).
+const LineCase = struct { name: []const u8, arguments: []const u8, expected: ?[]const u8 };
+
+/// Settles `cases` as one Operation's calls on `session` and returns nothing; the readers are asked afterwards.
+fn settleLineCases(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, prefix: []const u8, cases: []const LineCase) !void {
+    var key: [32]u8 = undefined;
+    const input = try std.fmt.bufPrint(&key, "{s}-input", .{prefix});
+    try submitTestMessage(storage, tmp, input, input, session, "run");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var calls: [16]TestingCall = undefined;
+    var ids: [16][8]u8 = undefined;
+    var encoded: [16][512]u8 = undefined;
+    for (cases, 0..) |case, at| {
+        const id = try std.fmt.bufPrint(&ids[at], "call-{d}", .{at});
+        var writer = std.Io.Writer.fixed(&encoded[at]);
+        try std.json.Stringify.value(case.arguments, .{}, &writer);
+        const quoted = writer.buffered();
+        calls[at] = .{ .item_id = id, .name = case.name, .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = case.arguments };
+    }
+    try settleCallsForTesting(storage, tmp, binding, prefix, calls[0..cases.len]);
+}
+
+/// A Session's calls as Activity shows them: every call is a `call` row whose `description` is its line, and a rejected call is
+/// also a `tool_result` row whose presentation carries it. Each case's line is checked on both, the rejected ones in order.
+fn expectActivityLines(storage: *Store, session: []const u8, cases: []const LineCase, rejected: []const bool) !void {
+    var request: protocol.ActivityPage = .{ .kinds = .initMany(&.{.call}) };
+    try request.session.set(session);
+    const calls = try store_core.activityPageForTesting(storage, request);
+    try std.testing.expectEqual(cases.len, calls.count);
+    for (calls.items[0..calls.count]) |item| {
+        const call = item.value.call;
+        if (cases[call.call_ordinal].expected) |expected| {
+            try std.testing.expectEqualStrings(expected, call.description.?.slice());
+        } else try std.testing.expect(call.description == null);
+    }
+    // A rejected call's result is published once every call of its Operation is fulfilled, so only a Session of rejected calls has them.
+    var count: usize = 0;
+    for (rejected) |yes| count += @intFromBool(yes);
+    if (count != cases.len) return;
+    request.kinds = .initMany(&.{.tool_result});
+    const results = try store_core.activityPageForTesting(storage, request);
+    var at: usize = 0;
+    for (results.items[0..results.count]) |item| {
+        while (!rejected[at]) at += 1;
+        const line = item.value.tool_result.presentation.line;
+        if (cases[at].expected) |expected| {
+            try std.testing.expectEqualStrings(expected, line.?.words.slice());
+        } else try std.testing.expect(line == null);
+        at += 1;
+    }
+    try std.testing.expectEqual(count, results.count);
+}
+
+test "TPR-4 a call reads its line from its tool, whether a tool served it and the label it saved, as it did when the line was saved" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            const records = testingHostToolRecords(&.{.{
+                .name = "fetch_page",
+                .owner = .mcp,
+                .server = "docs",
+                .description = "Fetch a page.",
+                .input_schema = "{\"type\":\"object\",\"properties\":{}}",
+            }});
+            const digests = blk: {
+                var out: [records.len][32]u8 = undefined;
+                for (records, &out) |record, *digest| digest.* = tool_defs.recordDigest(&record);
+                break :blk out;
+            };
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+            defer storage.close() catch unreachable;
+            var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+            const cwd = try canonicalCwd(std.testing.io, &workspace);
+
+            // A Session that offers Bash, a core tool, an MCP tool: each call is accepted, or rejected for what it carried.
+            var offered = try completeConfiguration("line-offered", "", cwd, "model-a");
+            offered.configuration.tools = try .of(&.{ "bash", "fetch_page", "find_tools" });
+            offered.configuration.permission_mode.state = .value;
+            try offered.configuration.permission_mode.value.set("bypass");
+            const offered_session = (try storage.configure(&offered, .{})).accepted.session;
+            const offered_cases = [_]LineCase{
+                .{ .name = "bash", .arguments = "{\"description\":\"Run the tests\",\"cmd\":\"zig build test\"}", .expected = "Run the tests" },
+                .{ .name = "bash", .arguments = "{\"cmd\":\"zig build test\"}", .expected = null },
+                .{ .name = "find_tools", .arguments = "{}", .expected = "Find tools" },
+                .{ .name = "fetch_page", .arguments = "{\"rui_call_description\":\"Fetch the docs page\"}", .expected = "Fetch the docs page" },
+                .{ .name = "fetch_page", .arguments = "{}", .expected = "fetch_page" },
+                .{ .name = "fetch_page", .arguments = "{\"rui_call_description\":\"Fetch\",\"broken\":", .expected = "fetch_page" },
+                .{ .name = "no_such_tool", .arguments = "{}", .expected = null },
+            };
+            const offered_rejected = [_]bool{ false, true, false, false, false, true, true };
+            try settleLineCases(&storage, &tmp, offered_session.slice(), "line-offered-calls", &offered_cases);
+            try expectActivityLines(&storage, offered_session.slice(), &offered_cases, &offered_rejected);
+
+            // A Session that offers nothing: a Bash call that said what it did keeps those words, a core tool keeps its own,
+            // and an MCP tool nothing served has none.
+            var bare = try completeConfiguration("line-bare", "", cwd, "model-a");
+            bare.configuration.tools = try .of(&.{});
+            const bare_session = (try storage.configure(&bare, .{})).accepted.session;
+            const bare_cases = [_]LineCase{
+                .{ .name = "bash", .arguments = "{\"description\":\"Run the tests\",\"cmd\":\"zig build test\"}", .expected = "Run the tests" },
+                .{ .name = "bash", .arguments = "{\"cmd\":\"zig build test\"}", .expected = null },
+                .{ .name = "find_tools", .arguments = "{}", .expected = "Find tools" },
+                .{ .name = "fetch_page", .arguments = "{\"rui_call_description\":\"Fetch the docs page\"}", .expected = null },
+                .{ .name = "stop_action", .arguments = "{}", .expected = null },
+            };
+            const bare_rejected = [_]bool{ true, true, true, true, true };
+            try settleLineCases(&storage, &tmp, bare_session.slice(), "line-bare-calls", &bare_cases);
+            try expectActivityLines(&storage, bare_session.slice(), &bare_cases, &bare_rejected);
+
+            // A lane root that declares an app tool: its call saves no label, so it has no line.
+            const declaration = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+            var lane = try completeConfiguration("line-lane", "", cwd, "model-a");
+            lane.configuration.tools = try .of(&.{});
+            lane.configuration.app_tools = .{ .state = .value, .borrowed = declaration.ptr, .length = declaration.len, .digest = protocol.contentDigest(declaration) };
+            const lane_session = (try storage.configure(&lane, .{})).accepted.session;
+            const lane_cases = [_]LineCase{.{ .name = "ask", .arguments = "{}", .expected = null }};
+            try settleLineCases(&storage, &tmp, lane_session.slice(), "line-lane-calls", &lane_cases);
+            var request: protocol.ActivityPage = .{ .kinds = .initMany(&.{.call}) };
+            try request.session.set(lane_session.slice());
+            const lane_page = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, 1), lane_page.count);
+            try std.testing.expect(lane_page.items[0].value.call.description == null);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE session_ref=?1 AND label IS NULL AND subject IS NULL AND rejection_code IS NULL", .{lane_session.slice()}));
         }
     }.run);
 }

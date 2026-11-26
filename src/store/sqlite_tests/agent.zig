@@ -34,6 +34,20 @@ fn configureMessagingSession(storage: *Store, key: []const u8) !protocol.Bounded
     return reply.accepted.session;
 }
 
+/// The text of the Activity row of call `ordinal`: its line, a Session it names standing as its label or its ID.
+fn callText(storage: *Store, request: protocol.ActivityPage, ordinal: u64, out: *[64]u8) ![]const u8 {
+    const page = try store_core.activityPageForTesting(storage, request);
+    for (page.items[0..page.count]) |item| switch (item.value) {
+        .call => |call| if (call.call_ordinal == ordinal) {
+            const text = call.description.?.slice();
+            @memcpy(out[0..text.len], text);
+            return out[0..text.len];
+        },
+        else => {},
+    };
+    return error.TestUnexpectedResult;
+}
+
 test "a message_agent call runs as one core command: the Message is admitted from its Session and the call resolves" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -56,9 +70,19 @@ test "a message_agent call runs as one core command: the Message is admitted fro
     try settleCallsForTesting(&storage, &tmp, model, "agent-metadata", &calls);
 
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND approval_position IS NULL", .{}));
-    var line_buffer: [32]u8 = undefined;
-    const line = try std.fmt.bufPrint(&line_buffer, "Message {s}", .{receiver.slice()});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{line}));
+    // The call keeps the Session it named and no line; the line is derived when it is read, from that Session's label as it is now.
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE subject=?1 AND label IS NULL", .{receiver.slice()}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE subject='zzzzzz' AND label IS NULL", .{}));
+    var seen: [64]u8 = undefined;
+    var request: protocol.ActivityPage = .{};
+    try request.session.set(caller.slice());
+    const before = try callText(&storage, request, 0, &seen);
+    var expected_buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_buffer, "Message {s}", .{receiver.slice()}), before);
+    // Renaming the peer changes the line of the row that was saved before; the Store holds no copy of the words.
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET label='Review the WAL' WHERE session_ref=?1", .{receiver.slice()});
+    try std.testing.expectEqualStrings("Message Review the WAL", try callText(&storage, request, 0, &seen));
+    try std.testing.expectEqualStrings("Message zzzzzz", try callText(&storage, request, 1, &seen));
     try std.testing.expect(try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{}) == null);
 
     const first = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;

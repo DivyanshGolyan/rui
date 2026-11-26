@@ -1,19 +1,22 @@
 //! The words of a tool call ("Message abc123", "Search “q”", "Read an image"): the one owner of call wording.
-//! Pure. `call_classification` decides which `Call` a set of facts is; this file decides what it says.
+//! Pure. `call_classification` decides which `Call` a set of facts is; this file decides what it says, and `of` derives a
+//! saved call's line at read from what the Store holds: the tool's name, the label the model gave, the Session the call named.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const HostedAction = @import("hosted_action.zig").HostedAction;
+const saved_label = @import("saved_label.zig");
 const session_id = @import("session_id.zig");
+const tool_presentation = @import("tool_presentation.zig");
+const tool_proposal = @import("tool_proposal.zig");
 const utf8_validation = @import("utf8_validation.zig");
 
-/// The most bytes one call line may take: one line of words, whoever draws it. This file owns the limit and
-/// `tool_presentation` and the MCP argument shape name it, so this file imports none of them and stays a leaf.
-pub const max_bytes = 200;
+/// The most bytes one call line may take: one line of words, whoever draws it.
+pub const max_bytes = tool_presentation.max_description_bytes;
 pub const Description = Bounded(max_bytes);
 
 /// One variant per built-in tool; `call_classification` checks at compile time that none is missing.
 pub const Call = union(enum) {
-    /// The label the model gave the command.
+    /// The label the model gave the command, as one tidy line.
     bash: []const u8,
     find_tools,
     /// The id of the Session the message is for.
@@ -35,62 +38,81 @@ pub const WebSearchCall = struct {
     pub const excerpt_bytes = 2 * max_bytes;
 };
 
-pub fn describe(call: Call) Description {
-    const out: Description = switch (call) {
-        .bash => |label| blk: {
-            var out: Description = .{};
-            out.set(label) catch unreachable;
-            break :blk out;
-        },
-        .message_agent => |id| blk: {
-            var out: Description = .{};
-            compose(&out, &.{ "Message ", "" }, &.{id});
-            break :blk out;
-        },
-        .find_tools => blk: {
-            var out: Description = .{};
-            out.set("Find tools") catch unreachable;
-            break :blk out;
-        },
-        .read_image => blk: {
-            var out: Description = .{};
-            out.set("Read an image") catch unreachable;
-            break :blk out;
-        },
-        .read_transcript => |id| blk: {
-            var out: Description = .{};
-            if (id) |target| compose(&out, &.{ "Read ", "'s transcript" }, &.{target.slice()}) else compose(&out, &.{"Read own transcript"}, &.{});
-            break :blk out;
-        },
-        .skill => blk: {
-            var out: Description = .{};
-            out.set("Use skills") catch unreachable;
-            break :blk out;
-        },
-        .stop_action => blk: {
-            var out: Description = .{};
-            out.set("Stop an Action") catch unreachable;
-            break :blk out;
-        },
-        .start_agent => blk: {
-            var out: Description = .{};
-            out.set("Start an agent") catch unreachable;
-            break :blk out;
-        },
-        .watch_github_pr => blk: {
-            var out: Description = .{};
-            out.set("Watch a GitHub pull request") catch unreachable;
-            break :blk out;
-        },
-        .web_search => |search| describeWebSearch(search),
+/// What the Store holds of one saved call: the facts its line is derived from, and nothing of the line itself.
+pub const Facts = struct {
+    /// The tool's saved name, at most `tool_name.max_bytes`, read inline.
+    name: []const u8,
+    /// Set on a call no tool served; `served` says what words such a call keeps.
+    rejection: ?tool_proposal.Rejection = null,
+    /// What the model said about the call (a Bash or MCP `description` argument), as saved.
+    label: ?[]const u8 = null,
+    /// The Session a `message_agent` or `read_transcript` call named: its ID, `session_id.bytes` long.
+    subject: ?[]const u8 = null,
+    /// That Session's label now, so a rename shows on every row that names it.
+    subject_label: ?Bounded(saved_label.max_label_bytes) = null,
+};
+
+/// The line of a saved call, or null for a call that has no words, as it was before the line stopped being saved. A built-in tool says
+/// its own words; Bash says its label, or the fallback words when it has none; any other tool (an MCP or app tool) says its label,
+/// and an app call, which saves none, has no line. A call no tool served (`rejection`) keeps the words it could be given:
+/// `served` says which. Total over any saved text: a label is read through `saved_label`. A subject that is not a Session ID is an error.
+pub fn of(facts: Facts) tool_presentation.Line.Error!?tool_presentation.Line {
+    const tool = std.meta.stringToEnum(std.meta.Tag(Call), facts.name);
+    if (!served(tool, facts)) return null;
+    const words = saved_label.callWords(facts.label orelse "");
+    const call: Call = switch (tool orelse .web_search) {
+        .bash => .{ .bash = words.slice() },
+        .find_tools => .find_tools,
+        .message_agent => .{ .message_agent = if (facts.subject) |id| (if (id.len > session_id.bytes) return error.InvalidLine else id) else "" },
+        .read_image => .read_image,
+        .read_transcript => .{ .read_transcript = if (facts.subject) |id| Bounded(session_id.bytes).from(id) catch return error.InvalidLine else null },
+        .skill => .skill,
+        .start_agent => .start_agent,
+        .stop_action => .stop_action,
+        .watch_github_pr => .watch_github_pr,
+        // Not a built-in tool's name (a hosted search is never a saved call): an MCP or app tool, served only with a label.
+        .web_search => return tool_presentation.Line.ofSaved(facts.label.?),
     };
-    return out;
+    var line = try lineOf(call);
+    if (line.link != null) if (saved_label.labelWords(facts.subject_label)) |peer| try line.setLabel(peer.slice());
+    return line;
+}
+
+/// Whether a saved call has words. An accepted call does, except an app call (it saved no label). A rejected call (a tool name
+/// nothing served, or arguments no tool accepted) has the words its tool's name and what was saved give it: a label; a message to
+/// a Session it named; the tools that said the same whatever the arguments; the tools that name no argument, once the tool was known.
+fn served(tool: ?std.meta.Tag(Call), facts: Facts) bool {
+    const rejected = facts.rejection != null;
+    return switch (tool orelse .web_search) {
+        .web_search => facts.label != null,
+        .bash => facts.label != null or !rejected,
+        .message_agent => facts.subject != null or !rejected,
+        .find_tools, .read_transcript, .skill => true,
+        .start_agent, .stop_action => facts.rejection != .unknown_tool,
+        .read_image, .watch_github_pr => !rejected,
+    };
+}
+
+fn lineOf(call: Call) tool_presentation.Line.Error!tool_presentation.Line {
+    const Line = tool_presentation.Line;
+    return switch (call) {
+        .bash => |label| Line.plain(label),
+        .message_agent => |id| if (id.len == 0) Line.plain("Message an agent") else Line.linked("Message ", id, ""),
+        .find_tools => Line.plain("Find tools"),
+        .read_image => Line.plain("Read an image"),
+        .read_transcript => |id| if (id) |target| Line.linked("Read ", target.slice(), "'s transcript") else Line.plain("Read own transcript"),
+        .skill => Line.plain("Use skills"),
+        .stop_action => Line.plain("Stop an Action"),
+        .start_agent => Line.plain("Start an agent"),
+        .watch_github_pr => Line.plain("Watch a GitHub pull request"),
+        .web_search => |search| Line.plain(describeWebSearch(search).slice()),
+    };
 }
 
 /// A hosted web search's line from its stored action, read at display time. `target` and `pattern` are the leading bytes
 /// of the first target and of the pattern (at most `WebSearchCall.excerpt_bytes` of each is looked at), never the stored text.
 pub fn ofHosted(action: HostedAction, target: []const u8, pattern: []const u8) Description {
-    return describe(.{ .web_search = .{ .action = action, .target = target, .pattern = pattern } });
+    return describeWebSearch(.{ .action = action, .target = target, .pattern = pattern });
 }
 
 fn describeWebSearch(call: WebSearchCall) Description {
@@ -227,32 +249,74 @@ test "TPR-4 a web search call's description says what it did, on one line, withi
         .{ .action = .search, .target = "\xff\xfe\xfd\xfc", .expected = "Search the web" },
         .{ .action = .search, .target = "q\xe2\x82", .expected = "Search “q”" },
     }) |case| {
-        const description = describe(.{ .web_search = .{ .action = case.action, .target = case.target orelse "", .pattern = case.pattern orelse "" } });
+        const description = describeWebSearch(.{ .action = case.action, .target = case.target orelse "", .pattern = case.pattern orelse "" });
         try std.testing.expectEqualStrings(case.expected, description.slice());
         try std.testing.expect(description.slice().len <= max_bytes);
     }
 }
 
-test "TPR-4 a Bash call is described by the description its arguments carry" {
-    try std.testing.expectEqualStrings("Run parser tests", describe(.{ .bash = "Run parser tests" }).slice());
-}
-
-test "TPR-4 every tool call has fixed words, or the words of what it names" {
-    const id: []const u8 = "abc123";
-    const own: ?Bounded(session_id.bytes) = null;
-    var other: Bounded(session_id.bytes) = .{};
-    try other.set("zzzzzz");
-    const cases = [_]struct { call: Call, expected: []const u8 }{
-        .{ .call = .{ .bash = "Run parser tests" }, .expected = "Run parser tests" },
-        .{ .call = .{ .message_agent = id }, .expected = "Message abc123" },
-        .{ .call = .find_tools, .expected = "Find tools" },
-        .{ .call = .read_image, .expected = "Read an image" },
-        .{ .call = .{ .read_transcript = own }, .expected = "Read own transcript" },
-        .{ .call = .{ .read_transcript = other }, .expected = "Read zzzzzz's transcript" },
-        .{ .call = .skill, .expected = "Use skills" },
-        .{ .call = .stop_action, .expected = "Stop an Action" },
-        .{ .call = .start_agent, .expected = "Start an agent" },
-        .{ .call = .watch_github_pr, .expected = "Watch a GitHub pull request" },
+test "TPR-4 a saved call's line is derived from its tool, label and subject, and a call no tool served keeps the words it was given" {
+    var peer = Bounded(saved_label.max_label_bytes){};
+    try peer.set("Review the WAL");
+    const long_label: [max_bytes]u8 = @splat('x');
+    const long_subject: [session_id.bytes + 1]u8 = @splat('x');
+    const Case = struct { facts: Facts, plain: ?[]const u8, peer: ?[]const u8 = null };
+    const cases = [_]Case{
+        .{ .facts = .{ .name = "bash", .label = "Run parser tests" }, .plain = "Run parser tests" },
+        .{ .facts = .{ .name = "bash", .label = "  Run\nparser   tests " }, .plain = "Run parser tests" },
+        .{ .facts = .{ .name = "bash", .label = &long_label }, .plain = &long_label },
+        .{ .facts = .{ .name = "bash" }, .plain = saved_label.fallback_words },
+        .{ .facts = .{ .name = "bash", .label = " \n" }, .plain = saved_label.fallback_words },
+        .{ .facts = .{ .name = "find_tools" }, .plain = "Find tools" },
+        .{ .facts = .{ .name = "find_tools", .label = "ignored", .subject = "abc123" }, .plain = "Find tools" },
+        .{ .facts = .{ .name = "message_agent", .subject = "abc123" }, .plain = "Message abc123", .peer = "abc123" },
+        .{ .facts = .{ .name = "message_agent", .subject = "abc123", .subject_label = peer }, .plain = "Message Review the WAL", .peer = "abc123" },
+        .{ .facts = .{ .name = "message_agent" }, .plain = "Message an agent" },
+        .{ .facts = .{ .name = "read_image" }, .plain = "Read an image" },
+        .{ .facts = .{ .name = "read_transcript" }, .plain = "Read own transcript" },
+        .{ .facts = .{ .name = "read_transcript", .subject = "zzzzzz" }, .plain = "Read zzzzzz's transcript", .peer = "zzzzzz" },
+        .{ .facts = .{ .name = "read_transcript", .subject = "zzzzzz", .subject_label = peer }, .plain = "Read Review the WAL's transcript", .peer = "zzzzzz" },
+        .{ .facts = .{ .name = "skill" }, .plain = "Use skills" },
+        .{ .facts = .{ .name = "stop_action" }, .plain = "Stop an Action" },
+        .{ .facts = .{ .name = "start_agent" }, .plain = "Start an agent" },
+        .{ .facts = .{ .name = "watch_github_pr" }, .plain = "Watch a GitHub pull request" },
+        // Any other tool is an MCP or app tool: its label, and an app call saves none, so it has no line.
+        .{ .facts = .{ .name = "find_docs", .label = "Find the install page" }, .plain = "Find the install page" },
+        .{ .facts = .{ .name = "mcp__docs__find", .label = "mcp__docs__find" }, .plain = "mcp__docs__find" },
+        .{ .facts = .{ .name = "mcp__docs__find", .label = "  " }, .plain = saved_label.fallback_words },
+        .{ .facts = .{ .name = "app_tool" }, .plain = null },
+        // A call no tool served keeps the words its saved facts give it, as it did when the line was saved.
+        .{ .facts = .{ .name = "bash", .label = "Run", .rejection = .unknown_tool }, .plain = "Run" },
+        .{ .facts = .{ .name = "bash", .label = "Run", .rejection = .invalid_arguments }, .plain = "Run" },
+        .{ .facts = .{ .name = "bash", .rejection = .invalid_arguments }, .plain = null },
+        .{ .facts = .{ .name = "message_agent", .rejection = .invalid_arguments }, .plain = null },
+        .{ .facts = .{ .name = "message_agent", .subject = "abc123", .rejection = .unknown_tool }, .plain = "Message abc123", .peer = "abc123" },
+        .{ .facts = .{ .name = "read_transcript", .rejection = .unknown_tool }, .plain = "Read own transcript" },
+        .{ .facts = .{ .name = "find_tools", .rejection = .invalid_arguments }, .plain = "Find tools" },
+        .{ .facts = .{ .name = "skill", .rejection = .unknown_tool }, .plain = "Use skills" },
+        .{ .facts = .{ .name = "stop_action", .rejection = .invalid_arguments }, .plain = "Stop an Action" },
+        .{ .facts = .{ .name = "start_agent", .rejection = .invalid_arguments }, .plain = "Start an agent" },
+        .{ .facts = .{ .name = "stop_action", .rejection = .unknown_tool }, .plain = null },
+        .{ .facts = .{ .name = "read_image", .rejection = .invalid_arguments }, .plain = null },
+        .{ .facts = .{ .name = "watch_github_pr", .rejection = .unknown_tool }, .plain = null },
+        .{ .facts = .{ .name = "mcp__docs__find", .label = "mcp__docs__find", .rejection = .invalid_arguments }, .plain = "mcp__docs__find" },
+        .{ .facts = .{ .name = "app_tool", .rejection = .invalid_arguments }, .plain = null },
+        .{ .facts = .{ .name = "no_such_tool", .rejection = .unknown_tool }, .plain = null },
     };
-    for (cases) |case| try std.testing.expectEqualStrings(case.expected, describe(case.call).slice());
+    for (cases) |case| {
+        const line = try of(case.facts) orelse {
+            try std.testing.expect(case.plain == null);
+            continue;
+        };
+        try std.testing.expect(line.valid());
+        var out: [2 * max_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&out);
+        try line.writePlain(&writer);
+        try std.testing.expectEqualStrings(case.plain.?, writer.buffered());
+        try std.testing.expectEqual(case.peer != null, line.link != null);
+        if (case.peer) |id| try std.testing.expectEqualStrings(id, line.link.?.peer.session.slice());
+    }
+    try std.testing.expectError(error.InvalidLine, of(.{ .name = "message_agent", .subject = "bad\nid" }));
+    try std.testing.expectError(error.InvalidLine, of(.{ .name = "message_agent", .subject = &long_subject }));
+    try std.testing.expectError(error.InvalidLine, of(.{ .name = "read_transcript", .subject = &long_subject }));
 }

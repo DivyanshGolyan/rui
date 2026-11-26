@@ -790,7 +790,7 @@ const insert_entry = rsql.Write(.{
 
 const insert_call = rsql.Write(.{
     .sql = "INSERT INTO model_tool_call(operation_id,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id," ++
-        "rejection_code,rejection_content_id,acceptance_position,action_kind,description,field_metadata,session_ref) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,@session(?13))",
+        "rejection_code,rejection_content_id,acceptance_position,action_kind,label,subject,field_metadata,session_ref) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,@session(?14))",
     .Args = struct {
         operation_id: u64,
         call_ordinal: u64,
@@ -802,7 +802,8 @@ const insert_call = rsql.Write(.{
         rejection_content_id: ?u64,
         acceptance_position: ?u64,
         action_kind: ?u64,
-        description: ?tool_record.Description,
+        label: ?tool_record.Description,
+        subject: ?tool_record.Description,
         field_metadata: FieldCertificate.Bytes,
         session: rsql.SessionHead,
     },
@@ -1767,7 +1768,10 @@ const Settlement = struct {
         const name_content_id, const call_id_content_id, const arguments_content_id = content_ids;
         var field_metadata: FieldCertificate.Bytes = undefined;
         for (fields.*, 0..) |field, at| FieldCertificate.write(&field_metadata, at, .{ .length = field.decoded_length, .digest = field.content_digest });
-        const description = try callDescription(call_facts, s.io, s.output.source, record);
+        const label = try callLabel(call_facts, s.io, s.output.source, record);
+        // Copied, not borrowed: the insert is queued, and the facts are reused for the next call before it is stepped.
+        var subject: ?tool_record.Description = null;
+        if (call_facts.subject()) |text| subject = try tool_record.Description.from(text);
 
         a.write(insert_call, .{
             .operation_id = s.binding.operation_id,
@@ -1780,7 +1784,8 @@ const Settlement = struct {
             .rejection_content_id = rejection_content_id,
             .acceptance_position = if (rejection_code != null) try s.positions.take(1) else null,
             .action_kind = if (rejection_code == null) 1 else null,
-            .description = description,
+            .label = label,
+            .subject = subject,
             .field_metadata = field_metadata,
             .session = s.session,
         });
@@ -1885,7 +1890,10 @@ fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.C
     try writeChecked(sink, &decoded.hash, decoded.window[0..count], written, length);
 }
 
-noinline fn callDescription(facts: *const tool_defs.CallFacts, io: std.Io, file: std.Io.File, arguments: OutputMetadataRecord) !?tool_record.Description {
+/// What a call is saved under as its label: a Bash call's `description` argument, and an MCP call's when it gave a valid one, else
+/// the tool's own name (the words an MCP call has always read as). Null for every other call: a built-in tool's words and an app
+/// call's lack of them are derived at read (`tool_line.of`), so the Store holds no sentence for them.
+noinline fn callLabel(facts: *const tool_defs.CallFacts, io: std.Io, file: std.Io.File, arguments: OutputMetadataRecord) !?tool_record.Description {
     if (facts.tool) |*tool| if (tool.runner() == .mcp) {
         var fallback: tool_record.Description = .{ .len = 0 };
         try fallback.set(tool.name);
@@ -1906,7 +1914,10 @@ noinline fn callDescription(facts: *const tool_defs.CallFacts, io: std.Io, file:
         description.len = decoded.end;
         return if (tool_presentation.ToolPresentation.validDescription(description.slice())) description else fallback;
     };
-    return facts.description();
+    const label = facts.label() orelse return null;
+    var saved: tool_record.Description = .{ .len = 0 };
+    try saved.set(label);
+    return saved;
 }
 
 noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord, offered: *const tool_record.Offered) !tool_defs.CallFacts {

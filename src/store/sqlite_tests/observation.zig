@@ -73,7 +73,7 @@ test "TPR-3 a saved tool label reads as one tidy line in a Message's recovered A
     try submitTestMessage(&storage, &tmp, "recovery-label-input", "recovery-label", session.slice(), "run");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     _ = try tests.recoverPairForTesting(&storage, &tmp, binding, "recovery-label");
-    try sqlite.exec(storage.sqliteDatabase(), "UPDATE model_tool_call SET description='  Run' || char(10) || 'first   command ' WHERE call_ordinal=0");
+    try sqlite.exec(storage.sqliteDatabase(), "UPDATE model_tool_call SET label='  Run' || char(10) || 'first   command ' WHERE call_ordinal=0");
     var out: store_core.Observed = undefined;
     try storage.observeCommand("recovery-label", null, &out);
     const recovery = out.full.observation.kind.message.?.recovery;

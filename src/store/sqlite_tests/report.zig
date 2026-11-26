@@ -511,7 +511,7 @@ fn costFixtureForTesting(storage: *Store, tmp: *std.testing.TmpDir, cycles: usiz
 test "a Current report and inspection do no more work than main at the cost fixture" {
     var failure: ?anyerror = null;
     inline for (.{
-        .{ 1, [4]i64{ 37, 2954, 12, 633 } },
+        .{ 1, [4]i64{ 37, 2958, 12, 633 } },
         .{ 8, [4]i64{ 37, 5674, 12, 633 } },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});

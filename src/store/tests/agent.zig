@@ -20,6 +20,7 @@ const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const completeMessage = store_testing.completeMessage;
 const configureTestSession = store_testing.configureTestSession;
+const configureTestSessionWithMode = shared_fixtures.configureTestSessionWithMode;
 const settleItemsForTesting = store_testing.settleItemsForTesting;
 const submitTestMessage = store_testing.submitTestMessage;
 const skills_fixture_domain = @import("../domain/skills.zig");
@@ -1237,4 +1238,171 @@ test "SES-22 a child's app lane is its creator's lane when attached or detached,
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND creator_ref=?2 AND parent_ref IS NULL AND app_lane=?2", .{ capture.child.slice(), root.slice() }));
         }
     }.run);
+}
+
+/// The text a report's presentation line reads as: its words, with a Session it names standing as its label or its ID.
+fn reportedLine(out: []u8, presentation: std.json.ObjectMap) ![]const u8 {
+    const line = presentation.get("line").?.object;
+    var writer = std.Io.Writer.fixed(out);
+    try writer.writeAll(line.get("before").?.string);
+    if (line.get("peer")) |peer| {
+        const label = peer.object.get("label");
+        try writer.writeAll(if (label != null and label.? == .string) label.?.string else peer.object.get("session").?.string);
+    }
+    if (line.get("after")) |after| if (after == .string) try writer.writeAll(after.string);
+    return writer.buffered();
+}
+
+/// Every reader of a Session's calls at once: Activity's call rows and tool rows, the report's Actions and a Message's recovery.
+/// `expected` is the line of each of the sender's four Session-naming calls, in order; `recovered` that of the recovery Session's
+/// second call. An error is what every reader that meets a call it cannot show returns.
+fn expectSubjectLines(storage: *Store, tmp: *std.testing.TmpDir, sender: []const u8, expected: [4][]const u8, recovered: []const u8) !void {
+    var request: protocol.ActivityPage = .{ .kinds = .initMany(&.{.call}) };
+    try request.session.set(sender);
+    const page = try store_core.activityPageForTesting(storage, request);
+    try std.testing.expectEqual(@as(usize, 4), page.count);
+    for (page.items[0..page.count]) |item| try std.testing.expectEqualStrings(expected[item.value.call.call_ordinal], item.value.call.description.?.slice());
+    request.kinds = .full;
+    const full = try store_core.activityPageForTesting(storage, request);
+    for (full.aggregates.?.call_activity.entries[0..full.aggregates.?.call_activity.count]) |entry| {
+        try std.testing.expectEqualStrings(expected[entry.ordinal], entry.presentation.line.?.description().?.slice());
+    }
+    const bytes = try testingSessionReportWithProfile(storage, tmp, sender, 256 * 1024, .current);
+    defer std.testing.allocator.free(bytes);
+    var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer report.deinit();
+    const unresolved = report.value.object.get("actions").?.object.get("unresolved").?.array.items;
+    try std.testing.expectEqual(@as(usize, 4), unresolved.len);
+    for (unresolved) |row| {
+        var text: [256]u8 = undefined;
+        const ordinal = try std.fmt.parseInt(usize, row.object.get("call_ordinal").?.string, 10);
+        try std.testing.expectEqualStrings(expected[ordinal], try reportedLine(&text, row.object.get("presentation").?.object));
+    }
+    const recovery = (try store_testing.observeCommandForTesting(storage, "line-recovery-message")).kind.message.?.recovery;
+    try std.testing.expectEqualStrings(recovered, recovery.calls[0].description.?.slice());
+}
+
+/// One Store holding a sender's four Session-naming calls (a message_agent and a read_transcript call naming a peer, and each naming
+/// a Session that does not exist) and a Session whose Message has two recovered calls, to which the recovery reader is pointed.
+const SubjectFixture = struct {
+    sender: protocol.Bounded(protocol.max_session_bytes),
+    peer: protocol.Bounded(protocol.max_session_bytes),
+    model: store_core.AttemptBinding,
+    recovery_model: store_core.AttemptBinding,
+    message_name: u64,
+    transcript_name: u64,
+
+    fn open(case: *store_testing.Case, tmp: *std.testing.TmpDir, storage: *Store) !SubjectFixture {
+        try store_testing.testingStore(case, storage, tmp, std.testing.io);
+        var path: [protocol.max_workspace_bytes]u8 = undefined;
+        var create = try completeConfiguration("line-sender", "", try canonicalCwd(std.testing.io, &path), "model-a");
+        create.configuration.tools = try .of(&.{ "message_agent", "read_transcript" });
+        create.configuration.permission_mode.state = .value;
+        try create.configuration.permission_mode.value.set("bypass");
+        const sender = (try storage.configure(&create, .{})).accepted.session;
+        const peer = try configureTestSession(storage, "line-peer");
+        try store_testing.exec(storage, "UPDATE session SET label='Review the WAL' WHERE session_ref=?1", .{peer.slice()});
+        try submitTestMessage(storage, tmp, "line-sender-input", "line-sender-message", sender.slice(), "go");
+        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const names = [_][]const u8{ "message_agent", "message_agent", "read_transcript", "read_transcript" };
+        const ids = [_][]const u8{ peer.slice(), "zzzzzz", peer.slice(), "zzzzzz" };
+        var calls: [4]TestingCall = undefined;
+        var arguments: [4][96]u8 = undefined;
+        var encoded: [4][128]u8 = undefined;
+        var item_ids: [4][8]u8 = undefined;
+        for (&calls, names, ids, 0..) |*call, name, id, at| {
+            const decoded = if (std.mem.eql(u8, name, "message_agent"))
+                try std.fmt.bufPrint(&arguments[at], "{{\"id\":\"{s}\",\"text\":\"hello\"}}", .{id})
+            else
+                try std.fmt.bufPrint(&arguments[at], "{{\"id\":\"{s}\"}}", .{id});
+            var writer = std.Io.Writer.fixed(&encoded[at]);
+            try std.json.Stringify.value(decoded, .{}, &writer);
+            const quoted = writer.buffered();
+            const item = try std.fmt.bufPrint(&item_ids[at], "item-{d}", .{at});
+            call.* = .{ .item_id = item, .name = name, .encoded_call_id = item, .decoded_call_id = item, .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = decoded };
+        }
+        try settleCallsForTesting(storage, tmp, model, "line-calls", &calls);
+        const recovering = try configureTestSessionWithMode(storage, "line-recovering", "bypass");
+        try submitTestMessage(storage, tmp, "line-recovery-input", "line-recovery-message", recovering.slice(), "run");
+        const recovery_model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        _ = try shared_fixtures.recoverPairForTesting(storage, tmp, recovery_model, "line-recovery-calls");
+        return .{
+            .sender = sender,
+            .peer = peer,
+            .model = model,
+            .recovery_model = recovery_model,
+            .message_name = try store_testing.queryU64(storage, "SELECT name_content_id FROM model_tool_call WHERE operation_id=?1 AND call_ordinal=0", .{model.operation_id}),
+            .transcript_name = try store_testing.queryU64(storage, "SELECT name_content_id FROM model_tool_call WHERE operation_id=?1 AND call_ordinal=2", .{model.operation_id}),
+        };
+    }
+
+    /// Makes the recovery Session's second call a call to `name` naming `subject` (none: its own Session).
+    fn recovered(self: *const SubjectFixture, storage: *Store, name: u64, subject: ?[]const u8) !void {
+        if (subject) |named| return store_testing.exec(storage, "UPDATE model_tool_call SET name_content_id=?1,label=NULL,subject=?2 WHERE operation_id=?3 AND call_ordinal=1", .{ name, named, self.recovery_model.operation_id });
+        try store_testing.exec(storage, "UPDATE model_tool_call SET name_content_id=?1,label=NULL,subject=NULL WHERE operation_id=?2 AND call_ordinal=1", .{ name, self.recovery_model.operation_id });
+    }
+};
+
+test "TPR-4 every reader derives a Session-naming call's line from its saved subject, and a renamed peer changes it" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            const fixture = try SubjectFixture.open(case, &tmp, &storage);
+            defer storage.close() catch unreachable;
+            const sender = fixture.sender.slice();
+            // A peer that exists reads under its label; one that does not reads under its ID.
+            const known = [4][]const u8{ "Message Review the WAL", "Message zzzzzz", "Read Review the WAL's transcript", "Read zzzzzz's transcript" };
+            try fixture.recovered(&storage, fixture.message_name, fixture.peer.slice());
+            try expectSubjectLines(&storage, &tmp, sender, known, "Message Review the WAL");
+            try fixture.recovered(&storage, fixture.transcript_name, "zzzzzz");
+            try expectSubjectLines(&storage, &tmp, sender, known, "Read zzzzzz's transcript");
+            // The line is derived: renaming the peer changes every reader, and a call with no subject reads its own Session.
+            try store_testing.exec(&storage, "UPDATE session SET label='Fix the cache' WHERE session_ref=?1", .{fixture.peer.slice()});
+            try fixture.recovered(&storage, fixture.transcript_name, fixture.peer.slice());
+            try expectSubjectLines(&storage, &tmp, sender, .{ "Message Fix the cache", "Message zzzzzz", "Read Fix the cache's transcript", "Read zzzzzz's transcript" }, "Read Fix the cache's transcript");
+            try fixture.recovered(&storage, fixture.transcript_name, null);
+            try std.testing.expectEqualStrings("Read own transcript", (try store_testing.observeCommandForTesting(&storage, "line-recovery-message")).kind.message.?.recovery.calls[0].description.?.slice());
+        }
+    }.run);
+}
+
+const CallDamage = enum { subject, name };
+const CallReader = enum { activity, report, recovery };
+
+/// A Store damaged one way, read one way: the reader refuses it.
+fn Damaged(comptime damage: CallDamage, comptime reader: CallReader) type {
+    return struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            const fixture = try SubjectFixture.open(case, &tmp, &storage);
+            defer storage.close() catch unreachable;
+            // A subject that is not a Session ID (a line break); a name longer than a tool's, from a Message of 100 bytes.
+            const long_session = try configureTestSession(&storage, "line-long");
+            try submitTestMessage(&storage, &tmp, "line-long-input", "line-long-message", long_session.slice(), &@as([100]u8, @splat('x')));
+            const long_name = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key='line-long-message'", .{});
+            const operation = if (reader == .recovery) fixture.recovery_model.operation_id else fixture.model.operation_id;
+            const call: u64 = if (reader == .recovery) 1 else 0;
+            switch (damage) {
+                .subject => try store_testing.exec(&storage, "UPDATE model_tool_call SET name_content_id=?1,label=NULL,subject=?2 WHERE operation_id=?3 AND call_ordinal=?4", .{ fixture.message_name, "b\nd!!!", operation, call }),
+                .name => try store_testing.exec(&storage, "UPDATE model_tool_call SET name_content_id=?1 WHERE operation_id=?2 AND call_ordinal=?3", .{ long_name, operation, call }),
+            }
+            switch (reader) {
+                .activity => {
+                    var request: protocol.ActivityPage = .{ .kinds = .initMany(&.{.call}) };
+                    try request.session.set(fixture.sender.slice());
+                    try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));
+                },
+                .report => try std.testing.expectError(error.CorruptStore, testingSessionReportWithProfile(&storage, &tmp, fixture.sender.slice(), 256 * 1024, .current)),
+                .recovery => try std.testing.expectError(error.CorruptStore, store_testing.observeCommandForTesting(&storage, "line-recovery-message")),
+            }
+        }
+    };
+}
+
+test "TPR-4 every reader refuses a call whose subject is no Session ID or whose tool name is too long, and fences" {
+    inline for (comptime std.meta.tags(CallDamage)) |damage| inline for (comptime std.meta.tags(CallReader)) |reader| try store_testing.forEachEngine(Damaged(damage, reader).run);
 }

@@ -165,7 +165,7 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expectEqual(@as(i64, sqlite_heap_bytes), c.sqlite3_hard_heap_limit64(-1));
     try std.testing.expectEqual(@as(c_int, 16 * 1024), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_SQL_LENGTH, -1));
     try std.testing.expectEqual(@as(c_int, 65), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_VARIABLE_NUMBER, -1));
-    try std.testing.expectEqual(@as(c_int, 46), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_COLUMN, -1));
+    try std.testing.expectEqual(@as(c_int, 50), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_COLUMN, -1));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_ATTACHED, -1));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_WORKER_THREADS, -1));
 
