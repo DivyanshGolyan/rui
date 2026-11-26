@@ -1523,6 +1523,7 @@ def prove_caller_disposal():
     with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
         import model_fixture as dispatch
         import conversation_page_fixture as page
+        import host_fixture
         import bash_fixture as bash
 
     for owner in (dispatch, page, bash):
@@ -1563,7 +1564,7 @@ def prove_caller_disposal():
                         raise cleanup
 
                 stop_module, stop_name = (bash.fixture, "stop_host") if owner is bash else (
-                    owner, "stop_host" if owner is dispatch else "stop_process")
+                    (dispatch, "stop_host") if owner is dispatch else (host_fixture, "stop_process"))
                 try:
                     with patch.object(stop_module, stop_name, stop), \
                             patch.object(endpoints[0], "shutdown", shutdown), \
