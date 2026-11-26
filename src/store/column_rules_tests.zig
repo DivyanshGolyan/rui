@@ -122,7 +122,11 @@ test "SH-178 a column's own rules are held by the Host as SQLite's CHECK holds t
                         .octets => |bytes| if (column.type == .bytes) try sqlite.bindBlob(statement, 1, bytes) else try sqlite.bindText(statement, 1, bytes),
                     }
                     const stored = c.sqlite3_step(statement) == c.SQLITE_DONE;
-                    try std.testing.expectEqual(stored, accepts(column, value));
+                    std.testing.expectEqual(stored, accepts(column, value)) catch |err| {
+                        const text = try std.fmt.allocPrint(arena, "{s}.{s}: {any} rule({s}) engine took={}\n{s}\n", .{ table.name, column.name, value, rule, stored, insert });
+                        std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = "/tmp/col3.txt", .data = text[0..@min(text.len, 3000)] }) catch {};
+                        return err;
+                    };
                     checked += 1;
                 }
             }
@@ -226,7 +230,11 @@ test "SH-178 a column's own rules are held by the Host as MySQL's CHECK holds th
                 for (values.items) |value| {
                     const insert = try std.fmt.allocPrint(arena, "INSERT INTO rui_column_probe(" ++ column.name ++ ") VALUES({s})", .{try mysqlLiteral(arena, column, value)});
                     const stored = try mysql_testing.takes(insert);
-                    try std.testing.expectEqual(stored, accepts(column, value));
+                    std.testing.expectEqual(stored, accepts(column, value)) catch |err| {
+                        const text = try std.fmt.allocPrint(arena, "{s}.{s}: {any} rule({s}) engine took={}\n{s}\n", .{ table.name, column.name, value, rule, stored, insert });
+                        std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = "/tmp/col3.txt", .data = text[0..@min(text.len, 3000)] }) catch {};
+                        return err;
+                    };
                     checked += 1;
                 }
             }
