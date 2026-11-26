@@ -354,7 +354,7 @@ const Settings = struct {
                         (if (old) |value| (if (next) |other| value.eql(other.slice()) else false) else next == null)
                     else
                         old.eql(next.slice()),
-                    .choice, .content, .tools, .decimal_policy, .app_tools => old == next,
+                    .choice, .content, .tools, .decimal_policy, .app_tools => std.meta.eql(old, next),
                 };
                 fields.setPresent(@field(session_settings.SessionField, entry.field), !same);
             }
