@@ -123,8 +123,8 @@ pub const tool_continuation_selection = rsql.Read(.{
     .cardinality = .optional,
 });
 
-pub const retry_allowance_open_sql = std.fmt.comptimePrint("attempt_ordinal<{d}", .{retry_policy.maximum_attempts});
-pub const retry_exhausted_sql = std.fmt.comptimePrint("resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal={d}", .{retry_policy.maximum_attempts});
+pub const retry_allowance_open_sql = store_schema.retry_allowance_open_sql;
+pub const retry_exhausted_sql = store_schema.retry_exhausted_sql;
 pub const retry_admission_page_rows = product_defaults.active_capacity + 1;
 const retry_admission_select_text = std.fmt.comptimePrint(
     "SELECT o.turn_id,o.operation_id,o.attempt_ordinal,o.retry_due_at_ms," ++ rsql.session_head_columns ++ " " ++
