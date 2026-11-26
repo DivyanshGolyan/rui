@@ -123,8 +123,8 @@ test "EXR-100 each connection's model list is published and rendered on its own"
     lists.publish(openai, "{\"data\":[{\"id\":\"gpt-6-luna\"}]}");
     lists.publish(openai, "{\"data\":[{\"id\":\"gpt-6-mare\"}]}");
     try std.testing.expectEqualStrings("gpt-6-mare\n", lists.live.get(openai).?.live.bytes);
-    try std.testing.expect(lists.live.get(codex).? == .catalog);
-    try std.testing.expect(lists.live.get(beta).? == .catalog);
+    try std.testing.expect(lists.live.get(codex) == null);
+    try std.testing.expect(lists.live.get(beta) == null);
     try std.testing.expectEqualStrings("gpt-6-sol\nalpha-only\n", lists.live.get(alpha).?.live.bytes);
 }
 
