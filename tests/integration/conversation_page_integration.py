@@ -15,9 +15,10 @@ from host_process import wait_for
 import host_process
 from host_process import TestHTTPServer, canonical_fixture_root, dispose_all
 from conversation_page_fixture import whole_stream_shape
-from host_fixture import dispose_endpoint, host_resources, request
+from host_fixture import conversation_rows, dispose_endpoint, host_resources, request, row_kind
 
 
+USER_ROWS = dict(end=None, position="0", ordinal=None, direction="backward", kinds=["user"], limit="16")
 ACTIVITY_KINDS = ["admission", "user", "assistant", "call", "tool_result", "hosted_call", "turn_ended", "stop", "received", "approval_requested", "session_changed", "compacted"]
 
 
@@ -36,12 +37,10 @@ def main():
         foreign_session = configure(state, store, "foreign-config")
         alias = state / "store-alias"
         alias.symlink_to(store, target_is_directory=True)
-        head, body = request(socket_path, alias, "/v1/conversation-page", "conversation_page", page_session,
-            end="0", before_position="0", before_ordinal="0")
+        head, body = request(socket_path, alias, "/v1/activity-page", "activity_page", page_session, **USER_ROWS)
         assert head.startswith(b"HTTP/1.1 409 "), (head, body)
         assert json.loads(body) == {"version": host_process.WIRE_VERSION, "type": "invocation_error", "code": "wrong_store_identity"}, body
-        head, body = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session,
-            end="0", before_position="0", before_ordinal="0")
+        head, body = request(socket_path, store, "/v1/activity-page", "activity_page", page_session, **USER_ROWS)
         assert head.startswith(b"HTTP/1.1 200 "), (head, body)
         assert json.loads(body)["items"] == []
 
@@ -50,33 +49,22 @@ def main():
         admitted_after = int(time.time())
         message(state, store, "page-message", page_session, payload)
         wait_for(lambda: endpoint.counts()[0] == 1, "held provider request")
-        head, body = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session,
-            end="0", before_position="0", before_ordinal="0")
+        head, body = request(socket_path, store, "/v1/activity-page", "activity_page", page_session, **USER_ROWS)
         assert head.startswith(b"HTTP/1.1 200 "), (head, body)
         page = json.loads(body)
-        assert page["direction"] == "newest_first" and not page["more"], page
+        assert page["direction"] == "backward" and not page["more"], page
         assert len(page["items"]) == 1, page
         item = page["items"][0]
-        assert item["kind"] == "user" and item["ordinal"] == "0", item
-        assert admitted_after <= int(item["admitted_at"]) <= int(time.time()), item
-        for field in ("end", "before_position", "before_ordinal"):
-            cursor = {"end": page["end"], "before_position": item["position"], "before_ordinal": "0"}
-            cursor[field] = str(2**64 - 1)
-            head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session, **cursor)
-            assert head.startswith(b"HTTP/1.1 400 "), head
-        head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session,
-            end=page["end"], before_position=item["position"], before_ordinal="1")
-        assert head.startswith(b"HTTP/1.1 409 "), head
+        user = item["value"]["user"]
+        assert item["ordinal"] == "0", item
+        assert admitted_after <= int(user["admitted_at"]) <= int(time.time()), item
         for field in ("position", "ordinal"):
             identity = {"position": item["position"], "ordinal": "0", "start": "0"}
             identity[field] = str(2**64 - 1)
             head, _ = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session, **identity)
             assert head.startswith(b"HTTP/1.1 400 "), head
-        head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session,
-            end="0", before_position="0", before_ordinal="0")
-        assert head.startswith(b"HTTP/1.1 200 "), head
         domain = b"rui/content/v1"
-        assert item["content"] == {
+        assert user["content"] == {
             "type": "text", "bytes": "10005", "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + payload.encode()).hexdigest(),
         }, item
         chunks = []
@@ -114,9 +102,6 @@ def main():
         for index in range(8):
             message(state, store, f"queued-{index}", page_session, "q" * (256 * 1024))
         after = host_resources(process.pid)
-        head, body = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session,
-            end=page["end"], before_position=item["position"], before_ordinal="0")
-        assert head.startswith(b"HTTP/1.1 200 ") and json.loads(body)["items"] == [], (head, body)
         assert stop_session(state, store, "page-stop", page_session)["answer"]["status"] == "accepted"
         endpoint.release.set()
         wait_for(lambda: inspect_execution(store, page_session)["custody_occupied"] == "0", "physical cleanup")
@@ -168,17 +153,12 @@ def projected_ranges():
         session = configure(state, store, "projection-config")
         message(state, store, "projection-key", session, "input")
 
-        def completed_page():
-            head, body = request(fields["socket"], store, "/v1/conversation-page", "conversation_page", session,
-                end="0", before_position="0", before_ordinal="0")
-            assert head.startswith(b"HTTP/1.1 200 "), (head, body)
-            page = json.loads(body)
-            return page if page["items"] and page["items"][0]["kind"] == "assistant" else None
+        def completed_row():
+            return next((row for row in conversation_rows(fields["socket"], store, session) if row_kind(row) == "assistant"), None)
 
-        page = wait_for(completed_page, "public assistant projection")
-        item = page["items"][0]
+        item = wait_for(completed_row, "public assistant projection")
         domain = b"rui/content/v1"
-        assert item["content"]["sha256"] == hashlib.sha256(len(domain).to_bytes(8, "big") + domain + expected).hexdigest(), item
+        assert item["value"]["assistant"]["content"]["sha256"] == hashlib.sha256(len(domain).to_bytes(8, "big") + domain + expected).hexdigest(), item
         for start in (0, 4095, 4096, len(expected) - 1, len(expected), len(expected), 1):
             head, data = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session,
                 position=item["position"], ordinal="0", start=str(start))
@@ -208,7 +188,7 @@ def missing_assistant_entries():
          "status": "completed", "output": items}}])
     failures = []
     for fault in ("commentary", "final", "cross-operation"):
-        for route in ("page", "exact", "activity", "full"):
+        for route in ("exact", "activity", "full"):
             with tempfile.TemporaryDirectory(prefix="rui-message-certificates-") as root:
                 state = canonical_fixture_root(root)
                 store = state / "store"
@@ -243,7 +223,6 @@ def missing_assistant_entries():
                     HostDiagnostics(process)
                     assert f.read_result(store, "first") == b"Selected answer"
                     paths = {
-                        "page": ("conversation-page", "conversation_page", dict(end="0", before_position="0", before_ordinal="0")),
                         "exact": ("conversation-content", "conversation_content", dict(position=str(target[0]), ordinal="0", start="0")),
                         "activity": ("activity-page", "activity_page", dict(end=None, position="0", ordinal=None, direction="forward", kinds=ACTIVITY_KINDS, limit="16")),
                         "full": ("inspect-session", "inspect_session", dict(profile="full")),

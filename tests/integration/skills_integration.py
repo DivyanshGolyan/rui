@@ -12,6 +12,7 @@ import threading
 import host_process
 import model_fixture as fixture
 from control_fixture import raw_request
+from host_fixture import conversation_rows, row_kind
 from host_process import canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 
 
@@ -192,25 +193,14 @@ def main():
             complete(key)
 
         def conversation(session):
-            cursor = {"end": "0", "before_position": "0", "before_ordinal": "0"}
             rows = []
-            for _ in range(16):
-                request = {"version": host_process.WIRE_VERSION, "kind": "conversation_page",
-                           "store": str(store), "session": session, **cursor}
-                body = json.dumps(request).encode()
-                head, payload = raw_request(host.rui_ready_fields["socket"], "/v1/conversation-page", body)
-                assert head.startswith(b"HTTP/1.1 200 "), (head, payload)
-                page = json.loads(payload)
-                for item in page["items"]:
-                    content = subprocess.run([str(fixture.RUI), "session", "read-conversation", "--store", str(store),
-                        "--session", session, "--position", item["position"], "--ordinal", item["ordinal"]],
-                        capture_output=True, timeout=15, env=environment)
-                    assert content.returncode == 0, content.stderr
-                    rows.append((item, content.stdout))
-                if not page["more"]:
-                    return list(reversed(rows))
-                cursor = {name: page[name] for name in ("end", "before_position", "before_ordinal")}
-            raise AssertionError("unexpectedly large skills Conversation")
+            for item in conversation_rows(host.rui_ready_fields["socket"], store, session):
+                content = subprocess.run([str(fixture.RUI), "session", "read-conversation", "--store", str(store),
+                    "--session", session, "--position", item["position"], "--ordinal", item["ordinal"]],
+                    capture_output=True, timeout=15, env=environment)
+                assert content.returncode == 0, content.stderr
+                rows.append((item, content.stdout))
+            return list(reversed(rows))
 
         host = start()
 
@@ -374,7 +364,7 @@ def main():
         assert raw.decode() not in "\n".join(messages(invoked, "developer")), invoked
         pathlib.Path(demo["path"]).unlink()
         before_replay = conversation(parent)
-        users = [content for item, content in before_replay if item["kind"] == "user"]
+        users = [content for item, content in before_replay if row_kind(item) == "user"]
         assert b"/demo" in users and expected_invocation.encode() not in users, before_replay
         restricted_before = conversation(restricted_session)
         stop_process(host)
@@ -533,15 +523,15 @@ def main():
         schema_bytes = json.dumps(CHILD_SCHEMA, separators=(",", ":")).encode()
         assert child_saved["session"]["output_schema"] == content_reference(schema_bytes), child_saved
         child_conversation = conversation(child)
-        assert CHILD_TASK.encode() in [content for item, content in child_conversation if item["kind"] == "user"], child_conversation
+        assert CHILD_TASK.encode() in [content for item, content in child_conversation if row_kind(item) == "user"], child_conversation
         if "structured_output" in child_saved["execution"].get("unavailable", []):
             assert child_saved["work"]["state"]["kind"] == "failed", child_saved
             assert child_saved["recent_messages"][0]["outcome"] == "unsupported_output_schema", child_saved
             assert child_saved["work"]["latest_outcome"]["code"] == "unsupported_output_schema", child_saved
-            assert not any(item["kind"] == "assistant" for item, _ in child_conversation), child_conversation
+            assert not any(row_kind(item) == "assistant" for item, _ in child_conversation), child_conversation
         else:
             assert child_saved["recent_messages"][0]["outcome"] == "completed", child_saved
-            assert b'{"child":"ok"}' in [content for item, content in child_conversation if item["kind"] == "assistant"], child_conversation
+            assert b'{"child":"ok"}' in [content for item, content in child_conversation if row_kind(item) == "assistant"], child_conversation
         endpoint.decoded()
         print("skills Host wire passed: creation, default/restricted tools, raw invocation, idle metadata-only reload, and restart replay")
     except BaseException:
