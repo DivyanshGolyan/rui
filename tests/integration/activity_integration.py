@@ -313,7 +313,7 @@ def main():
                 value["received"] = value.pop("admission")
                 value["received"]["origin"] = origin
                 return wire
-            for origin, ok in (({"person": {}}, False), ({"peer": {"session": "k7m2qx"}}, True), ({"action": "7"}, True), ({"action": "0"}, False), ({"action": str(2**63)}, False),
+            for origin, ok in (({"person": {}}, False), ({"peer": {"session": "k7m2qx"}}, True), ({"action": "7"}, True), ({"server_event": {}}, True), ({"action": "0"}, False), ({"action": str(2**63)}, False),
                                ({"peer": {"session": "k7m2qx"}, "action": "7"}, False), ({}, False), ({"person": True}, False)):
                 mock_reply(fields["socket"], store, "page", json.dumps(received(origin)).encode(), ok=ok)
             for origin in ({"peer": {"session": "k7m2qx"}}, {"action": "7"}):

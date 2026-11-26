@@ -1811,6 +1811,8 @@ export interface components {
             peer: components["schemas"]["NamedPeer"];
         } | {
             action: components["schemas"]["Decimal"];
+        } | {
+            server_event: Record<string, never>;
         };
         MessageRecoveryJson: {
             unknown_outcomes: {

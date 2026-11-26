@@ -1231,7 +1231,7 @@ fn messageWith(reads: client.SessionReads, scratch: std.Io.File, item: protocol.
     if (messageLabel(value.state, labels)) |label| try labelRow(sink, label, colour);
     switch (value.origin) {
         .peer => |sender| return peerLine(sink, sender, value.admitted_at),
-        .person, .action => {},
+        .person, .action, .server_event => {},
     }
     if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(true);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };

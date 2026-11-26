@@ -7418,6 +7418,21 @@
               "action"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "server_event": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "server_event"
+            ],
+            "additionalProperties": false
           }
         ]
       },

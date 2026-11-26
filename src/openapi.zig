@@ -2341,6 +2341,7 @@ test "Activity schema requires a typed origin on a Message" {
         .{ prefix ++ ",\"origin\":{\"peer\":{\"session\":\"absent\",\"label\":null}}}}}", true },
         .{ prefix ++ ",\"origin\":{\"person\":{}}}}}", true },
         .{ prefix ++ ",\"origin\":{\"action\":\"4\"}}}}", true },
+        .{ prefix ++ ",\"origin\":{\"server_event\":{}}}}}", true },
         .{ prefix ++ "}}}", false },
         .{ prefix ++ ",\"sender\":null}}}", false },
         .{ prefix ++ ",\"origin\":null}}}", false },

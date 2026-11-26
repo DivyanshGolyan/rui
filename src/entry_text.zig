@@ -20,7 +20,7 @@ const skipped = .{
     .{ "ApprovalRequested", "description" },
 };
 
-const Leaf = enum { integer, flag, tag, quoted, peer, presentation, hosted, body };
+const Leaf = enum { integer, flag, tag, quoted, presentation, hosted, body };
 
 fn leaf(comptime Owner: type, comptime name: []const u8, comptime T: type) Leaf {
     const Base = switch (@typeInfo(T)) {
@@ -34,8 +34,6 @@ fn leaf(comptime Owner: type, comptime name: []const u8, comptime T: type) Leaf 
         .array => |array| if (array.child == activity_read.ProposalFieldReference) .body else bad(Owner, name, T),
         .@"struct" => if (bounded.isBounded(Base))
             .quoted
-        else if (Base == facts.NamedPeer)
-            .peer
         else if (Base == tool_presentation.ToolPresentation)
             .presentation
         else if (Base == facts.Item.HostedAction)
@@ -99,10 +97,6 @@ fn writeField(out: *std.Io.Writer, comptime Owner: type, comptime name: []const 
         .quoted => {
             try out.print(" {s}=", .{name});
             try std.json.Stringify.value(present.slice(), .{}, out);
-        },
-        .peer => {
-            try out.print(" {s}=", .{name});
-            try std.json.Stringify.value(present.session.slice(), .{}, out);
         },
         .presentation => try writePresentation(out, present),
         // The kind and how many targets the Store holds; the targets and the pattern are the row's body.
@@ -171,12 +165,6 @@ fn filled(comptime T: type) T {
                 value.set("x") catch unreachable;
                 return value;
             }
-            if (T == facts.NamedPeer) {
-                var value: T = .{ .session = .{}, .label = .{} };
-                value.session.set("abcdef") catch unreachable;
-                value.label.set("secret label") catch unreachable;
-                return value;
-            }
             var value: T = undefined;
             inline for (struct_info.field_names, struct_info.field_types) |name, Field| @field(value, name) = filled(Field);
             return value;
@@ -195,7 +183,6 @@ test "INS-14 entry text prints every fact of every Activity row" {
         try writeFacts(&out, &item);
         const text = out.buffered();
         try std.testing.expect(std.mem.startsWith(u8, text, " at=2001-09-09T01:46:40Z"));
-        try std.testing.expect(std.mem.indexOf(u8, text, "secret label") == null);
         const Payload = @TypeOf(payload);
         if (Payload == tool_presentation.ToolPresentation) {
             try std.testing.expect(std.mem.indexOf(u8, text, " code=") != null);
@@ -214,6 +201,27 @@ test "INS-14 entry text prints every fact of every Activity row" {
             }
         }
     }
+}
+
+test "INS-14 a peer origin prints neither its Session nor its label" {
+    var peer: facts.NamedPeer = .{ .session = .{}, .label = .{} };
+    try peer.session.set("abcdef");
+    try peer.label.set("secret label");
+    const message: facts.Item.Message = .{
+        .admission = 7,
+        .key = try .from("k1"),
+        .turn = null,
+        .state = .queued,
+        .content = .{ .text = .{ .length = 3, .digest = @splat(0) } },
+        .admitted_at = 1_000_000_000,
+        .origin = .{ .peer = peer },
+    };
+    const item: facts.Item = .{ .position = 2, .at = 0, .value = .{ .received = message } };
+    var buffer: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    try writeFacts(&out, &item);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "abcdef") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "secret label") == null);
 }
 
 test "INS-14 a message row prints its admission facts and keeps the origin to the caller" {

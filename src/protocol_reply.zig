@@ -2164,15 +2164,17 @@ pub const JsonNamedPeer = struct {
     }
 };
 
-/// A Message's origin as Activity sends it: `{"person":{}}`, `{"peer":NamedPeer}` or `{"action":"ID"}`.
+/// A Message's origin as Activity sends it: `{"person":{}}`, `{"peer":NamedPeer}`, `{"action":"ID"}` or `{"server_event":{}}`.
 pub const JsonOrigin = union(enum) {
     person: struct {},
     peer: JsonNamedPeer,
     action: JsonString(20),
+    server_event: struct {},
 
     fn origin(self: *const JsonOrigin) !protocol.Origin {
         return switch (self.*) {
             .person => .person,
+            .server_event => .server_event,
             .peer => |named| .{ .peer = try named.peer() },
             .action => |action| blk: {
                 const action_id = try decimalId(action, false);
@@ -2731,7 +2733,7 @@ test "an activity Message's origin travels as one value and its row kind must ad
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("k7m2qx");
     try peer.label.set("Review");
-    const origins = [_]protocol.Origin{ .person, .{ .peer = peer }, .{ .action = std.math.maxInt(i64) } };
+    const origins = [_]protocol.Origin{ .person, .{ .peer = peer }, .{ .action = std.math.maxInt(i64) }, .server_event };
     for (origins) |origin| for ([_]protocol.ActivityItem.Kind{ .admission, .user, .received }) |kind| {
         var message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 7, .origin = origin };
         if (kind == .user) {
@@ -2762,7 +2764,7 @@ test "an activity Message's origin travels as one value and its row kind must ad
         };
         try std.testing.expectEqual(std.meta.activeTag(origin), std.meta.activeTag(read));
         switch (origin) {
-            .person => {},
+            .person, .server_event => {},
             .peer => |named| {
                 try std.testing.expectEqualStrings(named.session.slice(), read.peer.session.slice());
                 try std.testing.expectEqualStrings(named.label.slice(), read.peer.label.slice());

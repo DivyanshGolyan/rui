@@ -471,7 +471,7 @@ pub const NamedPeerJson = struct {
 
 pub const Origin = activity_facts.Item.Origin;
 
-/// Who admitted a Message: `{"person":{}}`, `{"peer":{"session":...,"label":...}}` or `{"action":"ID"}`.
+/// Who admitted a Message: `{"person":{}}`, `{"peer":{"session":...,"label":...}}`, `{"action":"ID"}` or `{"server_event":{}}`.
 pub const OriginJson = struct {
     value: Origin,
 
@@ -479,7 +479,8 @@ pub const OriginJson = struct {
     pub const person_shape = .{"{\"person\":{}}"};
     pub const peer_shape = .{ "{\"peer\":", Hole{ .json = NamedPeerJson }, "}" };
     pub const action_shape = .{ "{\"action\":\"", Hole.decimal, "\"}" };
-    pub const openapi_shapes = .{ person_shape, peer_shape, action_shape };
+    pub const server_event_shape = .{"{\"server_event\":{}}"};
+    pub const openapi_shapes = .{ person_shape, peer_shape, action_shape, server_event_shape };
     pub const max_json_bytes = maxShapeBytes(openapi_shapes);
 
     pub fn writeJson(self: *const OriginJson, out: *std.Io.Writer) !void {
@@ -487,6 +488,7 @@ pub const OriginJson = struct {
             .person => try writeShape(out, person_shape, .{}),
             .peer => |peer| try writeShape(out, peer_shape, .{NamedPeerJson{ .value = peer }}),
             .action => |id| try writeShape(out, action_shape, .{id}),
+            .server_event => try writeShape(out, server_event_shape, .{}),
         }
     }
 };

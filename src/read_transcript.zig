@@ -294,6 +294,7 @@ noinline fn outlineHeader(store: *storage.Store, arena: std.mem.Allocator, sessi
             .action => |action| try out.print(" Action {d}", .{action}),
             .peer => |sender| try out.print(" {s}", .{sender.session.slice()}),
             .person => try out.writeAll(" person"),
+            .server_event => try out.writeAll(" server"),
         },
         .call, .tool_result => {
             const request = try contentRequest(arena, session, item);
