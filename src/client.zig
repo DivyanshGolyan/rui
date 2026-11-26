@@ -299,29 +299,6 @@ pub const Requests = struct {
         return resolveClientPaths(self.io, store_path);
     }
 
-    pub fn conversationPage(self: Requests, store_path: []const u8, session: []const u8, cursor: protocol_reply.ConversationCursor) !protocol_reply.ConversationPageReply {
-        try self.check();
-        try protocol_reply.validateIdentityInputs("", session);
-        try cursor.validate();
-        const paths = try resolveClientPaths(self.io, store_path);
-        var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.conversation_page_request, .{ paths.store_identity.slice(), session, cursor.end, cursor.before_position, cursor.before_ordinal });
-        const fd = try openRead(self, &paths, "/v1/conversation-page", body.slice());
-        defer closeSocket(self.io, fd);
-        const Sink = struct {
-            buffer: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{},
-            pub fn feed(s: *@This(), bytes: []const u8) !void {
-                try s.buffer.append(bytes);
-            }
-        };
-        var sink: Sink = .{};
-        var reply: ReplyBuffer = .{};
-        return switch (try readReportResponse(self, fd, &sink, &reply)) {
-            .report => .{ .page = try protocol_reply.ConversationPage.parse(sink.buffer.slice(), cursor) },
-            .command => |value| .{ .failure = try protocol_reply.decodeReadFailure(value, false) },
-        };
-    }
-
     pub fn readConversationContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
@@ -4527,7 +4504,6 @@ test "client read boundaries reject noncanonical Sessions before path or socket 
         try std.testing.expectError(error.InvalidTarget, requests.readAction("/never-open", session, 1, 0, 0, file, &reply));
         try std.testing.expectError(error.InvalidTarget, requests.readActionArguments("/never-open", session, 1, file, &reply));
         try std.testing.expectError(error.InvalidTarget, requests.readActionCallId("/never-open", session, 1, file, &reply));
-        try std.testing.expectError(error.InvalidSession, requests.conversationPage("/never-open", session, .{ .end = 0 }));
         try std.testing.expectError(error.InvalidSession, requests.readConversationContent("/never-open", session, 1, 0, null, file));
         try std.testing.expectError(error.InvalidSession, requests.activityPage("/never-open", session, .{}));
         try std.testing.expectError(error.InvalidSession, requests.readActivityContent("/never-open", session, 1, 0, null, file));
@@ -5588,7 +5564,6 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.read_action_arguments_request, .{ &store, &session, id }, protocol.max_read_action_arguments_request_bytes },
         .{ protocol.read_action_call_id_request, .{ &store, &session, id }, protocol.max_read_action_call_id_request_bytes },
         .{ protocol.conversation_content_request.all, .{ &store, &session, id, id }, protocol.max_conversation_content_request_bytes },
-        .{ protocol.conversation_page_request, .{ &store, &session, id, id, id }, protocol.max_conversation_page_request_bytes },
         .{ (protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id }, comptime protocol.shapeBytes(protocol.activity_page_request.head ++ protocol.activity_page_request.tail) },
         .{ protocol.activity_page_request.all, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id, @as(?[]const u8, &observation_token) }, protocol.max_activity_page_request_bytes },
         .{ protocol.activity_search_request.all, .{ &store, &session, &search_query, protocol.ActivityPage.Kinds.full, optional_id, optional_id, id }, protocol.max_activity_search_request_bytes },

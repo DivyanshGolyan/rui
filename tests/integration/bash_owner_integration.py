@@ -9,6 +9,7 @@ import threading
 import bash_fixture
 import model_fixture as fixture
 from control_fixture import raw_request
+from host_fixture import conversation_rows, row_kind
 import host_process
 from host_process import canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process
 from bash_fixture import dispose_owner_case, execution_idle, stage_action
@@ -259,14 +260,8 @@ def main():
             == second_result
         )
         session = second_session
-        page_request = {"version": host_process.WIRE_VERSION, "kind": "conversation_page",
-                        "store": str(retention_store), "session": session, "end": "0",
-                        "before_position": "0", "before_ordinal": "0"}
-        head, body = raw_request(fields["socket"], "/v1/conversation-page",
-                                 json.dumps(page_request, separators=(",", ":")).encode())
-        assert head.startswith(b"HTTP/1.1 200 "), (head, body)
-        page = json.loads(body)
-        result_item = next(item for item in page["items"] if item["kind"] == "tool_result")
+        result_item = next(row for row in conversation_rows(fields["socket"], retention_store, session)
+                           if row_kind(row) == "tool_result")
         content = b""
         while True:
             content_request = {"version": host_process.WIRE_VERSION, "kind": "conversation_content",

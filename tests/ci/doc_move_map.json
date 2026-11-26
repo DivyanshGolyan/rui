@@ -1043,7 +1043,7 @@
       "source": "ARCHITECTURE.md",
       "anchor": "public-conversation-pages",
       "destination": "docs/contracts/inspection.md",
-      "destination_anchor": "public-conversation-pages"
+      "destination_anchor": "public-conversation-content"
     },
     {
       "source": "ARCHITECTURE.md",

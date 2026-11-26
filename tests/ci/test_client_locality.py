@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from client_locality import (
-    ALLOWED, CLASSIFIER, DEFAULT_IMPORT, GATE, ISSUES, MESSAGE, REQUIRED_SOURCES,
+    ALLOWED, CLASSIFIER, DEFAULT_IMPORT, GATE, ISSUES, MESSAGE, ORIGIN_FACT, REQUIRED_SOURCES,
     ROOT, TS_DEFAULT, allowance_growth, allowed_entries, findings, scan,
     stale_allowances, surfaces, violations,
 )
@@ -64,6 +64,24 @@ class ClientLocalityTest(unittest.TestCase):
         self.assertEqual(findings(source, "src/attention.zig"), [])
         self.assertEqual(findings('function modelCallCurrent(row: Row): boolean { return row.modelCallCurrent; }',
                                   "clients/ts/src/sessions.ts"), [])
+
+    def test_a_message_origin_is_read_from_the_host(self):
+        for source, relative in (
+            ('const action = message.source_action;', "src/session_view.zig"),
+            ('if (item.source_action) |id| use(id);', "src/overview_view.zig"),
+            ('const action = message.@"source_action";', "src/session_view.zig"),
+            ('const action = row["source_action"];', "clients/ts/src/feed.ts"),
+            ('const action = entry.source_action;', "clients/ts/src/feed.ts"),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(findings(source, relative), [(1, ORIGIN_FACT)])
+        for source, relative in (
+            ('switch (message.origin) { .action => |id| use(id), else => {} }', "src/session_view.zig"),
+            ('const origin = entry.origin;', "clients/ts/src/feed.ts"),
+            ('test "a fixture names the action" { _ = item.source_action; }', "src/session_view.zig"),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(findings(source, relative), [])
 
     def test_typescript_literal_session_defaults_are_detected(self):
         for source in (

@@ -74,28 +74,6 @@ noinline fn renderToolRejection(response: protocol.JsonOut, session: []const u8,
     } else try response.appendShape(shape, .{ value.replayed, session, value.code, message, value.missing });
 }
 
-pub fn renderConversationPage(response: protocol.JsonOut, page: *const command_reply.PublicConversationPage) !void {
-    const shapes = protocol.conversation_page_reply;
-    try response.appendShape(shapes.head, .{page.end});
-    for (page.items[0..page.count], 0..) |item, index| {
-        if (index != 0) try response.append(",");
-        switch (item.kind) {
-            .hosted_call => try response.appendShape(shapes.hosted_call, .{ item.position, item.ordinal }),
-            inline else => |kind| try response.appendShape(shapes.item(kind), .{ item.position, item.ordinal, protocol.ContentValueJson{ .value = item.content } }),
-        }
-        switch (item.kind) {
-            .user => if (item.admitted_at) |second| try response.appendShape(shapes.admission, .{ second, protocol.NamedPeerJson.optional(item.sender), item.source_action }),
-            .tool_result, .hosted_call => if (item.presentation) |presentation| try response.appendShape(shapes.presentation, .{protocol.ToolPresentationJson{ .value = presentation }}),
-            .assistant => {},
-        }
-        try response.appendShape(shapes.item_end, .{});
-    }
-    if (page.more) {
-        const last = page.items[page.count - 1];
-        try response.appendShape(shapes.more, .{ last.position, last.ordinal });
-    } else try response.appendShape(shapes.last, .{});
-}
-
 const SubjectTypes = struct {
     pub const model_interruption = command_reply.ModelInterruptionTarget;
     pub const permission_decision = struct {
@@ -585,25 +563,6 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try line.link.?.peer.session.set(&@as([protocol.max_session_bytes]u8, @splat(1)));
     try line.link.?.peer.label.set(&@as([protocol.max_label_bytes]u8, @splat(1)));
     const presentation: protocol.ToolPresentation = .{ .line = line, .code = Worst.tag(protocol.ToolPresentation.Code), .sign = Worst.tag(protocol.ToolPresentation.Sign), .publication_position = max };
-    var longest_conversation: usize = 0;
-    for (std.meta.tags(protocol.ConversationItemKind)) |kind| {
-        var page: command_reply.PublicConversationPage = .{ .end = max, .count = protocol.public_conversation_page_items, .more = true };
-        for (&page.items) |*item| item.* = .{
-            .position = max,
-            .ordinal = max,
-            .kind = kind,
-            .content = .{ .parts = .{ .identity = content, .owner = .{ .message = max } } },
-            .presentation = if (kind == .tool_result or kind == .hosted_call) presentation else null,
-            .admitted_at = if (kind == .user) max else null,
-            .sender = if (kind == .user) .{ .session = session, .label = label } else null,
-            .source_action = if (kind == .user) max else null,
-        };
-        var response: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{};
-        try response.render(renderConversationPage, .{&page});
-        longest_conversation = @max(longest_conversation, response.len);
-    }
-    try std.testing.expectEqual(protocol.max_conversation_page_response_bytes, longest_conversation);
-
     var key: protocol.Bounded(protocol.max_key_bytes) = .{};
     try key.set(&escaped_key);
     const peer: protocol.NamedPeer = .{ .session = session, .label = label };

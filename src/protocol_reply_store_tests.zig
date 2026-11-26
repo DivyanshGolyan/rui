@@ -296,23 +296,6 @@ const PromotedAction = struct {
         try std.testing.expectEqual(self.action, message.origin.action);
         try std.testing.expectEqual(@as(u64, text.len), message.content.text.length);
         try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &message.content.text.digest);
-
-        const produced = try std.testing.allocator.create(@import("command_reply.zig").PublicConversationPage);
-        defer std.testing.allocator.destroy(produced);
-        try storage.publicConversationPage(&.{ .session = self.session }, produced, std.testing.allocator);
-        var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
-        defer rendered.deinit();
-        try @import("host_reply.zig").renderConversationPage(.{ .writer = &rendered.writer }, produced);
-        const parsed = try protocol_reply.ConversationPage.parse(rendered.written(), .{ .end = 0 });
-        var sources: usize = 0;
-        for (parsed.items[0..parsed.count]) |item| if (item.source_action) |source| {
-            try std.testing.expectEqual(self.action, source);
-            try std.testing.expect(item.sender == null);
-            try std.testing.expectEqual(@as(u64, text.len), item.content.text.length);
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &item.content.text.digest);
-            sources += 1;
-        };
-        try std.testing.expectEqual(@as(usize, 1), sources);
     }
 
     fn receipt(self: PromotedAction, storage: *store.Store) !@import("content_value.zig").Value {

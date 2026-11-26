@@ -1,6 +1,7 @@
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const conversation_read = @import("../../conversation_read.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const content_domain = @import("../domain/content.zig");
@@ -87,7 +88,7 @@ test "a page's rows share their rounds, so a full page takes as many as one row"
                 call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
             }
             try settleCallsForTesting(&storage, &tmp, binding, "rounds-output", &calls);
-            var conversation: protocol.ConversationPage = .{};
+            var conversation: conversation_read.ConversationPage = .{};
             try conversation.session.set(session.slice());
             var activity: protocol.ActivityPage = .{};
             try activity.session.set(session.slice());
@@ -106,7 +107,7 @@ test "a page's rows share their rounds, so a full page takes as many as one row"
 
 const PageRounds = struct { rounds: [2]u32, conversation: usize, activity: usize, results: u64, end: u64 };
 
-fn pageRounds(storage: *Store, conversation: *const protocol.ConversationPage, activity: *const protocol.ActivityPage) !PageRounds {
+fn pageRounds(storage: *Store, conversation: *const conversation_read.ConversationPage, activity: *const protocol.ActivityPage) !PageRounds {
     var result: PageRounds = undefined;
     var public_page: reads_domain.PublicConversationPage = undefined;
     var activity_page: protocol.ActivityFacts = undefined;
@@ -423,7 +424,7 @@ test "completed tool labels trust admission while model replay authenticates pay
             try settleTwoActionsForTesting(&storage, &tmp, binding, "replay-calls");
             var stop = try completeSessionStop("replay-stop", session.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            var request: protocol.ConversationPage = .{};
+            var request: conversation_read.ConversationPage = .{};
             try request.session.set(session.slice());
             const before = try store_core.publicConversationPageForTesting(&storage, request);
             try store_testing.zeroContent(&storage, "SELECT name_content_id FROM model_tool_call");
@@ -642,7 +643,7 @@ test "a web search call shows as its line, in the conversation and the activity,
                 .{ "Open ziglang.org/x", .failed },
                 .{ "Search “zig 0.17 \"notes\"”", .succeeded },
             };
-            var request: protocol.ConversationPage = .{};
+            var request: conversation_read.ConversationPage = .{};
             try request.session.set(session.slice());
             const page = try store_core.publicConversationPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 5), page.count);
@@ -870,7 +871,7 @@ test "the step to format 96 reads a search saved as a sentence as a search with 
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT hosted_action FROM model_output_item WHERE item_kind=5", .{}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item WHERE (hosted_action IS NOT NULL)<>(item_kind=5)", .{}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM hosted_target", .{}));
-            var request: protocol.ConversationPage = .{};
+            var request: conversation_read.ConversationPage = .{};
             try request.session.set("d8mv7p");
             const page = try store_core.activityPageForTesting(&storage, .{ .session = request.session, .direction = .backward });
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item WHERE item_kind=5 AND hosted_action=0", .{}));

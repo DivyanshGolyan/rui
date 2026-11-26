@@ -20,7 +20,8 @@ MESSAGE = ("a rule every viewer must agree on belongs to the Host (#1620); "
 DEFAULT_IMPORT = "imports product_defaults.zig"
 CLASSIFIER = "classifies Session work"
 TS_DEFAULT = "hard-codes a Session default"
-ISSUES = {DEFAULT_IMPORT: "#1621", CLASSIFIER: "#1622", TS_DEFAULT: "#1621"}
+ORIGIN_FACT = "re-derives a Message origin"
+ISSUES = {DEFAULT_IMPORT: "#1621", CLASSIFIER: "#1622", TS_DEFAULT: "#1621", ORIGIN_FACT: "#2282"}
 
 # Shared dependencies can be in graph.host even though these client entry points
 # themselves must remain covered. Keep the requested minimum inventory together.
@@ -165,6 +166,17 @@ def default_sites(tokens):
             j += 1
 
 
+def origin_fact_sites(tokens):
+    """Who admitted a Message is the Host's typed `origin`, so a client never rebuilds it from `source_action`.
+
+    The Activity wire carries `origin` only; the public Conversation page still declares `source_action` until
+    #2351 removes it, and `wire.ts` is outside this scan, so a client reading that field today is the finding.
+    """
+    for token in tokens:
+        if (unquote(token.text.removeprefix("@")) or token.text) == "source_action":
+            yield token.line, ORIGIN_FACT
+
+
 def findings(source, relative):
     ts = relative.startswith("clients/ts/src/")
     if ts and test_file(relative):
@@ -179,6 +191,7 @@ def findings(source, relative):
                 if imported is not None and Path(imported).name == "product_defaults.zig":
                     found.append((tokens[i].line, DEFAULT_IMPORT))
     found.extend(classifier_sites(tokens, ts))
+    found.extend(origin_fact_sites(tokens))
     if ts:
         found.extend(default_sites(tokens))
     return sorted(set(found))
