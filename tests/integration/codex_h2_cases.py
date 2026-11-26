@@ -303,6 +303,101 @@ def openai_base_url_run(*, catalog_available=False):
                 retain_failure_state("OpenAI base URL failure state", root)
 
 
+def named_sign_in_connections_run():
+    """Two signed-in accounts under their own names keep their own record files: signing one out
+    leaves the other serving, and a restart does not move either."""
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-named-sign-in.")).resolve()
+    private = root / "private"
+    private.mkdir(mode=0o700)
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(root / "key.pem"), "-out", str(root / "cert.pem"),
+        "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(root / "cert.pem", root / "key.pem")
+    tls.set_alpn_protocols(["h2"])
+    endpoint = h2_fixture.Endpoint(tls, 1, sse=True, eager_sse=True, named_answers=True)
+    endpoint.max_streams = 1
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    port = endpoint.server_address[1]
+    records = {"work": private / "work.json", "personal": private / "personal.json"}
+    for record in records.values():
+        codex.credentials(record)
+
+    def connection(name):
+        base = f"https://localhost:{port}/{name}/v1"
+        return {"name": name, "label": name.title(), "base_url": base,
+                "credential": {"kind": "openai-device", "client_id": "app_named_sign_in", "audience": base,
+                               "source": {"kind": "saved"}},
+                "headers": [], "refusals": [], "formats": [{"family": "responses", "dialect": "openai-responses/2", "web_search": True}],
+                "assign": [], "models": {"list": "catalog"}}
+    settings_file = private / "host.json"
+    settings_file.write_text(json.dumps({"connections": [connection("work"), connection("personal")]}))
+    settings_file.chmod(0o600)
+    store = root / "store"
+    host = None
+    complete = False
+
+    def start():
+        return start_ready_process([
+            fixture.RUI, "host", "serve", "--store", store, "--settings", str(settings_file),
+            "--set", "execution.activeCapacity=1", "--set", "network.caFile=" + str(root / "cert.pem"),
+            "--set", "models.catalogUrl=https://127.0.0.1:1/api.json"], env={
+            **os.environ, "RUI_WORK_CREDENTIAL_FILE": str(records["work"]),
+            "RUI_PERSONAL_CREDENTIAL_FILE": str(records["personal"]),
+        })[0]
+    try:
+        host = start()
+
+        def configure(name, connection_name):
+            configuration = fixture.command(
+                "session", "configure", "--store", store, "--record", root / f"{name}-config.json", "--key", f"{name}-config",
+                "--workspace", fixture.ROOT, "--connection", connection_name, "--model", "gpt-6-sol", "--tools", "none",
+            )
+            assert configuration["answer"]["status"] == "accepted", configuration
+            return configuration["answer"]["session"]
+
+        def answer_for(name, session):
+            fixture.message(root, store, name, session, name)
+            observation, answer, _ = fixture.wait_for_result_release(store, name, session, time.monotonic() + 20)
+            return observation, answer
+
+        def paths_posted():
+            return [headers[b":path"] for headers in endpoint.request_headers if headers[b":method"] == b"POST"]
+        work_session = configure("work", "work")
+        personal_session = configure("personal", "personal")
+        for name, session in (("work", work_session), ("personal", personal_session)):
+            observation, answer = answer_for(f"first-{name}", session)
+            assert observation["result"]["status"] == "completed" and answer == f"answer-first-{name}".encode(), (observation, answer)
+        assert sorted(paths_posted()) == [b"/personal/v1/responses", b"/work/v1/responses"], paths_posted()
+
+        # Signing one account out removes its own record only; the other keeps answering.
+        records["personal"].unlink()
+        fixture.stop_host(host)
+        host = start()
+        observation, answer = answer_for("after-work", work_session)
+        assert observation["result"]["status"] == "completed" and answer == b"answer-after-work", (observation, answer)
+        assert paths_posted().count(b"/work/v1/responses") == 2 and paths_posted().count(b"/personal/v1/responses") == 1, paths_posted()
+        print("named sign-in connections passed: work and personal each answer on their own record, and signing personal out leaves work serving across a restart")
+        complete = True
+    finally:
+        def retire():
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "named sign-in connection endpoint thread did not retire"
+        cleaned = False
+        try:
+            dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, retire)
+            cleaned = True
+        finally:
+            if complete and cleaned:
+                shutil.rmtree(root)
+            else:
+                retain_failure_state("named sign-in connection failure state", root)
+
+
 def named_key_connections_run():
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-named-key.")).resolve()
     private = root / "private"
