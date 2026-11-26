@@ -280,6 +280,17 @@ The Store keeps no wire label (format 74): a client and a Host compare the wire 
 It has one canonical configure shape, which includes the omission-aware provider and Label fields, and one canonical Message shape, on which any Message may carry `require_model` (digest domain `rui/core/message/v4`, which binds the flag; a Message without it keeps its digest).
 Pre-provider captures are not accepted or defaulted to Codex.
 
+#### Schema-change rules
+
+Four rules govern each Store format step, so a database team applies few statements and no table copies (issue #2367; owner: Divyansh, 2026-11-26).
+
+1. A new fact goes in a new side table (`CREATE TABLE`). A step adds no column to `core_command`, `model_operation`, `tool_record` or `message_admission`, the four tables rebuilt most often. `tests/ci/schema_rules.py check` fails a step this branch adds or edits that does: on MySQL an `ALTER TABLE ... ADD COLUMN` or a new table renamed over one of them, on SQLite a rebuild whose `CREATE TABLE` defines a column the `INSERT ... SELECT` does not list.
+2. Once the Host owns closed sets ([column rules](#store-format-and-upgrades)), a new enum value or command kind is a code change, not a format step.
+3. A drop or rename ships at least one release after the step that added its replacement (expand, then contract): 9 of the 46 steps before schema 97 reversed an earlier design in one breath. A reader of the step history judges this; no check can.
+4. On MySQL a column added to a large table is nullable with no CHECK and no foreign key. Measured on live MySQL 8.4.13 against a 2,000,000-row table: a nullable `ADD COLUMN` takes `ALGORITHM=INSTANT` in 0.10 s and a `NOT NULL DEFAULT 0` one in 0.16 s; the same column with an inline `CHECK` refuses INSTANT (error 1845) and runs as a 7.67 s copy, a separate `ADD CHECK` refuses it the same way, a foreign key refuses it (error 1846), and `ADD INDEX` is never instant (2.39 s). While the schema still renders every column's rules as CHECKs, a format step cannot follow the fourth rule; the v1 rebaseline that removes CHECKs (epic #2364) makes it enforceable, and until then the scoreboard counts the copy-forcing column adds.
+
+`python3 tests/ci/schema_rules.py scoreboard` prints, for each release after the first and for unreleased main, the formats shipped, the steps they carry, the SQLite table rebuilds (a table renamed aside and recreated), the MySQL statements the database team must apply and how many tables a step adds a column to and also gives a CHECK, foreign key, key or `MODIFY` in the same step, each a copy. The target after v1 is zero rebuilds.
+
 ### Store durability
 
 One thread at a time holds the Store: its connection, its scratch and its id allocator.
