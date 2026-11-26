@@ -3,6 +3,9 @@ const h2 = @import("h2");
 const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const connection = @import("connection.zig");
+const listing_slot = @import("listing_slot.zig");
+const ListingSlot = listing_slot.ListingSlot;
+const ListingArray = listing_slot.ListingArray;
 const connection_names = @import("connection_names.zig");
 const provider_route = @import("provider_route.zig");
 const host_headers = @import("host_headers.zig");
@@ -153,36 +156,9 @@ pub const Options = struct {
     observation: HeaderObservation = .{},
     scratch_path: []const u8,
     budget: ScratchBudget,
-    listing_urls: std.EnumArray(ListingKind, ?[]const u8) = .initFill(null),
+    listing_urls: ListingArray(?[]const u8) = .initFill(null),
 };
 
-pub const ListingKind = blk: {
-    var count = 1;
-    for (std.enums.values(protocol.Provider)) |served| count += @intFromBool(served.facts().model_list == .live);
-    var names: [count][]const u8 = undefined;
-    var values: [count]u8 = undefined;
-    names[0] = "catalog";
-    var at = 1;
-    for (std.enums.values(protocol.Provider)) |served| if (served.facts().model_list == .live) {
-        names[at] = @tagName(served);
-        at += 1;
-    };
-    for (&values, 0..) |*value, index| value.* = index;
-    break :blk @Enum(u8, .exhaustive, &names, &values);
-};
-
-pub fn providerListing(served: protocol.Provider) ?ListingKind {
-    return switch (served) {
-        inline else => |name| if (@hasField(ListingKind, @tagName(name))) @field(ListingKind, @tagName(name)) else null,
-    };
-}
-
-pub fn listedProvider(kind: ListingKind) ?protocol.Provider {
-    return switch (kind) {
-        .catalog => null,
-        inline else => |name| @field(protocol.Provider, @tagName(name)),
-    };
-}
 pub const ListingFetch = struct {
     stream: h2.Stream,
     finished: bool,
@@ -287,7 +263,7 @@ pub const Credentials = struct {
 
 pub const Reactor = struct {
     comptime {
-        const required_endpoints = connection.max_served + std.enums.values(ListingKind).len;
+        const required_endpoints = connection.max_served + ListingSlot.count;
         if (h2.max_endpoints < required_endpoints)
             @compileError("provider request and independent listing URLs exceed H2 endpoint capacity");
     }
@@ -299,9 +275,9 @@ pub const Reactor = struct {
     scratch_path: []const u8,
     budget: ScratchBudget,
     credentials: Credentials,
-    listing_endpoints: std.EnumArray(ListingKind, ?h2.Endpoint),
+    listing_endpoints: ListingArray(?h2.Endpoint),
     catalog_endpoint_error: ?h2.EndpointError,
-    listings: std.EnumArray(ListingKind, ?*ListingFetch),
+    listings: ListingArray(?*ListingFetch),
     mutex: std.Io.Mutex = .init,
     stopping: bool = false,
     failure: ?h2.DriveError = null,
@@ -350,7 +326,7 @@ pub const Reactor = struct {
         for (options.endpoints.names[0..options.endpoints.len], options.endpoints.values[0..options.endpoints.len]) |name, url| {
             try self.endpoints.set(name, try self.client.addEndpoint(url));
         }
-        for (options.listing_urls.values, &self.listing_endpoints.values, std.enums.values(ListingKind)) |url, *endpoint, kind| {
+        for (options.listing_urls.values, &self.listing_endpoints.values, ListingSlot.all) |url, *endpoint, kind| {
             if (url) |value| endpoint.* = self.client.addEndpoint(value) catch |err| {
                 if (kind != .catalog) return err;
                 self.catalog_endpoint_error = err;
@@ -359,7 +335,7 @@ pub const Reactor = struct {
         }
     }
 
-    pub fn startListing(self: *Reactor, kind: ListingKind, fetch: *ListingFetch, fields: []const h2.Field, response: []u8) !void {
+    pub fn startListing(self: *Reactor, kind: ListingSlot, fetch: *ListingFetch, fields: []const h2.Field, response: []u8) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.unlockWaking();
         std.debug.assert(self.listings.get(kind) == null);
@@ -375,7 +351,7 @@ pub const Reactor = struct {
         self.client.launch(&fetch.stream);
     }
 
-    pub fn finishedListing(self: *Reactor, kind: ListingKind) ?*ListingFetch {
+    pub fn finishedListing(self: *Reactor, kind: ListingSlot) ?*ListingFetch {
         const fetch = self.listings.get(kind) orelse return null;
         return if (fetch.finished) fetch else null;
     }
@@ -385,7 +361,7 @@ pub const Reactor = struct {
         return false;
     }
 
-    pub fn endListing(self: *Reactor, kind: ListingKind) void {
+    pub fn endListing(self: *Reactor, kind: ListingSlot) void {
         const fetch = self.listings.get(kind) orelse return;
         self.mutex.lockUncancelable(self.io);
         defer self.unlockWaking();
@@ -486,7 +462,7 @@ pub const Reactor = struct {
     }
 
     pub fn observe(self: *Reactor, stream: *h2.Stream, event: h2.Event) h2.Verdict {
-        for (self.listings.values, std.enums.values(ListingKind)) |listing, kind| {
+        for (self.listings.values, ListingSlot.all) |listing, kind| {
             if (listing) |fetch| if (stream == &fetch.stream) {
                 if (kind == .catalog and event == .head and event.head.kind == .final) {
                     for (event.head.fields) |field| {
@@ -962,6 +938,7 @@ test "Reactor registers every provider and independent listing subset without en
         "http://127.0.0.1:2/openai/responses",
         "http://127.0.0.1:3/chatgpt/responses",
     };
+    const listing_slots = [_]ListingSlot{ .catalog, .ofConnection(1), .ofConnection(2) };
     const listing_urls = [_][]const u8{
         "http://127.0.0.1:4/catalog",
         "http://127.0.0.1:5/openai/models",
@@ -980,8 +957,8 @@ test "Reactor registers every provider and independent listing subset without en
         for (request_urls, provider_route.built_in_names, 0..) |value, name, bit| {
             if (served_mask & (@as(usize, 1) << @intCast(bit)) != 0) try options.endpoints.set(name, value);
         }
-        for (&options.listing_urls.values, listing_urls, 0..) |*url, value, bit| {
-            if (listing_mask & (@as(usize, 1) << @intCast(bit)) != 0) url.* = value;
+        for (listing_slots, listing_urls, 0..) |slot, value, bit| {
+            if (listing_mask & (@as(usize, 1) << @intCast(bit)) != 0) options.listing_urls.set(slot, value);
         }
         try reactor.init(std.testing.allocator, std.testing.io, options);
         defer reactor.deinit();
@@ -989,10 +966,41 @@ test "Reactor registers every provider and independent listing subset without en
         for (provider_route.built_in_names, 0..) |name, bit| {
             try std.testing.expectEqual(served_mask & (@as(usize, 1) << @intCast(bit)) != 0, reactor.endpoints.get(name) != null);
         }
-        for (reactor.listing_endpoints.values, 0..) |endpoint, bit| {
-            try std.testing.expectEqual(listing_mask & (@as(usize, 1) << @intCast(bit)) != 0, endpoint != null);
+        for (ListingSlot.all) |slot| {
+            const bit = std.mem.indexOfScalar(ListingSlot, &listing_slots, slot);
+            const wanted = if (bit) |index| listing_mask & (@as(usize, 1) << @intCast(index)) != 0 else false;
+            try std.testing.expectEqual(wanted, reactor.listing_endpoints.get(slot) != null);
         }
     };
+}
+
+test "EXR-102 Reactor registers every served connection's request and listing endpoint with the catalog" {
+    var options: Options = .{
+        .endpoints = .{},
+        .capacity = 1,
+        .inactivity_seconds = 1,
+        .scratch_path = "/nonexistent",
+        .budget = undefined,
+    };
+    var used: std.atomic.Value(u64) = .init(0);
+    options.budget = .{ .used = &used, .limit = 1 };
+    var request_urls: [connection.max_served][48]u8 = undefined;
+    var listing_urls: [connection.max_served][48]u8 = undefined;
+    var names: [connection.max_served][8]u8 = undefined;
+    for (0..connection.max_served) |index| {
+        const name = try std.fmt.bufPrint(&names[index], "c{d}", .{index});
+        const request = try std.fmt.bufPrint(&request_urls[index], "http://127.0.0.1:{d}/responses", .{index + 1});
+        const listing = try std.fmt.bufPrint(&listing_urls[index], "http://127.0.0.1:{d}/models", .{index + 1});
+        try options.endpoints.set(connection.Name.parse(name).?, request);
+        options.listing_urls.set(ListingSlot.ofConnection(index), listing);
+    }
+    options.listing_urls.set(.catalog, "http://127.0.0.1:99/catalog");
+    var reactor: Reactor = undefined;
+    try reactor.init(std.testing.allocator, std.testing.io, options);
+    defer reactor.deinit();
+    try std.testing.expectEqual(@as(?h2.EndpointError, null), reactor.catalog_endpoint_error);
+    try std.testing.expectEqual(@as(usize, connection.max_served), reactor.endpoints.len);
+    for (ListingSlot.all) |slot| try std.testing.expect(reactor.listing_endpoints.get(slot) != null);
 }
 
 test "EXR-102 Reactor holds an endpoint for every name of a full served set" {
@@ -1044,8 +1052,8 @@ test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
         .scratch_path = "/nonexistent",
         .budget = .{ .used = &used, .limit = 1 },
         .listing_urls = listing_urls: {
-            var urls: std.EnumArray(ListingKind, ?[]const u8) = .initFill(null);
-            urls.set(.openai, "http://127.0.0.1:1/models");
+            var urls: ListingArray(?[]const u8) = .initFill(null);
+            urls.set(ListingSlot.ofConnection(1), "http://127.0.0.1:1/models");
             urls.set(.catalog, "https://models.dev/api.json");
             break :listing_urls urls;
         },
@@ -1058,8 +1066,8 @@ test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
         try std.testing.expect(reactor.listing_endpoints.get(.catalog) == null);
         var fetch: ListingFetch = undefined;
         var response: [1]u8 = undefined;
-        try reactor.startListing(.openai, &fetch, &.{}, &response);
-        defer reactor.endListing(.openai);
+        try reactor.startListing(ListingSlot.ofConnection(1), &fetch, &.{}, &response);
+        defer reactor.endListing(ListingSlot.ofConnection(1));
         try std.testing.expectEqual(@as(?Completion, null), try reactor.nextCompletion(false));
     }
     var required = options;
@@ -1263,20 +1271,6 @@ const TurnStateRecord = struct {
     }
 };
 
-test "each live-list provider has its own listing beside the catalog's" {
-    var kinds: usize = 0;
-    for (std.enums.values(protocol.Provider)) |served| {
-        const live = served.facts().model_list == .live;
-        try std.testing.expectEqual(live, providerListing(served) != null);
-        if (providerListing(served)) |kind| {
-            try std.testing.expectEqual(served, listedProvider(kind).?);
-            kinds += 1;
-        }
-    }
-    try std.testing.expectEqual(@as(?protocol.Provider, null), listedProvider(.catalog));
-    try std.testing.expectEqual(kinds + 1, std.enums.values(ListingKind).len);
-}
-
 test "catalog listing captures a bounded ETag and rejects duplicates without observing provider headers" {
     var reactor: Reactor = undefined;
     reactor.listings = .initFill(null);
@@ -1299,7 +1293,7 @@ test "catalog listing captures a bounded ETag and rejects duplicates without obs
     } }));
     try std.testing.expect(fetch.etag == null);
     reactor.listings.set(.catalog, null);
-    reactor.listings.set(.openai, &fetch);
+    reactor.listings.set(ListingSlot.ofConnection(1), &fetch);
     try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&fetch.stream, head));
     try std.testing.expect(fetch.etag == null);
 }

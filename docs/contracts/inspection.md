@@ -246,17 +246,17 @@ Otherwise an asked server has landed when the status reply's `instance` equals t
 A status reply with no row for an asked server, or a `last` of `never` once that server has landed, is an invalid reply.
 A landed server's outcome is its `last` outcome, which may come from a list that began after the ask.
 
-`POST /v1/model-list` takes `kind:"model_list"` and returns `connections`: for each connection the Host serves, in Provider order, its `connection`, `source` and `models`, each an `id` with `known`, whether Rui's model catalog knows its facts.
+`POST /v1/model-list` takes `kind:"model_list"` and returns `connections`: for each connection the Host serves, in served order, its `connection`, `source` and `models`, each an `id` with `known`, whether Rui's model catalog knows its facts.
 A model the catalog does not list runs with default limits (see compaction).
-The ChatGPT device sign-in (`codex`) has no list, so its `source` is always `catalog` and its models are the catalog's OpenAI IDs in catalog order.
-At Host start and on every model-list request, the execution owner's HTTP/2 Client starts an OpenAI key's `GET BASE/models` (when served), a ChatGPT plan's `GET https://api.openai.com/v1/models` (when served) and an unauthenticated `GET https://models.dev/api.json`, each unless that fetch is already in flight.
+The ChatGPT device sign-in (`codex`) has no list, so its `source` is always `catalog` and its models are the catalog's OpenAI IDs in catalog order; so is a key connection whose settings do not declare `models.list` as `openai`.
+At Host start and on every model-list request, the execution owner's HTTP/2 Client starts the `GET BASE/models` of the OpenAI key and of every key connection that declares `models.list` as `openai` (when served), a ChatGPT plan's `GET https://api.openai.com/v1/models` (when served) and an unauthenticated `GET https://models.dev/api.json`, each unless that fetch is already in flight.
 Each has its own endpoint and stream beyond Active Capacity, including a catalog-only Host with no model slots.
 No fetch reserves a model slot.
 The plan's GET carries a lease from the Host's one sign-in worker, which serves it only when no model slot waits for that worker, and returns the lease as soon as the GET holds its own copy of the token; it never waits for a refresh, and a 401 on it forces none.
 Without a usable sign-in the lease fails and `/v1/models` is never contacted.
 The plan's list keeps only entries whose `visibility` is `list`, by `slug`, in server order.
-Each provider's IDs (at most 512, 16 KiB together, per provider) stay in Host memory and are replaced on refresh.
-While a provider's fetch runs its source is `pending` with the catalog's OpenAI IDs; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `catalog_fallback` with the catalog's OpenAI IDs when it or its sign-in lease failed, answered with something else or listed more than that bound.
+Each connection's IDs (at most 512, 16 KiB together, per connection) stay in Host memory and are replaced on refresh.
+While a connection's fetch runs its source is `pending` with the catalog's OpenAI IDs; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `catalog_fallback` with the catalog's OpenAI IDs when it or its sign-in lease failed, answered with something else or listed more than that bound.
 A refresh keeps the previous provider source while in flight; the initial provider fetch alone starts `pending`.
 The reply signals refresh, then reads one selected fact generation from the Store and renders it with the independently retained provider lists; it does not wait for the network.
 Its operation-owned facts and reply storage are released after the request; the Host retains no fact snapshot between requests.

@@ -321,6 +321,7 @@ def named_key_connections_run():
     tls.set_alpn_protocols(["h2"])
     endpoint = h2_fixture.Endpoint(tls, 1, sse=True, eager_sse=True, named_answers=True)
     endpoint.max_streams = 1
+    endpoint.models = b'{"data":[{"id":"custom-model"},{"id":"listed-only-model"}]}'
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
     port = endpoint.server_address[1]
@@ -374,7 +375,17 @@ def named_key_connections_run():
         for headers in posts.values():
             assert headers[b":authority"].startswith(b"localhost:"), headers
             assert b"chatgpt-account-id" not in headers, headers
-        print("named key connections passed: alpha and beta each answer a session on their own endpoint with their own key")
+        def lists_published():
+            lists = {entry["connection"]: entry for entry in h2_fixture.closed_host_request(ready["socket"], store, "model_list")["connections"]}
+            return lists if lists["alpha"]["source"] == "live" and lists["beta"]["source"] == "live" else None
+        lists = fixture.wait_for(lists_published, "the alpha and beta model lists", timeout=20)
+        for name in ("alpha", "beta"):
+            assert [model["id"] for model in lists[name]["models"]] == ["custom-model", "listed-only-model"], lists[name]
+        gets = {headers[b":path"]: headers for headers in provider_requests() if headers[b":method"] == b"GET"}
+        assert set(gets) == {b"/alpha/v1/models", b"/beta/v1/models"}, sorted(gets)
+        assert gets[b"/alpha/v1/models"][b"authorization"] == ("Bearer " + codex.OPENAI_KEY).encode(), gets[b"/alpha/v1/models"]
+        assert gets[b"/beta/v1/models"][b"authorization"] == ("Bearer " + beta_value).encode(), gets[b"/beta/v1/models"]
+        print("named key connections passed: alpha and beta each answer a session and list their models on their own endpoint with their own key")
         complete = True
     finally:
         def retire():

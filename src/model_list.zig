@@ -97,7 +97,7 @@ pub fn objectKey(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !?[]con
 const model_overhead = "{\"id\":\"\",\"known\":false},".len;
 const provider_overhead = ",{\"connection\":\"\",\"source\":\"catalog_fallback\",\"models\":[]}".len + max_provider_name_bytes;
 const max_provider_name_bytes = connection.max_name_bytes;
-const provider_count = connection.max_list;
+const provider_count = connection.max_served;
 
 pub fn providersBytes(facts: []const catalog.Entry) usize {
     @setEvalBranchQuota(20000);
