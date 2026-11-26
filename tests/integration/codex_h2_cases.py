@@ -329,8 +329,7 @@ def named_sign_in_connections_run():
     def connection(name):
         base = f"https://localhost:{port}/{name}/v1"
         return {"name": name, "label": name.title(), "base_url": base,
-                "credential": {"kind": "openai-device", "client_id": "app_named_sign_in", "audience": base,
-                               "source": {"kind": "saved"}},
+                "credential": {"kind": "openai-device", "client_id": "app_named_sign_in", "audience": base},
                 "headers": [], "refusals": [], "formats": [{"family": "responses", "dialect": "openai-responses/2", "web_search": True}],
                 "assign": [], "models": {"list": "catalog"}}
     settings_file = private / "host.json"
