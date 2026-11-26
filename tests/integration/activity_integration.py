@@ -16,8 +16,7 @@ import time
 
 from control_fixture import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse
 from host_process import wait_for
-from conversation_page_fixture import host_resources
-from conversation_page_fixture import idle_resources, provider_connections
+from host_fixture import host_resources, idle_resources, provider_connections
 from model_fixture import sse_tool_calls
 import host_process
 from host_process import TestHTTPServer, canonical_fixture_root, retain_failure_state, stop_process
