@@ -27,31 +27,50 @@ class SchemaRulesTest(unittest.TestCase):
 
     def test_a_column_on_each_busy_table_is_refused_in_either_dialect(self):
         for table in SIDE_TABLE_ONLY:
-            add = f"ALTER TABLE {table} ADD COLUMN extra BIGINT"
-            self.assertEqual(side_table_violations({7: step(7, [add], ["SELECT 1"])}), [(7, "sqlite", table)])
-            self.assertEqual(side_table_violations({7: step(7, ["SELECT 1"], [add])}), [(7, "mysql", table)])
+            for add in (f"ALTER TABLE {table} ADD COLUMN extra BIGINT", f"alter table {table} add column extra int"):
+                self.assertEqual(side_table_violations({7: step(7, ["SELECT 1"], [add])}), [(7, "mysql", table)])
+            rebuild = [f"ALTER TABLE {table} RENAME TO {table}_7", f"CREATE TABLE {table}(\n a BIGINT PRIMARY KEY,\n b TEXT,\n extra BIGINT CHECK(extra>0)\n)",
+                       f"INSERT INTO {table}(a,b) SELECT a,b FROM {table}_7", f"DROP TABLE {table}_7"]
+            self.assertEqual(side_table_violations({7: step(7, rebuild, ["SELECT 1"])}), [(7, "sqlite", table)])
+
+    def test_a_rebuild_that_keeps_the_columns_passes(self):
+        table = SIDE_TABLE_ONLY[0]
+        rebuild = [f"ALTER TABLE {table} RENAME TO {table}_7", f"CREATE TABLE {table}(\n a BIGINT PRIMARY KEY,\n b TEXT,\n CHECK(a>0)\n)",
+                   f"INSERT INTO {table}(a,b) SELECT a,b FROM {table}_7", f"DROP TABLE {table}_7"]
+        self.assertEqual(side_table_violations({7: step(7, rebuild, [])}), [])
+
+    def test_a_mysql_table_built_aside_and_renamed_over_a_busy_table_is_refused(self):
+        mysql = ["CREATE TABLE core_command_new(a BIGINT)", "RENAME TABLE core_command TO core_command_old"]
+        self.assertEqual(side_table_violations({7: step(7, ["SELECT 1"], mysql)}), [(7, "mysql", "core_command")])
 
     def test_a_side_table_or_another_table_passes(self):
         steps = {7: step(7, ["CREATE TABLE core_command_note(id BIGINT)", "ALTER TABLE session ADD COLUMN x BIGINT",
                              "ALTER TABLE core_command ADD INDEX i(a)"], ["ALTER TABLE core_command DROP COLUMN a"])}
         self.assertEqual(side_table_violations(steps), [])
 
-    def test_only_the_steps_a_branch_adds_are_checked(self):
-        base = {7: step(7, ["ALTER TABLE tool_record ADD COLUMN x BIGINT"], [])}
+    def test_only_what_this_branch_wrote_is_checked(self):
+        old = step(7, ["ALTER TABLE tool_record RENAME TO x"], ["ALTER TABLE tool_record ADD COLUMN x BIGINT"])
+        base = {7: old}
         head = {**base, 8: step(8, ["CREATE TABLE tool_note(id BIGINT)"], [])}
         self.assertEqual(list(new_steps(base, head)), [8])
-        self.assertEqual(side_table_violations(new_steps(base, head)), [])
+        self.assertEqual(side_table_violations(new_steps(base, head), base), [])
+
+    def test_an_edit_of_an_unreleased_step_is_checked_for_the_statements_it_adds(self):
+        old = step(7, ["SELECT 1"], ["ALTER TABLE session ADD COLUMN x BIGINT"])
+        edited = step(7, ["SELECT 1"], ["ALTER TABLE session ADD COLUMN x BIGINT", "ALTER TABLE tool_record ADD COLUMN y BIGINT"])
+        changed = new_steps({7: old}, {7: edited})
+        self.assertEqual(side_table_violations(changed, {7: old}), [(7, "mysql", "tool_record")])
+        self.assertEqual(side_table_violations({7: old}, {7: old}), [])
 
     def test_the_message_names_the_fix(self):
         self.assertIn("CREATE TABLE", side_table_message(7, "mysql", "tool_record"))
 
-    def test_a_copy_forcing_add_is_an_added_column_with_a_check_or_a_foreign_key(self):
-        copy = ["ALTER TABLE t ADD COLUMN a BIGINT, ADD CHECK(a IS NULL OR a>0)",
-                "ALTER TABLE t ADD COLUMN b BIGINT, ADD FOREIGN KEY(b) REFERENCES u(id)",
-                "ALTER TABLE t ADD COLUMN c BIGINT CHECK(c>0)"]
-        instant = ["ALTER TABLE t ADD COLUMN d BIGINT", "ALTER TABLE t ADD CHECK(d>0)", "CREATE TABLE u(id BIGINT)"]
-        self.assertEqual(copy_forcing(step(1, [], copy)), 3)
-        self.assertEqual(copy_forcing(step(1, [], instant)), 0)
+    def test_a_table_that_gets_a_column_and_a_check_key_or_modify_is_a_copy(self):
+        together = ["ALTER TABLE t ADD COLUMN a BIGINT, ADD CHECK(a IS NULL OR a>0)"]
+        apart = ["ALTER TABLE t ADD COLUMN b BIGINT", "ALTER TABLE t MODIFY COLUMN b BIGINT NOT NULL, ADD CHECK(b>0)"]
+        keyed = ["ALTER TABLE t ADD COLUMN c BIGINT", "ALTER TABLE t ADD UNIQUE(c)"]
+        instant = ["ALTER TABLE t ADD COLUMN d BIGINT", "ALTER TABLE u ADD CHECK(d>0)", "CREATE TABLE v(id BIGINT)"]
+        self.assertEqual([copy_forcing(step(1, [], texts)) for texts in (together, apart, keyed, instant)], [1, 1, 1, 0])
 
     def test_a_rebuild_is_a_table_renamed_aside(self):
         text = step(1, ["ALTER TABLE a RENAME TO a_old", "CREATE TABLE a(x BIGINT)", "DROP TABLE a_old",

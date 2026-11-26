@@ -14,12 +14,20 @@ from release_numbers import (SCHEMA, ZIG_STRING, git, main_base, migration_steps
 ROOT = Path(__file__).resolve().parents[2]
 # The tables rebuilt most often (issue #2367): a new fact goes in a side table, never a new column here.
 SIDE_TABLE_ONLY = ("core_command", "model_operation", "tool_record", "message_admission")
-ALTER = re.compile(r"ALTER TABLE (\w+) ")
-RENAME = re.compile(r"ALTER TABLE \w+ RENAME TO ")
-# What forces MySQL 8.4 to copy a table instead of changing it in place when it comes with ADD COLUMN: measured live
-# on 8.4.13 (2,000,000 rows): an inline or separate CHECK refuses ALGORITHM=INSTANT (error 1845, a 7.67 s copy against
-# 0.10 s without), and a foreign key refuses it too (error 1846).
-COPY_FORCING = re.compile(r"\bADD CHECK\b|\bADD FOREIGN KEY\b|\bCHECK\s*\(|\bREFERENCES\b")
+ALTER = re.compile(r"ALTER TABLE (\w+) ", re.IGNORECASE)
+RENAME = re.compile(r"ALTER TABLE \w+ RENAME TO ", re.IGNORECASE)
+MYSQL_RENAME = re.compile(r"RENAME TABLE (\w+) TO ", re.IGNORECASE)
+ADD_COLUMN = re.compile(r"\bADD\s+(?:COLUMN\b|\()", re.IGNORECASE)
+CREATE = re.compile(r"CREATE TABLE (\w+)\s*\(", re.IGNORECASE)
+INSERT = re.compile(r"INSERT INTO (\w+)\s*\(([^)]*)\)\s*SELECT", re.IGNORECASE)
+COLUMN_LINE = re.compile(r"^\s*(\w+)\s+\w+", re.MULTILINE)
+NOT_COLUMNS = {"check", "foreign", "primary", "unique", "constraint", "key", "index"}
+# What forces MySQL 8.4 to copy a table instead of changing it in place when a step also adds a column to it:
+# measured live on 8.4.13 (2,000,000 rows), an inline or separate CHECK refuses ALGORITHM=INSTANT (error 1845, a
+# 7.67 s copy against 0.10 s without) and a foreign key refuses it too (error 1846); a key or index is never instant
+# and MODIFY changes a column's definition.
+COPY_FORCING = re.compile(r"\bADD\s+(?:CHECK|FOREIGN KEY|UNIQUE|INDEX|KEY|CONSTRAINT)\b|\bCHECK\s*\(|\bREFERENCES\b"
+                          r"|\bMODIFY\b|\bCHANGE\b", re.IGNORECASE)
 
 
 def statements(step, dialect):
@@ -36,35 +44,66 @@ def statements(step, dialect):
 def added_to(sql):
     """The table an `ALTER TABLE ... ADD COLUMN` statement adds a column to, else None."""
     match = ALTER.match(sql)
-    return match[1] if match and "ADD COLUMN" in sql else None
+    return match[1] if match and ADD_COLUMN.search(sql) else None
+
+
+def created_columns(sql):
+    """The (table, column names) a `CREATE TABLE t(...)` statement defines, else None."""
+    match = CREATE.match(sql)
+    if match is None:
+        return None
+    body = sql[match.end():]
+    names = [name for name in COLUMN_LINE.findall(body) if name.lower() not in NOT_COLUMNS]
+    return match[1], names
 
 
 def new_steps(base, head):
-    """The steps `head` adds beyond `base`, both as migration_steps returns them."""
-    return {start: text for start, text in head.items() if start not in base}
+    """The steps `head` adds or edits beyond `base`, both as migration_steps returns them: an edit of an unreleased
+    step counts as much as a new one."""
+    return {start: text for start, text in head.items() if base.get(start) != text}
 
 
-def side_table_violations(steps):
-    """Each added column on a SIDE_TABLE_ONLY table, as (from, dialect, table)."""
+def side_table_violations(steps, base=None):
+    """Each way a step gives a SIDE_TABLE_ONLY table a column, as (from, dialect, table).
+
+    SQLite adds a column by rebuilding the table (rename aside, CREATE TABLE, INSERT ... SELECT), so a CREATE TABLE
+    column the INSERT never lists is a new column; MySQL adds one by ALTER ... ADD COLUMN or by building a new table
+    and renaming it over the old one. `base` maps from to the step main carries, so a statement main already has is
+    not charged to this branch."""
     found = []
     for start, step in sorted(steps.items()):
+        old = {dialect: set(statements((base or {}).get(start, ""), dialect)) for dialect in ("sqlite", "mysql")}
         for dialect in ("sqlite", "mysql"):
-            for sql in statements(step, dialect):
+            texts = [sql for sql in statements(step, dialect) if sql not in old[dialect]]
+            for sql in texts:
                 table = added_to(sql)
                 if table in SIDE_TABLE_ONLY:
                     found.append((start, dialect, table))
+                rename = MYSQL_RENAME.match(sql)
+                if dialect == "mysql" and rename and rename[1] in SIDE_TABLE_ONLY:
+                    found.append((start, dialect, rename[1]))
+                created = created_columns(sql)
+                if dialect == "sqlite" and created and created[0] in SIDE_TABLE_ONLY:
+                    listed = next((set(name.strip().lower() for name in m[2].split(",")) for later in texts
+                                   if (m := INSERT.match(later)) and m[1] == created[0]), set())
+                    if any(name.lower() not in listed for name in created[1]):
+                        found.append((start, dialect, created[0]))
     return found
 
 
 def side_table_message(start, dialect, table):
-    return (f"the {dialect} step from {start} adds a column to {table}, one of the tables a format rebuilds most often "
-            f"({', '.join(SIDE_TABLE_ONLY)}). Fix: put the new fact in its own table (CREATE TABLE) keyed by the "
+    return (f"the {dialect} step from {start} gives {table} a column, and it is one of the tables a format rebuilds most "
+            f"often ({', '.join(SIDE_TABLE_ONLY)}). Fix: put the new fact in its own table (CREATE TABLE) keyed by the "
             "row it describes")
 
 
 def copy_forcing(step):
-    """Count of MySQL statements in a step that add a column and force a table copy."""
-    return sum(1 for sql in statements(step, "mysql") if added_to(sql) and COPY_FORCING.search(sql))
+    """Count of tables a MySQL step adds a column to and also gives a CHECK, foreign key, key, index or MODIFY,
+    in the same statement or another statement of the step: each is a full table copy."""
+    texts = statements(step, "mysql")
+    added = {table for sql in texts if (table := added_to(sql))}
+    return sum(1 for table in added
+               if any((m := ALTER.match(sql)) and m[1] == table and COPY_FORCING.search(sql) for sql in texts))
 
 
 def rebuilds(step):
@@ -76,7 +115,7 @@ def scoreboard(releases):
     """One row per release after the first, from [(tag, schema.zig source), ...] oldest first.
 
     Each row: tag, formats shipped since the previous release, steps shipped, SQLite table rebuilds, MySQL
-    statements the database team applies, and the MySQL column adds that force a table copy."""
+    statements the database team applies, and the MySQL tables a step adds a column to and also gives a CHECK, key or MODIFY, which copy the table."""
     rows = []
     for (_, before), (tag, after) in zip(releases, releases[1:]):
         low, high = schema_version(before), schema_version(after)
@@ -109,7 +148,7 @@ def check(root):
         return []
     head = migration_steps((root / SCHEMA).read_text())
     reference = migration_steps(git(root, "show", f"{base}:{SCHEMA}"))
-    return [side_table_message(*found) for found in side_table_violations(new_steps(reference, head))]
+    return [side_table_message(*found) for found in side_table_violations(new_steps(reference, head), reference)]
 
 
 def main(argv):
