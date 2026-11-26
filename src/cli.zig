@@ -2996,6 +2996,7 @@ fn infoConfiguration(store: []const u8, session: []const u8, edit: *const ChatIn
             try admitModel(model);
             input.model = .{ .present = true, .value = model };
         },
+        .connection => |name| input.provider = .{ .present = true, .value = name },
         .label => |label| input.label = try labelArgument(label),
     }
     return input;

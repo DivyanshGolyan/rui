@@ -252,10 +252,14 @@ pub const Job = struct {
     pub fn setInfoEdit(self: *Job, edit: ChatInfo.Edit) !void {
         self.info_edit = edit;
         switch (edit) {
-            .label, .model => |text| {
+            .label, .model, .connection => |text| {
                 if (text.len > self.command_text.len) return error.ValueTooLong;
                 @memcpy(self.command_text[0..text.len], text);
-                self.info_edit = if (edit == .label) .{ .label = self.command_text[0..text.len] } else .{ .model = self.command_text[0..text.len] };
+                self.info_edit = switch (edit) {
+                    .label => .{ .label = self.command_text[0..text.len] },
+                    .model => .{ .model = self.command_text[0..text.len] },
+                    else => .{ .connection = self.command_text[0..text.len] },
+                };
             },
             else => {},
         }

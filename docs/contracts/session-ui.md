@@ -601,14 +601,15 @@ It takes only its natural content height, leaving the latest feed rows visible a
 Opening Model adds only the match and overflow rows it needs; filtering gives their space back to the feed.
 If space runs short, the panel takes feed space, not the retained input or its bottom footer.
 While Settings or chat info (including a nested choice) is open, it takes input precedence over an active approval without changing the approval request, selector or draft; behind the Settings dialog the approval shows faded and takes no input. Closing the panel restores the approval. If approval arrives while a panel is open, it does not steal the panel focus.
-Its title is the chat's label, with Effort, Permissions, Allowed tools, Folder and Model below, and Context only while Current supplies a non-null estimate. Its footer uses the chat's label at the left and only `esc` at the right; Settings uses `Settings` at the left and the same `esc` at the right, with no `info` suffix or `close` wording.
+Its title is the chat's label, with Effort, Permissions, Allowed tools, Folder and Model below, then Account only while the Host serves another connection and Context only while Current supplies a non-null estimate.
+Account shows the chat's connection. Enter lists the connections of the Host's model menu, the chat's own first and marked as current, and choosing another sends one Configure that moves the chat there; choosing the current one saves nothing. The panel never asks the Host whether the move is possible: a connection of another wire format is refused by the Host and the refusal shows on the row as `couldn't save`. Its footer uses the chat's label at the left and only `esc` at the right; Settings uses `Settings` at the left and the same `esc` at the right, with no `info` suffix or `close` wording.
 A missing estimate omits the Context row: neither `unknown` nor an invented zero is a context measurement; an actual zero estimate is shown as zero.
 Folder and Context are read-only; Folder shortens HOME to `~` and fits long paths from the left, preserving the true right edge.
 It first keeps a suffix of whole path components with a leading ellipsis; when the basename itself is too wide, it keeps the longest grapheme-aligned basename suffix that fits after that ellipsis.
 It never arbitrarily cuts the right edge or shows an ellipsis alone instead of all the name.
 A blank row separates the fields from Rename, Archive and Copy last answer, even when the actions stack.
-Keys move focus over what is drawn (`chat_info_focus`): Effort, Permissions, Allowed tools and Model, then the actions; Folder and Context take no focus.
-Up and Down move between rows: Down from Model reaches Rename, and Up from the action row returns to Model.
+Keys move focus over what is drawn (`chat_info_focus`): Effort, Permissions, Allowed tools, Model and Account when shown, then the actions; Folder and Context take no focus.
+Up and Down move between rows: Down from Model reaches Account when it is shown and otherwise Rename, and Up from the action row returns to the row above it (Account or Model).
 Left and Right move between Rename, Archive and Copy last answer on their one row, stopping at either end; when the actions stack, each is its own row, Up and Down move between them, and Left and Right do nothing.
 Tab and Shift-Tab step through every focusable item in order and wrap from Copy last answer to Effort and back.
 Enter opens a choice or runs the action; moving focus never opens a choice.

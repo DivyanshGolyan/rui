@@ -79,7 +79,7 @@ Folder is read-only: HOME is shown as `~`, and a long path keeps its right edge 
 It prefers whole trailing directory components; if the basename itself is too wide, it shows the longest grapheme-aligned basename suffix that fits, never an arbitrary right-side cut or an ellipsis hiding the whole name.
 Context is read-only and appears only when a context estimate is available; a missing estimate is not shown as unknown or zero, while a known zero is shown as zero.
 A blank row separates the fields from Rename, Archive and Copy last answer, including when those actions stack.
-A chat can move to another connection of the same wire format; the model then applies there.
+A chat can move to another connection of the same wire format; the model then applies there. The panel's Account row does it: it appears only while the Host serves another connection, lists them, and a refused move shows `couldn't save` on the row. `rui session configure --connection NAME` does the same from the command line.
 Its filter is the Model field’s editable value, with indented matches below it and no separate `Filter:` row.
 The list shrinks as matches narrow; a quiet `↓ N more` only reports models below the viewport.
 Esc closes an open choice first, then the panel.
