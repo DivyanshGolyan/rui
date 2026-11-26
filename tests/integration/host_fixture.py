@@ -67,3 +67,25 @@ def request(socket_path, store, route, kind, session, **fields):
         separators=(",", ":"),
     ).encode()
     return raw_request(socket_path, route, body)
+
+
+CONVERSATION_KINDS = ("user", "assistant", "tool_result", "hosted_call")
+
+
+def conversation_rows(socket_path, store, session, kinds=CONVERSATION_KINDS):
+    """Every Activity row of these kinds, oldest first: forward pages of one captured end."""
+    rows, end, position, ordinal = [], None, "0", None
+    while True:
+        head, body = request(socket_path, store, "/v1/activity-page", "activity_page", session,
+            end=end, position=position, ordinal=ordinal, direction="forward", kinds=list(kinds), limit="16")
+        assert head.startswith(b"HTTP/1.1 200 "), (head, body)
+        page = json.loads(body)
+        rows += page["items"]
+        if not page["more"]:
+            return rows
+        last = page["items"][-1]
+        end, position, ordinal = page["end"], last["position"], last["ordinal"]
+
+
+def row_kind(row):
+    return next(iter(row["value"]))

@@ -30,6 +30,7 @@ const nextTestingItem = shared_fixtures.nextTestingItem;
 const openCheckedView = shared_fixtures.openCheckedView;
 const os = @import("os");
 const protocol = @import("../protocol.zig");
+const conversation_read = @import("../conversation_read.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const round_budgets = shared_fixtures.round_budgets;
@@ -1867,7 +1868,7 @@ fn plainTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter, repl
     try std.testing.expectEqual(2, read_bytes);
     _ = replies.keep(bytes[0..read_bytes]);
     try meter.stop(.readOwnedContent);
-    var request: protocol.ConversationPage = .{};
+    var request: conversation_read.ConversationPage = .{};
     try request.session.set(session.slice());
     var page: reads_domain.PublicConversationPage = undefined;
     meter.start();

@@ -13,6 +13,7 @@ import time
 import control_fixture as control
 import model_fixture as model
 import host_process
+from host_fixture import conversation_rows, row_kind
 from host_process import HostDiagnostics, PeerCensus, canonical_fixture_root, dispose_all, stop_process, wait_for
 from product_defaults import DEFAULTS, context_window
 
@@ -84,12 +85,9 @@ def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
             def read(route, kind, **fields):
                 return peers.call(kind, lambda: exchange(sock, store, route, kind, **fields))
 
-            head, body = read("/v1/conversation-page", "conversation_page", session=session,
-                              end="0", before_position="0", before_ordinal="0")
-            assert head.startswith(b"HTTP/1.1 200 "), head
-            items = json.loads(body)["items"]
-            user = next(item["position"] for item in items if item["kind"] == "user")
-            assistant = next(item["position"] for item in items if item["kind"] == "assistant")
+            rows = peers.call("activity_page", lambda: conversation_rows(sock, store, session))
+            user = next(row["position"] for row in rows if row_kind(row) == "user")
+            assistant = next(row["position"] for row in rows if row_kind(row) == "assistant")
             routes = [
                 ("/v1/read-result", "read_result", {"key": "message"}, text),
                 *[("/v1/conversation-content", "conversation_content",
@@ -163,11 +161,8 @@ def main():
 
             head, body = read("/v1/read-result", "read_result", key="reply-message")
             assert head.startswith(b"HTTP/1.1 200 ") and body == expected
-            head, body = read("/v1/conversation-page", "conversation_page",
-                                  session=session, end="0", before_position="0", before_ordinal="0")
-            assert head.startswith(b"HTTP/1.1 200 "), head
-            item = json.loads(body)["items"][0]
-            assert item["kind"] == "assistant", item
+            item = peers.call("activity_page", lambda: conversation_rows(sock, store, session), timeout=5)[-1]
+            assert row_kind(item) == "assistant", item
             for index in range(10):
                 deadline = time.monotonic() + 5
                 held_requests.append(peers.expect("conversation_content" if index in (0, 2) else

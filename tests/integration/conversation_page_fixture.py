@@ -6,7 +6,7 @@ import threading
 
 from control_fixture import configure, inspect_execution, message, observe, start_host, successful_sse, raw_request
 import host_process
-from host_fixture import dispose_endpoint, request
+from host_fixture import conversation_rows, dispose_endpoint, request, row_kind
 from host_process import canonical_fixture_root, stop_process, TestHTTPServer, wait_for
 
 
@@ -58,15 +58,11 @@ def whole_stream_shape(length):
             else:
                 message(state, store, "stream-message", session, "input")
 
-            def completed_page():
-                head, body = request(fields["socket"], store, "/v1/conversation-page", "conversation_page", session,
-                    end="0", before_position="0", before_ordinal="0")
-                assert head.startswith(b"HTTP/1.1 200 "), (head, body)
-                items = json.loads(body)["items"]
+            def completed_row():
                 kind = "assistant" if length else "user"
-                return next((item for item in items if item["kind"] == kind), None)
+                return next((row for row in conversation_rows(fields["socket"], store, session) if row_kind(row) == kind), None)
 
-            item = wait_for(completed_page, "stream public identity")
+            item = wait_for(completed_row, "stream public identity")
             identity = dict(position=item["position"], ordinal="0", start="0", stream=True)
             head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **identity)
             assert head.startswith(b"HTTP/1.1 200 ") and body == expected, (head, len(body), length)

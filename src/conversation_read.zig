@@ -7,7 +7,6 @@ pub const public_conversation_page_items = 16;
 pub const ConversationItemKind = enum { user, assistant, tool_result, hosted_call };
 
 pub const ConversationPage = struct {
-    store: Bounded(store_path.max_bytes) = .{},
     session: Bounded(session_id.max_reference_bytes) = .{},
     end: u64 = 0,
     before_position: u64 = 0,

@@ -3,6 +3,7 @@ const tests = @import("../tests.zig");
 const std = @import("std");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
+const conversation_read = @import("../../conversation_read.zig");
 const wire_request = @import("../../wire_request.zig");
 const tool_defs = @import("../../tools.zig");
 const output_decode = @import("../../output_decode.zig");
@@ -454,7 +455,7 @@ test "continued accepted output allows model revisions and keeps public text rea
         .request_id = .{},
     };
     try storage.settleModelSuccess(binding, &output, .{});
-    var public_request = protocol.ConversationPage{};
+    var public_request = conversation_read.ConversationPage{};
     try public_request.session.set(created_session_0.slice());
     const public_page = try store_core.publicConversationPageForTesting(&storage, public_request);
     try std.testing.expectEqual(@as(usize, 2), public_page.count);

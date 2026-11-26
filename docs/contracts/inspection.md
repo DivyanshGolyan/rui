@@ -18,7 +18,7 @@ Explicit **Full** contains Current plus the following closed inventory:
 
 - for a Session, every Session Context Revision; admitted Message with its binding, application or exclusion and public outcome; canonical Conversation entry; Turn; model or Action Operation with its public Resolution; Tool Call and ordered Tool Result, including bounded call rejection; Permission Request, Decision and Authorization; and committed Session stop or Model Interruption command with its public outcome.
 
-A Message or Action Resolution with parts appears in both profiles as its `parts` content value with its owner, where text would be inlined; Full Conversation entries carry the same content value as Conversation pages.
+A Message or Action Resolution with parts appears in both profiles as its `parts` content value with its owner, where text would be inlined; Full Conversation entries carry the same content value as Activity rows.
 
 Full model Operations include `offered_tools`, the sorted tool names in the effective offer frozen at that Operation’s admission.
 Current settings and Full revision settings expose configured allowed intent as `tools` and loaded intent as `loaded_tools`, and app tool names as `app_tools`: Current settings name the app tools the Session's lane declares now, and a Full revision names the app tools that revision itself declared, so a child's revisions are empty and the lane root's revisions carry the declaration history; none reconstructs an existing Operation’s offer.
@@ -54,33 +54,17 @@ Store/report production between windows is excluded, so progressing replies have
 Delivery failure ends the exchange without appending a second HTTP response or revoking committed work; existing reader, report-scratch, socket and connection-population owners retain their cleanup responsibilities.
 No reply queue, worker, payload copy or new persistent state is introduced.
 
-### Public Conversation pages
+### Public conversation content
 
-The separate `conversation_page` Host read is a filtered projection of canonical applied User entries, assistant text and completed Tool Results; it does not change Current/Full reports or persist a transcript.
-Action values, pending input, instruction text, model-output items (including private reasoning and encrypted continuation), proposals and partial tool groups are outside this projection.
-Full retains its complete inventory; Action inspection remains the exact approval-target read.
-A missing Session or malformed/stale cursor fails without changing work.
+A public conversation item is a canonical applied User entry, assistant text or completed Tool Result, which Activity serves as a `user`, `assistant` or `tool_result` row, or a hosted web search, served as a `hosted_call` row.
+Action values, pending input, instruction text, model-output items (including private reasoning and encrypted continuation), proposals and partial tool groups are not public conversation items.
+A Tool Result shares its completed group's final acceptance position and takes a one-based call ordinal; other entries use ordinal zero.
+A row's `(position, ordinal)` names the item; the route below reads its bytes, and a `content` value is `{"type":"text",bytes,sha256}` or, for a Message or Action Resolution with parts, `{"type":"parts",bytes,sha256,owner}`, whose owner reads its parts through [the parts routes](#typed-message-and-action-resolution-parts).
 
-`POST /v1/conversation-page` takes the ordinary wire envelope with `kind:"conversation_page"`, `session`, and decimal-string `end`, `before_position`, `before_ordinal`.
-A first page has both `before` fields at `"0"`; `end:"0"` captures the current end, while a previously observed committed end fixes replay before any later work appends.
-Cursor positions and ordinals must fit SQLite's signed integer domain; invalid public values are rejected before binding, not treated as canonical corruption.
-The returned `end` fixes the last committed Session position at that read; subsequent pages echo it and pass the previous page's `before_position`/`before_ordinal` when `more` is true.
-Results run newest-first, at most 16 items per page; Tool Results share their completed group's final acceptance position and use one-based call ordinals to break ties, descending within that reverse traversal.
-Other entries use ordinal zero.
-Once a group settles its final acceptance position is newer than any prior fixed end, so incomplete results cannot materialize behind an existing cursor.
-Later appends are outside the fixed end.
-Each item carries kind, position, ordinal and its `content` value; no payload is silently shortened into a preview.
-A `content` value is `{"type":"text",bytes,sha256}` or, for a Message or Action Resolution with parts, `{"type":"parts",bytes,sha256,owner}`, whose owner reads its parts through [the parts routes](#typed-message-and-action-resolution-parts).
-Reverse the retrieved sequence for chronological presentation.
-An empty first page has no continuation, even if work later appends.
-
-Continuation cursors must identify an actual public item in that Session at or before the fixed end.
-The Store validates the same public identity used by exact content reads before applying the reverse keyset predicate; invented ordinals and private-only positions are invalid cursors, not alternate positions in the history.
-
-Before exposing a returned page row, cursor or content reader, the Store validates the exposed content's public classification and metadata; ordinary entries also validate their producing admission or Operation and Turn in that Session.
+Before exposing an item's content, the Store validates the exposed content's public classification and metadata; ordinary entries also validate their producing admission or Operation and Turn in that Session.
 A missing public identity remains an ordinary request error; contradictory ordinary provenance or private/missing exposed content under an existing public identity fences the Store rather than disappearing through a filtering join.
 Privacy applies to the exposed content, not its projection backing: accepted provider source rows may legitimately be private.
-These checks retain only constant-size identity/metadata values and no payload or cache; the existing page query's traversal time can still grow with canonical history.
+These checks retain only constant-size identity/metadata values and no payload or cache.
 
 `POST /v1/conversation-content` takes `session`, `position`, `ordinal` and `start` as decimal strings; it resolves the public item in that Session rather than trusting a caller-supplied digest.
 Position and ordinal share the signed SQLite domain; invalid values fail as ordinary identities.
@@ -116,7 +100,7 @@ Content rows are deduplicated across Sessions, so one value can be reachable fro
 Two routes read a parts value:
 
 - `POST /v1/public-parts {session, owner}` returns the whole part list in one JSON reply: the value, `{"type":"parts","bytes":D,"sha256":H,"owner":…}`, then every part in ordinal order. A Text part carries its exact byte length and digest; an Image part also carries its MIME type (`image/png` or `image/jpeg`), its width and height and its name or `null`. The value's `bytes` and `sha256` identify its manifest, not the sum of its parts.
-- `POST /v1/public-part-content {session, owner, part, start[, stream:true]}` returns one zero-based part's exact bytes with the [conversation-content framing](#public-conversation-pages): one 4 KiB window from `start` with `X-Rui-Content-Bytes` and `X-Rui-Next-Offset`, or, with `stream:true` and `start` 0, the whole part checked against its digest.
+- `POST /v1/public-part-content {session, owner, part, start[, stream:true]}` returns one zero-based part's exact bytes with the [conversation-content framing](#public-conversation-content): one 4 KiB window from `start` with `X-Rui-Content-Bytes` and `X-Rui-Next-Offset`, or, with `stream:true` and `start` 0, the whole part checked against its digest.
 
 Every `sha256` is the [Store content digest](store.md#sqlite-and-representation): SHA-256 over the eight-byte big-endian length of `rui/content/v1`, followed by that domain and the bytes; it is not the raw bytes' SHA-256.
 Both routes answer `409 parts_unavailable` with `ContentNotFound` for an unknown owner, an owner outside the Session or a missing part, and with `ContentIsText` for a value without parts; a part read also answers `RangeOutOfBounds` for a `start` past the part's length.
@@ -126,7 +110,7 @@ A part read is indexed: it finds the owner, then the part by ordinal, without re
 Damage found by either read fences the Store.
 
 `session list-parts --session ID --admission ID` and `action list-parts --session ID --action ID` print the list reply as one JSON value. `session read-part` and `action read-part` take the same selectors and `--part N` and write the exact bytes of a Text or Image part to stdout, checked against the length and digest the list certified. A missing part, a value without parts, or a foreign or nonpublic selection fails without writing to stdout.
-Every other public reader projects such a value as its `parts` content value with its owner: Activity and Conversation pages, the Action read, Session listing, Current and Full reports and keyed observation. Only text routes, which serve bytes, refuse it with `ContentIsParts`.
+Every other public reader projects such a value as its `parts` content value with its owner: Activity, the Action read, Session listing, Current and Full reports and keyed observation. Only text routes, which serve bytes, refuse it with `ContentIsParts`.
 
 ### Tool Call proposals
 
@@ -174,8 +158,7 @@ A `ToolPresentation` is `{line, code, sign, publication_position}`.
 A frontend draws `sign` and `line` and never learns which tool wrote the row; a UI that cannot draw a link shows the peer's label or ID in its place.
 One `tools.describe`, exhaustive over the Tool Catalog, gives every tool its description: Bash's is the one its model wrote, and a hosted web search, which has no field for the model to fill, is described by `tool_line` from the facts the provider gave: `Search “query”`, `Open site/page` (without the scheme or `www.`), `Find “pattern” in site/page`, or `Search the web` when the provider gives no details, on one line and cut with `…` within the 200-byte bound.
 The search stays a model output item, not a Tool Call: the Store saves the facts, never the sentence (Store schema 96): the item row holds its action (`none`, `search`, `open_page` or `find_in_page`), whether it failed and the pattern's public content, and each target (a query, each of a search's further queries, or a URL, at most 64 per item) is one `hosted_target` row of exact provider bytes in provider order.
-Conversation pages return it at the item's own position as a `hosted_call` item that carries only its `ToolPresentation` and no content, and the frontend draws it as a tool row, so successes pack with Bash rows and a failure stands apart.
-Activity pages return the same item with its `action` facts too: `kind`, the first eight targets as bounded text references, `targets_total` and the pattern's reference; the presentation line is derived at read from the first target and the pattern, never stored.
+Activity pages return it at the item's own position as a `hosted_call` row that carries its `ToolPresentation` and no content, and the frontend draws it as a tool row, so successes pack with Bash rows and a failure stands apart; the row also carries its `action` facts: `kind`, the first eight targets as bounded text references, `targets_total` and the pattern's reference; the presentation line is derived at read from the first target and the pattern, never stored.
 `activity-content` on a `hosted_call` row takes an optional `field`: the index into the row's body order (the targets in provider order, then the pattern), so every exact text opens; a Session stored before schema 96 reads its searches as `none` with no targets, drawn `Search the web`.
 Every screen draws a description as one line of prose: controls, bidi controls and `\` escape as on any terminal line, while `"` shows as written, since no escape contains one; an exact command or field still escapes `"` too.
 
@@ -679,7 +662,6 @@ Restart never imports leftover ingress.
 | [Activity `at`](#public-session-activity) | `store/tests/` `'every activity row is dated by the fact that owns it'` and `'a Tool Result is dated by its group's last acceptance, even when the clock stepped back'`, `protocol_reply.zig` `'an activity row carries its time'`, `activity_integration.py` | None |
 | [Model call Activity](#public-session-activity) (D179, D219) | `store/tests/` `'model_call derives frozen model and usage'`, `'model_call retry emits one row'` on SQLite and MySQL; `server_execution.zig` `'model resolution owner'` on SQLite and live MySQL (success/failure/interruption/stop/archive × prelaunch/no-response/first-response, with controls across live/backoff/replacement-prelaunch; backoff before and after custody retirement/reopen, replacement clears at admission; controls also inject callbacks during/after capture, including MySQL write-rerun; immutable after cleanup, coherent timing pairs, unchanged round budgets); `activity_golden_tests.zig`; `activity-integration`; schema and MySQL `'model call timing'` migration tests; provider timing tests | One row per resolved Operation at admission, final-attempt timings (not retry totals), null first event when none arrived, frozen requested model, stored served-model evidence and usage, pagination and reopen. Format-68 nullable ALTER migrations preserve format-67 resolutions without backfill. |
 | First Message, starter and `from_person_at` | `store/tests/` `'a list row carries its Session's Label, times, first Message, work and peers'`. `peer_integration.py`: B's first Message names A as its sender, A's names none, and only A has a Message from a person or script | Configure-only Sessions report `null` |
-| [Conversation cursor bounds](#public-conversation-pages) | `protocol.zig` `'conversation cursor parser rejects'`, `conversation_page_integration.py` | None |
 | [Ingress through admission](#ingress-ownership-through-admission) | `admission_integration.sh` | None |
 | Slow report readers beside controls | `server_delivery_integration.py` | Mid-capture and partial-delivery failure: none located |
 
@@ -698,6 +680,6 @@ Restart never imports leftover ingress.
 | Reply delivery inactivity and drain | `'reply delivery'`, `server-delivery-integration`, `PeerCensus` | Run apart from load. Not Mac drain or SIGPIPE |
 | Controls queue behind settlement | `'active model settlement'`, `control_integration.py` | Store hold proves exclusion, not latency. Unordered contention reports unavailable |
 | Host reply and request bounds | `'exact worst-case'` | Each bound derives from the JSON shape its writer writes; full 128-byte keys, escaped Store, Session and workspace strings and escaped 96-byte codes. No fixed 8 KiB allowance |
-| [Conversation pages](#public-conversation-pages) and streaming | `'public'`, `'sequential work'`, `'public assistant message provenance'`, `conversation_page_integration.py` | Exact message item, public part text, Session, Turn and Attempt bindings. Whole-value reads check stored bytes against their digest at the end; ranged reads past the start do not. No aggregate memory |
+| [Conversation content](#public-conversation-content) and streaming | `'public'`, `'sequential work'`, `'public assistant message provenance'`, `conversation_page_integration.py` | Exact message item, public part text, Session, Turn and Attempt bindings. Whole-value reads check stored bytes against their digest at the end; ranged reads past the start do not. No aggregate memory |
 | [Session activity](#public-session-activity) and tool labels | `activity-integration`, `'tool label'` | `RUI_ACTIVITY_MEASURE=1` samples. No latency bound |
 | [Content step faults fence](store.md#canonical-content-reads-and-retention) | `'public content SQLite step'` | None |

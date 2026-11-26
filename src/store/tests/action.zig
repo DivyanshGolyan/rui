@@ -1,6 +1,7 @@
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const conversation_read = @import("../../conversation_read.zig");
 const wire_request = @import("../../wire_request.zig");
 const tool_defs = @import("../../tools.zig");
 const store_core = @import("../Store.zig");
@@ -351,7 +352,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, binding, "action-metadata");
 
-            var public_request = protocol.ConversationPage{};
+            var public_request = conversation_read.ConversationPage{};
             try public_request.session.set(session.slice());
             const proposed = try store_core.publicConversationPageForTesting(&storage, public_request);
             try std.testing.expectEqual(@as(usize, 1), proposed.count);
@@ -2488,7 +2489,7 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
                 try std.testing.expectEqual(@as(usize, 40), value_count);
             }
             _ = try storage.openActivityContent(&.{ .session = session, .position = value_user.?.position, .ordinal = value_user.?.ordinal });
-            var conversation: protocol.ConversationPage = .{ .session = session };
+            var conversation: conversation_read.ConversationPage = .{ .session = session };
             var person_count: usize = 0;
             var peer_count: usize = 0;
             var final_count: usize = 0;

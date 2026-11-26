@@ -2,6 +2,7 @@ const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
+const conversation_read = @import("../../conversation_read.zig");
 const wire_request = @import("../../wire_request.zig");
 const output_decode = @import("../../output_decode.zig");
 const store_core = @import("../Store.zig");
@@ -36,7 +37,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             const created_session_0_reply = try storage.configure(&configuration, .{});
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
-            var request = protocol.ConversationPage{};
+            var request = conversation_read.ConversationPage{};
             try request.session.set(created_session_0.slice());
             try std.testing.expectEqual(@as(usize, 0), (try store_core.publicConversationPageForTesting(&storage, request)).count);
 
@@ -167,7 +168,7 @@ test "private-only model output never becomes public conversation" {
                 .model_evidence = testing_absent_model_evidence,
                 .request_id = .{},
             }, .{});
-            var request = protocol.ConversationPage{};
+            var request = conversation_read.ConversationPage{};
             try request.session.set(session.slice());
             const page = try store_core.publicConversationPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 1), page.count);
@@ -202,7 +203,7 @@ test "public tool-result cursor crosses a completed group boundary" {
                 call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = call_id, .decoded_call_id = call_id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
             }
             try settleCallsForTesting(&storage, &tmp, binding, "group-metadata", &calls);
-            var cursor = protocol.ConversationPage{};
+            var cursor = conversation_read.ConversationPage{};
             try cursor.session.set(session.slice());
             const newest = try store_core.publicConversationPageForTesting(&storage, cursor);
             try std.testing.expectEqual(@as(usize, 16), newest.count);

@@ -344,23 +344,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/conversation-page": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** One page of a Session's conversation, newest first. */
-        post: operations["conversationPage"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/conversation-content": {
         parameters: {
             query?: never;
@@ -1206,132 +1189,6 @@ export interface components {
             start: "0";
             /** @constant */
             stream?: true;
-        };
-        ConversationPageReply: {
-            /** @constant */
-            version: "30";
-            /** @constant */
-            type: "conversation_page";
-            /** @constant */
-            direction: "newest_first";
-            end: components["schemas"]["Decimal"];
-            items: ({
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "user";
-                content: components["schemas"]["ContentValue"];
-            } | {
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "user";
-                content: components["schemas"]["ContentValue"];
-                admitted_at: components["schemas"]["Decimal"];
-                sender: components["schemas"]["NamedPeer"] | null;
-                source_action: components["schemas"]["Decimal"] | null;
-            } | {
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "assistant";
-                content: components["schemas"]["ContentValue"];
-            } | {
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "tool_result";
-                content: components["schemas"]["ContentValue"];
-            } | {
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "tool_result";
-                content: components["schemas"]["ContentValue"];
-                presentation: components["schemas"]["ToolPresentation"];
-            } | {
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "hosted_call";
-            } | {
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "hosted_call";
-                presentation: components["schemas"]["ToolPresentation"];
-            })[];
-            /** @constant */
-            more: false;
-        } | {
-            /** @constant */
-            version: "30";
-            /** @constant */
-            type: "conversation_page";
-            /** @constant */
-            direction: "newest_first";
-            end: components["schemas"]["Decimal"];
-            items: ({
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "user";
-                content: components["schemas"]["ContentValue"];
-            } | {
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "user";
-                content: components["schemas"]["ContentValue"];
-                admitted_at: components["schemas"]["Decimal"];
-                sender: components["schemas"]["NamedPeer"] | null;
-                source_action: components["schemas"]["Decimal"] | null;
-            } | {
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "assistant";
-                content: components["schemas"]["ContentValue"];
-            } | {
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "tool_result";
-                content: components["schemas"]["ContentValue"];
-            } | {
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "tool_result";
-                content: components["schemas"]["ContentValue"];
-                presentation: components["schemas"]["ToolPresentation"];
-            } | {
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "hosted_call";
-            } | {
-                position: components["schemas"]["Decimal"];
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                kind: "hosted_call";
-                presentation: components["schemas"]["ToolPresentation"];
-            })[];
-            /** @constant */
-            more: true;
-            before_position: components["schemas"]["Decimal"];
-            before_ordinal: components["schemas"]["Decimal"];
-        };
-        ConversationPageRequest: {
-            /** @constant */
-            version: "30";
-            /** @constant */
-            kind: "conversation_page";
-            store: string;
-            session: string;
-            end: components["schemas"]["Decimal"];
-            before_position: components["schemas"]["Decimal"];
-            before_ordinal: components["schemas"]["Decimal"];
         };
         /** @description An unsigned 64-bit integer in decimal. */
         Decimal: string;
@@ -4691,44 +4548,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ListSessionsReply"];
-                };
-            };
-            /** @description A refusal or failure. */
-            default: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorReply"];
-                };
-            };
-        };
-    };
-    conversationPage: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description The wire version this document describes. Any other version is refused. */
-                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
-                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
-                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ConversationPageRequest"];
-            };
-        };
-        responses: {
-            /** @description The reply. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ConversationPageReply"];
                 };
             };
             /** @description A refusal or failure. */
