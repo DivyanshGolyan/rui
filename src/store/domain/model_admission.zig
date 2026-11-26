@@ -123,13 +123,11 @@ pub const tool_continuation_selection = rsql.Read(.{
     .cardinality = .optional,
 });
 
-pub const retry_allowance_open_sql = store_schema.retry_allowance_open_sql;
-pub const retry_exhausted_sql = store_schema.retry_exhausted_sql;
 pub const retry_admission_page_rows = product_defaults.active_capacity + 1;
 const retry_admission_select_text = std.fmt.comptimePrint(
     "SELECT o.turn_id,o.operation_id,o.attempt_ordinal,o.retry_due_at_ms," ++ rsql.session_head_columns ++ " " ++
         "FROM model_operation o @index(model_operation_retry_due) JOIN session s ON s.session_ref=o.session_ref " ++
-        "WHERE o.resolution_code IS NULL AND o." ++ retry_allowance_open_sql ++ " " ++
+        "WHERE o.resolution_code IS NULL AND o." ++ store_schema.retry_allowance_open_sql ++ " " ++
         "AND o.retry_due_at_ms<=?1 AND o.operation_id>?2 AND " ++ "@served(s.provider)" ++
         " ORDER BY o.operation_id LIMIT {d}",
     .{retry_admission_page_rows},
@@ -1380,7 +1378,7 @@ pub fn dispatchWork(reader: anytype, paused: bool, capacity: action_domain.Capac
 const retrying_attempt = rsql.Read(.{
     .sql = "SELECT 1 AS retrying,EXISTS(SELECT 1 FROM model_operation waiting @index(model_operation_retry_due) " ++
         "JOIN turn waiting_turn ON waiting_turn.operation_id=waiting.operation_id AND waiting_turn.outcome_code IS NULL " ++
-        "WHERE waiting.resolution_code IS NULL AND waiting." ++ retry_allowance_open_sql ++ " AND waiting.retry_due_at_ms>0) AS waiting " ++
+        "WHERE waiting.resolution_code IS NULL AND waiting." ++ store_schema.retry_allowance_open_sql ++ " AND waiting.retry_due_at_ms>0) AS waiting " ++
         "FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
         "WHERE active.outcome_code IS NULL AND current.resolution_code IS NULL AND current.retry_due_at_ms IS NOT NULL LIMIT 1",
     .Args = struct {},
@@ -1397,7 +1395,7 @@ const due_retries = rsql.Read(.{
 
 const next_scheduled_retry = rsql.Read(.{
     .sql = "SELECT o.retry_due_at_ms FROM model_operation o @index(model_operation_retry_due) JOIN session s ON s.session_ref=o.session_ref " ++
-        "WHERE o.resolution_code IS NULL AND o." ++ retry_allowance_open_sql ++ " " ++
+        "WHERE o.resolution_code IS NULL AND o." ++ store_schema.retry_allowance_open_sql ++ " " ++
         "AND o.retry_due_at_ms>?1 AND " ++ "@served(s.provider)" ++
         " ORDER BY o.retry_due_at_ms LIMIT 1",
     .Args = struct { now_ms: u64 },
@@ -1410,7 +1408,7 @@ pub const retry_admission_select_sql = due_retries.sql;
 const retry_attempt = rsql.Write(.{
     .sql = "UPDATE model_operation SET " ++ model_attempt.replacement_sql ++ ",attempt_ordinal=?2,retry_due_at_ms=0,attempt_at=@now,retry_scheduled_at=NULL " ++
         "WHERE operation_id=?1 AND session_ref=@session(?6) AND turn_id=?3 AND resolution_code IS NULL " ++
-        "AND attempt_ordinal=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5",
+        "AND attempt_ordinal=?4 AND " ++ store_schema.retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5",
     .Args = struct { operation_id: u64, replacement: u64, turn_id: u64, attempt_ordinal: u64, now_ms: u64, session: rsql.SessionHead },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.RetryNoLongerDue } },
 });

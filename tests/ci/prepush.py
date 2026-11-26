@@ -34,6 +34,7 @@ import failure_cause
 import report_issue
 from qualification import matrix_targets
 from pr_overlap import repo_from_remote
+from release_numbers import SCHEMA_SOURCES
 from select_tests import FIXTURES
 
 import build_artifact
@@ -74,11 +75,11 @@ SOURCE_POLICY = (
     (("src/store/*.zig", "src/store.zig"), (("test_store_engine_boundary.py", "*"),
                                           ("test_store_conformance.py", "*"))),
     (("tests/ci/caller_errors.py",), (("test_store_engine_boundary.py", "*"),)),
-    (("src/store/schema.zig", "tests/integration/host_process.py"),(("test_store_schema_fixtures.py", "*"),)),
+    ((*SCHEMA_SOURCES, "tests/integration/host_process.py"),(("test_store_schema_fixtures.py", "*"),)),
     (("build.zig.zon", "src/h2/h2.zig", "tests/integration/*.py",
       "tests/integration/*.sh", "tests/qualification/*.go", "tests/qualification/*.py", "tests/qualification/*.sh"),
      (("test_transport_version_fixtures.py", "*"),)),
-    (("src/store/schema.zig", "src/store/migration_baseline.sqlite.sql",
+    ((*SCHEMA_SOURCES, "src/store/migration_baseline.sqlite.sql",
       "src/store/migration_baseline.mysql.sql", "src/store/migration_baseline_rows.sql"),
      (("test_store_schema_version.py", "*"),)),
     (("tests/ci/prepush.py",), (("test_prepush_red.py", "*"),
@@ -435,7 +436,7 @@ def checks(paths, available, base, mode="default", mysql=False):
         yield "client locality", [sys.executable, "-B", "tests/ci/client_locality.py"]
     if any(matches(path, DEEP_MODULES_ALLOWANCE_INPUTS) for path in paths):
         yield "deep-modules allowance", [sys.executable, "-B", "tests/ci/deep_modules_allowance.py"]
-    if "src/store/schema.zig" in paths:
+    if any(source in paths for source in SCHEMA_SOURCES):
         yield "schema number", [sys.executable, "-B", "tests/ci/schema_number.py", "--check"]
     generation = {"openapi.json", *GENERATED[1:], "clients/ts/scripts/generate-settings.mjs"}
     if any(path.startswith("src/") for path in paths):

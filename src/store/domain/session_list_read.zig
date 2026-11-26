@@ -23,7 +23,7 @@ const archive_membership = @import("archive_membership.zig");
 const content_domain = @import("content.zig");
 const content_parts = @import("content_parts.zig");
 const configuration_domain = @import("configuration.zig");
-const model_admission_domain = @import("model_admission.zig");
+const store_schema = @import("../schema.zig");
 const reads_domain = @import("reads.zig");
 const report_domain = @import("report.zig");
 const tool_set = @import("tool_set.zig");
@@ -237,7 +237,7 @@ const retry_crossings = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key FROM model_operation o @index(model_operation_retry_due) " ++
         "JOIN turn t ON t.operation_id=o.operation_id AND t.outcome_code IS NULL " ++
         "JOIN session s ON s.session_ref=o.session_ref " ++
-        "WHERE o.resolution_code IS NULL AND o." ++ model_admission_domain.retry_allowance_open_sql ++
+        "WHERE o.resolution_code IS NULL AND o." ++ store_schema.retry_allowance_open_sql ++
         " AND o.retry_due_at_ms>?1 AND o.retry_due_at_ms<=?2 LIMIT " ++ std.fmt.comptimePrint("{d}", .{change_ring.Touched.max + 1}),
     .Args = struct { after: u64, through: u64 },
     .Row = struct { session_ref: SessionText, workspace_key: rsql.Positive },
@@ -247,7 +247,7 @@ const retry_crossings = rsql.Read(.{
 const next_retry_crossing = rsql.Read(.{
     .sql = "SELECT o.retry_due_at_ms FROM model_operation o @index(model_operation_retry_due) " ++
         "JOIN turn t ON t.operation_id=o.operation_id AND t.outcome_code IS NULL " ++
-        "WHERE o.resolution_code IS NULL AND o." ++ model_admission_domain.retry_allowance_open_sql ++
+        "WHERE o.resolution_code IS NULL AND o." ++ store_schema.retry_allowance_open_sql ++
         " AND o.retry_due_at_ms>?1 " ++
         "ORDER BY o.retry_due_at_ms LIMIT 1",
     .Args = struct { after: u64 },

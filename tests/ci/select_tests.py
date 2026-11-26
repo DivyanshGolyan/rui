@@ -23,7 +23,7 @@ from import_architecture import scoped_imports
 from platform_boundary import mac_path
 from qualification import RESOURCES
 from strict_paths import strict
-from release_numbers import SCHEMA as STORE_SCHEMA, digest_rows, migration_steps, schema_version, touches_mysql_migration
+from release_numbers import SCHEMA as STORE_SCHEMA, SCHEMA_SOURCES, digest_rows, migration_steps, schema_version, touches_mysql_migration
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -370,7 +370,7 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
                    "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py",
                    "tests/ci/release.py", "tests/ci/release_publication.py", "tests/ci/git_command.py", "tests/ci/test_release_publication.py", "tests/ci/release_numbers.py", "tests/ci/qualification.py",
                    "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
-                   "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/store/schema.zig",
+                   "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, *SCHEMA_SOURCES,
                    "src/fetch_dependencies.sh", "release/*", "install.sh", "build.zig", "build.zig.zon")
 
 UPGRADE_CHECK_PATHS = (UPGRADE, "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
@@ -1144,7 +1144,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             "live_needs": sorted(([root, reason] for root, reason in live_needs), key=lambda need: (need[0] or "", need[1])),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
             "mac_required": mac_required, "upgrade_required": upgrade_required,
-            "unit_compile_required": "src/store/schema.zig" in paths,
+            "unit_compile_required": any(source in paths for source in SCHEMA_SOURCES),
             "mysql_migration": mysql_migration,
             "mysql_tests": mysql_tests,
             "retry": not strict(paths),
