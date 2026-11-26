@@ -183,8 +183,8 @@ pub fn render(comptime expr: Expr) []const u8 {
 /// atom is parenthesised, so the text reads back with the structure the value has. This is the only place that decides it.
 fn operand(comptime expr: Expr) []const u8 {
     return switch (expr) {
-        .col, .int, .text, .null_value, .coalesce, .count, .exists => render(expr),
-        .all, .any, .not, .cmp, .is_null, .is_not_null, .one_of, .not_exists => "(" ++ render(expr) ++ ")",
+        .col, .int, .text, .null_value, .coalesce, .count, .exists, .call, .group => render(expr),
+        .all, .any, .not, .cmp, .is_null, .is_not_null, .one_of, .not_exists, .between, .in_list => "(" ++ render(expr) ++ ")",
     };
 }
 
@@ -202,7 +202,7 @@ fn joined(comptime parts: []const Expr, comptime separator: []const u8) []const 
 
 fn joinedPlain(comptime parts: []const Expr, comptime separator: []const u8) []const u8 {
     comptime {
-        if (parts.len == 0) @compileError("rule: a coalesce needs a member");
+        if (parts.len == 0) @compileError("rule: a call, coalesce or IN list needs a member");
         var out: []const u8 = "";
         for (parts, 0..) |part, index| out = out ++ (if (index == 0) "" else separator) ++ render(part);
         return out;
@@ -277,4 +277,11 @@ test "SH-181 every node kind used as an operand keeps its own structure" {
     try std.testing.expectEqualStrings("(t.a IS NULL) IN ('x')", comptime render(oneOf(isNull(x), &.{"x"})));
     try std.testing.expectEqualStrings("((t.a=1 AND t.a=2)='x' OR (t.a=1 AND t.a=2)='y' OR (t.a=1 AND t.a=2)='z')", comptime render(oneOf(all(&.{ eq(x, int(1)), eq(x, int(2)) }), &.{ "x", "y", "z" })));
     try std.testing.expectEqualStrings("(t.a=1)=(t.a=2)", comptime render(eq(eq(x, int(1)), eq(x, int(2)))));
+}
+
+test "SH-181 a BETWEEN or an IN list used as an operand is parenthesised, a call and a group are not" {
+    const x = comptime col("t", "a");
+    try std.testing.expectEqualStrings("(t.a BETWEEN 1 AND 3)=1", comptime render(eq(between(x, int(1), int(3)), int(1))));
+    try std.testing.expectEqualStrings("(t.a IN (1,2)) IS NULL", comptime render(isNull(inList(x, &.{ int(1), int(2) }))));
+    try std.testing.expectEqualStrings("length(t.a)=2", comptime render(eq(call("length", &.{x}), int(2))));
 }
