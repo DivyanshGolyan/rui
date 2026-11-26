@@ -54,7 +54,8 @@ pub fn classify(
 /// migration that rewrites `core_command.code`.
 const renamed_codes = [_]struct { saved: []const u8, current: []const u8 }{
     .{ .saved = "unsupported_provider", .current = "unknown_connection" },
-    .{ .saved = "provider_is_immutable", .current = "connection_is_immutable" },
+    .{ .saved = "provider_is_immutable", .current = "connection_wire_differs" },
+    .{ .saved = "connection_is_immutable", .current = "connection_wire_differs" },
 };
 
 fn rejectionOf(comptime Rejection: type, code: []const u8) ?Rejection {
@@ -64,7 +65,7 @@ fn rejectionOf(comptime Rejection: type, code: []const u8) ?Rejection {
 }
 
 test "a refusal saved under a renamed code replays as its current name" {
-    const Current = enum { unknown_connection, connection_is_immutable, other };
+    const Current = enum { unknown_connection, connection_wire_differs, other };
     const digest: [32]u8 = @splat(7);
     inline for (.{ cli_value.CommandKind.configure, cli_value.CommandKind.message }) |kind| {
         for (renamed_codes) |rename| {

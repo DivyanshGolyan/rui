@@ -167,6 +167,15 @@ fn tokenCount(text: []const u8, allow_zero: bool) !u64 {
     return value;
 }
 
+/// The one rule for moving a Session to another connection: the target must be one a Session may be
+/// created on and speak the Session's own codec, so only the account changes. Replay keys opaque state on
+/// the connection, so the history stays valid; a signed-out target fails at its first request by name.
+pub fn switchRejection(existing: *const CurrentConfiguration, requested: connection.Name, served: *const provider_route.Served) ?configuration_admission.Rejection {
+    if (requested.eql(existing.provider)) return null;
+    const codec = served.codecOf(requested.slice()) orelse return .connection_unserved;
+    return if (codec == existing.codec) null else .connection_wire_differs;
+}
+
 pub fn configurationBeforeWorkspace(
     selected_facts: []const model_catalog.Entry,
     current: ?*const CurrentConfiguration,
@@ -180,15 +189,7 @@ pub fn configurationBeforeWorkspace(
     else
         null;
     _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
-    const provider = if (requested.provider.state == .value)
-        connection.Name.parse(requested.provider.value.slice()) orelse return .unknown_connection
-    else
-        null;
-    if (current) |existing| {
-        if (provider) |value| {
-            if (!value.eql(existing.provider)) return .connection_is_immutable;
-        }
-    }
+    if (requested.provider.state == .value) _ = connection.Name.parse(requested.provider.value.slice()) orelse return .unknown_connection;
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     if (compact_at) |tokens| if (model_catalog.find(selected_facts, model)) |known| {
@@ -1014,6 +1015,7 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     const model = if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice();
     // Named tools resolve through the lane before their parent authority is judged, so an unknown or unavailable name
     // is refused by name, as the Host-only path did.
+    if (current_configuration) |existing| if (switchRejection(existing, provider, request.served)) |rejection| return .{ .rejected = rejection };
     if (configuration.tools.state == .value) if (toolsRejection(&reads.lane_tools, request.served, provider, requestedNames(configuration))) |rejection| return .{ .rejected = rejection };
     reads.defaults = configuration_defaults.resolve(v.model.facts(), .{
         .creating = creating,

@@ -51,7 +51,7 @@ A creation that lacks a model, a Workspace (standalone, without a parent) or a c
 A standalone creation carries the caller’s Workspace, including when its tools do not include Bash; a child inherits its parent’s Workspace. A supplied Workspace is checked before creation. Enabling Bash later runs it in the saved Workspace, which a later configure cannot change.
 Creation atomically establishes Session, baseline, Workspace bookkeeping, access scope and request answer. An accepted configure creation or creating Message answer saves a `configuration` object with `connection`, `model`, nullable `reasoning_effort`, `workspace`, `tools`, `loaded_tools`, `permission_mode` and nullable decimal-string `compaction_trigger` with the admission; same-key replay returns it unchanged after later revisions or restart, with bounded work independent of Session history. Addressed configure and ordinary Message answers do not include creation configuration.
 The creation spec may carry personal saved effort and Permission Mode in its `preferences` object, separate from explicit setting members. The Host applies them only to omitted creation settings: a supported saved effort wins over the model default, and a saved Permission Mode applies when valid and within parent authority. An unsupported saved effort or invalid or parent-widening saved permission falls back to the Host default, which remains subject to parent authority. Explicit settings, including null effort requesting the Host default, take precedence and are validated normally; they never silently fall back to a saved value. Preferences are create-only; an addressed update carrying them is refused. The creation answer exposes the resolved configuration.
-Addressed configure preserves every omitted setting; connection and Workspace remain immutable, while the model may change within the connection (D192).
+Addressed configure preserves every omitted setting; Workspace remains immutable, while the model may change within the connection (D192) and the connection may change to another served connection of the same wire format, so a person can move a chat to another account and keep working (#2362).
 A creating spec may also name `parent`, a Session ID relation, never a revisioned setting (D178).
 The child inherits that Session's Workspace and connection and may only narrow its configured tool names and Permission Mode, through the same admission owner as `start_agent` (D122, D140).
 For an omitted child `compactAt`, the Host uses the inherited connection, not a personal saved connection. For example, with a Codex parent and `gpt-6.2-astra`, the threshold is 244,800 tokens whether the client saved OpenAI or Codex. A saved OpenAI binding alone would give 945,000, 90% of this model's 1,050,000-token window, since OpenAI has no provider trigger and `gpt-6.2-astra` has no price step.
@@ -65,13 +65,13 @@ A creation-only `preset` seeds configure from a connect-time spec: supplied valu
 Preset lookup/update rejections instead bind the original request, including the preset name, and replay that saved rejection even if the Host can later resolve the preset.
 
 Later configurations preserve omitted connection/model values and accept explicit equal values.
-A different connection rejects the whole update, without a revision or partial changes; unknown connections reject without fallback.
+A different connection is accepted only when it is a name a Session may be created on and speaks the Session's own codec (`switchRejection` owns the rule); an unserved name is refused with `connection_unserved` and another wire format with `connection_wire_differs`, each rejecting the whole update without a revision or partial changes, and never falling back to another connection. An accepted switch is an ordinary revision that writes a `session_changed` row for `provider`; it applies to subsequent model requests as a model change does, and a signed-out target fails at its first request by its own name. Replay keys opaque state on the connection, so the other account's private state is never reused.
 A model change is an ordinary revision and writes a `session_changed` row for `model`, before, during or after work.
 The Session ID and attached children carry on.
 Validate retained or supplied effort against the new model only when the catalog lists it; an unlisted model passes any supported effort word through (D229/D137).
 The retained or supplied compactAt must fit the new model's known window.
 
-To use another connection, create a new Session.
+To use a connection of another wire format, create a new Session.
 V1 has no fork, history transfer or cross-provider handoff.
 Operations still resolve their frozen settings revisions, and output retains its producing Operation's provenance.
 

@@ -28,7 +28,7 @@ pub const Rejection = enum {
     permission_mode_wider_than_parent,
     invalid_workspace,
     workspace_is_immutable,
-    connection_is_immutable,
+    connection_wire_differs,
     model_is_immutable,
     revision_exhausted,
     skills_unavailable,
