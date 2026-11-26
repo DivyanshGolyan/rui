@@ -7,6 +7,7 @@ const attention = @import("attention.zig");
 const change_ring = @import("change_ring.zig");
 const failure_class = @import("failure_class.zig");
 const state_marks = @import("marks.zig");
+const say_text = @import("testing/say_text.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
 const model_picker = @import("model_picker.zig");
@@ -810,7 +811,7 @@ pub const Effects = struct {
 };
 
 pub const Said = struct {
-    notice: ?[]const u8 = null,
+    notice: ?state_marks.Say = null,
     stoppable: bool,
 };
 
@@ -851,8 +852,13 @@ pub const Notice = struct {
     len: usize = 0,
     colour: Colour,
 
+    /// The words alone; `said` is what the footer draws.
     pub fn text(self: *const Notice) []const u8 {
         return self.bytes[0..self.len];
+    }
+
+    pub fn said(self: *const Notice) state_marks.Say {
+        return .{ .words = self.text(), .tone = if (self.colour == .attention) .attention else .quiet };
     }
 };
 
@@ -1460,7 +1466,6 @@ pub const State = struct {
     fn say(self: *State, colour: Colour, comptime format: []const u8, args: anytype) void {
         var notice: Notice = .{ .colour = colour };
         var writer = std.Io.Writer.fixed(&notice.bytes);
-        if (colour == .attention) writer.writeAll(state_marks.attention_sign) catch {};
         writer.print(format, args) catch {};
         notice.len = writer.buffered().len;
         self.notice = notice;
@@ -4080,8 +4085,8 @@ pub fn footerRight(state: *const State) []const u8 {
     return "";
 }
 
-pub fn footerNotice(state: *const State) ?[]const u8 {
-    return if (state.notice) |*notice| notice.text() else null;
+pub fn footerNotice(state: *const State) ?state_marks.Say {
+    return if (state.notice) |*notice| notice.said() else null;
 }
 
 fn segmentsOf(arena: Allocator, spans: []const Span, width: u16, fill: Style) error{OutOfMemory}![]const Segment {
@@ -4333,7 +4338,7 @@ test "SUI-172 an attention notice starts with the sign and the other tones carry
         state.say(colour, "Select {s}.", .{"a chat"});
         var expected: [32]u8 = undefined;
         const sign = if (colour == .attention) state_marks.attention_sign else "";
-        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{s}Select a chat.", .{sign}), state.notice.?.text());
+        try say_text.expect(try std.fmt.bufPrint(&expected, "{s}Select a chat.", .{sign}), state.notice.?.said());
         try std.testing.expectEqual(colour, state.notice.?.colour);
     }
 }
@@ -4341,7 +4346,7 @@ test "SUI-172 an attention notice starts with the sign and the other tones carry
 fn expectNotice(state: *State, expected: ?[]const u8) !void {
     if (expected) |text| {
         const notice = state.notice orelse return error.TestExpectedNotice;
-        try std.testing.expectEqualStrings(text, notice.text());
+        try say_text.expect(text, notice.said());
     } else if (state.notice) |*notice| try std.testing.expectEqualStrings("", notice.text());
 }
 
@@ -5187,7 +5192,7 @@ test "OVM-4 stop gestures follow the work state" {
 }
 
 fn expectSaid(notice: ?[]const u8, stoppable_: bool, said: Said) !void {
-    try std.testing.expectEqualStrings(notice orelse "", said.notice orelse "");
+    try std.testing.expectEqualStrings(notice orelse "", if (said.notice) |shown| shown.words else "");
     try std.testing.expectEqual(notice == null, said.notice == null);
     try std.testing.expectEqual(stoppable_, said.stoppable);
 }
@@ -5211,7 +5216,7 @@ test "conversation footer domain carries chat notices but never upgrade status" 
         state.notice = null;
         if (notice) state.say(.normal, "Copied 3 lines", .{});
         const said = conversation(&state, "k7m2qx".*, true);
-        try std.testing.expectEqualStrings(if (notice) "Copied 3 lines" else "", said.notice orelse "");
+        try std.testing.expectEqualStrings(if (notice) "Copied 3 lines" else "", if (said.notice) |shown| shown.words else "");
     };
     for (endings) |how| for (std.enums.values(upgrade_status.Outcome)) |outcome| {
         state.notice = null;
@@ -8243,7 +8248,7 @@ test "list input has no text domain and ignored printable or slash input preserv
     try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .ignored } }));
     try std.testing.expectEqual(selected, state.selected);
     try std.testing.expect(state.notice != null);
-    try std.testing.expectEqualStrings("retained notice", state.notice.?.text());
+    try say_text.expect("retained notice", state.notice.?.said());
     try std.testing.expectEqual(@as(usize, 0), state.request_count);
 }
 
@@ -8280,7 +8285,7 @@ test "creation accepted opens its known reference and rejected creation permits 
     _ = try submit(&state);
     try expectEffects(&.{}, try step(&state, .{ .created = .{ .failed = "rejected" } }));
     try std.testing.expect(!state.creating());
-    try std.testing.expectEqualStrings("! Not created: rejected", state.notice.?.text());
+    try say_text.expect("! Not created: rejected", state.notice.?.said());
     try expectEffects(&.{.{ .create = null }}, try submit(&state));
     try expectEffects(&.{ .{ .open = "n3w5es".* }, .list_models }, try step(&state, .{ .created = .{ .created = .{ .reference = "n3w5es".*, .handle = "capture" } } }));
     try std.testing.expectEqualStrings("n3w5es", &state.selected.session);
@@ -8448,7 +8453,7 @@ fn stopCase4() !void {
             state.upgrade.after = if (blocked) .blocked else .reobserving;
             try expectEffects(&.{}, try step(&state, event));
             try std.testing.expectEqual(@as(usize, 0), state.request_count);
-            try std.testing.expectEqualStrings(state_marks.attention_sign ++ upgrade_recovery, state.notice.?.text());
+            try say_text.expect(state_marks.attention_sign ++ upgrade_recovery, state.notice.?.said());
             state.upgrade.after = .open;
             try expectEffects(&.{.{ .stop = ref }}, try step(&state, event));
         }
@@ -8507,13 +8512,13 @@ test "archive admission reports only a new ledger request across every surface c
                 try std.testing.expectEqual(expected_request.sent, actual_request.sent);
             }
             if (hold != .active) {
-                try std.testing.expectEqualStrings(state_marks.attention_sign ++ upgrade_recovery, state.notice.?.text());
+                try say_text.expect(state_marks.attention_sign ++ upgrade_recovery, state.notice.?.said());
             } else if (!case.restore and archive != .active) {
                 try std.testing.expect(state.notice == null);
             } else if (held != .none) {
                 try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), if (held == .pending) "request pending" else "request unsure") != null);
             } else if (full) {
-                try std.testing.expectEqualStrings("! Busy; try again shortly.", state.notice.?.text());
+                try say_text.expect("! Busy; try again shortly.", state.notice.?.said());
             }
             try std.testing.expectEqual(IntentAdmission.refused, (try step(&state, .{ .resized = .{ .width = 46, .height = 18 } })).intent_admission);
         }
@@ -8637,7 +8642,7 @@ test "Upgrade is never refused as a Host request: the status bar shows its run a
     try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade.after);
 
     try expectEffects(&.{}, try submit(&state));
-    try std.testing.expectEqualStrings(state_marks.attention_sign ++ upgrade_recovery, footerNotice(&state).?);
+    try say_text.expect(state_marks.attention_sign ++ upgrade_recovery, footerNotice(&state).?);
     try expectEffects(&.{}, try step(&state, .start_upgrade));
     try expectStatus(&state, "Checking for updates…", .normal);
 }
@@ -9959,7 +9964,7 @@ test "launch core creation outcomes reveal or open exactly once" {
             .unconfirmed => {
                 try std.testing.expectEqual(.unknown, state.requests[0].status);
                 try std.testing.expect(state.creating());
-                try std.testing.expectEqualStrings("! Creation unsure; details on exit", state.notice.?.text());
+                try say_text.expect("! Creation unsure; details on exit", state.notice.?.said());
             },
         }
         try expectEffects(&.{}, try step(&state, .launch_poll));
@@ -10150,7 +10155,7 @@ test "launch core exposes overview when Host is lost during creation" {
     try std.testing.expect(!state.hidesOverview());
     try std.testing.expect(state.creating());
     _ = try step(&state, .{ .created = .{ .unconfirmed = "lost-create" } });
-    try std.testing.expectEqualStrings("! Creation unsure; details on exit", state.notice.?.text());
+    try say_text.expect("! Creation unsure; details on exit", state.notice.?.said());
 }
 
 test "launch core leaves narrow overview alone after widening" {

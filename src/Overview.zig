@@ -28,6 +28,7 @@ const stderr = @import("stderr.zig");
 const test_poll = @import("test_poll");
 const app_events = @import("testing/app_events.zig");
 const view = @import("overview_view.zig");
+const say_text = @import("testing/say_text.zig");
 const provider_selection = @import("provider_selection.zig");
 const connection_names = @import("connection_names.zig");
 const ClientTask = @import("ClientTask.zig");
@@ -398,7 +399,7 @@ scratch: ?std.Io.File = null,
 
 opened: view.Reference = undefined,
 /// The notice the next Session opens with; set only while a followed link returns to the Session it left.
-opening_notice: ?[]const u8 = null,
+opening_notice: ?@import("marks.zig").Say = null,
 lent_failed: bool = false,
 started: ?view.Reference = null,
 screen_fresh: bool = true,
@@ -737,7 +738,7 @@ fn openOrReturn(self: *Self, ctx: *vxfw.EventContext, reference: view.Reference)
         self.follow.return_to = null;
         try self.dropFailedOpen(ctx);
         self.opened = back;
-        self.opening_notice = "That Session no longer exists.";
+        self.opening_notice = .quiet("That Session no longer exists.");
         defer self.opening_notice = null;
         self.ops.open(self, ctx) catch |reopen_err| return self.endFailedOpen(ctx, back, reopen_err);
     };
@@ -3117,7 +3118,7 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
+    try say_text.expect("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.said());
     const guidance = "rui: Not sure k7m2qx stopped. Check with: rui request recover stop-handle\n";
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
@@ -3129,7 +3130,7 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
-    try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
+    try say_text.expect("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.said());
     const running = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer running.close();
     try std.testing.expect(try running.overview.event(.{ .tick = test_now_s * 1000 }) == null);
@@ -3500,7 +3501,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     finished.overview.opened = "k7m2qx".*;
     try finished.lend();
     try std.testing.expectEqual(@as(usize, 2), Seen.now.lists);
-    try std.testing.expectEqualStrings(unsure, conversationLine(finished.overview, true).notice.?);
+    try say_text.expect(unsure, conversationLine(finished.overview, true).notice.?);
 
     const queued = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer queued.close();
@@ -3514,7 +3515,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     try queued.lend();
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqual(@as(usize, 2), Seen.now.lists);
-    try std.testing.expectEqualStrings(unsure, conversationLine(queued.overview, true).notice.?);
+    try say_text.expect(unsure, conversationLine(queued.overview, true).notice.?);
 }
 
 test "a failed terminal restore still prints the departure guidance" {
@@ -4441,7 +4442,7 @@ test "a stop captured and then not sent keeps its handle, here and on departure"
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
+    try say_text.expect("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.said());
     var buffer: [1024]u8 = undefined;
     try std.testing.expectEqualStrings("rui: Not sure k7m2qx stopped. Check with: rui request recover stop-handle\n", try finishedGuidance(rig, &buffer));
 }
@@ -4517,7 +4518,7 @@ test "Footer notice domain uses production clipping sanitization and colour" {
         .{ .raw = "Saved.\nNext", .displayed = "Saved. Next" },
         .{ .raw = "Saved.\rNext", .displayed = "Saved. Next" },
         .{ .raw = "First\nSecond\rThird\x1b", .displayed = "First Second Third\\x1b" },
-        .{ .raw = "! Not created: model_required", .displayed = "! Not created: model_required" },
+        .{ .raw = "Not created: model_required", .displayed = "Not created: model_required" },
         .{ .raw = "Configured.\n! label saved locally only", .displayed = "Configured. ! label saved locally only" },
     };
     const rig = try openListed();
@@ -4530,7 +4531,9 @@ test "Footer notice domain uses production clipping sanitization and colour" {
         rig.overview.state.notice = notice;
         var shown = try rig.shown(width, 24);
         defer shown.deinit();
-        const visible = case.displayed[0..@min(case.displayed.len, width)];
+        var drawn_buffer: [1024]u8 = undefined;
+        const drawn = try std.fmt.bufPrint(&drawn_buffer, "{s}{s}", .{ if (colour == .attention) "! " else "", case.displayed });
+        const visible = drawn[0..@min(drawn.len, width)];
         const footer_row = view.layout(&rig.overview.state).settings.start - 1;
         const footer = try shown.line(footer_row);
         try std.testing.expectEqual(@as(u16, 22), footer_row + 1);
@@ -4819,7 +4822,7 @@ test "a stop that ends with no answer reads as failed, whatever the job before i
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     var expected: [64]u8 = undefined;
-    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "! {s} not stopped: stop_request_failed", .{&first}), overview.state.notice.?.text());
+    try say_text.expect(try std.fmt.bufPrint(&expected, "! {s} not stopped: stop_request_failed", .{&first}), overview.state.notice.?.said());
 }
 
 test "conversation archive and restore use the exact unlisted opened reference through the existing worker" {
@@ -5190,7 +5193,7 @@ test "a Session link that no longer opens returns to the Session it left with a 
     const reopened = overview.app_session.?;
     try std.testing.expectEqualStrings("k7m2qx", &reopened.session);
     const shown = &reopened.frontend.?.shown_notice;
-    try std.testing.expectEqualStrings("That Session no longer exists.", shown.current(shown.shown_ms.?).?);
+    try say_text.expect("That Session no longer exists.", shown.current(shown.shown_ms.?).?);
     try std.testing.expectEqual(@as(?view.Reference, null), overview.follow.return_to);
     try std.testing.expectEqual(@as(?view.Reference, null), overview.follow.pending);
 }
@@ -5862,7 +5865,7 @@ test "App root navigation shows and focuses the main pane before every Session s
                         } else null;
                         if (kept) {
                             if (notice) |reason| {
-                                try std.testing.expectEqualStrings(reason, frontend.?.notice orelse return error.TestUnexpectedResult);
+                                try say_text.expect(reason, frontend.?.notice orelse return error.TestUnexpectedResult);
                             } else try std.testing.expect(frontend.?.notice == null);
                         }
                         const requested = try Nav.focus(&ctx);
@@ -6328,7 +6331,7 @@ fn sidebarLateListing() !void {
         frontend.shown_notice.dismiss();
         frontend.submission.intent = null;
         frontend.info_open = mode == .info;
-        if (mode == .notice) frontend.shown_notice.show("Copied 3 lines", @intCast(@max(std.Io.Clock.real.now(overview.init.io).toMilliseconds(), 0)));
+        if (mode == .notice) frontend.shown_notice.show(@import("marks.zig").Say.quiet("Copied 3 lines"), @intCast(@max(std.Io.Clock.real.now(overview.init.io).toMilliseconds(), 0)));
         if (mode == .unconfirmed or mode == .rejected or mode == .info) {
             frontend.submission.intent = .{ .decision = .{ .action = 19, .decision = .allow_once } };
             frontend.submission.state = if (mode == .rejected) .rejected else .unconfirmed;

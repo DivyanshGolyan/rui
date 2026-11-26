@@ -1,76 +1,13 @@
 import http.server
 import json
-import os
 import sqlite3
 import tempfile
 import threading
 
-from control_fixture import configure, inspect_execution, message, observe, raw_request, start_host, successful_sse
+from control_fixture import configure, inspect_execution, message, observe, start_host, successful_sse, raw_request
 import host_process
-import os_semantics
-from host_process import canonical_fixture_root, dispose_all, stop_process, TestHTTPServer, wait_for
-
-
-def dispose_page(process, endpoint, thread, timeout):
-    def shutdown():
-        if thread.ident is not None:
-            try:
-                endpoint.shutdown()
-            except BaseException:
-                dispose_all(endpoint.shutdown)
-                raise
-
-    def join():
-        if thread.ident is not None:
-            thread.join(timeout=timeout)
-            assert not thread.is_alive(), "Conversation endpoint thread did not retire"
-
-    dispose_all(
-        lambda: stop_process(process) if process is not None else None,
-        shutdown,
-        endpoint.server_close,
-        join,
-    )
-
-
-def host_resources(pid):
-    memory = os_semantics.process_memory(pid)
-    if memory is None:
-        return None
-    return memory["rss_kib"] * 1024, len(os_semantics.descriptor_links(pid))
-
-
-def provider_connections(pid, port):
-    inodes = {row[9] for rows in (os_semantics.socket_table("tcp"), os_semantics.socket_table("tcp6")) if rows is not None
-              for row in rows if int(row[2].rsplit(":", 1)[1], 16) == port}
-    count = 0
-    for fd in os_semantics.descriptor_links(pid):
-        try:
-            target = os.readlink(fd)
-        except FileNotFoundError:
-            continue
-        count += target.startswith("socket:[") and target[8:-1] in inodes
-    return count
-
-
-def idle_resources(pid, path):
-    try:
-        descriptors = {fd.name: os.readlink(fd) for fd in os_semantics.descriptor_links(pid)}
-        unix = os_semantics.socket_table("unix")
-        if unix is None: return None
-        peers = {f"socket:[{r[6]}]" for r in unix if len(r) == 8 and r[7] == path and int(r[3], 16) == 0}
-        if any(target in peers for target in descriptors.values()): return None
-        if descriptors != {fd.name: os.readlink(fd) for fd in os_semantics.descriptor_links(pid)}: return None
-    except FileNotFoundError: return None
-    return host_resources(pid)[0], len(descriptors)
-
-
-def request(socket_path, store, route, kind, session, **fields):
-    body = json.dumps(
-        {"version": host_process.WIRE_VERSION, "kind": kind, "store": str(store), "session": session, **fields},
-        separators=(",", ":"),
-    ).encode()
-    return raw_request(socket_path, route, body)
+from host_fixture import dispose_endpoint, request
+from host_process import canonical_fixture_root, stop_process, TestHTTPServer, wait_for
 
 
 def whole_stream_shape(length):
@@ -167,4 +104,4 @@ def whole_stream_shape(length):
             process = None
             print(f"whole stream {length} bytes: exact escape-heavy framing and digest no-false-success witness passed")
         finally:
-            dispose_page(process, endpoint, worker, 5)
+            dispose_endpoint(process, endpoint, worker, 5)

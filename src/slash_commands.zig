@@ -4,6 +4,8 @@ const cli_args = @import("cli_args.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
 const model_capability = @import("model_capability.zig");
 const TerminalText = @import("TerminalText.zig");
+const Say = @import("marks.zig").Say;
+const say_text = @import("testing/say_text.zig");
 const ReasoningEffort = model_capability.ReasoningEffort;
 const ArchiveState = @import("session_archive.zig").State;
 
@@ -118,39 +120,33 @@ fn slashed(text: []const u8) bool {
     return text.len != 0 and text[0] == '/' and !std.mem.startsWith(u8, text, "//");
 }
 
-pub fn unknown(buffer: *[unknown_bytes]u8, text: []const u8) []const u8 {
+pub fn unknown(buffer: *[unknown_bytes]u8, text: []const u8) Say {
     const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
     var shown = name.len <= max_unknown_name;
     for (name) |byte| shown = shown and byte > ' ' and byte < 0x7f;
-    return std.fmt.bufPrint(buffer, "! Unknown command{s}{s}", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
+    return .attention(std.fmt.bufPrint(buffer, "Unknown command{s}{s}", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable);
 }
 
 const max_unknown_name = 32;
-pub const unknown_bytes = "! Unknown command ".len + max_unknown_name;
+pub const unknown_bytes = "Unknown command ".len + max_unknown_name;
 
 pub const short_result_bytes = 256;
 pub const short_result_lines = 2;
-pub const result_notice_bytes = short_result_bytes + short_result_lines * "! ".len;
 
-pub fn resultNotice(buffer: *[result_notice_bytes]u8, output: []const u8) ?[]const u8 {
+/// A command's output as a footer notice, or null when it takes a page: more than a line, or longer than a short result.
+/// Its words are copied into `buffer`, which the notice borrows.
+pub fn resultNotice(buffer: *[short_result_bytes]u8, output: []const u8) ?Say {
     if (output.len > short_result_bytes) return null;
     const text = std.mem.trimEnd(u8, output, "\n");
     if (text.len == 0) return no_output;
-    if (std.mem.count(u8, text, "\n") >= short_result_lines) return null;
-    var writer = std.Io.Writer.fixed(buffer);
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        if (writer.buffered().len != 0) writer.writeByte('\n') catch unreachable;
-        if (std.mem.startsWith(u8, line, "Rui: ")) {
-            writer.writeAll(line[5..]) catch unreachable;
-        } else if (std.mem.startsWith(u8, line, "rui: ")) {
-            writer.print("! {s}", .{line[5..]}) catch unreachable;
-        } else writer.writeAll(line) catch unreachable;
-    }
-    return writer.buffered();
+    if (std.mem.indexOfScalar(u8, text, '\n') != null) return null;
+    const said: Say = if (std.mem.startsWith(u8, text, "rui: ")) .attention(text[5..]) else if (std.mem.startsWith(u8, text, "Rui: ")) .quiet(text[5..]) else .quiet(text);
+    if (said.words.len == 0) return no_output;
+    @memcpy(buffer[0..said.words.len], said.words);
+    return .{ .words = buffer[0..said.words.len], .tone = said.tone };
 }
 
-pub const no_output = "Command finished with no output.";
+pub const no_output = Say.quiet("Command finished with no output.");
 
 pub fn named(total: usize, rows: usize) usize {
     return if (total <= rows) total else if (rows >= 2) rows - 1 else rows;
@@ -781,23 +777,29 @@ test "/setup completion preserves the shared option order" {
 
 test "an unknown command names itself when it is short printable ASCII" {
     var buffer: [unknown_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("! Unknown command /foo", unknown(&buffer, "/foo bar"));
-    try std.testing.expectEqualStrings("! Unknown command", unknown(&buffer, "/\x1b[2J"));
+    try say_text.expect("! Unknown command /foo", unknown(&buffer, "/foo bar"));
+    try say_text.expect("! Unknown command", unknown(&buffer, "/\x1b[2J"));
     const long = "/" ++ @as([max_unknown_name]u8, @splat('x'));
-    try std.testing.expectEqualStrings("! Unknown command", unknown(&buffer, long));
-    try std.testing.expectEqualStrings("! Unknown command " ++ long[0..max_unknown_name] ++ "", unknown(&buffer, long[0..max_unknown_name]));
+    try say_text.expect("! Unknown command", unknown(&buffer, long));
+    try say_text.expect("! Unknown command " ++ long[0..max_unknown_name] ++ "", unknown(&buffer, long[0..max_unknown_name]));
 }
 
-test "a command's short output is a conversation notice, and longer output takes a page" {
-    var buffer: [result_notice_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("Configured.", resultNotice(&buffer, "Rui: Configured.\n").?);
-    try std.testing.expectEqualStrings("Saved.\n! Host unavailable", resultNotice(&buffer, "Saved.\nrui: Host unavailable\n").?);
-    try std.testing.expectEqualStrings(no_output, resultNotice(&buffer, "").?);
-    try std.testing.expectEqualStrings(no_output, resultNotice(&buffer, "\n").?);
+test "a command's one-line output is a conversation notice, and anything longer takes a page" {
+    var buffer: [short_result_bytes]u8 = undefined;
+    try say_text.expect("Configured.", resultNotice(&buffer, "Rui: Configured.\n").?);
+    try say_text.expect("! Host unavailable", resultNotice(&buffer, "rui: Host unavailable\n").?);
+    try say_text.expect("Saved.", resultNotice(&buffer, "Saved.").?);
+    try say_text.expect(no_output, resultNotice(&buffer, "rui: ").?);
+    try say_text.expect(no_output, resultNotice(&buffer, "Rui: \n").?);
+    try say_text.expect("rui:x", resultNotice(&buffer, "rui:x").?);
+    try say_text.expect("RUI: x", resultNotice(&buffer, "RUI: x").?);
+    try say_text.expect(no_output, resultNotice(&buffer, "").?);
+    try say_text.expect(no_output, resultNotice(&buffer, "\n").?);
+    try std.testing.expect(resultNotice(&buffer, "Saved.\nrui: Host unavailable\n") == null);
     try std.testing.expect(resultNotice(&buffer, "one\ntwo\nthree\n") == null);
     const long: [short_result_bytes + 1]u8 = @splat('x');
     try std.testing.expect(resultNotice(&buffer, &long) == null);
-    try std.testing.expectEqual(@as(usize, short_result_bytes), resultNotice(&buffer, long[0..short_result_bytes]).?.len);
+    try std.testing.expectEqual(@as(usize, short_result_bytes), resultNotice(&buffer, long[0..short_result_bytes]).?.words.len);
 }
 
 test "deleted app commands are unknown in conversation and absent from completion" {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const row_text = @import("testing/row_text.zig");
+const say_text = @import("testing/say_text.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const chrome = @import("session_chrome.zig");
@@ -51,7 +52,7 @@ pub const View = struct {
     details: bool = false,
     repair_details: bool = false,
     facts: Identity = .{},
-    notice: ?[]const u8 = null,
+    notice: ?chrome.Say = null,
     notice_priority: enum { normal, recovery } = .normal,
     overlay: ?@import("InputArea.zig").Panel = null,
     info_footer: ?vxfw.Widget = null,
@@ -177,7 +178,7 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     footer.* = .{ .left = "", .right = right.items, .notice = if (notice) |text| try chrome.noticeLine(ctx.arena, text) else null, .style = self.facts.style };
     if (notice) |text| {
         var tone = self.facts.style;
-        if (std.mem.startsWith(u8, text, "!")) tone.fg = self.status.attention.fg;
+        if (text.tone == .attention) tone.fg = self.status.attention.fg;
         footer.right_style = tone;
     }
     const size = ctx.max.size();
@@ -340,8 +341,8 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
     var screen: AppScreen.Session = .{ .content = &facade, .input = input.widget(), .userdata = &recorder, .on_event = Recorder.event };
     const palette: vxfw.Text = .{ .text = "/setup" };
 
-    self.place(&screen, &input, .{ .width = 80, .notice = "Copied 12 lines", .overlay = .{ .inline_panel = palette.widget() } });
-    try std.testing.expectEqualStrings("Copied 12 lines", self.status.bar.notice.?);
+    self.place(&screen, &input, .{ .width = 80, .notice = chrome.Say.quiet("Copied 12 lines"), .overlay = .{ .inline_panel = palette.widget() } });
+    try std.testing.expectEqualStrings("Copied 12 lines", self.status.bar.notice.?.words);
     try std.testing.expectEqualStrings("", self.state.text);
     try std.testing.expect(input.panel.?.inline_panel.eql(palette.widget()));
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -354,8 +355,8 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
         const opening = try input.widget().draw(ctx);
         try std.testing.expectEqual(idle.size.height, opening.size.height);
         try std.testing.expectEqualStrings("", self.state.text);
-        try std.testing.expectEqualStrings("Opening…", self.status.bar.notice.?);
-        self.place(&screen, &input, .{ .width = width, .facts = .{ .archive = .archived }, .notice = "Copied 3 lines", .stoppable = true });
+        try say_text.expect("Opening…", self.status.bar.notice.?);
+        self.place(&screen, &input, .{ .width = width, .facts = .{ .archive = .archived }, .notice = chrome.Say.quiet("Copied 3 lines"), .stoppable = true });
         const noticed = try input.widget().draw(ctx);
         try std.testing.expectEqual(idle.size.height, noticed.size.height);
         const footer = try input.facts.draw(ctx);
@@ -365,7 +366,7 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
 
     self.place(&screen, &input, .{ .width = 80 });
     try std.testing.expect(input.panel == null);
-    self.place(&screen, &input, .{ .width = 80, .notice = "Copied 12 lines", .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries" });
+    self.place(&screen, &input, .{ .width = 80, .notice = chrome.Say.quiet("Copied 12 lines"), .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries" });
     try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", self.status.bar.left);
     try std.testing.expectEqualStrings("ctrl+r retries", self.status.key.label);
 }
@@ -381,7 +382,7 @@ test "SUI-162 recovery notice priority follows the current view" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} };
-    var view: View = .{ .width = 80, .repair_details = true, .details = true, .notice = "ctrl+r retries" };
+    var view: View = .{ .width = 80, .repair_details = true, .details = true, .notice = chrome.Say.quiet("ctrl+r retries") };
     for ([_]bool{ false, true, false }) |recovery| {
         view.notice_priority = if (recovery) .recovery else .normal;
         self.place(&screen, &input, view);
@@ -481,8 +482,9 @@ test "SessionChrome transient reply categories appear once in Footer and never i
     defer arena.deinit();
     var screen: AppScreen.Session = undefined;
     screen.input = input.widget();
-    for ([_][]const u8{ "Copied 3 lines", "Configured.", "! Unknown command /nope", "! Copy unavailable", "Opening tool output…", "No earlier message.", "Restored chat" }) |notice| for ([_]u16{ 46, 99 }) |width| {
-        self.place(&screen, &input, .{ .width = width, .facts = .{}, .notice = notice });
+    for ([_]chrome.Say{ .quiet("Copied 3 lines"), .quiet("Configured."), .attention("Unknown command /nope"), .attention("Copy unavailable"), .quiet("Opening tool output…"), .quiet("No earlier message."), .quiet("Restored chat") }) |said| for ([_]u16{ 46, 99 }) |width| {
+        const notice = try std.fmt.allocPrint(arena.allocator(), "{s}{s}", .{ said.sign(), said.words });
+        self.place(&screen, &input, .{ .width = width, .facts = .{}, .notice = said });
         const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
         try std.testing.expectEqual(@as(u16, 4), drawn.size.height);
         try std.testing.expectEqual(@as(usize, 2), drawn.children.len);
