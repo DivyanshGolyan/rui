@@ -22,7 +22,7 @@ export const STORE = "0123456789abcdef0123456789abcdef";
 export const canonical = JSON.stringify({ version: WIRE_VERSION, type: "invocation_error", code: "canonical_store_failure" });
 export const dispatched = JSON.stringify({ version: WIRE_VERSION, type: "host_unavailable", code: "dispatch_fenced" });
 // A feed page with no rows: a watch reads it, then waits for a nudge. `work` is what the page reader requires.
-export const emptyPage = JSON.stringify({ version: WIRE_VERSION, type: "activity_page", delta: "full", since: "t0", items: [], more: false, end: "0", queued: { count: "0" }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle", since: "1" } } });
+export const emptyPage = JSON.stringify({ version: WIRE_VERSION, type: "activity_page", delta: "full", since: "t0", items: [], more: false, end: "0", aggregates: { as_of: "0", call_activity: { total: "0", entries: [] }, queued: { count: "0" } }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle", since: "1" } } });
 export const unrelatedInvocation = JSON.stringify({ version: WIRE_VERSION, type: "invocation_error", code: "invalid_arguments" });
 export const unrelatedBusy = JSON.stringify({ version: WIRE_VERSION, type: "busy", code: "ordinary_capacity_exhausted" });
 export const fenceLine = JSON.stringify({ rui_start_error: { code: "store_fenced", message: "the MySQL Store lost ownership or its connection; restart the Host" } }) + "\n";

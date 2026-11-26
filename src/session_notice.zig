@@ -3,6 +3,7 @@ const submission = @import("submission_state.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const Text = @import("TerminalText.zig");
 const protocol = @import("protocol.zig");
+const Say = @import("marks.zig").Say;
 const keymap = @import("keymap.zig");
 
 const retry_words = keymap.retry_hint ++ " original";
@@ -99,12 +100,12 @@ pub const Action = struct {
     reason: bool,
 };
 
-pub fn decision(action: Action) []const u8 {
-    if (action.preview) return "! Action exceeds in-app preview. Approval disabled.";
-    return if (action.visible) "! Action needs a decision; Esc returns to the choice." else "! Action needs a decision; Esc returns to it.";
+pub fn decision(action: Action) Say {
+    if (action.preview) return .attention("Action exceeds in-app preview. Approval disabled.");
+    return .attention(if (action.visible) "Action needs a decision; Esc returns to the choice." else "Action needs a decision; Esc returns to it.");
 }
 
-pub const reason_not_ready = "! Not ready; nothing denied · " ++ ConsentPolicy.deny_words;
+pub const reason_not_ready: Say = .attention("Not ready; nothing denied · " ++ ConsentPolicy.deny_words);
 
 pub const Refusal = @import("session_keys.zig").Facts.Send.Refusal;
 
@@ -117,29 +118,29 @@ pub const Busy = struct {
     letter: bool,
 };
 
-pub const host_not_ready = "! Host not ready.";
-pub const opening_not_ready = "! Chat still opening.";
-pub const saving_not_ready = "! Chat info still saving.";
+pub const host_not_ready: Say = .attention("Host not ready.");
+pub const opening_not_ready: Say = .attention("Chat still opening.");
+pub const saving_not_ready: Say = .attention("Chat info still saving.");
 
 /// The notice for a refused send. `.upgrade` is not here: its words depend on
 /// the Upgrade's phase, which `session_upgrade.refusal` owns.
-pub fn busy(facts: Busy) []const u8 {
+pub fn busy(facts: Busy) Say {
     if (facts.refusal) |refusal| switch (refusal) {
-        .command => return "! Command still running.",
+        .command => return .attention("Command still running."),
         .saving => return saving_not_ready,
         .upgrade => unreachable,
-        .rejected => return "! Original rejected. Keep editing; /discard releases it.",
+        .rejected => return .attention("Original rejected. Keep editing; /discard releases it."),
         .host => return host_not_ready,
         .opening => return opening_not_ready,
-        .preparing => return "! Action needs a decision.",
+        .preparing => return .attention("Action needs a decision."),
         .submitting => {},
     };
     if (facts.action) |action| {
         if (!action.reason) return decision(action);
-        return if (facts.letter) "! Use ←→ and Enter to choose; a message denies the call." else reason_not_ready;
+        return if (facts.letter) .attention("Use ←→ and Enter to choose; a message denies the call.") else reason_not_ready;
     }
-    if (facts.held) |held| if (held.kind == .decision) return "! Decision pending. Keep editing; Ctrl-R retries that decision.";
-    return "! Input still pending. Keep editing; Ctrl-R retries the original.";
+    if (facts.held) |held| if (held.kind == .decision) return .attention("Decision pending. Keep editing; Ctrl-R retries that decision.");
+    return .attention("Input still pending. Keep editing; Ctrl-R retries the original.");
 }
 
 pub const Close = union(enum) { leave, stay: []const u8 };
@@ -212,22 +213,28 @@ test "original presentation preserves placement actions repair and opening prece
     }
 }
 
+fn expectAttention(words: []const u8, said: Say) !void {
+    try std.testing.expectEqualStrings(words, said.words);
+    try std.testing.expect(said.tone == .attention);
+}
+
 test "Enter in the draft says the most pressing reason it sent nothing" {
     const reason: Action = .{ .preview = false, .visible = true, .reason = true };
     const rejected: Held = .{ .kind = .message, .state = .rejected };
     const pending: Held = .{ .kind = .decision, .state = .unconfirmed };
     const cases = [_]struct { Busy, []const u8 }{
-        .{ .{ .refusal = .command, .held = rejected, .action = reason, .letter = false }, "! Command still running." },
-        .{ .{ .refusal = .rejected, .held = rejected, .action = reason, .letter = false }, "! Original rejected. Keep editing; /discard releases it." },
-        .{ .{ .refusal = .preparing, .held = pending, .action = reason, .letter = false }, "! Action needs a decision." },
-        .{ .{ .refusal = null, .held = pending, .action = reason, .letter = false }, reason_not_ready },
-        .{ .{ .refusal = null, .held = null, .action = reason, .letter = true }, "! Use ←→ and Enter to choose; a message denies the call." },
-        .{ .{ .refusal = null, .held = null, .action = .{ .preview = false, .visible = false, .reason = false }, .letter = true }, "! Action needs a decision; Esc returns to it." },
-        .{ .{ .refusal = null, .held = pending, .action = null, .letter = true }, "! Decision pending. Keep editing; Ctrl-R retries that decision." },
-        .{ .{ .refusal = .submitting, .held = .{ .kind = .message, .state = .unconfirmed }, .action = null, .letter = false }, "! Input still pending. Keep editing; Ctrl-R retries the original." },
+        .{ .{ .refusal = .command, .held = rejected, .action = reason, .letter = false }, "Command still running." },
+        .{ .{ .refusal = .rejected, .held = rejected, .action = reason, .letter = false }, "Original rejected. Keep editing; /discard releases it." },
+        .{ .{ .refusal = .preparing, .held = pending, .action = reason, .letter = false }, "Action needs a decision." },
+        .{ .{ .refusal = null, .held = pending, .action = reason, .letter = false }, reason_not_ready.words },
+        .{ .{ .refusal = null, .held = null, .action = reason, .letter = true }, "Use ←→ and Enter to choose; a message denies the call." },
+        .{ .{ .refusal = null, .held = null, .action = .{ .preview = false, .visible = false, .reason = false }, .letter = true }, "Action needs a decision; Esc returns to it." },
+        .{ .{ .refusal = null, .held = pending, .action = null, .letter = true }, "Decision pending. Keep editing; Ctrl-R retries that decision." },
+        .{ .{ .refusal = .submitting, .held = .{ .kind = .message, .state = .unconfirmed }, .action = null, .letter = false }, "Input still pending. Keep editing; Ctrl-R retries the original." },
     };
-    for (cases) |case| try std.testing.expectEqualStrings(case[1], busy(case[0]));
-    try std.testing.expect(std.mem.indexOf(u8, reason_not_ready, ConsentPolicy.deny_words) != null);
+    for (cases) |case| try expectAttention(case[1], busy(case[0]));
+    try std.testing.expect(reason_not_ready.tone == .attention);
+    try std.testing.expect(std.mem.indexOf(u8, reason_not_ready.words, ConsentPolicy.deny_words) != null);
 }
 
 test "every way Enter is refused names its own reason, whatever original or Action is held" {
@@ -242,41 +249,41 @@ test "every way Enter is refused names its own reason, whatever original or Acti
         // The first refusing fact in the contract's order, listed here
         // independently of `Send.refusal`.
         const expected: ?[]const u8 = if (send.command_active)
-            "! Command still running."
+            "Command still running."
         else if (send.upgrade)
             null
         else if (send.saving)
-            saving_not_ready
+            saving_not_ready.words
         else if (send.rejected)
-            "! Original rejected. Keep editing; /discard releases it."
+            "Original rejected. Keep editing; /discard releases it."
         else if (send.host_held)
-            host_not_ready
+            host_not_ready.words
         else if (send.opening)
-            opening_not_ready
+            opening_not_ready.words
         else if (send.preparing)
-            "! Action needs a decision."
+            "Action needs a decision."
         else
             null;
         if (expected) |words| for (helds) |held| for (actions) |action| for ([_]bool{ false, true }) |letter| {
-            try std.testing.expectEqualStrings(words, busy(.{ .refusal = send.refusal(), .held = held, .action = action, .letter = letter }));
+            try expectAttention(words, busy(.{ .refusal = send.refusal(), .held = held, .action = action, .letter = letter }));
         };
         // A send still under way refuses with no reason of its own: the held
         // original or Action says what is pending.
         if (send.refusal() == .submitting) {
-            try std.testing.expectEqualStrings("! Input still pending. Keep editing; Ctrl-R retries the original.", busy(.{ .refusal = .submitting, .held = null, .action = null, .letter = false }));
-            try std.testing.expectEqualStrings("! Decision pending. Keep editing; Ctrl-R retries that decision.", busy(.{ .refusal = .submitting, .held = helds[2], .action = null, .letter = false }));
+            try expectAttention("Input still pending. Keep editing; Ctrl-R retries the original.", busy(.{ .refusal = .submitting, .held = null, .action = null, .letter = false }));
+            try expectAttention("Decision pending. Keep editing; Ctrl-R retries that decision.", busy(.{ .refusal = .submitting, .held = helds[2], .action = null, .letter = false }));
         }
         if (bits == std.math.maxInt(u8)) break;
     }
     // The reasons this PR words fit the narrowest chat footer.
-    for ([_][]const u8{ host_not_ready, opening_not_ready, saving_not_ready }) |words| try std.testing.expect(words.len <= 46);
+    for ([_]Say{ host_not_ready, opening_not_ready, saving_not_ready }) |said| try std.testing.expect(said.sign().len + said.words.len <= 46);
 }
 
 test "a waiting Action that is a preview says it is decided in the shell, whether or not it is on screen" {
     for ([_]bool{ false, true }) |visible| {
-        try std.testing.expectEqualStrings("! Action exceeds in-app preview. Approval disabled.", decision(.{ .preview = true, .visible = visible, .reason = false }));
+        try expectAttention("Action exceeds in-app preview. Approval disabled.", decision(.{ .preview = true, .visible = visible, .reason = false }));
     }
-    try std.testing.expectEqualStrings("! Action needs a decision; Esc returns to the choice.", decision(.{ .preview = false, .visible = true, .reason = false }));
+    try expectAttention("Action needs a decision; Esc returns to the choice.", decision(.{ .preview = false, .visible = true, .reason = false }));
 }
 
 test "Esc leaves the settled view with an empty draft unless the held original is not yet saved" {

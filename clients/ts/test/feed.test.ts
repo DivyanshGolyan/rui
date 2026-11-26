@@ -16,9 +16,9 @@ function narrowed(entry: FeedEntry): void {
 		case "admission": case "user": case "received": {
 			const state: "queued" | "applied" | "excluded" = entry.state;
 			const admitted: string = entry.admittedAt;
-			const sender: Schemas["NamedPeer"] | null = entry.sender;
+			const origin: Schemas["MessageOrigin"] = entry.origin;
 			const text: string | undefined = entry.text;
-			void [state, admitted, sender, text];
+			void [state, admitted, origin, text];
 			break;
 		}
 		case "assistant": {
@@ -185,7 +185,7 @@ for (const follow of [false, true]) {
 			const position = first ? "2" : "3";
 			return Buffer.from(JSON.stringify({ delta: "full", since: "token", more: first, end: "9",
 				items: [{ position, ordinal: "1", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }],
-				queued: { count: "0" }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } },
+				aggregates: { as_of: first ? position : "9", call_activity: { total: "0", entries: [] }, queued: { count: "0" } }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } },
 			}));
 		};
 		// A following traversal needs a line; its second page is owed by the first page's `more`, not by a nudge.

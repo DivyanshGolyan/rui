@@ -74,7 +74,7 @@ test("archival reaches an idle watcher only through the Host's nudge, and submit
 		}
 		assert.equal(path, "/v1/activity-page");
 		pageReads++;
-		return Buffer.from(JSON.stringify({ delta: "full", since: "token", end: "0", items: [], more: false, queued: { count: "0" }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle" } } }));
+		return Buffer.from(JSON.stringify({ delta: "full", since: "token", end: "0", items: [], more: false, aggregates: { as_of: "0", call_activity: { total: "0", entries: [] }, queued: { count: "0" } }, work: { actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle" } } }));
 	});
 	const session = new Session(line.link, "k7m2qx");
 	const followed = session.watch({ signal: controller.signal }).next();

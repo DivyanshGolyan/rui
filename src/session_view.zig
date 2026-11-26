@@ -1229,7 +1229,10 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
 fn messageWith(reads: client.SessionReads, scratch: std.Io.File, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
     if (!visibleMessage(value)) return;
     if (messageLabel(value.state, labels)) |label| try labelRow(sink, label, colour);
-    if (value.sender) |sender| return peerLine(sink, sender, value.admitted_at);
+    switch (value.origin) {
+        .peer => |sender| return peerLine(sink, sender, value.admitted_at),
+        .person, .action, .server_event => {},
+    }
     if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(true);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     try userPrefix(sink, colour, value.admitted_at);
@@ -1481,7 +1484,7 @@ pub fn tight(value: protocol.ActivityItem.Value) bool {
     return switch (value) {
         .tool_result => |result| result.presentation.code.packs(),
         .hosted_call => |hosted| hosted.presentation.code.packs(),
-        .admission, .received, .user => |message_| message_.sender != null,
+        .admission, .received, .user => |message_| message_.origin == .peer,
         .assistant, .call, .turn_ended, .stop, .approval_requested, .session_changed, .compacted, .model_call, .instruction, .skill => false,
     };
 }
@@ -1491,15 +1494,15 @@ pub fn gap(above: bool, below: bool, tool_pair: bool) bool {
 }
 
 pub fn visibleMessage(value: protocol.ActivityItem.Message) bool {
-    return value.source_action == null;
+    return value.origin.personFacing();
 }
 
 /// `scratch` holds the part list of a parts value while its row draws.
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, provider: ?@import("connection.zig").Name, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
-    return renderWith(client.SessionReads.selected(requests, store, session), scratch, provider, item, queued, held, sink, colour, home, destination, fold);
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, provider: ?@import("connection.zig").Name, item: protocol.ActivityItem, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
+    return renderWith(client.SessionReads.selected(requests, store, session), scratch, provider, item, held, sink, colour, home, destination, fold);
 }
 
-pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@import("connection.zig").Name, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
+pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@import("connection.zig").Name, item: protocol.ActivityItem, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
     switch (item.value) {
         .admission, .received, .user => |value| if (!visibleMessage(value)) return false,
         else => {},
@@ -1507,13 +1510,12 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
     switch (item.value) {
         .admission => |value| {
             _ = value;
-            _ = queued;
             _ = held;
             return false;
         },
         .received => |value| try messageWith(reads, scratch, item, value, .none, sink, colour),
         .user => |value| {
-            if (value.sender != null or value.source_action != null) return false;
+            if (value.origin != .person) return false;
             try messageWith(reads, scratch, item, value, .none, sink, colour);
         },
         .assistant => |assistant| {

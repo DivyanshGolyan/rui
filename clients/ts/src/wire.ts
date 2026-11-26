@@ -537,7 +537,7 @@ export interface components {
     schemas: {
         ActionBackgroundConflictReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "action_background_reply";
             answer: {
@@ -553,7 +553,7 @@ export interface components {
         };
         ActionBackgroundReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "action_background_reply";
             answer: {
@@ -570,7 +570,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "action_background_reply";
             answer: {
@@ -585,7 +585,7 @@ export interface components {
         };
         ActionBackgroundRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "action_background";
             store: string;
@@ -601,7 +601,7 @@ export interface components {
         };
         ActionPublishRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "action_publish";
             store: string;
@@ -611,7 +611,7 @@ export interface components {
         };
         ActionStopConflictReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "action_stop_reply";
             answer: {
@@ -627,7 +627,7 @@ export interface components {
         };
         ActionStopReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "action_stop_reply";
             answer: {
@@ -640,7 +640,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "action_stop_reply";
             answer: {
@@ -655,7 +655,7 @@ export interface components {
         };
         ActionStopRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "action_stop";
             store: string;
@@ -665,7 +665,7 @@ export interface components {
         };
         ActivityContentRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "activity_content";
             store: string;
@@ -686,8 +686,7 @@ export interface components {
                     /** @enum {string} */
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
-                    sender: components["schemas"]["NamedPeer"] | null;
-                    source_action: components["schemas"]["Decimal"] | null;
+                    origin: components["schemas"]["MessageOrigin"];
                     content: components["schemas"]["ContentValue"];
                 };
             };
@@ -703,8 +702,7 @@ export interface components {
                     /** @enum {string} */
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
-                    sender: components["schemas"]["NamedPeer"] | null;
-                    source_action: components["schemas"]["Decimal"] | null;
+                    origin: components["schemas"]["MessageOrigin"];
                     content: components["schemas"]["ContentValue"];
                 };
             };
@@ -800,8 +798,7 @@ export interface components {
                     /** @enum {string} */
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
-                    sender: components["schemas"]["NamedPeer"] | null;
-                    source_action: components["schemas"]["Decimal"] | null;
+                    origin: components["schemas"]["MessageOrigin"];
                     content: components["schemas"]["ContentValue"];
                 };
             };
@@ -886,7 +883,7 @@ export interface components {
         };
         ActivityPageReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "activity_page";
             end: components["schemas"]["Decimal"];
@@ -894,15 +891,14 @@ export interface components {
             direction: "forward" | "backward";
             items: components["schemas"]["ActivityItem"][];
             more: boolean;
-            call_activity: components["schemas"]["CallActivity"];
-            queued: components["schemas"]["Queued"];
+            aggregates: components["schemas"]["Aggregates"] | null;
             work: components["schemas"]["PageWork"];
             /** @constant */
             delta: "full";
             since: string | null;
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "activity_page";
             /** @constant */
@@ -911,7 +907,7 @@ export interface components {
         };
         ActivityPageRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "activity_page";
             store: string;
@@ -945,7 +941,7 @@ export interface components {
         };
         ActivitySearchReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "activity_search";
             items: components["schemas"]["ActivitySearchItem"][];
@@ -953,7 +949,7 @@ export interface components {
         };
         ActivitySearchRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "activity_search";
             store: string;
@@ -987,6 +983,11 @@ export interface components {
             };
             connection?: string;
             workspace?: string;
+        };
+        Aggregates: {
+            as_of: components["schemas"]["Decimal"];
+            call_activity: components["schemas"]["CallActivity"];
+            queued: components["schemas"]["Queued"];
         };
         ArchivedRowFields: {
             reference: string;
@@ -1038,7 +1039,7 @@ export interface components {
         };
         ConfigureConflictReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -1059,7 +1060,7 @@ export interface components {
         };
         ConfigureReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -1078,7 +1079,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -1111,7 +1112,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -1133,7 +1134,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -1155,7 +1156,7 @@ export interface components {
         };
         ConfigureRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "configure";
             store: string;
@@ -1194,7 +1195,7 @@ export interface components {
         };
         ConversationContentRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "conversation_content";
             store: string;
@@ -1208,7 +1209,7 @@ export interface components {
         };
         ConversationPageReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "conversation_page";
             /** @constant */
@@ -1264,7 +1265,7 @@ export interface components {
             more: false;
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "conversation_page";
             /** @constant */
@@ -1323,7 +1324,7 @@ export interface components {
         };
         ConversationPageRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "conversation_page";
             store: string;
@@ -1336,7 +1337,7 @@ export interface components {
         Decimal: string;
         ErrorReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @enum {string} */
             type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "conversation_unavailable" | "activity_unavailable" | "failed_response_unavailable" | "parts_unavailable";
             code: string;
@@ -1350,7 +1351,7 @@ export interface components {
         };
         HostInfoReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "host_info";
             store: string;
@@ -1371,21 +1372,21 @@ export interface components {
         };
         HostInfoRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "host_info";
             store: string;
         };
         HostPauseReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "host_pause_reply";
             paused: boolean;
         };
         HostPauseRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "host_pause";
             store: string;
@@ -1535,14 +1536,14 @@ export interface components {
         };
         HostStopReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "host_stop_reply";
             /** @constant */
             status: "acknowledged";
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "host_stop_reply";
             /** @constant */
@@ -1551,13 +1552,13 @@ export interface components {
         };
         HostStopRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "host_stop";
             store: string;
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "host_stop";
             store: string;
@@ -1584,7 +1585,7 @@ export interface components {
         };
         InspectSessionReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_report";
             /** @constant */
@@ -1607,7 +1608,7 @@ export interface components {
             execution: components["schemas"]["domainreportExecutionJson"];
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_report";
             /** @constant */
@@ -1628,7 +1629,7 @@ export interface components {
             execution: components["schemas"]["domainreportExecutionJson"];
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_report";
             /** @constant */
@@ -1647,7 +1648,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_report";
             /** @constant */
@@ -1664,7 +1665,7 @@ export interface components {
         };
         InspectSessionRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "inspect_session";
             store: string;
@@ -1672,7 +1673,7 @@ export interface components {
             since?: string | null;
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "inspect_session";
             store: string;
@@ -1681,7 +1682,7 @@ export interface components {
             profile: "full";
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "inspect_session";
             store: string;
@@ -1693,7 +1694,7 @@ export interface components {
         };
         ListSessionsReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
@@ -1706,7 +1707,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
@@ -1719,7 +1720,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
@@ -1729,7 +1730,7 @@ export interface components {
             next: null;
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["ArchivedRowFields"][];
@@ -1745,7 +1746,7 @@ export interface components {
         };
         ListSessionsRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "list_sessions";
             store: string;
@@ -1759,7 +1760,7 @@ export interface components {
             after_reference?: string;
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "list_sessions";
             store: string;
@@ -1773,7 +1774,7 @@ export interface components {
         };
         MessageConflictReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1804,6 +1805,15 @@ export interface components {
                 message: components["schemas"]["Decimal"];
             };
         };
+        MessageOrigin: {
+            person: Record<string, never>;
+        } | {
+            peer: components["schemas"]["NamedPeer"];
+        } | {
+            action: components["schemas"]["Decimal"];
+        } | {
+            server_event: Record<string, never>;
+        };
         MessageRecoveryJson: {
             unknown_outcomes: {
                 action: components["schemas"]["Decimal"];
@@ -1816,7 +1826,7 @@ export interface components {
         };
         MessageReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1838,7 +1848,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1874,7 +1884,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1899,7 +1909,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1925,7 +1935,7 @@ export interface components {
         };
         MessageRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "message";
             store: string;
@@ -1942,7 +1952,7 @@ export interface components {
             require_model?: true;
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "message";
             store: string;
@@ -1955,7 +1965,7 @@ export interface components {
         };
         ModelInterruptionConflictReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "model_interruption_reply";
             answer: {
@@ -1974,7 +1984,7 @@ export interface components {
         };
         ModelInterruptionReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "model_interruption_reply";
             answer: {
@@ -1989,7 +1999,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "model_interruption_reply";
             answer: {
@@ -2007,7 +2017,7 @@ export interface components {
         };
         ModelInterruptionRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "model_interruption";
             store: string;
@@ -2029,14 +2039,14 @@ export interface components {
         };
         ModelListReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "model_list";
             connections: components["schemas"]["ModelListEntry"][];
         };
         ModelListRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "model_list";
             store: string;
@@ -2047,7 +2057,7 @@ export interface components {
         };
         ObserveCommandReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2060,7 +2070,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2100,7 +2110,7 @@ export interface components {
             };
         } | ({
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2128,7 +2138,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2161,7 +2171,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2195,7 +2205,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2227,7 +2237,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2264,7 +2274,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2302,7 +2312,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2330,7 +2340,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2368,7 +2378,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2407,7 +2417,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2440,7 +2450,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2474,7 +2484,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2507,7 +2517,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2541,7 +2551,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2560,7 +2570,7 @@ export interface components {
             };
         }) | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2612,7 +2622,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2658,7 +2668,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2704,7 +2714,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2750,7 +2760,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2788,7 +2798,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2846,7 +2856,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2896,7 +2906,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2906,7 +2916,7 @@ export interface components {
         };
         ObserveCommandRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "observe_command";
             store: string;
@@ -2937,7 +2947,7 @@ export interface components {
         };
         PermissionDecisionConflictReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "permission_decision_reply";
             answer: {
@@ -2955,7 +2965,7 @@ export interface components {
         };
         PermissionDecisionReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "permission_decision_reply";
             answer: {
@@ -2969,7 +2979,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "permission_decision_reply";
             answer: {
@@ -2986,7 +2996,7 @@ export interface components {
         };
         PermissionDecisionRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "permission_decision";
             store: string;
@@ -3021,7 +3031,7 @@ export interface components {
         };
         PublicPartContentRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "public_part_content";
             store: string;
@@ -3034,7 +3044,7 @@ export interface components {
         };
         PublicPartsReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "public_parts";
             session: string;
@@ -3043,7 +3053,7 @@ export interface components {
         };
         PublicPartsRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "public_parts";
             store: string;
@@ -3059,7 +3069,7 @@ export interface components {
         };
         ReadActionArgumentsRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "read_action_arguments";
             store: string;
@@ -3068,7 +3078,7 @@ export interface components {
         };
         ReadActionCallIdRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "read_action_call_id";
             store: string;
@@ -3077,7 +3087,7 @@ export interface components {
         };
         ReadActionReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "action_read";
             session: string;
@@ -3096,7 +3106,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "action_read";
             session: string;
@@ -3125,7 +3135,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "action_read";
             session: string;
@@ -3150,7 +3160,7 @@ export interface components {
         };
         ReadActionRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "read_action";
             store: string;
@@ -3161,7 +3171,7 @@ export interface components {
         };
         ReadResultRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "read_result";
             store: string;
@@ -3169,7 +3179,7 @@ export interface components {
         };
         SessionArchiveConflictReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_archive_reply";
             answer: {
@@ -3188,7 +3198,7 @@ export interface components {
         };
         SessionArchiveReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_archive_reply";
             answer: {
@@ -3204,7 +3214,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_archive_reply";
             answer: {
@@ -3222,7 +3232,7 @@ export interface components {
         };
         SessionArchiveRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "session_archive";
             store: string;
@@ -3232,7 +3242,7 @@ export interface components {
         };
         SessionPinConflictReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_pin_reply";
             answer: {
@@ -3247,7 +3257,7 @@ export interface components {
         };
         SessionPinReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_pin_reply";
             answer: {
@@ -3259,7 +3269,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_pin_reply";
             answer: {
@@ -3273,7 +3283,7 @@ export interface components {
         };
         SessionPinRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "session_pin";
             store: string;
@@ -3311,7 +3321,7 @@ export interface components {
         };
         SessionStopConflictReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_stop_reply";
             answer: {
@@ -3330,7 +3340,7 @@ export interface components {
         };
         SessionStopReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_stop_reply";
             answer: {
@@ -3349,7 +3359,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "session_stop_reply";
             answer: {
@@ -3367,7 +3377,7 @@ export interface components {
         };
         SessionStopRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "session_stop";
             store: string;
@@ -3383,7 +3393,7 @@ export interface components {
         };
         SkillSuggestionsReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "skill_suggestions";
             revision: components["schemas"]["Decimal"];
@@ -3395,7 +3405,7 @@ export interface components {
         };
         SkillSuggestionsRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "skill_suggestions";
             store: string;
@@ -3403,7 +3413,7 @@ export interface components {
             prefix: string;
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "skill_suggestions";
             store: string;
@@ -3432,7 +3442,7 @@ export interface components {
         };
         ToolsReloadReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "tools_reload_reply";
             instance: string;
@@ -3443,13 +3453,13 @@ export interface components {
         };
         ToolsReloadRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "tools_reload";
             store: string;
         } | {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "tools_reload";
             store: string;
@@ -3457,7 +3467,7 @@ export interface components {
         };
         ToolsStatusReply: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             type: "tools_status";
             instance: string;
@@ -3476,7 +3486,7 @@ export interface components {
         };
         ToolsStatusRequest: {
             /** @constant */
-            version: "29";
+            version: "30";
             /** @constant */
             kind: "tools_status";
             store: string;
@@ -3836,7 +3846,7 @@ export interface components {
     responses: never;
     parameters: {
         /** @description The wire version this document describes. Any other version is refused. */
-        WireVersion: "29";
+        WireVersion: "30";
         /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
         HostInstance: string;
         /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it, and a request without it is refused. */

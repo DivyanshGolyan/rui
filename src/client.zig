@@ -4479,13 +4479,13 @@ test "response framing rejects ambiguous or malformed fields before interpreting
 test "client activity peer boundary rejects noncanonical IDs and owns canonical labels" {
     for ([_][]const u8{ "k7m2qx", "09azvw", "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", "01234567-89ab-4cde-8012-3456789abcde" }, 0..) |session, index| {
         var body: protocol.RequestBuffer = .{};
-        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"received\":{\"admission\":\"1\",\"key\":\"key\\u0000雪\",\"turn\":null,\"state\":\"queued\",\"admitted_at\":\"1\",\"source_action\":null,\"content\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"abababababababababababababababababababababababababababababababab\"},\"sender\":{\"session\":");
+        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"received\":{\"admission\":\"1\",\"key\":\"key\\u0000雪\",\"turn\":null,\"state\":\"queued\",\"admitted_at\":\"1\",\"content\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"abababababababababababababababababababababababababababababababab\"},\"origin\":{\"peer\":{\"session\":");
         try body.appendJsonString(session);
-        try body.append("}}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\",\"newest_content\":null},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("}}}}}],\"more\":false,\"aggregates\":{\"as_of\":\"1\",\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\",\"newest_content\":null}},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (index < 2) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
-            try std.testing.expectEqualStrings(session, page.facts.items[0].value.received.sender.?.session.slice());
+            try std.testing.expectEqualStrings(session, page.facts.items[0].value.received.origin.peer.session.slice());
             try std.testing.expectEqualStrings("key\x00雪", page.facts.items[0].value.received.key.slice());
         } else try std.testing.expectError(error.InvalidResponse, protocol_reply.ActivityPage.parse(body.slice(), .{}));
     }
@@ -4498,15 +4498,15 @@ test "client activity sender labels are canonical or refused" {
         .{ .label = "bad\nlabel", .ok = false },
     }) |case| {
         var body: protocol.RequestBuffer = .{};
-        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"received\":{\"admission\":\"1\",\"key\":\"key\\u0000雪\",\"turn\":null,\"state\":\"queued\",\"admitted_at\":\"1\",\"source_action\":null,\"content\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"abababababababababababababababababababababababababababababababab\"},\"sender\":{\"session\":");
+        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"received\":{\"admission\":\"1\",\"key\":\"key\\u0000雪\",\"turn\":null,\"state\":\"queued\",\"admitted_at\":\"1\",\"content\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"abababababababababababababababababababababababababababababababab\"},\"origin\":{\"peer\":{\"session\":");
         try body.appendJsonString("k7m2qx");
         try body.append(",\"label\":");
         try body.appendJsonString(case.label);
-        try body.append("}}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\",\"newest_content\":null},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("}}}}}],\"more\":false,\"aggregates\":{\"as_of\":\"1\",\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\",\"newest_content\":null}},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (case.ok) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
-            const sender = page.facts.items[0].value.received.sender.?;
+            const sender = page.facts.items[0].value.received.origin.peer;
             try std.testing.expectEqualStrings(case.label, sender.label.slice());
             try std.testing.expectEqualStrings(case.label, sender.name());
         } else try std.testing.expectError(error.InvalidResponse, protocol_reply.ActivityPage.parse(body.slice(), .{}));

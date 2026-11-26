@@ -5,6 +5,7 @@ const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
 const activity_facts = @import("../../activity_facts.zig");
+const SourceKind = @import("../../source_kind.zig").SourceKind;
 const content_value = @import("../../content_value.zig");
 const conversation_read = @import("../../conversation_read.zig");
 const activity_read = @import("../../activity_read.zig");
@@ -1136,9 +1137,10 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     const lower = if (forward) request.position + 1 else if (boundary) |item| item.position else 0;
     const upper = if (forward) (if (boundary) |item| item.position else end) else if (request.position == 0) end else @min(end, request.position - @intFromBool((request.ordinal orelse 0) == 0));
     const last = if (forward) boundary else null;
-    const call_position = activity_facts.queueCutoff(end, forward, page.more, if (last) |item| item.position else null);
+    const call_position = activity_facts.Aggregates.position(end, forward, page.more, if (last) |item| item.position else null);
     var missing: missing_assistant_entry.Result = null;
-    var calls: CallRows = .{ .activity = &page.call_activity, .args = .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null } };
+    var call_activity_facts: activity_facts.CallActivity = .{};
+    var calls: CallRows = .{ .activity = &call_activity_facts, .args = .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null } };
     var waiting: QueuedMessages = .{};
     if (lower <= upper and request.kinds.contains(.assistant)) a.read(missing_assistant_entry, .{ .session = session_ref, .lower = lower, .upper = upper }, &missing);
     if (request.kinds.eql(.full)) {
@@ -1147,8 +1149,10 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     }
     try readItems(page.items.len, a, session_ref, end, at[0..page.count], page.items[0..page.count], &calls, null);
     if (missing != null) return error.CorruptStore;
-    page.queued = waiting.queued;
-    if (waiting.queued.count != 0) page.queued.newest_content = try content_parts.publicValue(&(waiting.newest orelse return error.CorruptStore), .{ .message = waiting.queued.newest_admission });
+    if (request.kinds.eql(.full)) {
+        page.aggregates = .{ .as_of = call_position, .call_activity = call_activity_facts, .queued = waiting.queued };
+        if (waiting.queued.count != 0) page.aggregates.?.queued.newest_content = try content_parts.publicValue(&(waiting.newest orelse return error.CorruptStore), .{ .message = waiting.queued.newest_admission });
+    } else page.aggregates = null;
     page.work.read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
     page.work.revision = session.revision.get();
     page.work.creator = session.creator_ref;
@@ -1431,7 +1435,7 @@ const activity_message = rsql.Read(.{
         sourced_input.consistentSql("m", "c") ++ " " ++
         "AND (m.turn_id IS NULL OR (t.session_ref=m.session_ref AND EXISTS(SELECT 1 FROM conversation_entry e " ++
         "WHERE e.source_admission_id=m.admission_id AND e.session_ref=m.session_ref AND e.turn_id=m.turn_id AND e.content_id=m.content_id))) AS consistent," ++
-        "m.admitted_at,m.sender_session_ref," ++ sourced_input.actionIdSql("m") ++ " AS source_action_id FROM message_admission m " ++
+        "m.admitted_at,m.source_kind,m.sender_session_ref," ++ sourced_input.actionIdSql("m") ++ " AS source_action_id FROM message_admission m " ++
         "LEFT JOIN core_command c ON c.command_key=m.command_key LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
         "WHERE m.session_ref=?1 AND m.admission_id=?3",
     .Args = struct { session: []const u8, end: u64, admission: u64 },
@@ -1443,6 +1447,7 @@ const activity_message = rsql.Read(.{
         excluded: bool,
         consistent: bool,
         admitted_at: rsql.Positive,
+        source_kind: u8,
         sender_session_ref: ?SessionText,
         source_action_id: ?rsql.Positive,
     },
@@ -1636,8 +1641,12 @@ const MessageRead = struct {
         message.turn = null;
         message.state = if (row.applied) .applied else if (row.excluded) .excluded else .queued;
         message.admitted_at = row.admitted_at.get();
-        message.sender = if (row.sender_session_ref) |sender| .{ .session = sender } else null;
-        message.source_action = if (row.source_action_id) |action| action.get() else null;
+        const kind = std.enums.fromInt(SourceKind, row.source_kind) orelse return error.CorruptStore;
+        message.origin = activity_facts.Item.Origin.fromSource(
+            kind,
+            if (row.sender_session_ref) |sender| .{ .session = sender } else null,
+            if (row.source_action_id) |action| action.get() else null,
+        ) orelse return error.CorruptStore;
         if (row.applied) message.turn = (row.turn_id orelse return error.CorruptStore).get();
         read.content_id = row.content_id.get();
     }
@@ -1737,8 +1746,8 @@ const ItemRead = struct {
                     if (kind == 2) message.entry.queue(a, session);
                 } else {
                     a.read(content_metadata, .{ .content_id = message.read.content_id }, &message.metadata);
-                    if (message.read.message.sender) |*sender| {
-                        message.label = .{ .peer = sender };
+                    if (message.read.message.origin == .peer) {
+                        message.label = .{ .peer = &message.read.message.origin.peer };
                         message.label.queue(a);
                     }
                     if (kind == 2) message.entry.queueMetadata(a);
@@ -1809,12 +1818,12 @@ const ItemRead = struct {
                 const message = &read.state.message;
                 if (read.round == 1) {
                     if (!try message.read.count.found()) return error.CorruptStore;
-                    if (kind != 2 and (kind == 11) != (message.read.message.sender != null or message.read.message.source_action != null)) return error.CorruptStore;
+                    if (kind != 2 and (kind == 11) != (message.read.message.origin.admitsAs() == .received)) return error.CorruptStore;
                     if (kind == 2) try message.entry.found();
                     return;
                 }
                 message.read.message.content = try content_parts.publicValue(&message.metadata, .{ .message = message.read.message.admission });
-                if (message.read.message.sender != null) try message.label.found();
+                if (message.read.message.origin == .peer) try message.label.found();
                 item.at = message.read.message.admitted_at;
                 if (kind == 2) {
                     if (message.read.message.state != .applied) return error.CorruptStore;

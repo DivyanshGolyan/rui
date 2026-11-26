@@ -17,6 +17,7 @@ const content_value = @import("content_value.zig");
 const tool_proposal = @import("tool_proposal.zig");
 const skill_reference = @import("skill_reference.zig");
 const hosted_action = @import("hosted_action.zig");
+const SourceKind = @import("source_kind.zig").SourceKind;
 
 const ToolPresentation = tool_presentation.ToolPresentation;
 
@@ -69,7 +70,48 @@ pub const Item = struct {
             .stop, .approval_requested, .session_changed, .compacted, .model_call => .none,
         };
     }
-    pub const Message = struct { admission: u64, key: Bounded(idempotency_key.max_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: content_value.Value, admitted_at: u64, sender: ?NamedPeer = null, source_action: ?u64 = null };
+    pub const Message = struct { admission: u64, key: Bounded(idempotency_key.max_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: content_value.Value, admitted_at: u64, origin: Origin = .person };
+
+    /// Who admitted a Message: a person (or script), another Session, the background Action whose result or published value it is, or the Host itself.
+    /// One value, so a Message cannot name a Session and an Action at once; `SourceKind` owns which origins have a row a person is shown
+    /// and where Activity admits them, and this type only maps onto it.
+    pub const Origin = union(enum) {
+        person,
+        peer: NamedPeer,
+        action: u64,
+        /// Input the Host admits on its own account. Nothing writes one yet; the kind is here so `SourceKind` and `Origin` never disagree about it.
+        server_event,
+
+        /// The origin of a stored Message from its saved source kind and the sender Session or Action the Store holds for it.
+        /// Null when the facts disagree with the kind (a person or server event with a sender or an Action, a peer with an Action, an Action with a sender).
+        pub fn fromSource(kind: SourceKind, peer_session: ?NamedPeer, source_action: ?u64) ?Origin {
+            return switch (kind) {
+                .person => if (peer_session == null and source_action == null) .person else null,
+                .peer => if (peer_session) |peer_named| if (source_action == null) .{ .peer = peer_named } else null else null,
+                .action_final, .action_value => if (source_action) |action_id| if (peer_session == null) .{ .action = action_id } else null else null,
+                .server_event => if (peer_session == null and source_action == null) .server_event else null,
+            };
+        }
+
+        fn representative(self: Origin) SourceKind {
+            return switch (self) {
+                .person => .person,
+                .peer => .peer,
+                .action => .action_final,
+                .server_event => .server_event,
+            };
+        }
+
+        /// Does a person reading the conversation see a row for this Message?
+        pub fn personFacing(self: Origin) bool {
+            return self.representative().personFacing();
+        }
+
+        /// The Activity row kind that admits this Message: `admission` for a person's, `received` for any other origin.
+        pub fn admitsAs(self: Origin) SourceKind.Admission {
+            return self.representative().admitsAs();
+        }
+    };
     pub const Call = activity_read.ProposalMetadata;
     /// A hosted web search: the line a reader shows (derived from the action when it is read, never stored) and the
     /// action's facts, which the Store holds as exact strings.
@@ -161,17 +203,73 @@ pub const Queued = struct {
     newest_content: ?content_value.Value = null,
 };
 
-/// The position a page's queued aggregate (and call activity) is taken at: the last row of a
-/// forward page that has more, otherwise the page's end. The Store and the client both use it.
-pub fn queueCutoff(end: u64, forward: bool, more: bool, last: ?u64) u64 {
-    return if (forward and more) last.? else end;
+/// What a page says about the Session as a whole, not about its rows: the live calls and the Messages still
+/// queued, counted at `as_of`. A page reads them only when it asks for every kind, so a page of some kinds carries
+/// none; "not read" is null, never an empty count.
+pub const Aggregates = struct {
+    /// The position the counts were taken at: the last row of a forward page that has more, otherwise the page's end.
+    as_of: u64,
+    call_activity: CallActivity = .{},
+    queued: Queued = .{},
+
+    /// The one owner of `as_of`: the Store takes the counts there, and the client refuses a page that names another.
+    /// `last` is the position of the page's last row, which a forward page with more must have.
+    pub fn position(end: u64, forward: bool, more: bool, last: ?u64) u64 {
+        return if (forward and more) last.? else end;
+    }
+};
+
+test "aggregates are taken at a forward page's last row only while more follows" {
+    try std.testing.expectEqual(@as(u64, 7), Aggregates.position(40, true, true, 7));
+    try std.testing.expectEqual(@as(u64, 40), Aggregates.position(40, true, false, 7));
+    try std.testing.expectEqual(@as(u64, 40), Aggregates.position(40, false, true, 7));
+    try std.testing.expectEqual(@as(u64, 40), Aggregates.position(40, false, false, null));
 }
 
-test "queueCutoff takes a forward page's aggregate at its last row only while more follows" {
-    try std.testing.expectEqual(@as(u64, 7), queueCutoff(40, true, true, 7));
-    try std.testing.expectEqual(@as(u64, 40), queueCutoff(40, true, false, 7));
-    try std.testing.expectEqual(@as(u64, 40), queueCutoff(40, false, true, 7));
-    try std.testing.expectEqual(@as(u64, 40), queueCutoff(40, false, false, null));
+test "ADM-35 an origin is built from a stored source kind and answers through it" {
+    const Origin = Item.Origin;
+    var peer: NamedPeer = .{ .session = .{} };
+    try peer.session.set("k7m2qx");
+    const Case = struct { kind: SourceKind, peer: ?NamedPeer, action: ?u64, origin: ?Origin };
+    const cases = [_]Case{
+        .{ .kind = .person, .peer = null, .action = null, .origin = .person },
+        .{ .kind = .person, .peer = peer, .action = null, .origin = null },
+        .{ .kind = .person, .peer = null, .action = 4, .origin = null },
+        .{ .kind = .peer, .peer = peer, .action = null, .origin = .{ .peer = peer } },
+        .{ .kind = .peer, .peer = null, .action = null, .origin = null },
+        .{ .kind = .peer, .peer = peer, .action = 4, .origin = null },
+        .{ .kind = .action_final, .peer = null, .action = 4, .origin = .{ .action = 4 } },
+        .{ .kind = .action_value, .peer = null, .action = 4, .origin = .{ .action = 4 } },
+        .{ .kind = .action_final, .peer = null, .action = null, .origin = null },
+        .{ .kind = .action_value, .peer = peer, .action = 4, .origin = null },
+        .{ .kind = .server_event, .peer = null, .action = null, .origin = .server_event },
+        .{ .kind = .server_event, .peer = peer, .action = null, .origin = null },
+        .{ .kind = .server_event, .peer = null, .action = 4, .origin = null },
+    };
+    for (cases) |case| {
+        const origin = Origin.fromSource(case.kind, case.peer, case.action);
+        try std.testing.expectEqual(case.origin == null, origin == null);
+        const expected = case.origin orelse continue;
+        try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(origin.?));
+        switch (expected) {
+            .person, .server_event => {},
+            .peer => |named| {
+                try std.testing.expectEqualStrings(named.session.slice(), origin.?.peer.session.slice());
+                try std.testing.expectEqualStrings(named.label.slice(), origin.?.peer.label.slice());
+            },
+            .action => |action| try std.testing.expectEqual(action, origin.?.action),
+        }
+    }
+    // The answers come from the source kind: an Action's origin answers as both of its kinds do.
+    try std.testing.expectEqual(SourceKind.action_final.personFacing(), SourceKind.action_value.personFacing());
+    try std.testing.expectEqual(SourceKind.action_final.admitsAs(), SourceKind.action_value.admitsAs());
+    const origins = [_]Origin{ .person, .{ .peer = peer }, .{ .action = 4 }, .server_event };
+    const facing = [_]bool{ true, true, false, true };
+    const admits = [_]SourceKind.Admission{ .admission, .received, .received, .received };
+    for (origins, facing, admits) |origin, shown, kind| {
+        try std.testing.expectEqual(shown, origin.personFacing());
+        try std.testing.expectEqual(kind, origin.admitsAs());
+    }
 }
 
 pub const PageWork = struct {
@@ -190,8 +288,7 @@ pub const Page = struct {
     items: [activity_read.ActivityPage.items]Item = undefined,
     count: usize = 0,
     more: bool = false,
-    call_activity: CallActivity = .{},
-    queued: Queued = .{},
+    aggregates: ?Aggregates = null,
     work: PageWork = .{},
 };
 

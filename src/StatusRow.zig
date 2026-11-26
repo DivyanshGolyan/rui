@@ -106,7 +106,7 @@ test "the status row shows what needs the person with its key clickable, and the
     try std.testing.expectEqual(@as(usize, 1), actions.retried);
     try std.testing.expectEqual(@as(usize, 1), actions.stopped);
 
-    row.bar = chrome.bar(.{ .notice = "Copied 12 lines", .width = 40 });
+    row.bar = chrome.bar(.{ .notice = chrome.Say.quiet("Copied 12 lines"), .width = 40 });
     const notice = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 0), notice.children.len);
     try std.testing.expectEqualStrings(" ", notice.readCell(0, 0).char.grapheme);

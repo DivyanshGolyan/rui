@@ -16,8 +16,7 @@ import time
 
 from control_fixture import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse
 from host_process import wait_for
-from conversation_page_fixture import host_resources
-from conversation_page_fixture import idle_resources, provider_connections
+from host_fixture import host_resources, idle_resources, provider_connections
 from model_fixture import sse_tool_calls
 import host_process
 from host_process import TestHTTPServer, canonical_fixture_root, retain_failure_state, stop_process
@@ -145,7 +144,7 @@ def main():
             index, approval = approvals[0]
             assert pending[index - 1] is calls[0] and approval["position"] == calls[0]["position"] and approval["ordinal"] == "1", approval
             assert approval["value"]["approval_requested"]["action"] == calls[0]["value"]["call"]["action"]
-            live = page(store)["page"]["call_activity"]
+            live = page(store)["page"]["aggregates"]["call_activity"]
             assert live["total"] == "18" and [int(e["ordinal"]) for e in live["entries"]] == [0, 1, 2], live
             assert live["entries"][0]["presentation"]["code"] == "pending_permission", live
             assert live["entries"][0]["presentation"]["line"] == {"before": "Exit with success", "peer": None, "after": None}, live
@@ -187,18 +186,19 @@ def main():
             assert len(results) == 18 and len({r["position"] for r in results}) == 1
             assert [int(r["ordinal"]) for r in results] == list(range(1, 19))
             projected = page(store)
-            assert projected["page"]["call_activity"]["total"] == "18", projected
+            assert projected["page"]["aggregates"]["call_activity"]["total"] == "18", projected
             while True:
                 facts = projected["page"]
                 boundary = (int(facts["items"][-1]["position"]), int(facts["items"][-1]["ordinal"])) if facts["more"] else (int(facts["end"]), 2**63-1)
                 remaining = [r for r in results if (int(r["position"]), int(r["ordinal"])) > boundary]
-                live = facts["call_activity"]
+                assert int(facts["aggregates"]["as_of"]) == boundary[0], (boundary, facts["aggregates"]["as_of"])
+                live = facts["aggregates"]["call_activity"]
                 assert int(live["total"]) == len(remaining), (boundary, live)
                 assert [int(e["ordinal"]) for e in live["entries"]] == [int(r["ordinal"])-1 for r in remaining[:3]], live
                 if projected["next"] is None: break
                 cursor = projected["next"]
                 projected = page(store, cursor["end"], cursor["position"], cursor["ordinal"], cursor["direction"])
-            assert page(store, direction="backward")["page"]["call_activity"]["total"] == "0"
+            assert page(store, direction="backward")["page"]["aggregates"]["call_activity"]["total"] == "0"
             assert caller(store, "content", results[0]["position"], results[0]["ordinal"]) == b"declined: a new message arrived; ask again if still needed"
             assert history(store, complete_end, direction="backward")[1] == list(reversed(complete))
             assert history(store, position=queued_end)[1] == [r for r in complete if int(r["position"]) > int(queued_end)], "catch-up replayed old group ties"
@@ -259,12 +259,12 @@ def main():
                     process = None
             saved.close()
             valid = {"version": host_process.WIRE_VERSION, "type": "activity_page", "delta": "full", "since": None, "end": str(2**63-1), "direction": "forward", "more": False,
-                "call_activity": {"total": "0", "entries": []},
-                "queued": json.loads((pathlib.Path(__file__).resolve().parents[2] / "src/codecs/fixtures/activity/empty-queue.json").read_text()),
+                "aggregates": {"as_of": str(2**63-1), "call_activity": {"total": "0", "entries": []},
+                    "queued": json.loads((pathlib.Path(__file__).resolve().parents[2] / "src/codecs/fixtures/activity/empty-queue.json").read_text())},
                 "work": {"creator": None, "read_version": "0"*32 + ".0", "state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None,
                     "actions": {"stop": False, "interrupt": None, "decide": None}, "revision": "1", "workspace": "/w"},
                 "items": [{"position": str(i+1), "ordinal": "0", "at": str(2**63-1), "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
-                    "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"type": "text", "bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
+                    "turn": None, "state": "queued", "admitted_at": str(2**63-1), "origin": {"person": {}}, "content": {"type": "text", "bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)
             for version in (None, "missing", "malformed"):
                 wire = copy.deepcopy(valid)
@@ -273,19 +273,19 @@ def main():
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             for fault in ("missing", "count", "duplicate", "order", "retired", "overflow"):
                 wire = copy.deepcopy(valid)
-                if fault == "missing": del wire["call_activity"]
+                if fault == "missing": del wire["aggregates"]
                 else:
                     entry = {"operation": "1", "ordinal": "0", "presentation": {"line": {"before": "Inspect local files", "peer": None, "after": None}, "code": "unresolved", "sign": "active", "publication_position": None}}
                     entries = [entry]
-                    if fault == "count": wire["call_activity"]["total"] = "2"
+                    if fault == "count": wire["aggregates"]["call_activity"]["total"] = "2"
                     else:
                         if fault in ("duplicate", "order", "overflow"):
                             entries += [copy.deepcopy(entry)]
                             if fault == "order": entries[0]["ordinal"] = "1"
                             if fault == "overflow": entries += [copy.deepcopy(entry), copy.deepcopy(entry)]
-                        wire["call_activity"]["total"] = str(len(entries))
+                        wire["aggregates"]["call_activity"]["total"] = str(len(entries))
                         if fault == "retired": entry["presentation"].update(code="succeeded", sign="finished", publication_position="1")
-                    wire["call_activity"]["entries"] = entries
+                    wire["aggregates"]["call_activity"]["entries"] = entries
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             for work, ok in (({"turn": "1", "operation": "2", "first_action": "3", "state": {"kind": "approval", "since": "1"}}, True),
                              ({"turn": "1"}, False), ({"operation": "2"}, False), ({"first_action": "3"}, True),
@@ -306,27 +306,29 @@ def main():
                 wire["items"][0]["value"]["stop"].update(fault)
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
                 wire["items"][0]["value"]["stop"] = {"key": "stop", "turn": None, "cutoff": "0", "completion": "pending"}
-            def received(sender):
+            def received(origin):
                 wire = copy.deepcopy(valid)
                 value = wire["items"][0]["value"]
                 value["received"] = value.pop("admission")
-                value["received"]["sender"] = sender
+                value["received"]["origin"] = origin
                 return wire
-            for sender, ok in ((None, False), ({"session": "k7m2qx"}, True)):
-                mock_reply(fields["socket"], store, "page", json.dumps(received(sender)).encode(), ok=ok)
-            wire = copy.deepcopy(valid)
-            wire["items"][0]["value"]["admission"]["sender"] = {"session": "k7m2qx"}
-            mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
+            for origin, ok in (({"person": {}}, False), ({"peer": {"session": "k7m2qx"}}, True), ({"action": "7"}, True), ({"server_event": {}}, True), ({"action": "0"}, False), ({"action": str(2**63)}, False),
+                               ({"peer": {"session": "k7m2qx"}, "action": "7"}, False), ({}, False), ({"person": True}, False)):
+                mock_reply(fields["socket"], store, "page", json.dumps(received(origin)).encode(), ok=ok)
+            for origin in ({"peer": {"session": "k7m2qx"}}, {"action": "7"}):
+                wire = copy.deepcopy(valid)
+                wire["items"][0]["value"]["admission"]["origin"] = origin
+                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             for session in (SESSION, foreign, "k7m2qx"):
                 sender = {"session": session}
-                mock_reply(fields["socket"], store, "page", json.dumps(received(sender)).encode(), ok=True)
+                mock_reply(fields["socket"], store, "page", json.dumps(received({"peer": sender})).encode(), ok=True)
                 sender["prefix"] = "6"
-                mock_reply(fields["socket"], store, "page", json.dumps(received(sender)).encode())
+                mock_reply(fields["socket"], store, "page", json.dumps(received({"peer": sender})).encode())
             for label, ok in (("Review", True), ("", False), ("a\nb", False)):
-                mock_reply(fields["socket"], store, "page", json.dumps(received({"session": "k7m2qx", "label": label})).encode(), ok=ok)
+                mock_reply(fields["socket"], store, "page", json.dumps(received({"peer": {"session": "k7m2qx", "label": label}})).encode(), ok=ok)
             for session in ("rui/1a2b3c4d-0000-4000-8000-000000000001", "reviewer", "K7m2qx", "k7m2qi", "k7\x00qx"):
-                mock_reply(fields["socket"], store, "page", json.dumps(received({"session": session})).encode())
-            for fault in ("order", "union", "digest", "binding", "integer", "field", "stamp", "sender", "undated", "dated"):
+                mock_reply(fields["socket"], store, "page", json.dumps(received({"peer": {"session": session}})).encode())
+            for fault in ("order", "union", "digest", "binding", "integer", "field", "stamp", "origin", "undated", "dated"):
                 wire = copy.deepcopy(valid)
                 if fault == "undated": del wire["items"][0]["at"]
                 if fault == "dated": wire["items"][0]["at"] = "1"
@@ -337,7 +339,7 @@ def main():
                 if fault == "integer": wire["end"] = str(2**63)
                 if fault == "field": del wire["items"][0]["value"]["admission"]["key"]
                 if fault == "stamp": wire["items"][0]["value"]["admission"]["admitted_at"] = "0"
-                if fault == "sender": del wire["items"][0]["value"]["admission"]["sender"]
+                if fault == "origin": del wire["items"][0]["value"]["admission"]["origin"]
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             encoded = json.dumps(valid).encode()
             mock_reply(fields["socket"], store, "page", encoded[:-1], len(encoded))
@@ -452,7 +454,7 @@ def performance_case(item_bytes):
         for reference, identity in zip(calls[0]["value"]["call"]["fields"][:2],
                 (b"bash", b"performance-call")):
             assert reference == {"type": "text", "bytes": str(len(identity)), "sha256": digest(identity).hex()}, reference
-        expected = first["page"]["call_activity"]
+        expected = first["page"]["aggregates"]["call_activity"]
         assert expected["total"] == "1" and expected["entries"][0]["presentation"]["line"] == {"before": label, "peer": None, "after": None}, expected
         assert expected["entries"][0]["presentation"]["code"] == "pending_permission", expected
         print(json.dumps({"admission_seconds": time.monotonic() - admitted_start, "call": calls[0], "activity": expected}), flush=True)
@@ -466,7 +468,7 @@ def performance_case(item_bytes):
                     current = command("session", "inspect", "--store", store, "--session", SESSION)
                     current_end = time.monotonic()
                     if done.is_set(): return
-                    observed = page(store)["page"]["call_activity"]
+                    observed = page(store)["page"]["aggregates"]["call_activity"]
                     end = time.monotonic()
                     assert observed == expected, observed
                     unresolved = current["actions"]["unresolved"]

@@ -2012,7 +2012,7 @@ test "Chat info copy label follows successful short reply dismissal replacement 
         try press(&page, &ctx, vaxis.Key.left);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copy last answer") != null);
         fixture.copy_notice.showCopy(0, .panel_copy);
-        fixture.copy_notice.show("another reply", 0);
+        fixture.copy_notice.show(@import("marks.zig").Say.quiet("another reply"), 0);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copied") == null);
         page.panel.selected = 8;
         try press(&page, &ctx, vaxis.Key.enter);

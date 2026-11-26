@@ -14,8 +14,8 @@ from control_fixture import encode_sse
 from host_process import wait_for
 import host_process
 from host_process import TestHTTPServer, canonical_fixture_root, dispose_all
-from conversation_page_fixture import dispose_page, host_resources
-from conversation_page_fixture import request, whole_stream_shape
+from conversation_page_fixture import whole_stream_shape
+from host_fixture import dispose_endpoint, host_resources, request
 
 
 ACTIVITY_KINDS = ["admission", "user", "assistant", "call", "tool_result", "hosted_call", "turn_ended", "stop", "received", "approval_requested", "session_changed", "compacted"]
@@ -127,7 +127,7 @@ def main():
         print(f"conversation Host resource snapshots baseline={baseline} queued_2MiB={after} drained={drained} (RSS bytes, FDs; Linux only)")
     finally:
         dispose_all(endpoint.release.set,
-                    lambda: dispose_page(process, endpoint, thread, 3),
+                    lambda: dispose_endpoint(process, endpoint, thread, 3),
                     lambda: shutil.rmtree(state))
 
 
@@ -189,7 +189,7 @@ def projected_ranges():
         wait_for(lambda: inspect_execution(store, session)["custody_occupied"] == "0", "projected result cleanup")
         print("multi-part Conversation ranges: exact escaped/multibyte bytes, healthy trailing empties and repeated EOF passed")
     finally:
-        dispose_all(lambda: dispose_page(process, endpoint, thread, 3),
+        dispose_all(lambda: dispose_endpoint(process, endpoint, thread, 3),
                     lambda: shutil.rmtree(state))
 
 
@@ -262,7 +262,7 @@ def missing_assistant_entries():
                               f"diagnostics={process.rui_diagnostics.tail()!r}", flush=True)
                     raise
                 finally:
-                    dispose_page(process, endpoint, worker, 5)
+                    dispose_endpoint(process, endpoint, worker, 5)
     assert not failures, failures
 
 
