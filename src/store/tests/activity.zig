@@ -1,6 +1,7 @@
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const conversation_read = @import("../../conversation_read.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const content_domain = @import("../domain/content.zig");
