@@ -2996,6 +2996,7 @@ fn infoConfiguration(store: []const u8, session: []const u8, edit: *const ChatIn
             try admitModel(model);
             input.model = .{ .present = true, .value = model };
         },
+        .connection => |name| input.provider = .{ .present = true, .value = name },
         .label => |label| input.label = try labelArgument(label),
     }
     return input;
@@ -5622,6 +5623,9 @@ test "chat info edits produce sparse typed Session configuration without slash p
     const model = try infoConfiguration("/store", "k7m2qx", &.{ .model = "future-chat" }, &tools_buffer);
     try std.testing.expect(model.model.present and !model.provider.present);
     try std.testing.expectEqualStrings("future-chat", model.model.value);
+    const moved = try infoConfiguration("/store", "k7m2qx", &.{ .connection = "work" }, &tools_buffer);
+    try std.testing.expect(moved.provider.present and !moved.model.present and !moved.label.present);
+    try std.testing.expectEqualStrings("work", moved.provider.value);
     const label = try infoConfiguration("/store", "k7m2qx", &.{ .label = "lane \"four\"" }, &tools_buffer);
     try std.testing.expect(label.label.present);
     try std.testing.expectEqualStrings("lane \"four\"", label.label.value.?);
