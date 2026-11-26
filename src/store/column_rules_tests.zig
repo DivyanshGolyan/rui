@@ -235,3 +235,9 @@ test "SH-178 a column's own rules are held by the Host as MySQL's CHECK holds th
     _ = try mysql_testing.takes("DROP TABLE IF EXISTS rui_column_probe");
     try std.testing.expect(checked > 1000);
 }
+
+test "SH-178 a set of ranges and literals holds the bytes it names, and its neighbours are outside it" {
+    try std.testing.expect(column_rules.inSet("a-z0-9_-", 'a') and column_rules.inSet("a-z0-9_-", 'z') and column_rules.inSet("a-z0-9_-", '0') and column_rules.inSet("a-z0-9_-", '9'));
+    try std.testing.expect(column_rules.inSet("a-z0-9_-", '_') and column_rules.inSet("a-z0-9_-", '-'));
+    for ("`{A/:@[ ") |outside| try std.testing.expect(!column_rules.inSet("a-z0-9_-", outside));
+}

@@ -62,9 +62,3 @@ pub fn inSet(comptime set: []const u8, byte: u8) bool {
     }
     return false;
 }
-
-test "SH-178 a set of ranges and literals holds the bytes it names, and its neighbours are outside it" {
-    try std.testing.expect(inSet("a-z0-9_-", 'a') and inSet("a-z0-9_-", 'z') and inSet("a-z0-9_-", '0') and inSet("a-z0-9_-", '9'));
-    try std.testing.expect(inSet("a-z0-9_-", '_') and inSet("a-z0-9_-", '-'));
-    for ("`{A/:@[ ") |outside| try std.testing.expect(!inSet("a-z0-9_-", outside));
-}
