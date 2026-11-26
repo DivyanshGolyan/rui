@@ -540,6 +540,14 @@ pub fn inspectConnections(init: std.process.Init, dir: []const u8, readiness: *p
 }
 
 fn connectionReadiness(init: std.process.Init, served: *const served_connection.Connection) provider_selection.Readiness {
+    if (signInKind(&served.credential) != null) {
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var record_buffer: [credentials.max_file_bytes + 1]u8 = undefined;
+        defer std.crypto.secureZero(u8, &record_buffer);
+        const path = credential_location.connectionCredentialFile(init.environ_map, served.name.slice(), &path_buffer) catch return .credential_error;
+        const record = credentials.readPrivate(path, &record_buffer) catch return .credential_error;
+        return if (record == null) .missing else .configured;
+    }
     var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
     defer std.crypto.secureZero(u8, &key_buffer);
     _ = loadConnectionKey(init, served.name.slice(), &served.credential, &key_buffer) catch |err| return if (err == error.ApiKeyMissing) .missing else .credential_error;
@@ -769,9 +777,6 @@ pub fn resolveConnections(init: std.process.Init, settings: *const hs.Settings, 
     for (settings.connections.entries) |*entry| {
         const served = &entry.value;
         const name = served.name.slice();
-        var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
-        defer std.crypto.secureZero(u8, &key_buffer);
-        const bytes = loadConnectionKey(init, name, &served.credential, &key_buffer) catch |err| return connectionFailure(failure, name, err);
         var url_buffer: [providers.Connected.max_url_bytes]u8 = undefined;
         const resolved = served_connection.resolve(served, .{ .id = "", .native_family = .responses }, &url_buffer) catch |err| return connectionFailure(failure, name, err);
         const fixture = hs.fixtureEndpoint(settings, resolved.url);
@@ -779,10 +784,28 @@ pub fn resolveConnections(init: std.process.Init, settings: *const hs.Settings, 
             .label = served.label,
             .codec = resolved.codec,
             .web_search = if (served.endpointFor(.responses)) |endpoint| endpoint.web_search else false,
-            .live_list = served.models.list == .openai,
+            .live_list = served.models.list == .openai or served.models.list == .chatgpt_plan,
         };
+        if (signInKind(&served.credential)) |kind| {
+            var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const path = credential_location.connectionCredentialFile(init.environ_map, name, &path_buffer) catch |err| return connectionFailure(failure, name, err);
+            connected.addSignIn(served.name, presentation, resolved.url, kind, path, fixture) catch |err| return connectionFailure(failure, name, err);
+            continue;
+        }
+        var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
+        defer std.crypto.secureZero(u8, &key_buffer);
+        const bytes = loadConnectionKey(init, name, &served.credential, &key_buffer) catch |err| return connectionFailure(failure, name, err);
         _ = connected.add(served.name, presentation, resolved.url, bytes, fixture) catch |err| return connectionFailure(failure, name, err);
     }
+}
+
+/// The sign-in a connection's credential is, or null for a key connection.
+fn signInKind(credential: *const served_connection.Credential) ?providers.Connected.SignInKind {
+    return switch (credential.*) {
+        .oauth => .plan,
+        .@"openai-device" => .device,
+        .key => null,
+    };
 }
 
 fn connectionFailure(failure: *start_report.Failure, name: []const u8, err: anyerror) anyerror {

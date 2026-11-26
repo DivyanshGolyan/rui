@@ -1367,8 +1367,11 @@ pub const Connections = struct {
     }
 
     /// The first connection this Rui version does not serve, and the field
-    /// that makes it so. It serves one shape: a key, one Responses format,
-    /// and no extra headers or refusal rules.
+    /// that makes it so. It serves one Responses format, no extra headers or
+    /// refusal rules, and one of: a bearer key, a ChatGPT browser sign-in
+    /// (`oauth` speaking `openai-responses/3`) or a ChatGPT device sign-in
+    /// (`openai-device` speaking `openai-responses/2`). A sign-in's record is
+    /// its own file per name, so two names never share one.
     pub fn unserved(self: *const Connections) ?struct { name: []const u8, field: []const u8 } {
         for (self.entries) |*entry| {
             const name = entry.value.name.slice();
@@ -1380,7 +1383,8 @@ pub const Connections = struct {
                     if (key.placement != .bearer) return .{ .name = name, .field = "credential" };
                     if (key.source == .command) return .{ .name = name, .field = "credential.source" };
                 },
-                .oauth, .@"openai-device" => return .{ .name = name, .field = "credential" },
+                .oauth => if (entry.value.formats[0].dialect != .@"openai-responses/3") return .{ .name = name, .field = "credential" },
+                .@"openai-device" => if (entry.value.formats[0].dialect != .@"openai-responses/2") return .{ .name = name, .field = "credential" },
             }
         }
         return null;
