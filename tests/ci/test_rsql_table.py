@@ -50,7 +50,7 @@ class RsqlTableTest(unittest.TestCase):
             return record(b"schema", name, value, inputs)
 
         def statement_record(kind, text, signature=b"sig", sqlite=b"sqlite", parts=b"mysql", inputs=b"inputs"):
-            return record(kind, text, signature, sqlite, parts, b"a0,n,", b"0", b"select_one", inputs)
+            return record(kind, text, signature, sqlite, parts, b"a0,n,", b"0", b"select_one", b"", inputs)
 
         def fixture_record(text, parts=b"mysql", inputs=b"inputs"):
             return record(b"fixture", text, parts, b"a0,n,", inputs)

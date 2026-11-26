@@ -18,6 +18,7 @@ ALLOWED = {
     "history.zig",
     "sqlite_tests.zig",
     "rsql.zig",
+    "column_rules_tests.zig",
 }
 ALLOWED_DIRECTORIES = ("sqlite_tests/",)
 

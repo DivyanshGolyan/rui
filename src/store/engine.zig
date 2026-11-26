@@ -1,5 +1,9 @@
 const std = @import("std");
 const Sqlite = @import("engine/Sqlite.zig");
+const column_rules = @import("column_rules.zig");
+const schema = @import("schema.zig");
+const rsql = @import("rsql.zig");
+const isBounded = @import("../bounded.zig").isBounded;
 pub const Mysql = @import("engine/Mysql.zig");
 
 pub const Kind = @import("../store_target.zig").Kind;
@@ -33,6 +37,7 @@ pub const Failure = error{
     IdentityReadFailed,
     TooManyPositionClaims,
     ContentNotInserted,
+    ColumnRuleRefused,
 };
 
 pub const ContentHost = struct {
@@ -172,6 +177,7 @@ pub const Engine = union(Kind) {
     }
 
     pub inline fn bind(e: *Engine, statement: ?Statement, comptime S: type, args: *const S.Args, now: i64) Failure!void {
+        try admit(S, args);
         return switch (e.*) {
             .sqlite => Sqlite.bind(statement, S, args, now),
             .mysql => |*s| s.bind(S, args, now),
@@ -332,3 +338,37 @@ pub const ContentSink = union(Kind) {
         }
     }
 };
+
+/// Refuses an argument the column it is bound to would refuse; compiles to nothing for a statement that binds no column.
+pub inline fn admit(comptime S: type, args: *const S.Args) error{ColumnRuleRefused}!void {
+    if (comptime !@hasDecl(S, "bound_columns")) return;
+    const info = @typeInfo(S.Args).@"struct";
+    inline for (S.bound_columns) |bound| {
+        const column = comptime schema.columnOf(bound.table, bound.column);
+        const name = info.field_names[bound.arg - 1];
+        const Field = info.field_types[bound.arg - 1];
+        if (valueOf(Field, &@field(args, name))) |value| {
+            if (!column_rules.accepts(column, value)) return error.ColumnRuleRefused;
+        }
+    }
+}
+
+/// The rule-relevant value of a bound argument, or null for a type whose every value the language already keeps inside any rule.
+/// Takes the argument by pointer: the octets it returns point into it.
+fn valueOf(comptime T: type, value: *const T) ?column_rules.Value {
+    if (T == []const u8) return .{ .octets = value.* };
+    if (T == rsql.Bytes) return .{ .octets = value.bytes };
+    if (T == rsql.Positive) return .{ .int = std.math.cast(i64, @backingInt(value.*)) orelse std.math.maxInt(i64) };
+    if (T == rsql.SessionHead) return null;
+    if (comptime isBounded(T)) return .{ .octets = value.slice() };
+    if (comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "slice")) return .{ .octets = value.slice() };
+    if (comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "blob_capacity")) return .{ .octets = value.bytes[0..value.len] };
+    return switch (@typeInfo(T)) {
+        .optional => |optional| if (value.*) |*present| valueOf(optional.child, present) else .null,
+        .bool => .{ .int = @intFromBool(value.*) },
+        .int => .{ .int = std.math.cast(i64, value.*) orelse std.math.maxInt(i64) },
+        .@"enum" => .{ .octets = @tagName(value.*) },
+        .array => |array| if (array.child == u8) .{ .octets = value } else null,
+        else => null,
+    };
+}
