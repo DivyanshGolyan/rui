@@ -296,7 +296,7 @@ fn mapped(err: anyerror) ?Code {
         error.TooManyInputParts => .message_parts_limit,
         error.ImageNotRegular, error.UnsupportedImage, error.TruncatedImage, error.MalformedImage, error.ImageMimeMismatch, error.ImageResourceLimit => .message_image_invalid,
         error.InvalidArguments, error.InvalidPrefix => .invocation_invalid,
-        error.InvalidInvocation, error.SettingsInvalid => .invocation_invalid,
+        error.InvalidInvocation, error.SettingsInvalid, error.SignInKindMismatch => .invocation_invalid,
         error.CallerFailure, error.ContentChanged => .internal_unexpected,
         error.InsecureDirectoryPermissions => .internal_unexpected,
         error.ConnectionSuperseded => .sign_in_connection_changed,
