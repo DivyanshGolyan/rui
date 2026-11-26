@@ -44,6 +44,18 @@ pub const Edit = union(enum) {
     model: []const u8,
     connection: []const u8,
     label: []const u8,
+
+    /// The edit with its text copied into `buffer`, so it outlives the caller's bytes.
+    pub fn copiedInto(self: Edit, buffer: []u8) error{ValueTooLong}!Edit {
+        switch (self) {
+            inline .label, .model, .connection => |text, tag| {
+                if (text.len > buffer.len) return error.ValueTooLong;
+                @memcpy(buffer[0..text.len], text);
+                return @unionInit(Edit, @tagName(tag), buffer[0..text.len]);
+            },
+            else => return self,
+        }
+    }
 };
 
 pub const Backend = struct {
@@ -709,17 +721,7 @@ const Fixture = struct {
         const self: *Fixture = @ptrCast(@alignCast(raw));
         self.save_calls += 1;
         if (self.fail_submit) return error.AccessDenied;
-        self.edit = switch (edit) {
-            .label, .model, .connection => |text| blk: {
-                @memcpy(self.text[0..text.len], text);
-                break :blk switch (edit) {
-                    .label => .{ .label = self.text[0..text.len] },
-                    .model => .{ .model = self.text[0..text.len] },
-                    else => .{ .connection = self.text[0..text.len] },
-                };
-            },
-            else => edit,
-        };
+        self.edit = try edit.copiedInto(&self.text);
         self.state_value = .pending;
     }
     fn archive(raw: *anyopaque) !view.IntentAdmission {

@@ -250,19 +250,7 @@ pub const Job = struct {
     }
 
     pub fn setInfoEdit(self: *Job, edit: ChatInfo.Edit) !void {
-        self.info_edit = edit;
-        switch (edit) {
-            .label, .model, .connection => |text| {
-                if (text.len > self.command_text.len) return error.ValueTooLong;
-                @memcpy(self.command_text[0..text.len], text);
-                self.info_edit = switch (edit) {
-                    .label => .{ .label = self.command_text[0..text.len] },
-                    .model => .{ .model = self.command_text[0..text.len] },
-                    else => .{ .connection = self.command_text[0..text.len] },
-                };
-            },
-            else => {},
-        }
+        self.info_edit = try edit.copiedInto(&self.command_text);
     }
 
     pub fn retryCompletion(self: *const Job, latest: ?LatestEnding) RetryCompletion {
@@ -2693,6 +2681,10 @@ test "chat info worker owns typed model and label bytes until completion" {
     try job.setInfoEdit(.{ .model = &model });
     @memset(&model, 'x');
     try std.testing.expectEqualStrings("future-chat", job.info_edit.?.model);
+    var named = "work".*;
+    try job.setInfoEdit(.{ .connection = &named });
+    @memset(&named, 'x');
+    try std.testing.expectEqualStrings("work", job.info_edit.?.connection);
     try job.setInfoEdit(.{ .permission = .ask });
     try std.testing.expectEqual(ChatInfo.Edit{ .permission = .ask }, job.info_edit.?);
 }

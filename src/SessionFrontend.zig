@@ -577,19 +577,7 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
         fn configure(raw: *anyopaque, edit: ChatInfo.Edit) !void {
             const frontend = owner(raw);
             try frontend.infoMaySave();
-            var held = edit;
-            switch (edit) {
-                .label, .model, .connection => |text| {
-                    if (text.len > frontend.info_bytes.len) return error.ValueTooLong;
-                    @memcpy(frontend.info_bytes[0..text.len], text);
-                    held = switch (edit) {
-                        .label => .{ .label = frontend.info_bytes[0..text.len] },
-                        .model => .{ .model = frontend.info_bytes[0..text.len] },
-                        else => .{ .connection = frontend.info_bytes[0..text.len] },
-                    };
-                },
-                else => {},
-            }
+            const held = try edit.copiedInto(&frontend.info_bytes);
             var intent_buffer: [1024]u8 = undefined;
             if (try frontend.reserveConfigure(configureIntent(&intent_buffer, held)) != .admitted) return error.Busy;
             frontend.info_edit = held;
@@ -10491,7 +10479,7 @@ test "chat info Configure and Copy admission either owns work or refuses before 
             return null;
         }
     };
-    const edits: []const ChatInfo.Edit = &.{ .{ .effort = .low }, .{ .permission = .ask }, .{ .tools = .{ .allowed = try .of(&.{ "bash", "none" }), .loaded = try .of(&.{"none"}) } }, .{ .model = "gpt-6-luna" }, .{ .label = "Renamed" } };
+    const edits: []const ChatInfo.Edit = &.{ .{ .effort = .low }, .{ .permission = .ask }, .{ .tools = .{ .allowed = try .of(&.{ "bash", "none" }), .loaded = try .of(&.{"none"}) } }, .{ .model = "gpt-6-luna" }, .{ .connection = "work" }, .{ .label = "Renamed" } };
     for (std.enums.values(Hold)) |hold| for (0..edits.len + 1) |effect| {
         const held = try HeldFrontend.create();
         defer held.destroy();
