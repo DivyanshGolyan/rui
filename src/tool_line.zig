@@ -22,7 +22,7 @@ pub const Call = union(enum) {
     /// The id of the Session the message is for.
     message_agent: []const u8,
     read_image,
-    read_transcript: ?Bounded(session_id.max_reference_bytes),
+    read_transcript: ?Bounded(session_id.bytes),
     skill,
     start_agent,
     stop_action,
@@ -42,40 +42,55 @@ pub const WebSearchCall = struct {
 pub const Facts = struct {
     /// The tool's saved name, at most `tool_name.max_bytes`, read inline.
     name: []const u8,
-    /// A call no tool served (`unknown_tool`, `invalid_arguments`) has no line.
+    /// Set on a call no tool served; `served` says what words such a call keeps.
     rejection: ?tool_proposal.Rejection = null,
     /// What the model said about the call (a Bash or MCP `description` argument), as saved.
     label: ?[]const u8 = null,
-    /// The Session a `message_agent` or `read_transcript` call named.
+    /// The Session a `message_agent` or `read_transcript` call named: its ID, `session_id.bytes` long.
     subject: ?[]const u8 = null,
     /// That Session's label now, so a rename shows on every row that names it.
     subject_label: ?Bounded(saved_label.max_label_bytes) = null,
 };
 
-/// The line of a saved call, or null for a call no tool served. A built-in tool says its own words; Bash says its label,
-/// or the fallback words when it has none; any other tool (an MCP or app tool) says its label, or its own name.
-/// Total over any saved text: a label is read through `saved_label`. A subject that is not a Session reference is an error.
+/// The line of a saved call, or null for a call that has no words, as it was before the line stopped being saved. A built-in tool says
+/// its own words; Bash says its label, or the fallback words when it has none; any other tool (an MCP or app tool) says its label,
+/// and an app call, which saves none, has no line. A call no tool served (`rejection`) keeps the words it could be given:
+/// `served` says which. Total over any saved text: a label is read through `saved_label`. A subject that is not a Session ID is an error.
 pub fn of(facts: Facts) tool_presentation.Line.Error!?tool_presentation.Line {
-    if (facts.rejection != null) return null;
-    const label = facts.label orelse "";
-    const words = saved_label.callWords(label);
-    const tool = std.meta.stringToEnum(std.meta.Tag(Call), facts.name) orelse .web_search;
-    const call: Call = switch (tool) {
+    const tool = std.meta.stringToEnum(std.meta.Tag(Call), facts.name);
+    if (!served(tool, facts)) return null;
+    const words = saved_label.callWords(facts.label orelse "");
+    const call: Call = switch (tool orelse .web_search) {
         .bash => .{ .bash = words.slice() },
         .find_tools => .find_tools,
-        .message_agent => .{ .message_agent = facts.subject orelse "" },
+        .message_agent => .{ .message_agent = if (facts.subject) |id| (if (id.len > session_id.bytes) return error.InvalidLine else id) else "" },
         .read_image => .read_image,
-        .read_transcript => .{ .read_transcript = if (facts.subject) |id| Bounded(session_id.max_reference_bytes).from(id) catch return error.InvalidLine else null },
+        .read_transcript => .{ .read_transcript = if (facts.subject) |id| Bounded(session_id.bytes).from(id) catch return error.InvalidLine else null },
         .skill => .skill,
         .start_agent => .start_agent,
         .stop_action => .stop_action,
         .watch_github_pr => .watch_github_pr,
-        // Not a built-in tool's name (a hosted search is never a saved call): an MCP or app tool.
-        .web_search => return tool_presentation.Line.ofSaved(if (saved_label.readWords(max_bytes, label) != null) label else facts.name),
+        // Not a built-in tool's name (a hosted search is never a saved call): an MCP or app tool, served only with a label.
+        .web_search => return tool_presentation.Line.ofSaved(facts.label.?),
     };
     var line = try lineOf(call);
     if (line.link != null) if (saved_label.labelWords(facts.subject_label)) |peer| try line.setLabel(peer.slice());
     return line;
+}
+
+/// Whether a saved call has words. An accepted call does, except an app call (it saved no label). A rejected call (a tool name
+/// nothing served, or arguments no tool accepted) has the words its tool's name and what was saved give it: a label; a message to
+/// a Session it named; the tools that said the same whatever the arguments; the tools that name no argument, once the tool was known.
+fn served(tool: ?std.meta.Tag(Call), facts: Facts) bool {
+    const rejected = facts.rejection != null;
+    return switch (tool orelse .web_search) {
+        .web_search => facts.label != null,
+        .bash => facts.label != null or !rejected,
+        .message_agent => facts.subject != null or !rejected,
+        .find_tools, .read_transcript, .skill => true,
+        .start_agent, .stop_action => facts.rejection != .unknown_tool,
+        .read_image, .watch_github_pr => !rejected,
+    };
 }
 
 fn lineOf(call: Call) tool_presentation.Line.Error!tool_presentation.Line {
@@ -240,11 +255,11 @@ test "TPR-4 a web search call's description says what it did, on one line, withi
     }
 }
 
-test "TPR-4 a saved call's line is derived from its tool, label and subject, and a call no tool served has none" {
+test "TPR-4 a saved call's line is derived from its tool, label and subject, and a call no tool served keeps the words it was given" {
     var peer = Bounded(saved_label.max_label_bytes){};
     try peer.set("Review the WAL");
     const long_label: [max_bytes]u8 = @splat('x');
-    const long_subject: [session_id.max_reference_bytes + 1]u8 = @splat('x');
+    const long_subject: [session_id.bytes + 1]u8 = @splat('x');
     const Case = struct { facts: Facts, plain: ?[]const u8, peer: ?[]const u8 = null };
     const cases = [_]Case{
         .{ .facts = .{ .name = "bash", .label = "Run parser tests" }, .plain = "Run parser tests" },
@@ -265,13 +280,27 @@ test "TPR-4 a saved call's line is derived from its tool, label and subject, and
         .{ .facts = .{ .name = "stop_action" }, .plain = "Stop an Action" },
         .{ .facts = .{ .name = "start_agent" }, .plain = "Start an agent" },
         .{ .facts = .{ .name = "watch_github_pr" }, .plain = "Watch a GitHub pull request" },
-        // Any other tool is an MCP or app tool: its label when the model gave one, else its own name.
+        // Any other tool is an MCP or app tool: its label, and an app call saves none, so it has no line.
         .{ .facts = .{ .name = "find_docs", .label = "Find the install page" }, .plain = "Find the install page" },
-        .{ .facts = .{ .name = "mcp__docs__find" }, .plain = "mcp__docs__find" },
-        .{ .facts = .{ .name = "mcp__docs__find", .label = "  " }, .plain = "mcp__docs__find" },
-        // A call no tool served has no line, whatever else was saved.
-        .{ .facts = .{ .name = "bash", .label = "Run", .rejection = .unknown_tool }, .plain = null },
+        .{ .facts = .{ .name = "mcp__docs__find", .label = "mcp__docs__find" }, .plain = "mcp__docs__find" },
+        .{ .facts = .{ .name = "mcp__docs__find", .label = "  " }, .plain = saved_label.fallback_words },
+        .{ .facts = .{ .name = "app_tool" }, .plain = null },
+        // A call no tool served keeps the words its saved facts give it, as it did when the line was saved.
+        .{ .facts = .{ .name = "bash", .label = "Run", .rejection = .unknown_tool }, .plain = "Run" },
+        .{ .facts = .{ .name = "bash", .label = "Run", .rejection = .invalid_arguments }, .plain = "Run" },
+        .{ .facts = .{ .name = "bash", .rejection = .invalid_arguments }, .plain = null },
         .{ .facts = .{ .name = "message_agent", .rejection = .invalid_arguments }, .plain = null },
+        .{ .facts = .{ .name = "message_agent", .subject = "abc123", .rejection = .unknown_tool }, .plain = "Message abc123", .peer = "abc123" },
+        .{ .facts = .{ .name = "read_transcript", .rejection = .unknown_tool }, .plain = "Read own transcript" },
+        .{ .facts = .{ .name = "find_tools", .rejection = .invalid_arguments }, .plain = "Find tools" },
+        .{ .facts = .{ .name = "skill", .rejection = .unknown_tool }, .plain = "Use skills" },
+        .{ .facts = .{ .name = "stop_action", .rejection = .invalid_arguments }, .plain = "Stop an Action" },
+        .{ .facts = .{ .name = "start_agent", .rejection = .invalid_arguments }, .plain = "Start an agent" },
+        .{ .facts = .{ .name = "stop_action", .rejection = .unknown_tool }, .plain = null },
+        .{ .facts = .{ .name = "read_image", .rejection = .invalid_arguments }, .plain = null },
+        .{ .facts = .{ .name = "watch_github_pr", .rejection = .unknown_tool }, .plain = null },
+        .{ .facts = .{ .name = "mcp__docs__find", .label = "mcp__docs__find", .rejection = .invalid_arguments }, .plain = "mcp__docs__find" },
+        .{ .facts = .{ .name = "app_tool", .rejection = .invalid_arguments }, .plain = null },
         .{ .facts = .{ .name = "no_such_tool", .rejection = .unknown_tool }, .plain = null },
     };
     for (cases) |case| {
@@ -288,5 +317,6 @@ test "TPR-4 a saved call's line is derived from its tool, label and subject, and
         if (case.peer) |id| try std.testing.expectEqualStrings(id, line.link.?.peer.session.slice());
     }
     try std.testing.expectError(error.InvalidLine, of(.{ .name = "message_agent", .subject = "bad\nid" }));
+    try std.testing.expectError(error.InvalidLine, of(.{ .name = "message_agent", .subject = &long_subject }));
     try std.testing.expectError(error.InvalidLine, of(.{ .name = "read_transcript", .subject = &long_subject }));
 }

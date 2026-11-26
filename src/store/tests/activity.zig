@@ -926,9 +926,9 @@ test "the step to format 98 keeps a Bash or MCP call's saved line as its label a
                 .{ .ordinal = 2, .label = null, .subject = "d8mv7p" },
                 .{ .ordinal = 3, .label = null, .subject = "d8mv7p" },
                 .{ .ordinal = 4, .label = null, .subject = null },
-                // An MCP call keeps its description, and an MCP fallback that is only the tool's name is no label.
+                // An MCP call keeps its description, or the tool's name it read as when it gave none; a built-in with fixed words keeps neither.
                 .{ .ordinal = 5, .label = "Fetch the docs page", .subject = null },
-                .{ .ordinal = 6, .label = null, .subject = null },
+                .{ .ordinal = 6, .label = "fetch_page", .subject = null },
                 .{ .ordinal = 7, .label = null, .subject = null },
                 // A Bash call whose label is the tool's name keeps it.
                 .{ .ordinal = 8, .label = "bash", .subject = null },

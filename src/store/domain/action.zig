@@ -674,7 +674,7 @@ const resolve_unattempted_action = rsql.Write(.{
 /// What the row of a resolved call shows beyond its call line. Every resolver answers it, so a tool
 /// that has something to say about how its call went cannot forget to: the compiler lists the callers.
 pub const Shown = union(enum) {
-    /// Nothing more than the call line saved at settlement.
+    /// Nothing more than the call line, derived at read from the label and subject saved at settlement.
     call_line,
     /// The words that say what running the call did, and how a success finishes. The write reads the slices inside
     /// in place, so they point into the caller's transition, not into a copy.

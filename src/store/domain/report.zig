@@ -737,7 +737,7 @@ const WorkOldestRow = struct {
     call_tool: ?reads_domain.CallTool,
     call_rejection: ?tool_proposal.Rejection,
     call_label: ?Bounded(tool_presentation.max_description_bytes),
-    call_subject: ?Bounded(session_id.max_reference_bytes),
+    call_subject: ?reads_domain.CallSubject,
     call_subject_label: ?Bounded(tool_presentation.max_label_bytes),
 };
 
@@ -886,7 +886,7 @@ pub const WorkRow = struct {
     running_tool: ?reads_domain.CallTool,
     running_rejection: ?tool_proposal.Rejection,
     running_label: ?Bounded(tool_presentation.max_description_bytes),
-    running_subject: ?Bounded(session_id.max_reference_bytes),
+    running_subject: ?reads_domain.CallSubject,
     running_subject_label: ?Bounded(tool_presentation.max_label_bytes),
     running_call: ?u64,
     stop_cutoff: ?u64,

@@ -799,7 +799,7 @@ const stored_presentation = rsql.Read(.{
         call_tool: ?CallTool,
         call_rejection: ?tool_proposal.Rejection,
         call_label: ?Bounded(tool_presentation.max_description_bytes),
-        call_subject: ?Bounded(session_id.bytes),
+        call_subject: ?CallSubject,
         call_subject_label: ?Bounded(tool_presentation.max_label_bytes),
         code: ?tool_presentation.ToolPresentation.Code,
         authorized: ?bool,
@@ -861,21 +861,24 @@ pub fn call_subject_join(comptime call: []const u8, comptime subject: []const u8
 }
 
 pub const CallTool = activity_read.CallText.Tool;
+/// The Session a call named: a Session ID, which is all the write path saves and all the column holds.
+pub const CallSubject = Bounded(session_id.bytes);
 
 /// What `call_line_columns` read, kept together until `line` turns it into the call's Line.
 pub const StoredCall = struct {
     tool: ?CallTool = null,
     rejection: ?tool_proposal.Rejection = null,
     label: ?Bounded(tool_presentation.max_description_bytes) = null,
-    subject: ?SessionText = null,
+    subject: ?CallSubject = null,
     subject_label: ?Bounded(tool_presentation.max_label_bytes) = null,
 
-    /// The call's line, or null for a call no tool served. A name too long to be a tool's, on a call a tool served, is a corrupt Store.
+    /// The call's line (`tool_line.of`), or null where it has none. A name too long to be a tool's names no tool, so a call that a tool
+    /// served with one is a corrupt Store, and a call nothing served has no line.
     pub fn line(self: *const StoredCall) error{CorruptStore}!?tool_presentation.Line {
-        if (self.rejection != null) return null;
-        const tool = self.tool orelse return error.CorruptStore;
+        const tool = self.tool orelse return if (self.rejection != null) null else error.CorruptStore;
         return tool_line.of(.{
             .name = tool.slice(),
+            .rejection = self.rejection,
             .label = if (self.label) |*label| label.slice() else null,
             .subject = if (self.subject) |*subject| subject.slice() else null,
             .subject_label = self.subject_label,
@@ -913,8 +916,7 @@ const PresentationRead = struct {
     fn keep(read: *PresentationRead, row: *const stored_presentation.Row) error{CorruptStore}!void {
         read.session = row.session_ref;
         read.proposal = .{ .position = row.session_position.get() };
-        const subject: ?SessionText = if (row.call_subject) |subject| SessionText.from(subject.slice()) catch unreachable else null;
-        const call: StoredCall = .{ .tool = row.call_tool, .rejection = row.call_rejection, .label = row.call_label, .subject = subject, .subject_label = row.call_subject_label };
+        const call: StoredCall = .{ .tool = row.call_tool, .rejection = row.call_rejection, .label = row.call_label, .subject = row.call_subject, .subject_label = row.call_subject_label };
         const outcome: StoredOutcome = .{ .text = row.outcome_text, .link_at = row.outcome_link_at, .link_session = row.outcome_link_session, .label = row.outcome_label, .completion = row.outcome_completion };
         read.out.* = try presentationOf(call, outcome, row.code, row.authorized, read.out.publication_position);
     }
@@ -1540,7 +1542,7 @@ const call_details = rsql.Read(.{
         tool: *?activity_read.CallText.Tool,
         rejection: ?tool_proposal.Rejection,
         label: *?activity_read.CallText.Description,
-        subject: ?Bounded(session_id.bytes),
+        subject: ?CallSubject,
         subject_label: ?Bounded(tool_presentation.max_label_bytes),
         server: *?activity_read.CallText.Server,
     },
@@ -1550,8 +1552,7 @@ const call_details = rsql.Read(.{
 /// The line of the call a details read found, as the text its Activity row carries. Checked against the proposal first.
 fn callDetailsText(details: *const call_details.Row, metadata: *const activity_read.ProposalMetadata) error{CorruptStore}!?activity_read.CallText.Description {
     try checkCallDetails(details, metadata);
-    const subject: ?SessionText = if (details.subject) |subject| SessionText.from(subject.slice()) catch unreachable else null;
-    const stored: StoredCall = .{ .tool = details.tool.*, .rejection = details.rejection, .label = details.label.*, .subject = subject, .subject_label = details.subject_label };
+    const stored: StoredCall = .{ .tool = details.tool.*, .rejection = details.rejection, .label = details.label.*, .subject = details.subject, .subject_label = details.subject_label };
     return stored.text();
 }
 

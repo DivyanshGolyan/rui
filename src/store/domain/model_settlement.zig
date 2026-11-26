@@ -1890,15 +1890,18 @@ fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.C
     try writeChecked(sink, &decoded.hash, decoded.window[0..count], written, length);
 }
 
-/// What the model said about a call, saved as the call's label: a Bash call's `description` argument, or an MCP call's when it
-/// gave a valid one. Null when it said nothing; the line a reader shows then comes from the tool (`tool_line.of`).
+/// What a call is saved under as its label: a Bash call's `description` argument, and an MCP call's when it gave a valid one, else
+/// the tool's own name (the words an MCP call has always read as). Null for every other call: a built-in tool's words and an app
+/// call's lack of them are derived at read (`tool_line.of`), so the Store holds no sentence for them.
 noinline fn callLabel(facts: *const tool_defs.CallFacts, io: std.Io, file: std.Io.File, arguments: OutputMetadataRecord) !?tool_record.Description {
     if (facts.tool) |*tool| if (tool.runner() == .mcp) {
-        if (facts.invalid_mcp_arguments) return null;
+        var fallback: tool_record.Description = .{ .len = 0 };
+        try fallback.set(tool.name);
+        if (facts.invalid_mcp_arguments) return fallback;
         var source: output_format.JsonStringSource = .{
             .encoded = .{ .io = io, .file = file, .position = arguments.start, .end = try arguments.end() },
         };
-        const range = try mcp_arguments.descriptionRange(&source) orelse return null;
+        const range = try mcp_arguments.descriptionRange(&source) orelse return fallback;
         source = .{ .encoded = .{ .io = io, .file = file, .position = arguments.start, .end = try arguments.end() } };
         for (0..@intCast(range.start)) |_| _ = try source.take();
         var encoded: [6 * tool_presentation.max_description_bytes]u8 = undefined;
@@ -1909,7 +1912,7 @@ noinline fn callLabel(facts: *const tool_defs.CallFacts, io: std.Io, file: std.I
         var decoded = std.Io.Writer.fixed(&description.bytes);
         try mcp_document.writeDecoded(&decoded, contents);
         description.len = decoded.end;
-        return if (tool_presentation.ToolPresentation.validDescription(description.slice())) description else null;
+        return if (tool_presentation.ToolPresentation.validDescription(description.slice())) description else fallback;
     };
     const label = facts.label() orelse return null;
     var saved: tool_record.Description = .{ .len = 0 };

@@ -2770,7 +2770,7 @@ const recovery_actions = rsql.Read(.{
         "WHERE m.command_key=?1 AND " ++ recovery_range_sql ++ " " ++
         "ORDER BY a.parent_operation_id DESC,a.call_ordinal DESC LIMIT 5",
     .Args = struct { key: []const u8 },
-    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive, call_tool: ?reads_domain.CallTool, call_rejection: ?tool_proposal.Rejection, call_label: ?Bounded(tool_presentation.max_description_bytes), call_subject: ?Bounded(session_id.max_reference_bytes), call_subject_label: ?Bounded(tool_presentation.max_label_bytes) },
+    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive, call_tool: ?reads_domain.CallTool, call_rejection: ?tool_proposal.Rejection, call_label: ?Bounded(tool_presentation.max_description_bytes), call_subject: ?reads_domain.CallSubject, call_subject_label: ?Bounded(tool_presentation.max_label_bytes) },
     .cardinality = .{ .at_most = 5 },
 });
 
