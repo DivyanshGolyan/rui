@@ -292,6 +292,44 @@ test "HST connections: SH-153 the nesting bound refuses the next container insid
     try expectRefusal(gpa, out.written(), "connections", "nesting");
 }
 
+test "HST connections: SH-154 a sign-in connection seals only at the Adapter's endpoint with its own listing and issuer" {
+    const gpa = std.testing.allocator;
+    const device_ok = "{\"kind\":\"openai-device\",\"client_id\":\"app_x\",\"audience\":\"@BASE@\"}";
+    const oauth_ok = "{\"kind\":\"oauth\",\"authorize_url\":\"https://auth.openai.com/oauth/authorize\",\"token_url\":\"https://auth.openai.com/oauth/token\",\"client_id\":\"client\",\"scopes\":\"openid chatgpt.tokens.use.direct\",\"required_scope\":\"chatgpt.tokens.use.direct\",\"audience\":\"@BASE@\",\"link\":[]}";
+    const oauth_foreign = "{\"kind\":\"oauth\",\"authorize_url\":\"https://auth.example/authorize\",\"token_url\":\"https://auth.example/token\",\"client_id\":\"client\",\"scopes\":\"openid chatgpt.tokens.use.direct\",\"required_scope\":\"chatgpt.tokens.use.direct\",\"audience\":\"@BASE@\",\"link\":[]}";
+    const cases = [_]struct { credential: []const u8, dialect: []const u8, base: []const u8, list: []const u8, refused: ?[]const u8 }{
+        .{ .credential = device_ok, .dialect = "openai-responses/2", .base = "https://chatgpt.com/backend-api/codex", .list = "catalog", .refused = null },
+        .{ .credential = device_ok, .dialect = "openai-responses/3", .base = "https://chatgpt.com/backend-api/codex", .list = "catalog", .refused = "credential" },
+        .{ .credential = device_ok, .dialect = "openai-responses/2", .base = "https://chatgpt.com/backend-api/codex", .list = "openai", .refused = "models.list" },
+        .{ .credential = oauth_ok, .dialect = "openai-responses/3", .base = "https://api.openai.com/v1", .list = "chatgpt_plan", .refused = null },
+        .{ .credential = oauth_ok, .dialect = "openai-responses/2", .base = "https://api.openai.com/v1", .list = "chatgpt_plan", .refused = "credential" },
+        .{ .credential = oauth_ok, .dialect = "openai-responses/3", .base = "https://api.openai.com/v1", .list = "catalog", .refused = "models.list" },
+        .{ .credential = oauth_ok, .dialect = "openai-responses/3", .base = "https://gateway.example/v1", .list = "chatgpt_plan", .refused = "base_url" },
+        .{ .credential = oauth_foreign, .dialect = "openai-responses/3", .base = "https://api.openai.com/v1", .list = "chatgpt_plan", .refused = "credential" },
+    };
+    for (cases) |case| {
+        const credential = try std.mem.replaceOwned(u8, gpa, case.credential, "@BASE@", case.base);
+        defer gpa.free(credential);
+        const entry = try std.fmt.allocPrint(gpa, "{{\"name\":\"work\",\"label\":\"Work\",\"base_url\":\"{s}\",\"credential\":{s},\"headers\":[],\"refusals\":[],\"formats\":[{{\"family\":\"responses\",\"dialect\":\"{s}\",\"web_search\":false}}],\"assign\":[],\"models\":{{\"list\":\"{s}\"}}}}", .{ case.base, credential, case.dialect, case.list });
+        defer gpa.free(entry);
+        const text = try connectionDocument(gpa, &.{entry});
+        defer gpa.free(text);
+        const settings = try gpa.create(hs.Settings);
+        defer gpa.destroy(settings);
+        settings.* = .{};
+        defer settings.deinit();
+        var failure: start_report.Failure = .init(.settings_invalid, "");
+        try hs.apply(settings, gpa, text, .file, checks, &failure);
+        try hs.anchor(settings, "/tmp/host-settings");
+        if (case.refused) |field| {
+            try std.testing.expectError(error.SettingsInvalid, hs.seal(settings, &failure));
+            const expected = try std.fmt.allocPrint(gpa, "connections.work.{s}", .{field});
+            defer gpa.free(expected);
+            try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), expected) != null);
+        } else _ = try hs.seal(settings, &failure);
+    }
+}
+
 test "HST connections: SH-154 seal refuses each shape this Rui version does not serve, by name" {
     const gpa = std.testing.allocator;
     const cases = [_]struct { from: []const u8, to: []const u8, field: []const u8 }{

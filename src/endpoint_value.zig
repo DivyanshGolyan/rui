@@ -3,6 +3,9 @@ const url = @import("url");
 
 pub const max_endpoint_bytes = url.max_url_bytes;
 
+/// The ChatGPT sign-in issuer: the token URL of every sign-in this Host serves starts with it.
+pub const sign_in_issuer = "https://auth.openai.com";
+
 pub fn validateEndpoint(endpoint: []const u8) !void {
     if (endpoint.len == 0 or endpoint.len > max_endpoint_bytes or
         std.mem.indexOfScalar(u8, endpoint, 0) != null or !std.unicode.utf8ValidateSlice(endpoint))
