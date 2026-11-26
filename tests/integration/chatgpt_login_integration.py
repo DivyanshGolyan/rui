@@ -66,8 +66,9 @@ class IssuerHandler(fixture.SuccessHandler):
 
 class Login:
 
-    def __init__(self, url):
+    def __init__(self, url, *extra):
         test_issuer = ["--test-chatgpt-fixture-endpoint", url] if url else []
+        test_issuer += extra
         environment = {name: value for name, value in os.environ.items() if name not in ("DISPLAY", "WAYLAND_DISPLAY")}
         self.process = subprocess.Popen(
             [str(fixture.RUI), "auth", "login", "chatgpt", *test_issuer],
@@ -141,6 +142,11 @@ UNCONFIRMED = ("Rui: Signed out of ChatGPT: Rui deleted its tokens, but ChatGPT 
 def logout(url, **variables):
     return subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--test-chatgpt-fixture-endpoint", url],
                           capture_output=True, text=True, timeout=30, env={**os.environ, **variables})
+
+
+def named_file_present(path):
+    """Whether a named sign-in's record still holds a signed-in account (signing out empties it)."""
+    return path.exists() and "state=signed_out" not in path.read_text()
 
 
 def unfound(way, variable):
@@ -431,6 +437,71 @@ def run():
         assert credential_facts(device_file)["state"] == "ready"
         fixture.stop_host(host)
         host = None
+        # A named sign-in keeps its own record and leaves the built-ins and the saved default alone.
+        built_in_before = credential_file.read_bytes() if credential_file.exists() else None
+        default_before = saved_default()
+        work_file = credential_dir / "work.json"
+        os.environ["RUI_WORK_CREDENTIAL_FILE"] = str(work_file)
+        refused = subprocess.run([str(fixture.RUI), "auth", "login", "chatgpt", "--connection", "chatgpt", "--test-chatgpt-fixture-endpoint", url],
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+        assert refused.returncode == 2 and not work_file.exists(), refused
+        named_login = Login(url, "--connection", "work")
+        logins.append(named_login)
+        named_link = named_login.link(base)
+        named_port = urllib.parse.urlsplit(named_link["redirect_uri"]).port
+        named_token = compact({"exp": FAR}, "bmFtZWQ")
+        with endpoint.lock:
+            endpoint.tokens.append(tokens(named_link, named_token, "plan-refresh-named"))
+        assert get(callback(named_port, {"code": "ac-made-up-named", "scope": PLAN_SCOPE, "state": named_link["state"], "client_id": CLIENT}))[0] == 200
+        code, stdout, stderr = named_login.finish()
+        assert code == 0, (code, stdout, stderr)
+        named_facts = credential_facts(work_file)
+        assert (named_facts["state"], named_facts["client_id"], named_facts["access_token"]) == ("ready", CLIENT, named_token), named_facts
+        assert "Signed in to ChatGPT in the browser as work." in stdout and "oauth credential" in stdout, stdout
+        assert named_token not in stdout + stderr and "plan-refresh-named" not in stdout + stderr
+        assert "New Sessions will use" not in stdout and "Start a conversation with" not in stdout, stdout
+        assert (credential_file.read_bytes() if credential_file.exists() else None) == built_in_before
+        assert saved_default() == default_before
+        revoked_before = len(endpoint.revoke_requests)
+        named_out = subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--connection", "work", "--test-chatgpt-fixture-endpoint", url],
+                                   capture_output=True, text=True, timeout=30)
+        assert named_out.returncode == 0 and named_out.stderr == "", named_out
+        assert named_out.stdout.startswith("Rui: Signed out of ChatGPT as work in the browser"), named_out
+        asked = endpoint.revoke_requests[revoked_before:]
+        assert asked and all(request["token"] == ["plan-refresh-named"] for request in asked), asked
+        assert not named_file_present(work_file), work_file.read_text() if work_file.exists() else None
+        assert (credential_file.read_bytes() if credential_file.exists() else None) == built_in_before
+        again = subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--connection", "work", "--test-chatgpt-fixture-endpoint", url],
+                               capture_output=True, text=True, timeout=30)
+        assert (again.returncode, again.stdout) == (0, "Rui: Not signed in as work; nothing changed.\n"), again
+        # A name's grammar is refused on both commands before anything is touched.
+        for argv in (["login", "openai", "--connection", "work"], ["login", "chatgpt", "--connection", "Work"],
+                     ["login", "chatgpt", "--connection", "2fa"], ["logout", "chatgpt", "--connection", "codex"],
+                     ["logout", "chatgpt", "--connection", "2fa"]):
+            bad = subprocess.run([str(fixture.RUI), "auth", *argv, "--test-chatgpt-fixture-endpoint", url],
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+            assert bad.returncode == 2 and "Nothing was changed" in bad.stderr, (argv, bad)
+        # A ready device-code record under the name is not replaced by a browser login, and
+        # logging out of it signs it out locally without asking the issuer to revoke anything.
+        codex_fixture.credentials(work_file)
+        device_before = work_file.read_bytes()
+        crossed = subprocess.run([str(fixture.RUI), "auth", "login", "chatgpt", "--connection", "work", "--test-chatgpt-fixture-endpoint", url],
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+        assert crossed.returncode == 2 and "already holds the other kind" in crossed.stderr, crossed
+        assert work_file.read_bytes() == device_before
+        revoked_before = len(endpoint.revoke_requests)
+        device_out = subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--connection", "work", "--test-chatgpt-fixture-endpoint", url],
+                                    capture_output=True, text=True, timeout=30)
+        assert (device_out.returncode, device_out.stderr) == (0, ""), device_out
+        assert device_out.stdout.startswith("Rui: Signed out of ChatGPT as work with a device code"), device_out
+        assert len(endpoint.revoke_requests) == revoked_before and credential_facts(work_file)["state"] == "signed_out"
+        # An unreadable record is not signed out and says so.
+        work_file.write_text("not a credential\n")
+        work_file.chmod(0o600)
+        broken = subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--connection", "work", "--test-chatgpt-fixture-endpoint", url],
+                                capture_output=True, text=True, timeout=30)
+        assert broken.returncode == 1 and broken.stdout == "" and broken.stderr != "", broken
+        del os.environ["RUI_WORK_CREDENTIAL_FILE"]
         print("chatgpt login passed: listener and pasted sign-in, returning client reused, stale answer refused, "
               "logout ends both sign-ins and a running Host refuses either until the next sign-in, and says when "
               "ChatGPT has not confirmed; an unset default is filled, an OpenAI default stays and a device-code one is "

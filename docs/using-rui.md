@@ -288,6 +288,8 @@ An explicit `--permission-mode` on a new Session wins over the saved choice; wit
 
 Signing in with `rui auth login PROVIDER` saves that provider as the default when none is saved.
 Either ChatGPT sign-in, in the browser or with `--device-code`, also replaces a saved default of the other and keeps the model saved with it, since both sign in to the same ChatGPT account: new Sessions use the one logged in last, and Sessions already open keep theirs.
+
+To keep several ChatGPT accounts at once, add `--connection NAME` to the login (`rui auth login chatgpt --connection work`, with `--device-code` for a code). The sign-in lives in its own file (`~/.config/rui/NAME.json`, or `RUI_NAME_CREDENTIAL_FILE`), leaves the default sign-ins and the default for new Sessions alone, and is served once a connection of that name with an `oauth` (browser) or `openai-device` credential is in the Host settings ([Connections](host.md)). `rui auth logout chatgpt --connection NAME` ends that one account only. NAME starts with a lowercase letter, then lowercase letters, digits and `-`, and is not `codex` or `chatgpt`.
 Any other saved provider stays; the sign-in says so and names the command that changes it, such as `rui defaults configure --connection chatgpt`.
 Existing Sessions keep their provider.
 

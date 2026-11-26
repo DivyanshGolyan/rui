@@ -336,6 +336,25 @@ pub fn logout(io: std.Io, browser_path: ?[]const u8, device_code_path: ?[]const 
     };
 }
 
+/// How one connection's sign-in ended: the record names its own way in (a browser sign-in
+/// carries the app registration it was issued to, a device-code one has none), read under the
+/// same lock that ends it, so the decision to revoke or only sign out cannot go stale.
+pub const Ended = union(enum) { browser: Browser, device_code: DeviceCode };
+
+pub fn logoutRecord(io: std.Io, path: []const u8, issuer: Issuer) Ended {
+    const mapped = pages.Mapped(Revoke).map() catch return .{ .device_code = .failed };
+    defer mapped.unmap();
+    const room = mapped.value;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(room));
+    var context: Revocation = .{ .io = io, .issuer = issuer, .room = room };
+    const ended = credentials.signOut(path, &room.credentials, &context, Revocation.revoke) catch |err| return switch (err) {
+        error.FileNotFound => .{ .device_code = .absent },
+        else => .{ .device_code = .failed },
+    };
+    if (!ended) return .{ .device_code = .absent };
+    return if (context.device) .{ .device_code = .removed } else .{ .browser = context.outcome };
+}
+
 fn endBrowser(io: std.Io, path: []const u8, issuer: Issuer) Browser {
     const mapped = pages.Mapped(Revoke).map() catch return .failed;
     defer mapped.unmap();
@@ -361,37 +380,67 @@ fn endDeviceCode(path: []const u8) DeviceCode {
 
 fn keepDeviceCode(_: void, _: *const policy.Record) !void {}
 
-fn revokeBrowser(io: std.Io, credential_path: []const u8, issuer: Issuer, room: *Revoke) !Browser {
-    const Context = struct {
-        io: std.Io,
-        issuer: Issuer,
-        room: *Revoke,
-        outcome: Browser = .unconfirmed,
+const Revocation = struct {
+    io: std.Io,
+    issuer: Issuer,
+    room: *Revoke,
+    outcome: Browser = .unconfirmed,
+    device: bool = false,
 
-        fn revoke(self: *@This(), current: *const policy.Record) !void {
-            if (self.issuer == .fixture) try policy.requireFixtureClient(current);
-            var request = wire.revokeRequest(current, &self.room.form) catch return;
-            switch (self.issuer) {
-                .openai => {},
-                .fixture => |base| request.url = try Issuer.fixtureUrl(base, "/oauth/revoke", &self.room.url),
-            }
-            for (0..revoke_attempts) |attempt| {
-                if (attempt != 0) self.io.sleep(.fromSeconds(@intCast(attempt)), .awake) catch {};
-                const status = codex_auth.post(self.io, request, &self.room.response, null) catch continue;
-                switch (wire.revocation(status)) {
-                    .revoked => {
-                        self.outcome = .revoked;
-                        return;
-                    },
-                    .retry => continue,
-                    .refused => return,
-                }
+    fn revoke(self: *@This(), current: *const policy.Record) !void {
+        if (current.client_id.slice().len == 0) {
+            self.device = true;
+            return;
+        }
+        if (self.issuer == .fixture) try policy.requireFixtureClient(current);
+        var request = wire.revokeRequest(current, &self.room.form) catch return;
+        switch (self.issuer) {
+            .openai => {},
+            .fixture => |base| request.url = try Issuer.fixtureUrl(base, "/oauth/revoke", &self.room.url),
+        }
+        for (0..revoke_attempts) |attempt| {
+            if (attempt != 0) self.io.sleep(.fromSeconds(@intCast(attempt)), .awake) catch {};
+            const status = codex_auth.post(self.io, request, &self.room.response, null) catch continue;
+            switch (wire.revocation(status)) {
+                .revoked => {
+                    self.outcome = .revoked;
+                    return;
+                },
+                .retry => continue,
+                .refused => return,
             }
         }
-    };
-    var context: Context = .{ .io = io, .issuer = issuer, .room = room };
-    if (!try credentials.signOut(credential_path, &room.credentials, &context, Context.revoke)) return .absent;
+    }
+};
+
+fn revokeBrowser(io: std.Io, credential_path: []const u8, issuer: Issuer, room: *Revoke) !Browser {
+    var context: Revocation = .{ .io = io, .issuer = issuer, .room = room };
+    if (!try credentials.signOut(credential_path, &room.credentials, &context, Revocation.revoke)) return .absent;
     return context.outcome;
+}
+
+test "a connection's record says by itself whether its logout revokes a browser sign-in or only deletes a device-code one" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(io, "private", .{ .permissions = .fromMode(0o700) });
+    private.close(io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/private/work.json", .{root[0..root_len]});
+    const head = "version=3\ngeneration=1\naccount_id=" ++ policy.fixture_account_id ++ "\n";
+    const body = "fedramp=0\nid_token=" ++ policy.fixture_id_token ++ "\naccess_token=" ++ policy.fixture_access_token ++
+        "\nrefresh_token=synthetic-refresh\nexpires_at=4102444800\nrefreshed_at=100\nstate=ready\n";
+    const issuer: Issuer = .{ .fixture = "http://127.0.0.1:9" };
+    // No record, an unreadable one, a device-code one and a browser one (it names its app registration).
+    try std.testing.expectEqual(Ended{ .device_code = .absent }, logoutRecord(io, path, issuer));
+    try tmp.dir.writeFile(io, .{ .sub_path = "private/work.json", .data = "not a credential\n", .flags = .{ .permissions = .fromMode(0o600) } });
+    try std.testing.expectEqual(Ended{ .device_code = .failed }, logoutRecord(io, path, issuer));
+    try tmp.dir.writeFile(io, .{ .sub_path = "private/work.json", .data = head ++ body, .flags = .{ .permissions = .fromMode(0o600) } });
+    try std.testing.expectEqual(Ended{ .device_code = .removed }, logoutRecord(io, path, issuer));
+    try tmp.dir.writeFile(io, .{ .sub_path = "private/work.json", .data = head ++ "client_id=" ++ policy.fixture_client_id ++ "\n" ++ body, .flags = .{ .permissions = .fromMode(0o600) } });
+    try std.testing.expectEqual(Ended{ .browser = .unconfirmed }, logoutRecord(io, path, issuer));
 }
 
 test "logout ends the device-code sign-in in each state it can be in, beside a browser one that is absent or unreadable" {

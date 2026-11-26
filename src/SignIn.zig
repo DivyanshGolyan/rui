@@ -463,14 +463,14 @@ fn runAttempt(self: *Self) !Published {
     const fixture = std.mem.eql(u8, init_.environ_map.get("RUI_TEST_LOGIN") orelse "", "waiting");
     var connection: ?host_start.ConnectionSave = null;
     switch (self.attempt) {
-        .browser => try provider_login.chatgpt(init_, if (fixture) .{ .fixture = "http://127.0.0.1:1" } else .openai, show, .{ .read = pasted }, cancelled, publish),
+        .browser => try provider_login.chatgpt(init_, .{ .provider = .chatgpt }, if (fixture) .{ .fixture = "http://127.0.0.1:1" } else .openai, show, .{ .read = pasted }, cancelled, publish),
         .device => {
             if (fixture) {
                 try display("BDL9-KI88H");
                 while (!cancelled()) try init_.io.sleep(.fromMilliseconds(20), .awake);
                 return error.LoginInterrupted;
             }
-            try provider_login.codex(init_, codex_auth.login, display, cancelled, publish);
+            try provider_login.codex(init_, .{ .provider = .codex }, codex_auth.login, display, cancelled, publish);
         },
         .key => {
             connection = try host_start.saveConnection(init_, self.target.slice(), frozen.endpoint, frozen.key, frozen.model, publish);
