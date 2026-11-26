@@ -299,6 +299,53 @@ test "a Session switches only to a served connection of its own wire format, ove
     try std.testing.expectEqual(@as(?configuration_admission.Rejection, null), configuration_domain.switchRejection(&chat, connection.Name.parse("work").?, &served));
 }
 
+test "a Session moves to another account of its wire format, records the change, and refuses another wire format" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var routes = protocol.servedBuiltIns(.endpoint);
+            try routes.put(.{ .name = connection.Name.parse("work").?, .label = .{}, .route = .key_file, .codec = .@"openai-responses/3", .web_search = true });
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var initial = try completeConfiguration("switch-initial", "", workspace, "model-a");
+            initial.configuration.provider.state = .value;
+            try initial.configuration.provider.value.set("chatgpt");
+            const created = try storage.configure(&initial, .{});
+            try std.testing.expect(created == .accepted);
+            const session = created.accepted.session;
+            const before = try storage.inspectSessionForTesting(session.slice());
+
+            var move: wire_request.ConfigureCommand = .{};
+            try move.key.set("switch-to-work");
+            try move.session.set(session.slice());
+            move.configuration.provider.state = .value;
+            try move.configuration.provider.value.set("work");
+            const moved = try storage.configure(&move, .{});
+            try std.testing.expect(moved == .accepted);
+            try std.testing.expectEqual(before.revision + 1, moved.accepted.revision);
+            const after = try storage.inspectSessionForTesting(session.slice());
+            try std.testing.expectEqualStrings("work", after.provider.?.slice());
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE field='provider' AND revision=?1", .{moved.accepted.revision}));
+
+            var other: wire_request.ConfigureCommand = .{};
+            try other.key.set("switch-to-codex");
+            try other.session.set(session.slice());
+            other.configuration.provider.state = .value;
+            try other.configuration.provider.value.set("codex");
+            const refused = try storage.configure(&other, .{});
+            try std.testing.expect(refused == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.connection_wire_differs, refused.rejected.code);
+            const kept = try storage.inspectSessionForTesting(session.slice());
+            try std.testing.expectEqual(after.revision, kept.revision);
+            try std.testing.expectEqualStrings("work", kept.provider.?.slice());
+        }
+    }.run);
+}
+
 test "a different connection name rejects mixed configuration atomically and replays exact shape" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
