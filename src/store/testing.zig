@@ -504,7 +504,7 @@ pub fn setLegacyNullEffortForTesting(storage: *Store, session: []const u8) !void
 }
 
 /// Names the connection of a settled revision, so a test can replay an Operation whose
-/// connection differs from the Session's current one (a provider is immutable in a Session).
+/// connection differs from the Session's current one (a Session moves only to a served connection of its own wire format).
 pub fn setRevisionProviderForTesting(storage: *Store, session: []const u8, revision: u64, provider: []const u8) !void {
     try exec(storage, "UPDATE session_revision SET provider=?3 WHERE session_ref=?1 AND revision=?2", .{ session, revision, provider });
 }

@@ -1,1 +1,1 @@
-pub const wire_version = "31";
+pub const wire_version = "32";

@@ -37,9 +37,9 @@ export interface AppToolSpec {
 export interface AgentSpec {
 	/** The Session Workspace, fixed for its life. Root creation requires it; children inherit it. */
 	workspace?: string;
-	/** `openai` or `codex`. Fixed for the Session's life. */
+	/** A served connection name. May change later only to another served connection of the same wire format. */
 	connection?: NonNullable<Schemas["AgentSpec"]["connection"]>;
-	/** Creation requires a model, supplied directly or by a preset. May change within the fixed provider. */
+	/** Creation requires a model, supplied directly or by a preset. May change later; a new connection must offer the Session's tools. */
 	model: string;
 	instructions?: string;
 	/** JSON output schema object; `null` clears it. */
