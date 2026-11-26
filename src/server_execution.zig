@@ -1,6 +1,8 @@
 const std = @import("std");
 const provider_route = @import("provider_route.zig");
 const connection_names = @import("connection_names.zig");
+const connection = @import("connection.zig");
+const listing_slot = @import("listing_slot.zig");
 const tool_result = @import("tool_result.zig");
 const server_mcp = @import("server_mcp.zig");
 const server_github_pr_watch = @import("server_github_pr_watch.zig");
@@ -600,7 +602,7 @@ const Workspace = struct {
     provider_failure: output_decode.ProviderFailure,
     decode: output_decode.Decode,
     settlement: store_module.ValidatedOutput,
-    listings: std.EnumArray(provider.ListingKind, ListingWork),
+    listings: listing_slot.ListingArray(ListingWork),
     image_calls: server_read_image.Calls,
     turn_state: execution_turn.State,
 };
@@ -732,13 +734,14 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
     const budget = run.shared.retention.sharedBudget().narrowed(
         if (run.shared.probes.fails(.request_scratch_acquire)) 0 else run.settings.limits.request_scratch_limit_bytes,
     );
-    var listing_urls: std.EnumArray(provider.ListingKind, ?[]const u8) = .initFill(null);
-    defer for (listing_urls.values, std.enums.values(provider.ListingKind)) |url, kind| {
+    var listing_urls: listing_slot.ListingArray(?[]const u8) = .initFill(null);
+    defer for (listing_urls.values, listing_slot.ListingSlot.all) |url, kind| {
         if (kind != .catalog) if (url) |owned| run.shared.allocator.free(owned);
     };
-    for (std.enums.values(provider.ListingKind)) |kind| {
-        const name = provider.listedProvider(kind) orelse continue;
-        const served = run.settings.providers.liveList(provider_route.nameOf(name)) orelse continue;
+    for (listing_slot.ListingSlot.all) |kind| {
+        const index = kind.connectionIndex() orelse continue;
+        const served = run.settings.providers.liveListAt(index) orelse continue;
+        const name = run.settings.providers.table.names[index];
         listing_urls.set(kind, std.fmt.allocPrint(run.shared.allocator, "{s}/models", .{providers.responsesBase(served.endpoint).?}) catch |err| {
             run.shared.model_lists.publish(name, err);
             continue;
@@ -786,7 +789,7 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
     defer if (reactor) |active| active.deinit();
     if (reactor) |active| startListings(&run, active, &workspace.listings);
     defer if (reactor) |active| {
-        for (std.enums.values(provider.ListingKind)) |kind| endListing(active, kind, workspace.listings.getPtr(kind));
+        for (listing_slot.ListingSlot.all) |kind| endListing(active, kind, workspace.listings.getPtr(kind));
     };
     run.shared.lifecycle.connectDispatchWake(reactor, run.shared.store);
     defer run.shared.store.commitWake().store(null, .release);
@@ -1252,7 +1255,7 @@ const NativeTurn = struct {
     pub noinline fn serviceOneCompletion(self: *NativeTurn) bool {
         if (callServiceOneCompletion(self.run, self.reactor, self.slots, self.workspace)) return true;
         const reactor = self.reactor orelse return false;
-        for (std.enums.values(provider.ListingKind)) |kind| {
+        for (listing_slot.ListingSlot.all) |kind| {
             if (reactor.finishedListing(kind) == null) continue;
             finishListing(self.run, reactor, kind, self.workspace.listings.getPtr(kind));
             return true;
@@ -1283,8 +1286,8 @@ const NativeTurn = struct {
 
 const max_catalog_response_bytes = 16 * 1024 * 1024;
 
-noinline fn startListings(run: *Run, reactor: *provider.Reactor, works: *std.EnumArray(provider.ListingKind, ListingWork)) void {
-    for (std.enums.values(provider.ListingKind)) |kind| {
+noinline fn startListings(run: *Run, reactor: *provider.Reactor, works: *listing_slot.ListingArray(ListingWork)) void {
+    for (listing_slot.ListingSlot.all) |kind| {
         const work = works.getPtr(kind);
         if (reactor.listings.get(kind) != null or work.auth != .none or reactor.listing_endpoints.get(kind) == null) continue;
         if (listingCredential(run, kind)) |credential| if (credential.leased()) {
@@ -1295,19 +1298,19 @@ noinline fn startListings(run: *Run, reactor: *provider.Reactor, works: *std.Enu
     }
 }
 
-fn listingCredential(run: *Run, kind: provider.ListingKind) ?providers.Credential {
-    const name = provider.listedProvider(kind) orelse return null;
-    return run.settings.providers.liveList(provider_route.nameOf(name)).?.credential;
+fn listingCredential(run: *Run, kind: listing_slot.ListingSlot) ?providers.Credential {
+    const index = kind.connectionIndex() orelse return null;
+    return run.settings.providers.liveListAt(index).?.credential;
 }
 
-fn startLeasedListing(run: *Run, reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork, lease: ?*const providers.Lease) void {
+fn startLeasedListing(run: *Run, reactor: *provider.Reactor, kind: listing_slot.ListingSlot, work: *ListingWork, lease: ?*const providers.Lease) void {
     startListing(run, reactor, kind, work, lease) catch |err| {
         endListing(reactor, kind, work);
         listingFailed(run, kind, err);
     };
 }
 
-noinline fn startListing(run: *Run, reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork, lease: ?*const providers.Lease) !void {
+noinline fn startListing(run: *Run, reactor: *provider.Reactor, kind: listing_slot.ListingSlot, work: *ListingWork, lease: ?*const providers.Lease) !void {
     var headers: providers.Headers = .{};
     defer headers.deinit();
     var source: ?store_module.ModelCatalogSource = null;
@@ -1328,18 +1331,24 @@ noinline fn startListing(run: *Run, reactor: *provider.Reactor, kind: provider.L
     try reactor.startListing(kind, &work.fetch, request_fields, work.response.?);
 }
 
-fn listingFailed(run: *Run, kind: provider.ListingKind, err: anyerror) void {
-    if (provider.listedProvider(kind)) |name| return run.shared.model_lists.publish(name, err);
+/// The connection a listing slot fetches the models of; null for the catalog.
+fn listedName(run: *const Run, kind: listing_slot.ListingSlot) ?connection.Name {
+    const index = kind.connectionIndex() orelse return null;
+    return run.settings.providers.table.names[index];
+}
+
+fn listingFailed(run: *Run, kind: listing_slot.ListingSlot, err: anyerror) void {
+    if (listedName(run, kind)) |name| return run.shared.model_lists.publish(name, err);
     stderr.print("rui: models.dev catalog unavailable ({s}); the saved catalog stands\n", .{@errorName(err)});
 }
 
-noinline fn finishListing(run: *Run, reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork) void {
+noinline fn finishListing(run: *Run, reactor: *provider.Reactor, kind: listing_slot.ListingSlot, work: *ListingWork) void {
     defer endListing(reactor, kind, work);
     const stream = &reactor.finishedListing(kind).?.stream;
     if (stream.end().?.cause != .complete) return listingFailed(run, kind, error.ListingTransportFailed);
     if (stream.status() != 200 and !(kind == .catalog and stream.status() == 304)) return listingFailed(run, kind, error.ListingRefused);
     const body = work.response.?[0..@intCast(stream.responseLength())];
-    if (provider.listedProvider(kind)) |name| return run.shared.model_lists.publish(name, body);
+    if (listedName(run, kind)) |name| return run.shared.model_lists.publish(name, body);
     saveCatalogAnswer(run.shared.store, work, stream.status().?, body) catch |err| listingFailed(run, kind, err);
 }
 
@@ -1354,7 +1363,7 @@ noinline fn saveCatalogAnswer(store: *store_module.Store, work: *ListingWork, st
     try store.saveModelFacts(entries, if (work.fetch.etag) |*etag| etag.slice() else null);
 }
 
-fn endListing(reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork) void {
+fn endListing(reactor: *provider.Reactor, kind: listing_slot.ListingSlot, work: *ListingWork) void {
     reactor.endListing(kind);
     work.auth = .none;
     if (work.credential) |shared| reactor.credentials.release(shared);
@@ -2348,7 +2357,7 @@ fn advanceModelPreparation(
     reactor: ?*provider.Reactor,
     slots: []ExecutionSlot,
     preparation: *model_adapter.Preparation,
-    listings: *std.EnumArray(provider.ListingKind, ListingWork),
+    listings: *listing_slot.ListingArray(ListingWork),
     byte_allowance: usize,
     item_allowance: usize,
 ) bool {
@@ -2406,13 +2415,13 @@ fn advanceModelPreparation(
     return true;
 }
 
-fn advanceCredentialWork(run: *Run, reactor: *provider.Reactor, slots: []ExecutionSlot, worker: *AuthWorker, request: *provider.PreparedRequest, listings: *std.EnumArray(provider.ListingKind, ListingWork)) bool {
+fn advanceCredentialWork(run: *Run, reactor: *provider.Reactor, slots: []ExecutionSlot, worker: *AuthWorker, request: *provider.PreparedRequest, listings: *listing_slot.ListingArray(ListingWork)) bool {
     for (slots) |*slot| switch (slot.*) {
         .model_authenticating => |*active| if (active.requested) return advanceAuthentication(run, reactor, slot, request),
         .model_refreshing => |*active| if (active.requested) return advanceRefresh(run, slot),
         else => {},
     };
-    for (&listings.values, std.enums.values(provider.ListingKind)) |*work, kind| {
+    for (&listings.values, listing_slot.ListingSlot.all) |*work, kind| {
         if (work.auth == .requested) return advanceListingAuthentication(run, reactor, worker, kind, work);
     }
     if (!worker.idle()) return false;
@@ -2438,7 +2447,7 @@ fn advanceCredentialWork(run: *Run, reactor: *provider.Reactor, slots: []Executi
         },
         else => {},
     };
-    for (&listings.values, std.enums.values(provider.ListingKind)) |*work, kind| {
+    for (&listings.values, listing_slot.ListingSlot.all) |*work, kind| {
         if (work.auth != .waiting) continue;
         work.auth = .requested;
         worker.request(listingCredential(run, kind).?.signIn().?);
@@ -2447,7 +2456,7 @@ fn advanceCredentialWork(run: *Run, reactor: *provider.Reactor, slots: []Executi
     return false;
 }
 
-noinline fn advanceListingAuthentication(run: *Run, reactor: *provider.Reactor, worker: *AuthWorker, kind: provider.ListingKind, work: *ListingWork) bool {
+noinline fn advanceListingAuthentication(run: *Run, reactor: *provider.Reactor, worker: *AuthWorker, kind: listing_slot.ListingSlot, work: *ListingWork) bool {
     const result = worker.take() orelse return false;
     work.auth = .none;
     switch (result) {
@@ -3361,7 +3370,7 @@ test "a leased model list waits behind every model slot, and its lease always go
     const models_url = "http://127.0.0.1:1/v1/models";
     var served: providers.Providers = .{};
     served.table.set(provider_route.nameOf(.codex), .{ .endpoint = "http://127.0.0.1:1/responses", .credential = .{ .chatgpt_device = .{ .path = path, .refresh = .synthetic } } }) catch unreachable;
-    served.table.set(provider_route.nameOf(.chatgpt), .{ .endpoint = "http://127.0.0.1:1/v1/responses", .credential = .{ .chatgpt_plan = .{ .path = path, .refresh = .{ .fixture_endpoint = "http://127.0.0.1:1/token" } } } }) catch unreachable;
+    served.table.set(provider_route.nameOf(.chatgpt), .{ .endpoint = "http://127.0.0.1:1/v1/responses", .credential = .{ .chatgpt_plan = .{ .path = path, .refresh = .{ .fixture_endpoint = "http://127.0.0.1:1/token" } } }, .live_list = true }) catch unreachable;
     const plan_source = served.get(provider_route.nameOf(.chatgpt)).?.credential.signIn().?;
     const device_source = served.get(provider_route.nameOf(.codex)).?.credential.signIn().?;
     var records: [1]execution.CustodyRecord = @splat(.{});
@@ -3380,8 +3389,10 @@ test "a leased model list waits behind every model slot, and its lease always go
     var run: Run = .{ .shared = testing_parts.sharedOf(&host), .settings = testing_parts.settingsOf(&host), .execution = &execution_state, .custody = &execution_state.custody, .auth_worker = &worker };
     defer host.model_lists.deinit();
     var used: std.atomic.Value(u64) = .init(0);
-    var urls: std.EnumArray(provider.ListingKind, ?[]const u8) = .initFill(null);
-    urls.set(provider.providerListing(.chatgpt).?, models_url);
+    var urls: listing_slot.ListingArray(?[]const u8) = .initFill(null);
+    const chatgpt = provider_route.nameOf(.chatgpt);
+    const kind = served.listingSlot(chatgpt).?;
+    urls.set(kind, models_url);
     var reactor: provider.Reactor = undefined;
     try reactor.init(std.testing.allocator, io, .{
         .endpoints = provider.builtInEndpoints(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = "http://127.0.0.1:1/v1/responses" }),
@@ -3392,9 +3403,8 @@ test "a leased model list waits behind every model slot, and its lease always go
         .listing_urls = urls,
     });
     defer reactor.deinit();
-    var listings: std.EnumArray(provider.ListingKind, ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
+    var listings: listing_slot.ListingArray(ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
     for (urls.values, &listings.values) |url, *work| work.url = url;
-    const kind = provider.providerListing(.chatgpt).?;
     const work = listings.getPtr(kind);
     defer endListing(&reactor, kind, work);
     var request: provider.PreparedRequest = undefined;
@@ -3418,16 +3428,16 @@ test "a leased model list waits behind every model slot, and its lease always go
     try std.testing.expect(!advanceCredentialWork(&run, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(!slots[0].model_authenticating.requested);
     worker.state = .{ .failed = error.FileNotFound };
-    try std.testing.expect(host.model_lists.live.get(.chatgpt) == .pending);
+    try std.testing.expect(host.model_lists.get(chatgpt) == .pending);
     try std.testing.expect(advanceCredentialWork(&run, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(work.auth == .none and worker.state == .idle and !reactor.listingPending());
-    try std.testing.expect(host.model_lists.live.get(.chatgpt) == .catalog_fallback);
+    try std.testing.expect(host.model_lists.get(chatgpt) == .catalog_fallback);
     try std.testing.expect(advanceCredentialWork(&run, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(slots[0].model_authenticating.requested);
     worker.state = .idle;
     slots[0] = .free;
 
-    host.model_lists.set(.chatgpt, .pending);
+    host.model_lists.set(chatgpt, .pending);
     startListings(&run, &reactor, &listings);
     try std.testing.expect(advanceCredentialWork(&run, &reactor, &slots, &worker, &request, &listings));
     try credentials.leaseInto(path, &worker.credential, &worker.work.credentials);
@@ -3435,7 +3445,7 @@ test "a leased model list waits behind every model slot, and its lease always go
     try std.testing.expect(advanceCredentialWork(&run, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(worker.state == .idle and work.auth == .none);
     try std.testing.expect(reactor.listings.get(kind) != null and work.credential != null);
-    try std.testing.expect(host.model_lists.live.get(.chatgpt) == .pending);
+    try std.testing.expect(host.model_lists.get(chatgpt) == .pending);
     startListings(&run, &reactor, &listings);
     try std.testing.expect(work.auth == .none);
     endListing(&reactor, kind, work);
@@ -3448,7 +3458,7 @@ test "a leased model list waits behind every model slot, and its lease always go
     try std.testing.expect(advanceCredentialWork(&run, &reactor, &slots, &worker, &request, &listings));
     try std.testing.expect(worker.state == .idle and work.auth == .none and !reactor.listingPending());
     try std.testing.expect(work.credential == null and work.response == null);
-    try std.testing.expect(host.model_lists.live.get(.chatgpt) == .catalog_fallback);
+    try std.testing.expect(host.model_lists.get(chatgpt) == .catalog_fallback);
 }
 
 test "authentication worker answers each job with that job's result" {
@@ -5080,7 +5090,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             .binding = binding,
         } }};
         _ = host.lifecycle.advance(phase);
-        var listings: std.EnumArray(provider.ListingKind, ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
+        var listings: listing_slot.ListingArray(ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
         try std.testing.expect(advanceModelPreparation(
             &run,
             null,
@@ -5314,7 +5324,7 @@ test "an encode failure settles unanswered and releases request scratch" {
             &retained,
         );
         defer if (preparation.state.active) preparation.cancel();
-        var listings: std.EnumArray(provider.ListingKind, ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
+        var listings: listing_slot.ListingArray(ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
         // The ordered-input case has a working counted loopback transport.
         // The Text codec-decline control retains its original null reactor.
         defer if (slots[0] == .provider) {

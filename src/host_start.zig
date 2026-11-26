@@ -779,6 +779,7 @@ pub fn resolveConnections(init: std.process.Init, settings: *const hs.Settings, 
             .label = served.label,
             .codec = resolved.codec,
             .web_search = if (served.endpointFor(.responses)) |endpoint| endpoint.web_search else false,
+            .live_list = served.models.list == .openai,
         };
         _ = connected.add(served.name, presentation, resolved.url, bytes, fixture) catch |err| return connectionFailure(failure, name, err);
     }

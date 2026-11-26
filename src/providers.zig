@@ -37,6 +37,7 @@ pub const Connected = struct {
         label_len: usize = 0,
         codec: provider_name.Codec = .@"openai-responses/2",
         web_search: bool = false,
+        live_list: bool = false,
         url: [max_url_bytes]u8 = undefined,
         url_len: usize = 0,
         key: secret_value.Key = .{},
@@ -47,12 +48,14 @@ pub const Connected = struct {
         label: []const u8,
         codec: provider_name.Codec,
         web_search: bool,
+        /// The connection declares that its key's model list is what the key may use.
+        live_list: bool = false,
     };
 
     pub fn add(self: *Connected, name: connection.Name, presentation: Presentation, url: []const u8, key: []const u8, fixture: bool) error{ServedFull}!*Entry {
         if (self.len == self.entries.len) return error.ServedFull;
         const entry = &self.entries[self.len];
-        entry.* = .{ .name = name, .codec = presentation.codec, .web_search = presentation.web_search, .fixture = fixture };
+        entry.* = .{ .name = name, .codec = presentation.codec, .web_search = presentation.web_search, .live_list = presentation.live_list, .fixture = fixture };
         if (presentation.label.len > connection.max_label_bytes or url.len > max_url_bytes) return error.ServedFull;
         @memcpy(entry.label[0..presentation.label.len], presentation.label);
         entry.label_len = presentation.label.len;
@@ -88,6 +91,7 @@ pub fn fromSettings(settings: *const @import("host_settings.zig").Settings, conn
             .label = entry.label[0..entry.label_len],
             .codec = entry.codec,
             .web_search = entry.web_search,
+            .live_list = entry.live_list,
         }) catch unreachable;
     }
     inline for (std.enums.values(Provider)) |named| {
@@ -108,6 +112,7 @@ pub fn fromSettings(settings: *const @import("host_settings.zig").Settings, conn
                 .label = named.shown(),
                 .codec = named.codec(),
                 .web_search = named.runsTool("web_search"),
+                .live_list = named.facts().model_list == .live,
             }) catch unreachable;
         }
     }
@@ -362,6 +367,9 @@ pub const Served = struct {
     label: []const u8 = "",
     codec: provider_name.Codec = .@"openai-responses/2",
     web_search: bool = false,
+    /// The connection's own model list is fetched and shown as what its key may use. A built-in
+    /// provider declares it in its facts, a key connection in its settings (`models.list`).
+    live_list: bool = false,
 };
 
 pub const none: Providers = .{};
@@ -409,17 +417,28 @@ pub const Providers = struct {
         return out;
     }
 
-    pub fn liveList(self: *const Providers, name: connection.Name) ?*const Served {
-        const provider = provider_route.builtInOf(name) orelse return null;
-        if (provider.facts().model_list != .live) return null;
-        const entry = self.get(name) orelse return null;
-        if (entry.credential.listing() == null or responsesBase(entry.endpoint) == null) return null;
+    /// The served connection at `index` of the table when it lists its own models.
+    pub fn liveListAt(self: *const Providers, index: usize) ?*const Served {
+        if (index >= self.table.len) return null;
+        const entry = &self.table.values[index];
+        if (!entry.live_list or entry.credential.listing() == null or responsesBase(entry.endpoint) == null) return null;
         return entry;
+    }
+
+    /// Where the served connection `name` fetches its model list: the one owner of the slot a name maps to.
+    pub fn listingSlot(self: *const Providers, name: connection.Name) ?@import("listing_slot.zig").ListingSlot {
+        for (self.table.names[0..self.table.len], 0..) |one, index| if (one.eql(name)) return .ofConnection(index);
+        return null;
+    }
+
+    pub fn liveList(self: *const Providers, name: connection.Name) ?*const Served {
+        for (self.table.names[0..self.table.len], 0..) |one, index| if (one.eql(name)) return self.liveListAt(index);
+        return null;
     }
 
     pub fn liveLists(self: *const Providers) usize {
         var count: usize = 0;
-        for (provider_route.built_in_names) |name| count += @intFromBool(self.liveList(name) != null);
+        for (0..self.table.len) |index| count += @intFromBool(self.liveListAt(index) != null);
         return count;
     }
 
@@ -699,23 +718,34 @@ test "each route says how its model list reads, and a provider's list is live on
     for (std.enums.values(Provider)) |name| try std.testing.expect(providers.liveList(provider_route.nameOf(name)) == null);
     try std.testing.expectEqual(@as(usize, 0), providers.liveLists());
     providers.table.set(provider_route.nameOf(.codex), .{ .endpoint = endpoint(.codex), .credential = device }) catch unreachable;
-    providers.table.set(provider_route.nameOf(.openai), .{ .endpoint = endpoint(.openai), .credential = keyed }) catch unreachable;
-    providers.table.set(provider_route.nameOf(.chatgpt), .{ .endpoint = endpoint(.chatgpt), .credential = plan }) catch unreachable;
+    providers.table.set(provider_route.nameOf(.openai), .{ .endpoint = endpoint(.openai), .credential = keyed, .live_list = true }) catch unreachable;
+    providers.table.set(provider_route.nameOf(.chatgpt), .{ .endpoint = endpoint(.chatgpt), .credential = plan, .live_list = true }) catch unreachable;
     try std.testing.expect(providers.liveList(provider_route.nameOf(.codex)) == null);
     try std.testing.expectEqual(providers.get(provider_route.nameOf(.openai)).?, providers.liveList(provider_route.nameOf(.openai)).?);
     try std.testing.expectEqual(providers.get(provider_route.nameOf(.chatgpt)).?, providers.liveList(provider_route.nameOf(.chatgpt)).?);
     try std.testing.expectEqual(@as(usize, 2), providers.liveLists());
-    providers.table.set(provider_route.nameOf(.openai), .{ .endpoint = "http://127.0.0.1:9/responses", .credential = .none }) catch unreachable;
-    providers.table.set(provider_route.nameOf(.chatgpt), .{ .endpoint = "http://127.0.0.1:9/chat", .credential = plan }) catch unreachable;
+    providers.table.set(provider_route.nameOf(.openai), .{ .endpoint = "http://127.0.0.1:9/responses", .credential = .none, .live_list = true }) catch unreachable;
+    providers.table.set(provider_route.nameOf(.chatgpt), .{ .endpoint = "http://127.0.0.1:9/chat", .credential = plan, .live_list = true }) catch unreachable;
     try std.testing.expect(providers.liveList(provider_route.nameOf(.openai)) == null and providers.liveList(provider_route.nameOf(.chatgpt)) == null);
     try std.testing.expectEqual(@as(usize, 0), providers.liveLists());
+
+    // A key connection lists its models when its settings declare it, whatever its name; the slot follows its table position.
+    const alpha = connection.Name.parse("alpha").?;
+    const beta = connection.Name.parse("beta").?;
+    providers.table.set(alpha, .{ .endpoint = "https://alpha.example/v1/responses", .credential = keyed, .live_list = true }) catch unreachable;
+    providers.table.set(beta, .{ .endpoint = "https://beta.example/v1/responses", .credential = keyed }) catch unreachable;
+    try std.testing.expectEqual(providers.get(alpha).?, providers.liveList(alpha).?);
+    try std.testing.expect(providers.liveList(beta) == null);
+    try std.testing.expectEqual(@as(usize, 1), providers.liveLists());
+    try std.testing.expectEqual(@as(?@import("listing_slot.zig").ListingSlot, .ofConnection(3)), providers.listingSlot(alpha));
+    try std.testing.expectEqual(@as(?@import("listing_slot.zig").ListingSlot, null), providers.listingSlot(connection.Name.parse("gamma").?));
 }
 
 test "fromSettings serves each key connection at its own URL with its own key, and nothing for an absent name" {
     var settings: @import("host_settings.zig").Settings = .{};
     inline for (std.enums.values(Provider)) |named| @field(settings.providers.entries, @tagName(named)) = null;
     var connected: Connected = .{};
-    const presentation: Connected.Presentation = .{ .label = "Alpha", .codec = .@"openai-responses/2", .web_search = false };
+    const presentation: Connected.Presentation = .{ .label = "Alpha", .codec = .@"openai-responses/2", .web_search = false, .live_list = true };
     _ = try connected.add(connection.Name.parse("alpha").?, presentation, "https://alpha.example/v1/responses", "sk-alpha-key", false);
     _ = try connected.add(connection.Name.parse("beta").?, .{ .label = "Beta", .codec = .@"openai-responses/2", .web_search = false }, "https://beta.example/v1/responses", "sk-beta-key", false);
     defer connected.wipe();
@@ -728,6 +758,8 @@ test "fromSettings serves each key connection at its own URL with its own key, a
     try std.testing.expectEqualStrings("sk-beta-key", served.get(connection.Name.parse("beta").?).?.credential.key_file.key);
     try std.testing.expect(served.get(connection.Name.parse("gamma").?) == null);
     try std.testing.expectEqual(protocol.Route.key_file, served.served().route("alpha"));
+    try std.testing.expect(alpha.live_list and !served.get(connection.Name.parse("beta").?).?.live_list);
+    try std.testing.expectEqual(@as(usize, 1), served.liveLists());
 }
 
 test "a connection keeps its own facts under a built-in name, and a built-in entry carries the built-in facts" {
