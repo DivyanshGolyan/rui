@@ -81,6 +81,8 @@ SOURCE_POLICY = (
     (("src/store/schema.zig", "src/store/migration_baseline.sqlite.sql",
       "src/store/migration_baseline.mysql.sql", "src/store/migration_baseline_rows.sql"),
      (("test_store_schema_version.py", "*"),)),
+    (("src/store/schema.zig", "tests/ci/schema_rules.py", "tests/ci/test_schema_rules.py"),
+     (("test_schema_rules.py", "*"),)),
     (("tests/ci/prepush.py",), (("test_prepush_red.py", "*"),
                               ("test_caller_errors.py", "CallerErrors.test_gate_is_explicitly_wired_in_local_feedback"),
                               ("test_selection.py", "SelectionTest.test_prepush_leaves_server_targets_to_ci"))),
@@ -437,6 +439,7 @@ def checks(paths, available, base, mode="default", mysql=False):
         yield "deep-modules allowance", [sys.executable, "-B", "tests/ci/deep_modules_allowance.py"]
     if "src/store/schema.zig" in paths:
         yield "schema number", [sys.executable, "-B", "tests/ci/schema_number.py", "--check"]
+        yield "schema rules", [sys.executable, "-B", "tests/ci/schema_rules.py", "check"]
     generation = {"openapi.json", *GENERATED[1:], "clients/ts/scripts/generate-settings.mjs"}
     if any(path.startswith("src/") for path in paths):
         graph = tree_graph()
