@@ -89,12 +89,10 @@ Unknown Actions and Actions from another Session are refused.
 Native users read the sole terminal Resolution through `action read`.
 A Session Stop keeps the existing runner-aware cancellation and uncertainty rules; Host recovery records uncertainty without replaying an invocation.
 
-Bash arguments require `cmd` and `description`; `stdin` and `timeout_ms` are optional.
+A call's label is advice for the screen, whatever the tool: the model may give one or none, the label never refuses a valid call, and what is saved is repaired by one owner (`saved_label`) to one tidy line, or no label when no words are left. A tool names its label argument its own way (Bash `description`, MCP `rui_call_description`); a label that is not a string is no label, and the call still runs.
+Bash arguments require `cmd`; `description`, `stdin` and `timeout_ms` are optional, and a Bash label is saved at most 100 bytes.
 Function tools are offered with `"strict": false`, explicitly, since an omitted field lets the provider make the schema strict: the provider does not check a call against its schema, Rui does.
 A call whose arguments fail that check is settled as an `invalid_arguments` rejection whose result tells the model what was wrong (for example "Invalid arguments for tool 'bash': cmd is required."), so the model corrects the call within the Turn; the Turn does not fail.
-The description is nonblank, single-line, valid UTF-8, and at most 100 decoded UTF-8 bytes.
-Validation counts decoded bytes, not JSON spelling, characters, or display columns.
-Missing or invalid descriptions receive the ordinary invalid-arguments rejection, naming the description; Rui does not repair, fabricate, or accept a compatibility form.
 The original argument string remains canonical and unchanged.
 
 The tool schema guides descriptions toward a base verb, concrete target, and useful scope, in sentence case without trailing punctuation.

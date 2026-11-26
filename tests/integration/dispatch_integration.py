@@ -3619,7 +3619,7 @@ def main(mode="all", correlation_case="all"):
                                 "maximum": 9223372036854775807,
                             },
                         },
-                        "required": ["cmd", "description"],
+                        "required": ["cmd"],
                         "additionalProperties": False,
                     },
                 },

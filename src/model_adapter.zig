@@ -6097,10 +6097,10 @@ test "CM-47 a prepared request's bytes stay as pinned over pages, tool results, 
     const Scenario = enum { pages, tool_results, bounds, peer };
     const Pinned = struct {
         const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
-            .pages = "d71f15a07c4d2d407e78f760ad333bf3f2e0d7ab5eb58754f0f72bf9dd852998",
-            .tool_results = "5a5e6586f1cbe72a9af8f6c15b017a12a68dae286106d8ee21f9b98cdb4841e1",
-            .bounds = "e07be40f4153a47b97fb529d5e04437f4d0d456907d3dfb2eb209ab975b99058",
-            .peer = "eb4108d6fcc4d3e890871ed1c6a4c9cff7d9ead0b5bf83a918a44ef59a34383a",
+            .pages = "540bbba6c67f86483dc8edec2a5bfdf9b5469b0e776f4b02ac6ca2d21450a3b4",
+            .tool_results = "c6ba490b3df4642da86184ffcedeb71c2628eb7d9ad36167b1018683c11e8c0c",
+            .bounds = "946f86577efb35437726b002e56565b7ef95aa4e21194c04e5f464ef26e386f7",
+            .peer = "2eaa4dfad16e53fef92dd8e5cf4ecc4369f29712a0a39a9baabc96aaf6eaf1e3",
         });
     };
     const testing = store.testing;

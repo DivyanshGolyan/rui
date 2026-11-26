@@ -540,6 +540,17 @@ pub fn inspectConnections(init: std.process.Init, dir: []const u8, readiness: *p
 }
 
 fn connectionReadiness(init: std.process.Init, served: *const served_connection.Connection) provider_selection.Readiness {
+    if (signInKind(&served.credential) != null) {
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = credential_location.connectionCredentialFile(init.environ_map, served.name.slice(), &path_buffer) catch return .credential_error;
+        const status = codex_auth.localStatus(path, codex_auth.nowSeconds(init.io)) catch return .credential_error;
+        return switch (status) {
+            .missing => .missing,
+            .configured => .configured,
+            .renewal_due => .renewal_due,
+            .refresh_required => .refresh_required,
+        };
+    }
     var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
     defer std.crypto.secureZero(u8, &key_buffer);
     _ = loadConnectionKey(init, served.name.slice(), &served.credential, &key_buffer) catch |err| return if (err == error.ApiKeyMissing) .missing else .credential_error;
@@ -769,26 +780,42 @@ pub fn resolveConnections(init: std.process.Init, settings: *const hs.Settings, 
     for (settings.connections.entries) |*entry| {
         const served = &entry.value;
         const name = served.name.slice();
-        var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
-        defer std.crypto.secureZero(u8, &key_buffer);
-        const bytes = loadConnectionKey(init, name, &served.credential, &key_buffer) catch |err| return connectionFailure(failure, name, err);
+        const field: []const u8 = if (signInKind(&served.credential) != null) "credential" else "key";
         var url_buffer: [providers.Connected.max_url_bytes]u8 = undefined;
-        const resolved = served_connection.resolve(served, .{ .id = "", .native_family = .responses }, &url_buffer) catch |err| return connectionFailure(failure, name, err);
+        const resolved = served_connection.resolve(served, .{ .id = "", .native_family = .responses }, &url_buffer) catch |err| return connectionFailure(failure, name, field, err);
         const fixture = hs.fixtureEndpoint(settings, resolved.url);
         const presentation: providers.Connected.Presentation = .{
             .label = served.label,
             .codec = resolved.codec,
             .web_search = if (served.endpointFor(.responses)) |endpoint| endpoint.web_search else false,
-            .live_list = served.models.list == .openai,
+            .live_list = served.models.list == .openai or served.models.list == .chatgpt_plan,
         };
-        _ = connected.add(served.name, presentation, resolved.url, bytes, fixture) catch |err| return connectionFailure(failure, name, err);
+        if (signInKind(&served.credential)) |kind| {
+            var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const path = credential_location.connectionCredentialFile(init.environ_map, name, &path_buffer) catch |err| return connectionFailure(failure, name, field, err);
+            connected.addSignIn(served.name, presentation, resolved.url, kind, path, fixture) catch |err| return connectionFailure(failure, name, field, err);
+            continue;
+        }
+        var key_buffer: [api_key.max_key_bytes + 2]u8 = undefined;
+        defer std.crypto.secureZero(u8, &key_buffer);
+        const bytes = loadConnectionKey(init, name, &served.credential, &key_buffer) catch |err| return connectionFailure(failure, name, field, err);
+        _ = connected.add(served.name, presentation, resolved.url, bytes, fixture) catch |err| return connectionFailure(failure, name, field, err);
     }
 }
 
-fn connectionFailure(failure: *start_report.Failure, name: []const u8, err: anyerror) anyerror {
+/// The sign-in a connection's credential is, or null for a key connection.
+fn signInKind(credential: *const served_connection.Credential) ?providers.Connected.SignInKind {
+    return switch (credential.*) {
+        .oauth => .plan,
+        .@"openai-device" => .device,
+        .key => null,
+    };
+}
+
+fn connectionFailure(failure: *start_report.Failure, name: []const u8, field: []const u8, err: anyerror) anyerror {
     if (err == error.OutOfMemory) return err;
     var message: [start_report.max_refusal_message_bytes]u8 = undefined;
-    failure.* = .init(.settings_invalid, std.fmt.bufPrint(&message, "connections.{s}.key: {s}", .{ name, @errorName(err) }) catch "connections: a key connection cannot be served");
+    failure.* = .init(.settings_invalid, std.fmt.bufPrint(&message, "connections.{s}.{s}: {s}", .{ name, field, @errorName(err) }) catch "connections: a connection cannot be served");
     return error.SettingsInvalid;
 }
 

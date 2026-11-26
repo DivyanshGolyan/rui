@@ -976,6 +976,14 @@ test "an Action's command and stdin lines carry the content mark, so neither can
             .arguments = "{\"description\":\"Probe\",\"cmd\":\"cat\",\"stdin\":\"x\\n\",\"timeout_ms\":null}",
             .expected = "\n● Probe\n  $ cat\n  stdin:\n  │ x\n  │\n",
         },
+        .{
+            .arguments = "{\"cmd\":\"true\"}",
+            .expected = "\n●\n  $ true\n",
+        },
+        .{
+            .arguments = "{\"description\":\" \\n \",\"cmd\":\"true\"}",
+            .expected = "\n●\n  $ true\n",
+        },
     }) |case| {
         try scratch.setLength(std.testing.io, 0);
         try scratch.writePositionalAll(std.testing.io, case.arguments, 0);

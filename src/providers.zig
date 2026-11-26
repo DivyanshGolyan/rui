@@ -42,8 +42,15 @@ pub const Connected = struct {
         url: [max_url_bytes]u8 = undefined,
         url_len: usize = 0,
         key: secret_value.Key = .{},
+        /// Set for a sign-in connection: it reads its credential record from `record_path`, not a key.
+        sign_in: ?SignInKind = null,
+        record_path: [max_record_path_bytes]u8 = undefined,
+        record_len: usize = 0,
         fixture: bool = false,
     };
+
+    pub const SignInKind = enum { plan, device };
+    pub const max_record_path_bytes = 1024;
 
     pub const Presentation = struct {
         label: []const u8,
@@ -68,6 +75,15 @@ pub const Connected = struct {
         return entry;
     }
 
+    /// Adds a sign-in connection: its credential record lives in its own file at `record_path`.
+    pub fn addSignIn(self: *Connected, name: connection.Name, presentation: Presentation, url: []const u8, kind: SignInKind, record_path: []const u8, fixture: bool) error{ ServedFull, InvalidCredentialPath }!void {
+        if (record_path.len > max_record_path_bytes) return error.InvalidCredentialPath;
+        const entry = try self.add(name, presentation, url, "", fixture);
+        entry.sign_in = kind;
+        @memcpy(entry.record_path[0..record_path.len], record_path);
+        entry.record_len = record_path.len;
+    }
+
     pub fn wipe(self: *Connected) void {
         for (self.entries[0..self.len]) |*entry| entry.key.wipe();
         self.len = 0;
@@ -88,7 +104,10 @@ pub fn fromSettings(settings: *const @import("host_settings.zig").Settings, conn
     for (connected.entries[0..connected.len]) |*entry| {
         result.table.set(entry.name, .{
             .endpoint = entry.url[0..entry.url_len],
-            .credential = .{ .key_file = .{ .key = entry.key.slice(), .fixture = entry.fixture } },
+            .credential = if (entry.sign_in) |kind| switch (kind) {
+                .plan => .{ .chatgpt_plan = .{ .path = entry.record_path[0..entry.record_len] } },
+                .device => .{ .chatgpt_device = .{ .path = entry.record_path[0..entry.record_len], .refresh = if (entry.fixture) .synthetic else .issuer } },
+            } else .{ .key_file = .{ .key = entry.key.slice(), .fixture = entry.fixture } },
             .label = entry.label[0..entry.label_len],
             .codec = entry.codec,
             .web_search = entry.web_search,
@@ -765,6 +784,27 @@ test "fromSettings serves each key connection at its own URL with its own key, a
     try std.testing.expectEqual(protocol.Route.key_file, served.served().route("alpha"));
     try std.testing.expect(alpha.live_list and !served.get(connection.Name.parse("beta").?).?.live_list);
     try std.testing.expectEqual(@as(usize, 1), served.liveLists());
+}
+
+test "two named sign-ins serve their own records and routes, apart from a key connection" {
+    var settings: @import("host_settings.zig").Settings = .{};
+    inline for (std.enums.values(Provider)) |named| @field(settings.providers.entries, @tagName(named)) = null;
+    var connected: Connected = .{};
+    defer connected.wipe();
+    const presentation: Connected.Presentation = .{ .label = "Work", .codec = .@"openai-responses/3", .web_search = true, .live_list = true };
+    try connected.addSignIn(connection.Name.parse("work").?, presentation, "https://chatgpt.example/backend-api/codex/responses", .plan, "/records/work.json", false);
+    try connected.addSignIn(connection.Name.parse("personal").?, presentation, "https://chatgpt.example/backend-api/codex/responses", .plan, "/records/personal.json", false);
+    try connected.addSignIn(connection.Name.parse("device").?, .{ .label = "Device", .codec = .@"openai-responses/2", .web_search = false }, "https://chatgpt.example/backend-api/codex/responses", .device, "/records/device.json", true);
+    _ = try connected.add(connection.Name.parse("alpha").?, .{ .label = "Alpha", .codec = .@"openai-responses/2", .web_search = false }, "https://alpha.example/v1/responses", "sk-alpha-key", false);
+    const served = fromSettings(&settings, &connected);
+    const table = served.served();
+    try std.testing.expectEqual(protocol.Route.chatgpt_plan, table.route("work"));
+    try std.testing.expectEqual(protocol.Route.chatgpt_plan, table.route("personal"));
+    try std.testing.expectEqual(protocol.Route.chatgpt_device, table.route("device"));
+    try std.testing.expectEqual(protocol.Route.key_file, table.route("alpha"));
+    try std.testing.expectEqualStrings("/records/work.json", served.get(connection.Name.parse("work").?).?.credential.signIn().?.path);
+    try std.testing.expectEqualStrings("/records/personal.json", served.get(connection.Name.parse("personal").?).?.credential.signIn().?.path);
+    try std.testing.expectEqual(Authentication.RefreshTarget.synthetic, served.get(connection.Name.parse("device").?).?.credential.signIn().?.refresh);
 }
 
 test "a connection keeps its own facts under a built-in name, and a built-in entry carries the built-in facts" {

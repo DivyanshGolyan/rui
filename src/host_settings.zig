@@ -1308,6 +1308,30 @@ pub fn fixtureEndpoint(settings: *const Settings, endpoint: []const u8) bool {
     return endpoint_value.fixtureEndpoint(endpoint, if (settings.network.ca_file) |*ca| ca.slice() else null);
 }
 
+/// The field that makes a sign-in connection unservable, or null. The Host signs in to the ChatGPT
+/// issuer and sends the token to the Adapter's own endpoint only, so a sign-in connection is served
+/// at that endpoint (a device sign-in also at a loopback fixture), speaks the listing its sign-in
+/// has, and names the ChatGPT issuer as its token URL. Key connections have no such rule.
+fn signInRefusal(settings: *const Settings, served: *const connection.Connection) ?[]const u8 {
+    var url_buffer: [2048]u8 = undefined;
+    const resolved = connection.resolve(served, .{ .id = "", .native_family = .responses }, &url_buffer) catch return "base_url";
+    switch (served.credential) {
+        .key => return if (served.models.list == .chatgpt_plan) "models.list" else null,
+        .oauth => |oauth| {
+            if (!std.mem.eql(u8, resolved.url, provider_name.api_endpoint)) return "base_url";
+            if (!std.mem.startsWith(u8, oauth.token_url, issuer_url)) return "credential";
+            if (served.models.list != .chatgpt_plan) return "models.list";
+        },
+        .@"openai-device" => {
+            if (!std.mem.eql(u8, resolved.url, provider_name.managed_endpoint) and !fixtureEndpoint(settings, resolved.url)) return "base_url";
+            if (served.models.list != .catalog) return "models.list";
+        },
+    }
+    return null;
+}
+
+const issuer_url = endpoint_value.sign_in_issuer;
+
 fn unservedConnection(failure: *start_report.Failure, name: []const u8, field: []const u8) error{SettingsInvalid} {
     var buffer: [start_report.max_refusal_message_bytes / 2]u8 = undefined;
     const at = std.fmt.bufPrint(&buffer, "connections.{s}.{s}", .{ name, field }) catch unreachable;
@@ -1354,6 +1378,9 @@ pub fn seal(settings: *const Settings, failure: *start_report.Failure) error{Set
     // format, and no extra headers or refusal rules. Each other shape is
     // parsed and kept in the document, and refused here by name.
     if (settings.connections.unserved()) |found| return unservedConnection(failure, found.name, found.field);
+    for (settings.connections.entries) |*entry| {
+        if (signInRefusal(settings, &entry.value)) |field| return unservedConnection(failure, entry.value.name.slice(), field);
+    }
     for (settings.tools.mcp.names[0..settings.tools.mcp.len], settings.tools.mcp.slice()) |*name, *server| {
         var buffer: [start_report.max_refusal_message_bytes / 2]u8 = undefined;
         if (!secret_value.valid(server.bearer_token.value())) return refuse(failure, std.fmt.bufPrint(&buffer, "tools.mcp.{s}.bearerToken", .{name.slice()}) catch unreachable, "credential source has not been resolved");
