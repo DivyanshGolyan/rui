@@ -13,7 +13,7 @@ pub const Phase = enum {
     active,
 };
 
-pub const recovery_words = "This window can't continue after the update. Select Version in Settings to retry, or open rui in a new terminal.";
+pub const recovery_words = "This window can't continue after the update. Open rui in a new terminal.";
 pub const rereading = "Reading this chat…";
 
 pub fn refusal(phase: Phase) state_marks.Say {
