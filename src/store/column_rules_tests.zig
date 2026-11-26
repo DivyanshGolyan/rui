@@ -72,7 +72,7 @@ fn candidates(comptime column: schema.Column, out: *std.ArrayList(Value), arena:
                     try out.append(arena, .{ .octets = accent });
                 } else if (length > 0) {
                     const multibyte = try arena.alloc(u8, length);
-                    for (multibyte, 0..) |*byte, at| byte.* = if (at % 2 == 0) 0xc3 else 0xa9;
+                    for (multibyte, 0..) |*byte, at| byte.* = if (at + 1 == length and length % 2 == 1) 'a' else if (at % 2 == 0) 0xc3 else 0xa9;
                     try out.append(arena, .{ .octets = multibyte });
                 }
             }
@@ -226,11 +226,7 @@ test "SH-178 a column's own rules are held by the Host as MySQL's CHECK holds th
                 for (values.items) |value| {
                     const insert = try std.fmt.allocPrint(arena, "INSERT INTO rui_column_probe(" ++ column.name ++ ") VALUES({s})", .{try mysqlLiteral(arena, column, value)});
                     const stored = try mysql_testing.takes(insert);
-                    std.testing.expectEqual(stored, accepts(column, value)) catch |err| {
-                        const text = try std.fmt.allocPrint(arena, "{s}.{s}: {any} rule({s}) engine took={}\n{s}\n", .{ table.name, column.name, value, rule, stored, insert });
-                        std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = "/tmp/col3.txt", .data = text[0..@min(text.len, 3000)] }) catch {};
-                        return err;
-                    };
+                    try std.testing.expectEqual(stored, accepts(column, value));
                     checked += 1;
                 }
             }
