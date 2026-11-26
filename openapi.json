@@ -2169,25 +2169,8 @@
                       "admitted_at": {
                         "$ref": "#/components/schemas/Decimal"
                       },
-                      "sender": {
-                        "anyOf": [
-                          {
-                            "$ref": "#/components/schemas/NamedPeer"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "source_action": {
-                        "anyOf": [
-                          {
-                            "$ref": "#/components/schemas/Decimal"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
+                      "origin": {
+                        "$ref": "#/components/schemas/MessageOrigin"
                       },
                       "content": {
                         "$ref": "#/components/schemas/ContentValue"
@@ -2199,8 +2182,7 @@
                       "turn",
                       "state",
                       "admitted_at",
-                      "sender",
-                      "source_action",
+                      "origin",
                       "content"
                     ],
                     "additionalProperties": false
@@ -2267,25 +2249,8 @@
                       "admitted_at": {
                         "$ref": "#/components/schemas/Decimal"
                       },
-                      "sender": {
-                        "anyOf": [
-                          {
-                            "$ref": "#/components/schemas/NamedPeer"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "source_action": {
-                        "anyOf": [
-                          {
-                            "$ref": "#/components/schemas/Decimal"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
+                      "origin": {
+                        "$ref": "#/components/schemas/MessageOrigin"
                       },
                       "content": {
                         "$ref": "#/components/schemas/ContentValue"
@@ -2297,8 +2262,7 @@
                       "turn",
                       "state",
                       "admitted_at",
-                      "sender",
-                      "source_action",
+                      "origin",
                       "content"
                     ],
                     "additionalProperties": false
@@ -2778,25 +2742,8 @@
                       "admitted_at": {
                         "$ref": "#/components/schemas/Decimal"
                       },
-                      "sender": {
-                        "anyOf": [
-                          {
-                            "$ref": "#/components/schemas/NamedPeer"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "source_action": {
-                        "anyOf": [
-                          {
-                            "$ref": "#/components/schemas/Decimal"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
+                      "origin": {
+                        "$ref": "#/components/schemas/MessageOrigin"
                       },
                       "content": {
                         "$ref": "#/components/schemas/ContentValue"
@@ -2808,8 +2755,7 @@
                       "turn",
                       "state",
                       "admitted_at",
-                      "sender",
-                      "source_action",
+                      "origin",
                       "content"
                     ],
                     "additionalProperties": false
@@ -7427,6 +7373,64 @@
               "bytes",
               "sha256",
               "owner"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "MessageOrigin": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "person": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "person"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "peer": {
+                "$ref": "#/components/schemas/NamedPeer"
+              }
+            },
+            "required": [
+              "peer"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "$ref": "#/components/schemas/Decimal"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "server_event": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "server_event"
             ],
             "additionalProperties": false
           }

@@ -405,7 +405,7 @@ test "inline skills a peer Session's Message may list the recipient's skills" {
                 .admission, .received => |message| message,
                 else => return error.TestUnexpectedResult,
             };
-            try std.testing.expectEqualStrings(sender.slice(), received.sender.?.session.slice());
+            try std.testing.expectEqualStrings(sender.slice(), received.origin.peer.session.slice());
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest(authored), &received.content.text.digest);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill k JOIN message_admission m ON m.admission_id=k.admission_id JOIN content c ON c.content_id=k.content_id WHERE m.sender_session_ref=?2 AND k.position=1 AND k.name='demo' AND c.digest=?1", .{ store_testing.Blob{ .bytes = &protocol.contentDigest(body) }, sender.slice() }));
         }

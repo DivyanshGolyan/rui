@@ -10023,7 +10023,7 @@ fn paginatedReplayCount() !void {
             try peer.session.set("9f8e7d");
             for (facts.items[0..facts.count], 0..) |*item, i| {
                 const position = if (facts.direction == .backward) last - i else first + i;
-                item.* = .{ .position = position, .ordinal = 0, .at = 1, .value = if (position == 1) .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1 } } else .{ .received = .{ .admission = position, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1, .sender = peer } } };
+                item.* = .{ .position = position, .ordinal = 0, .at = 1, .value = if (position == 1) .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1 } } else .{ .received = .{ .admission = position, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1, .origin = .{ .peer = peer } } } };
             }
             const job = frontend.freeze(.activity);
             frontend.reading.feed_read = read;

@@ -584,7 +584,7 @@ fn scanAt(job: *Job, task: *Task, reads: client.SessionReads, plan: FeedPolicy.P
             .tight = false,
             .provisional = pending,
             .queue_terminal = switch (item.value) {
-                .user => |message| message.sender == null and message.source_action == null and message.state == .applied,
+                .user => |message| message.origin == .person and message.state == .applied,
                 .stop => true,
                 else => false,
             },
@@ -1316,7 +1316,7 @@ const FakeHost = struct {
     /// A Message that arrived from another Session: a row the Session draws.
     fn received(admission: u64, peer: protocol.NamedPeer) protocol.ActivityItem.Message {
         var value = message(admission).admission;
-        value.sender = peer;
+        value.origin = .{ .peer = peer };
         return value;
     }
 
@@ -1378,7 +1378,7 @@ const FakeHost = struct {
         for (self.tail, @as(usize, @intCast(self.history)) + 1..) |_, at| {
             if (at > boundary) break;
             const value = self.item(.{ .position = at }, boundary).value;
-            if (value != .admission or value.admission.state != .queued or value.admission.sender != null or value.admission.source_action != null) continue;
+            if (value != .admission or value.admission.state != .queued or value.admission.origin != .person) continue;
             if (aggregates.queued.count == 0) aggregates.queued.oldest_position = at;
             aggregates.queued.count += 1;
             aggregates.queued.newest_admission = value.admission.admission;
@@ -1542,7 +1542,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
             try peer.session.set("9f8e7d");
             try peer.label.set("Peer");
             var incoming = FakeHost.message(90).admission;
-            incoming.sender = peer;
+            incoming.origin = .{ .peer = peer };
             incoming.admitted_at = std.math.maxInt(u64);
             for ([_]enum { person, script, session }{ .person, .script, .session }) |source| {
                 for (std.enums.values(@FieldType(protocol.ActivityItem.Message, "state"))) |state| {
@@ -1552,7 +1552,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
                         value.turn = if (state == .applied) 1 else null;
                         value.admitted_at = std.math.maxInt(u64);
                         if (source == .script) try value.key.set("script");
-                        if (source == .session) value.sender = peer;
+                        if (source == .session) value.origin = .{ .peer = peer };
                         const rows = [_]protocol.ActivityItem{
                             .{ .position = 2, .at = 1, .value = if (source == .session) .{ .received = value } else .{ .admission = value } },
                             .{ .position = 3, .at = 1, .value = .{ .received = incoming } },
@@ -1997,7 +1997,7 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
     const content: content_value.Value = .{ .text = .{ .length = 3, .digest = @splat(0xab) } };
     const Kind = struct { value: protocol.ActivityItem.Value, line: []const u8, packed_: bool };
     const kinds = [_]Kind{
-        .{ .value = .{ .received = .{ .admission = 5, .key = .{}, .turn = 3, .state = .applied, .content = content, .admitted_at = std.math.maxInt(u64), .sender = peer } }, .line = "← Received message from 9f8e7d", .packed_ = true },
+        .{ .value = .{ .received = .{ .admission = 5, .key = .{}, .turn = 3, .state = .applied, .content = content, .admitted_at = std.math.maxInt(u64), .origin = .{ .peer = peer } } }, .line = "← Received message from 9f8e7d", .packed_ = true },
         .{ .value = .{ .hosted_call = .{ .presentation = .{ .line = search, .code = .succeeded, .sign = .finished, .publication_position = null }, .action = .{ .kind = .search } } }, .line = "✓ Search", .packed_ = true },
         .{ .value = .{ .hosted_call = .{ .presentation = .{ .line = find, .code = .failed, .sign = .failed, .publication_position = null }, .action = .{ .kind = .find_in_page } } }, .line = "× Find", .packed_ = false },
         .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 0, .completion = .completed } }, .line = "▪ Stopped", .packed_ = false },
@@ -2155,7 +2155,7 @@ test "SUI-53 replay replaces queued rows and counts only new rows" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     var incoming = FakeHost.message(90).admission;
-    incoming.sender = peer;
+    incoming.origin = .{ .peer = peer };
     var applied = FakeHost.message(1).admission;
     applied.state = .applied;
     applied.turn = 1;
@@ -2741,7 +2741,7 @@ test "SUI-56 quote extraction follows visible Message provenance" {
     try peer.session.set("9f8e7d");
     try peer.label.set("Other Session");
     var received = FakeHost.message(2).admission;
-    received.sender = peer;
+    received.origin = .{ .peer = peer };
     const source = "  雪e\u{301}\n  body\n\nlast";
     var authored = FakeHost.message(1);
     authored.admission.content = .{ .text = .{ .length = source.len, .digest = protocol.contentDigest(source) } };
@@ -2837,9 +2837,9 @@ test "session_reads native queued personal bands preserve peer presentation and 
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     var incoming = FakeHost.message(1).admission;
-    incoming.sender = peer;
+    incoming.origin = .{ .peer = peer };
     var background = FakeHost.message(2).admission;
-    background.source_action = 19;
+    background.origin = .{ .action = 19 };
     const tail = [_]FakeHost.Tail{ .{ .value = .{ .received = incoming } }, .{ .value = .{ .received = background } } };
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 2, .held = true };
     var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 2 } };
@@ -2862,7 +2862,7 @@ test "session_reads hides every background Action admission without fetching con
             var background = FakeHost.message(7).admission;
             background.state = state;
             background.turn = if (state == .applied) 1 else null;
-            background.source_action = 19;
+            background.origin = .{ .action = 19 };
             const value: protocol.ActivityItem.Value = switch (kind) {
                 .received => .{ .received = background },
                 .user => .{ .user = background },
@@ -2889,9 +2889,9 @@ test "session_reads queued summary ignores background Actions among person and p
     var newest = FakeHost.message(2).admission;
     newest.content = .{ .text = .{ .length = newest_text.len, .digest = protocol.contentDigest(newest_text) } };
     var incoming = FakeHost.message(3).admission;
-    incoming.sender = peer;
+    incoming.origin = .{ .peer = peer };
     var background = FakeHost.message(4).admission;
-    background.source_action = 19;
+    background.origin = .{ .action = 19 };
     const tail = [_]FakeHost.Tail{
         .{ .value = FakeHost.message(1) },
         .{ .value = .{ .admission = newest } },
@@ -2919,7 +2919,7 @@ test "session_reads queued summary ignores background Actions among person and p
 
 test "session_reads advances through pages containing only hidden background Actions" {
     var background = FakeHost.message(1).admission;
-    background.source_action = 19;
+    background.origin = .{ .action = 19 };
     var tail: [21]FakeHost.Tail = undefined;
     for (tail[0..20]) |*row| row.* = .{ .value = .{ .received = background } };
     tail[20] = .{ .value = FakeHost.message(21) };

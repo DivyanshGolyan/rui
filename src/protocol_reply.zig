@@ -147,7 +147,7 @@ pub const ActivityPage = struct {
         if (bytes.len > activity_reply.max_page_bytes) return error.InvalidActivityPage;
         const Ref = JsonContentValue;
         const Fact = protocol.ActivityItem;
-        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, source_action: ?JsonString(20) = null, content: Ref };
+        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), origin: JsonOrigin, content: Ref };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref, description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
         const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
@@ -200,9 +200,9 @@ pub const ActivityPage = struct {
                 }) or !cursor.kinds.contains(std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(item.value)).?)) return error.InvalidActivityPage;
             switch (item.value) {
                 inline .admission, .user, .received => |message, kind| {
-                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = message.content.value, .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null, .source_action = if (message.source_action) |action| try id(action, false) else null };
+                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = message.content.value, .admitted_at = try id(message.admitted_at, false), .origin = try message.origin.origin() };
                     if ((value.state == .applied) != (value.turn != null) or (kind == .user and value.state != .applied)) return error.InvalidActivityPage;
-                    if ((value.sender != null and value.source_action != null) or (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.sender != null or value.source_action != null)))) return error.InvalidActivityPage;
+                    if (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.origin.admitsAs() == .received))) return error.InvalidActivityPage;
                     fact.value = @unionInit(Fact.Value, @tagName(kind), value);
                 },
                 .approval_requested => |request| {
@@ -2164,6 +2164,27 @@ pub const JsonNamedPeer = struct {
     }
 };
 
+/// A Message's origin as Activity sends it: `{"person":{}}`, `{"peer":NamedPeer}`, `{"action":"ID"}` or `{"server_event":{}}`.
+pub const JsonOrigin = union(enum) {
+    person: struct {},
+    peer: JsonNamedPeer,
+    action: JsonString(20),
+    server_event: struct {},
+
+    fn origin(self: *const JsonOrigin) !protocol.Origin {
+        return switch (self.*) {
+            .person => .person,
+            .server_event => .server_event,
+            .peer => |named| .{ .peer = try named.peer() },
+            .action => |action| blk: {
+                const action_id = try decimalId(action, false);
+                if (action_id > std.math.maxInt(i64)) return error.InvalidActivityPage;
+                break :blk .{ .action = action_id };
+            },
+        };
+    }
+};
+
 pub const JsonWorkState = struct {
     value: protocol.WorkState,
 
@@ -2705,6 +2726,52 @@ test "an activity row carries its time, and a Message's rows carry its admission
     var missing: [activity_reply.max_page_bytes]u8 = undefined;
     const bytes = try std.fmt.bufPrint(&missing, "{s}{s}", .{ writer.buffered()[0..at], writer.buffered()[at + field.len ..] });
     try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(bytes, .{}));
+}
+
+test "an activity Message's origin travels as one value and its row kind must admit it" {
+    const content: content_value.Value = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } };
+    var peer: protocol.NamedPeer = .{ .session = .{} };
+    try peer.session.set("k7m2qx");
+    try peer.label.set("Review");
+    const origins = [_]protocol.Origin{ .person, .{ .peer = peer }, .{ .action = std.math.maxInt(i64) }, .server_event };
+    for (origins) |origin| for ([_]protocol.ActivityItem.Kind{ .admission, .user, .received }) |kind| {
+        var message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 7, .origin = origin };
+        if (kind == .user) {
+            message.state = .applied;
+            message.turn = 1;
+        }
+        const value: protocol.ActivityItem.Value = switch (kind) {
+            .admission => .{ .admission = message },
+            .user => .{ .user = message },
+            else => .{ .received = message },
+        };
+        var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        facts.items[0] = .{ .position = 1, .at = 7, .value = value };
+        try facts.work.workspace.set("/w");
+        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&writer, &facts);
+        // An applied User row speaks for any origin; an admission is a person's and a received row anyone else's.
+        const allowed = kind == .user or (kind == .received) == (origin != .person);
+        if (!allowed) {
+            try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
+            continue;
+        }
+        const parsed = (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].value;
+        const read = switch (parsed) {
+            .admission, .user, .received => |one| one.origin,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(std.meta.activeTag(origin), std.meta.activeTag(read));
+        switch (origin) {
+            .person, .server_event => {},
+            .peer => |named| {
+                try std.testing.expectEqualStrings(named.session.slice(), read.peer.session.slice());
+                try std.testing.expectEqualStrings(named.label.slice(), read.peer.label.slice());
+            },
+            .action => |action| try std.testing.expectEqual(action, read.action),
+        }
+    };
 }
 
 test "SUI-47 work state wire preserves owned facts" {

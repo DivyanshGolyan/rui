@@ -292,8 +292,8 @@ const PromotedAction = struct {
         try readNativeActivity(storage, &.{ .session = self.session, .kinds = .initOne(.received) }, page);
         try std.testing.expectEqual(@as(usize, 1), page.facts.count);
         const message = page.facts.items[0].value.received;
-        try std.testing.expectEqual(@as(?u64, self.action), message.source_action);
-        try std.testing.expect(message.sender == null);
+        try std.testing.expect(message.origin == .action);
+        try std.testing.expectEqual(self.action, message.origin.action);
         try std.testing.expectEqual(@as(u64, text.len), message.content.text.length);
         try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &message.content.text.digest);
 

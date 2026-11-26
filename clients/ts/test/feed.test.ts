@@ -16,9 +16,9 @@ function narrowed(entry: FeedEntry): void {
 		case "admission": case "user": case "received": {
 			const state: "queued" | "applied" | "excluded" = entry.state;
 			const admitted: string = entry.admittedAt;
-			const sender: Schemas["NamedPeer"] | null = entry.sender;
+			const origin: Schemas["MessageOrigin"] = entry.origin;
 			const text: string | undefined = entry.text;
-			void [state, admitted, sender, text];
+			void [state, admitted, origin, text];
 			break;
 		}
 		case "assistant": {
