@@ -788,17 +788,21 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
 }
 
 const stored_presentation = rsql.Read(.{
-    .sql = "SELECT tool_call.description," ++ tool_fulfillment.codeSql("tool_call", "a") ++ " AS code,a.authorized,item.session_ref,item.session_position," ++ outcome_columns ++ " " ++
-        "FROM model_tool_call tool_call LEFT JOIN action_operation a ON a.parent_operation_id=tool_call.operation_id AND a.call_ordinal=tool_call.call_ordinal " ++
+    .sql = "SELECT " ++ call_line_columns("tool_call", "call_name", "call_subject", "call_") ++ "," ++ tool_fulfillment.codeSql("tool_call", "a") ++ " AS code,a.authorized,item.session_ref,item.session_position," ++ outcome_columns ++ " " ++
+        "FROM model_tool_call tool_call " ++ call_line_joins("JOIN", "tool_call", "call_name", "call_subject") ++ " LEFT JOIN action_operation a ON a.parent_operation_id=tool_call.operation_id AND a.call_ordinal=tool_call.call_ordinal " ++
         outcome_join ++ " " ++
         "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
         "WHERE tool_call.operation_id=?1 AND tool_call.call_ordinal=?2",
     .Args = struct { operation: u64, ordinal: u64 },
     .Row = struct {
-        description: ?Bounded(tool_presentation.max_description_bytes),
+        call_tool: ?CallTool,
+        call_rejection: ?tool_proposal.Rejection,
+        call_label: ?Bounded(tool_presentation.max_description_bytes),
+        call_subject: ?Bounded(session_id.bytes),
+        call_subject_label: ?Bounded(tool_presentation.max_label_bytes),
         code: ?tool_presentation.ToolPresentation.Code,
         authorized: ?bool,
-        session_ref: SessionText,
+        session_ref: Bounded(session_id.bytes),
         session_position: rsql.Positive,
         outcome_text: ?Bounded(tool_presentation.max_description_bytes),
         outcome_link_at: ?u64,
@@ -836,16 +840,60 @@ pub const StoredOutcome = struct {
     }
 };
 
+/// The columns and joins that bring a saved call's facts to a read: its tool's name (inline, bounded), the rejection, the label the
+/// model gave, the Session it named and that Session's label now. Every read that shows a call's line selects these from the call
+/// as `call`, so the line has one reader (`StoredCall.line`). `prefix` names the columns; `name` and `subject` name the joined rows.
+pub fn call_line_columns(comptime call: []const u8, comptime name: []const u8, comptime subject: []const u8, comptime prefix: []const u8) []const u8 {
+    return "CASE WHEN " ++ name ++ ".byte_length<=" ++ std.fmt.comptimePrint("{d}", .{activity_read.CallText.max_tool_bytes}) ++ " THEN @payload(" ++ name ++ ") END AS " ++ prefix ++ "tool," ++
+        call ++ ".rejection_code AS " ++ prefix ++ "rejection," ++ call ++ ".label AS " ++ prefix ++ "label," ++ call ++ ".subject AS " ++ prefix ++ "subject," ++
+        subject ++ ".label AS " ++ prefix ++ "subject_label";
+}
+
+/// `join` is "JOIN" where the call is always there and "LEFT JOIN" where the call may be absent.
+pub fn call_line_joins(comptime join: []const u8, comptime call: []const u8, comptime name: []const u8, comptime subject: []const u8) []const u8 {
+    return join ++ " content " ++ name ++ " ON " ++ name ++ ".content_id=" ++ call ++ ".name_content_id " ++ call_subject_join(call, subject);
+}
+
+/// Only the Session a call named, for a read that has already joined the tool's name.
+pub fn call_subject_join(comptime call: []const u8, comptime subject: []const u8) []const u8 {
+    return "LEFT JOIN session " ++ subject ++ " ON " ++ subject ++ ".session_ref=" ++ call ++ ".subject";
+}
+
+pub const CallTool = activity_read.CallText.Tool;
+
+/// What `call_line_columns` read, kept together until `line` turns it into the call's Line.
+pub const StoredCall = struct {
+    tool: ?CallTool = null,
+    rejection: ?tool_proposal.Rejection = null,
+    label: ?Bounded(tool_presentation.max_description_bytes) = null,
+    subject: ?SessionText = null,
+    subject_label: ?Bounded(tool_presentation.max_label_bytes) = null,
+
+    /// The call's line, or null for a call no tool served. A name too long to be a tool's, on a call a tool served, is a corrupt Store.
+    pub fn line(self: *const StoredCall) error{CorruptStore}!?tool_presentation.Line {
+        if (self.rejection != null) return null;
+        const tool = self.tool orelse return error.CorruptStore;
+        return tool_line.of(.{
+            .name = tool.slice(),
+            .label = if (self.label) |*label| label.slice() else null,
+            .subject = if (self.subject) |*subject| subject.slice() else null,
+            .subject_label = self.subject_label,
+        }) catch return error.CorruptStore;
+    }
+
+    /// The line as one plain text a reader that cannot draw a link shows: a Session it names stands as its label or its ID.
+    pub fn text(self: *const StoredCall) error{CorruptStore}!?Bounded(tool_presentation.max_description_bytes) {
+        const shown = try self.line() orelse return null;
+        return shown.description() orelse error.CorruptStore;
+    }
+};
+
 const PresentationRead = struct {
     operation: u64,
     ordinal: u64,
     out: *tool_presentation.ToolPresentation,
-    session: SessionText = undefined,
+    session: Bounded(session_id.bytes) = undefined,
     proposal: ProposalRead = undefined,
-    description: ?Bounded(tool_presentation.max_description_bytes) = null,
-    outcome: StoredOutcome = .{},
-    code: ?tool_presentation.ToolPresentation.Code = null,
-    authorized: ?bool = null,
     count: RowCount = .{},
 
     fn init(operation: u64, ordinal: u64, publication_position: ?u64, out: *tool_presentation.ToolPresentation) PresentationRead {
@@ -862,12 +910,12 @@ const PresentationRead = struct {
     }
 
     fn keep(read: *PresentationRead, row: *const stored_presentation.Row) error{CorruptStore}!void {
-        read.description = row.description;
-        read.outcome = .{ .text = row.outcome_text, .link_at = row.outcome_link_at, .link_session = row.outcome_link_session, .label = row.outcome_label, .completion = row.outcome_completion };
-        read.code = row.code;
-        read.authorized = row.authorized;
         read.session = row.session_ref;
         read.proposal = .{ .position = row.session_position.get() };
+        const subject: ?SessionText = if (row.call_subject) |subject| SessionText.from(subject.slice()) catch unreachable else null;
+        const call: StoredCall = .{ .tool = row.call_tool, .rejection = row.call_rejection, .label = row.call_label, .subject = subject, .subject_label = row.call_subject_label };
+        const outcome: StoredOutcome = .{ .text = row.outcome_text, .link_at = row.outcome_link_at, .link_session = row.outcome_link_session, .label = row.outcome_label, .completion = row.outcome_completion };
+        read.out.* = try presentationOf(call, outcome, row.code, row.authorized, read.out.publication_position);
     }
 
     fn checkCall(read: *const PresentationRead) !void {
@@ -880,14 +928,13 @@ const PresentationRead = struct {
 
     fn finish(read: *PresentationRead) !void {
         try read.proposal.found();
-        read.out.* = try presentationOf(read.description, read.outcome, read.code, read.authorized, read.out.publication_position);
     }
 };
 
-/// The one place a call line, a derived code and an authorization become a presentation.
+/// The one place a call's saved facts, a derived code and an authorization become a presentation.
 /// A resolved call that recorded an outcome line shows it, finished as that outcome chose; every other row shows its call line, plain, as `done`.
 pub fn presentationOf(
-    description: ?Bounded(tool_presentation.max_description_bytes),
+    call: StoredCall,
     outcome: StoredOutcome,
     code: ?tool_presentation.ToolPresentation.Code,
     authorized: ?bool,
@@ -895,8 +942,7 @@ pub fn presentationOf(
 ) error{CorruptStore}!tool_presentation.ToolPresentation {
     const derived: tool_presentation.ToolPresentation.Code = code orelse if (authorized orelse false) .unresolved else .pending_permission;
     if (try outcome.line()) |shown| return tool_presentation.ToolPresentation.of(shown, derived, std.enums.fromInt(tool_presentation.Completion, outcome.completion orelse return error.CorruptStore) orelse return error.CorruptStore, publication_position);
-    const line: ?tool_presentation.Line = if (description) |saved| tool_presentation.Line.ofSaved(saved.slice()) else null;
-    return tool_presentation.ToolPresentation.of(line, derived, .done, publication_position);
+    return tool_presentation.ToolPresentation.of(try call.line(), derived, .done, publication_position);
 }
 
 /// A hosted call's row: the action it took, how many targets the Store holds, and the leading bytes of the first target and of
@@ -997,7 +1043,7 @@ const HostedRead = struct {
         if (row.targets_total > hosted_action.max_targets) return error.CorruptStore;
         const target: []const u8 = if (row.target_prefix) |*prefix| prefix.slice() else "";
         const pattern: []const u8 = if (row.pattern_prefix) |*prefix| prefix.slice() else "";
-        read.presentation.* = try presentationOf(tool_line.ofHosted(kind, target, pattern), .{}, if (row.call_failed) .failed else .succeeded, null, read.position);
+        read.presentation.* = try tool_presentation.ToolPresentation.of(tool_presentation.Line.ofSaved(tool_line.ofHosted(kind, target, pattern).slice()), if (row.call_failed) .failed else .succeeded, .done, read.position);
         read.at = (row.resolved_at orelse return error.CorruptStore).get();
         const action = read.action orelse return;
         action.kind = kind;
@@ -1479,14 +1525,30 @@ const ModelCallRead = struct {
 };
 
 const call_details = rsql.Read(.{
-    .sql = "SELECT op.resolved_at,c.description,CASE WHEN name.byte_length<=" ++ std.fmt.comptimePrint("{d}", .{activity_read.CallText.max_tool_bytes}) ++ " THEN @payload(name) END AS tool," ++
+    .sql = "SELECT op.resolved_at," ++ call_line_columns("c", "name", "call_subject", "") ++ "," ++
         action_domain.mcpServerForNameSql("op", "c.name_content_id") ++ " AS server FROM model_operation op " ++
-        "JOIN model_tool_call c ON c.operation_id=op.operation_id JOIN content name ON name.content_id=c.name_content_id " ++
+        "JOIN model_tool_call c ON c.operation_id=op.operation_id " ++ call_line_joins("JOIN", "c", "name", "call_subject") ++ " " ++
         "WHERE op.operation_id=?1 AND op.session_ref=?2 AND c.call_ordinal=?3",
     .Args = struct { operation: u64, session: []const u8, ordinal: u64 },
-    .Row = struct { resolved_at: rsql.Positive, description: *?activity_read.CallText.Description, tool: *?activity_read.CallText.Tool, server: *?activity_read.CallText.Server },
+    .Row = struct {
+        resolved_at: rsql.Positive,
+        tool: *?activity_read.CallText.Tool,
+        rejection: ?tool_proposal.Rejection,
+        label: *?activity_read.CallText.Description,
+        subject: ?Bounded(session_id.bytes),
+        subject_label: ?Bounded(tool_presentation.max_label_bytes),
+        server: *?activity_read.CallText.Server,
+    },
     .cardinality = .optional,
 });
+
+/// The line of the call a details read found, as the text its Activity row carries. Checked against the proposal first.
+fn callDetailsText(details: *const call_details.Row, metadata: *const activity_read.ProposalMetadata) error{CorruptStore}!?activity_read.CallText.Description {
+    try checkCallDetails(details, metadata);
+    const subject: ?SessionText = if (details.subject) |subject| SessionText.from(subject.slice()) catch unreachable else null;
+    const stored: StoredCall = .{ .tool = details.tool.*, .rejection = details.rejection, .label = details.label.*, .subject = subject, .subject_label = details.subject_label };
+    return stored.text();
+}
 
 fn checkCallDetails(details: *const call_details.Row, metadata: *const activity_read.ProposalMetadata) error{CorruptStore}!void {
     const field = metadata.fields[@backingInt(tool_proposal.Field.name)];
@@ -1701,7 +1763,7 @@ const ItemRead = struct {
             4 => {
                 const call = &read.state.call;
                 if (read.round == 1) readProposal(a, session, &call.proposal) else {
-                    call.resolved.description = &item.value.call.description;
+                    call.resolved.label = &item.value.call.description;
                     call.resolved.tool = &item.value.call.tool;
                     call.resolved.server = &item.value.call.server;
                     a.readInto(call_details, .{ .operation = item.value.call.operation, .session = session, .ordinal = item.value.call.call_ordinal }, &call.resolved, &call.found);
@@ -1717,7 +1779,7 @@ const ItemRead = struct {
                 const approval = &read.state.approval;
                 if (read.round == 1) a.read(approval_request, .{ .action = item.value.approval_requested.action, .session = session }, &approval.row) else if (read.round == 2) readProposal(a, item.value.approval_requested.session.slice(), &approval.proposal) else {
                     const request = &item.value.approval_requested;
-                    approval.details.description = &request.description;
+                    approval.details.label = &request.description;
                     approval.details.tool = &request.tool;
                     approval.details.server = &request.server;
                     a.readInto(call_details, .{ .operation = request.operation, .session = request.session.slice(), .ordinal = request.call_ordinal }, &approval.details, &approval.found);
@@ -1804,8 +1866,7 @@ const ItemRead = struct {
                     return;
                 }
                 if (!call.found.get()) return error.CorruptStore;
-                try checkCallDetails(&call.resolved, &item.value.call);
-                if (call.resolved.description.*) |*text| text.* = saved_label.callWords(text.slice());
+                item.value.call.description = try callDetailsText(&call.resolved, &item.value.call);
                 item.at = call.resolved.resolved_at.get();
             },
             10 => {
@@ -1850,8 +1911,7 @@ const ItemRead = struct {
                     return;
                 }
                 if (!approval.found.get()) return error.CorruptStore;
-                try checkCallDetails(&approval.details, &approval.metadata);
-                if (approval.details.description.*) |*text| text.* = saved_label.callWords(text.slice());
+                request.description = try callDetailsText(&approval.details, &approval.metadata);
             },
             13 => {
                 const change = &read.state.change;

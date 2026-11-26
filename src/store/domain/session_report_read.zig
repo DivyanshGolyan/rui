@@ -14,6 +14,7 @@ const session_report = @import("../../session_report.zig");
 const tool_name = @import("../../tool_name.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const saved_label = @import("../../saved_label.zig");
+const tool_proposal = @import("../../tool_proposal.zig");
 const tool_defs = @import("../../tool_record.zig");
 const turn_policy = @import("../../turn_policy.zig");
 const store_core = @import("../Store.zig");
@@ -136,14 +137,14 @@ const recent_messages = rsql.Read(.{
 const unresolved_actions = rsql.Read(.{
     .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode,@payload(call_name) AS tool_name," ++
         "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
-        "call_name.digest AS name_digest," ++ action_domain.mcpServerSql("a", "operation") ++ " AS server,tool_call.description FROM action_operation a " ++
+        "call_name.digest AS name_digest," ++ action_domain.mcpServerSql("a", "operation") ++ " AS server," ++ reads_domain.call_line_columns("tool_call", "call_name", "call_subject", "call_") ++ " FROM action_operation a " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id " ++
         "JOIN turn active ON active.turn_id=operation.turn_id " ++
         "CROSS JOIN session_revision revision ON revision.session_ref=a.session_ref AND revision.revision=a.permission_revision " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
         "CROSS JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
         "CROSS JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
-        "CROSS JOIN content call_name ON call_name.content_id=tool_call.name_content_id " ++
+        "CROSS JOIN content call_name ON call_name.content_id=tool_call.name_content_id " ++ reads_domain.call_subject_join("tool_call", "call_subject") ++ " " ++
         "WHERE a.session_ref=?1 AND a.acceptance_position IS NULL AND " ++ action_domain.unresolvedSql("a") ++ " ORDER BY a.action_id",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -160,7 +161,11 @@ const unresolved_actions = rsql.Read(.{
         arguments_digest: [32]u8,
         name_digest: [32]u8,
         server: ?Bounded(64),
-        description: ?Description,
+        call_tool: ?reads_domain.CallTool,
+        call_rejection: ?tool_proposal.Rejection,
+        call_label: ?Description,
+        call_subject: ?Bounded(session_id.max_reference_bytes),
+        call_subject_label: ?Bounded(tool_presentation.max_label_bytes),
     },
     .cardinality = .each,
 });
@@ -178,12 +183,13 @@ const publications_sql = "WITH publications AS (SELECT operation.operation_id," 
 
 const resolved_actions = rsql.Read(.{
     .sql = publications_sql ++ "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolution_code,a.acceptance_position," ++
-        "result.byte_length AS result_length,result.digest AS result_digest,result.content_id AS result_id,result.private AS result_private,result.form AS result_form,tool_call.description," ++ reads_domain.outcome_columns ++ "," ++ tool_fulfillment.resolutionPublicationSql("a", "publications.publication") ++ " AS publication " ++
+        "result.byte_length AS result_length,result.digest AS result_digest,result.content_id AS result_id,result.private AS result_private,result.form AS result_form," ++ reads_domain.call_line_columns("tool_call", "call_name", "call_subject", "call_") ++ "," ++ reads_domain.outcome_columns ++ "," ++ tool_fulfillment.resolutionPublicationSql("a", "publications.publication") ++ " AS publication " ++
         "FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
         "CROSS JOIN action_operation a ON a.parent_operation_id=operation.operation_id " ++
         "CROSS JOIN content result ON result.content_id=a.resolution_content_id " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
+        reads_domain.call_line_joins("CROSS JOIN", "tool_call", "call_name", "call_subject") ++ " " ++
         reads_domain.outcome_join ++ " LEFT JOIN publications ON publications.operation_id=operation.operation_id " ++
         "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND a.resolution_code IS NOT NULL ORDER BY a.action_id",
     .Args = struct { session: []const u8 },
@@ -198,7 +204,11 @@ const resolved_actions = rsql.Read(.{
         result_id: rsql.Positive,
         result_private: bool,
         result_form: u8,
-        description: ?Description,
+        call_tool: ?reads_domain.CallTool,
+        call_rejection: ?tool_proposal.Rejection,
+        call_label: ?Description,
+        call_subject: ?Bounded(session_id.max_reference_bytes),
+        call_subject_label: ?Bounded(tool_presentation.max_label_bytes),
         outcome_text: ?Bounded(tool_presentation.max_description_bytes),
         outcome_link_at: ?u64,
         outcome_link_session: ?Bounded(session_id.max_reference_bytes),
@@ -213,7 +223,7 @@ const rejected_calls = rsql.Read(.{
     .sql = publications_sql ++ "SELECT tool_call.operation_id,tool_call.call_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
         "rejection.byte_length AS rejection_length,rejection.digest AS rejection_digest,name.byte_length AS name_length,name.digest AS name_digest," ++
         "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
-        "tool_call.description,publications.publication " ++
+        "publications.publication " ++
         "FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
@@ -238,7 +248,6 @@ const rejected_calls = rsql.Read(.{
         call_id_digest: [32]u8,
         arguments_length: u64,
         arguments_digest: [32]u8,
-        description: ?Description,
         publication: ?rsql.Positive,
     },
     .cardinality = .each,
@@ -444,6 +453,7 @@ fn ListRead(comptime Row: type, comptime values: anytype, comptime Watcher: type
     const VisitError = @typeInfo(@typeInfo(Watcher).pointer.child.Result("row")).error_union.error_set;
     return struct {
         watched: Watcher,
+        decoded: Row = undefined,
         failure: ?(ValuesError || VisitError) = null,
 
         pub fn visit(read: *@This(), row: *const Row) bool {
@@ -488,7 +498,7 @@ fn unresolvedRow(row: *const unresolved_actions.Row) ValuesError!session_report.
             .call_id = .{ .length = row.call_id_length, .digest = row.call_id_digest },
             .server = server,
             .arguments = .{ .length = row.arguments_length, .digest = row.arguments_digest },
-            .presentation = try reads_domain.presentationOf(row.description, .{}, null, row.authorized, null),
+            .presentation = try reads_domain.presentationOf(.{ .tool = row.call_tool, .rejection = row.call_rejection, .label = row.call_label, .subject = row.call_subject, .subject_label = row.call_subject_label }, .{}, null, row.authorized, null),
         },
     };
 }
@@ -510,7 +520,7 @@ fn resolvedRow(row: *const resolved_actions.Row) ValuesError!session_report.Row 
             .code = row.resolution_code.slice(),
             .acceptance_position = row.acceptance_position.get(),
             .result = try @import("content_parts.zig").publicValue(&.{ .byte_length = row.result_length, .digest = row.result_digest, .private = row.result_private, .form = row.result_form }, .{ .action = row.action_id.get() }),
-            .presentation = try reads_domain.presentationOf(row.description, .{ .text = row.outcome_text, .link_at = row.outcome_link_at, .link_session = row.outcome_link_session, .label = row.outcome_label, .completion = row.outcome_completion }, try presentedCode(row.resolution_code.slice()), null, optional(row.publication)),
+            .presentation = try reads_domain.presentationOf(.{ .tool = row.call_tool, .rejection = row.call_rejection, .label = row.call_label, .subject = row.call_subject, .subject_label = row.call_subject_label }, .{ .text = row.outcome_text, .link_at = row.outcome_link_at, .link_session = row.outcome_link_session, .label = row.outcome_label, .completion = row.outcome_completion }, try presentedCode(row.resolution_code.slice()), null, optional(row.publication)),
         },
     };
 }
@@ -526,7 +536,7 @@ fn rejectedRow(row: *const rejected_calls.Row) ValuesError!session_report.Row {
             .name = .{ .length = row.name_length, .digest = row.name_digest },
             .call_id = .{ .length = row.call_id_length, .digest = row.call_id_digest },
             .arguments = .{ .length = row.arguments_length, .digest = row.arguments_digest },
-            .presentation = try reads_domain.presentationOf(row.description, .{}, try presentedCode(row.rejection_code.slice()), null, optional(row.publication)),
+            .presentation = try reads_domain.presentationOf(.{ .rejection = std.meta.stringToEnum(tool_proposal.Rejection, row.rejection_code.slice()) orelse return error.CorruptStore }, .{}, try presentedCode(row.rejection_code.slice()), null, optional(row.publication)),
         },
     };
 }

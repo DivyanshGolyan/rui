@@ -84,11 +84,21 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
                     .decoded_arguments = line.arguments,
                 }});
                 errdefer std.debug.print("MCP arguments: {s}\n", .{line.arguments});
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{line.expected}));
-                if (line.expected.len == 200) {
-                    const page = try store_core.activityPageForTesting(&storage, .{ .session = session });
-                    try std.testing.expectEqual(@as(usize, 1), page.call_activity.count);
+                // The call keeps only the label the model gave; with none, the line is derived from the tool's name.
+                if (std.mem.eql(u8, line.expected, "fetch_page")) {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE label IS NULL AND subject IS NULL", .{}));
+                } else {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE label=?1 AND subject IS NULL", .{line.expected}));
+                }
+                const page = try store_core.activityPageForTesting(&storage, .{ .session = session });
+                // A call whose arguments are not one JSON object is rejected, and a call no tool served has no line.
+                if (page.call_activity.count == 1) {
                     try std.testing.expectEqualStrings(line.expected, page.call_activity.entries[0].presentation.line.?.words.slice());
+                } else {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE rejection_code='invalid_arguments'", .{}));
+                }
+                if (line.expected.len == 200) {
+                    try std.testing.expectEqual(@as(usize, 1), page.call_activity.count);
                     const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
                     defer std.testing.allocator.free(report);
                     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});

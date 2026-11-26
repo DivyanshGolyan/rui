@@ -460,10 +460,10 @@ test "read_transcript core runner reads other Session outlines before full windo
     try settleCallsForTesting(&database, &tmp, model, "transcript-metadata", &calls);
     try std.testing.expectEqual(@as(u64, args.len), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM action_operation WHERE authorized=1 AND approval_position IS NULL", .{}));
     try std.testing.expect(try database.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{}) == null);
-    const note = try std.fmt.allocPrint(arena, "Read {s}'s transcript", .{other.slice()});
-    try std.testing.expectEqual(@as(u64, 8), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{note}));
-    try std.testing.expectEqual(@as(u64, 2), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE description='Read own transcript'", .{}));
-    try std.testing.expectEqual(@as(u64, 1), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE description='Read zzzzzz''s transcript'", .{}));
+    // The call keeps the Session it named and no line: a call with no id names none, and reads as the Session's own transcript.
+    try std.testing.expectEqual(@as(u64, 8), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE subject=?1 AND label IS NULL", .{other.slice()}));
+    try std.testing.expectEqual(@as(u64, 2), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE subject IS NULL AND label IS NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE subject='zzzzzz'", .{}));
 
     for (args, 0..) |_, index| {
         const work = (try database.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;

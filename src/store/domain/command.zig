@@ -14,7 +14,7 @@ const content_value = @import("../../content_value.zig");
 const input_parts = @import("../../input_parts.zig");
 const tool_defs = @import("../../tool_record.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
-const saved_label = @import("../../saved_label.zig");
+const tool_proposal = @import("../../tool_proposal.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const cli_value = @import("../../cli_value.zig");
@@ -2763,14 +2763,14 @@ fn readMessageWork(a: *report_domain.ReadAccess, read: *report_domain.WorkRead, 
 }
 
 const recovery_actions = rsql.Read(.{
-    .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolved_at,c.description " ++
+    .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolved_at," ++ reads_domain.call_line_columns("c", "call_name", "call_subject", "call_") ++ " " ++
         "FROM message_admission m JOIN turn t ON t.turn_id=m.turn_id " ++
         "JOIN action_operation a @index(action_operation_indeterminate) ON a.session_ref=m.session_ref " ++
-        "JOIN model_tool_call c ON c.operation_id=a.parent_operation_id AND c.call_ordinal=a.call_ordinal " ++
+        "JOIN model_tool_call c ON c.operation_id=a.parent_operation_id AND c.call_ordinal=a.call_ordinal " ++ reads_domain.call_line_joins("JOIN", "c", "call_name", "call_subject") ++ " " ++
         "WHERE m.command_key=?1 AND " ++ recovery_range_sql ++ " " ++
         "ORDER BY a.parent_operation_id DESC,a.call_ordinal DESC LIMIT 5",
     .Args = struct { key: []const u8 },
-    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive, description: ?Bounded(tool_presentation.max_description_bytes) },
+    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive, call_tool: ?reads_domain.CallTool, call_rejection: ?tool_proposal.Rejection, call_label: ?Bounded(tool_presentation.max_description_bytes), call_subject: ?Bounded(session_id.max_reference_bytes), call_subject_label: ?Bounded(tool_presentation.max_label_bytes) },
     .cardinality = .{ .at_most = 5 },
 });
 
@@ -2786,7 +2786,7 @@ fn readRecovery(a: anytype, key: []const u8, out: *reads_domain.Recovery) !void 
             .action_id = row.action_id.get(),
             .operation_id = row.parent_operation_id.get(),
             .call = row.call_ordinal,
-            .description = if (row.description) |saved| saved_label.callWords(saved.slice()) else null,
+            .description = try (reads_domain.StoredCall{ .tool = row.call_tool, .rejection = row.call_rejection, .label = row.call_label, .subject = row.call_subject, .subject_label = row.call_subject_label }).text(),
             .at = row.resolved_at.get(),
         };
     }

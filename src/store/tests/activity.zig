@@ -882,6 +882,108 @@ test "the step to format 96 reads a search saved as a sentence as a search with 
     }.run);
 }
 
+/// Format 97 rows for the step to 98: calls on one operation whose saved line the step must sort into a label, a subject or neither.
+/// Contents 100 to 103 are tool names and 104 to 110 call ids, each with its real digest.
+fn callLines97() old_format.Start {
+    return .{ .format = 97, .sql = .{ .per_engine = .{
+        .sqlite = "INSERT INTO content(content_id,digest,byte_length,private,payload) VALUES(100,X'2d872b97bcf4ee4694ca276ffe13d096a379706db977b411cd9a8c0f1fa011c8',13,0,X'6d6573736167655f6167656e74'),(101,X'0d38ecfd3259949a32faa2b7729ae39148750e83cca4a0477d1499c5f439c5b5',15,0,X'726561645f7472616e736372697074'),(102,X'59bdea1dc6d57f7e3449c2e9e2d80fcc83236681969ac401ccec2e5adbb99c9e',10,0,X'66657463685f70616765'),(103,X'19def275b4f6517f179272b70ba3c7bc3fd56069c4f50b04c0b8811d1d9693dd',10,0,X'66696e645f746f6f6c73'),(104,X'504f3efb93f8334c0c667ca164d6be548cc14d583d8f04cd037eb5e8861310ab',6,0,X'63616c6c2d30'),(105,X'6eb3318760b251c70e4da6f829f65508c756e4932ac1fb77c884210f43d3274c',6,0,X'63616c6c2d31'),(106,X'9f183c02ba21bb6312bfb58c5372fc8784e96e4e3904abf11d80e7e05d0ab92b',6,0,X'63616c6c2d32'),(107,X'a65a971eb71791a3de3c80887dbbe37a100a8870d66ab594eab25acc90b2858a',6,0,X'63616c6c2d33'),(108,X'960fb5898e77f51790604f705eacbde5f1a1b90a7539515906d737b62085a751',6,0,X'63616c6c2d34'),(109,X'ae305eb6f9697fbb744602086e4ca27648b6e090cff0db9602922d9dfa20381e',6,0,X'63616c6c2d35');" ++
+            "INSERT INTO content(content_id,digest,byte_length,private,payload) VALUES(110,X'261cbf342cfe9ed87658daa6c6414c02739fab9be8f85bc18a3cf0b30d8e1b92',6,0,X'63616c6c2d36');" ++
+            "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,description,field_metadata,action_kind) VALUES(2,'brhkcj',2,2,100,104,100,'Message d8mv7p',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1),(2,'brhkcj',3,3,101,105,101,'Read d8mv7p''s transcript',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1),(2,'brhkcj',4,4,101,106,101,'Read own transcript',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1),(2,'brhkcj',5,5,102,107,102,'Fetch the docs page',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1),(2,'brhkcj',6,6,102,108,102,'fetch_page',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1),(2,'brhkcj',7,7,103,109,103,'Find tools',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1),(2,'brhkcj',8,8,9,110,9,'bash',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1);",
+        .mysql = "INSERT INTO content(content_id,digest,byte_length,private) VALUES(100,X'2d872b97bcf4ee4694ca276ffe13d096a379706db977b411cd9a8c0f1fa011c8',13,0),(101,X'0d38ecfd3259949a32faa2b7729ae39148750e83cca4a0477d1499c5f439c5b5',15,0),(102,X'59bdea1dc6d57f7e3449c2e9e2d80fcc83236681969ac401ccec2e5adbb99c9e',10,0),(103,X'19def275b4f6517f179272b70ba3c7bc3fd56069c4f50b04c0b8811d1d9693dd',10,0),(104,X'504f3efb93f8334c0c667ca164d6be548cc14d583d8f04cd037eb5e8861310ab',6,0),(105,X'6eb3318760b251c70e4da6f829f65508c756e4932ac1fb77c884210f43d3274c',6,0),(106,X'9f183c02ba21bb6312bfb58c5372fc8784e96e4e3904abf11d80e7e05d0ab92b',6,0),(107,X'a65a971eb71791a3de3c80887dbbe37a100a8870d66ab594eab25acc90b2858a',6,0),(108,X'960fb5898e77f51790604f705eacbde5f1a1b90a7539515906d737b62085a751',6,0),(109,X'ae305eb6f9697fbb744602086e4ca27648b6e090cff0db9602922d9dfa20381e',6,0);" ++
+            "INSERT INTO content_chunk(content_id,chunk_index,bytes) VALUES(100,0,X'6d6573736167655f6167656e74'),(101,0,X'726561645f7472616e736372697074'),(102,0,X'66657463685f70616765'),(103,0,X'66696e645f746f6f6c73'),(104,0,X'63616c6c2d30'),(105,0,X'63616c6c2d31'),(106,0,X'63616c6c2d32'),(107,0,X'63616c6c2d33'),(108,0,X'63616c6c2d34'),(109,0,X'63616c6c2d35');" ++
+            "INSERT INTO content(content_id,digest,byte_length,private) VALUES(110,X'261cbf342cfe9ed87658daa6c6414c02739fab9be8f85bc18a3cf0b30d8e1b92',6,0);" ++
+            "INSERT INTO content_chunk(content_id,chunk_index,bytes) VALUES(110,0,X'63616c6c2d36');" ++
+            "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,description,field_metadata,action_kind) VALUES(2,'brhkcj',2,2,100,104,100,'Message d8mv7p',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1),(2,'brhkcj',3,3,101,105,101,'Read d8mv7p''s transcript',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1),(2,'brhkcj',4,4,101,106,101,'Read own transcript',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1),(2,'brhkcj',5,5,102,107,102,'Fetch the docs page',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1),(2,'brhkcj',6,6,102,108,102,'fetch_page',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1),(2,'brhkcj',7,7,103,109,103,'Find tools',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1),(2,'brhkcj',8,8,9,110,9,'bash',X'000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1);",
+    } } };
+}
+
+test "the step to format 98 keeps a Bash or MCP call's saved line as its label and the Session a core call named as its subject" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            const start = comptime callLines97();
+            try old_format.openAt(case, &storage, &tmp, std.testing.io, &start);
+            defer storage.close() catch unreachable;
+            const Row = struct { ordinal: u64, label: ?[]const u8, subject: ?[]const u8 };
+            const rows = [_]Row{
+                // The baseline's Bash calls keep what they said.
+                .{ .ordinal = 0, .label = "Run first command", .subject = null },
+                .{ .ordinal = 1, .label = "Run second command", .subject = null },
+                // A core call keeps no label, and the Session its saved words named becomes its subject.
+                .{ .ordinal = 2, .label = null, .subject = "d8mv7p" },
+                .{ .ordinal = 3, .label = null, .subject = "d8mv7p" },
+                .{ .ordinal = 4, .label = null, .subject = null },
+                // An MCP call keeps its description, and an MCP fallback that is only the tool's name is no label.
+                .{ .ordinal = 5, .label = "Fetch the docs page", .subject = null },
+                .{ .ordinal = 6, .label = null, .subject = null },
+                .{ .ordinal = 7, .label = null, .subject = null },
+                // A Bash call whose label is the tool's name keeps it.
+                .{ .ordinal = 8, .label = "bash", .subject = null },
+            };
+            for (rows) |row| {
+                const where = "operation_id=2 AND call_ordinal=?1";
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE " ++ where, .{row.ordinal}));
+                if (row.label) |label| {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE " ++ where ++ " AND label=?2", .{ row.ordinal, label }));
+                } else {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE " ++ where ++ " AND label IS NULL", .{row.ordinal}));
+                }
+                if (row.subject) |subject| {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE " ++ where ++ " AND subject=?2", .{ row.ordinal, subject }));
+                } else {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE " ++ where ++ " AND subject IS NULL", .{row.ordinal}));
+                }
+            }
+        }
+    }.run);
+}
+
+/// Format 97 rows that turn the baseline's second call into a `message_agent` call saved as "Message d8mv7p".
+fn messageLine97() old_format.Start {
+    return .{ .format = 97, .sql = .{ .per_engine = .{
+        .sqlite = "INSERT INTO content(content_id,digest,byte_length,private,payload) VALUES(100,X'2d872b97bcf4ee4694ca276ffe13d096a379706db977b411cd9a8c0f1fa011c8',13,0,X'6d6573736167655f6167656e74'),(101,X'0d38ecfd3259949a32faa2b7729ae39148750e83cca4a0477d1499c5f439c5b5',15,0,X'726561645f7472616e736372697074'),(102,X'59bdea1dc6d57f7e3449c2e9e2d80fcc83236681969ac401ccec2e5adbb99c9e',10,0,X'66657463685f70616765'),(103,X'19def275b4f6517f179272b70ba3c7bc3fd56069c4f50b04c0b8811d1d9693dd',10,0,X'66696e645f746f6f6c73'),(104,X'504f3efb93f8334c0c667ca164d6be548cc14d583d8f04cd037eb5e8861310ab',6,0,X'63616c6c2d30'),(105,X'6eb3318760b251c70e4da6f829f65508c756e4932ac1fb77c884210f43d3274c',6,0,X'63616c6c2d31'),(106,X'9f183c02ba21bb6312bfb58c5372fc8784e96e4e3904abf11d80e7e05d0ab92b',6,0,X'63616c6c2d32'),(107,X'a65a971eb71791a3de3c80887dbbe37a100a8870d66ab594eab25acc90b2858a',6,0,X'63616c6c2d33'),(108,X'960fb5898e77f51790604f705eacbde5f1a1b90a7539515906d737b62085a751',6,0,X'63616c6c2d34'),(109,X'ae305eb6f9697fbb744602086e4ca27648b6e090cff0db9602922d9dfa20381e',6,0,X'63616c6c2d35');" ++
+            "UPDATE model_tool_call SET name_content_id=100,description='Message d8mv7p',field_metadata=X'0d000000000000002d872b97bcf4ee4694ca276ffe13d096a379706db977b411cd9a8c0f1fa011c806000000000000002424a1124da95105ad0cae02f8974290bcdfa6b8f722ab0a9010a03d85dc70aa4200000000000000218db1eed2b15d82d37c2be4440ff39e46365886bd914326b0bf6fceee17f4d1' WHERE operation_id=2 AND call_ordinal=1;",
+        .mysql = "INSERT INTO content(content_id,digest,byte_length,private) VALUES(100,X'2d872b97bcf4ee4694ca276ffe13d096a379706db977b411cd9a8c0f1fa011c8',13,0),(101,X'0d38ecfd3259949a32faa2b7729ae39148750e83cca4a0477d1499c5f439c5b5',15,0),(102,X'59bdea1dc6d57f7e3449c2e9e2d80fcc83236681969ac401ccec2e5adbb99c9e',10,0),(103,X'19def275b4f6517f179272b70ba3c7bc3fd56069c4f50b04c0b8811d1d9693dd',10,0),(104,X'504f3efb93f8334c0c667ca164d6be548cc14d583d8f04cd037eb5e8861310ab',6,0),(105,X'6eb3318760b251c70e4da6f829f65508c756e4932ac1fb77c884210f43d3274c',6,0),(106,X'9f183c02ba21bb6312bfb58c5372fc8784e96e4e3904abf11d80e7e05d0ab92b',6,0),(107,X'a65a971eb71791a3de3c80887dbbe37a100a8870d66ab594eab25acc90b2858a',6,0),(108,X'960fb5898e77f51790604f705eacbde5f1a1b90a7539515906d737b62085a751',6,0),(109,X'ae305eb6f9697fbb744602086e4ca27648b6e090cff0db9602922d9dfa20381e',6,0);" ++
+            "INSERT INTO content_chunk(content_id,chunk_index,bytes) VALUES(100,0,X'6d6573736167655f6167656e74'),(101,0,X'726561645f7472616e736372697074'),(102,0,X'66657463685f70616765'),(103,0,X'66696e645f746f6f6c73'),(104,0,X'63616c6c2d30'),(105,0,X'63616c6c2d31'),(106,0,X'63616c6c2d32'),(107,0,X'63616c6c2d33'),(108,0,X'63616c6c2d34'),(109,0,X'63616c6c2d35');" ++
+            "UPDATE model_tool_call SET name_content_id=100,description='Message d8mv7p',field_metadata=X'0d000000000000002d872b97bcf4ee4694ca276ffe13d096a379706db977b411cd9a8c0f1fa011c806000000000000002424a1124da95105ad0cae02f8974290bcdfa6b8f722ab0a9010a03d85dc70aa4200000000000000218db1eed2b15d82d37c2be4440ff39e46365886bd914326b0bf6fceee17f4d1' WHERE operation_id=2 AND call_ordinal=1;",
+    } } };
+}
+
+test "TPR-4 a call saved before format 98 reads its line from what the step kept, so renaming its peer changes it" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            const start = comptime messageLine97();
+            try old_format.openAt(case, &storage, &tmp, std.testing.io, &start);
+            defer storage.close() catch unreachable;
+            var request: protocol.ActivityPage = .{};
+            try request.session.set("brhkcj");
+            try expectCallWords(&storage, request, "Message d8mv7p");
+            // The Store holds no copy of the words: renaming the peer changes the row saved before.
+            try store_testing.exec(&storage, "UPDATE session SET label='Review the WAL' WHERE session_ref='d8mv7p'", .{});
+            try expectCallWords(&storage, request, "Message Review the WAL");
+        }
+    }.run);
+}
+
+/// The Activity words of the baseline's two calls: the first is Bash, the second says `second`.
+fn expectCallWords(storage: *Store, request: protocol.ActivityPage, second: []const u8) !void {
+    const page = try store_core.activityPageForTesting(storage, request);
+    var seen: [2]bool = .{ false, false };
+    for (page.items[0..page.count]) |item| switch (item.value) {
+        .call => |call| {
+            seen[call.call_ordinal] = true;
+            try std.testing.expectEqualStrings(if (call.call_ordinal == 0) "Run first command" else second, call.description.?.slice());
+        },
+        else => {},
+    };
+    try std.testing.expect(seen[0] and seen[1]);
+}
+
 const sequence_to_first_argument = "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) ";
 
 test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in rounds" {

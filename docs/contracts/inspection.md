@@ -162,7 +162,7 @@ Tool Results validate the complete group's accepted call/output-item and Session
 Outcome provenance is the terminal Turn's causing model Operation, not a later Session Operation.
 Full, Current and exact Action inspection retain their independent authorities.
 
-Tool Call admission validates the original descriptor and atomically saves its nullable decoded description, bounded to 200 UTF-8 bytes, and the three accepted field lengths and digests on the immutable call.
+Tool Call admission validates the original descriptor and atomically saves its nullable label (the decoded `description` argument of a Bash or MCP call, bounded to 200 UTF-8 bytes), the Session a `message_agent` or `read_transcript` call named, and the three accepted field lengths and digests on the immutable call.
 Bash keeps its independent 100-byte argument bound; a valid Bash descriptor retains its label even when Bash is disabled and the call is rejected; malformed Bash descriptors and unknown tools have null labels.
 The Store combines that admission-owned label with canonical outcomes for shared `ToolPresentation` metadata on Current, Activity, and Conversation.
 A call that handed work to another Session also saves an outcome line (the words, the Session it names and the finish it chose) with its resolution, written by `action.queueResolution`, the one writer; a failed send to a Session that exists saves it too, and every other call keeps its call line. `line` reads that outcome in place of the call line, with the named Session's label as the Store holds it when the page is read.
@@ -208,7 +208,7 @@ Pages echo end/direction and return at most `limit` owned metadata rows with `mo
 Only complete Tool Result groups share positions, using one-based call ordinals; a Session's own `approval_requested` row shares its call's position at ordinal 1; a revision's `session_changed` rows share its position, numbered from zero; other rows, including forwarded child facts, use zero.
 An `approval_requested` row (D115) follows each call whose Action was saved under an `ask` revision, whatever was decided since, and carries `session` (the Session whose Action it is), `action` (the id `permission_decision` names), `operation` and `call_ordinal`; it is dated by its Operation's settlement, which saved the Action.
 Both `call` and `approval_requested` rows carry inline `description`, `tool` and `server` (D240, wire 14).
-`description` is the saved D227 call line, at most 200 bytes, or null where no line was saved;
+`description` is the call's line derived when it is read (`tool_line.of`) from its saved label and subject, at most 200 bytes, a Session it names standing as that Session's current label or its ID, or null for a call no tool served;
 `tool` is the saved name, at most the tool-name bound, or null for an oversized rejected name (its full name remains in `fields[0]`).
 `server` is the MCP server from the proposing Operation's frozen offer, null for built-ins or an unknown tool, never today's tool set.
 These fields read existing call content, settlement and frozen-offer facts; no arguments are re-parsed and no Store-format change is needed.

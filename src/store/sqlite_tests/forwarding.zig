@@ -208,8 +208,8 @@ test "K4 forwarded approval hydration steps exclude prior forward history" {
                 "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 "SELECT value+1000000,0,session_ref,?3+3*(value-1)+1,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count FROM model_output_item CROSS JOIN sequence WHERE operation_id=?2 AND item_ordinal=0", .{ history, model.operation_id, child_start });
             try store_testing.sqlite_only.exec(&storage, sequence ++
-                "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,description,field_metadata,action_kind) " ++
-                "SELECT value+1000000,session_ref,0,0,name_content_id,call_id_content_id,arguments_content_id,description,field_metadata,action_kind FROM model_tool_call CROSS JOIN sequence WHERE operation_id=?2 AND call_ordinal=0", .{ history, model.operation_id });
+                "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,label,subject,field_metadata,action_kind) " ++
+                "SELECT value+1000000,session_ref,0,0,name_content_id,call_id_content_id,arguments_content_id,label,subject,field_metadata,action_kind FROM model_tool_call CROSS JOIN sequence WHERE operation_id=?2 AND call_ordinal=0", .{ history, model.operation_id });
             try store_testing.sqlite_only.exec(&storage, sequence ++
                 "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,approval_position) " ++
                 "SELECT value+1000000,value+1000000,0,session_ref,tool_kind,permission_revision,0,?3+3*(value-1)+2 FROM action_operation CROSS JOIN sequence WHERE parent_operation_id=?2 AND call_ordinal=0", .{ history, model.operation_id, child_start });

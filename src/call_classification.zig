@@ -62,24 +62,17 @@ pub const CallFacts = struct {
         };
     }
 
-    pub fn description(self: *const CallFacts) ?Description {
-        const words = self.wording() orelse return null;
-        std.debug.assert(tool_presentation.ToolPresentation.validDescription(words.slice()));
-        return words;
+    /// What the model said about the call, kept as it said it: a Bash call's `description`. (An MCP call's is read from its
+    /// arguments where they are settled.) Nothing else is saved; the line a reader shows is `tool_line.of`.
+    pub fn label(self: *const CallFacts) ?[]const u8 {
+        const arguments = self.bashArguments() orelse return null;
+        return arguments.description.slice();
     }
 
-    fn wording(self: *const CallFacts) ?Description {
-        if (self.bashArguments()) |arguments| return tool_line.describe(.{ .bash = arguments.description.slice() });
-        if (self.messageAgentArguments()) |arguments| return tool_line.describe(.{ .message_agent = arguments.id.slice() });
-        if (self.read_image == true) return tool_line.describe(.read_image);
-        if (self.github_pr_watch == true) return tool_line.describe(.watch_github_pr);
-        if (self.find_tools) return tool_line.describe(.find_tools);
-        if (self.skill) return tool_line.describe(.skill);
-        if (self.read_transcript) return tool_line.describe(.{ .read_transcript = self.transcript_id });
-        if (self.tool) |*selected| if (selected.runner() == .core) {
-            if (std.mem.eql(u8, selected.name, "stop_action")) return tool_line.describe(.stop_action);
-            if (std.mem.eql(u8, selected.name, start_agent_record.name)) return tool_line.describe(.start_agent);
-        };
+    /// The Session the call named: a `message_agent` call's `id`, or a `read_transcript` call's.
+    pub fn subject(self: *const CallFacts) ?[]const u8 {
+        if (self.messageAgentArguments()) |arguments| return arguments.id.slice();
+        if (self.read_transcript) if (self.transcript_id) |*id| return id.slice();
         return null;
     }
 };
