@@ -243,7 +243,6 @@ pub const SessionPinRejection = mutation_answer.SessionPinRejection;
 pub const ModelInterruptionRejection = mutation_answer.ModelInterruptionRejection;
 pub const PermissionDecisionRejection = mutation_answer.PermissionDecisionRejection;
 pub const MessageProgressStatus = WorkState.Progress;
-pub const ConversationItemKind = conversation_read.ConversationItemKind;
 
 pub const PermissionDecisionCommand = command_input.PermissionDecisionCommand;
 
