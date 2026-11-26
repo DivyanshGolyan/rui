@@ -20,7 +20,8 @@ MESSAGE = ("a rule every viewer must agree on belongs to the Host (#1620); "
 DEFAULT_IMPORT = "imports product_defaults.zig"
 CLASSIFIER = "classifies Session work"
 TS_DEFAULT = "hard-codes a Session default"
-ISSUES = {DEFAULT_IMPORT: "#1621", CLASSIFIER: "#1622", TS_DEFAULT: "#1621"}
+ORIGIN_FACT = "re-derives a Message origin or a failure class"
+ISSUES = {DEFAULT_IMPORT: "#1621", CLASSIFIER: "#1622", TS_DEFAULT: "#1621", ORIGIN_FACT: "#2282"}
 
 # Shared dependencies can be in graph.host even though these client entry points
 # themselves must remain covered. Keep the requested minimum inventory together.
@@ -165,6 +166,23 @@ def default_sites(tokens):
             j += 1
 
 
+def origin_fact_sites(tokens):
+    """Who admitted a Message is the Host's `origin`, and a failure's class is the Host's to name.
+
+    A client that reads `source_action` rebuilds the origin from a field the wire no longer carries; one that
+    calls `failure_class.of` classifies a code the Host already classified.
+    """
+    names = [token.text for token in tokens]
+    for i, name in enumerate(names):
+        if name == "source_action":
+            yield tokens[i].line, ORIGIN_FACT
+        elif names[i:i + 3] == ["failure_class", ".", "of"]:
+            yield tokens[i].line, ORIGIN_FACT
+        elif (names[i:i + 2] == ["@import", "("] and unquote(names[i + 2]) == "failure_class.zig"
+              and names[i + 3:i + 6] == [")", ".", "of"]):
+            yield tokens[i].line, ORIGIN_FACT
+
+
 def findings(source, relative):
     ts = relative.startswith("clients/ts/src/")
     if ts and test_file(relative):
@@ -179,6 +197,7 @@ def findings(source, relative):
                 if imported is not None and Path(imported).name == "product_defaults.zig":
                     found.append((tokens[i].line, DEFAULT_IMPORT))
     found.extend(classifier_sites(tokens, ts))
+    found.extend(origin_fact_sites(tokens))
     if ts:
         found.extend(default_sites(tokens))
     return sorted(set(found))
