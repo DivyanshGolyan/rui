@@ -2,7 +2,7 @@ const std = @import("std");
 const policy = @import("codex_credential_policy.zig");
 const Text = @import("json_scalar.zig").Text;
 
-pub const issuer = "https://auth.openai.com";
+pub const issuer = @import("endpoint_value.zig").sign_in_issuer;
 pub const client_id = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const response_limit = 64 * 1024;
 pub const token_limit = policy.max_token_bytes;

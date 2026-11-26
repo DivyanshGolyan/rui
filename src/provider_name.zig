@@ -111,4 +111,3 @@ test "every provider owns an HTTPS endpoint" {
         try std.testing.expect(std.mem.endsWith(u8, provider.facts().endpoint, "/responses"));
     }
 }
-pub const sign_in_issuer = @import("codex_token_wire.zig").issuer;

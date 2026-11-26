@@ -1330,7 +1330,7 @@ fn signInRefusal(settings: *const Settings, served: *const connection.Connection
     return null;
 }
 
-const issuer_url = provider_name.sign_in_issuer;
+const issuer_url = endpoint_value.sign_in_issuer;
 
 fn unservedConnection(failure: *start_report.Failure, name: []const u8, field: []const u8) error{SettingsInvalid} {
     var buffer: [start_report.max_refusal_message_bytes / 2]u8 = undefined;
