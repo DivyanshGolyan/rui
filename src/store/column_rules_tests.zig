@@ -3,6 +3,7 @@ const schema = @import("schema.zig");
 const rsql = @import("rsql.zig");
 const engine = @import("engine.zig");
 const column_rules = @import("column_rules.zig");
+const char_set = @import("rules/char_set.zig");
 const Value = column_rules.Value;
 const accepts = column_rules.accepts;
 const admit = engine.admit;
@@ -237,7 +238,7 @@ test "SH-178 a column's own rules are held by the Host as MySQL's CHECK holds th
 }
 
 test "SH-178 a set of ranges and literals holds the bytes it names, and its neighbours are outside it" {
-    try std.testing.expect(column_rules.inSet("a-z0-9_-", 'a') and column_rules.inSet("a-z0-9_-", 'z') and column_rules.inSet("a-z0-9_-", '0') and column_rules.inSet("a-z0-9_-", '9'));
-    try std.testing.expect(column_rules.inSet("a-z0-9_-", '_') and column_rules.inSet("a-z0-9_-", '-'));
-    for ("`{A/:@[ ") |outside| try std.testing.expect(!column_rules.inSet("a-z0-9_-", outside));
+    try std.testing.expect(char_set.inSet("a-z0-9_-", 'a') and char_set.inSet("a-z0-9_-", 'z') and char_set.inSet("a-z0-9_-", '0') and char_set.inSet("a-z0-9_-", '9'));
+    try std.testing.expect(char_set.inSet("a-z0-9_-", '_') and char_set.inSet("a-z0-9_-", '-'));
+    for ("`{A/:@[ ") |outside| try std.testing.expect(!char_set.inSet("a-z0-9_-", outside));
 }

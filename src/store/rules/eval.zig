@@ -3,6 +3,7 @@
 //! has no per-rule code here: both this file and the renderer switch on the node kind.
 const std = @import("std");
 const rule = @import("rule.zig");
+const char_set = @import("char_set.zig");
 
 const Expr = rule.Expr;
 const Select = rule.Select;
@@ -31,7 +32,7 @@ pub const Table = struct {
 /// Rows a rule's subqueries read, as a test states them.
 pub const World = struct { tables: []const Table = &.{} };
 
-pub const Error = error{ UnknownColumn, UnknownTable, ScopeTooDeep, MismatchedRow };
+pub const Error = error{ UnknownColumn, UnknownTable, ScopeTooDeep, MismatchedRow, BadCall };
 
 const max_frames = 16;
 
@@ -125,10 +126,59 @@ pub fn eval(expr: *const Expr, scope: Scope) Error!Value {
             }
             return .null;
         },
+        .group => |inner| return eval(inner, scope),
+        .between => |b| {
+            const value = try eval(b.value, scope);
+            const low = compare(.ge, value, try eval(b.low, scope));
+            const high = compare(.le, value, try eval(b.high, scope));
+            return conjunction(low, high);
+        },
+        .in_list => |l| {
+            const subject = try eval(l.value, scope);
+            var unknown = subject == .null;
+            for (l.items) |*item| {
+                const match = compare(.eq, subject, try eval(item, scope));
+                if (match == .null) unknown = true else if (match.isTrue()) return Value.flag(true);
+            }
+            return if (unknown) .null else Value.flag(false);
+        },
+        .call => |c| return callValue(c, scope),
         .exists => |query| return Value.flag(try matches(query, scope, true) > 0),
         .not_exists => |query| return Value.flag(try matches(query, scope, true) == 0),
         .count => |query| return .{ .int = @intCast(try matches(query, scope, false)) },
     }
+}
+
+fn conjunction(a: Value, b: Value) Value {
+    if ((a != .null and !a.isTrue()) or (b != .null and !b.isTrue())) return Value.flag(false);
+    return if (a == .null or b == .null) .null else Value.flag(true);
+}
+
+/// The functions and rsql macros a rule may call. `@same` and `@distinct` never answer unknown; the rest are unknown for NULL.
+fn callValue(c: Expr.Call, scope: Scope) Error!Value {
+    const is = std.mem.eql;
+    if (is(u8, c.name, "@same") or is(u8, c.name, "@distinct")) {
+        if (c.args.len != 2) return error.BadCall;
+        const a = try eval(&c.args[0], scope);
+        const b = try eval(&c.args[1], scope);
+        const same = if (a == .null or b == .null) a == .null and b == .null else compare(.eq, a, b).isTrue();
+        return Value.flag(same == is(u8, c.name, "@same"));
+    }
+    if (c.args.len == 0) return error.BadCall;
+    const subject = try eval(&c.args[0], scope);
+    if (subject == .null) return .null;
+    if (is(u8, c.name, "length") or is(u8, c.name, "@octets")) {
+        if (c.args.len != 1 or subject != .text) return error.BadCall;
+        return .{ .int = @intCast(subject.text.len) };
+    }
+    if (c.args.len != 2 or subject != .text or c.args[1] != .text) return error.BadCall;
+    const set = c.args[1].text;
+    if (is(u8, c.name, "@initial")) return Value.flag(subject.text.len != 0 and char_set.inSet(set, subject.text[0]));
+    if (is(u8, c.name, "@charset")) {
+        for (subject.text) |byte| if (!char_set.inSet(set, byte)) return Value.flag(false);
+        return Value.flag(true);
+    }
+    return error.BadCall;
 }
 
 fn compare(op: Expr.Op, left: Value, right: Value) Value {
@@ -140,7 +190,7 @@ fn compare(op: Expr.Op, left: Value, right: Value) Value {
     };
     return Value.flag(switch (op) {
         .eq => order == .eq,
-        .ne => order != .eq,
+        .ne, .bang_ne => order != .eq,
         .lt => order == .lt,
         .le => order != .gt,
         .gt => order == .gt,
@@ -257,4 +307,31 @@ test "an unknown column or table is an error, never a quiet false" {
     try std.testing.expectError(error.UnknownColumn, checks(comptime rule.eq(col("t", "zz"), int(1)), &cols, &.{i(1)}));
     const missing = comptime rule.Select{ .table = "nope", .alias = "x", .where = int(1) };
     try std.testing.expectError(error.UnknownTable, checks(comptime rule.exists(missing), &cols, &.{i(1)}));
+}
+
+test "between, in-list, length and the rsql macros follow SQL's answers for NULL" {
+    const cols = [_][]const u8{ "n", "s" };
+    const in_range = comptime rule.between(rule.field("n"), int(1), int(3));
+    const listed = comptime rule.inList(rule.field("n"), &.{ int(1), int(2), rule.null_value });
+    try std.testing.expectEqual(i(1), try evalRow(in_range, &cols, &.{ i(3), n }));
+    try std.testing.expectEqual(i(0), try evalRow(in_range, &cols, &.{ i(4), n }));
+    try std.testing.expectEqual(n, try evalRow(in_range, &cols, &.{ n, n }));
+    try std.testing.expectEqual(i(1), try evalRow(listed, &cols, &.{ i(2), n }));
+    // 5 is in no member, and a NULL member makes that unknown rather than false.
+    try std.testing.expectEqual(n, try evalRow(listed, &cols, &.{ i(5), n }));
+    const same = comptime rule.call("@same", &.{ rule.field("n"), rule.null_value });
+    const distinct = comptime rule.call("@distinct", &.{ rule.field("s"), rule.text("x") });
+    try std.testing.expectEqual(i(1), try evalRow(same, &cols, &.{ n, n }));
+    try std.testing.expectEqual(i(0), try evalRow(same, &cols, &.{ i(1), n }));
+    try std.testing.expectEqual(i(1), try evalRow(distinct, &cols, &.{ n, n }));
+    try std.testing.expectEqual(i(0), try evalRow(distinct, &cols, &.{ n, .{ .text = "x" } }));
+    const octets = comptime rule.eq(rule.call("@octets", &.{rule.field("s")}), int(2));
+    try std.testing.expectEqual(i(1), try evalRow(octets, &cols, &.{ n, .{ .text = "\xc3\xa9" } }));
+    const shape = comptime rule.all(&.{ rule.call("@initial", &.{ rule.field("s"), rule.text("a-z") }), rule.call("@charset", &.{ rule.field("s"), rule.text("a-z0-9") }) });
+    try std.testing.expectEqual(i(1), try evalRow(shape, &cols, &.{ n, .{ .text = "ab1" } }));
+    try std.testing.expectEqual(i(0), try evalRow(shape, &cols, &.{ n, .{ .text = "1ab" } }));
+}
+
+fn evalRow(comptime expr: Expr, columns: []const []const u8, row: []const Value) !Value {
+    return eval(&expr, Scope.ofRow(.{}, "", columns, row));
 }

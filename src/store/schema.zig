@@ -1252,6 +1252,7 @@ test "SH-8 MySQL schema export emits bootstrap and requested migrations" {
 }
 
 const catalog = @import("catalog.zig");
+const rules = @import("rules/rule.zig");
 pub const retry_allowance_open_sql = catalog.retry_allowance_open_sql;
 pub const retry_exhausted_sql = catalog.retry_exhausted_sql;
 pub const oneOf = catalog.oneOf;
@@ -1639,7 +1640,7 @@ fn mysqlObjects(comptime every: []const Table, comptime all_indexes: []const Ind
                     lines = lines ++ .{" " ++ clause};
                 } else later = later ++ .{Object{ .kind = .foreign_key, .name = table.name ++ "(" ++ list(key.columns) ++ ")", .sql = "ALTER TABLE " ++ table.name ++ " ADD " ++ clause }};
             }
-            for (checks ++ table.checks) |check| lines = lines ++ .{" CHECK(" ++ expression(.mysql, table, check) ++ ")"};
+            for (checks ++ tableChecks(table)) |check| lines = lines ++ .{" CHECK(" ++ expression(.mysql, table, check) ++ ")"};
             result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = "CREATE TABLE " ++ table.name ++ "(\n" ++ joinLines(lines) ++
                 "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin" }};
         }
@@ -1962,7 +1963,7 @@ fn createTable(comptime table: Table) []const u8 {
     for (table.foreign_keys) |key| {
         if (key.columns.len > 1) lines = lines ++ .{" FOREIGN KEY(" ++ list(key.columns) ++ ") " ++ referenceClause(key)};
     }
-    for (table.checks) |check| lines = lines ++ .{" CHECK(" ++ expression(.sqlite, table, check) ++ ")"};
+    for (tableChecks(table)) |check| lines = lines ++ .{" CHECK(" ++ expression(.sqlite, table, check) ++ ")"};
     const body = joinLines(lines);
     checkIdentifier(table.name);
     return "CREATE TABLE " ++ table.name ++ "(\n" ++ body ++ "\n) STRICT" ++ (if (table.without_rowid) ", WITHOUT ROWID" else "");
@@ -1991,6 +1992,15 @@ fn columnDefinition(comptime table: Table, comptime column: Column) []const u8 {
     return text;
 }
 
+/// The CHECK text of each cross-column rule a table carries.
+fn tableChecks(comptime table: Table) []const []const u8 {
+    comptime {
+        var texts: []const []const u8 = &.{};
+        for (table.checks) |check| texts = texts ++ .{rules.render(check)};
+        return texts;
+    }
+}
+
 pub fn columnCheck(comptime column: Column) ?[]const u8 {
     const name = column.name;
     const type_bound: ?[]const u8 = switch (column.type) {
@@ -2004,8 +2014,9 @@ pub fn columnCheck(comptime column: Column) ?[]const u8 {
     if (column.range) |range| body = joinRule(body, rangeBound(name, range));
     if (column.initial) |set| body = joinRule(body, "@initial(" ++ name ++ ",'" ++ set ++ "')");
     if (column.charset) |set| body = joinRule(body, "@charset(" ++ name ++ ",'" ++ set ++ "')");
-    const own = body orelse return column.check;
-    const all = if (column.check) |check| own ++ " AND " ++ check else own;
+    const written: ?[]const u8 = if (column.check) |check| rules.render(check) else null;
+    const own = body orelse return written;
+    const all = if (written) |check| own ++ " AND " ++ check else own;
     if (!column.nullable) return all;
     const lifted = column.range != null or column.initial != null or column.charset != null;
     const grouped = column.check != null or (type_bound != null and lifted);
@@ -2241,7 +2252,7 @@ const mysql_test_label: Table = .{
     .columns = &.{
         .{ .name = "label", .type = .{ .text = .{ .min = 1, .max = 8 } } },
         .{ .name = "note", .type = .{ .text = .{ .max = 100 } }, .nullable = true },
-        .{ .name = "body", .type = .{ .bytes = null }, .check = "length(body)<10" },
+        .{ .name = "body", .type = .{ .bytes = null }, .check = rules.lt(rules.call("length", &.{rules.field("body")}), rules.int(10)) },
         .{ .name = "first_turn", .type = .int },
     },
     .primary_key = &.{"label"},
@@ -3023,8 +3034,8 @@ test "schema 80 creator migration matches canonical SQLite and MySQL column cons
     const generated_position = std.mem.indexOf(u8, canonical_session_mysql, "session_obligation_parent_lead").?;
     try std.testing.expect(obligation_position < creator_position and creator_position < generated_position);
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "ADD COLUMN creator_ref VARCHAR(6) AFTER obligation_since") != null);
-    try std.testing.expect(std.mem.indexOf(u8, canonical_session_mysql, "CHECK(" ++ creator.check.? ++ ")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "CHECK(" ++ creator.check.? ++ ")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, canonical_session_mysql, "CHECK(" ++ comptime rules.render(creator.check.?) ++ ")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "CHECK(" ++ comptime rules.render(creator.check.?) ++ ")") != null);
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "FOREIGN KEY(creator_ref) REFERENCES session(session_ref)") != null);
 }
 

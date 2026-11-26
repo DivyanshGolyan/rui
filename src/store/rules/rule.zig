@@ -23,9 +23,21 @@ pub const Expr = union(enum) {
     exists: *const Select,
     not_exists: *const Select,
     count: *const Select,
+    /// `value BETWEEN low AND high`.
+    between: Between,
+    /// `value IN (items)`: any number of members, written as the list, unlike `one_of`.
+    in_list: InList,
+    /// An explicit parenthesis around `inner`, for a text that groups where precedence alone would not.
+    group: *const Expr,
+    /// A function or rsql macro call: `length(x)`, `@octets(x)`, `@same(a,1)`, `@initial(x,'a-z')`.
+    call: Call,
 
+    pub const Between = struct { value: *const Expr, low: *const Expr, high: *const Expr };
+    pub const InList = struct { value: *const Expr, items: []const Expr };
+    pub const Call = struct { name: []const u8, args: []const Expr };
     pub const Col = struct { alias: []const u8, name: []const u8 };
-    pub const Op = enum { eq, ne, lt, le, gt, ge };
+    /// `ne` and `bang_ne` mean the same; both exist so the DDL text a Store already carries renders unchanged (one goes at the v1 rebaseline).
+    pub const Op = enum { eq, ne, bang_ne, lt, le, gt, ge };
     pub const Cmp = struct { op: Op, left: *const Expr, right: *const Expr };
     pub const OneOf = struct { value: *const Expr, set: []const []const u8 };
 };
@@ -43,6 +55,10 @@ pub const Select = struct {
 pub fn col(comptime alias: []const u8, comptime name: []const u8) Expr {
     return .{ .col = .{ .alias = alias, .name = name } };
 }
+/// A column of the row a rule is checked against, named without an alias.
+pub fn field(comptime name: []const u8) Expr {
+    return col("", name);
+}
 pub fn int(comptime value: i64) Expr {
     return .{ .int = value };
 }
@@ -59,6 +75,9 @@ pub fn eq(comptime left: Expr, comptime right: Expr) Expr {
 }
 pub fn ne(comptime left: Expr, comptime right: Expr) Expr {
     return compare(.ne, left, right);
+}
+pub fn bangNe(comptime left: Expr, comptime right: Expr) Expr {
+    return compare(.bang_ne, left, right);
 }
 pub fn lt(comptime left: Expr, comptime right: Expr) Expr {
     return compare(.lt, left, right);
@@ -93,6 +112,18 @@ pub fn oneOf(comptime value: Expr, comptime set: []const []const u8) Expr {
 pub fn coalesce(comptime parts: []const Expr) Expr {
     return .{ .coalesce = parts };
 }
+pub fn between(comptime value: Expr, comptime low: Expr, comptime high: Expr) Expr {
+    return .{ .between = .{ .value = &value, .low = &low, .high = &high } };
+}
+pub fn inList(comptime value: Expr, comptime items: []const Expr) Expr {
+    return .{ .in_list = .{ .value = &value, .items = items } };
+}
+pub fn group(comptime inner: Expr) Expr {
+    return .{ .group = &inner };
+}
+pub fn call(comptime name: []const u8, comptime args: []const Expr) Expr {
+    return .{ .call = .{ .name = name, .args = args } };
+}
 pub fn exists(comptime query: Select) Expr {
     return .{ .exists = &query };
 }
@@ -107,6 +138,7 @@ fn symbol(op: Expr.Op) []const u8 {
     return switch (op) {
         .eq => "=",
         .ne => "<>",
+        .bang_ne => "!=",
         .lt => "<",
         .le => "<=",
         .gt => ">",
@@ -115,12 +147,12 @@ fn symbol(op: Expr.Op) []const u8 {
 }
 
 /// The Rui SQL of a rule, with one canonical spacing: single spaces around keywords, none around operators.
-/// A conjunction or disjunction nested in another list is parenthesised, so the text reads back as the value does.
+/// A disjunction inside a conjunction is parenthesised, so the text reads back as the value does; AND binds tighter than OR.
 pub fn render(comptime expr: Expr) []const u8 {
     comptime {
         @setEvalBranchQuota(1_000_000);
         return switch (expr) {
-            .col => |c| c.alias ++ "." ++ c.name,
+            .col => |c| if (c.alias.len == 0) c.name else c.alias ++ "." ++ c.name,
             .int => |value| std.fmt.comptimePrint("{d}", .{value}),
             .text => |value| "'" ++ value ++ "'",
             .null_value => "NULL",
@@ -132,6 +164,10 @@ pub fn render(comptime expr: Expr) []const u8 {
             .any => |parts| joined(parts, " OR "),
             .one_of => |s| oneOfText(s),
             .coalesce => |parts| "coalesce(" ++ joinedPlain(parts, ",") ++ ")",
+            .between => |b| operand(b.value.*) ++ " BETWEEN " ++ operand(b.low.*) ++ " AND " ++ operand(b.high.*),
+            .in_list => |l| operand(l.value.*) ++ " IN (" ++ joinedPlain(l.items, ",") ++ ")",
+            .group => |inner| "(" ++ render(inner.*) ++ ")",
+            .call => |c| c.name ++ "(" ++ joinedPlain(c.args, ",") ++ ")",
             .exists => |query| "EXISTS(" ++ selectText("1", query.*) ++ ")",
             .not_exists => |query| "NOT EXISTS(" ++ selectText("1", query.*) ++ ")",
             .count => |query| "(" ++ selectText("count(*)", query.*) ++ ")",
@@ -152,11 +188,7 @@ fn joined(comptime parts: []const Expr, comptime separator: []const u8) []const 
     comptime {
         var out: []const u8 = "";
         for (parts, 0..) |part, index| {
-            const nested = switch (part) {
-                .any => std.mem.eql(u8, separator, " AND "),
-                .all => std.mem.eql(u8, separator, " OR "),
-                else => false,
-            };
+            const nested = part == .any and std.mem.eql(u8, separator, " AND ");
             out = out ++ (if (index == 0) "" else separator) ++ (if (nested) "(" ++ render(part) ++ ")" else render(part));
         }
         return out;
