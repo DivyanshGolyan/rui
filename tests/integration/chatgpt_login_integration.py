@@ -66,8 +66,9 @@ class IssuerHandler(fixture.SuccessHandler):
 
 class Login:
 
-    def __init__(self, url):
+    def __init__(self, url, *extra):
         test_issuer = ["--test-chatgpt-fixture-endpoint", url] if url else []
+        test_issuer += extra
         environment = {name: value for name, value in os.environ.items() if name not in ("DISPLAY", "WAYLAND_DISPLAY")}
         self.process = subprocess.Popen(
             [str(fixture.RUI), "auth", "login", "chatgpt", *test_issuer],
@@ -431,6 +432,32 @@ def run():
         assert credential_facts(device_file)["state"] == "ready"
         fixture.stop_host(host)
         host = None
+        # A named sign-in keeps its own record and leaves the built-ins and the saved default alone.
+        built_in_before = credential_file.read_bytes() if credential_file.exists() else None
+        default_before = saved_default()
+        work_file = credential_dir / "work.json"
+        os.environ["RUI_WORK_CREDENTIAL_FILE"] = str(work_file)
+        refused = subprocess.run([str(fixture.RUI), "auth", "login", "chatgpt", "--connection", "chatgpt", "--test-chatgpt-fixture-endpoint", url],
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+        assert refused.returncode == 2 and not work_file.exists(), refused
+        named_login = Login(url, "--connection", "work")
+        logins.append(named_login)
+        named_link = named_login.link(base)
+        named_port = urllib.parse.urlsplit(named_link["redirect_uri"]).port
+        named_token = compact({"exp": FAR}, "bmFtZWQ")
+        with endpoint.lock:
+            endpoint.tokens.append(tokens(named_link, named_token, "plan-refresh-named"))
+        assert get(callback(named_port, {"code": "ac-made-up-named", "scope": PLAN_SCOPE, "state": named_link["state"], "client_id": CLIENT}))[0] == 200
+        code, stdout, stderr = named_login.finish()
+        assert code == 0, (code, stdout, stderr)
+        named_facts = credential_facts(work_file)
+        assert (named_facts["state"], named_facts["client_id"], named_facts["access_token"]) == ("ready", CLIENT, named_token), named_facts
+        assert "Signed in to ChatGPT in the browser as work." in stdout and "oauth credential" in stdout, stdout
+        assert named_token not in stdout + stderr and "plan-refresh-named" not in stdout + stderr
+        assert "New Sessions will use" not in stdout and "Start a conversation with" not in stdout, stdout
+        assert (credential_file.read_bytes() if credential_file.exists() else None) == built_in_before
+        assert saved_default() == default_before
+        del os.environ["RUI_WORK_CREDENTIAL_FILE"]
         print("chatgpt login passed: listener and pasted sign-in, returning client reused, stale answer refused, "
               "logout ends both sign-ins and a running Host refuses either until the next sign-in, and says when "
               "ChatGPT has not confirmed; an unset default is filled, an OpenAI default stays and a device-code one is "

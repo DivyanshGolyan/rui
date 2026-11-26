@@ -42,6 +42,36 @@ pub fn connectionCredentialFile(environ: *const std.process.Environ.Map, name: [
     return connectionFile(environ, name, .sign_in, buffer);
 }
 
+/// A sign-in record's owner: a built-in provider, or a named connection that has its own file.
+pub const Record = union(enum) {
+    provider: Provider,
+    connection: []const u8,
+};
+
+/// Where a sign-in record is saved: a provider's default file, or a connection's own.
+pub fn recordFile(environ: *const std.process.Environ.Map, record: Record, buffer: []u8) Error![]const u8 {
+    return switch (record) {
+        .provider => |provider| switch (provider) {
+            inline else => |named| default(environ, named, buffer),
+        },
+        .connection => |name| connectionCredentialFile(environ, name, buffer),
+    };
+}
+
+/// Whether the environment names the record's file, so the default directory under HOME is not its home.
+pub fn recordFileNamed(environ: *const std.process.Environ.Map, record: Record) bool {
+    switch (record) {
+        .provider => |provider| switch (provider) {
+            inline else => |named| return environ.get(comptime variable(named)) != null,
+        },
+        .connection => |name| {
+            var buffer: [max_variable_bytes]u8 = undefined;
+            const variable_name = connectionVariable(name, .sign_in, &buffer) orelse return false;
+            return environ.get(variable_name) != null;
+        },
+    }
+}
+
 const FileKind = enum { key, sign_in };
 
 fn connectionFile(environ: *const std.process.Environ.Map, name: []const u8, kind: FileKind, buffer: []u8) Error![]const u8 {
@@ -124,4 +154,20 @@ test "a sign-in connection's record is RUI_<NAME>_CREDENTIAL_FILE or HOME's json
     try std.testing.expectEqualStrings("/home/test/.config/rui/personal.json", try connectionCredentialFile(&env, "personal", &other));
     try env.put("RUI_WORK_CREDENTIAL_FILE", "relative");
     try std.testing.expectError(error.InvalidCredentialPath, connectionCredentialFile(&env, "work", &buffer));
+}
+
+test "a record file is the provider's default or the connection's own, and says whether the environment named it" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try env.put("HOME", "/home/test");
+    try std.testing.expectEqualStrings("/home/test/.config/rui/chatgpt.json", try recordFile(&env, .{ .provider = .chatgpt }, &buffer));
+    try std.testing.expectEqualStrings("/home/test/.config/rui/work.json", try recordFile(&env, .{ .connection = "work" }, &buffer));
+    try std.testing.expect(!recordFileNamed(&env, .{ .provider = .chatgpt }) and !recordFileNamed(&env, .{ .connection = "work" }));
+    try env.put("RUI_WORK_CREDENTIAL_FILE", "/records/work.json");
+    try env.put("RUI_CHATGPT_CREDENTIAL_FILE", "/records/chatgpt.json");
+    try std.testing.expectEqualStrings("/records/work.json", try recordFile(&env, .{ .connection = "work" }, &buffer));
+    try std.testing.expectEqualStrings("/records/chatgpt.json", try recordFile(&env, .{ .provider = .chatgpt }, &buffer));
+    try std.testing.expect(recordFileNamed(&env, .{ .provider = .chatgpt }) and recordFileNamed(&env, .{ .connection = "work" }));
+    try std.testing.expect(!recordFileNamed(&env, .{ .connection = "personal" }));
 }

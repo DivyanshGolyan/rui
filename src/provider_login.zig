@@ -14,10 +14,10 @@ pub fn createConfigDirectory(io: std.Io, home: []const u8) !void {
     dir.close(io);
 }
 
-pub fn codex(init: std.process.Init, comptime exchange: anytype, display: anytype, cancelled: *const fn () bool, publish: *const fn () bool) !void {
+pub fn codex(init: std.process.Init, record: location.Record, comptime exchange: anytype, display: anytype, cancelled: *const fn () bool, publish: *const fn () bool) !void {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try location.default(init.environ_map, .codex, &path_buffer);
-    if (init.environ_map.get(location.variable(.codex)) == null) try createConfigDirectory(init.io, init.environ_map.get("HOME").?);
+    const path = try location.recordFile(init.environ_map, record, &path_buffer);
+    if (!location.recordFileNamed(init.environ_map, record)) try createConfigDirectory(init.io, init.environ_map.get("HOME").?);
     if (cancelled()) return error.LoginInterrupted;
     const mapped = try pages.Mapped(auth.Login).map();
     defer mapped.unmap();
@@ -36,9 +36,9 @@ pub fn codex(init: std.process.Init, comptime exchange: anytype, display: anytyp
     try credentials.install(path, &room.record, null, &room.work.credentials);
 }
 
-pub fn chatgpt(init: std.process.Init, issuer: plan_login.Issuer, display: anytype, paste: plan_login.Paste, cancelled: *const fn () bool, publish: *const fn () bool) !void {
+pub fn chatgpt(init: std.process.Init, owner: location.Record, issuer: plan_login.Issuer, display: anytype, paste: plan_login.Paste, cancelled: *const fn () bool, publish: *const fn () bool) !void {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try location.default(init.environ_map, .chatgpt, &path_buffer);
+    const path = try location.recordFile(init.environ_map, owner, &path_buffer);
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
     if (!std.fs.path.isAbsolute(home)) return error.InvalidCredentialPath;
     try createConfigDirectory(init.io, home);

@@ -326,7 +326,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .host_serve => unreachable,
         .host_set, .host_unset, .host_settings => try hostSettings(init, command, parsed),
         .defaults_inspect, .defaults_configure => try setup(init, parsed, .command_line),
-        .auth_login => try login(init, parsed.positional.?, parsed.has("device-code"), parsed.get("test-chatgpt-fixture-endpoint"), codex_auth.login),
+        .auth_login => try login(init, parsed.positional.?, parsed.has("device-code"), parsed.get("connection"), parsed.get("test-chatgpt-fixture-endpoint"), codex_auth.login),
         .auth_logout => try planLogout(init, parsed.positional.?, parsed.get("test-chatgpt-fixture-endpoint")),
         .auth_status => {
             const readiness = localReadiness(init);
@@ -473,11 +473,11 @@ fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Rea
     try output.flush();
 }
 
-fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
+fn planLogin(init: std.process.Init, record: credential_location.Record, fixture_endpoint: ?[]const u8) !void {
     var interrupt = LoginInterrupt.init();
     defer interrupt.deinit();
-    const issuer = try planIssuer(init, fixture_endpoint);
-    provider_login.chatgpt(init, issuer, planDisplay, .{ .fd = std.Io.File.stdin().handle, .read = readStdin }, loginInterrupted, struct {
+    const issuer = try planIssuer(init, record, fixture_endpoint);
+    provider_login.chatgpt(init, record, issuer, planDisplay, .{ .fd = std.Io.File.stdin().handle, .read = readStdin }, loginInterrupted, struct {
         fn publish() bool {
             return login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null;
         }
@@ -485,6 +485,7 @@ fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
         error.HomeRequired => homeRequired("the ChatGPT credential and host id are in HOME/.config/rui unless " ++ comptime credential_location.variable(.chatgpt) ++ " names the credential"),
         else => err,
     };
+    if (record == .connection) return namedLoginReceipt(init, record.connection, .browser);
     const outcome = try finishLogin(init, .chatgpt, "Rui: Signed in to ChatGPT.\n") orelse return;
     try std.Io.File.stdout().writeStreamingAll(init.io, "A running Host that serves ChatGPT uses this sign-in from its next request; one started before you signed in needs a restart to serve it.\n");
     try std.Io.File.stdout().writeStreamingAll(init.io, conversationStart(.chatgpt, outcome));
@@ -566,7 +567,7 @@ fn planLogout(init: std.process.Init, provider: []const u8, fixture_endpoint: ?[
         stderr.diagnostic("rui: rui auth logout signs out of chatgpt only; Rui keeps no sign-in to end for another provider.\n", .{});
         return usage();
     }
-    const issuer = try planIssuer(init, fixture_endpoint);
+    const issuer = try planIssuer(init, .{ .provider = .chatgpt }, fixture_endpoint);
     var browser_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const browser_path = credential_location.default(init.environ_map, .chatgpt, &browser_buffer) catch null;
     var device_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -694,9 +695,9 @@ test "logout says how it left each ChatGPT login, and fails while either may rem
     }
 }
 
-fn planIssuer(init: std.process.Init, fixture_endpoint: ?[]const u8) !chatgpt_plan_login.Issuer {
+fn planIssuer(init: std.process.Init, record: credential_location.Record, fixture_endpoint: ?[]const u8) !chatgpt_plan_login.Issuer {
     const endpoint = fixture_endpoint orelse return .openai;
-    if (init.environ_map.get(credential_location.variable(.chatgpt)) == null) return error.FixtureCredentialPathRequired;
+    if (!credential_location.recordFileNamed(init.environ_map, record)) return error.FixtureCredentialPathRequired;
     const base = providers.responsesBase(endpoint) orelse return error.InvalidArguments;
     if (!std.mem.startsWith(u8, base, "http://127.0.0.1:")) return error.InvalidArguments;
     return .{ .fixture = base };
@@ -1379,21 +1380,32 @@ test "auth login reads its provider and --device-code as one of the two ways int
     }) |case| try std.testing.expectEqual(case[2], loginProvider(case[0], case[1]));
 }
 
-fn login(init: std.process.Init, name: []const u8, device_code: bool, fixture_endpoint: ?[]const u8, comptime exchange: anytype) !void {
+fn login(init: std.process.Init, name: []const u8, device_code: bool, connection_name: ?[]const u8, fixture_endpoint: ?[]const u8, comptime exchange: anytype) !void {
     const provider = loginProvider(name, device_code) orelse return usage();
     if (provider.login() == null) {
         stderr.diagnostic("rui auth login: {s} has no terminal sign-in yet; nothing was changed.\n", .{provider.shown()});
         return usage();
     }
-    if (fixture_endpoint) |fixture| return if (provider == .chatgpt) planLogin(init, fixture) else usage();
+    const record: credential_location.Record = if (connection_name) |given| named: {
+        if (provider == .openai) {
+            stderr.diagnostic("rui auth login: --connection keeps a ChatGPT sign-in under its own name; an API key has none. Nothing was changed.\n", .{});
+            return usage();
+        }
+        if (!connectionNameFree(given)) {
+            stderr.diagnostic("rui auth login: --connection names an account: lowercase letters, digits and '-', at most {d} bytes, and not codex, chatgpt or openai. Nothing was changed.\n", .{@import("connection.zig").max_name_bytes});
+            return usage();
+        }
+        break :named .{ .connection = given };
+    } else .{ .provider = provider };
+    if (fixture_endpoint) |fixture| return if (provider == .chatgpt) planLogin(init, record, fixture) else usage();
     switch (provider) {
         .openai => return saveApiKey(init),
         .codex => {},
-        .chatgpt => return planLogin(init, null),
+        .chatgpt => return planLogin(init, record, null),
     }
     var interrupt = LoginInterrupt.init();
     defer interrupt.deinit();
-    try provider_login.codex(init, exchange, struct {
+    try provider_login.codex(init, record, exchange, struct {
         fn display(code: []const u8) !void {
             std.debug.print("Open https://auth.openai.com/codex/device and enter code: {s}\n" ++ device_login_guidance ++ "Waiting for you to approve in the browser...\n", .{code});
         }
@@ -1402,8 +1414,41 @@ fn login(init: std.process.Init, name: []const u8, device_code: bool, fixture_en
             return login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null;
         }
     }.publish);
+    if (record == .connection) return namedLoginReceipt(init, record.connection, .device);
     const outcome = try finishLogin(init, .codex, "Rui: Signed in to ChatGPT with a device code.\n") orelse return;
     try std.Io.File.stdout().writeStreamingAll(init.io, conversationStart(.codex, outcome));
+}
+
+/// Whether `name` is a connection name that no built-in provider already owns.
+fn connectionNameFree(name: []const u8) bool {
+    const parsed = @import("connection.zig").Name.parse(name) orelse return false;
+    for (std.enums.values(protocol.Provider)) |provider| if (parsed.eql(provider_route.nameOf(provider))) return false;
+    return true;
+}
+
+const NamedSignIn = enum { browser, device };
+
+fn namedLoginReceipt(init: std.process.Init, name: []const u8, way: NamedSignIn) !void {
+    var buffer: [512]u8 = undefined;
+    try std.Io.File.stdout().writeStreamingAll(init.io, try namedLoginText(&buffer, name, way));
+}
+
+fn namedLoginText(buffer: []u8, name: []const u8, way: NamedSignIn) ![]const u8 {
+    const how, const kind = switch (way) {
+        .browser => .{ "in the browser", "oauth" },
+        .device => .{ "with a device code", "openai-device" },
+    };
+    return std.fmt.bufPrint(buffer, "Rui: Signed in to ChatGPT {s} as {s}. Its sign-in has its own file; the default sign-ins and the default for new Sessions are unchanged.\nServe it by adding a connection named {s} with a {s} credential to the Host settings (docs/host.md, Connections).\n", .{ how, name, name, kind });
+}
+
+test "a named login's receipt names the connection and the credential kind to serve it with, and a built-in name is not a connection name" {
+    var buffer: [512]u8 = undefined;
+    const browser = try namedLoginText(&buffer, "work", .browser);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "as work") != null and std.mem.indexOf(u8, browser, "oauth credential") != null);
+    const device = try namedLoginText(&buffer, "work", .device);
+    try std.testing.expect(std.mem.indexOf(u8, device, "with a device code") != null and std.mem.indexOf(u8, device, "openai-device credential") != null);
+    for ([_]struct { []const u8, bool }{ .{ "work", true }, .{ "my-2", true }, .{ "codex", false }, .{ "chatgpt", false }, .{ "openai", false }, .{ "Work", false }, .{ "", false }, .{ "a" ** 17, false } }) |case|
+        try std.testing.expectEqual(case[1], connectionNameFree(case[0]));
 }
 
 fn finishLogin(init: std.process.Init, provider: protocol.Provider, receipt: []const u8) !?preferences.LoginDefault {
