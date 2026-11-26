@@ -71,8 +71,8 @@ pub const ItemJson = struct {
             inline .admission, .user, .received => |message, tag| {
                 const name = @tagName(tag);
                 try writeShape(out, @field(value_shapes, name), .{
-                    message.admission,   message.key.slice(),                    message.turn,          message.state,
-                    message.admitted_at, OriginJson{ .value = message.origin },         ContentValueJson{ .value = message.content },
+                    message.admission,   message.key.slice(),                   message.turn,                                 message.state,
+                    message.admitted_at, OriginJson{ .value = message.origin }, ContentValueJson{ .value = message.content },
                 });
             },
             .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal, optionalText(&request.description), optionalText(&request.tool), optionalText(&request.server) }),
