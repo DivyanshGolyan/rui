@@ -66,6 +66,20 @@ fn run(sql: []const u8) !void {
     try drain(&root, null);
 }
 
+/// Whether the server takes `sql`, without printing a refusal: a probe asks a question the answer to which may be no.
+pub fn takes(sql: []const u8) !bool {
+    _ = try connection();
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    try root.query(sql);
+    var refused = false;
+    while (!root.isReady()) switch (try root.next()) {
+        .err => refused = true,
+        else => {},
+    };
+    return !refused;
+}
+
 pub fn database(storage: *Store) []const u8 {
     return std.mem.sliceTo(&storage.engine.mysql.state.testing_database, 0);
 }

@@ -1285,6 +1285,9 @@ pub inline fn resolutionIs(comptime column: []const u8, comptime resolution: tur
 
 pub const Octets = struct { min: u32 = 0, max: u32 };
 
+/// Inclusive integer bounds of an `.int` column; an absent `max` is unbounded above.
+pub const Range = struct { min: i64, max: ?i64 = null };
+
 pub const ColumnType = union(enum) {
     int,
     flag,
@@ -1298,6 +1301,11 @@ pub const Column = struct {
     type: ColumnType,
     nullable: bool = false,
     default: ?[]const u8 = null,
+    /// The column's own value rules, rendered into its CHECK and held by the Host when a value is bound (`column_rules.zig`).
+    range: ?Range = null,
+    initial: ?[]const u8 = null,
+    charset: ?[]const u8 = null,
+    /// What no column value expresses: a rule over this column and others.
     check: ?[]const u8 = null,
     read_by: ReadBy = .recipient,
     engines: Engines = .all,
@@ -1358,9 +1366,9 @@ const provider_column: Column = .{ .name = "provider", .type = .{ .text = .{ .mi
 /// The wire grammar a revision's bags were written by (codec_abi.Dialect's codecs); each revision freezes its own.
 const codec_column: Column = .{ .name = "codec", .type = .{ .text = .{ .min = 3, .max = 40 } } };
 const codec_options_column: Column = .{ .name = "codec_options", .type = .{ .bytes = .{ .min = 1, .max = 512 } }, .nullable = true };
-const tool_set_column: Column = .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" };
-const permission_mode_column: Column = .{ .name = "permission_mode", .type = .int, .check = "permission_mode BETWEEN 0 AND 1" };
-const compaction_trigger_column: Column = .{ .name = "compaction_trigger", .type = .int, .nullable = true, .check = "compaction_trigger IS NULL OR compaction_trigger>0" };
+const tool_set_column: Column = .{ .name = "tool_set_id", .type = .int, .range = .{ .min = 1 } };
+const permission_mode_column: Column = .{ .name = "permission_mode", .type = .int, .range = .{ .min = 0, .max = 1 } };
+const compaction_trigger_column: Column = .{ .name = "compaction_trigger", .type = .int, .nullable = true, .range = .{ .min = 1 } };
 const reasoning_effort_column: Column = .{ .name = "reasoning_effort", .type = .{ .tag = &.{ "none", "low", "medium", "high", "xhigh", "max" } }, .nullable = true };
 const label_column: Column = .{ .name = "label", .type = .{ .text = .{ .min = 1, .max = 100 } }, .nullable = true };
 
@@ -1431,9 +1439,9 @@ pub const tables = [_]Table{
     .{
         .name = "store_owner",
         .columns = &.{
-            .{ .name = "owner_key", .type = .int, .check = "owner_key=1" },
-            .{ .name = "epoch", .type = .int, .check = "epoch>=0" },
-            .{ .name = "commit_seq", .type = .int, .check = "commit_seq>=0" },
+            .{ .name = "owner_key", .type = .int, .range = .{ .min = 1, .max = 1 } },
+            .{ .name = "epoch", .type = .int, .range = .{ .min = 0 } },
+            .{ .name = "commit_seq", .type = .int, .range = .{ .min = 0 } },
         },
         .primary_key = &.{"owner_key"},
         .engines = .mysql,
@@ -1455,7 +1463,7 @@ pub const tables = [_]Table{
         .name = "content_chunk",
         .columns = &.{
             .{ .name = "content_id", .type = .int },
-            .{ .name = "chunk_index", .type = .int, .check = "chunk_index>=0" },
+            .{ .name = "chunk_index", .type = .int, .range = .{ .min = 0 } },
             .{ .name = "bytes", .type = .{ .bytes = .{ .min = 1, .max = content_chunk_bytes } } },
         },
         .primary_key = &.{ "content_id", "chunk_index" },
@@ -1466,7 +1474,7 @@ pub const tables = [_]Table{
         .name = "content_part",
         .columns = &.{
             .{ .name = "content_id", .type = .int },
-            .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
+            .{ .name = "ordinal", .type = .int, .range = .{ .min = 0 } },
             .{ .name = "part_content_id", .type = .int },
         },
         .primary_key = &.{ "content_id", "ordinal" },
@@ -1477,9 +1485,9 @@ pub const tables = [_]Table{
     .{
         .name = "tool_record",
         .columns = &.{
-            .{ .name = "tool_record_id", .type = .int, .check = "tool_record_id>0" },
-            .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = tool_defs.max_name_bytes } }, .check = "@charset(name,'A-Za-z0-9_-')" },
-            .{ .name = "remote_name", .type = .{ .text = .{ .min = 0, .max = tool_defs.max_name_bytes } }, .check = "@charset(remote_name,'A-Za-z0-9_-')" },
+            .{ .name = "tool_record_id", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = tool_defs.max_name_bytes } }, .charset = "A-Za-z0-9_-" },
+            .{ .name = "remote_name", .type = .{ .text = .{ .min = 0, .max = tool_defs.max_name_bytes } }, .charset = "A-Za-z0-9_-" },
             .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider", "mcp", "app" } } },
             .{
                 .name = "server",
@@ -1516,7 +1524,7 @@ pub const tables = [_]Table{
     .{
         .name = "tool_set",
         .columns = &.{
-            .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" },
+            .{ .name = "tool_set_id", .type = .int, .range = .{ .min = 1 } },
             .{ .name = "digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "member_count", .type = .int, .check = std.fmt.comptimePrint("member_count BETWEEN 0 AND {d}", .{tool_defs.max_host_tool_records}) },
         },
@@ -1527,7 +1535,7 @@ pub const tables = [_]Table{
         .name = "tool_set_member",
         .columns = &.{
             .{ .name = "tool_set_id", .type = .int },
-            .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
+            .{ .name = "ordinal", .type = .int, .range = .{ .min = 0 } },
             .{ .name = "tool_record_id", .type = .int },
         },
         .primary_key = &.{ "tool_set_id", "ordinal" },
@@ -1540,7 +1548,7 @@ pub const tables = [_]Table{
     .{
         .name = "host_tool_set",
         .columns = &.{
-            .{ .name = "slot", .type = .int, .check = "slot=1" },
+            .{ .name = "slot", .type = .int, .range = .{ .min = 1, .max = 1 } },
             .{ .name = "tool_set_id", .type = .int },
         },
         .primary_key = &.{"slot"},
@@ -1553,17 +1561,17 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "model_id", .type = .{ .text = .{ .min = 1, .max = 256 } } },
             .{ .name = "context_window", .type = .int, .nullable = true },
-            .{ .name = "efforts", .type = .int, .check = "efforts BETWEEN 0 AND 63" },
+            .{ .name = "efforts", .type = .int, .range = .{ .min = 0, .max = 63 } },
             .{ .name = "openai_listed", .type = .flag },
             .{ .name = "generation", .type = .int },
-            .{ .name = "output_limit", .type = .int, .nullable = true, .check = "output_limit IS NULL OR output_limit BETWEEN 0 AND 4294967295" },
+            .{ .name = "output_limit", .type = .int, .nullable = true, .range = .{ .min = 0, .max = 4294967295 } },
         },
         .primary_key = &.{"model_id"},
     },
     .{
         .name = "model_catalog_source",
         .columns = &.{
-            .{ .name = "slot", .type = .int, .check = "slot=1" },
+            .{ .name = "slot", .type = .int, .range = .{ .min = 1, .max = 1 } },
             .{ .name = "etag", .type = .{ .text = .{ .min = 0, .max = 512 } }, .nullable = true },
             .{ .name = "generation", .type = .int },
             .{ .name = "fetched_at", .type = .int },
@@ -1573,7 +1581,7 @@ pub const tables = [_]Table{
     .{
         .name = "session",
         .columns = &.{
-            .{ .name = "session_ref", .type = .{ .text = .{ .min = 6, .max = 6 } }, .check = "@charset(session_ref,'0123456789abcdefghjkmnpqrstvwxyz')" },
+            .{ .name = "session_ref", .type = .{ .text = .{ .min = 6, .max = 6 } }, .charset = "0123456789abcdefghjkmnpqrstvwxyz" },
             .{ .name = "workspace", .type = .{ .text = .{ .min = 1, .max = 4096 } } },
             provider_column,
             .{ .name = "prefix_seal", .type = .{ .bytes = .{ .min = prefix_seal.encoded_bytes, .max = prefix_seal.encoded_bytes } }, .nullable = true },
@@ -1583,21 +1591,21 @@ pub const tables = [_]Table{
             .{ .name = "loaded_tool_set_id", .type = .int, .nullable = true },
             permission_mode_column,
             .{ .name = "output_schema_content_id", .type = .int, .nullable = true },
-            .{ .name = "revision", .type = .int, .check = "revision>0" },
+            .{ .name = "revision", .type = .int, .range = .{ .min = 1 } },
             compaction_trigger_column,
-            .{ .name = "output_reservation", .type = .int, .nullable = true, .check = "output_reservation IS NULL OR output_reservation>=0" },
+            .{ .name = "output_reservation", .type = .int, .nullable = true, .range = .{ .min = 0 } },
             reasoning_effort_column,
             label_column,
-            .{ .name = "created_at", .type = .int, .check = "created_at>0" },
-            .{ .name = "next_position", .type = .int, .check = "next_position>0" },
-            .{ .name = "created_seq", .type = .int, .check = "created_seq>0" },
+            .{ .name = "created_at", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "next_position", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "created_seq", .type = .int, .range = .{ .min = 1 } },
             .{ .name = "workspace_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "workspace_key", .type = .int },
             .{ .name = "parent_ref", .type = .{ .text = null }, .nullable = true },
-            .{ .name = "obligation_since", .type = .int, .nullable = true, .sqlite_added = true, .check = "obligation_since IS NULL OR obligation_since>0" },
+            .{ .name = "obligation_since", .type = .int, .nullable = true, .sqlite_added = true, .range = .{ .min = 1 } },
             .{ .name = "creator_ref", .type = .{ .text = null }, .nullable = true, .sqlite_added = true, .check = "creator_ref IS NULL OR creator_ref<>session_ref" },
-            .{ .name = "archive_seq", .type = .int, .nullable = true, .sqlite_added = true, .check = "archive_seq IS NULL OR archive_seq>0" },
-            .{ .name = "app_tool_set_id", .type = .int, .nullable = true, .sqlite_added = true, .check = "app_tool_set_id IS NULL OR app_tool_set_id>0" },
+            .{ .name = "archive_seq", .type = .int, .nullable = true, .sqlite_added = true, .range = .{ .min = 1 } },
+            .{ .name = "app_tool_set_id", .type = .int, .nullable = true, .sqlite_added = true, .range = .{ .min = 1 } },
             .{ .name = "app_lane", .type = .{ .text = null }, .nullable = true, .sqlite_added = true, .check = "app_lane IS NULL OR @octets(app_lane)=6" },
         },
         .primary_key = &.{"session_ref"},
@@ -1619,16 +1627,16 @@ pub const tables = [_]Table{
         .name = "core_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = .{ .max = 128 } } },
-            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 9" },
+            .{ .name = "kind", .type = .int, .range = .{ .min = 1, .max = 9 } },
             .{ .name = "target", .type = .{ .text = .{ .max = 128 } } },
             .{ .name = "input_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "primary_content_id", .type = .int, .nullable = true, .holds = .value },
             .{ .name = "secondary_content_id", .type = .int, .nullable = true },
             .{ .name = "accepted", .type = .flag },
             .{ .name = "code", .type = .{ .text = .{ .max = 96 } } },
-            .{ .name = "revision", .type = .int, .check = "revision>=0" },
+            .{ .name = "revision", .type = .int, .range = .{ .min = 0 } },
             .{ .name = "created", .type = .flag },
-            .{ .name = "command_seq", .type = .int, .check = "command_seq>0" },
+            .{ .name = "command_seq", .type = .int, .range = .{ .min = 1 } },
             // Bits of required_settings.Setting: set exactly with a missing_settings rejection.
             .{ .name = "missing_settings", .type = .int, .nullable = true, .check = "missing_settings IS NULL AND code<>'missing_settings' OR missing_settings IS NOT NULL AND code='missing_settings' AND missing_settings BETWEEN 1 AND 7" },
         },
@@ -1643,7 +1651,7 @@ pub const tables = [_]Table{
         .name = "session_revision",
         .columns = &.{
             .{ .name = "session_ref", .type = .{ .text = null } },
-            .{ .name = "revision", .type = .int, .check = "revision>0" },
+            .{ .name = "revision", .type = .int, .range = .{ .min = 1 } },
             .{ .name = "command_key", .type = .{ .text = null } },
             .{ .name = "workspace", .type = .{ .text = null } },
             provider_column,
@@ -1657,11 +1665,11 @@ pub const tables = [_]Table{
             permission_mode_column,
             .{ .name = "output_schema_content_id", .type = .int, .nullable = true },
             compaction_trigger_column,
-            .{ .name = "output_reservation", .type = .int, .nullable = true, .check = "output_reservation IS NULL OR output_reservation>=0" },
+            .{ .name = "output_reservation", .type = .int, .nullable = true, .range = .{ .min = 0 } },
             reasoning_effort_column,
             label_column,
             .{ .name = "effort_source_revision", .type = .int, .default = "1", .check = "effort_source_revision>0 AND effort_source_revision<=revision" },
-            .{ .name = "app_tool_set_id", .type = .int, .nullable = true, .sqlite_added = true, .check = "app_tool_set_id IS NULL OR app_tool_set_id>0" },
+            .{ .name = "app_tool_set_id", .type = .int, .nullable = true, .sqlite_added = true, .range = .{ .min = 1 } },
         },
         .primary_key = &.{ "session_ref", "revision" },
         .uniques = &.{&.{"command_key"}},
@@ -1681,11 +1689,11 @@ pub const tables = [_]Table{
         .name = "session_change",
         .columns = &.{
             .{ .name = "session_ref", .type = .{ .text = null } },
-            .{ .name = "position", .type = .int, .check = "position>0" },
-            .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
+            .{ .name = "position", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "ordinal", .type = .int, .range = .{ .min = 0 } },
             .{ .name = "revision", .type = .int, .check = "revision>1" },
             .{ .name = "field", .type = .{ .tag = session_settings.revision_fields } },
-            .{ .name = "changed_at", .type = .int, .check = "changed_at>0" },
+            .{ .name = "changed_at", .type = .int, .range = .{ .min = 1 } },
             .{ .name = "provider_text", .type = .{ .text = .{ .min = 0, .max = @import("../outcome_code.zig").max_report_bytes } }, .nullable = true },
             .{ .name = "refused_operation_id", .type = .int, .nullable = true },
         },
@@ -1702,16 +1710,16 @@ pub const tables = [_]Table{
     .{
         .name = "message_admission",
         .columns = &.{
-            .{ .name = "admission_id", .type = .int, .check = "admission_id>0", .read_by = .both },
+            .{ .name = "admission_id", .type = .int, .range = .{ .min = 1 }, .read_by = .both },
             .{ .name = "session_ref", .type = .{ .text = null }, .read_by = .both },
             .{ .name = "command_key", .type = .{ .text = null }, .read_by = .both },
             .{ .name = "content_id", .type = .int, .read_by = .both, .holds = .value },
             .{ .name = "admission_position", .type = .int, .nullable = true, .check = "admission_position>0" },
             .{ .name = "turn_id", .type = .int, .nullable = true },
-            .{ .name = "admitted_at", .type = .int, .check = "admitted_at>0", .read_by = .both },
+            .{ .name = "admitted_at", .type = .int, .range = .{ .min = 1 }, .read_by = .both },
             .{ .name = "sender_session_ref", .type = .{ .text = null }, .nullable = true, .read_by = .both },
             .{ .name = "source_action_id", .type = .int, .nullable = true },
-            .{ .name = "source_kind", .type = .int, .check = "source_kind BETWEEN 1 AND 5" },
+            .{ .name = "source_kind", .type = .int, .range = .{ .min = 1, .max = 5 } },
         },
         .primary_key = &.{"admission_id"},
         .uniques = &.{ &.{"command_key"}, &.{"source_action_id"}, &.{ "admission_id", "source_kind" } },
@@ -1729,12 +1737,12 @@ pub const tables = [_]Table{
         .name = "action_value",
         .columns = &.{
             .{ .name = "action_id", .type = .int },
-            .{ .name = "ordinal", .type = .int, .check = "ordinal>0" },
-            .{ .name = "handle", .type = .{ .text = .{ .min = 32, .max = 32 } }, .check = "@charset(handle,'0-9a-f')" },
+            .{ .name = "ordinal", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "handle", .type = .{ .text = .{ .min = 32, .max = 32 } }, .charset = "0-9a-f" },
             .{ .name = "publication_key", .type = .{ .text = .{ .min = 1, .max = 128 } } },
             .{ .name = "content_id", .type = .int },
             .{ .name = "admission_id", .type = .int, .nullable = true },
-            .{ .name = "published_at", .type = .int, .check = "published_at>0" },
+            .{ .name = "published_at", .type = .int, .range = .{ .min = 1 } },
         },
         .primary_key = &.{ "action_id", "ordinal" },
         .uniques = &.{ &.{ "handle", "publication_key" }, &.{"admission_id"} },
@@ -1744,7 +1752,7 @@ pub const tables = [_]Table{
     .{
         .name = "turn",
         .columns = &.{
-            .{ .name = "turn_id", .type = .int, .check = "turn_id>0" },
+            .{ .name = "turn_id", .type = .int, .range = .{ .min = 1 } },
             .{ .name = "session_ref", .type = .{ .text = null } },
             .{ .name = "first_admission_id", .type = .int },
             .{ .name = "input_cutoff", .type = .int, .check = "input_cutoff>=first_admission_id" },
@@ -1752,7 +1760,7 @@ pub const tables = [_]Table{
             .{ .name = "outcome_code", .type = .{ .text = .{ .min = 1, .max = 96 } }, .nullable = true },
             .{ .name = "outcome_content_id", .type = .int, .nullable = true },
             .{ .name = "outcome_position", .type = .int, .nullable = true, .check = "outcome_position>0" },
-            .{ .name = "outcome_at", .type = .int, .nullable = true, .check = "outcome_at IS NULL OR outcome_at>0" },
+            .{ .name = "outcome_at", .type = .int, .nullable = true, .range = .{ .min = 1 } },
             .{ .name = "continuation_operation_id", .type = .int, .nullable = true, .check = "continuation_operation_id IS NULL OR continuation_operation_id<=operation_id" },
         },
         .primary_key = &.{"turn_id"},
@@ -1770,10 +1778,10 @@ pub const tables = [_]Table{
             .{ .name = "session_ref", .type = .{ .text = null } },
             .{ .name = "selected_turn_id", .type = .int, .nullable = true },
             .{ .name = "position", .type = .int, .nullable = true, .check = "position>0" },
-            .{ .name = "admission_cutoff", .type = .int, .check = "admission_cutoff>=0" },
-            .{ .name = "stopped_at", .type = .int, .check = "stopped_at>0" },
+            .{ .name = "admission_cutoff", .type = .int, .range = .{ .min = 0 } },
+            .{ .name = "stopped_at", .type = .int, .range = .{ .min = 1 } },
             .{ .name = "parent_caused", .type = .flag, .default = "0" },
-            .{ .name = "action_cutoff", .type = .int, .default = "0", .check = "action_cutoff>=0", .sqlite_added = true },
+            .{ .name = "action_cutoff", .type = .int, .default = "0", .range = .{ .min = 0 }, .sqlite_added = true },
         },
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{
@@ -1822,8 +1830,8 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "child_ref", .type = .{ .text = null } },
             .{ .name = "cause_ref", .type = .{ .text = null } },
-            .{ .name = "cause_position", .type = .int, .check = "cause_position>0" },
-            .{ .name = "settled", .type = .int, .check = "settled BETWEEN 0 AND 1" },
+            .{ .name = "cause_position", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "settled", .type = .int, .range = .{ .min = 0, .max = 1 } },
         },
         .primary_key = &.{ "child_ref", "cause_ref", "cause_position" },
         .foreign_keys = &.{
@@ -1835,14 +1843,14 @@ pub const tables = [_]Table{
     .{
         .name = "session_forward",
         .columns = &.{
-            .{ .name = "forward_id", .type = .int, .check = "forward_id>0" },
+            .{ .name = "forward_id", .type = .int, .range = .{ .min = 1 } },
             .{ .name = "target_ref", .type = .{ .text = null } },
             .{ .name = "child_ref", .type = .{ .text = null } },
-            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 2" },
-            .{ .name = "source_id", .type = .int, .check = "source_id>0" },
-            .{ .name = "position", .type = .int, .nullable = true, .check = "position IS NULL OR position>0" },
-            .{ .name = "ordinal", .type = .int, .check = "ordinal=0" },
-            .{ .name = "delivered_at", .type = .int, .nullable = true, .check = "delivered_at IS NULL OR delivered_at>0" },
+            .{ .name = "kind", .type = .int, .range = .{ .min = 1, .max = 2 } },
+            .{ .name = "source_id", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "position", .type = .int, .nullable = true, .range = .{ .min = 1 } },
+            .{ .name = "ordinal", .type = .int, .range = .{ .min = 0, .max = 0 } },
+            .{ .name = "delivered_at", .type = .int, .nullable = true, .range = .{ .min = 1 } },
             .{ .name = "message_delivered", .type = .flag, .nullable = true },
             .{ .name = "suppress_message", .type = .flag, .default = "0" },
         },
@@ -1859,8 +1867,8 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
             .{ .name = "session_ref", .type = .{ .text = .{ .max = 128 } } },
-            .{ .name = "turn_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(turn_id,'0-9')" },
-            .{ .name = "operation_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(operation_id,'0-9')" },
+            .{ .name = "turn_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .charset = "0-9" },
+            .{ .name = "operation_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .charset = "0-9" },
         },
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{references("command_key", "core_command", command_reference)},
@@ -1869,46 +1877,46 @@ pub const tables = [_]Table{
     .{
         .name = "model_operation",
         .columns = &.{
-            .{ .name = "operation_id", .type = .int, .check = "operation_id>0" },
+            .{ .name = "operation_id", .type = .int, .range = .{ .min = 1 } },
             .{ .name = "turn_id", .type = .int },
             .{ .name = "session_ref", .type = .{ .text = null } },
-            .{ .name = "settings_revision", .type = .int, .check = "settings_revision>0" },
-            .{ .name = "input_cutoff", .type = .int, .check = "input_cutoff>0" },
-            .{ .name = "admission_position", .type = .int, .check = "admission_position>0" },
+            .{ .name = "settings_revision", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "input_cutoff", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "admission_position", .type = .int, .range = .{ .min = 1 } },
             .{ .name = "purpose", .type = .flag, .default = "0" },
             compaction_trigger_column,
-            .{ .name = "output_reservation", .type = .int, .check = "output_reservation>=0" },
+            .{ .name = "output_reservation", .type = .int, .range = .{ .min = 0 } },
             reasoning_effort_column,
-            .{ .name = "output_item_count", .type = .int, .nullable = true, .check = "output_item_count IS NULL OR output_item_count>=0" },
+            .{ .name = "output_item_count", .type = .int, .nullable = true, .range = .{ .min = 0 } },
             .{ .name = "attempt_ordinal", .type = .int, .check = std.fmt.comptimePrint("attempt_ordinal BETWEEN 1 AND {d}", .{retry_policy.maximum_attempts}) },
             .{ .name = "auth_refresh_claimed", .type = .flag, .default = "0" },
-            .{ .name = "retry_due_at_ms", .type = .int, .nullable = true, .check = "retry_due_at_ms IS NULL OR retry_due_at_ms>=0" },
+            .{ .name = "retry_due_at_ms", .type = .int, .nullable = true, .range = .{ .min = 0 } },
             .{ .name = "last_failure_code", .type = .{ .text = .{ .min = 1, .max = 96 } }, .nullable = true },
             .{ .name = "resolution_code", .type = .{ .text = .{ .min = 1, .max = 96 } }, .nullable = true },
             .{ .name = "resolution_content_id", .type = .int, .nullable = true },
             .{ .name = "response_id", .type = .{ .text = .{ .max = 256 } }, .nullable = true },
             .{ .name = "model_evidence", .type = .{ .bytes = .{ .min = 7, .max = 775 } }, .nullable = true },
             .{ .name = "request_id", .type = .{ .text = .{ .max = 256 } }, .nullable = true },
-            .{ .name = "usage_uncached_tokens", .type = .int, .nullable = true, .check = "usage_uncached_tokens IS NULL OR usage_uncached_tokens>=0" },
-            .{ .name = "usage_cache_read_tokens", .type = .int, .nullable = true, .check = "usage_cache_read_tokens IS NULL OR usage_cache_read_tokens>=0" },
-            .{ .name = "usage_cache_write_tokens", .type = .int, .nullable = true, .check = "usage_cache_write_tokens IS NULL OR usage_cache_write_tokens>=0" },
-            .{ .name = "usage_output_tokens", .type = .int, .nullable = true, .check = "usage_output_tokens IS NULL OR usage_output_tokens>=0" },
+            .{ .name = "usage_uncached_tokens", .type = .int, .nullable = true, .range = .{ .min = 0 } },
+            .{ .name = "usage_cache_read_tokens", .type = .int, .nullable = true, .range = .{ .min = 0 } },
+            .{ .name = "usage_cache_write_tokens", .type = .int, .nullable = true, .range = .{ .min = 0 } },
+            .{ .name = "usage_output_tokens", .type = .int, .nullable = true, .range = .{ .min = 0 } },
             .{ .name = "interrupted_by_command_key", .type = .{ .text = null }, .nullable = true },
-            .{ .name = "attempt_at", .type = .int, .nullable = true, .check = "attempt_at IS NULL OR attempt_at>0" },
-            .{ .name = "retry_scheduled_at", .type = .int, .nullable = true, .check = "retry_scheduled_at IS NULL OR retry_scheduled_at>0" },
-            .{ .name = "resolved_at", .type = .int, .nullable = true, .check = "resolved_at IS NULL OR resolved_at>0" },
-            .{ .name = "history_floor", .type = .int, .nullable = true, .check = "history_floor IS NULL OR history_floor>0" },
-            .{ .name = "history_level", .type = .int, .nullable = true, .check = "history_level IS NULL OR history_level BETWEEN 1 AND 3" },
-            .{ .name = "history_dropped", .type = .int, .nullable = true, .check = "history_dropped IS NULL OR history_dropped>=0" },
+            .{ .name = "attempt_at", .type = .int, .nullable = true, .range = .{ .min = 1 } },
+            .{ .name = "retry_scheduled_at", .type = .int, .nullable = true, .range = .{ .min = 1 } },
+            .{ .name = "resolved_at", .type = .int, .nullable = true, .range = .{ .min = 1 } },
+            .{ .name = "history_floor", .type = .int, .nullable = true, .range = .{ .min = 1 } },
+            .{ .name = "history_level", .type = .int, .nullable = true, .range = .{ .min = 1, .max = 3 } },
+            .{ .name = "history_dropped", .type = .int, .nullable = true, .range = .{ .min = 0 } },
             tool_set_column,
             .{ .name = "effort_source_revision", .type = .int, .default = "1", .check = "effort_source_revision>0 AND effort_source_revision<=settings_revision" },
             .{ .name = "previous_reasoning_effort", .type = reasoning_effort_column.type, .nullable = true },
             .{ .name = "effort_update", .type = .flag, .default = "0", .check = "(effort_update=0 OR reasoning_effort IS NOT NULL)" },
             .{ .name = "previous_effort_override", .type = reasoning_effort_column.type, .nullable = true },
-            .{ .name = "latency_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "latency_ms IS NULL OR latency_ms>=0" },
-            .{ .name = "first_event_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "first_event_ms IS NULL OR first_event_ms>=0" },
-            .{ .name = "context_window", .type = .int, .check = "context_window BETWEEN 0 AND 4294967295" },
-            .{ .name = "output_limit", .type = .int, .default = "32000", .sqlite_added = true, .check = "output_limit BETWEEN 0 AND 4294967295" },
+            .{ .name = "latency_ms", .type = .int, .nullable = true, .sqlite_added = true, .range = .{ .min = 0 } },
+            .{ .name = "first_event_ms", .type = .int, .nullable = true, .sqlite_added = true, .range = .{ .min = 0 } },
+            .{ .name = "context_window", .type = .int, .range = .{ .min = 0, .max = 4294967295 } },
+            .{ .name = "output_limit", .type = .int, .default = "32000", .sqlite_added = true, .range = .{ .min = 0, .max = 4294967295 } },
         },
         .primary_key = &.{"operation_id"},
         .uniques = &.{&.{ "operation_id", "session_ref" }},
@@ -1937,8 +1945,8 @@ pub const tables = [_]Table{
         .name = "message_skill",
         .columns = &.{
             .{ .name = "admission_id", .type = .int },
-            .{ .name = "position", .type = .int, .check = "position>0" },
-            .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = 64 } }, .check = "@charset(name,'a-z0-9-')" },
+            .{ .name = "position", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = 64 } }, .charset = "a-z0-9-" },
             .{ .name = "content_id", .type = .int },
         },
         .primary_key = &.{ "admission_id", "position" },
@@ -1952,7 +1960,7 @@ pub const tables = [_]Table{
         .name = "session_skill_catalog",
         .columns = &.{
             .{ .name = "session_ref", .type = .{ .text = null } },
-            .{ .name = "position", .type = .int, .check = "position>=0" },
+            .{ .name = "position", .type = .int, .range = .{ .min = 0 } },
             .{ .name = "catalog_content_id", .type = .int },
         },
         .primary_key = &.{ "session_ref", "position" },
@@ -1966,9 +1974,9 @@ pub const tables = [_]Table{
         .name = "conversation_entry",
         .columns = &.{
             .{ .name = "session_ref", .type = .{ .text = null } },
-            .{ .name = "entry_ordinal", .type = .int, .check = "entry_ordinal>0" },
-            .{ .name = "session_position", .type = .int, .check = "session_position>0" },
-            .{ .name = "entry_kind", .type = .int, .check = "entry_kind BETWEEN 1 AND 4" },
+            .{ .name = "entry_ordinal", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "session_position", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "entry_kind", .type = .int, .range = .{ .min = 1, .max = 4 } },
             .{ .name = "turn_id", .type = .int, .nullable = true },
             .{ .name = "source_admission_id", .type = .int, .nullable = true },
             .{ .name = "source_kind", .type = .int, .nullable = true },
@@ -1977,9 +1985,9 @@ pub const tables = [_]Table{
             .{ .name = "source_skill_admission_id", .type = .int, .nullable = true },
             .{ .name = "source_skill_position", .type = .int, .nullable = true },
             .{ .name = "source_operation_id", .type = .int, .nullable = true },
-            .{ .name = "source_item_ordinal", .type = .int, .nullable = true, .check = "source_item_ordinal IS NULL OR source_item_ordinal>=0" },
+            .{ .name = "source_item_ordinal", .type = .int, .nullable = true, .range = .{ .min = 0 } },
             .{ .name = "content_id", .type = .int, .holds = .value },
-            .{ .name = "recorded_at", .type = .int, .check = "recorded_at>0" },
+            .{ .name = "recorded_at", .type = .int, .range = .{ .min = 1 } },
         },
         .primary_key = &.{ "session_ref", "entry_ordinal" },
         .uniques = &.{ &.{"source_admission_id"}, &.{ "session_ref", "session_position" }, &.{ "session_ref", "source_revision" }, &.{ "session_ref", "source_catalog_position" }, &.{ "source_skill_admission_id", "source_skill_position" } },
@@ -2012,12 +2020,12 @@ pub const tables = [_]Table{
         .name = "model_output_item",
         .columns = &.{
             .{ .name = "operation_id", .type = .int },
-            .{ .name = "item_ordinal", .type = .int, .check = "item_ordinal>=0" },
+            .{ .name = "item_ordinal", .type = .int, .range = .{ .min = 0 } },
             .{ .name = "session_ref", .type = .{ .text = null } },
-            .{ .name = "session_position", .type = .int, .check = "session_position>0" },
-            .{ .name = "item_kind", .type = .int, .check = "item_kind BETWEEN 1 AND 5" },
+            .{ .name = "session_position", .type = .int, .range = .{ .min = 1 } },
+            .{ .name = "item_kind", .type = .int, .range = .{ .min = 1, .max = 5 } },
             .{ .name = "message_content_id", .type = .int, .nullable = true, .check = "(message_content_id IS NOT NULL)=(item_kind=2)" },
-            .{ .name = "attempt_ordinal", .type = .int, .check = "attempt_ordinal>0" },
+            .{ .name = "attempt_ordinal", .type = .int, .range = .{ .min = 1 } },
             .{ .name = "item_id_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "replay_omits_reasoning_text", .type = .flag, .check = "(replay_omits_reasoning_text=0 OR item_kind=1)" },
             .{ .name = "phase", .type = .int, .default = "0", .check = "phase IN (0,1,2) AND (phase=0 OR item_kind=2)" },
@@ -2044,7 +2052,7 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "operation_id", .type = .int },
             .{ .name = "item_ordinal", .type = .int },
-            .{ .name = "target_ordinal", .type = .int, .check = "target_ordinal>=0" },
+            .{ .name = "target_ordinal", .type = .int, .range = .{ .min = 0 } },
             .{ .name = "content_id", .type = .int },
         },
         .primary_key = &.{ "operation_id", "item_ordinal", "target_ordinal" },
@@ -2059,10 +2067,10 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "operation_id", .type = .int },
             .{ .name = "item_ordinal", .type = .int },
-            .{ .name = "part_ordinal", .type = .int, .check = "part_ordinal>=0" },
+            .{ .name = "part_ordinal", .type = .int, .range = .{ .min = 0 } },
             .{ .name = "part_array", .type = .int, .check = "part_array IN (1,2)" },
             .{ .name = "part_kind", .type = .int, .check = "part_kind=0 OR (part_kind IN (1,2,4) AND part_array=1) OR (part_kind=3 AND part_array=2)" },
-            .{ .name = "text_length", .type = .int, .nullable = true, .check = "text_length IS NULL OR text_length>=0" },
+            .{ .name = "text_length", .type = .int, .nullable = true, .range = .{ .min = 0 } },
             .{ .name = "text_content_id", .type = .int, .nullable = true },
             .{ .name = "extras_content_id", .type = .int },
         },
@@ -2079,8 +2087,8 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "operation_id", .type = .int },
             .{ .name = "session_ref", .type = .{ .text = null } },
-            .{ .name = "call_ordinal", .type = .int, .check = "call_ordinal>=0" },
-            .{ .name = "item_ordinal", .type = .int, .check = "item_ordinal>=0" },
+            .{ .name = "call_ordinal", .type = .int, .range = .{ .min = 0 } },
+            .{ .name = "item_ordinal", .type = .int, .range = .{ .min = 0 } },
             .{ .name = "name_content_id", .type = .int },
             .{ .name = "call_id_content_id", .type = .int },
             .{ .name = "arguments_content_id", .type = .int },
@@ -2089,8 +2097,8 @@ pub const tables = [_]Table{
             .{ .name = "field_metadata", .type = .{ .bytes = .{ .min = 120, .max = 120 } } },
             .{ .name = "rejection_code", .type = .{ .tag = &.{ "unknown_tool", "invalid_arguments" } }, .nullable = true },
             .{ .name = "rejection_content_id", .type = .int, .nullable = true },
-            .{ .name = "acceptance_position", .type = .int, .nullable = true, .check = "acceptance_position IS NULL OR acceptance_position>0" },
-            .{ .name = "action_kind", .type = .int, .nullable = true, .check = "action_kind IS NULL OR action_kind=1" },
+            .{ .name = "acceptance_position", .type = .int, .nullable = true, .range = .{ .min = 1 } },
+            .{ .name = "action_kind", .type = .int, .nullable = true, .range = .{ .min = 1, .max = 1 } },
         },
         .primary_key = &.{ "operation_id", "call_ordinal" },
         .uniques = &.{ &.{ "operation_id", "item_ordinal" }, &.{ "operation_id", "call_id_content_id" }, &.{ "operation_id", "call_ordinal", "action_kind" } },
@@ -2111,28 +2119,28 @@ pub const tables = [_]Table{
     .{
         .name = "action_operation",
         .columns = &.{
-            .{ .name = "action_id", .type = .int, .check = "action_id>0" },
+            .{ .name = "action_id", .type = .int, .range = .{ .min = 1 } },
             .{ .name = "parent_operation_id", .type = .int },
-            .{ .name = "call_ordinal", .type = .int, .check = "call_ordinal>=0" },
+            .{ .name = "call_ordinal", .type = .int, .range = .{ .min = 0 } },
             .{ .name = "session_ref", .type = .{ .text = null } },
-            .{ .name = "tool_kind", .type = .int, .check = "tool_kind=1" },
-            .{ .name = "permission_revision", .type = .int, .check = "permission_revision>0" },
+            .{ .name = "tool_kind", .type = .int, .range = .{ .min = 1, .max = 1 } },
+            .{ .name = "permission_revision", .type = .int, .range = .{ .min = 1 } },
             .{ .name = "authorized", .type = .flag },
             .{ .name = "attempt_ordinal", .type = .int, .default = "0", .check = "attempt_ordinal IN (0,1)" },
-            .{ .name = "bash_timeout_override_ms", .type = .int, .nullable = true, .check = "bash_timeout_override_ms IS NULL OR bash_timeout_override_ms>0" },
-            .{ .name = "attempt_timeout_ms", .type = .int, .nullable = true, .check = "attempt_timeout_ms IS NULL OR attempt_timeout_ms>0" },
-            .{ .name = "sender_handle", .type = .{ .text = .{ .min = 32, .max = 32 } }, .nullable = true, .check = "@charset(sender_handle,'0-9a-f')" },
+            .{ .name = "bash_timeout_override_ms", .type = .int, .nullable = true, .range = .{ .min = 1 } },
+            .{ .name = "attempt_timeout_ms", .type = .int, .nullable = true, .range = .{ .min = 1 } },
+            .{ .name = "sender_handle", .type = .{ .text = .{ .min = 32, .max = 32 } }, .nullable = true, .charset = "0-9a-f" },
             .{
                 .name = "resolution_code",
                 .type = .{ .tag = &.{ "denied", "cancelled", "succeeded", "failed", "timed_out", "indeterminate", "storage_failed", "spawn_failed", "infrastructure_shutdown" } },
                 .nullable = true,
             },
             .{ .name = "resolution_content_id", .type = .int, .nullable = true, .holds = .value },
-            .{ .name = "acceptance_position", .type = .int, .nullable = true, .check = "acceptance_position IS NULL OR acceptance_position>0" },
-            .{ .name = "attempt_at", .type = .int, .nullable = true, .check = "attempt_at IS NULL OR attempt_at>0" },
-            .{ .name = "decided_at", .type = .int, .nullable = true, .check = "decided_at IS NULL OR decided_at>0" },
-            .{ .name = "resolved_at", .type = .int, .nullable = true, .check = "resolved_at IS NULL OR resolved_at>0" },
-            .{ .name = "approval_position", .type = .int, .nullable = true, .check = "approval_position IS NULL OR approval_position>0" },
+            .{ .name = "acceptance_position", .type = .int, .nullable = true, .range = .{ .min = 1 } },
+            .{ .name = "attempt_at", .type = .int, .nullable = true, .range = .{ .min = 1 } },
+            .{ .name = "decided_at", .type = .int, .nullable = true, .range = .{ .min = 1 } },
+            .{ .name = "resolved_at", .type = .int, .nullable = true, .range = .{ .min = 1 } },
+            .{ .name = "approval_position", .type = .int, .nullable = true, .range = .{ .min = 1 } },
             .{ .name = "background_content_id", .type = .int, .nullable = true, .sqlite_added = true, .holds = .value },
             .{ .name = "background_position", .type = .int, .nullable = true, .check = "(background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))", .sqlite_added = true },
             .{ .name = "background_at", .type = .int, .nullable = true, .check = "(background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)", .sqlite_added = true },
@@ -2140,7 +2148,7 @@ pub const tables = [_]Table{
             // names (NULL: the row keeps its call line), where in the words that Session belongs, and whether the
             // call handed work on (1) or just finished (0). No foreign key: the line is a record of what the call said.
             .{ .name = "outcome_text", .type = .{ .text = .{ .min = 0, .max = 200 } }, .nullable = true, .sqlite_added = true },
-            .{ .name = "outcome_link_at", .type = .int, .nullable = true, .sqlite_added = true, .check = "outcome_link_at IS NULL OR outcome_link_at>=0" },
+            .{ .name = "outcome_link_at", .type = .int, .nullable = true, .sqlite_added = true, .range = .{ .min = 0 } },
             .{ .name = "outcome_link_session", .type = .{ .text = .{ .min = 1, .max = 128 } }, .nullable = true, .sqlite_added = true },
             .{
                 .name = "outcome_completion",
@@ -2176,7 +2184,7 @@ pub const tables = [_]Table{
         .name = "permission_decision_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
-            .{ .name = "action_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(action_id,'0-9')" },
+            .{ .name = "action_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .charset = "0-9" },
             .{ .name = "decision", .type = .{ .tag = &.{ "allow_once", "deny" } } },
         },
         .primary_key = &.{"command_key"},
@@ -2205,7 +2213,7 @@ pub const tables = [_]Table{
         .name = "action_stop_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
-            .{ .name = "action_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(action_id,'0-9')" },
+            .{ .name = "action_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .charset = "0-9" },
             .{ .name = "resolution_position", .type = .int, .nullable = true, .check = "resolution_position>0" },
         },
         .primary_key = &.{"command_key"},
@@ -2216,7 +2224,7 @@ pub const tables = [_]Table{
         .name = "action_control_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
-            .{ .name = "action_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(action_id,'0-9')" },
+            .{ .name = "action_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .charset = "0-9" },
             .{ .name = "selected_action_id", .type = .int, .nullable = true },
             .{ .name = "selection", .type = .{ .tag = &.{ "background", "final" } }, .nullable = true },
             .{ .name = "selection_position", .type = .int, .nullable = true, .check = "selection_position>0" },
@@ -2359,6 +2367,26 @@ pub fn readByBoth(comptime table: []const u8) []const []const u8 {
             };
             if (names.len != 0 and sessionColumns(table).len != 2) @compileError("schema: only a table that names two Sessions reads a column by both: " ++ table);
             return names;
+        }
+        @compileError("schema: no table named " ++ table);
+    }
+}
+
+/// The CHECK expression a column's own rules render to on an engine, null when it carries none.
+pub fn columnRuleSql(comptime dialect: rsql.Dialect, comptime table: []const u8, comptime column: Column) ?[]const u8 {
+    comptime {
+        const text = columnCheck(column) orelse return null;
+        return expression(dialect, tables[tablePosition(&tables, table)], text);
+    }
+}
+
+pub fn columnOf(comptime table: []const u8, comptime column: []const u8) Column {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            for (candidate.columns) |each| if (std.mem.eql(u8, each.name, column)) return each;
+            @compileError("schema: no column " ++ column ++ " in " ++ table);
         }
         @compileError("schema: no table named " ++ table);
     }
@@ -2951,19 +2979,38 @@ fn columnDefinition(comptime table: Table, comptime column: Column) []const u8 {
     return text;
 }
 
-fn columnCheck(comptime column: Column) ?[]const u8 {
+pub fn columnCheck(comptime column: Column) ?[]const u8 {
     const name = column.name;
-    const bound: ?[]const u8 = switch (column.type) {
+    const type_bound: ?[]const u8 = switch (column.type) {
         .int => null,
         .flag => name ++ " IN (0,1)",
         .text => |octets| if (octets) |bounds| lengthBound("@octets(" ++ name ++ ")", bounds) else null,
         .bytes => |octets| if (octets) |bounds| lengthBound("length(" ++ name ++ ")", bounds) else null,
         .tag => |values| oneOf(name, values),
     };
-    const type_bound = bound orelse return column.check;
-    const body = if (column.check) |check| type_bound ++ " AND " ++ check else type_bound;
-    if (!column.nullable) return body;
-    return name ++ " IS NULL OR " ++ (if (column.check == null) body else "(" ++ body ++ ")");
+    var body: ?[]const u8 = type_bound;
+    if (column.range) |range| body = joinRule(body, rangeBound(name, range));
+    if (column.initial) |set| body = joinRule(body, "@initial(" ++ name ++ ",'" ++ set ++ "')");
+    if (column.charset) |set| body = joinRule(body, "@charset(" ++ name ++ ",'" ++ set ++ "')");
+    const own = body orelse return column.check;
+    const all = if (column.check) |check| own ++ " AND " ++ check else own;
+    if (!column.nullable) return all;
+    const lifted = column.range != null or column.initial != null or column.charset != null;
+    const grouped = column.check != null or (type_bound != null and lifted);
+    return name ++ " IS NULL OR " ++ (if (grouped) "(" ++ all ++ ")" else all);
+}
+
+fn joinRule(comptime before: ?[]const u8, comptime rule: []const u8) []const u8 {
+    return if (before) |text| text ++ " AND " ++ rule else rule;
+}
+
+fn rangeBound(comptime name: []const u8, comptime range: Range) []const u8 {
+    if (range.max) |max| {
+        if (range.min == max) return std.fmt.comptimePrint("{s}={d}", .{ name, max });
+        return std.fmt.comptimePrint("{s} BETWEEN {d} AND {d}", .{ name, range.min, max });
+    }
+    if (range.min == 1) return name ++ ">0";
+    return std.fmt.comptimePrint("{s}>={d}", .{ name, range.min });
 }
 
 fn lengthBound(comptime length: []const u8, comptime bounds: Octets) []const u8 {

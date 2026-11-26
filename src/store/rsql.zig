@@ -354,6 +354,7 @@ fn WriteFrom(comptime table: type, comptime spec: WriteSpec) type {
         pub const Args = spec.Args;
         pub const expect = spec.expect;
         pub const guarded = facts.shape != .insert_row;
+        pub const bound_columns = facts.bound;
         pub const sql = if (hit) |found| found.sqlite else renderStatement(spec.sql, fieldCount(Args));
         pub const mysql: Template = if (hit) |found| found.mysql else mysqlTemplate(spec.sql);
         pub const uses_now = facts.uses_now;
@@ -377,6 +378,8 @@ pub const Facts = struct {
     uses_now: bool,
     shape: Shape,
     single_row: bool = false,
+    /// A write's arguments that are, by themselves, a column's whole value (`BoundColumn`).
+    bound: []const BoundColumn = &.{},
 };
 
 pub const TableVariant = struct { signature: []const u8, sqlite: [:0]const u8 };
@@ -449,7 +452,7 @@ fn signature(comptime kind: StatementKind, comptime Args: type, comptime Row: ty
 
 fn factsOf(comptime parsed: Parsed) Facts {
     const shape = shapeOf(parsed.statement);
-    return .{ .uses_now = parsed.uses_now, .shape = shape, .single_row = shape == .select_one };
+    return .{ .uses_now = parsed.uses_now, .shape = shape, .single_row = shape == .select_one, .bound = boundOf(parsed.statement) };
 }
 
 fn shapeOf(comptime statement: Statement) Shape {
@@ -510,7 +513,7 @@ fn collect(
     comptime {
         @setEvalBranchQuota(100 * (sql.len + sqlite.len) + 1_000_000);
         _ = Exported(@tagName(kind) ++ "\x1f" ++ sql ++ "\x1f" ++ checked ++ "\x1f" ++ sqlite ++ "\x1f" ++ templateRecord(mysql) ++ "\x1f" ++
-            (if (facts.uses_now) "1" else "0") ++ "\x1f" ++ @tagName(facts.shape) ++ "\x1f" ++ inputs() ++ "\x1c");
+            (if (facts.uses_now) "1" else "0") ++ "\x1f" ++ @tagName(facts.shape) ++ "\x1f" ++ boundRecord(facts.bound) ++ "\x1f" ++ inputs() ++ "\x1c");
     }
 }
 
@@ -559,6 +562,15 @@ pub fn fixtureRendering(comptime text: []const u8) MysqlRendering {
     }
 }
 
+/// A write's bound columns, `arg:table:column` each, comma between.
+fn boundRecord(comptime bound: []const BoundColumn) []const u8 {
+    comptime {
+        var text: []const u8 = "";
+        for (bound, 0..) |one, i| text = text ++ (if (i == 0) "" else ",") ++ std.fmt.comptimePrint("{d}", .{one.arg}) ++ ":" ++ one.table ++ ":" ++ one.column;
+        return text;
+    }
+}
+
 /// A template's MySQL parts (0x1e between them), 0x1f, then its slots.
 fn templateRecord(comptime mysql: Template) []const u8 {
     comptime {
@@ -576,6 +588,30 @@ fn templateRecord(comptime mysql: Template) []const u8 {
 }
 
 pub const StatementKind = enum { read, write };
+
+/// A write's argument `?arg` (1-based) that is, by itself, the value a column takes: an INSERT ... VALUES entry or an UPDATE assignment.
+pub const BoundColumn = struct { arg: usize, table: []const u8, column: []const u8 };
+
+fn boundOf(comptime statement: Statement) []const BoundColumn {
+    comptime {
+        var found: []const BoundColumn = &.{};
+        switch (statement) {
+            .insert => |insert| switch (insert.values) {
+                .row => |row| for (insert.columns, row) |column, value| {
+                    if (value == .parameter) found = found ++ .{BoundColumn{ .arg = value.parameter, .table = insert.table, .column = column }};
+                },
+                .select => |select| for (insert.columns, select.first.results) |column, result| {
+                    if (result.value == .parameter) found = found ++ .{BoundColumn{ .arg = result.value.parameter, .table = insert.table, .column = column }};
+                },
+            },
+            .update => |update| for (update.assigned, update.values) |column, value| {
+                if (value == .parameter) found = found ++ .{BoundColumn{ .arg = value.parameter, .table = update.table, .column = column }};
+            },
+            else => {},
+        }
+        return found;
+    }
+}
 
 pub const ObligationProjectionSpec = struct { sql: []const u8, Args: type };
 pub fn ObligationProjection(comptime spec: ObligationProjectionSpec) type {
@@ -597,6 +633,7 @@ pub fn ObligationProjection(comptime spec: ObligationProjectionSpec) type {
         pub const Args = spec.Args;
         pub const expect: Expect = .{ .at_most = std.math.maxInt(u32) };
         pub const guarded = true;
+        pub const bound_columns: []const BoundColumn = &.{};
         pub const sql = renderStatement(text, fieldCount(Args));
         pub const mysql: Template = mysqlTemplate(mysql_text);
         pub const uses_now = R.uses_now;
@@ -823,7 +860,7 @@ const Statement = union(enum) {
         columns: []const []const u8,
         values: union(enum) { row: []const Expr, select: Select },
     },
-    update: struct { table: []const u8, assigned: []const []const u8, where: Expr, query: usize },
+    update: struct { table: []const u8, assigned: []const []const u8, values: []const Expr, where: Expr, query: usize },
     delete: struct { table: []const u8, where: Expr, query: usize },
 };
 
@@ -1065,11 +1102,12 @@ const Parser = struct {
             const opened = p.open();
             try p.expect("SET");
             var assigned: []const []const u8 = &.{};
+            var values: []const Expr = &.{};
             while (true) {
                 const column = try p.name();
                 try p.expectSymbol("=");
                 const read_from = p.columns.len;
-                _ = try p.expr();
+                values = values ++ .{try p.expr()};
                 if (readsAssigned(p.columns[read_from..], target, assigned)) |read|
                     return p.refuseWith("rsql: SET reads " ++ read ++ " after assigning it, and MySQL assigns left to right; read it before the write or assign it last");
                 assigned = assigned ++ .{column};
@@ -1077,7 +1115,7 @@ const Parser = struct {
             }
             const where = try p.writtenWhere();
             p.close(opened, writtenTable(target), where);
-            break :update .{ .update = .{ .table = target, .assigned = assigned, .where = where, .query = opened.id } };
+            break :update .{ .update = .{ .table = target, .assigned = assigned, .values = values, .where = where, .query = opened.id } };
         } else if (p.accept("DELETE")) delete: {
             try p.expect("FROM");
             const target = try p.tableName();
