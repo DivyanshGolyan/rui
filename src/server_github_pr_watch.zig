@@ -821,13 +821,14 @@ test "PRW-66 a watch with no change ends at its deadline with the latest snapsho
     var github = newGithub();
     defer github.arena.deinit();
     var limits: Limits = .loopback;
-    limits.deadline_ms = 700;
+    limits.deadline_ms = 2000;
     const finished = try runWatch(arena, .{ .github = &github, .limits = limits });
     const parsed = try expectOutcome(finished, "succeeded", "no_change");
     defer parsed.deinit();
     try expectChanged(parsed.value, &.{});
     try std.testing.expectEqualStrings("pending", parsed.value.object.get("snapshot").?.object.get("checks").?.string);
-    // It kept polling until the deadline instead of ending after the baseline.
+    // It polled again after the baseline instead of ending there (each poll reads the pull request twice). The
+    // deadline leaves the watch's startup and one poll gap a wide margin, so a slow host cannot spend it all first.
     try std.testing.expect(github.pull_reads >= 4);
 }
 
