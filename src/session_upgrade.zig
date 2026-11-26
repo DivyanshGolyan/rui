@@ -14,14 +14,13 @@ pub const Phase = enum {
 };
 
 pub const recovery_words = "This window can't continue after the update. Select Version in Settings to retry, or open rui in a new terminal.";
-pub const recovery = state_marks.attention_sign ++ recovery_words;
 pub const rereading = "Reading this chat…";
 
-pub fn refusal(phase: Phase) []const u8 {
+pub fn refusal(phase: Phase) state_marks.Say {
     return switch (phase) {
-        .quiescing => "! Updating; nothing sent.",
-        .reobserving => "! Reading this chat after the update; nothing sent.",
-        .blocked => recovery,
+        .quiescing => .attention("Updating; nothing sent."),
+        .reobserving => .attention("Reading this chat after the update; nothing sent."),
+        .blocked => .attention(recovery_words),
         .active => unreachable,
     };
 }

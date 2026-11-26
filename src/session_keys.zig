@@ -3,6 +3,8 @@ const keymap = @import("keymap.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const ActionConsent = @import("ActionConsent.zig");
 const session_chrome = @import("session_chrome.zig");
+const Say = @import("marks.zig").Say;
+const say_text = @import("testing/say_text.zig");
 
 pub const Action = enum {
     page_up,
@@ -84,7 +86,7 @@ pub fn clearsOverviewNotice(selected: Selection, opening: bool) bool {
 
 pub const AtChoice = union(enum) {
     nothing,
-    say: []const u8,
+    say: Say,
     perform: Action,
     pick: ConsentPolicy.Choice,
     confirm,
@@ -95,15 +97,15 @@ pub fn atChoice(selected: Selection, command_holds: bool) AtChoice {
     return switch (selected) {
         .none => .nothing,
         .action => |action| switch (action) {
-            .recover => .{ .say = "! Action needs a decision; nothing to retry." },
+            .recover => .{ .say = .attention("Action needs a decision; nothing to retry.") },
             .older, .newer => .nothing,
             else => .{ .perform = action },
         },
         .left => .{ .pick = .allow_once },
         .right => .{ .pick = .deny },
         .enter => .confirm,
-        .text => if (command_holds) .{ .say = "! Command still running. Input ignored." } else .draft,
-        .refused => .{ .say = "! Key combination not recognized; nothing authorized." },
+        .text => if (command_holds) .{ .say = .attention("Command still running. Input ignored.") } else .draft,
+        .refused => .{ .say = .attention("Key combination not recognized; nothing authorized.") },
     };
 }
 
@@ -121,9 +123,9 @@ test "at the choice only the arrows and Enter act; typing moves to the draft unl
     try std.testing.expectEqual(AtChoice{ .pick = .deny }, atChoice(.right, false));
     try std.testing.expectEqual(AtChoice.confirm, atChoice(.enter, true));
     try std.testing.expectEqual(AtChoice.draft, atChoice(.text, false));
-    try std.testing.expectEqualStrings("! Command still running. Input ignored.", atChoice(.text, true).say);
-    try std.testing.expectEqualStrings("! Key combination not recognized; nothing authorized.", atChoice(.refused, false).say);
-    try std.testing.expectEqualStrings("! Action needs a decision; nothing to retry.", atChoice(.{ .action = .recover }, false).say);
+    try say_text.expect("! Command still running. Input ignored.", atChoice(.text, true).say);
+    try say_text.expect("! Key combination not recognized; nothing authorized.", atChoice(.refused, false).say);
+    try say_text.expect("! Action needs a decision; nothing to retry.", atChoice(.{ .action = .recover }, false).say);
     try std.testing.expectEqual(AtChoice.nothing, atChoice(.none, false));
     try std.testing.expectEqual(AtChoice.nothing, atChoice(.{ .action = .older }, false));
     try std.testing.expectEqual(AtChoice.nothing, atChoice(.{ .action = .newer }, false));

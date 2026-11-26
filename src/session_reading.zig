@@ -1,6 +1,8 @@
 const std = @import("std");
+const say_text = @import("testing/say_text.zig");
 const departure = @import("session_departure.zig");
 const ReadPhase = departure.ReadPhase;
+const Say = @import("marks.zig").Say;
 
 pub const scan_interval_ns: i96 = 250_000_000;
 
@@ -39,26 +41,28 @@ pub fn commandSettled(completed: bool, phase: ReadPhase) bool {
     return !completed or phase == .inspection;
 }
 
-pub const Unavailable = union(enum) { say: []const u8, copy };
+pub const Unavailable = union(enum) { say: Say, copy };
 
 pub fn unavailable(phase: ReadPhase, inspection: Inspection) Unavailable {
     return switch (phase) {
-        .activity, .fill, .permission => .{ .say = "! Messages unavailable; scroll to retry." },
-        .message => .{ .say = "! Message unavailable." },
-        .tool => .{ .say = "! Tool output unavailable." },
-        .recall => .{ .say = "! Sent message unavailable." },
-        .retry => .{ .say = "! Retry unavailable; nothing sent." },
-        .inspection => if (inspection == .copy) .copy else .{ .say = "! Inspection unavailable." },
+        .activity, .fill, .permission => .{ .say = .attention("Messages unavailable; scroll to retry.") },
+        .message => .{ .say = .attention("Message unavailable.") },
+        .tool => .{ .say = .attention("Tool output unavailable.") },
+        .recall => .{ .say = .attention("Sent message unavailable.") },
+        .retry => .{ .say = .attention("Retry unavailable; nothing sent.") },
+        .inspection => if (inspection == .copy) .copy else .{ .say = .attention("Inspection unavailable.") },
     };
 }
 
-pub fn copyFailure(to_file: bool, err: anyerror) []const u8 {
+pub fn copyFailure(to_file: bool, err: anyerror) Say {
     if (to_file) switch (err) {
-        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => return "! This directory is not writable.",
+        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => return .attention("This directory is not writable."),
         else => {},
     };
-    return "! Copy unavailable.";
+    return copy_unavailable;
 }
+
+pub const copy_unavailable = Say.attention("Copy unavailable.");
 
 pub const Place = enum { feed, elsewhere };
 
@@ -118,14 +122,14 @@ test "a command's output settles when its page shows or its read ends early, nev
 }
 
 test "a read that failed while preparing says which page is unavailable" {
-    try std.testing.expectEqualStrings("! Message unavailable.", unavailable(.message, .other).say);
-    try std.testing.expectEqualStrings("! Tool output unavailable.", unavailable(.tool, .other).say);
-    try std.testing.expectEqualStrings("! Sent message unavailable.", unavailable(.recall, .other).say);
-    try std.testing.expectEqualStrings("! Retry unavailable; nothing sent.", unavailable(.retry, .other).say);
-    try std.testing.expectEqualStrings("! Inspection unavailable.", unavailable(.inspection, .command).say);
+    try say_text.expect("! Message unavailable.", unavailable(.message, .other).say);
+    try say_text.expect("! Tool output unavailable.", unavailable(.tool, .other).say);
+    try say_text.expect("! Sent message unavailable.", unavailable(.recall, .other).say);
+    try say_text.expect("! Retry unavailable; nothing sent.", unavailable(.retry, .other).say);
+    try say_text.expect("! Inspection unavailable.", unavailable(.inspection, .command).say);
     try std.testing.expect(unavailable(.inspection, .copy) == .copy);
-    try std.testing.expectEqualStrings("! Messages unavailable; scroll to retry.", unavailable(.fill, .copy).say);
-    try std.testing.expectEqualStrings("! This directory is not writable.", copyFailure(true, error.ReadOnlyFileSystem));
-    try std.testing.expectEqualStrings("! Copy unavailable.", copyFailure(false, error.AccessDenied));
-    try std.testing.expectEqualStrings("! Copy unavailable.", copyFailure(true, error.BrokenPipe));
+    try say_text.expect("! Messages unavailable; scroll to retry.", unavailable(.fill, .copy).say);
+    try say_text.expect("! This directory is not writable.", copyFailure(true, error.ReadOnlyFileSystem));
+    try say_text.expect("! Copy unavailable.", copyFailure(false, error.AccessDenied));
+    try say_text.expect("! Copy unavailable.", copyFailure(true, error.BrokenPipe));
 }
