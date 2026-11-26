@@ -76,8 +76,8 @@ pub const Connected = struct {
     }
 
     /// Adds a sign-in connection: its credential record lives in its own file at `record_path`.
-    pub fn addSignIn(self: *Connected, name: connection.Name, presentation: Presentation, url: []const u8, kind: SignInKind, record_path: []const u8, fixture: bool) error{ServedFull}!void {
-        if (record_path.len > max_record_path_bytes) return error.ServedFull;
+    pub fn addSignIn(self: *Connected, name: connection.Name, presentation: Presentation, url: []const u8, kind: SignInKind, record_path: []const u8, fixture: bool) error{ ServedFull, InvalidCredentialPath }!void {
+        if (record_path.len > max_record_path_bytes) return error.InvalidCredentialPath;
         const entry = try self.add(name, presentation, url, "", fixture);
         entry.sign_in = kind;
         @memcpy(entry.record_path[0..record_path.len], record_path);
