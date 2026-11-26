@@ -89,7 +89,7 @@ Unknown Actions and Actions from another Session are refused.
 Native users read the sole terminal Resolution through `action read`.
 A Session Stop keeps the existing runner-aware cancellation and uncertainty rules; Host recovery records uncertainty without replaying an invocation.
 
-Bash arguments require `cmd` and `description`; `stdin` and `timeout_ms` are optional.
+Bash arguments require `cmd`; `description`, `stdin` and `timeout_ms` are optional. The `description` is advice for the screen: any string is accepted, a blank or missing one is no label, and a long or multi-line one is saved as one tidy line of at most 100 bytes, so no label refuses a call; only a `description` that is not a string is an `invalid_arguments` rejection.
 Function tools are offered with `"strict": false`, explicitly, since an omitted field lets the provider make the schema strict: the provider does not check a call against its schema, Rui does.
 A call whose arguments fail that check is settled as an `invalid_arguments` rejection whose result tells the model what was wrong (for example "Invalid arguments for tool 'bash': cmd is required."), so the model corrects the call within the Turn; the Turn does not fail.
 The description is nonblank, single-line, valid UTF-8, and at most 100 decoded UTF-8 bytes.

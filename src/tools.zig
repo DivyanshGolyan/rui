@@ -248,13 +248,12 @@ test "rejected Bash arguments name what is wrong" {
         .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"a_field_name_longer_than_sixteen\":1}", .unknown_field },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"cmd\":\"false\"}", .duplicate_field },
         .{ "{\"description\":\"Run tests\"}", .missing_cmd },
-        .{ "{\"cmd\":\"true\"}", .missing_description },
         .{ "{\"description\":\"Run tests\",\"cmd\":7}", .cmd_invalid },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"a\\u0000b\"}", .cmd_invalid },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"\\ud83d\\n\"}", .cmd_invalid },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"\\ud83d\\q\"}", .malformed_json },
-        .{ "{\"description\":\"\",\"cmd\":\"true\"}", .description_invalid },
-        .{ "{\"description\":\"" ++ @as([101]u8, @splat('a')) ++ "\",\"cmd\":\"true\"}", .description_invalid },
+        .{ "{\"description\":42,\"cmd\":\"true\"}", .description_invalid },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"description\":\"Read files\"}", .duplicate_field },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"stdin\":42}", .stdin_invalid },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"stdin\":\"\xff\"}", .stdin_invalid },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"timeout_ms\":0}", .timeout_invalid },
@@ -289,9 +288,8 @@ test "an invalid-arguments result tells the model what was wrong" {
         .{ .unknown_field, "Invalid arguments for tool 'bash': only cmd, description, stdin and timeout_ms are accepted." },
         .{ .duplicate_field, "Invalid arguments for tool 'bash': a field appears more than once." },
         .{ .missing_cmd, "Invalid arguments for tool 'bash': cmd is required." },
-        .{ .missing_description, "Invalid arguments for tool 'bash': description is required." },
         .{ .cmd_invalid, "Invalid arguments for tool 'bash': cmd must be a string of UTF-8 text with no NUL characters." },
-        .{ .description_invalid, "Invalid arguments for tool 'bash': description must be a nonblank, single-line string of UTF-8 text, at most 100 bytes." },
+        .{ .description_invalid, "Invalid arguments for tool 'bash': description, when given, must be a string." },
         .{ .stdin_invalid, "Invalid arguments for tool 'bash': stdin must be a string of UTF-8 text." },
         .{ .timeout_invalid, "Invalid arguments for tool 'bash': timeout_ms must be an integer from 1 to 9223372036854775807." },
     };
@@ -302,28 +300,37 @@ test "an invalid-arguments result tells the model what was wrong" {
     }
 }
 
-test "Bash descriptions are required and bounded by decoded UTF-8 bytes" {
-    var missing = TestSource{ .bytes = "{\"cmd\":\"true\",\"timeout_ms\":null}" };
-    try std.testing.expect(!try validBashArguments(&missing));
-    const invalid = [_][]const u8{
-        "\"\"",        "\"   \"",     "null",      "1", "\"line\\nnext\"", "\"line\\rnext\"",
-        "\"\\u2028\"", "\"\\ud800\"", "\"\xc3(\"",
+test "TPR-6 a Bash call is accepted whatever its description says, and saves it as one tidy line or none" {
+    const long_ascii = @as([150]u8, @splat('a'));
+    const cut_at_a_scalar = @as([99]u8, @splat('a')) ++ "\\u00e9\\u00e9";
+    const cases = [_]struct { description: []const u8, label: ?[]const u8 }{
+        .{ .description = "\"Run parser tests\"", .label = "Run parser tests" },
+        .{ .description = "\"  Run   tests\\nnow  \"", .label = "Run tests now" },
+        .{ .description = "\"line\\rnext\\u2028more\"", .label = "line next more" },
+        .{ .description = "\"a\\u0000b\"", .label = "a\u{fffd}b" },
+        .{ .description = "\"\"", .label = null },
+        .{ .description = "\"   \"", .label = null },
+        .{ .description = "null", .label = null },
+        .{ .description = "\"" ++ long_ascii ++ "\"", .label = &@as([100]u8, @splat('a')) },
+        .{ .description = "\"" ++ cut_at_a_scalar ++ "\"", .label = &@as([99]u8, @splat('a')) },
     };
-    var buffer: [512]u8 = undefined;
-    for (invalid) |description| {
-        var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"cmd\":\"true\",\"timeout_ms\":null,\"description\":{s}}}", .{description}) };
-        try std.testing.expect(!try validBashArguments(&source));
+    for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        const arguments = try std.fmt.bufPrint(&buffer, "{{\"cmd\":\"true\",\"description\":{s},\"timeout_ms\":null}}", .{case.description});
+        var source = TestSource{ .bytes = arguments };
+        const check = try checkBashArguments(&source);
+        errdefer std.debug.print("arguments: {s}\n", .{arguments});
+        const facts: CallFacts = .{ .tool = bash_record, .bash = check };
+        try std.testing.expect(check == .accepted);
+        if (case.label) |label| {
+            try std.testing.expectEqualStrings(label, facts.label().?);
+        } else {
+            try std.testing.expect(facts.label() == null);
+        }
     }
-    for ([_][]const u8{ @as([98]u8, @splat('a')) ++ "é", &@as([50 * 6]u8, @bitCast(@as([50][6]u8, @splat("\\u00e9".*)))) }) |description| {
-        var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"description\":\"{s}\",\"cmd\":\"printf ok\",\"timeout_ms\":null}}", .{description}) };
-        try std.testing.expect(try validBashArguments(&source));
-    }
-    for ([_][]const u8{ @as([99]u8, @splat('a')) ++ "é", &@as([51 * 6]u8, @bitCast(@as([51][6]u8, @splat("\\u00e9".*)))) }) |description| {
-        var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"cmd\":\"true\",\"description\":\"{s}\",\"timeout_ms\":null}}", .{description}) };
-        try std.testing.expect(!try validBashArguments(&source));
-    }
-    var duplicate = TestSource{ .bytes = "{\"description\":\"Run tests\",\"cmd\":\"true\",\"description\":\"Read files\",\"timeout_ms\":null}" };
-    try std.testing.expect(!try validBashArguments(&duplicate));
+    var omitted = TestSource{ .bytes = "{\"cmd\":\"true\"}" };
+    const none: CallFacts = .{ .tool = bash_record, .bash = try checkBashArguments(&omitted) };
+    try std.testing.expect(none.bash.? == .accepted and none.label() == null);
 }
 
 test "every provider-run tool the Host offers is run by some provider" {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const core_tools = @import("message_agent_arguments.zig");
 const Bounded = @import("bounded.zig").Bounded;
+const saved_label = @import("saved_label.zig");
 const session_id = @import("session_id.zig");
 const tool_presentation = @import("tool_presentation.zig");
 const tool_proposal = @import("tool_proposal.zig");
@@ -29,6 +30,9 @@ comptime {
 
 pub const BashArguments = struct {
     timeout_ms: ?u64 = null,
+    /// The model's activity label as it reads on a screen: its `description` repaired to one tidy line of at most
+    /// `max_bash_description_bytes` (`saved_label.readWords`). Empty when the model gave none or only blanks; the label
+    /// is advice, so no value of it refuses a call.
     description: Bounded(max_bash_description_bytes) = .{},
     stdin_present: bool = false,
 };
@@ -66,6 +70,7 @@ pub const CallFacts = struct {
     /// arguments where they are settled.) Nothing else is saved; the line a reader shows is `tool_line.of`.
     pub fn label(self: *const CallFacts) ?[]const u8 {
         const arguments = self.bashArguments() orelse return null;
+        if (arguments.description.len == 0) return null;
         return arguments.description.slice();
     }
 
@@ -82,7 +87,6 @@ pub const BashProblem = enum {
     unknown_field,
     duplicate_field,
     missing_cmd,
-    missing_description,
     cmd_invalid,
     description_invalid,
     stdin_invalid,
@@ -94,9 +98,8 @@ pub const BashProblem = enum {
             .unknown_field => "only cmd, description, stdin and timeout_ms are accepted",
             .duplicate_field => "a field appears more than once",
             .missing_cmd => "cmd is required",
-            .missing_description => "description is required",
             .cmd_invalid => "cmd must be a string of UTF-8 text with no NUL characters",
-            .description_invalid => std.fmt.comptimePrint("description must be a nonblank, single-line string of UTF-8 text, at most {d} bytes", .{max_bash_description_bytes}),
+            .description_invalid => "description, when given, must be a string",
             .stdin_invalid => "stdin must be a string of UTF-8 text",
             .timeout_invalid => std.fmt.comptimePrint("timeout_ms must be an integer from 1 to {d}", .{std.math.maxInt(i64)}),
         };
@@ -360,6 +363,10 @@ pub const BashParser = struct {
     value_target: ValueTarget = .none,
     key: Bounded(16) = .{},
     result: BashArguments = .{},
+    /// The `description` as the model wrote it, up to `saved_label.max_bytes`; the rest is dropped. `finishDescription` repairs it.
+    description_text: [saved_label.max_bytes]u8 = undefined,
+    description_len: usize = 0,
+    description_cut: bool = false,
     has_command: bool = false,
     has_timeout: bool = false,
     has_description: bool = false,
@@ -425,7 +432,7 @@ pub const BashParser = struct {
                                 self.phase = .after_value;
                             },
                             .description => {
-                                if (!tool_presentation.ToolPresentation.validDescription(self.result.description.slice())) return .{ .invalid = .description_invalid };
+                                self.finishDescription();
                                 self.has_description = true;
                                 self.phase = .after_value;
                             },
@@ -512,9 +519,13 @@ pub const BashParser = struct {
                         },
                         .description => {
                             if (self.has_description) return .{ .invalid = .duplicate_field };
-                            if (next != '"') return .{ .invalid = .description_invalid };
-                            self.string_target = .description;
-                            self.phase = .string;
+                            if (next == '"') {
+                                self.string_target = .description;
+                                self.phase = .string;
+                            } else if (next == 'n') {
+                                self.null_index = 1;
+                                self.phase = .timeout_null;
+                            } else return .{ .invalid = .description_invalid };
                         },
                         .stdin => {
                             if (self.has_stdin) return .{ .invalid = .duplicate_field };
@@ -545,11 +556,17 @@ pub const BashParser = struct {
                     if (self.timeout_value > std.math.maxInt(i64)) return .{ .invalid = .timeout_invalid };
                 },
                 .timeout_null => {
-                    if (next != "null"[self.null_index]) return .{ .invalid = if (self.value_target == .stdin) .stdin_invalid else .timeout_invalid };
+                    if (next != "null"[self.null_index]) return .{ .invalid = switch (self.value_target) {
+                        .stdin => .stdin_invalid,
+                        .description => .description_invalid,
+                        else => .timeout_invalid,
+                    } };
                     self.null_index += 1;
                     if (self.null_index == "null".len) {
                         if (self.value_target == .stdin) {
                             self.has_stdin = true;
+                        } else if (self.value_target == .description) {
+                            self.has_description = true;
                         } else {
                             self.result.timeout_ms = null;
                             self.has_timeout = true;
@@ -574,7 +591,6 @@ pub const BashParser = struct {
     fn finishAtEof(self: *const BashParser) BashParseProgress {
         if (self.phase != .after_object) return .{ .invalid = .malformed_json };
         if (!self.has_command) return .{ .invalid = .missing_cmd };
-        if (!self.has_description) return .{ .invalid = .missing_description };
         return .{ .complete = self.result };
     }
 
@@ -601,16 +617,33 @@ pub const BashParser = struct {
                 try input.writeAll(bytes);
             },
             .description => {
-                const label = &self.result.description;
-                if (bytes.len > label.bytes.len - label.len) return error.InvalidDescriptorShape;
-                @memcpy(label.bytes[label.len..][0..bytes.len], bytes);
-                label.len += bytes.len;
+                const room = self.description_text.len - self.description_len;
+                const kept = @min(bytes.len, room);
+                @memcpy(self.description_text[self.description_len..][0..kept], bytes[0..kept]);
+                self.description_len += kept;
+                if (kept < bytes.len) self.description_cut = true;
             },
         }
     }
 
+    /// The label the model wrote, repaired. A cut that fell inside a character drops that character's bytes first, so a long
+    /// label never ends in a replacement mark; a label with no words left is no label.
+    fn finishDescription(self: *BashParser) void {
+        var text: []const u8 = self.description_text[0..self.description_len];
+        if (self.description_cut) {
+            var end = text.len;
+            var continuation: usize = 0;
+            while (end > 0 and continuation < 3 and text[end - 1] & 0xc0 == 0x80) : (continuation += 1) end -= 1;
+            if (end > 0) {
+                const length = std.unicode.utf8ByteSequenceLength(text[end - 1]) catch 1;
+                if (length > continuation + 1) text = text[0 .. end - 1];
+            }
+        }
+        self.result.description = saved_label.readWords(max_bash_description_bytes, text) orelse .{};
+    }
+
     fn emitScalar(self: *BashParser, writer: anytype, input: anytype, scalar: u21) !bool {
-        if (scalar == 0 and self.string_target != .stdin) return false;
+        if (scalar == 0 and self.string_target != .stdin and self.string_target != .description) return false;
         var encoded: [4]u8 = undefined;
         const count = std.unicode.utf8Encode(scalar, &encoded) catch return false;
         try self.emitString(writer, input, encoded[0..count]);
