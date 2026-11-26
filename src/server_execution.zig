@@ -1298,7 +1298,8 @@ noinline fn startListings(run: *Run, reactor: *provider.Reactor, works: *listing
 }
 
 fn listingCredential(run: *Run, kind: listing_slot.ListingSlot) ?providers.Credential {
-    return run.settings.providers.listed(kind).?.served.credential;
+    const found = run.settings.providers.listed(kind) orelse return null;
+    return found.served.credential;
 }
 
 fn startLeasedListing(run: *Run, reactor: *provider.Reactor, kind: listing_slot.ListingSlot, work: *ListingWork, lease: ?*const providers.Lease) void {
