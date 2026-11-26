@@ -467,7 +467,8 @@ def run():
                                    capture_output=True, text=True, timeout=30)
         assert named_out.returncode == 0 and named_out.stderr == "", named_out
         assert named_out.stdout.startswith("Rui: Signed out of ChatGPT as work in the browser"), named_out
-        assert len(endpoint.revoke_requests) == revoked_before + 1 and not named_file_present(work_file), endpoint.revoke_requests
+        assert len(endpoint.revoke_requests) == revoked_before + 1, (revoked_before, endpoint.revoke_requests)
+        assert not named_file_present(work_file), work_file.read_text() if work_file.exists() else None
         assert (credential_file.read_bytes() if credential_file.exists() else None) == built_in_before
         again = subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--connection", "work", "--test-chatgpt-fixture-endpoint", url],
                                capture_output=True, text=True, timeout=30)
