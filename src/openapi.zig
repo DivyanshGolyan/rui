@@ -247,16 +247,6 @@ pub const routes = [_]Route{
         }, .{ live_list_deltas, live_list_deltas, live_list_deltas, .{"window"} }),
     },
     .{
-        .path = "/v1/conversation-page",
-        .kind = .conversation_page,
-        .summary = "One page of a Session's conversation, newest first.",
-        .variants = &.{variant(protocol.conversation_page_request, .{})},
-        .reply = jsonReply(.{
-            protocol.conversation_page_reply.head ++ .{ListOf(ConversationItem)} ++ protocol.conversation_page_reply.last,
-            protocol.conversation_page_reply.head ++ .{ListOf(ConversationItem)} ++ protocol.conversation_page_reply.more,
-        }),
-    },
-    .{
         .path = "/v1/conversation-content",
         .kind = .conversation_content,
         .summary = "The content of one conversation item.",
@@ -571,21 +561,6 @@ const SchemaObject = struct {
 const Configuration = configurationShape("Configuration");
 const Content = ContentSchema;
 const optionalMember = Optional;
-
-const ConversationItem = struct {
-    pub fn openapi_inline(d: *Document) !Value {
-        const page = protocol.conversation_page_reply;
-        return d.anyOf(&.{
-            try d.shapeSchema(tuple(page.item(.user)) ++ page.item_end),
-            try d.shapeSchema(tuple(page.item(.user)) ++ page.admission ++ page.item_end),
-            try d.shapeSchema(tuple(page.item(.assistant)) ++ page.item_end),
-            try d.shapeSchema(tuple(page.item(.tool_result)) ++ page.item_end),
-            try d.shapeSchema(tuple(page.item(.tool_result)) ++ page.presentation ++ page.item_end),
-            try d.shapeSchema(page.hosted_call ++ page.item_end),
-            try d.shapeSchema(page.hosted_call ++ page.presentation ++ page.item_end),
-        });
-    }
-};
 
 const ConnectionEntry = struct {
     pub const openapi_shape = protocol.host_info_reply.connection_entry;

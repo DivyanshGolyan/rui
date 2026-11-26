@@ -1601,7 +1601,6 @@ const Route = enum {
     read_action_arguments,
     inspect,
     list_sessions,
-    conversation_page,
     conversation_content,
     activity_page,
     activity_search,
@@ -1728,8 +1727,6 @@ const HeaderReader = struct {
             .inspect
         else if (std.mem.eql(u8, path, "/v1/list-sessions"))
             .list_sessions
-        else if (std.mem.eql(u8, path, "/v1/conversation-page"))
-            .conversation_page
         else if (std.mem.eql(u8, path, "/v1/conversation-content"))
             .conversation_content
         else if (std.mem.eql(u8, path, "/v1/activity-search"))
@@ -4000,8 +3997,6 @@ test "SH-51 a route that cannot serve a parts value refuses it as ordinary and l
         .{ .path = "read-action", .body = try std.fmt.allocPrint(arena, head ++ "read_action\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }), .has = action_owner },
         .{ .path = "activity-page", .body = try std.fmt.allocPrint(arena, head ++ "activity_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"admission\",\"user\",\"assistant\",\"call\",\"tool_result\"],\"limit\":\"16\"}}", .{session.slice()}), .has = action_owner },
         .{ .path = "activity-page", .body = try std.fmt.allocPrint(arena, head ++ "activity_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"admission\",\"user\",\"assistant\",\"call\",\"tool_result\"],\"limit\":\"16\"}}", .{session.slice()}), .has = message_owner },
-        .{ .path = "conversation-page", .body = try std.fmt.allocPrint(arena, head ++ "conversation_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"}}", .{session.slice()}), .has = action_owner },
-        .{ .path = "conversation-page", .body = try std.fmt.allocPrint(arena, head ++ "conversation_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"}}", .{session.slice()}), .has = message_owner },
         .{ .path = "observe-command", .body = try std.fmt.allocPrint(arena, head ++ "observe_command\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}), .has = "\"type\":\"parts\"" },
         .{ .path = "inspect-session", .body = try std.fmt.allocPrint(arena, head ++ "inspect_session\",\"store\":\"s\",\"session\":\"{s}\"}}", .{session.slice()}) },
         .{ .path = "activity-search", .body = try std.fmt.allocPrint(arena, head ++ "activity_search\",\"store\":\"s\",\"session\":\"{s}\",\"query\":\"after\",\"kinds\":[\"admission\",\"user\",\"tool_result\"],\"before_position\":null,\"before_ordinal\":null,\"limit\":\"16\"}}", .{session.slice()}), .has = "\"part\":\"2\"" },

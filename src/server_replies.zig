@@ -172,7 +172,6 @@ pub const Replies = struct {
             .read_action_call_id => |*command| Replies.deliverActionContent(self, reply, command, true),
             .inspect_session => |*request_value| try Replies.replyInspectSession(self, reply, request_value, number),
             .list_sessions => |*request_value| try Replies.replyListSessions(self, reply, request_value, number),
-            .conversation_page => |*command| try Replies.replyConversationPage(self, reply, command),
             .conversation_content => |*command| try Replies.prepareConversationContent(self, reply, command),
             .activity_page => |*command| try Replies.replyActivityPage(self, reply, command),
             .activity_search => |*command| try Replies.replyActivitySearch(self, reply, command),
@@ -500,16 +499,6 @@ pub const Replies = struct {
             return Replies.refuseRead(self, fd, "Session list", err);
         };
         _ = try fd.start(.{ .report = .{ .status = 200, .content_type = "application/json", .value = page } }, .{});
-    }
-
-    noinline fn replyConversationPage(self: *Replies, fd: *Reply, command: *@FieldType(wire_request.Request, "conversation_page")) !void {
-        const page = try createUnfilled(self.allocator, store_module.PublicConversationPage);
-        defer self.allocator.destroy(page);
-        self.store.publicConversationPage(command, page, self.allocator) catch |err| switch (err) {
-            error.SessionNotFound, error.InvalidCursor => return refuse(fd, 409, .conversation_unavailable, @errorName(err)),
-            else => return Replies.refuseRead(self, fd, "conversation page", err),
-        };
-        try replyJson(fd, 200, protocol.max_conversation_page_response_bytes, host_reply.renderConversationPage, .{page});
     }
 
     noinline fn replyActivityPage(self: *Replies, fd: *Reply, command: *@FieldType(wire_request.Request, "activity_page")) !void {

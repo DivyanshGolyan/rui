@@ -134,7 +134,6 @@ pub const ReasoningEffort = model_capability.ReasoningEffort;
 pub const max_connection_bytes = command_input.max_connection_bytes;
 pub const max_header_bytes = 16 * 1024;
 pub const content_window_bytes = conversation_read.content_window_bytes;
-pub const public_conversation_page_items = conversation_read.public_conversation_page_items;
 pub const max_json_depth = @import("json_limits.zig").max_depth;
 pub const max_sqlite_content_bytes = content_string.max_bytes;
 pub const session_list_page_size = session_list.session_list_page_size;
@@ -202,7 +201,6 @@ pub const Kind = enum {
     read_action_arguments,
     inspect_session,
     list_sessions,
-    conversation_page,
     conversation_content,
     activity_page,
     activity_search,
@@ -343,7 +341,6 @@ pub const ListSessions = session_list.ListSessions;
 
 pub const ListDelta = session_list.ListDelta;
 
-pub const ConversationPage = conversation_read.ConversationPage;
 pub const ConversationContent = conversation_read.ConversationContent;
 
 pub const ProposalField = tool_proposal.Field;
@@ -793,7 +790,6 @@ fn RequestOf(comptime Custody: type) type {
         read_action_arguments: ReadActionArguments,
         inspect_session: InspectSession,
         list_sessions: ListSessions,
-        conversation_page: ConversationPage,
         conversation_content: ConversationContent,
         activity_page: ActivityPage,
         activity_search: ActivitySearch,
@@ -811,7 +807,7 @@ fn RequestOf(comptime Custody: type) type {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
                 .action_publish => |*command| try command.text.removeTemporaryContent(io),
-                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .public_parts, .public_part_content, .skill_suggestions, .model_list, .tools_reload, .tools_status => {},
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_content, .activity_page, .activity_search, .activity_content, .public_parts, .public_part_content, .skill_suggestions, .model_list, .tools_reload, .tools_status => {},
             }
         }
 
@@ -971,10 +967,6 @@ fn ParserOf(comptime Custody: type) type {
                 .list_sessions => {
                     out.* = .{ .list_sessions = .{ .store = store } };
                     try self.parseListSessions(&out.list_sessions, &members);
-                },
-                .conversation_page => {
-                    out.* = .{ .conversation_page = .{ .store = store } };
-                    try self.parseConversationPage(&out.conversation_page, &members);
                 },
                 .conversation_content => {
                     out.* = .{ .conversation_content = .{ .store = store } };
@@ -1701,23 +1693,6 @@ fn ParserOf(comptime Custody: type) type {
             try out.validate();
         }
 
-        fn parseConversationPage(self: *Parser, out: *ConversationPage, members: *Members) !void {
-            const Field = enum { session, end, before_position, before_ordinal };
-            var seen: std.enums.EnumSet(Field) = .empty;
-            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-                .session => try self.readSmallString(&out.session),
-                .end => out.end = try self.readCanonicalU64(),
-                .before_position => out.before_position = try self.readCanonicalU64(),
-                .before_ordinal => out.before_ordinal = try self.readCanonicalU64(),
-            };
-            try require(Field, seen, &.{ .session, .end, .before_position, .before_ordinal });
-            if (out.end > std.math.maxInt(i64) or out.before_position > std.math.maxInt(i64) or
-                out.before_ordinal > std.math.maxInt(i64) or
-                (out.end == 0 and out.before_position != 0) or
-                (out.before_position == 0 and out.before_ordinal != 0) or
-                (out.end != 0 and out.before_position > out.end)) return error.InvalidCursor;
-        }
-
         fn parseConversationContent(self: *Parser, out: *ConversationContent, members: *Members) !void {
             const Field = enum { session, position, ordinal, start, stream };
             var seen: std.enums.EnumSet(Field) = .empty;
@@ -2352,7 +2327,6 @@ pub const conversation_content_request = struct {
     pub const tail = .{"}"};
     pub const all = head ++ stream ++ tail;
 };
-pub const conversation_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":\"", Hole.decimal, "\",\"before_position\":\"", Hole.decimal, "\",\"before_ordinal\":\"", Hole.decimal, "\"}" };
 pub const activity_search_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"query\":", Hole{ .string = 256 } };
     pub const kinds = .{ ",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind } };
@@ -2537,18 +2511,17 @@ pub const max_read_action_request_bytes = shapeBytes(read_action_request.all);
 pub const max_read_action_arguments_request_bytes = shapeBytes(read_action_arguments_request);
 pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id_request);
 pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request.all);
-pub const max_conversation_page_request_bytes = shapeBytes(conversation_page_request);
 pub const max_activity_page_request_bytes = shapeBytes(activity_page_request.all);
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request.all);
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
-    observe_command_request.all,       host_info_request,                   host_stop_request,
-    host_drain_request,                host_pause_request,                  read_result_request,
-    list_sessions_request.all,         read_action_request.all,             read_action_arguments_request,
-    read_action_call_id_request,       conversation_content_request.all,    conversation_page_request,
-    activity_search_request.all,       activity_page_request.all,           activity_content_request.all,
-    skill_suggestions_session_request, skill_suggestions_workspace_request, model_list_request,
-    public_parts_request,              public_part_content_request.all,     tools_reload_request.all,
-    tools_reload_request.named,        tools_status_request,
+    observe_command_request.all,         host_info_request,                host_stop_request,
+    host_drain_request,                  host_pause_request,               read_result_request,
+    list_sessions_request.all,           read_action_request.all,          read_action_arguments_request,
+    read_action_call_id_request,         conversation_content_request.all, activity_search_request.all,
+    activity_page_request.all,           activity_content_request.all,     skill_suggestions_session_request,
+    skill_suggestions_workspace_request, model_list_request,               public_parts_request,
+    public_part_content_request.all,     tools_reload_request.all,         tools_reload_request.named,
+    tools_status_request,
 }));
 
 pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
@@ -2823,37 +2796,6 @@ pub const max_diagnostic_buffer_bytes = blk: {
     break :blk @max(@max(bytes, max_host_info_response_bytes), @max(@max(host_stop_ack.len, shapeBytes(host_drain_reply)), shapeBytes(host_pause_reply)));
 };
 
-pub const conversation_page_reply = struct {
-    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"", Hole.decimal, "\",\"items\":[" };
-    pub fn item(comptime kind: ConversationItemKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole } {
-        comptime std.debug.assert(kind != .hosted_call);
-        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"content\":", .{ .json = ContentValueJson } };
-    }
-    pub const hosted_call = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"hosted_call\"" };
-    pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeerJson }, ",\"source_action\":", Hole.optional_id };
-    pub const presentation = .{ ",\"presentation\":", Hole{ .json = ToolPresentationJson } };
-    pub const item_end = .{"}"};
-
-    pub fn itemBytes(comptime kind: ConversationItemKind) usize {
-        const extra = switch (kind) {
-            .user => shapeBytes(admission),
-            .tool_result => shapeBytes(presentation),
-            .assistant => 0,
-            .hosted_call => return shapeBytes(hosted_call) + shapeBytes(presentation) + shapeBytes(item_end),
-        };
-        return shapeBytes(item(kind)) + extra + shapeBytes(item_end);
-    }
-    pub const last = .{"],\"more\":false}"};
-    pub const more = .{ "],\"more\":true,\"before_position\":\"", Hole.decimal, "\",\"before_ordinal\":\"", Hole.decimal, "\"}" };
-};
-
-pub const max_conversation_page_response_bytes = blk: {
-    const page = conversation_page_reply;
-    var item = 0;
-    for (std.meta.tags(ConversationItemKind)) |kind| item = @max(item, page.itemBytes(kind));
-    break :blk shapeBytes(page.head) + jsonListBytes(public_conversation_page_items, item) + maxShapeBytes(.{ page.last, page.more });
-};
-
 pub const JsonOut = struct {
     writer: *std.Io.Writer,
 
@@ -3002,33 +2944,6 @@ test "Conversation content stream wire requires start zero and literal true" {
         } else {
             const request = (try parseForTest(&parser)).conversation_content;
             try std.testing.expectEqual(case.stream, request.stream);
-        }
-    }
-}
-
-test "conversation cursor parser rejects unfixed and malformed continuations" {
-    const cases = [_]struct { body: []const u8, failure: ?anyerror = null }{
-        .{ .body = "\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"" },
-        .{ .body = "\"end\":\"25\",\"before_position\":\"0\",\"before_ordinal\":\"0\"" },
-        .{ .body = "\"end\":\"25\",\"before_position\":\"10\",\"before_ordinal\":\"2\"" },
-        .{ .body = "\"end\":\"0\",\"before_position\":\"10\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
-        .{ .body = "\"end\":\"25\",\"before_position\":\"0\",\"before_ordinal\":\"1\"", .failure = error.InvalidCursor },
-        .{ .body = "\"end\":\"25\",\"before_position\":\"26\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
-        .{ .body = "\"end\":\"25\",\"before_position\":\"10\",\"before_ordinal\":\"18446744073709551615\"", .failure = error.InvalidCursor },
-        .{ .body = "\"end\":\"18446744073709551615\",\"before_position\":\"10\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
-        .{ .body = "\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"1\"", .failure = error.InvalidCursor },
-        .{ .body = "\"end\":\"025\",\"before_position\":\"10\",\"before_ordinal\":\"0\"", .failure = error.InvalidIdentity },
-    };
-    for (cases) |case| {
-        var buffer: [512]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_page\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.body});
-        var source: MetadataSource = .{ .input = json };
-        var parser = Tested.Parser{ .source = &source };
-        if (case.failure) |failure| {
-            try std.testing.expectError(failure, parseForTest(&parser));
-        } else {
-            const request = try parseForTest(&parser);
-            try std.testing.expect(request == .conversation_page);
         }
     }
 }

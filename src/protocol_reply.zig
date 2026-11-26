@@ -27,96 +27,6 @@ const JsonArray = wire_field.JsonArray;
 pub const OmittableJson = wire_field.OmittableJson;
 pub const decimalId = wire_field.decimalId;
 
-pub const ConversationCursor = struct {
-    end: u64,
-    before_position: u64 = 0,
-    before_ordinal: u64 = 0,
-    pub fn validate(self: ConversationCursor) !void {
-        if (self.end > std.math.maxInt(i64) or self.before_position > self.end or self.before_ordinal > std.math.maxInt(i64) or
-            (self.before_position == 0 and self.before_ordinal != 0)) return error.InvalidCursor;
-    }
-};
-pub const ConversationPageReply = union(enum) { page: ConversationPage, failure: ReadFailure };
-pub const ConversationPage = struct {
-    pub const Item = struct {
-        position: u64,
-        ordinal: u64,
-        kind: protocol.ConversationItemKind,
-        /// Always text on an `assistant` item.
-        content: content_value.Value,
-        presentation: ?protocol.ToolPresentation = null,
-        admitted_at: ?u64 = null,
-        sender: ?protocol.NamedPeer = null,
-        source_action: ?u64 = null,
-    };
-    end: u64,
-    items: [protocol.public_conversation_page_items]Item = undefined,
-    count: usize = 0,
-    more: bool,
-    pub fn continuation(self: *const ConversationPage) ?ConversationCursor {
-        if (!self.more) return null;
-        const last = self.items[self.count - 1];
-        return .{ .end = self.end, .before_position = last.position, .before_ordinal = last.ordinal };
-    }
-    pub fn parse(bytes: []const u8, cursor: ConversationCursor) !ConversationPage {
-        try cursor.validate();
-        const Row = struct {
-            position: JsonString(20),
-            ordinal: JsonString(20),
-            kind: JsonEnum(@FieldType(Item, "kind")),
-            content: ?JsonContentValue = null,
-            presentation: ?JsonToolPresentation = null,
-            admitted_at: ?JsonString(20) = null,
-            sender: ?JsonNamedPeer = null,
-            source_action: ?JsonString(20) = null,
-        };
-        const Rows = JsonArray(Row, protocol.public_conversation_page_items);
-        const Wire = struct {
-            version: JsonString(8),
-            type: JsonString(32),
-            direction: JsonString(16),
-            end: JsonString(20),
-            items: Rows,
-            more: bool,
-            before_position: ?JsonString(20) = null,
-            before_ordinal: ?JsonString(20) = null,
-        };
-        var storage: [2 * protocol.max_conversation_page_response_bytes]u8 = undefined;
-        var fixed = std.heap.FixedBufferAllocator.init(&storage);
-        const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{ .ignore_unknown_fields = true }) catch return error.InvalidConversationPage;
-        if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("conversation_page") or !wire.direction.eql("newest_first")) return error.InvalidConversationPage;
-        var page: ConversationPage = .{ .end = try decimalId(wire.end, true), .count = wire.items.count, .more = wire.more };
-        if (page.end > std.math.maxInt(i64) or (cursor.end != 0 and page.end != cursor.end) or (page.more and page.count != page.items.len)) return error.InvalidConversationPage;
-        var position = cursor.before_position;
-        var ordinal = cursor.before_ordinal;
-        for (wire.items.values[0..page.count], page.items[0..page.count]) |row, *item| {
-            const hosted = row.kind.value == .hosted_call;
-            if (hosted == (row.content != null)) return error.InvalidConversationPage;
-            item.* = .{ .position = try decimalId(row.position, false), .ordinal = try decimalId(row.ordinal, true), .kind = row.kind.value, .content = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } } };
-            item.presentation = if (row.presentation) |p| p.value else null;
-            item.admitted_at = if (row.admitted_at) |second| try decimalId(second, false) else null;
-            item.sender = if (row.sender) |sender| sender.peer() catch return error.InvalidConversationPage else null;
-            item.source_action = if (row.source_action) |action| try decimalId(action, false) else null;
-            if ((item.kind == .tool_result or hosted) != (item.presentation != null) or (item.kind == .user) != (item.admitted_at != null) or
-                (item.kind != .user and (item.sender != null or item.source_action != null)) or
-                (item.sender != null and item.source_action != null) or
-                (item.admitted_at orelse 0) > std.math.maxInt(i64)) return error.InvalidConversationPage;
-            if (item.presentation) |p| if (p.publication_position != item.position or (hosted and p.line == null)) return error.InvalidConversationPage;
-            if (row.content) |value| item.content = if (item.kind == .assistant) .{ .text = value.text() catch return error.InvalidConversationPage } else value.value;
-            if (item.position > page.end or item.ordinal > std.math.maxInt(i64) or
-                ((item.kind == .tool_result) != (item.ordinal != 0)) or
-                (position != 0 and (item.position > position or (item.position == position and item.ordinal >= ordinal)))) return error.InvalidConversationPage;
-            position = item.position;
-            ordinal = item.ordinal;
-        }
-        if (page.more) {
-            if (wire.before_position == null or wire.before_ordinal == null or
-                try decimalId(wire.before_position.?, false) != position or try decimalId(wire.before_ordinal.?, true) != ordinal) return error.InvalidConversationPage;
-        } else if (wire.before_position != null or wire.before_ordinal != null) return error.InvalidConversationPage;
-        return page;
-    }
-};
-
 pub const ActivityCursor = struct {
     end: ?u64 = null,
     position: u64 = 0,
@@ -4152,27 +4062,8 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     try std.testing.expectEqualStrings("p33rs1", facts.settings.parent.?.slice());
 }
 
-test "a hosted call travels as its presentation alone, in the conversation and the activity" {
+test "a hosted call travels as its presentation alone, in the activity" {
     const presentation: protocol.ToolPresentation = .{ .line = try protocol.ToolLine.plain("Search \"zig\""), .code = .failed, .sign = .failed, .publication_position = 7 };
-    const conversation = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"9\",\"items\":[" ++
-        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"presentation\":{\"line\":{\"before\":\"Search \\\"zig\\\"\",\"peer\":null,\"after\":null},\"code\":\"failed\",\"sign\":\"failed\",\"publication_position\":\"7\"}}],\"more\":false}";
-    const page = try ConversationPage.parse(conversation, .{ .end = 0 });
-    try std.testing.expectEqual(@as(usize, 1), page.count);
-    try std.testing.expectEqual(protocol.ConversationItemKind.hosted_call, page.items[0].kind);
-    try std.testing.expectEqual(@as(u64, 0), page.items[0].content.text.length);
-    try std.testing.expectEqualDeep(presentation, page.items[0].presentation.?);
-    for ([_][]const u8{
-        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"content\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"},\"presentation\":{\"line\":{\"before\":\"a\",\"peer\":null,\"after\":null},\"code\":\"failed\",\"sign\":\"failed\",\"publication_position\":\"7\"}}",
-        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"presentation\":{\"line\":null,\"code\":\"failed\",\"sign\":\"failed\",\"publication_position\":\"7\"}}",
-        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\"}",
-        "{\"position\":\"7\",\"ordinal\":\"1\",\"kind\":\"hosted_call\",\"presentation\":{\"line\":{\"before\":\"a\",\"peer\":null,\"after\":null},\"code\":\"failed\",\"sign\":\"failed\",\"publication_position\":\"7\"}}",
-        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"assistant\"}",
-    }) |item| {
-        var buffer: [1024]u8 = undefined;
-        const bytes = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"9\",\"items\":[{s}],\"more\":false}}", .{item});
-        try std.testing.expectError(error.InvalidConversationPage, ConversationPage.parse(bytes, .{ .end = 0 }));
-    }
-
     var facts: protocol.ActivityFacts = .{ .end = 9, .aggregates = .{ .as_of = 9 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
     try facts.work.workspace.set("/w");
     var action: protocol.ActivityItem.HostedAction = .{ .kind = .search, .targets_total = 2, .pattern = .{ .length = 1, .digest = @splat(3) } };
