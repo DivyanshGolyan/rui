@@ -1578,7 +1578,7 @@ def prove_caller_disposal():
                                     dispatch.dispose_dispatch(processes, dict(zip(endpoints, threads)),
                                                               [release.set], lambda: retained.append(True))
                                 else:
-                                    dispose = (lambda: page.dispose_page(processes[0], endpoints[0], threads[0], 3)
+                                    dispose = (lambda: page.dispose_endpoint(processes[0], endpoints[0], threads[0], 3)
                                                if owner is page else
                                                bash.dispose_owner_case(processes[0], endpoints[0], threads[0]))
                                     dispose_all(release.set, dispose, lambda: retained.append(True))
@@ -1659,7 +1659,7 @@ def prove_caller_disposal():
                             if owner is dispatch:
                                 dispatch.stop_endpoint(endpoint, {endpoint: thread})
                             elif owner is page:
-                                page.dispose_page(None, endpoint, thread, 3)
+                                page.dispose_endpoint(None, endpoint, thread, 3)
                             else:
                                 bash.dispose_owner_case(None, endpoint, thread)
                     except BaseException as error:
@@ -1686,7 +1686,7 @@ sys.argv = [sys.argv[0], "unused-rui"]
 import conversation_page_fixture as page
 primary = AssertionError("whole-stream startup failure")
 serving = threading.Event()
-real_dispose = page.dispose_page
+real_dispose = page.dispose_endpoint
 
 def fail_startup(*args, **kwargs):
     assert serving.wait(timeout=5), "whole-stream endpoint did not enter serving loop"
@@ -1701,7 +1701,7 @@ def dispose_without_wait(process, endpoint, thread, timeout):
 with patch("socket.getfqdn", return_value="localhost"), \
         patch.object(page.TestHTTPServer, "service_actions", lambda self: serving.set()), \
         patch.object(page, "start_host", fail_startup), \
-        patch.object(page, "dispose_page", dispose_without_wait), \
+        patch.object(page, "dispose_endpoint", dispose_without_wait), \
         patch.object(page.TestHTTPServer, "shutdown", side_effect=OSError("shutdown refused")):
     try:
         page.whole_stream_shape(0)
@@ -1721,7 +1721,7 @@ print("whole-stream failure survived teardown and interpreter exit", flush=True)
     endpoint = MagicMock()
     thread = SimpleNamespace(ident=1, join=lambda timeout: None, is_alive=lambda: True)
     for dispose in (lambda: dispatch.stop_endpoint(endpoint, {endpoint: thread}),
-                    lambda: page.dispose_page(None, endpoint, thread, 3),
+                    lambda: page.dispose_endpoint(None, endpoint, thread, 3),
                     lambda: bash.dispose_owner_case(None, endpoint, thread)):
         try:
             dispose()
