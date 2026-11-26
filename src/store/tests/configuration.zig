@@ -292,6 +292,11 @@ test "a Session switches only to a served connection of its own wire format, ove
             .connection_unserved;
         try std.testing.expectEqual(expected, configuration_domain.switchRejection(&existing, connection.Name.parse(to).?, &served));
     };
+    // A Session whose connection is no longer served still switches, by the codec it saved.
+    var gone: CurrentConfiguration = .{};
+    gone.provider = connection.Name.parse("retired").?;
+    gone.codec = .@"openai-responses/3";
+    try std.testing.expectEqual(@as(?configuration_admission.Rejection, null), configuration_domain.switchRejection(&gone, connection.Name.parse("work").?, &served));
     // The one pair the contract is about: two accounts of one wire format switch freely.
     var chat: CurrentConfiguration = .{};
     chat.provider = connection.Name.parse("chatgpt").?;
@@ -306,6 +311,7 @@ test "a Session moves to another account of its wire format, records the change,
             defer tmp.cleanup();
             var routes = protocol.servedBuiltIns(.endpoint);
             try routes.put(.{ .name = connection.Name.parse("work").?, .label = .{}, .route = .key_file, .codec = .@"openai-responses/3", .web_search = true });
+            try routes.put(.{ .name = connection.Name.parse("plain").?, .label = .{}, .route = .key_file, .codec = .@"openai-responses/3", .web_search = false });
             var storage: Store = undefined;
             try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
             defer storage.close() catch unreachable;
@@ -318,6 +324,30 @@ test "a Session moves to another account of its wire format, records the change,
             try std.testing.expect(created == .accepted);
             const session = created.accepted.session;
             const before = try storage.inspectSessionForTesting(session.slice());
+
+            // The Session holds web_search, which a connection that does not run it cannot be offered: the
+            // switch is refused whole whether the saved tools are kept or named again, and accepted once they leave it.
+            var plain: wire_request.ConfigureCommand = .{};
+            try plain.key.set("switch-to-plain");
+            try plain.session.set(session.slice());
+            plain.configuration.provider.state = .value;
+            try plain.configuration.provider.value.set("plain");
+            const kept_tools = try storage.configure(&plain, .{});
+            try std.testing.expect(kept_tools == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.provider_tool_missing, kept_tools.rejected.code);
+            try std.testing.expectEqual(before.revision, (try storage.inspectSessionForTesting(session.slice())).revision);
+            var named: wire_request.ConfigureCommand = .{};
+            try named.key.set("switch-to-plain-named");
+            try named.session.set(session.slice());
+            named.configuration.provider.state = .value;
+            try named.configuration.provider.value.set("plain");
+            named.configuration.tools.state = .value;
+            named.configuration.tools.count = 0;
+            named.configuration.tools.names.len = 0;
+            try named.configuration.tools.insert("web_search");
+            const named_tools = try storage.configure(&named, .{});
+            try std.testing.expect(named_tools == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.provider_tool_missing, named_tools.rejected.code);
 
             var move: wire_request.ConfigureCommand = .{};
             try move.key.set("switch-to-work");

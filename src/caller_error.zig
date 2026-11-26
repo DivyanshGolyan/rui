@@ -111,6 +111,7 @@ pub const Code = enum {
 
     invalid_workspace,
     workspace_is_immutable,
+    connection_is_immutable,
     connection_wire_differs,
     model_is_immutable,
     revision_exhausted,
@@ -510,6 +511,7 @@ pub fn facts(code: Code) Facts {
         .permission_mode_wider_than_parent => .{ .act = .fix, .input = .permission_mode, .accepted = .{ .grammar = "ask when the parent asks" }, .says = "The parent asks before running commands, so its child Session must ask too. Nothing was created.", .next = "Use permissionMode ask." },
         .invalid_workspace => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "an absolute path to an existing directory" }, .says = "The workspace is not a usable absolute directory.", .next = "Set --workspace to an existing absolute directory accessible to the Host." },
         .workspace_is_immutable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "the workspace already saved for this Session" }, .says = "An existing Session cannot change its workspace.", .next = "Omit --workspace, or create a new Session for the other directory." },
+        .connection_is_immutable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a served connection of the same wire format as the Session's" }, .says = "This saved command was rejected when a Session could not change its connection.", .next = "Submit the connection change with a new idempotency key." },
         .connection_wire_differs => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a served connection of the same wire format as the Session's" }, .says = "A Session can switch only to a connection that speaks the same wire format as its current one. Nothing was changed.", .next = "Pick a connection of the same kind, or create a new Session with the other connection." },
         .model_is_immutable => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "model changes within the Session's fixed provider" }, .says = "This saved command was rejected when a Session could not change its model.", .next = "Submit the model change with a new idempotency key." },
         .skill_file_unavailable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "a readable SKILL.md at its advertised absolute path" }, .says = "The selected skill file could not be read.", .next = "Restore the file and access to it, or reload skills before choosing another name." },
