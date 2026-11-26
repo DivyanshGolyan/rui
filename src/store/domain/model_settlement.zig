@@ -9,6 +9,7 @@ const tool_defs = @import("../../call_classification.zig");
 const codec_abi = @import("../../codec_abi.zig");
 const tool_record = @import("../../tool_record.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
+const saved_label = @import("../../saved_label.zig");
 const mcp_arguments = @import("../../mcp/arguments.zig");
 const mcp_document = @import("../../mcp/document.zig");
 const tool_set = @import("tool_set.zig");
@@ -1911,8 +1912,10 @@ noinline fn callLabel(facts: *const tool_defs.CallFacts, io: std.Io, file: std.I
         var description: tool_record.Description = .{ .len = 0 };
         var decoded = std.Io.Writer.fixed(&description.bytes);
         try mcp_document.writeDecoded(&decoded, contents);
-        description.len = decoded.end;
-        return if (tool_presentation.ToolPresentation.validDescription(description.slice())) description else fallback;
+        // The model's words are repaired as they are saved (one tidy line); a label with no words left names the tool.
+        const words = saved_label.readWords(saved_label.max_bytes, decoded.buffered()) orelse return fallback;
+        try description.set(words.slice());
+        return description;
     };
     const label = facts.label() orelse return null;
     var saved: tool_record.Description = .{ .len = 0 };
