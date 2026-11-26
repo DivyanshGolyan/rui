@@ -474,6 +474,33 @@ def run():
         again = subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--connection", "work", "--test-chatgpt-fixture-endpoint", url],
                                capture_output=True, text=True, timeout=30)
         assert (again.returncode, again.stdout) == (0, "Rui: Not signed in as work; nothing changed.\n"), again
+        # A name's grammar is refused on both commands before anything is touched.
+        for argv in (["login", "openai", "--connection", "work"], ["login", "chatgpt", "--connection", "Work"],
+                     ["login", "chatgpt", "--connection", "2fa"], ["logout", "chatgpt", "--connection", "codex"],
+                     ["logout", "chatgpt", "--connection", "2fa"]):
+            bad = subprocess.run([str(fixture.RUI), "auth", *argv, "--test-chatgpt-fixture-endpoint", url],
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+            assert bad.returncode == 2 and "Nothing was changed" in bad.stderr, (argv, bad)
+        # A ready device-code record under the name is not replaced by a browser login, and
+        # logging out of it signs it out locally without asking the issuer to revoke anything.
+        codex_fixture.credentials(work_file)
+        device_before = work_file.read_bytes()
+        crossed = subprocess.run([str(fixture.RUI), "auth", "login", "chatgpt", "--connection", "work", "--test-chatgpt-fixture-endpoint", url],
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+        assert crossed.returncode == 2 and "already holds the other kind" in crossed.stderr, crossed
+        assert work_file.read_bytes() == device_before
+        revoked_before = len(endpoint.revoke_requests)
+        device_out = subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--connection", "work", "--test-chatgpt-fixture-endpoint", url],
+                                    capture_output=True, text=True, timeout=30)
+        assert (device_out.returncode, device_out.stderr) == (0, ""), device_out
+        assert device_out.stdout.startswith("Rui: Signed out of ChatGPT as work with a device code"), device_out
+        assert len(endpoint.revoke_requests) == revoked_before and credential_facts(work_file)["state"] == "signed_out"
+        # An unreadable record is not signed out and says so.
+        work_file.write_text("not a credential\n")
+        work_file.chmod(0o600)
+        broken = subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--connection", "work", "--test-chatgpt-fixture-endpoint", url],
+                                capture_output=True, text=True, timeout=30)
+        assert broken.returncode == 1 and broken.stdout == "" and broken.stderr != "", broken
         del os.environ["RUI_WORK_CREDENTIAL_FILE"]
         print("chatgpt login passed: listener and pasted sign-in, returning client reused, stale answer refused, "
               "logout ends both sign-ins and a running Host refuses either until the next sign-in, and says when "

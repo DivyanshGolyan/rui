@@ -483,12 +483,22 @@ fn planLogin(init: std.process.Init, record: credential_location.Record, fixture
         }
     }.publish) catch |err| return switch (err) {
         error.HomeRequired => homeRequired("the ChatGPT credential and host id are in HOME/.config/rui unless " ++ comptime credential_location.variable(.chatgpt) ++ " names the credential"),
+        error.SignInKindMismatch => crossKind(record),
         else => err,
     };
     if (record == .connection) return namedLoginReceipt(init, record.connection, .browser);
     const outcome = try finishLogin(init, .chatgpt, "Rui: Signed in to ChatGPT.\n") orelse return;
     try std.Io.File.stdout().writeStreamingAll(init.io, "A running Host that serves ChatGPT uses this sign-in from its next request; one started before you signed in needs a restart to serve it.\n");
     try std.Io.File.stdout().writeStreamingAll(init.io, conversationStart(.chatgpt, outcome));
+}
+
+fn crossKind(record: credential_location.Record) error{InvalidArguments} {
+    const name = switch (record) {
+        .connection => |named| named,
+        .provider => |provider| provider.shown(),
+    };
+    stderr.diagnostic("rui auth login: {s} already holds the other kind of ChatGPT sign-in (browser or device code); run rui auth logout chatgpt --connection {s} first. Nothing was changed.\n", .{ name, name });
+    return usage();
 }
 
 fn planDisplay(shown: chatgpt_plan_login.Shown) !void {
@@ -568,8 +578,8 @@ fn planLogout(init: std.process.Init, provider: []const u8, connection_name: ?[]
         return usage();
     }
     if (connection_name) |given| {
-        if (!connectionNameFree(given)) {
-            stderr.diagnostic("rui auth logout: --connection names an account: lowercase letters, digits and '-', at most {d} bytes, and not codex, chatgpt or openai. Nothing was changed.\n", .{@import("connection.zig").max_name_bytes});
+        if (!@import("connection.zig").signInName(given)) {
+            stderr.diagnostic("rui auth logout: --connection names an account: a lowercase letter then lowercase letters, digits and '-', at most {d} bytes, and not codex or chatgpt. Nothing was changed.\n", .{@import("connection.zig").max_name_bytes});
             return usage();
         }
         return namedLogout(init, given, fixture_endpoint);
@@ -1457,8 +1467,8 @@ fn login(init: std.process.Init, name: []const u8, device_code: bool, connection
             stderr.diagnostic("rui auth login: --connection keeps a ChatGPT sign-in under its own name; an API key has none. Nothing was changed.\n", .{});
             return usage();
         }
-        if (!connectionNameFree(given)) {
-            stderr.diagnostic("rui auth login: --connection names an account: lowercase letters, digits and '-', at most {d} bytes, and not codex, chatgpt or openai. Nothing was changed.\n", .{@import("connection.zig").max_name_bytes});
+        if (!@import("connection.zig").signInName(given)) {
+            stderr.diagnostic("rui auth login: --connection names an account: a lowercase letter then lowercase letters, digits and '-', at most {d} bytes, and not codex or chatgpt. Nothing was changed.\n", .{@import("connection.zig").max_name_bytes});
             return usage();
         }
         break :named .{ .connection = given };
@@ -1479,17 +1489,13 @@ fn login(init: std.process.Init, name: []const u8, device_code: bool, connection
         fn publish() bool {
             return login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null;
         }
-    }.publish);
+    }.publish) catch |err| return switch (err) {
+        error.SignInKindMismatch => crossKind(record),
+        else => err,
+    };
     if (record == .connection) return namedLoginReceipt(init, record.connection, .device);
     const outcome = try finishLogin(init, .codex, "Rui: Signed in to ChatGPT with a device code.\n") orelse return;
     try std.Io.File.stdout().writeStreamingAll(init.io, conversationStart(.codex, outcome));
-}
-
-/// Whether `name` is a connection name that no built-in provider already owns.
-fn connectionNameFree(name: []const u8) bool {
-    const parsed = @import("connection.zig").Name.parse(name) orelse return false;
-    for (std.enums.values(protocol.Provider)) |provider| if (parsed.eql(provider_route.nameOf(provider))) return false;
-    return true;
 }
 
 const NamedSignIn = enum { browser, device };
@@ -1513,8 +1519,8 @@ test "a named login's receipt names the connection and the credential kind to se
     try std.testing.expect(std.mem.indexOf(u8, browser, "as work") != null and std.mem.indexOf(u8, browser, "oauth credential") != null);
     const device = try namedLoginText(&buffer, "work", .device);
     try std.testing.expect(std.mem.indexOf(u8, device, "with a device code") != null and std.mem.indexOf(u8, device, "openai-device credential") != null);
-    for ([_]struct { []const u8, bool }{ .{ "work", true }, .{ "my-2", true }, .{ "codex", false }, .{ "chatgpt", false }, .{ "openai", false }, .{ "Work", false }, .{ "", false }, .{ "abcdefghijklmnopq", false } }) |case|
-        try std.testing.expectEqual(case[1], connectionNameFree(case[0]));
+    for ([_]struct { []const u8, bool }{ .{ "work", true }, .{ "my-2", true }, .{ "codex", false }, .{ "chatgpt", false }, .{ "openai", true }, .{ "2fa", false }, .{ "Work", false }, .{ "", false }, .{ "abcdefghijklmnopq", false } }) |case|
+        try std.testing.expectEqual(case[1], @import("connection.zig").signInName(case[0]));
 }
 
 fn finishLogin(init: std.process.Init, provider: protocol.Provider, receipt: []const u8) !?preferences.LoginDefault {

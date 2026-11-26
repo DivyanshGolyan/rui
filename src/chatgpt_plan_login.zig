@@ -337,24 +337,22 @@ pub fn logout(io: std.Io, browser_path: ?[]const u8, device_code_path: ?[]const 
 }
 
 /// How one connection's sign-in ended: the record names its own way in (a browser sign-in
-/// carries the app registration it was issued to, a device-code one has none), so the file
-/// alone says whether to revoke or only delete. An unreadable record is the way it cannot name.
+/// carries the app registration it was issued to, a device-code one has none), read under the
+/// same lock that ends it, so the decision to revoke or only sign out cannot go stale.
 pub const Ended = union(enum) { browser: Browser, device_code: DeviceCode };
 
 pub fn logoutRecord(io: std.Io, path: []const u8, issuer: Issuer) Ended {
-    const browser = browserRecord(path) catch return .{ .device_code = .failed };
-    const present = browser orelse return .{ .device_code = .absent };
-    return if (present) .{ .browser = endBrowser(io, path, issuer) } else .{ .device_code = endDeviceCode(path) };
-}
-
-/// Whether the record at `path` is a browser sign-in; null when there is no record.
-fn browserRecord(path: []const u8) !?bool {
-    const mapped = try pages.Mapped(credentials.Scratch).map();
+    const mapped = pages.Mapped(Revoke).map() catch return .{ .device_code = .failed };
     defer mapped.unmap();
-    const scratch = mapped.value;
-    defer std.crypto.secureZero(u8, std.mem.asBytes(scratch));
-    if (!try credentials.readSnapshotInto(path, &scratch.current, scratch)) return null;
-    return scratch.current.client_id.slice().len > 0;
+    const room = mapped.value;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(room));
+    var context: Revocation = .{ .io = io, .issuer = issuer, .room = room };
+    const ended = credentials.signOut(path, &room.credentials, &context, Revocation.revoke) catch |err| return switch (err) {
+        error.FileNotFound => .{ .device_code = .absent },
+        else => .{ .device_code = .failed },
+    };
+    if (!ended) return .{ .device_code = .absent };
+    return if (context.device) .{ .device_code = .removed } else .{ .browser = context.outcome };
 }
 
 fn endBrowser(io: std.Io, path: []const u8, issuer: Issuer) Browser {
@@ -382,36 +380,42 @@ fn endDeviceCode(path: []const u8) DeviceCode {
 
 fn keepDeviceCode(_: void, _: *const policy.Record) !void {}
 
-fn revokeBrowser(io: std.Io, credential_path: []const u8, issuer: Issuer, room: *Revoke) !Browser {
-    const Context = struct {
-        io: std.Io,
-        issuer: Issuer,
-        room: *Revoke,
-        outcome: Browser = .unconfirmed,
+const Revocation = struct {
+    io: std.Io,
+    issuer: Issuer,
+    room: *Revoke,
+    outcome: Browser = .unconfirmed,
+    device: bool = false,
 
-        fn revoke(self: *@This(), current: *const policy.Record) !void {
-            if (self.issuer == .fixture) try policy.requireFixtureClient(current);
-            var request = wire.revokeRequest(current, &self.room.form) catch return;
-            switch (self.issuer) {
-                .openai => {},
-                .fixture => |base| request.url = try Issuer.fixtureUrl(base, "/oauth/revoke", &self.room.url),
-            }
-            for (0..revoke_attempts) |attempt| {
-                if (attempt != 0) self.io.sleep(.fromSeconds(@intCast(attempt)), .awake) catch {};
-                const status = codex_auth.post(self.io, request, &self.room.response, null) catch continue;
-                switch (wire.revocation(status)) {
-                    .revoked => {
-                        self.outcome = .revoked;
-                        return;
-                    },
-                    .retry => continue,
-                    .refused => return,
-                }
+    fn revoke(self: *@This(), current: *const policy.Record) !void {
+        if (current.client_id.slice().len == 0) {
+            self.device = true;
+            return;
+        }
+        if (self.issuer == .fixture) try policy.requireFixtureClient(current);
+        var request = wire.revokeRequest(current, &self.room.form) catch return;
+        switch (self.issuer) {
+            .openai => {},
+            .fixture => |base| request.url = try Issuer.fixtureUrl(base, "/oauth/revoke", &self.room.url),
+        }
+        for (0..revoke_attempts) |attempt| {
+            if (attempt != 0) self.io.sleep(.fromSeconds(@intCast(attempt)), .awake) catch {};
+            const status = codex_auth.post(self.io, request, &self.room.response, null) catch continue;
+            switch (wire.revocation(status)) {
+                .revoked => {
+                    self.outcome = .revoked;
+                    return;
+                },
+                .retry => continue,
+                .refused => return,
             }
         }
-    };
-    var context: Context = .{ .io = io, .issuer = issuer, .room = room };
-    if (!try credentials.signOut(credential_path, &room.credentials, &context, Context.revoke)) return .absent;
+    }
+};
+
+fn revokeBrowser(io: std.Io, credential_path: []const u8, issuer: Issuer, room: *Revoke) !Browser {
+    var context: Revocation = .{ .io = io, .issuer = issuer, .room = room };
+    if (!try credentials.signOut(credential_path, &room.credentials, &context, Revocation.revoke)) return .absent;
     return context.outcome;
 }
 

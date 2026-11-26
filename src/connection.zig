@@ -1401,6 +1401,12 @@ pub const Connections = struct {
     }
 };
 
+/// Whether `text` may name a connection that holds a sign-in: a valid name (a lowercase letter
+/// first, then lowercase letters, digits and `-`) that no built-in sign-in owns.
+pub fn signInName(text: []const u8) bool {
+    return Name.parse(text) != null and !reservedName(text);
+}
+
 /// Whether a built-in sign-in owns the name (`codex`, `chatgpt`): a connection may not take it.
 pub fn reservedName(name: []const u8) bool {
     inline for (std.enums.values(provider_name.Provider)) |provider| {
