@@ -4,6 +4,7 @@
 const std = @import("std");
 
 /// One node of a rule. A column is named as `alias.name`; whether the name exists is the catalog's to check, not this file's.
+/// An unknown column in a subquery over an empty table is therefore found only by that check, not by `eval.zig`.
 pub const Expr = union(enum) {
     col: Col,
     int: i64,
@@ -13,9 +14,9 @@ pub const Expr = union(enum) {
     is_null: *const Expr,
     is_not_null: *const Expr,
     not: *const Expr,
-    /// AND, left to right; an empty list is true.
+    /// AND, left to right; at least one member.
     all: []const Expr,
-    /// OR, left to right; an empty list is false.
+    /// OR, left to right; at least one member.
     any: []const Expr,
     /// `value` equals one of `set`, written as the portable `IN (...)` for up to two members and an OR chain beyond.
     one_of: OneOf,
@@ -122,7 +123,10 @@ pub fn render(comptime expr: Expr) []const u8 {
         return switch (expr) {
             .col => |c| c.alias ++ "." ++ c.name,
             .int => |value| std.fmt.comptimePrint("{d}", .{value}),
-            .text => |value| "'" ++ value ++ "'",
+            .text => |value| blk: {
+                literalOk(value);
+                break :blk "'" ++ value ++ "'";
+            },
             .null_value => "NULL",
             .cmp => |c| operand(c.left.*) ++ symbol(c.op) ++ operand(c.right.*),
             .is_null => |value| operand(value.*) ++ " IS NULL",
@@ -139,17 +143,18 @@ pub fn render(comptime expr: Expr) []const u8 {
     }
 }
 
-/// An expression used as an operand of `=`, `IS NULL` or `NOT`: a connective needs parentheses there.
+/// An expression used as an operand of a comparison, a null test, `NOT`, `IN` or `BETWEEN`: everything that is not an
+/// atom is parenthesised, so the text reads back with the structure the value has. This is the only place that decides it.
 fn operand(comptime expr: Expr) []const u8 {
     return switch (expr) {
-        .all, .any, .not, .cmp, .is_null, .is_not_null => "(" ++ render(expr) ++ ")",
-        .one_of => |s| if (s.set.len <= 2) "(" ++ render(expr) ++ ")" else render(expr),
-        else => render(expr),
+        .col, .int, .text, .null_value, .coalesce, .count, .exists => render(expr),
+        .all, .any, .not, .cmp, .is_null, .is_not_null, .one_of, .not_exists => "(" ++ render(expr) ++ ")",
     };
 }
 
 fn joined(comptime parts: []const Expr, comptime separator: []const u8) []const u8 {
     comptime {
+        if (parts.len == 0) @compileError("rule: a conjunction or disjunction needs a member");
         var out: []const u8 = "";
         for (parts, 0..) |part, index| {
             const nested = switch (part) {
@@ -165,6 +170,7 @@ fn joined(comptime parts: []const Expr, comptime separator: []const u8) []const 
 
 fn joinedPlain(comptime parts: []const Expr, comptime separator: []const u8) []const u8 {
     comptime {
+        if (parts.len == 0) @compileError("rule: a coalesce needs a member");
         var out: []const u8 = "";
         for (parts, 0..) |part, index| out = out ++ (if (index == 0) "" else separator) ++ render(part);
         return out;
@@ -173,7 +179,9 @@ fn joinedPlain(comptime parts: []const Expr, comptime separator: []const u8) []c
 
 fn oneOfText(comptime s: Expr.OneOf) []const u8 {
     comptime {
-        const subject = render(s.value.*);
+        if (s.set.len == 0) @compileError("rule: a set needs a member");
+        for (s.set) |member| literalOk(member);
+        const subject = operand(s.value.*);
         var out: []const u8 = "";
         if (s.set.len <= 2) {
             for (s.set, 0..) |member, index| out = out ++ (if (index == 0) "" else ",") ++ "'" ++ member ++ "'";
@@ -184,10 +192,26 @@ fn oneOfText(comptime s: Expr.OneOf) []const u8 {
     }
 }
 
+/// A text literal is spliced between quotes, so it holds none.
+fn literalOk(comptime value: []const u8) void {
+    if (std.mem.indexOfScalar(u8, value, '\'') != null) @compileError("rule: a text literal holds no quote: " ++ value);
+}
+
+fn identifierOk(comptime name: []const u8) void {
+    if (name.len == 0) @compileError("rule: an empty name");
+    for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_') @compileError("rule: a name is letters, digits and underscores: " ++ name);
+}
+
 fn selectText(comptime projection: []const u8, comptime query: Select) []const u8 {
     comptime {
+        identifierOk(query.table);
+        identifierOk(query.alias);
         var out: []const u8 = "SELECT " ++ projection ++ " FROM " ++ query.table ++ " " ++ query.alias;
-        for (query.joins) |join| out = out ++ " LEFT JOIN " ++ join.table ++ " " ++ join.alias ++ " ON " ++ render(join.on);
+        for (query.joins) |join| {
+            identifierOk(join.table);
+            identifierOk(join.alias);
+            out = out ++ " LEFT JOIN " ++ join.table ++ " " ++ join.alias ++ " ON " ++ render(join.on);
+        }
         return out ++ " WHERE " ++ render(query.where);
     }
 }
@@ -201,7 +225,7 @@ test "a comparison, a null test and a set render as portable Rui SQL" {
     try std.testing.expectEqualStrings("(t.c='x' OR t.c='y' OR t.c='z')", comptime render(oneOf(col("t", "c"), &.{ "x", "y", "z" })));
 }
 
-test "a disjunction inside a conjunction keeps its parentheses, and a negation binds its whole operand" {
+test "SH-181 a disjunction inside a conjunction keeps its parentheses, and a negation binds its whole operand" {
     try std.testing.expectEqualStrings("t.a=1 AND (t.b=2 OR t.c=3)", comptime render(all(&.{
         eq(col("t", "a"), int(1)),
         any(&.{ eq(col("t", "b"), int(2)), eq(col("t", "c"), int(3)) }),
@@ -211,4 +235,14 @@ test "a disjunction inside a conjunction keeps its parentheses, and a negation b
 
 test "a boolean comparison renders both sides in parentheses" {
     try std.testing.expectEqualStrings("(t.a IS NULL)=(t.b IS NULL)", comptime render(eq(isNull(col("t", "a")), isNull(col("t", "b")))));
+}
+
+test "SH-181 every node kind used as an operand keeps its own structure" {
+    const q = comptime Select{ .table = "c", .alias = "c", .where = eq(col("c", "p"), col("p", "id")) };
+    const x = comptime col("t", "a");
+    try std.testing.expectEqualStrings("(NOT EXISTS(SELECT 1 FROM c c WHERE c.p=p.id))=1", comptime render(eq(notExists(q), int(1))));
+    try std.testing.expectEqualStrings("(NOT EXISTS(SELECT 1 FROM c c WHERE c.p=p.id)) IS NULL", comptime render(isNull(notExists(q))));
+    try std.testing.expectEqualStrings("(t.a IS NULL) IN ('x')", comptime render(oneOf(isNull(x), &.{"x"})));
+    try std.testing.expectEqualStrings("((t.a=1 AND t.a=2)='x' OR (t.a=1 AND t.a=2)='y' OR (t.a=1 AND t.a=2)='z')", comptime render(oneOf(all(&.{ eq(x, int(1)), eq(x, int(2)) }), &.{ "x", "y", "z" })));
+    try std.testing.expectEqualStrings("(t.a=1)=(t.a=2)", comptime render(eq(eq(x, int(1)), eq(x, int(2)))));
 }
