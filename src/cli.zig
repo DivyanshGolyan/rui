@@ -327,7 +327,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .host_set, .host_unset, .host_settings => try hostSettings(init, command, parsed),
         .defaults_inspect, .defaults_configure => try setup(init, parsed, .command_line),
         .auth_login => try login(init, parsed.positional.?, parsed.has("device-code"), parsed.get("connection"), parsed.get("test-chatgpt-fixture-endpoint"), codex_auth.login),
-        .auth_logout => try planLogout(init, parsed.positional.?, parsed.get("test-chatgpt-fixture-endpoint")),
+        .auth_logout => try planLogout(init, parsed.positional.?, parsed.get("connection"), parsed.get("test-chatgpt-fixture-endpoint")),
         .auth_status => {
             const readiness = localReadiness(init);
             try writeSignIns(init, &readiness);
@@ -562,10 +562,17 @@ fn readStdin(buffer: []u8) ?usize {
     return std.posix.read(std.Io.File.stdin().handle, buffer) catch 0;
 }
 
-fn planLogout(init: std.process.Init, provider: []const u8, fixture_endpoint: ?[]const u8) !void {
+fn planLogout(init: std.process.Init, provider: []const u8, connection_name: ?[]const u8, fixture_endpoint: ?[]const u8) !void {
     if (!std.mem.eql(u8, provider, "chatgpt")) {
         stderr.diagnostic("rui: rui auth logout signs out of chatgpt only; Rui keeps no sign-in to end for another provider.\n", .{});
         return usage();
+    }
+    if (connection_name) |given| {
+        if (!connectionNameFree(given)) {
+            stderr.diagnostic("rui auth logout: --connection names an account: lowercase letters, digits and '-', at most {d} bytes, and not codex, chatgpt or openai. Nothing was changed.\n", .{@import("connection.zig").max_name_bytes});
+            return usage();
+        }
+        return namedLogout(init, given, fixture_endpoint);
     }
     const issuer = try planIssuer(init, .{ .provider = .chatgpt }, fixture_endpoint);
     var browser_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -579,6 +586,65 @@ fn planLogout(init: std.process.Init, provider: []const u8, fixture_endpoint: ?[
     if (receipt.failed()) {
         recordExit(.unclassified);
         return error.Reported;
+    }
+}
+
+fn namedLogout(init: std.process.Init, name: []const u8, fixture_endpoint: ?[]const u8) !void {
+    const record: credential_location.Record = .{ .connection = name };
+    const issuer = try planIssuer(init, record, fixture_endpoint);
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = credential_location.recordFile(init.environ_map, record, &buffer) catch {
+        stderr.diagnostic("rui: could not end the ChatGPT sign-in {s}: Rui could not find its credential. Set RUI_<NAME>_CREDENTIAL_FILE for it to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt --connection {s} again.\n", .{ name, name });
+        recordExit(.unclassified);
+        return error.Reported;
+    };
+    var text: [768]u8 = undefined;
+    const said = namedLogoutText(&text, name, chatgpt_plan_login.logoutRecord(init.io, path, issuer));
+    if (said.ok) try std.Io.File.stdout().writeStreamingAll(init.io, said.text) else {
+        stderr.diagnosticBytes(said.text);
+        recordExit(.unclassified);
+        return error.Reported;
+    }
+}
+
+const NamedLogout = struct { ok: bool, text: []const u8 };
+
+fn namedLogoutText(buffer: []u8, name: []const u8, ended: chatgpt_plan_login.Ended) NamedLogout {
+    const unconfirmed = "Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.";
+    const text = switch (ended) {
+        .browser => |browser| switch (browser) {
+            .revoked => std.fmt.bufPrint(buffer, "Rui: Signed out of ChatGPT as {s} in the browser.\n", .{name}),
+            .unconfirmed => std.fmt.bufPrint(buffer, "Rui: Signed out of ChatGPT as {s} in the browser: " ++ unconfirmed ++ "\n", .{name}),
+            .absent => std.fmt.bufPrint(buffer, "Rui: Not signed in as {s}; nothing changed.\n", .{name}),
+            .failed, .unlocated => return .{ .ok = false, .text = std.fmt.bufPrint(buffer, "rui: still signed in to ChatGPT as {s}: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt --connection {s} again.\n", .{ name, name }) catch "rui: still signed in.\n" },
+        },
+        .device_code => |device| switch (device) {
+            .removed => std.fmt.bufPrint(buffer, "Rui: Signed out of ChatGPT as {s} with a device code.\n", .{name}),
+            .absent => std.fmt.bufPrint(buffer, "Rui: Not signed in as {s}; nothing changed.\n", .{name}),
+            .failed, .unlocated => return .{ .ok = false, .text = std.fmt.bufPrint(buffer, "rui: still signed in to ChatGPT as {s}: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt --connection {s} again.\n", .{ name, name }) catch "rui: still signed in.\n" },
+        },
+    };
+    return .{ .ok = true, .text = text catch "Rui: Signed out.\n" };
+}
+
+test "a named logout says how that one sign-in ended, and fails while it may remain" {
+    var buffer: [768]u8 = undefined;
+    const Case = struct { chatgpt_plan_login.Ended, bool, []const u8 };
+    for ([_]Case{
+        .{ .{ .browser = .revoked }, true, "Rui: Signed out of ChatGPT as work in the browser.\n" },
+        .{ .{ .device_code = .removed }, true, "Rui: Signed out of ChatGPT as work with a device code.\n" },
+        .{ .{ .browser = .absent }, true, "Rui: Not signed in as work; nothing changed.\n" },
+        .{ .{ .device_code = .absent }, true, "Rui: Not signed in as work; nothing changed.\n" },
+    }) |case| {
+        const said = namedLogoutText(&buffer, "work", case[0]);
+        try std.testing.expectEqual(case[1], said.ok);
+        try std.testing.expectEqualStrings(case[2], said.text);
+    }
+    const unconfirmed = namedLogoutText(&buffer, "work", .{ .browser = .unconfirmed });
+    try std.testing.expect(unconfirmed.ok and std.mem.indexOf(u8, unconfirmed.text, "as work in the browser") != null and std.mem.indexOf(u8, unconfirmed.text, "did not confirm") != null);
+    for ([_]chatgpt_plan_login.Ended{ .{ .browser = .failed }, .{ .browser = .unlocated }, .{ .device_code = .failed }, .{ .device_code = .unlocated } }) |ended| {
+        const said = namedLogoutText(&buffer, "work", ended);
+        try std.testing.expect(!said.ok and std.mem.indexOf(u8, said.text, "--connection work again") != null);
     }
 }
 

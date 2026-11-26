@@ -144,6 +144,11 @@ def logout(url, **variables):
                           capture_output=True, text=True, timeout=30, env={**os.environ, **variables})
 
 
+def named_file_present(path):
+    """Whether a named sign-in's record still holds a signed-in account (signing out empties it)."""
+    return path.exists() and "state=signed_out" not in path.read_text()
+
+
 def unfound(way, variable):
     return (f"rui: could not end the ChatGPT {way} sign-in: Rui could not find its credential. Set {variable} "
             "to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n")
@@ -457,6 +462,15 @@ def run():
         assert "New Sessions will use" not in stdout and "Start a conversation with" not in stdout, stdout
         assert (credential_file.read_bytes() if credential_file.exists() else None) == built_in_before
         assert saved_default() == default_before
+        revoked_before = len(endpoint.revoke_requests)
+        named_out = subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--connection", "work", "--test-chatgpt-fixture-endpoint", url],
+                                   capture_output=True, text=True, timeout=30)
+        assert (named_out.returncode, named_out.stdout, named_out.stderr) == (0, "Rui: Signed out of ChatGPT as work in the browser.\n", ""), named_out
+        assert len(endpoint.revoke_requests) == revoked_before + 1 and not named_file_present(work_file), endpoint.revoke_requests
+        assert (credential_file.read_bytes() if credential_file.exists() else None) == built_in_before
+        again = subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--connection", "work", "--test-chatgpt-fixture-endpoint", url],
+                               capture_output=True, text=True, timeout=30)
+        assert (again.returncode, again.stdout) == (0, "Rui: Not signed in as work; nothing changed.\n"), again
         del os.environ["RUI_WORK_CREDENTIAL_FILE"]
         print("chatgpt login passed: listener and pasted sign-in, returning client reused, stale answer refused, "
               "logout ends both sign-ins and a running Host refuses either until the next sign-in, and says when "

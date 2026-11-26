@@ -336,6 +336,27 @@ pub fn logout(io: std.Io, browser_path: ?[]const u8, device_code_path: ?[]const 
     };
 }
 
+/// How one connection's sign-in ended: the record names its own way in (a browser sign-in
+/// carries the app registration it was issued to, a device-code one has none), so the file
+/// alone says whether to revoke or only delete. An unreadable record is the way it cannot name.
+pub const Ended = union(enum) { browser: Browser, device_code: DeviceCode };
+
+pub fn logoutRecord(io: std.Io, path: []const u8, issuer: Issuer) Ended {
+    const browser = browserRecord(path) catch return .{ .device_code = .failed };
+    const present = browser orelse return .{ .device_code = .absent };
+    return if (present) .{ .browser = endBrowser(io, path, issuer) } else .{ .device_code = endDeviceCode(path) };
+}
+
+/// Whether the record at `path` is a browser sign-in; null when there is no record.
+fn browserRecord(path: []const u8) !?bool {
+    const mapped = try pages.Mapped(credentials.Scratch).map();
+    defer mapped.unmap();
+    const scratch = mapped.value;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(scratch));
+    if (!try credentials.readSnapshotInto(path, &scratch.current, scratch)) return null;
+    return scratch.current.client_id.slice().len > 0;
+}
+
 fn endBrowser(io: std.Io, path: []const u8, issuer: Issuer) Browser {
     const mapped = pages.Mapped(Revoke).map() catch return .failed;
     defer mapped.unmap();
@@ -392,6 +413,30 @@ fn revokeBrowser(io: std.Io, credential_path: []const u8, issuer: Issuer, room: 
     var context: Context = .{ .io = io, .issuer = issuer, .room = room };
     if (!try credentials.signOut(credential_path, &room.credentials, &context, Context.revoke)) return .absent;
     return context.outcome;
+}
+
+test "a connection's record says by itself whether its logout revokes a browser sign-in or only deletes a device-code one" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(io, "private", .{ .permissions = .fromMode(0o700) });
+    private.close(io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/private/work.json", .{root[0..root_len]});
+    const head = "version=3\ngeneration=1\naccount_id=" ++ policy.fixture_account_id ++ "\n";
+    const body = "fedramp=0\nid_token=" ++ policy.fixture_id_token ++ "\naccess_token=" ++ policy.fixture_access_token ++
+        "\nrefresh_token=synthetic-refresh\nexpires_at=4102444800\nrefreshed_at=100\nstate=ready\n";
+    const issuer: Issuer = .{ .fixture = "http://127.0.0.1:9" };
+    // No record, an unreadable one, a device-code one and a browser one (it names its app registration).
+    try std.testing.expectEqual(Ended{ .device_code = .absent }, logoutRecord(io, path, issuer));
+    try tmp.dir.writeFile(io, .{ .sub_path = "private/work.json", .data = "not a credential\n", .flags = .{ .permissions = .fromMode(0o600) } });
+    try std.testing.expectEqual(Ended{ .device_code = .failed }, logoutRecord(io, path, issuer));
+    try tmp.dir.writeFile(io, .{ .sub_path = "private/work.json", .data = head ++ body, .flags = .{ .permissions = .fromMode(0o600) } });
+    try std.testing.expectEqual(Ended{ .device_code = .removed }, logoutRecord(io, path, issuer));
+    try tmp.dir.writeFile(io, .{ .sub_path = "private/work.json", .data = head ++ "client_id=" ++ policy.fixture_client_id ++ "\n" ++ body, .flags = .{ .permissions = .fromMode(0o600) } });
+    try std.testing.expectEqual(Ended{ .browser = .unconfirmed }, logoutRecord(io, path, issuer));
 }
 
 test "logout ends the device-code sign-in in each state it can be in, beside a browser one that is absent or unreadable" {
