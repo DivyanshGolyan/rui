@@ -99,6 +99,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../rsql.zig"),
         @embedFile("../rsql_table.zig"),
         @embedFile("../schema.zig"),
+        @embedFile("../catalog.zig"),
         @embedFile("../sqlite.zig"),
         @embedFile("../testing.zig"),
         @embedFile("../column_rules.zig"),

@@ -44,8 +44,8 @@ const SessionFacts = configuration_domain.SessionFacts;
 const SupersedingControl = action_domain.SupersedingControl;
 const TurnOutcome = turn_domain.TurnOutcome;
 const import_window_bytes = content_domain.import_window_bytes;
-const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql;
-const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
+const retry_allowance_open_sql = store_schema.retry_allowance_open_sql;
+const retry_exhausted_sql = store_schema.retry_exhausted_sql;
 const context_changed = model_admission_domain.context_changed;
 
 pub const ModelTimings = @import("../../model_timing.zig").Values;
