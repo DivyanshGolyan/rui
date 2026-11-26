@@ -495,7 +495,6 @@ shallow-module BashLifecycle
 shallow-module InputCapture
 shallow-module SessionInput
 shallow-module SessionSubmission
-shallow-module UpgradeJob
 shallow-module app_input
 shallow-module cli_grammar
 shallow-module codex_credential_policy
