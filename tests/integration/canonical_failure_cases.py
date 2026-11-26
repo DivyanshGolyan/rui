@@ -20,7 +20,7 @@ import host_process
 from host_process import canonical_fixture_root, preserve_failure_metadata, retain_failure_state
 import os_semantics
 from canonical_fixture import ERROR, ERROR_BYTES, ReplyProxy, announced, invoke
-from conversation_page_fixture import request
+from host_fixture import request
 
 def content_failure(result):
     assert result.returncode == 1 and result.stdout == "", result
