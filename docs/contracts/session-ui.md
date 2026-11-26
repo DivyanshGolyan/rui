@@ -267,7 +267,7 @@ No nested conversation login owner is retained.
 
 Interactive input uses the single conversation-first frontend described under [staged persistent input](#staged-persistent-input).
 It captures each exact Message before transmission and observes Host activity without a separate per-prompt follow loop or follow reminders.
-Permission presents one exact Action above an Allow once / Deny choice that a fresh Enter confirms: Bash keeps its description and complete decoded command; MCP shows its frozen tool name and server, its call description when present, and the original JSON arguments. Its heading uses the shared needs-you mark and attention tone: `●` in Unicode and `?` in ASCII, matching the Session row.
+Permission presents one exact Action above an Allow once / Deny choice that a fresh Enter confirms: Bash keeps its description, when it has one, and complete decoded command; MCP shows its frozen tool name and server, its call description when present, and the original JSON arguments. Its heading uses the shared needs-you mark and attention tone: `●` in Unicode and `?` in ASCII, matching the Session row.
 Queued chat, typeahead and marked paste authorize nothing.
 The durable decision retains that exact target for Host revalidation.
 One-shot `action inspect` JSON retains the Action ID, opaque call ID and complete arguments, escaping every non-ASCII code point so control and bidirectional characters cannot disguise the proposal on a terminal.
@@ -881,7 +881,7 @@ Generated commands use printable hex Store selectors and bare six-character Sess
 When Current exposes an actionable permission, the frontend reads the selected call's identity from that capture before its complete arguments replace scratch.
 The runner is derived from the name and owner in the Operation's frozen offer, never from argument shape or the Session's latest catalog.
 Current includes the frozen `server` only for unresolved MCP calls; legacy built-in rows omit it.
-Bash displays `? <description>`, then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one.
+Bash displays `? <description>` when it has a label (a call with none shows the bare `?` line), then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one.
 MCP displays `? <saved description>` (at most 200 decoded UTF-8 bytes), `Tool`, `Server` and the original `Arguments` JSON.
 The label is extracted once at settlement from `rui_call_description`: a valid nonblank, single-line UTF-8 string of 1–200 bytes is saved; missing, non-string, blank, multi-line or oversized text saves the tool name instead.
 The terminal and TypeScript feed show the line the Store derives when it reads (`tool_line.of`) from that saved label, never re-parse arguments for it.

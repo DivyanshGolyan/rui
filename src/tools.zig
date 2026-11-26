@@ -248,13 +248,13 @@ test "rejected Bash arguments name what is wrong" {
         .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"a_field_name_longer_than_sixteen\":1}", .unknown_field },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"cmd\":\"false\"}", .duplicate_field },
         .{ "{\"description\":\"Run tests\"}", .missing_cmd },
-        .{ "{\"cmd\":\"true\"}", .missing_description },
         .{ "{\"description\":\"Run tests\",\"cmd\":7}", .cmd_invalid },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"a\\u0000b\"}", .cmd_invalid },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"\\ud83d\\n\"}", .cmd_invalid },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"\\ud83d\\q\"}", .malformed_json },
-        .{ "{\"description\":\"\",\"cmd\":\"true\"}", .description_invalid },
-        .{ "{\"description\":\"" ++ @as([101]u8, @splat('a')) ++ "\",\"cmd\":\"true\"}", .description_invalid },
+        .{ "{\"description\":,\"cmd\":\"true\"}", .malformed_json },
+        .{ "{\"description\":nope,\"cmd\":\"true\"}", .malformed_json },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"description\":\"Read files\"}", .duplicate_field },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"stdin\":42}", .stdin_invalid },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"stdin\":\"\xff\"}", .stdin_invalid },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"timeout_ms\":0}", .timeout_invalid },
@@ -289,9 +289,7 @@ test "an invalid-arguments result tells the model what was wrong" {
         .{ .unknown_field, "Invalid arguments for tool 'bash': only cmd, description, stdin and timeout_ms are accepted." },
         .{ .duplicate_field, "Invalid arguments for tool 'bash': a field appears more than once." },
         .{ .missing_cmd, "Invalid arguments for tool 'bash': cmd is required." },
-        .{ .missing_description, "Invalid arguments for tool 'bash': description is required." },
         .{ .cmd_invalid, "Invalid arguments for tool 'bash': cmd must be a string of UTF-8 text with no NUL characters." },
-        .{ .description_invalid, "Invalid arguments for tool 'bash': description must be a nonblank, single-line string of UTF-8 text, at most 100 bytes." },
         .{ .stdin_invalid, "Invalid arguments for tool 'bash': stdin must be a string of UTF-8 text." },
         .{ .timeout_invalid, "Invalid arguments for tool 'bash': timeout_ms must be an integer from 1 to 9223372036854775807." },
     };
@@ -302,28 +300,79 @@ test "an invalid-arguments result tells the model what was wrong" {
     }
 }
 
-test "Bash descriptions are required and bounded by decoded UTF-8 bytes" {
-    var missing = TestSource{ .bytes = "{\"cmd\":\"true\",\"timeout_ms\":null}" };
-    try std.testing.expect(!try validBashArguments(&missing));
-    const invalid = [_][]const u8{
-        "\"\"",        "\"   \"",     "null",      "1", "\"line\\nnext\"", "\"line\\rnext\"",
-        "\"\\u2028\"", "\"\\ud800\"", "\"\xc3(\"",
+test "TPR-6 a Bash call is accepted whatever its description says, and saves it as one tidy line or none" {
+    const parser = @import("call_classification.zig");
+    const sink = struct {
+        pub fn writeAll(_: *@This(), _: []const u8) !void {}
     };
-    var buffer: [512]u8 = undefined;
-    for (invalid) |description| {
-        var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"cmd\":\"true\",\"timeout_ms\":null,\"description\":{s}}}", .{description}) };
-        try std.testing.expect(!try validBashArguments(&source));
-    }
-    for ([_][]const u8{ @as([98]u8, @splat('a')) ++ "é", &@as([50 * 6]u8, @bitCast(@as([50][6]u8, @splat("\\u00e9".*)))) }) |description| {
-        var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"description\":\"{s}\",\"cmd\":\"printf ok\",\"timeout_ms\":null}}", .{description}) };
-        try std.testing.expect(try validBashArguments(&source));
-    }
-    for ([_][]const u8{ @as([99]u8, @splat('a')) ++ "é", &@as([51 * 6]u8, @bitCast(@as([51][6]u8, @splat("\\u00e9".*)))) }) |description| {
-        var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"cmd\":\"true\",\"description\":\"{s}\",\"timeout_ms\":null}}", .{description}) };
-        try std.testing.expect(!try validBashArguments(&source));
-    }
-    var duplicate = TestSource{ .bytes = "{\"description\":\"Run tests\",\"cmd\":\"true\",\"description\":\"Read files\",\"timeout_ms\":null}" };
-    try std.testing.expect(!try validBashArguments(&duplicate));
+    const long_a = @as([250]u8, @splat('a'));
+    const blanks_first = @as([250]u8, @splat(' ')) ++ "Run tests";
+    const split_scalar = @as([199]u8, @splat(' ')) ++ "\xc3\xa9x";
+    const cut_scalar = @as([199]u8, @splat('a')) ++ "\xc3\xa9";
+    const cut_in_blanks = "x" ++ @as([198]u8, @splat(' ')) ++ "\xc3\xa9y";
+    const cases = [_]struct { arguments: []const u8, label: ?[]const u8 = null, problem: ?BashProblem = null }{
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"Run parser tests\",\"timeout_ms\":null}", .label = "Run parser tests" },
+        .{ .arguments = "{\"description\":\"Run parser tests\",\"cmd\":\"true\"}", .label = "Run parser tests" },
+        .{ .arguments = "{\"cmd\":\"true\"}" },
+        .{ .arguments = "{\"timeout_ms\":5,\"cmd\":\"true\"}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":null}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"\"}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"   \"}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"  Run   tests\\nnow  \"}", .label = "Run tests now" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"line\\rnext\\u2028more\"}", .label = "line next more" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"a\\u0000b\"}", .label = "a\u{fffd}b" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"a\xffb\"}", .label = "a\u{fffd}b" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"x\\ud800\"}", .label = "x\u{fffd}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"\\ud800y\"}", .label = "\u{fffd}y" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"\\udc00\"}", .label = "\u{fffd}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"\\ud800\\n\"}", .label = "\u{fffd}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"\\ud800\\ud83d\\ude00\"}", .label = "\u{fffd}\u{1f600}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"\\ud83d\\ude00\"}", .label = "\u{1f600}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"" ++ long_a ++ "\"}", .label = &@as([100]u8, @splat('a')) },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"" ++ blanks_first ++ "\"}", .label = "Run tests" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"" ++ split_scalar ++ "\"}", .label = "\u{e9}x" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"" ++ cut_scalar ++ "\"}", .label = &@as([100]u8, @splat('a')) },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"" ++ cut_in_blanks ++ "\"}", .label = "x" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":42}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":-1.5e3}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":{}}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":true}" },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":[]}" },
+        .{ .arguments = "{\"description\":42,\"cmd\":\"true\"}" },
+        .{ .arguments = "{\"description\" : { \"a\" : [ 1, \"}\\\"]\" , {\"b\":null} ] } , \"cmd\" : \"true\" , \"timeout_ms\" : 5 }" },
+        .{ .arguments = "{\"description\":[\"x\"],\"cmd\":\"true\",\"description\":\"y\"}", .problem = .duplicate_field },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":42,\"description\":\"y\"}", .problem = .duplicate_field },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":}", .problem = .malformed_json },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":,\"x\":1}", .problem = .malformed_json },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":[}", .problem = .malformed_json },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":{\"a\":1}", .problem = .malformed_json },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":42} x", .problem = .malformed_json },
+        .{ .arguments = "{\"description\":42}", .problem = .missing_cmd },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":null,\"description\":\"x\"}", .problem = .duplicate_field },
+        .{ .arguments = "{\"cmd\":\"true\",\"description\":\"x\",\"description\":null}", .problem = .duplicate_field },
+    };
+    for (cases) |case| for ([_]usize{ 4096, 1 }) |chunk| {
+        var source = TestSource{ .bytes = case.arguments };
+        var machine: parser.BashParser = .{};
+        var discard: sink = .{};
+        errdefer std.debug.print("arguments: {s} chunk: {d}\n", .{ case.arguments, chunk });
+        const progress = while (true) {
+            const step = try machine.advance(&source, &discard, &discard, chunk);
+            if (step != .pending) break step;
+        };
+        if (case.problem) |problem| {
+            try std.testing.expectEqual(BashProblem, @TypeOf(problem));
+            try std.testing.expect(progress == .invalid and progress.invalid == problem);
+            continue;
+        }
+        try std.testing.expect(progress == .complete);
+        const facts: CallFacts = .{ .tool = bash_record, .bash = .{ .accepted = progress.complete } };
+        if (case.label) |label| {
+            try std.testing.expectEqualStrings(label, facts.label().?);
+        } else {
+            try std.testing.expect(facts.label() == null);
+        }
+    };
 }
 
 test "every provider-run tool the Host offers is run by some provider" {

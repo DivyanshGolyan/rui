@@ -1,6 +1,7 @@
 const std = @import("std");
 const core_tools = @import("message_agent_arguments.zig");
 const Bounded = @import("bounded.zig").Bounded;
+const saved_label = @import("saved_label.zig");
 const session_id = @import("session_id.zig");
 const tool_presentation = @import("tool_presentation.zig");
 const tool_proposal = @import("tool_proposal.zig");
@@ -29,6 +30,9 @@ comptime {
 
 pub const BashArguments = struct {
     timeout_ms: ?u64 = null,
+    /// The model's activity label as it reads on a screen: its `description` repaired to one tidy line of at most
+    /// `max_bash_description_bytes` (`saved_label.readWords`). Empty when the model gave none or only blanks; the label
+    /// is advice, so no value of it refuses a call.
     description: Bounded(max_bash_description_bytes) = .{},
     stdin_present: bool = false,
 };
@@ -66,6 +70,7 @@ pub const CallFacts = struct {
     /// arguments where they are settled.) Nothing else is saved; the line a reader shows is `tool_line.of`.
     pub fn label(self: *const CallFacts) ?[]const u8 {
         const arguments = self.bashArguments() orelse return null;
+        if (arguments.description.len == 0) return null;
         return arguments.description.slice();
     }
 
@@ -82,9 +87,7 @@ pub const BashProblem = enum {
     unknown_field,
     duplicate_field,
     missing_cmd,
-    missing_description,
     cmd_invalid,
-    description_invalid,
     stdin_invalid,
     timeout_invalid,
 
@@ -94,9 +97,7 @@ pub const BashProblem = enum {
             .unknown_field => "only cmd, description, stdin and timeout_ms are accepted",
             .duplicate_field => "a field appears more than once",
             .missing_cmd => "cmd is required",
-            .missing_description => "description is required",
             .cmd_invalid => "cmd must be a string of UTF-8 text with no NUL characters",
-            .description_invalid => std.fmt.comptimePrint("description must be a nonblank, single-line string of UTF-8 text, at most {d} bytes", .{max_bash_description_bytes}),
             .stdin_invalid => "stdin must be a string of UTF-8 text",
             .timeout_invalid => std.fmt.comptimePrint("timeout_ms must be an integer from 1 to {d}", .{std.math.maxInt(i64)}),
         };
@@ -335,6 +336,13 @@ pub const BashParseProgress = union(enum) {
     complete: BashArguments,
 };
 
+const Skip = struct {
+    depth: u8 = 0,
+    in_string: bool = false,
+    escaped: bool = false,
+    seen: bool = false,
+};
+
 pub const BashParser = struct {
     const Phase = enum {
         object_start,
@@ -347,6 +355,7 @@ pub const BashParser = struct {
         low_unicode,
         colon,
         value_start,
+        skip_value,
         timeout_digits,
         timeout_null,
         after_value,
@@ -360,6 +369,10 @@ pub const BashParser = struct {
     value_target: ValueTarget = .none,
     key: Bounded(16) = .{},
     result: BashArguments = .{},
+    /// The `description` as the model wrote it, up to `saved_label.max_bytes`; the rest is dropped. `finishDescription` repairs it.
+    description_text: [saved_label.max_bytes]u8 = undefined,
+    description_len: usize = 0,
+    description_cut: bool = false,
     has_command: bool = false,
     has_timeout: bool = false,
     has_description: bool = false,
@@ -370,6 +383,8 @@ pub const BashParser = struct {
     unicode_digits: u3 = 0,
     high_surrogate: u21 = 0,
     stdin_utf8: utf8_validation.State = .{},
+    /// A `description` that is not a string is skipped, whatever JSON it is: how deep it nests, and whether a string or an escape is open.
+    skip: Skip = .{},
 
     pub fn advance(self: *BashParser, source: anytype, writer: anytype, input: anytype, maximum_bytes: usize) !BashParseProgress {
         std.debug.assert(maximum_bytes != 0);
@@ -383,6 +398,20 @@ pub const BashParser = struct {
                 self.phase = .after_value;
                 continue;
             }
+            if (self.string_target == .description) switch (self.phase) {
+                // A high surrogate the next byte does not continue is repaired, and that byte is read again as it would have been.
+                .surrogate_backslash => if (next != '\\') {
+                    self.emitString(writer, input, replacement) catch |err| return self.emitFailure(err);
+                    self.phase = .string;
+                    continue;
+                },
+                .surrogate_u => if (next != 'u') {
+                    self.emitString(writer, input, replacement) catch |err| return self.emitFailure(err);
+                    self.phase = .escape;
+                    continue;
+                },
+                else => {},
+            };
             _ = try source.take();
             consumed += 1;
             switch (self.phase) {
@@ -425,7 +454,7 @@ pub const BashParser = struct {
                                 self.phase = .after_value;
                             },
                             .description => {
-                                if (!tool_presentation.ToolPresentation.validDescription(self.result.description.slice())) return .{ .invalid = .description_invalid };
+                                self.finishDescription();
                                 self.has_description = true;
                                 self.phase = .after_value;
                             },
@@ -464,14 +493,7 @@ pub const BashParser = struct {
                     self.unicode_value = self.unicode_value * 16 + (std.fmt.charToDigit(next, 16) catch return .{ .invalid = .malformed_json });
                     self.unicode_digits += 1;
                     if (self.unicode_digits == 4) {
-                        if (self.unicode_value >= 0xd800 and self.unicode_value <= 0xdbff) {
-                            self.high_surrogate = self.unicode_value;
-                            self.phase = .surrogate_backslash;
-                        } else {
-                            if (self.unicode_value >= 0xdc00 and self.unicode_value <= 0xdfff) return .{ .invalid = self.stringProblem() };
-                            if (!(self.emitScalar(writer, input, self.unicode_value) catch |err| return self.emitFailure(err))) return .{ .invalid = self.stringProblem() };
-                            self.phase = .string;
-                        }
+                        if (self.unicodeEscapeDone(writer, input) catch |err| return self.emitFailure(err)) |problem| return .{ .invalid = problem };
                     }
                 },
                 .surrogate_backslash => {
@@ -488,7 +510,13 @@ pub const BashParser = struct {
                     self.unicode_value = self.unicode_value * 16 + (std.fmt.charToDigit(next, 16) catch return .{ .invalid = .malformed_json });
                     self.unicode_digits += 1;
                     if (self.unicode_digits == 4) {
-                        if (self.unicode_value < 0xdc00 or self.unicode_value > 0xdfff) return .{ .invalid = self.stringProblem() };
+                        if (self.unicode_value < 0xdc00 or self.unicode_value > 0xdfff) {
+                            if (self.string_target != .description) return .{ .invalid = self.stringProblem() };
+                            // The high surrogate had no partner; the escape that followed it is read as a fresh one.
+                            self.emitString(writer, input, replacement) catch |err| return self.emitFailure(err);
+                            if (self.unicodeEscapeDone(writer, input) catch |err| return self.emitFailure(err)) |problem| return .{ .invalid = problem };
+                            continue;
+                        }
                         const scalar = 0x10000 + ((self.high_surrogate - 0xd800) << 10) +
                             (self.unicode_value - 0xdc00);
                         if (!(self.emitScalar(writer, input, scalar) catch |err| return self.emitFailure(err))) return .{ .invalid = self.stringProblem() };
@@ -512,9 +540,18 @@ pub const BashParser = struct {
                         },
                         .description => {
                             if (self.has_description) return .{ .invalid = .duplicate_field };
-                            if (next != '"') return .{ .invalid = .description_invalid };
-                            self.string_target = .description;
-                            self.phase = .string;
+                            if (next == '"') {
+                                self.string_target = .description;
+                                self.phase = .string;
+                            } else if (next == 'n') {
+                                self.null_index = 1;
+                                self.phase = .timeout_null;
+                            } else {
+                                // A label is advice: a value that is not a string is no label, and the call still runs.
+                                self.skip = .{};
+                                self.phase = .skip_value;
+                                if (try self.skipValue(next)) |problem| return .{ .invalid = problem };
+                            }
                         },
                         .stdin => {
                             if (self.has_stdin) return .{ .invalid = .duplicate_field };
@@ -539,17 +576,24 @@ pub const BashParser = struct {
                         },
                     }
                 },
+                .skip_value => if (try self.skipValue(next)) |problem| return .{ .invalid = problem },
                 .timeout_digits => {
                     self.timeout_value = std.math.mul(u64, self.timeout_value, 10) catch return .{ .invalid = .timeout_invalid };
                     self.timeout_value = std.math.add(u64, self.timeout_value, next - '0') catch return .{ .invalid = .timeout_invalid };
                     if (self.timeout_value > std.math.maxInt(i64)) return .{ .invalid = .timeout_invalid };
                 },
                 .timeout_null => {
-                    if (next != "null"[self.null_index]) return .{ .invalid = if (self.value_target == .stdin) .stdin_invalid else .timeout_invalid };
+                    if (next != "null"[self.null_index]) return .{ .invalid = switch (self.value_target) {
+                        .stdin => .stdin_invalid,
+                        .description => .malformed_json,
+                        else => .timeout_invalid,
+                    } };
                     self.null_index += 1;
                     if (self.null_index == "null".len) {
                         if (self.value_target == .stdin) {
                             self.has_stdin = true;
+                        } else if (self.value_target == .description) {
+                            self.has_description = true;
                         } else {
                             self.result.timeout_ms = null;
                             self.has_timeout = true;
@@ -571,10 +615,51 @@ pub const BashParser = struct {
         return .pending;
     }
 
+    /// Reads one byte of a description that is not a string. The value ends at the `,` or `}` that closes it at depth 0.
+    /// It is skipped, not validated: the arguments are the provider's JSON, and a label is never worth a refusal.
+    fn skipValue(self: *BashParser, next: u8) !?BashProblem {
+        const skip = &self.skip;
+        if (skip.in_string) {
+            if (skip.escaped) {
+                skip.escaped = false;
+            } else if (next == '\\') {
+                skip.escaped = true;
+            } else if (next == '"') skip.in_string = false;
+            return null;
+        }
+        switch (next) {
+            '"' => skip.in_string = true,
+            '{', '[' => skip.depth = std.math.add(u8, skip.depth, 1) catch return .malformed_json,
+            ']' => {
+                if (skip.depth == 0) return .malformed_json;
+                skip.depth -= 1;
+            },
+            '}' => {
+                if (skip.depth != 0) {
+                    skip.depth -= 1;
+                } else {
+                    if (!skip.seen) return .malformed_json;
+                    self.has_description = true;
+                    self.phase = .after_object;
+                    return null;
+                }
+            },
+            ',' => if (skip.depth == 0) {
+                if (!skip.seen) return .malformed_json;
+                self.has_description = true;
+                self.phase = .key_start;
+                return null;
+            },
+            ' ', '\t', '\n', '\r' => return null,
+            else => {},
+        }
+        skip.seen = true;
+        return null;
+    }
+
     fn finishAtEof(self: *const BashParser) BashParseProgress {
         if (self.phase != .after_object) return .{ .invalid = .malformed_json };
         if (!self.has_command) return .{ .invalid = .missing_cmd };
-        if (!self.has_description) return .{ .invalid = .missing_description };
         return .{ .complete = self.result };
     }
 
@@ -587,7 +672,7 @@ pub const BashParser = struct {
         return switch (self.string_target) {
             .key => .unknown_field,
             .command => .cmd_invalid,
-            .description => .description_invalid,
+            .description => unreachable, // the description buffers and repairs; it has no failing bytes
             .stdin => .stdin_invalid,
         };
     }
@@ -601,16 +686,61 @@ pub const BashParser = struct {
                 try input.writeAll(bytes);
             },
             .description => {
-                const label = &self.result.description;
-                if (bytes.len > label.bytes.len - label.len) return error.InvalidDescriptorShape;
-                @memcpy(label.bytes[label.len..][0..bytes.len], bytes);
-                label.len += bytes.len;
+                var rest = bytes;
+                while (rest.len != 0) {
+                    if (self.description_len == self.description_text.len) {
+                        // Full. Text with no words yet is only blanks ahead of the words, which never matter: empty the buffer,
+                        // keeping a half-read character. Otherwise the rest is cut.
+                        const held = self.description_text[0..self.description_len];
+                        const tail = incompleteTail(held);
+                        if (saved_label.readWords(max_bash_description_bytes, held[0 .. held.len - tail]) != null) {
+                            self.description_cut = true;
+                            return;
+                        }
+                        var kept: [3]u8 = undefined;
+                        @memcpy(kept[0..tail], held[held.len - tail ..]);
+                        @memcpy(self.description_text[0..tail], kept[0..tail]);
+                        self.description_len = tail;
+                    }
+                    const room = self.description_text.len - self.description_len;
+                    const taken = @min(rest.len, room);
+                    @memcpy(self.description_text[self.description_len..][0..taken], rest[0..taken]);
+                    self.description_len += taken;
+                    rest = rest[taken..];
+                }
             },
         }
     }
 
+    /// The label the model wrote, repaired. A cut that fell inside a character drops that character's bytes first, so a long
+    /// label never ends in a replacement mark; a label with no words left is no label.
+    fn finishDescription(self: *BashParser) void {
+        var text: []const u8 = self.description_text[0..self.description_len];
+        if (self.description_cut) text = text[0 .. text.len - incompleteTail(text)];
+        self.result.description = saved_label.readWords(max_bash_description_bytes, text) orelse .{};
+    }
+
+    /// A finished `\uXXXX` in `unicode_value`. A high surrogate waits for its partner; a lone low surrogate is invalid, except
+    /// in a `description`, where it is repaired to U+FFFD like every other lone surrogate (the label is advice).
+    fn unicodeEscapeDone(self: *BashParser, writer: anytype, input: anytype) !?BashProblem {
+        const value = self.unicode_value;
+        if (value >= 0xd800 and value <= 0xdbff) {
+            self.high_surrogate = value;
+            self.phase = .surrogate_backslash;
+            return null;
+        }
+        if (value >= 0xdc00 and value <= 0xdfff) {
+            if (self.string_target != .description) return self.stringProblem();
+            try self.emitString(writer, input, replacement);
+        } else if (!(try self.emitScalar(writer, input, value))) {
+            return self.stringProblem();
+        }
+        self.phase = .string;
+        return null;
+    }
+
     fn emitScalar(self: *BashParser, writer: anytype, input: anytype, scalar: u21) !bool {
-        if (scalar == 0 and self.string_target != .stdin) return false;
+        if (scalar == 0 and self.string_target != .stdin and self.string_target != .description) return false;
         var encoded: [4]u8 = undefined;
         const count = std.unicode.utf8Encode(scalar, &encoded) catch return false;
         try self.emitString(writer, input, encoded[0..count]);
@@ -632,6 +762,18 @@ fn emit(destination: ?*Bounded(16), writer: anytype, bytes: []const u8) !void {
         value.len += bytes.len;
     }
     if (@TypeOf(writer) != @TypeOf(null)) try writer.writeAll(bytes);
+}
+
+const replacement = "\u{fffd}";
+
+/// How many bytes at the end of `text` begin a character that its end cuts short (0 to 3).
+fn incompleteTail(text: []const u8) usize {
+    var continuation: usize = 0;
+    var end = text.len;
+    while (end > 0 and continuation < 3 and text[end - 1] & 0xc0 == 0x80) : (continuation += 1) end -= 1;
+    if (end == 0) return 0;
+    const length = std.unicode.utf8ByteSequenceLength(text[end - 1]) catch return 0;
+    return if (length > continuation + 1) continuation + 1 else 0;
 }
 
 const Discard = struct {
