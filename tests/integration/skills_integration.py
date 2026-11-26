@@ -201,7 +201,7 @@ def main():
                     capture_output=True, timeout=15, env=environment)
                 assert content.returncode == 0, content.stderr
                 rows.append((item, content.stdout))
-            return list(reversed(rows))
+            return rows
 
         host = start()
 
