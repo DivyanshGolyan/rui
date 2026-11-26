@@ -1447,7 +1447,7 @@ test "a named login's receipt names the connection and the credential kind to se
     try std.testing.expect(std.mem.indexOf(u8, browser, "as work") != null and std.mem.indexOf(u8, browser, "oauth credential") != null);
     const device = try namedLoginText(&buffer, "work", .device);
     try std.testing.expect(std.mem.indexOf(u8, device, "with a device code") != null and std.mem.indexOf(u8, device, "openai-device credential") != null);
-    for ([_]struct { []const u8, bool }{ .{ "work", true }, .{ "my-2", true }, .{ "codex", false }, .{ "chatgpt", false }, .{ "openai", false }, .{ "Work", false }, .{ "", false }, .{ "a" ** 17, false } }) |case|
+    for ([_]struct { []const u8, bool }{ .{ "work", true }, .{ "my-2", true }, .{ "codex", false }, .{ "chatgpt", false }, .{ "openai", false }, .{ "Work", false }, .{ "", false }, .{ "abcdefghijklmnopq", false } }) |case|
         try std.testing.expectEqual(case[1], connectionNameFree(case[0]));
 }
 
