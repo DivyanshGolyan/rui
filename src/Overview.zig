@@ -962,7 +962,16 @@ noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerro
         (if (departure) |value| value.has_guidance else left != null);
     const outcome: session_upgrade.Outcome = if (self.state.upgrade.run) |stands| if (stands == .ended) stands.ended.outcome else .unchanged else .unchanged;
     if (session_upgrade.relaunch(outcome, guidance) and self.relaunch_build != null) {
-        if (self.makeRelaunch(left)) |request| return request else |_| {}
+        if (self.makeRelaunch(left)) |request| {
+            // A window that cannot continue relaunches even with guidance, so the guidance is
+            // written first and stays in the terminal's scrollback beneath the new screen.
+            if (guidance) {
+                if (self.upgrade_report) |*report| _ = stderr.writeReceipt(report.written());
+                _ = stderr.write(text.buffered());
+                if (left) |held| try self.leaveFinished(held, departure);
+            }
+            return request;
+        } else |_| {}
     }
     if (self.upgrade_report) |*report| _ = stderr.writeReceipt(report.written());
     _ = stderr.write(text.buffered());
@@ -6482,9 +6491,9 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                     var ctx = rig.context();
                     defer ctx.cmds.deinit(gpa);
                     overview.leaveForUpgrade(&ctx, outcome);
-                    try std.testing.expectEqual(outcome != .unchanged and !guidance, ctx.quit);
+                    try std.testing.expectEqual(session_upgrade.relaunch(outcome, guidance), ctx.quit);
                     const request = try overview.finishApp({});
-                    try std.testing.expectEqual(outcome != .unchanged and !guidance, request != null);
+                    try std.testing.expectEqual(session_upgrade.relaunch(outcome, guidance), request != null);
                     if (request) |value| {
                         defer value.deinit(gpa);
                         try std.testing.expectEqualStrings("/published/build/bin/rui", value.executable);

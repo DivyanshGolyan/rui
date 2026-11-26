@@ -25,8 +25,14 @@ pub fn refusal(phase: Phase) state_marks.Say {
     };
 }
 
+/// An incompatible window cannot continue, so it relaunches whatever guidance remains
+/// (the guidance is written first); a compatible one leaves its screen for guidance.
 pub fn relaunch(outcome: Outcome, has_guidance: bool) bool {
-    return outcome != .unchanged and !has_guidance;
+    return switch (outcome) {
+        .unchanged => false,
+        .incompatible => true,
+        .compatible => !has_guidance,
+    };
 }
 
 pub const Upgrade = struct {
@@ -132,7 +138,7 @@ test "an unchanged run reads the listing again, and a conversation's failure blo
 test "relaunch is only an installed outcome without departure guidance" {
     for (std.enums.values(Outcome)) |outcome| {
         for ([_]bool{ false, true }) |guidance| {
-            try std.testing.expectEqual(outcome != .unchanged and !guidance, relaunch(outcome, guidance));
+            try std.testing.expectEqual(outcome == .incompatible or (outcome == .compatible and !guidance), relaunch(outcome, guidance));
         }
     }
 }
