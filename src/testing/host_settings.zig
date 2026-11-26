@@ -308,6 +308,7 @@ test "HST connections: SH-154 a sign-in connection seals only at the Adapter's e
         .{ .credential = oauth_foreign, .dialect = "openai-responses/3", .base = "https://api.openai.com/v1", .list = "chatgpt_plan", .refused = "credential" },
     };
     for (cases) |case| {
+        errdefer std.debug.print("case {s} {s} {s}\n", .{ case.dialect, case.base, case.list });
         const entry = try std.fmt.allocPrint(gpa, "{{\"name\":\"work\",\"label\":\"Work\",\"base_url\":\"{s}\",\"credential\":{s},\"headers\":[],\"refusals\":[],\"formats\":[{{\"family\":\"responses\",\"dialect\":\"{s}\",\"web_search\":false}}],\"assign\":[],\"models\":{{\"list\":\"{s}\"}}}}", .{ case.base, case.credential, case.dialect, case.list });
         defer gpa.free(entry);
         const text = try connectionDocument(gpa, &.{entry});
@@ -324,7 +325,10 @@ test "HST connections: SH-154 a sign-in connection seals only at the Adapter's e
             const expected = try std.fmt.allocPrint(gpa, "connections.work.{s}", .{field});
             defer gpa.free(expected);
             try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), expected) != null);
-        } else _ = try hs.seal(settings, &failure);
+        } else _ = hs.seal(settings, &failure) catch |err| {
+            std.debug.print("seal: {s}\n", .{failure.message.slice()});
+            return err;
+        };
     }
 }
 
