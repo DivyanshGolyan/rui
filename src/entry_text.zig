@@ -13,9 +13,8 @@ const tool_presentation = @import("tool_presentation.zig");
 
 /// Fields no token is printed for, each owned by another part of the line.
 const skipped = .{
-    // The caller prints the origin word (person, a peer's Session, `Action N`) until the typed origin replaces both fields.
-    .{ "Message", "sender" },
-    .{ "Message", "source_action" },
+    // The caller prints the origin word (person, a peer's Session, `Action N`).
+    .{ "Message", "origin" },
     // Display words, printed by the caller as the row's line.
     .{ "ProposalMetadata", "description" },
     .{ "ApprovalRequested", "description" },
@@ -157,6 +156,7 @@ fn filled(comptime T: type) T {
     switch (@typeInfo(T)) {
         .int => return 1,
         .bool => return true,
+        .void => return {},
         .@"enum" => return std.meta.tags(T)[0],
         .optional => |optional| return filled(optional.child),
         .array => |array| {
@@ -224,8 +224,7 @@ test "INS-14 a message row prints its admission facts and keeps the origin to th
         .state = .applied,
         .content = .{ .text = .{ .length = 3, .digest = @splat(0) } },
         .admitted_at = 1_000_000_000,
-        .sender = null,
-        .source_action = 4,
+        .origin = .{ .action = 4 },
     };
     const item: facts.Item = .{ .position = 2, .at = 0, .value = .{ .user = message } };
     var buffer: [256]u8 = undefined;

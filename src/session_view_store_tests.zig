@@ -250,7 +250,7 @@ test "SUI-61 Action-sourced inputs draw nothing in the conversation" {
             .state = state,
             .content = content_ref,
             .admitted_at = 1,
-            .source_action = 42,
+            .origin = .{ .action = 42 },
         };
         for ([_]protocol.ActivityItem.Value{ .{ .received = value }, .{ .user = value }, .{ .admission = value } }) |row| {
             const item: protocol.ActivityItem = .{ .position = 1, .at = 1, .value = row };

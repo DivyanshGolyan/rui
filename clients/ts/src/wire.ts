@@ -686,8 +686,7 @@ export interface components {
                     /** @enum {string} */
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
-                    sender: components["schemas"]["NamedPeer"] | null;
-                    source_action: components["schemas"]["Decimal"] | null;
+                    origin: components["schemas"]["MessageOrigin"];
                     content: components["schemas"]["ContentValue"];
                 };
             };
@@ -703,8 +702,7 @@ export interface components {
                     /** @enum {string} */
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
-                    sender: components["schemas"]["NamedPeer"] | null;
-                    source_action: components["schemas"]["Decimal"] | null;
+                    origin: components["schemas"]["MessageOrigin"];
                     content: components["schemas"]["ContentValue"];
                 };
             };
@@ -800,8 +798,7 @@ export interface components {
                     /** @enum {string} */
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
-                    sender: components["schemas"]["NamedPeer"] | null;
-                    source_action: components["schemas"]["Decimal"] | null;
+                    origin: components["schemas"]["MessageOrigin"];
                     content: components["schemas"]["ContentValue"];
                 };
             };
@@ -1807,6 +1804,13 @@ export interface components {
             owner: {
                 message: components["schemas"]["Decimal"];
             };
+        };
+        MessageOrigin: {
+            person: Record<string, never>;
+        } | {
+            peer: components["schemas"]["NamedPeer"];
+        } | {
+            action: components["schemas"]["Decimal"];
         };
         MessageRecoveryJson: {
             unknown_outcomes: {

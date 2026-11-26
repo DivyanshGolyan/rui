@@ -392,7 +392,7 @@ test "a peer Message is recorded with the sender Session of the Action that deli
             try session.set(allocated_session_1.slice());
             const received = try store_core.activityPageForTesting(&storage, .{ .session = session });
             try std.testing.expectEqual(@as(usize, 1), received.count);
-            const peer = received.items[0].value.received.sender.?;
+            const peer = received.items[0].value.received.origin.peer;
             try std.testing.expectEqualStrings(sender, peer.session.slice());
             {
                 var listed = try testingListRow(&storage, &tmp, allocated_session_1.slice());
@@ -403,7 +403,7 @@ test "a peer Message is recorded with the sender Session of the Action that deli
 
             try store_testing.exec(&storage, "UPDATE session SET label='Lead' WHERE session_ref=?1", .{sender});
             const named = try store_core.activityPageForTesting(&storage, .{ .session = session });
-            try std.testing.expectEqualStrings("Lead", named.items[0].value.received.sender.?.label.slice());
+            try std.testing.expectEqualStrings("Lead", named.items[0].value.received.origin.peer.label.slice());
             var admitted = (try storage.admitNextModelAttempt(.{})).?;
             var view: TestingPage = undefined;
             view.open(&storage, try admitted.permit.consume());

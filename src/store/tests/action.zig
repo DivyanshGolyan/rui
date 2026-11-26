@@ -1368,9 +1368,8 @@ test "background final input joins the next Turn boundary without changing an in
                 const activity = try store_core.activityPageForTesting(&storage, .{ .session = session });
                 var received: usize = 0;
                 for (activity.items[0..activity.count]) |item| switch (item.value) {
-                    .received, .user => |message| if (message.source_action) |source| {
-                        try std.testing.expectEqual(action, source);
-                        try std.testing.expect(message.sender == null);
+                    .received, .user => |message| if (message.origin == .action) {
+                        try std.testing.expectEqual(action, message.origin.action);
                         try std.testing.expectEqual(@as(u64, text.len), message.content.text.length);
                         try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &message.content.text.digest);
                         if (item.value == .received) received += 1;
@@ -1379,7 +1378,7 @@ test "background final input joins the next Turn boundary without changing an in
                 };
                 try std.testing.expectEqual(@as(usize, 1), received);
                 const person = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.admission) });
-                for (person.items[0..person.count]) |item| try std.testing.expect(item.value.admission.source_action == null);
+                for (person.items[0..person.count]) |item| try std.testing.expect(item.value.admission.origin == .person);
                 const public = try store_core.publicConversationPageForTesting(&storage, .{ .session = session });
                 var projected: usize = 0;
                 for (public.items[0..public.count]) |item| if (item.source_action) |source| {
@@ -2423,8 +2422,8 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
                 for (queued.items[0..queued.count]) |item| {
                     const message = item.value.received;
                     try std.testing.expect(message.state == .queued);
-                    if (message.sender != null) peer_queued = true;
-                    if (message.source_action != null and message.source_action.? == action_id) {
+                    if (message.origin == .peer) peer_queued = true;
+                    if ((message.origin == .action and message.origin.action == action_id)) {
                         if (std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("hidden value"))) {
                             value_queued += 1;
                             if (value_at == null) value_at = .{ .position = item.position, .ordinal = item.ordinal };
@@ -2468,11 +2467,11 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
                             .admission, .received, .user => |value| value,
                             else => unreachable,
                         };
-                        if (item.value == .user and value_user == null and message.source_action != null and message.source_action.? == action_id and
+                        if (item.value == .user and value_user == null and (message.origin == .action and message.origin.action == action_id) and
                             std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("hidden value"))) value_user = .{ .position = item.position, .ordinal = item.ordinal };
                         if (std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("visible person"))) person_count += 1;
-                        if (message.sender != null) peer_count += 1;
-                        if (message.source_action != null and message.source_action.? == action_id) {
+                        if (message.origin == .peer) peer_count += 1;
+                        if ((message.origin == .action and message.origin.action == action_id)) {
                             if (std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("hidden value"))) value_count += 1 else final_count += 1;
                         }
                     }

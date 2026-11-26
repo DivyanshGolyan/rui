@@ -1229,7 +1229,10 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
 fn messageWith(reads: client.SessionReads, scratch: std.Io.File, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
     if (!visibleMessage(value)) return;
     if (messageLabel(value.state, labels)) |label| try labelRow(sink, label, colour);
-    if (value.sender) |sender| return peerLine(sink, sender, value.admitted_at);
+    switch (value.origin) {
+        .peer => |sender| return peerLine(sink, sender, value.admitted_at),
+        .person, .action => {},
+    }
     if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(true);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     try userPrefix(sink, colour, value.admitted_at);
@@ -1481,7 +1484,7 @@ pub fn tight(value: protocol.ActivityItem.Value) bool {
     return switch (value) {
         .tool_result => |result| result.presentation.code.packs(),
         .hosted_call => |hosted| hosted.presentation.code.packs(),
-        .admission, .received, .user => |message_| message_.sender != null,
+        .admission, .received, .user => |message_| message_.origin == .peer,
         .assistant, .call, .turn_ended, .stop, .approval_requested, .session_changed, .compacted, .model_call, .instruction, .skill => false,
     };
 }
@@ -1491,7 +1494,7 @@ pub fn gap(above: bool, below: bool, tool_pair: bool) bool {
 }
 
 pub fn visibleMessage(value: protocol.ActivityItem.Message) bool {
-    return value.source_action == null;
+    return value.origin.personFacing();
 }
 
 /// `scratch` holds the part list of a parts value while its row draws.
@@ -1512,7 +1515,7 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
         },
         .received => |value| try messageWith(reads, scratch, item, value, .none, sink, colour),
         .user => |value| {
-            if (value.sender != null or value.source_action != null) return false;
+            if (value.origin != .person) return false;
             try messageWith(reads, scratch, item, value, .none, sink, colour);
         },
         .assistant => |assistant| {

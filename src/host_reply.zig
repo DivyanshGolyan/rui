@@ -613,15 +613,15 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var hosted_worst: protocol.ActivityItem.HostedAction = .{ .kind = Worst.tag(@import("hosted_action.zig").HostedAction), .targets_total = max, .pattern = text };
     while (hosted_worst.targets.len < protocol.ActivityItem.HostedAction.Targets.max_served) try hosted_worst.targets.append(text);
     const values = [_]protocol.ActivityItem.Value{
-        .{ .admission = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer, .source_action = max } },
-        .{ .user = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer, .source_action = max } },
+        .{ .admission = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .origin = .{ .peer = peer } } },
+        .{ .user = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .origin = .{ .peer = peer } } },
         .{ .assistant = .{ .content = text, .final = false } },
         .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field), .description = .{ .bytes = @splat(1), .len = CallText.max_description_bytes }, .tool = .{ .bytes = @splat(1), .len = CallText.max_tool_bytes }, .server = .{ .bytes = @splat(1), .len = CallText.max_server_bytes } } },
         .{ .tool_result = .{ .content = reference, .presentation = presentation } },
         .{ .hosted_call = .{ .presentation = presentation, .action = hosted_worst } },
         .{ .turn_ended = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = text } },
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
-        .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer, .source_action = max } },
+        .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .origin = .{ .peer = peer } } },
         .{ .approval_requested = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .action = max, .operation = max, .call_ordinal = max, .description = .{ .bytes = @splat(1), .len = CallText.max_description_bytes }, .tool = .{ .bytes = @splat(1), .len = CallText.max_tool_bytes }, .server = .{ .bytes = @splat(1), .len = CallText.max_server_bytes } } },
         .{ .session_changed = .{ .revision = max, .field = Worst.tag(protocol.SessionField), .provider_text = .{ .bytes = @splat(1), .len = protocol.max_report_bytes } } },
         .{ .compacted = .{ .operation = max, .dropped = max } },

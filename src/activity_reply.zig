@@ -11,7 +11,7 @@ const writeShape = protocol.writeShape;
 const shapeBytes = protocol.shapeBytes;
 const jsonListBytes = protocol.jsonListBytes;
 const ContentValueJson = protocol.ContentValueJson;
-const NamedPeerJson = protocol.NamedPeerJson;
+const OriginJson = protocol.OriginJson;
 const ToolPresentationJson = protocol.ToolPresentationJson;
 const Item = activity_facts.Item;
 const Page = activity_facts.Page;
@@ -35,7 +35,7 @@ pub const ItemJson = struct {
     pub const tail = .{"}}"};
     const call_details = .{ ",\"description\":", H{ .optional_string = activity_read.CallText.max_description_bytes }, ",\"tool\":", H{ .optional_string = activity_read.CallText.max_tool_bytes }, ",\"server\":", H{ .optional_string = activity_read.CallText.max_server_bytes } };
     pub const value_shapes = struct {
-        const message = .{ "{\"admission\":\"", H.decimal, "\",\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"state\":\"", H{ .tag = @FieldType(Item.Message, "state") }, "\",\"admitted_at\":\"", H.decimal, "\",\"sender\":", H{ .optional_json = NamedPeerJson }, ",\"source_action\":", H.optional_id, ",\"content\":", H{ .json = ContentValueJson }, "}" };
+        const message = .{ "{\"admission\":\"", H.decimal, "\",\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"state\":\"", H{ .tag = @FieldType(Item.Message, "state") }, "\",\"admitted_at\":\"", H.decimal, "\",\"origin\":", H{ .json = OriginJson }, ",\"content\":", H{ .json = ContentValueJson }, "}" };
         pub const admission = message;
         pub const user = message;
         pub const received = message;
@@ -72,7 +72,7 @@ pub const ItemJson = struct {
                 const name = @tagName(tag);
                 try writeShape(out, @field(value_shapes, name), .{
                     message.admission,   message.key.slice(),                    message.turn,          message.state,
-                    message.admitted_at, NamedPeerJson.optional(message.sender), message.source_action, ContentValueJson{ .value = message.content },
+                    message.admitted_at, OriginJson{ .value = message.origin },         ContentValueJson{ .value = message.content },
                 });
             },
             .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal, optionalText(&request.description), optionalText(&request.tool), optionalText(&request.server) }),

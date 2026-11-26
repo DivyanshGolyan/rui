@@ -290,12 +290,11 @@ noinline fn outlineHeader(store: *storage.Store, arena: std.mem.Allocator, sessi
     try out.print("{d}.{d} {s}", .{ item.position, item.ordinal, @tagName(item.value) });
     var note: ?[]const u8 = null;
     switch (item.value) {
-        .admission, .user, .received => |message| if (message.source_action) |action|
-            try out.print(" Action {d}", .{action})
-        else if (message.sender) |sender|
-            try out.print(" {s}", .{sender.session.slice()})
-        else
-            try out.writeAll(" person"),
+        .admission, .user, .received => |message| switch (message.origin) {
+            .action => |action| try out.print(" Action {d}", .{action}),
+            .peer => |sender| try out.print(" {s}", .{sender.session.slice()}),
+            .person => try out.writeAll(" person"),
+        },
         .call, .tool_result => {
             const request = try contentRequest(arena, session, item);
             const tool = try store.activityTool(request);

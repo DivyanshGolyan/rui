@@ -469,6 +469,28 @@ pub const NamedPeerJson = struct {
     }
 };
 
+pub const Origin = activity_facts.Item.Origin;
+
+/// Who admitted a Message: `{"person":{}}`, `{"peer":{"session":...,"label":...}}` or `{"action":"ID"}`.
+pub const OriginJson = struct {
+    value: Origin,
+
+    pub const openapi_name = "MessageOrigin";
+    pub const person_shape = .{"{\"person\":{}}"};
+    pub const peer_shape = .{ "{\"peer\":", Hole{ .json = NamedPeerJson }, "}" };
+    pub const action_shape = .{ "{\"action\":\"", Hole.decimal, "\"}" };
+    pub const openapi_shapes = .{ person_shape, peer_shape, action_shape };
+    pub const max_json_bytes = maxShapeBytes(openapi_shapes);
+
+    pub fn writeJson(self: *const OriginJson, out: *std.Io.Writer) !void {
+        switch (self.value) {
+            .person => try writeShape(out, person_shape, .{}),
+            .peer => |peer| try writeShape(out, peer_shape, .{NamedPeerJson{ .value = peer }}),
+            .action => |id| try writeShape(out, action_shape, .{id}),
+        }
+    }
+};
+
 pub const SessionField = session_settings.SessionField;
 
 pub const ActivityItem = activity_facts.Item;

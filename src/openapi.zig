@@ -2328,7 +2328,7 @@ test "Activity schema distinguishes full pages and token-only repeats" {
     }
 }
 
-test "Activity schema requires a canonical sender on a received Message" {
+test "Activity schema requires a typed origin on a Message" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2336,15 +2336,20 @@ test "Activity schema requires a canonical sender on a received Message" {
     const built = try document.build();
     const schemas = built.object.get("components").?.object.get("schemas").?.object;
     const schema = schemas.get("ActivityItem").?;
-    const prefix = "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"received\":{\"admission\":\"1\",\"key\":\"k\",\"turn\":null,\"state\":\"queued\",\"admitted_at\":\"1\",\"source_action\":null,\"content\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"abababababababababababababababababababababababababababababababab\"}";
+    const prefix = "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"received\":{\"admission\":\"1\",\"key\":\"k\",\"turn\":null,\"state\":\"queued\",\"admitted_at\":\"1\",\"content\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"abababababababababababababababababababababababababababababababab\"}";
     const cases = .{
-        .{ prefix ++ ",\"sender\":{\"session\":\"absent\",\"label\":null}}}}", true },
-        .{ prefix ++ ",\"sender\":null}}}", true },
+        .{ prefix ++ ",\"origin\":{\"peer\":{\"session\":\"absent\",\"label\":null}}}}}", true },
+        .{ prefix ++ ",\"origin\":{\"person\":{}}}}}", true },
+        .{ prefix ++ ",\"origin\":{\"action\":\"4\"}}}}", true },
         .{ prefix ++ "}}}", false },
-        .{ prefix ++ ",\"sender\":{}}}}", false },
-        .{ prefix ++ ",\"sender\":\"\"}}}", false },
-        .{ prefix ++ ",\"sender\":{\"session\":\"absent\"}}}}", false },
-        .{ prefix ++ ",\"sender\":{\"session\":null,\"label\":null}}}}", false },
+        .{ prefix ++ ",\"sender\":null}}}", false },
+        .{ prefix ++ ",\"origin\":null}}}", false },
+        .{ prefix ++ ",\"origin\":{}}}}", false },
+        .{ prefix ++ ",\"origin\":{\"person\":true}}}}", false },
+        .{ prefix ++ ",\"origin\":{\"peer\":null}}}}", false },
+        .{ prefix ++ ",\"origin\":{\"peer\":{\"session\":\"absent\"}}}}}", false },
+        .{ prefix ++ ",\"origin\":{\"action\":4}}}}", false },
+        .{ prefix ++ ",\"origin\":{\"person\":{},\"action\":\"4\"}}}}", false },
     };
     inline for (cases) |case| {
         const value = try std.json.parseFromSliceLeaky(Value, allocator, case[0], .{});

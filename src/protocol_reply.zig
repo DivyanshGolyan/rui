@@ -147,7 +147,7 @@ pub const ActivityPage = struct {
         if (bytes.len > activity_reply.max_page_bytes) return error.InvalidActivityPage;
         const Ref = JsonContentValue;
         const Fact = protocol.ActivityItem;
-        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, source_action: ?JsonString(20) = null, content: Ref };
+        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), origin: JsonOrigin, content: Ref };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref, description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
         const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
@@ -200,9 +200,9 @@ pub const ActivityPage = struct {
                 }) or !cursor.kinds.contains(std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(item.value)).?)) return error.InvalidActivityPage;
             switch (item.value) {
                 inline .admission, .user, .received => |message, kind| {
-                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = message.content.value, .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null, .source_action = if (message.source_action) |action| try id(action, false) else null };
+                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = message.content.value, .admitted_at = try id(message.admitted_at, false), .origin = try message.origin.origin() };
                     if ((value.state == .applied) != (value.turn != null) or (kind == .user and value.state != .applied)) return error.InvalidActivityPage;
-                    if ((value.sender != null and value.source_action != null) or (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.sender != null or value.source_action != null)))) return error.InvalidActivityPage;
+                    if (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.origin.admitsAs() == .received))) return error.InvalidActivityPage;
                     fact.value = @unionInit(Fact.Value, @tagName(kind), value);
                 },
                 .approval_requested => |request| {
@@ -2161,6 +2161,25 @@ pub const JsonNamedPeer = struct {
         const label = if (self.label) |label| label.value else protocol.Bounded(protocol.max_label_bytes){};
         if (self.label != null and !protocol.validLabel(label.slice())) return error.InvalidResponse;
         return .{ .session = self.session.value, .label = label };
+    }
+};
+
+/// A Message's origin as Activity sends it: `{"person":{}}`, `{"peer":NamedPeer}` or `{"action":"ID"}`.
+pub const JsonOrigin = union(enum) {
+    person: struct {},
+    peer: JsonNamedPeer,
+    action: JsonString(20),
+
+    fn origin(self: *const JsonOrigin) !protocol.Origin {
+        return switch (self.*) {
+            .person => .person,
+            .peer => |named| .{ .peer = try named.peer() },
+            .action => |action| blk: {
+                const action_id = try decimalId(action, false);
+                if (action_id > std.math.maxInt(i64)) return error.InvalidActivityPage;
+                break :blk .{ .action = action_id };
+            },
+        };
     }
 };
 
