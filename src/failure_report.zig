@@ -84,13 +84,13 @@ pub const Report = struct {
     }
 };
 
-fn repeat(comptime unit: []const u8, comptime count: usize) []const u8 {
-    comptime {
-        @setEvalBranchQuota(100_000);
-        var out: []const u8 = "";
-        for (0..count) |_| out = out ++ unit;
-        return out;
-    }
+fn repeat(comptime unit: []const u8, comptime count: usize) *const [unit.len * count]u8 {
+    const filled = comptime blk: {
+        var out: [unit.len * count]u8 = undefined;
+        for (0..count) |index| @memcpy(out[index * unit.len ..][0..unit.len], unit);
+        break :blk out;
+    };
+    return &filled;
 }
 
 /// What reading a provider's code and message leaves: the parts as the decoder builds them.
@@ -111,13 +111,13 @@ test "CM-69 a provider failure report keeps its code and message, each whole or 
         .{ .code = "c", .message = "", .kept_code = "c", .kept_message = "", .cut = .{ false, false }, .line = "c" },
         .{ .code = "c", .message = "m", .kept_code = "c", .kept_message = "m", .cut = .{ false, false }, .line = "c: m" },
         // Each part is cut at its own bound, and the flags are independent.
-        .{ .code = comptime repeat("c", 300), .message = "m", .kept_code = comptime repeat("c", 256), .kept_message = "m", .cut = .{ true, false }, .line = repeat("c", 256) ++ "…: m" },
-        .{ .code = "c", .message = comptime repeat("m", 300), .kept_code = "c", .kept_message = comptime repeat("m", 256), .cut = .{ false, true }, .line = "c: " ++ repeat("m", 256) ++ "…" },
-        .{ .code = comptime repeat("c", 257), .message = comptime repeat("m", 257), .kept_code = comptime repeat("c", 256), .kept_message = comptime repeat("m", 256), .cut = .{ true, true }, .line = repeat("c", 256) ++ "…: " ++ repeat("m", 256) ++ "…" },
+        .{ .code = repeat("c", 300), .message = "m", .kept_code = repeat("c", 256), .kept_message = "m", .cut = .{ true, false }, .line = repeat("c", 256) ++ "…: m" },
+        .{ .code = "c", .message = repeat("m", 300), .kept_code = "c", .kept_message = repeat("m", 256), .cut = .{ false, true }, .line = "c: " ++ repeat("m", 256) ++ "…" },
+        .{ .code = repeat("c", 257), .message = repeat("m", 257), .kept_code = repeat("c", 256), .kept_message = repeat("m", 256), .cut = .{ true, true }, .line = repeat("c", 256) ++ "…: " ++ repeat("m", 256) ++ "…" },
         // A part exactly at the bound is whole.
-        .{ .code = "", .message = comptime repeat("m", 256), .kept_code = "", .kept_message = comptime repeat("m", 256), .cut = .{ false, false }, .line = comptime repeat("m", 256) },
+        .{ .code = "", .message = repeat("m", 256), .kept_code = "", .kept_message = repeat("m", 256), .cut = .{ false, false }, .line = repeat("m", 256) },
         // A cut never splits a scalar: it keeps the longest valid prefix.
-        .{ .code = "", .message = comptime repeat("é", 200), .kept_code = "", .kept_message = comptime repeat("é", 128), .cut = .{ false, true }, .line = repeat("é", 128) ++ "…" },
+        .{ .code = "", .message = repeat("é", 200), .kept_code = "", .kept_message = repeat("é", 128), .cut = .{ false, true }, .line = repeat("é", 128) ++ "…" },
         .{ .code = "", .message = "x" ++ repeat("é", 200), .kept_code = "", .kept_message = "x" ++ repeat("é", 127), .cut = .{ false, true }, .line = "x" ++ repeat("é", 127) ++ "…" },
         // An ellipsis the provider sent is text, not a cut.
         .{ .code = "c…", .message = "wait…", .kept_code = "c…", .kept_message = "wait…", .cut = .{ false, false }, .line = "c…: wait…" },
