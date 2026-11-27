@@ -2513,14 +2513,13 @@ pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id
 pub const max_activity_page_request_bytes = shapeBytes(activity_page_request.all);
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request.all);
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
-    observe_command_request.all,         host_info_request,                host_stop_request,
-    host_drain_request,                  host_pause_request,               read_result_request,
-    list_sessions_request.all,           read_action_request.all,          read_action_arguments_request,
-    read_action_call_id_request,         activity_search_request.all,
-    activity_page_request.all,           activity_content_request.all,     skill_suggestions_session_request,
-    skill_suggestions_workspace_request, model_list_request,               public_parts_request,
-    public_part_content_request.all,     tools_reload_request.all,         tools_reload_request.named,
-    tools_status_request,
+    observe_command_request.all,  host_info_request,                 host_stop_request,
+    host_drain_request,           host_pause_request,                read_result_request,
+    list_sessions_request.all,    read_action_request.all,           read_action_arguments_request,
+    read_action_call_id_request,  activity_search_request.all,       activity_page_request.all,
+    activity_content_request.all, skill_suggestions_session_request, skill_suggestions_workspace_request,
+    model_list_request,           public_parts_request,              public_part_content_request.all,
+    tools_reload_request.all,     tools_reload_request.named,        tools_status_request,
 }));
 
 pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
