@@ -304,7 +304,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         paint(ctx, surface, line.text, @intCast(y), @min(3, inset.end), inset.end, style);
         // The drawn cells point at their bytes, so the note lives in the frame's arena.
         const note_bytes = try ctx.arena.alloc(u8, picker.max_limit_note);
-        if (picker.limitNote(note_bytes[0..picker.max_limit_note], entry.providers, self.provider, limited)) |note| {
+        if (picker.limitNote(note_bytes[0..picker.max_limit_note], entry.providers, self.provider, limited, self.props.unicode)) |note| {
             var dim = style;
             dim.dim = true;
             const gap = 2;
@@ -970,9 +970,9 @@ test "SUI-186 a model on a limited connection says so and names another connecti
     const menu: picker.Menu = .{ .entries = &entries };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    for ([_]bool{ false, true }) |is_limited| {
+    for ([_]bool{ false, true }) |is_limited| for ([_]bool{ true, false }) |unicode| {
         var limits: Limits = .{ .menu = &menu, .limited = if (is_limited) connection_names.NameSet.of(&.{work}) else .{} };
-        var choice: Self = .{};
+        var choice: Self = .{ .props = .{ .unicode = unicode } };
         choice.openSource(.{ .context = &limits, .read = Limits.read }, work, "gpt-6.1-sol");
         const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 4 }, .cell_size = .{} });
         var rows: [2][]const u8 = undefined;
@@ -981,8 +981,9 @@ test "SUI-186 a model on a limited connection says so and names another connecti
             for (0..drawn.size.width) |x| try text.writer.writeAll(drawn.readCell(@intCast(x), @intCast(y)).char.grapheme);
             row_text.* = text.written();
         }
-        try std.testing.expectEqual(is_limited, std.mem.indexOf(u8, rows[0], "limit reached on work · try home") != null);
+        try std.testing.expectEqual(is_limited, std.mem.indexOf(u8, rows[0], if (unicode) "limit reached on work · try home" else "limit reached on work - try home") != null);
+        if (!unicode) for (rows) |row_text| for (row_text) |byte| try std.testing.expect(byte < 0x80);
         try std.testing.expectEqual(is_limited, std.mem.indexOf(u8, rows[1], "limit reached on work") != null);
         try std.testing.expect(std.mem.indexOf(u8, rows[1], "try") == null);
-    }
+    };
 }
