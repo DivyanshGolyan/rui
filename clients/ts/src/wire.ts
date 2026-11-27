@@ -1157,6 +1157,7 @@ export interface components {
             label: string;
             /** @enum {string} */
             route: "unserved" | "endpoint" | "chatgpt_device" | "key_file" | "chatgpt_plan";
+            usage: components["schemas"]["UsageReading"] | null;
         };
         ContentText: {
             /** @constant */
@@ -3347,6 +3348,16 @@ export interface components {
             /** @constant */
             kind: "tools_status";
             store: string;
+        };
+        UsageReading: {
+            observed_at: components["schemas"]["Decimal"];
+            primary: components["schemas"]["UsageWindow"] | null;
+            secondary: components["schemas"]["UsageWindow"] | null;
+        };
+        UsageWindow: {
+            used_percent: string;
+            minutes: components["schemas"]["Decimal"];
+            reset_at: components["schemas"]["Decimal"] | null;
         };
         WorkActionsJson: {
             stop: boolean;

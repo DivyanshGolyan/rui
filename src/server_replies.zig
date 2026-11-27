@@ -7,6 +7,7 @@ const os = @import("os");
 const socket_os = os.socket;
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const connection = @import("connection.zig");
 const command_spec = @import("command_spec.zig");
 const core_tools = @import("core_tools.zig");
 const failed_responses = @import("failed_responses.zig");
@@ -17,6 +18,7 @@ const output_retention = @import("output_retention.zig");
 const SessionEnvironments = @import("SessionEnvironments.zig");
 const server_mcp_relist = @import("server_mcp_relist.zig");
 const ModelLists = @import("ModelLists.zig");
+const ConnectionUsage = @import("ConnectionUsage.zig");
 const server_host = @import("server_host.zig");
 const execution_owner = @import("execution_owner.zig");
 const server_reply = @import("server_reply.zig");
@@ -70,6 +72,7 @@ pub const Shared = struct {
     probes: *Probes,
     retention: *output_retention.Queue,
     model_lists: *ModelLists,
+    usage: *ConnectionUsage,
     scratch_used: *const std.atomic.Value(u64),
     environments: ?*SessionEnvironments,
 };
@@ -93,6 +96,7 @@ pub const Replies = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     lists: *ModelLists,
+    usage: *ConnectionUsage,
     lease: *const platform.StoreLease,
     store: *store_module.Store,
     lifecycle: *Lifecycle,
@@ -120,6 +124,7 @@ pub const Replies = struct {
             .io = shared.io,
             .allocator = shared.allocator,
             .lists = shared.model_lists,
+            .usage = shared.usage,
             .lease = shared.lease,
             .store = shared.store,
             .lifecycle = shared.lifecycle,
@@ -340,6 +345,9 @@ pub const Replies = struct {
 
     noinline fn replyHostInfo(self: *Replies, fd: *Reply) !void {
         if (!self.lifecycle.launchAllowed()) return refuse(fd, 503, .host_unavailable, "dispatch_fenced");
+        const entries = self.served.items();
+        var usage: [connection.max_served]?protocol.UsageReading = undefined;
+        for (entries, 0..) |entry, index| usage[index] = self.usage.get(entry.name);
         try replyJson(fd, 200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{host_reply.HostInfo{
             .store = self.lease.paths.store_identity.slice(),
             .instance = self.instance,
@@ -349,7 +357,8 @@ pub const Replies = struct {
             .started_at = self.started_at,
             .custody_occupied = self.execution.facts().custody_occupied,
             .paused = self.lifecycle.turnsHeld(),
-            .connections = self.served.items(),
+            .connections = entries,
+            .usage = usage[0..entries.len],
             .doublewrite = self.store.admissionDiagnostic().doublewrite,
             .settings_digest = self.settings_digest,
         }});
@@ -777,6 +786,7 @@ pub const testing_parts = if (builtin.is_test) struct {
             .probes = host.probes,
             .retention = host.retention,
             .model_lists = &host.model_lists,
+            .usage = &host.usage,
             .scratch_used = &host.scratch_used,
             .environments = host.environments,
         };

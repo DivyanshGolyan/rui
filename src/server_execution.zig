@@ -37,6 +37,7 @@ const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
 const server_host = @import("server_host.zig");
 const ModelLists = @import("ModelLists.zig");
+const ConnectionUsage = @import("ConnectionUsage.zig");
 const mcp_servers_module = @import("mcp/servers.zig");
 const execution_owner = @import("execution_owner.zig");
 const host_drain = @import("host_drain.zig");
@@ -176,6 +177,7 @@ pub const Shared = struct {
     probes: *server_host.Probes,
     retention: *output_retention.Queue,
     model_lists: *ModelLists,
+    usage: *ConnectionUsage,
     environments: ?*SessionEnvironments,
     allowance_diagnostic: *server_host.AllowanceDiagnostic,
     /// The Host process environment that `watch_github_pr` takes its `gh` profile from.
@@ -466,6 +468,7 @@ const testing_parts = if (@import("builtin").is_test) struct {
             .probes = host.probes,
             .retention = host.retention,
             .model_lists = &host.model_lists,
+            .usage = &host.usage,
             .environments = host.environments,
             .allowance_diagnostic = &host.allowance_diagnostic,
         };
@@ -2586,7 +2589,7 @@ fn launchPreparedRequest(
     const active = &slot.provider;
     active.transfer.start(reactor, request, binding, .{
         .fields = headers.fields(),
-        .observe_allowance = run.shared.probes.hooks.observe_allowance and served.credential.signIn() != null,
+        .observe_allowance = served.credential.signIn() != null,
         .timing = run.custody.modelTiming(token) catch unreachable,
         .credential = headers.takeCredential(),
         .routing = .{ .turn_id = binding.turn_id, .owner = served.credential.routingOwner(lease) },
@@ -2665,7 +2668,10 @@ fn completeTransfer(
 ) void {
     const active = &slot.provider;
     const owner = active.owner;
-    if (active.transfer.allowance) |observation| server_host.writeAllowance(run.shared.allowance_diagnostic, observation);
+    if (active.transfer.allowance) |observation| {
+        run.shared.usage.record(observation);
+        if (run.shared.probes.hooks.observe_allowance) server_host.writeAllowance(run.shared.allowance_diagnostic, observation);
+    }
     run.shared.probes.traceCompletionQueue(completion.queued_after, owner.binding);
     defer run.shared.probes.traceOperation("provider_completion_serviced", owner.binding);
     if (run.settings.providers.anySignIn()) run.shared.probes.traceTransfer(&active.transfer, owner.binding);

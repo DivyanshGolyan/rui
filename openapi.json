@@ -4555,12 +4555,23 @@
               "key_file",
               "chatgpt_plan"
             ]
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageReading"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "name",
           "label",
-          "route"
+          "route",
+          "usage"
         ],
         "additionalProperties": false
       },
@@ -13982,6 +13993,69 @@
           "version",
           "kind",
           "store"
+        ],
+        "additionalProperties": false
+      },
+      "UsageReading": {
+        "type": "object",
+        "properties": {
+          "observed_at": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "primary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageWindow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "secondary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageWindow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "observed_at",
+          "primary",
+          "secondary"
+        ],
+        "additionalProperties": false
+      },
+      "UsageWindow": {
+        "type": "object",
+        "properties": {
+          "used_percent": {
+            "type": "string",
+            "maxLength": 24,
+            "x-rui-max-bytes": 24
+          },
+          "minutes": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "reset_at": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "used_percent",
+          "minutes",
+          "reset_at"
         ],
         "additionalProperties": false
       },

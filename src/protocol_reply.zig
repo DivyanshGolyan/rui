@@ -324,6 +324,15 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
     return .{ .ready = try parseHostInfoFacts(body, store) };
 }
 
+fn usageWindow(wire: ?protocol.UsageWindowWire) !?protocol.UsageWindow {
+    const window = wire orelse return null;
+    const percent = std.fmt.parseFloat(f64, window.used_percent) catch return error.InvalidHostInfo;
+    if (!std.math.isFinite(percent) or percent < 0) return error.InvalidHostInfo;
+    const minutes = std.fmt.parseUnsigned(u64, window.minutes, 10) catch return error.InvalidHostInfo;
+    const reset_at = if (window.reset_at) |text| std.fmt.parseUnsigned(u64, text, 10) catch return error.InvalidHostInfo else null;
+    return .{ .used_percent = percent, .minutes = minutes, .reset_at = reset_at };
+}
+
 fn connectionFacts(list: anytype) !protocol.Connections {
     if (list.len > provider_route.max_served) return error.InvalidHostInfo;
     var out: protocol.Connections = .{};
@@ -331,7 +340,12 @@ fn connectionFacts(list: anytype) !protocol.Connections {
         const name = connection.Name.parse(item.name) orelse return error.InvalidHostInfo;
         for (list[0..index]) |earlier| if (std.mem.eql(u8, earlier.name, item.name)) return error.InvalidHostInfo;
         const label = provider_route.Label.parse(item.label) orelse return error.InvalidHostInfo;
-        out.items[out.len] = .{ .name = name, .label = label, .route = item.route };
+        const usage: ?protocol.UsageReading = if (item.usage) |wire| .{
+            .observed_at = std.fmt.parseUnsigned(u64, wire.observed_at, 10) catch return error.InvalidHostInfo,
+            .primary = try usageWindow(wire.primary),
+            .secondary = try usageWindow(wire.secondary),
+        } else null;
+        out.items[out.len] = .{ .name = name, .label = label, .route = item.route, .usage = usage };
         out.len += 1;
     }
     return out;
@@ -4733,4 +4747,37 @@ test "Archived window wire: a slim row reads back with its first Message and raw
         } else try std.testing.expect(decoded.first == null);
         if (case.prefix) |prefix| try std.testing.expectEqualStrings(prefix, decoded.first_prefix.?.slice()) else try std.testing.expect(decoded.first_prefix == null);
     }
+}
+
+test "CM-68 host info carries each connection's latest usage to the client's facts" {
+    const host_reply = @import("host_reply.zig");
+    const ConnectionUsage = @import("ConnectionUsage.zig");
+    const provider = @import("provider.zig");
+    const codex = connection.Name.parse("codex").?;
+    const work = connection.Name.parse("work").?;
+    var entries: [2]provider_route.Entry = undefined;
+    entries[0] = .{ .name = codex, .label = provider_route.Label.parse("ChatGPT (device code)").?, .route = .chatgpt_device, .codec = .@"openai-responses/2", .web_search = true };
+    entries[1] = .{ .name = work, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_plan, .codec = .@"openai-responses/3", .web_search = true };
+    var usage: ConnectionUsage = .init(std.testing.io);
+    const week: provider.AllowanceWindow = .{ .used = .{ .value = 25.5 }, .minutes = .{ .value = 10080 }, .reset_at = .{ .value = 1796350153 } };
+    usage.record(.{ .binding = std.mem.zeroes(@FieldType(provider.AllowanceObservation, "binding")), .provider = codex, .status = 200, .observed_at = 1795745356, .primary = week, .secondary = .{ .used = .{ .value = 100 }, .minutes = .{ .value = 300 } } });
+    const readings = [_]?protocol.UsageReading{ usage.get(codex), usage.get(work) };
+    const info: host_reply.HostInfo = .{ .store = "/sqlite", .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .connections = &entries, .usage = &readings, .doublewrite = null, .settings_digest = null };
+    var response: protocol.ResponseBuffer = .{};
+    try response.render(host_reply.renderHostInfo, .{info});
+    const facts = (try parseHostInfo(response.slice(), "/sqlite")).ready;
+    const reported = facts.capabilities.connections.slice();
+    try std.testing.expectEqual(@as(u64, 1795745356), reported[0].usage.?.observed_at);
+    try std.testing.expectEqual(@as(f64, 25.5), reported[0].usage.?.primary.?.used_percent);
+    try std.testing.expectEqual(@as(u64, 10080), reported[0].usage.?.primary.?.minutes);
+    try std.testing.expectEqual(@as(?u64, 1796350153), reported[0].usage.?.primary.?.reset_at);
+    try std.testing.expectEqual(@as(?u64, null), reported[0].usage.?.secondary.?.reset_at);
+    try std.testing.expectEqual(@as(u64, 300), reported[0].usage.?.secondary.?.minutes);
+    // A connection nothing was read from reports no usage, and a Host keeping no readings reports none for any.
+    try std.testing.expectEqual(@as(?protocol.UsageReading, null), reported[1].usage);
+    var none = info;
+    none.usage = &.{};
+    response.len = 0;
+    try response.render(host_reply.renderHostInfo, .{none});
+    for ((try parseHostInfo(response.slice(), "/sqlite")).ready.capabilities.connections.slice()) |fact| try std.testing.expectEqual(@as(?protocol.UsageReading, null), fact.usage);
 }

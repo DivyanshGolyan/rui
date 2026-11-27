@@ -47,6 +47,7 @@ const server_execution = @import("server_execution.zig");
 const execution_owner = @import("execution_owner.zig");
 const server_host = @import("server_host.zig");
 const ModelLists = @import("ModelLists.zig");
+const ConnectionUsage = @import("ConnectionUsage.zig");
 const child_exit_wake = @import("child_exit_wake.zig");
 const line_intake = @import("line_intake.zig");
 const signal_stack = @import("signal_stack.zig");
@@ -1289,6 +1290,7 @@ fn serveOpened(
     if (started_at <= 0) return error.ClockReadFailed;
     var model_lists: ModelLists = .init(io, allocator, served);
     defer model_lists.deinit();
+    var usage: ConnectionUsage = .init(io);
     const replies_shared: server_replies.Shared = .{
         .io = io,
         .allocator = allocator,
@@ -1298,6 +1300,7 @@ fn serveOpened(
         .probes = &probes,
         .retention = &retention,
         .model_lists = &model_lists,
+        .usage = &usage,
         .scratch_used = &scratch_used,
         .environments = environments,
     };
@@ -1333,6 +1336,7 @@ fn serveOpened(
         .probes = &probes,
         .retention = &retention,
         .model_lists = &model_lists,
+        .usage = &usage,
         .environments = environments,
         .allowance_diagnostic = &allowance_diagnostic,
         .github_environment = github_environment,

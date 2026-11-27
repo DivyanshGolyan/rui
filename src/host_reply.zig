@@ -258,6 +258,8 @@ pub const HostInfo = struct {
     custody_occupied: u64,
     paused: bool,
     connections: []const @import("provider_route.zig").Entry,
+    /// What each served connection last reported, in `connections` order; empty when the Host keeps no readings.
+    usage: []const ?protocol.UsageReading = &.{},
     doublewrite: ?[]const u8,
     /// SHA-256 of the frozen settings frame a detached Host started with; null for a foreground Host.
     settings_digest: ?@import("host_settings_handoff.zig").Digest,
@@ -273,7 +275,8 @@ pub fn renderHostInfo(response: protocol.JsonOut, info: HostInfo) !void {
     try response.append(shape.connections_head);
     for (info.connections, 0..) |*entry, index| {
         if (index != 0) try response.append(",");
-        try response.appendShape(shape.connection_entry, .{ entry.name.slice(), entry.label.slice(), entry.route });
+        const reading: ?protocol.UsageReadingJson = if (index < info.usage.len) if (info.usage[index]) |value| .{ .value = value } else null else null;
+        try response.appendShape(shape.connection_entry, .{ entry.name.slice(), entry.label.slice(), entry.route, reading });
     }
     try response.append(shape.connections_tail);
 }
