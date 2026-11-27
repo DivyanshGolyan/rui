@@ -4727,11 +4727,11 @@ test "SH-186 store check reads the Store its saved placement names, reports a br
     const check_run = @import("store.zig").check_run;
     var clean_tmp = std.testing.tmpDir(.{});
     defer clean_tmp.cleanup();
-    const clean_file = try check_run.storeFileForTesting(&clean_tmp, io, @import("store/schema.zig").schema_version, false);
+    const clean_file = try check_run.storeFileForTesting(&clean_tmp, io, @import("store.zig").schema_version, false);
     defer gpa.free(clean_file);
     var broken_tmp = std.testing.tmpDir(.{});
     defer broken_tmp.cleanup();
-    const broken_file = try check_run.storeFileForTesting(&broken_tmp, io, @import("store/schema.zig").schema_version, true);
+    const broken_file = try check_run.storeFileForTesting(&broken_tmp, io, @import("store.zig").schema_version, true);
     defer gpa.free(broken_file);
     const broken_lines = check_run.broken_row_lines;
     for ([_][]const u8{ "default", "moved", "mysql" }) |kind| {
