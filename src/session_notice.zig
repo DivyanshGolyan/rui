@@ -490,8 +490,27 @@ test "a refused chat Message names its unserved provider and the settings fix" {
     var buffer: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try writeUnserved(&writer, @import("connection.zig").Name.parse("openai"));
-    try std.testing.expectEqualStrings("! OpenAI isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
+    try std.testing.expectEqualStrings("OpenAI isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
     writer = std.Io.Writer.fixed(&buffer);
     try writeUnserved(&writer, null);
-    try std.testing.expectEqualStrings("! This Session's provider isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
+    try std.testing.expectEqualStrings("This Session's provider isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
+}
+
+test "SUI-172 a held original's line draws the sign from its tone: only a failure and an unconfirmed decision are attention" {
+    for ([_]submission.Kind{ .message, .decision }) |kind| {
+        for ([_]submission.State{ .not_started, .submitting, .unconfirmed, .rejected }) |state| {
+            const shown = presentation(false, false, .{ .kind = kind, .state = state });
+            const line = (if (kind == .message) shown.note else shown.status) orelse continue;
+            try std.testing.expect(!std.mem.startsWith(u8, line.words, "!"));
+            try std.testing.expectEqualStrings(if (kind == .decision and state == .unconfirmed) "! " else "", line.sign());
+        }
+        const refused = presentation(false, false, .{ .kind = kind, .state = .rejected, .failure = .{ .say = too_large, .key = .status } });
+        const line = (if (kind == .message) refused.note else refused.status).?;
+        try std.testing.expect(!std.mem.startsWith(u8, line.words, "!"));
+        try std.testing.expectEqualStrings("! ", line.sign());
+    }
+    var buffer: [unserved_capacity]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeUnserved(&writer, null);
+    try std.testing.expect(!std.mem.startsWith(u8, writer.buffered(), "!"));
 }
