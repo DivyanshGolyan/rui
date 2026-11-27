@@ -419,7 +419,7 @@ fn violatorsOf(name: []const u8, broken: bool) u32 {
     return 0;
 }
 
-test "SH-183 store check counts the rows that break a column rule, a cross-column rule and a reference in a plain SQLite Store" {
+test "SH-184 store check counts the rows that break a column rule, a cross-column rule and a reference in a plain SQLite Store" {
     var raw: ?*c.sqlite3 = null;
     defer _ = c.sqlite3_close(raw);
     try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
@@ -436,7 +436,7 @@ test "SH-183 store check counts the rows that break a column rule, a cross-colum
     for (all) |check| try std.testing.expectEqual(violatorsOf(check.name, true), try sqlite.pragmaInt(database, check.sql));
 }
 
-test "SH-183 store check's statements run on MySQL and count the rows that break each kind of rule" {
+test "SH-184 store check's statements run on MySQL and count the rows that break each kind of rule" {
     if (!try mysql_testing.available()) return;
     try std.testing.expect(try mysql_testing.takes("DROP DATABASE IF EXISTS rui_store_check_probe"));
     try std.testing.expect(try mysql_testing.takes("CREATE DATABASE rui_store_check_probe DEFAULT CHARSET utf8mb4 COLLATE utf8mb4_0900_bin"));
@@ -460,7 +460,7 @@ test "SH-183 store check's statements run on MySQL and count the rows that break
     }
 }
 
-// SH-183 over the schema's whole domain: an independent list of the checks, and every reference, own column rule and
+// SH-184 over the schema's whole domain: an independent list of the checks, and every reference, own column rule and
 // cross-column rule driven through a plain SQLite Store, each against an oracle that is not the statement under test.
 
 const Cell = evaluator.Value;
@@ -547,7 +547,7 @@ fn referenceName(arena: std.mem.Allocator, table: schema.Table, key: schema.Fore
     return std.fmt.allocPrint(arena, "{s}({s})->{s}", .{ table.name, joined, key.references });
 }
 
-test "SH-183 store check holds exactly one statement per rule and reference the schema holds" {
+test "SH-184 store check holds exactly one statement per rule and reference the schema holds" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -579,7 +579,7 @@ test "SH-183 store check holds exactly one statement per rule and reference the 
     }
 }
 
-test "SH-183 a reference counts a missing parent, and not a present parent or a NULL part, for every reference in the schema" {
+test "SH-184 a reference counts a missing parent, and not a present parent or a NULL part, for every reference in the schema" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -641,7 +641,7 @@ test "SH-183 a reference counts a missing parent, and not a present parent or a 
     try std.testing.expect(cases > 100);
 }
 
-test "SH-183 a column rule counts exactly the values the column refuses, for every column that holds only its own rules" {
+test "SH-184 a column rule counts exactly the values the column refuses, for every column that holds only its own rules" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -678,7 +678,7 @@ test "SH-183 a column rule counts exactly the values the column refuses, for eve
     try std.testing.expect(refused > 200);
 }
 
-test "SH-183 a cross-column rule counts the rows the rule value answers false, and not those it answers true or unknown" {
+test "SH-184 a cross-column rule counts the rows the rule value answers false, and not those it answers true or unknown" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

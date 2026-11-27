@@ -174,9 +174,9 @@ pub const Attention = struct {
 /// Matches the client classification at base 3e389620a3a6b83e314e02657c9e6a95e67488e8.
 pub fn attention(work: Work) ?Attention {
     const turn = work.turn orelse 0;
+    // A state that asks for a decision is exactly the needs-you standing; `standing` is its one spelling.
+    if (standing(work.state, work.actions.decide != null) == .needs_you) return .{ .kind = .approval, .turn = turn, .step = work.first_action orelse 0 };
     return switch (work.state) {
-        .approval => .{ .kind = .approval, .turn = turn, .step = work.first_action orelse 0 },
-        .bash => |bash| if (bash.approvals != 0) .{ .kind = .approval, .turn = turn, .step = work.first_action orelse 0 } else null,
         .failed => .{ .kind = .failed, .turn = turn, .step = std.math.maxInt(u64) },
         .finished => .{ .kind = .finished, .turn = turn, .step = std.math.maxInt(u64) },
         else => null,
@@ -185,7 +185,7 @@ pub fn attention(work: Work) ?Attention {
 
 /// What a Session's work asks of the person; a failed Turn is its own standing, not a kind of done.
 pub const Standing = enum {
-    /// An Action awaits a decision: an approval, or a Bash proposal with approvals pending.
+    /// A decision awaits the person: an approval, a Bash proposal with approvals pending, or any state with a decision served.
     needs_you,
     /// Thinking, retrying, stopping, or running a command that waits on nobody.
     working,
@@ -200,8 +200,10 @@ pub const Standing = enum {
     }
 };
 
-/// What a work state asks of the person, from the state alone.
-pub fn standing(state: WorkState) Standing {
+/// What a Session's work asks of the person: its state, and whether a decision is waiting on it (`decidable`, the served
+/// `actions.decide`). A waiting decision always asks, whatever the state: a promoted background Action can outlive its Turn.
+pub fn standing(state: WorkState, decidable: bool) Standing {
+    if (decidable) return .needs_you;
     return switch (state) {
         .approval => .needs_you,
         .bash => |bash| if (bash.approvals != 0) .needs_you else .working,
@@ -668,7 +670,7 @@ test "Session approval target belongs to Session inputs through continuation ter
     try std.testing.expectError(error.CorruptStore, derive(.{ .created_at = 1, .now_ms = 0, .first_action = 41 }));
 }
 
-test "attention and standing match base client classification across work states" {
+test "SUI-182 attention and standing follow the work state and its served decision across every state kind and optional ID" {
     // Expectations transcribed from attention.Attention.of and overview_view.orderClass
     // at 3e389620a3a6b83e314e02657c9e6a95e67488e8, with no viewer open stop.
     const Case = struct { state: WorkState, attention_kind: ?@FieldType(Attention, "kind"), standing: Standing };
@@ -685,11 +687,20 @@ test "attention and standing match base client classification across work states
         .{ .state = .{ .failed = .{ .since = 1, .code = try bounded(max_code_bytes, "failed"), .resets_at = null } }, .attention_kind = .failed, .standing = .failed },
         .{ .state = .{ .stopped = .{ .since = 1, .cause = .stop } }, .attention_kind = null, .standing = .done },
     };
-    for (cases) |case| for (0..8) |mask| {
-        const work: Work = .{ .state = case.state, .turn = if (mask & 1 != 0) 7 else null, .operation = if (mask & 2 != 0) 19 else null, .first_action = if (mask & 4 != 0) 41 else null };
-        try std.testing.expectEqual(case.standing, standing(work.state));
+    for (cases) |case| for (0..16) |mask| {
+        const decidable = mask & 8 != 0;
+        const work: Work = .{
+            .state = case.state,
+            .turn = if (mask & 1 != 0) 7 else null,
+            .operation = if (mask & 2 != 0) 19 else null,
+            .first_action = if (mask & 4 != 0) 41 else null,
+            .actions = .{ .decide = if (decidable) 41 else null },
+        };
+        // A waiting decision asks the person in every state; otherwise the state decides.
+        try std.testing.expectEqual(if (decidable) Standing.needs_you else case.standing, standing(work.state, decidable));
         const got = attention(work);
-        if (case.attention_kind) |kind| {
+        const kind_wanted: ?@FieldType(Attention, "kind") = if (decidable) .approval else case.attention_kind;
+        if (kind_wanted) |kind| {
             try std.testing.expect(got != null);
             try std.testing.expectEqual(kind, got.?.kind);
             try std.testing.expectEqual(work.turn orelse 0, got.?.turn);
