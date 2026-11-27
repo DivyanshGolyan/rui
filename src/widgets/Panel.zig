@@ -1236,7 +1236,7 @@ test "Panel hosted top rule option preserves title subtitle and bounded field ta
     try std.testing.expectEqualStrings("A", compact.readCell(3, 1).char.grapheme);
 }
 
-test "SUI-184 a Panel keeps its selection and open choice fitted to its inputs,, selects only a selectable row and highlights only a label of an open choice" {
+test "SUI-184 a Panel keeps its selection and open choice fitted to its inputs, selects only a selectable row and highlights only a label of an open choice" {
     const fields = [_]Field{
         .{ .label = "a", .value = "1" },
         .{ .label = "b", .value = "2", .selectable = false },
