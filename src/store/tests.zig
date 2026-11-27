@@ -113,6 +113,7 @@ test {
     _ = @import("domain/session_obligation.zig");
     _ = @import("rsql.zig");
     _ = @import("column_rules_tests.zig");
+    _ = @import("check_run.zig");
     _ = @import("schema.zig");
     _ = @import("access.zig");
     _ = @import("queue.zig");
