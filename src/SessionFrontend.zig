@@ -6444,7 +6444,7 @@ test "reader failure provenance keeps transport loss separate from local copy fa
                 try reply(page, "application/json", body.buffered().len, "", body.buffered());
             }
             if (self.mode == .temporary) return;
-            const content = try self.request("/v1/conversation-content");
+            const content = try self.request("/v1/activity-content");
             defer content.close(std.testing.io);
             self.contents += 1;
             var extra: [128]u8 = undefined;

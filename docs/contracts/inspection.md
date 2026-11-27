@@ -66,11 +66,11 @@ A missing public identity remains an ordinary request error; contradictory ordin
 Privacy applies to the exposed content, not its projection backing: accepted provider source rows may legitimately be private.
 These checks retain only constant-size identity/metadata values and no payload or cache.
 
-`POST /v1/conversation-content` takes `session`, `position`, `ordinal` and `start` as decimal strings; it resolves the public item in that Session rather than trusting a caller-supplied digest.
+`POST /v1/activity-content` (below, with the Activity reads) reads an item's bytes: it takes `session`, `position` and `ordinal` as decimal strings and resolves the public item in that Session rather than trusting a caller-supplied digest.
 Position and ordinal share the signed SQLite domain; invalid values fail as ordinary identities.
-By default the raw octet-stream response contains at most 4 KiB, with total `X-Rui-Content-Bytes` and exclusive `X-Rui-Next-Offset`; repeat until the offset equals total.
+Content framing, shared with `public-part-content`: the raw octet-stream response carries total `X-Rui-Content-Bytes` and exclusive `X-Rui-Next-Offset`; `activity-content` streams the whole value in one response, while `public-part-content` by default returns at most 4 KiB from `start`, repeated until the offset equals total.
 A range can split UTF-8: join bytes before decoding/display.
-A parts value has no text bytes: `conversation-content` and `activity-content` refuse it with `409` and `ContentIsParts`, without fencing, and the caller reads it through its owner.
+A parts value has no text bytes: `activity-content` refuses it with `409` and `ContentIsParts`, without fencing, and the caller reads it through its owner.
 Out-of-range or nonpublic identities fail without leaking content.
 The server requests public byte ranges; the Store owns representation selection, positioning, decoding and validation.
 Every public text is its own content row, so a range seeks directly.
@@ -100,7 +100,7 @@ Content rows are deduplicated across Sessions, so one value can be reachable fro
 Two routes read a parts value:
 
 - `POST /v1/public-parts {session, owner}` returns the whole part list in one JSON reply: the value, `{"type":"parts","bytes":D,"sha256":H,"owner":…}`, then every part in ordinal order. A Text part carries its exact byte length and digest; an Image part also carries its MIME type (`image/png` or `image/jpeg`), its width and height and its name or `null`. The value's `bytes` and `sha256` identify its manifest, not the sum of its parts.
-- `POST /v1/public-part-content {session, owner, part, start[, stream:true]}` returns one zero-based part's exact bytes with the [conversation-content framing](#public-conversation-content): one 4 KiB window from `start` with `X-Rui-Content-Bytes` and `X-Rui-Next-Offset`, or, with `stream:true` and `start` 0, the whole part checked against its digest.
+- `POST /v1/public-part-content {session, owner, part, start[, stream:true]}` returns one zero-based part's exact bytes with the [content framing](#public-conversation-content): one 4 KiB window from `start` with `X-Rui-Content-Bytes` and `X-Rui-Next-Offset`, or, with `stream:true` and `start` 0, the whole part checked against its digest.
 
 Every `sha256` is the [Store content digest](store.md#sqlite-and-representation): SHA-256 over the eight-byte big-endian length of `rui/content/v1`, followed by that domain and the bytes; it is not the raw bytes' SHA-256.
 Both routes answer `409 parts_unavailable` with `ContentNotFound` for an unknown owner, an owner outside the Session or a missing part, and with `ContentIsText` for a value without parts; a part read also answers `RangeOutOfBounds` for a `start` past the part's length.

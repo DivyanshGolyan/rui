@@ -614,7 +614,8 @@ pub const Replies = struct {
         try replyJson(fd, 200, protocol.tools_status_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsStatus, .{ self.instance, rows[0..count] });
     }
 
-    fn deliverActivityContent(self: *Replies, fd: std.posix.fd_t, command: @FieldType(wire_request.Request, "activity_content")) !void {
+    fn deliverActivityContent(self: *Replies, fd: std.posix.fd_t, request: @FieldType(wire_request.Request, "activity_content")) !void {
+        var command = request;
         var reply: Reply = undefined;
         reply.init(self.io, self.allocator, null);
         defer reply.deinit();
