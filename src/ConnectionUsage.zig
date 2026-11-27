@@ -17,7 +17,9 @@ fn any(reading: Reading) bool {
 
 io: std.Io,
 mutex: std.Io.Mutex = .init,
-latest: connection_names.NameArray(Reading) = .{},
+latest: connection_names.NameArray(Kept) = .{},
+
+const Kept = struct { reading: Reading, seen: i96 };
 
 pub fn init(io: std.Io) Self {
     return .{ .io = io };
@@ -49,19 +51,19 @@ pub fn record(self: *Self, observation: provider.AllowanceObservation) void {
     if (!any(reading)) return;
     self.mutex.lockUncancelable(self.io);
     defer self.mutex.unlock(self.io);
-    // Two Turns of one connection can complete out of order; the older reading never replaces a newer one.
-    if (self.latest.find(observation.provider)) |kept| if (kept.observed_at > reading.observed_at) return;
-    self.latest.set(observation.provider, reading) catch {};
+    // Two Turns of one connection can complete out of order; the reading seen earlier never replaces one seen later, whatever the wall clock says.
+    if (self.latest.find(observation.provider)) |kept| if (kept.seen > observation.seen) return;
+    self.latest.set(observation.provider, .{ .reading = reading, .seen = observation.seen }) catch {};
 }
 
 pub fn get(self: *Self, name: connection.Name) ?Reading {
     self.mutex.lockUncancelable(self.io);
     defer self.mutex.unlock(self.io);
-    return self.latest.get(name);
+    return (self.latest.get(name) orelse return null).reading;
 }
 
-fn observed(name: []const u8, at: i64, primary: provider.AllowanceWindow, secondary: provider.AllowanceWindow) provider.AllowanceObservation {
-    return .{ .binding = std.mem.zeroes(@FieldType(provider.AllowanceObservation, "binding")), .provider = connection.Name.parse(name).?, .status = 200, .observed_at = at, .primary = primary, .secondary = secondary };
+fn observed(name: []const u8, at: i64, seen: i96, primary: provider.AllowanceWindow, secondary: provider.AllowanceWindow) provider.AllowanceObservation {
+    return .{ .binding = std.mem.zeroes(@FieldType(provider.AllowanceObservation, "binding")), .provider = connection.Name.parse(name).?, .status = 200, .observed_at = at, .seen = seen, .primary = primary, .secondary = secondary };
 }
 
 test "CM-67 a connection's reading keeps the last readable windows and ignores a reply without numbers" {
@@ -70,24 +72,24 @@ test "CM-67 a connection's reading keeps the last readable windows and ignores a
     const bare: provider.AllowanceWindow = .{ .used = .{ .value = 3 }, .minutes = .invalid };
     const work = connection.Name.parse("work").?;
     try std.testing.expectEqual(@as(?Reading, null), usage.get(work));
-    usage.record(observed("work", 10, bare, .{}));
+    usage.record(observed("work", 10, 10, bare, .{}));
     try std.testing.expectEqual(@as(?Reading, null), usage.get(work));
-    usage.record(observed("work", 20, week, bare));
+    usage.record(observed("work", 20, 20, week, bare));
     const first = usage.get(work).?;
     try std.testing.expectEqual(@as(u64, 20), first.observed_at);
     try std.testing.expectEqual(@as(?Window, .{ .used_percent = 25.5, .minutes = 10080, .reset_at = 1700000000 }), first.primary);
     try std.testing.expectEqual(@as(?Window, null), first.secondary);
-    usage.record(observed("work", 30, .{}, .{}));
+    usage.record(observed("work", 30, 30, .{}, .{}));
     try std.testing.expectEqual(@as(u64, 20), usage.get(work).?.observed_at);
-    usage.record(observed("work", 40, .{}, .{ .used = .{ .value = 100 }, .minutes = .{ .value = 300 } }));
+    usage.record(observed("work", 40, 40, .{}, .{ .used = .{ .value = 100 }, .minutes = .{ .value = 300 } }));
     const later = usage.get(work).?;
     try std.testing.expectEqual(@as(u64, 40), later.observed_at);
     try std.testing.expectEqual(@as(?Window, null), later.primary);
     try std.testing.expectEqual(@as(?Window, .{ .used_percent = 100, .minutes = 300, .reset_at = null }), later.secondary);
     try std.testing.expectEqual(@as(?Reading, null), usage.get(connection.Name.parse("codex").?));
     // A Turn that completes late carries an older reading; the newer one stays.
-    usage.record(observed("work", 20, week, .{}));
+    usage.record(observed("work", 20, 20, week, .{}));
     try std.testing.expectEqual(@as(u64, 40), usage.get(work).?.observed_at);
-    usage.record(observed("work", 40, week, .{}));
+    usage.record(observed("work", 40, 40, week, .{}));
     try std.testing.expectEqual(@as(?Window, null), usage.get(work).?.secondary);
 }
