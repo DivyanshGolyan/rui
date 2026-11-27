@@ -840,6 +840,9 @@ pub const KeyList = struct {
     fields: []const Field,
     ground: vaxis.Style = .{},
     strong: vaxis.Style = .{ .bold = true },
+    /// Draw one field per row, never in pairs, and start each value right after its own label (at the margin when it has none),
+    /// so a row costs only its own width: for a list whose rows read down the page (the Connections reference).
+    single_column: bool = false,
     row_offset: usize = 0,
     total_rows: usize = 0,
     viewport_height: usize = 0,
@@ -865,8 +868,9 @@ pub const KeyList = struct {
         const column_gap = 2;
         const left_width = margin + key_widths[0] + key_gap + value_widths[0];
         const right_width = margin + key_widths[1] + key_gap + value_widths[1];
-        const columns: usize = if (self.fields.len > 1 and left_width + column_gap + right_width <= size.width) 2 else 1;
+        const columns: usize = if (!self.single_column and self.fields.len > 1 and left_width + column_gap + right_width <= size.width) 2 else 1;
         if (columns == 1) key_widths[0] = @max(key_widths[0], key_widths[1]);
+        if (self.single_column) key_widths = .{ 0, 0 };
         self.total_rows = (self.fields.len + columns - 1) / columns;
         self.viewport_height = size.height;
         self.row_offset = @min(self.row_offset, self.total_rows -| self.viewport_height);
@@ -880,7 +884,9 @@ pub const KeyList = struct {
             const column_width = if (column == 0) left_width else right_width;
             const limit: u16 = if (columns == 1) size.width else @intCast(start + column_width);
             const label: u16 = @intCast(@min(start + margin, limit));
-            const value: u16 = @intCast(@min(start + margin + key_widths[column] + key_gap, limit));
+            const own_key = if (self.single_column) ctx.stringWidth(field.label) else key_widths[column];
+            const gap: usize = if (self.single_column and field.label.len == 0) 0 else key_gap;
+            const value: u16 = @intCast(@min(start + margin + own_key + gap, limit));
             _ = paintTo(ctx, surface, field.label, label, @intCast(row), self.strong, limit);
             _ = paintTo(ctx, surface, field.value, value, @intCast(row), self.ground, limit);
         }

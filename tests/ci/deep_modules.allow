@@ -165,7 +165,7 @@ field-leak activity_read.ActivitySearch.limit
 field-leak activity_read.ActivitySearch.query
 field-leak activity_read.ActivitySearch.session
 field-leak app_input.Frame.modal
-field-leak app_settings.app_settings.keys_open
+field-leak app_settings.app_settings.reference_open
 field-leak bash.ContentSource.reader
 field-leak change_ring.Ring.sessions
 field-leak chat_info.chat_info.model_choice
