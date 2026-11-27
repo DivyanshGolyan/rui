@@ -159,17 +159,13 @@ fn peerName(sink: anytype, peer: protocol.NamedPeer, resume_style: []const u8) !
 }
 
 pub const Collapsed = struct {
-    source: enum { activity, conversation },
     position: u64,
     ordinal: u64,
     content: content_value.Value,
     row: bool,
 
     pub fn at(self: Collapsed) value_reads.At {
-        return .{ .source = switch (self.source) {
-            .activity => .activity,
-            .conversation => .conversation,
-        }, .position = self.position, .ordinal = self.ordinal };
+        return .{ .position = self.position, .ordinal = self.ordinal };
     }
 };
 
@@ -1242,7 +1238,7 @@ fn messageWith(reads: client.SessionReads, scratch: std.Io.File, item: protocol.
         .person, .action, .server_event => {},
     }
     if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(true);
-    const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
+    const block: Collapsed = .{ .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     try userPrefix(sink, colour, value.admitted_at);
     const display = try open(reads, scratch, item, value.content);
     var body: UserBody(@TypeOf(sink)) = undefined;

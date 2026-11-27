@@ -2,7 +2,6 @@ const connection = @import("../../connection.zig");
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
-const conversation_read = @import("../../conversation_read.zig");
 const wire_request = @import("../../wire_request.zig");
 const model_catalog = @import("../../model_catalog.zig");
 const model_capability = @import("../../model_capability.zig");
@@ -134,7 +133,7 @@ test "compaction overflow admits a new Operation without losing applied input" {
             try submitTestMessage(&storage, &tmp, "compact-input", "input", session.slice(), "keep all input");
             const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const detail = "{\"reason\":\"ContextOverflow\",\"stage\":\"response\",\"byte_offset\":\"0\",\"output_index\":null}";
-            var failure: ModelFailure = .{ .rejected = .{ .code = "context_overflow", .diagnostic = detail, .request_id = .{}, .report = "" } };
+            var failure: ModelFailure = .{ .rejected = .{ .code = "context_overflow", .diagnostic = detail, .request_id = .{}, .report = .empty } };
             try failure.rejected.request_id.set("compact-overflow-request");
             try storage.settleModelAttemptFailure(original, failure, .context_overflow, .{});
             const next = (try storage.admitNextModelAttempt(.{})) orelse return error.MissingCompaction;
@@ -182,15 +181,14 @@ test "compaction success retains host inputs and ordered anchor suffix across re
             try std.testing.expectError(error.InvalidProviderEnvelope, settleCompactionForTesting(&storage, &tmp, compact, &.{ .compaction, .web_search_call }));
             try std.testing.expect(!storage.isFenced());
             try settleCompactionForTesting(&storage, &tmp, compact, &.{ .reasoning, .compaction, .message });
-            var request: conversation_read.ConversationPage = .{};
-            try request.session.set(session.slice());
-            try std.testing.expectEqual(@as(usize, 1), (try store_core.publicConversationPageForTesting(&storage, request)).count);
+            const rows: protocol.ActivityPage.Kinds = .initMany(&.{ .user, .assistant, .tool_result, .hosted_call });
+            try std.testing.expectEqual(@as(usize, 1), (try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = rows })).count);
             try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(session.slice())).action_count);
             try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
             try storage.close();
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            try std.testing.expectEqual(@as(usize, 1), (try store_core.publicConversationPageForTesting(&storage, request)).count);
-            const activity = try store_core.activityPageForTesting(&storage, .{ .session = request.session });
+            try std.testing.expectEqual(@as(usize, 1), (try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = rows })).count);
+            const activity = try store_core.activityPageForTesting(&storage, .{ .session = session });
             for (activity.items[0..activity.count]) |item| try std.testing.expect(item.value != .assistant);
             const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
             defer std.testing.allocator.free(report);
@@ -199,7 +197,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
             for (parsed_report.value.object.get("full").?.object.get("conversation").?.array.items) |entry|
                 try std.testing.expect(!std.mem.eql(u8, "assistant", entry.object.get("kind").?.string));
             const compaction_message = try store_testing.queryU64(&storage, "SELECT session_position FROM model_output_item WHERE item_kind=2", .{});
-            try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = request.session, .position = compaction_message }));
+            try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = session, .position = compaction_message }));
             try std.testing.expect(!storage.isFenced());
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(compact.turn_id, successor.turn_id);

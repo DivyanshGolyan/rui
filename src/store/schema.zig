@@ -1386,6 +1386,17 @@ pub fn readByBoth(comptime table: []const u8) []const []const u8 {
 }
 
 /// The CHECK expression a column's own rules render to on an engine, null when it carries none.
+/// The cross-column rules of a table, each as the expression its CHECK holds, in the order the catalog lists them.
+pub fn tableRuleSql(comptime dialect: rsql.Dialect, comptime table: []const u8) []const []const u8 {
+    comptime {
+        @setEvalBranchQuota(100_000_000);
+        const found = tables[tablePosition(&tables, table)];
+        var texts: []const []const u8 = &.{};
+        for (tableChecks(found)) |check| texts = texts ++ .{expression(dialect, found, check)};
+        return texts;
+    }
+}
+
 pub fn columnRuleSql(comptime dialect: rsql.Dialect, comptime table: []const u8, comptime column: Column) ?[]const u8 {
     comptime {
         const text = columnCheck(column) orelse return null;
@@ -1519,6 +1530,19 @@ pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     };
 }
 
+/// The DDL of one form: `strict` is the schema as it is stored; `plain` leaves out every FOREIGN KEY and CHECK, so a
+/// database team can hold the tables, keys and indexes alone while the Host and `store check` hold the rules.
+pub fn ddlIn(comptime dialect: rsql.Dialect, comptime form: Form) [:0]const u8 {
+    if (form == .strict) return ddl(dialect);
+    return comptime blk: {
+        @setEvalBranchQuota(objects_quota);
+        var text: []const u8 = "";
+        for (plainObjects(dialect)) |object| text = text ++ object.sql ++ ";\n";
+        const terminated = text ++ "\x00";
+        break :blk terminated[0..text.len :0];
+    };
+}
+
 fn onEngine(comptime all: []const Table, comptime dialect: rsql.Dialect) []const Table {
     comptime {
         var result: []const Table = &.{};
@@ -1555,25 +1579,40 @@ fn joined(comptime items: []const []const u8, comptime separator: []const u8) []
     }
 }
 
+pub const Form = enum { strict, plain };
+
 pub const Object = struct { kind: enum { table, index, foreign_key }, name: []const u8, sql: []const u8 };
 
 pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     return comptime blk: {
         if (rsql.generatedSchema()) |generated| break :blk if (dialect == .sqlite) generated.sqlite_objects else generated.mysql_objects;
         @setEvalBranchQuota(objects_quota);
-        const result = renderedObjects(dialect);
+        const result = renderedObjects(dialect, .strict);
         break :blk result;
     };
 }
 
-fn renderedObjects(comptime dialect: rsql.Dialect) []const Object {
+/// The plain form's objects: no CHECK, no FOREIGN KEY. Rendered at comptime, never served from the statement table.
+pub fn plainObjects(comptime dialect: rsql.Dialect) []const Object {
+    return comptime blk: {
+        @setEvalBranchQuota(objects_quota);
+        const result = renderedObjects(dialect, .plain);
+        break :blk result;
+    };
+}
+
+pub fn objectsIn(comptime dialect: rsql.Dialect, comptime form: Form) []const Object {
+    return if (form == .strict) objects(dialect) else plainObjects(dialect);
+}
+
+fn renderedObjects(comptime dialect: rsql.Dialect, comptime form: Form) []const Object {
     comptime {
-        if (dialect == .mysql) return switch (mysqlObjects(&tables, &indexes)) {
+        if (dialect == .mysql) return switch (mysqlObjects(&tables, &indexes, form)) {
             .refused => |message| @compileError(message),
             .objects => |result| result,
         };
         var result: []const Object = &.{};
-        for (onEngine(&tables, .sqlite)) |table| result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = createTable(table) }};
+        for (onEngine(&tables, .sqlite)) |table| result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = createTable(table, form) }};
         for (indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createIndex(index) }};
         return result;
     }
@@ -1597,7 +1636,7 @@ pub const mysql_session = [_][:0]const u8{
 
 const MysqlObjects = union(enum) { refused: []const u8, objects: []const Object };
 
-fn mysqlObjects(comptime every: []const Table, comptime all_indexes: []const Index) MysqlObjects {
+fn mysqlObjects(comptime every: []const Table, comptime all_indexes: []const Index, comptime form: Form) MysqlObjects {
     comptime {
         @setEvalBranchQuota(50_000 * (every.len + all_indexes.len));
         const all = onEngine(every, .mysql);
@@ -1613,7 +1652,9 @@ fn mysqlObjects(comptime every: []const Table, comptime all_indexes: []const Ind
                 };
                 lines = lines ++ .{" " ++ column.name ++ " " ++ column_type.name ++ (if (column.nullable) "" else " NOT NULL") ++
                     (if (column.default) |value| " DEFAULT " ++ value else "")};
-                if (columnCheck(column)) |check| checks = checks ++ .{check};
+                if (form == .strict) if (columnCheck(column)) |check| {
+                    checks = checks ++ .{check};
+                };
             }
             for (all_indexes) |index| if (std.mem.eql(u8, index.table, table.name) and mysqlIndexForm(index) == .leading) {
                 const lead = indexColumn(index.columns[0]).name;
@@ -1634,13 +1675,15 @@ fn mysqlObjects(comptime every: []const Table, comptime all_indexes: []const Ind
             for (keys_of) |key| if (mysqlKeyError(all, all_indexes, table, key)) |message| return .{ .refused = message };
             lines = lines ++ .{" PRIMARY KEY(" ++ list(table.primary_key) ++ ")"};
             for (table.uniques) |unique| lines = lines ++ .{" UNIQUE(" ++ list(unique) ++ ")"};
-            for (table.foreign_keys) |key| {
+            if (form == .strict) for (table.foreign_keys) |key| {
                 const clause = "FOREIGN KEY(" ++ list(key.columns) ++ ") " ++ referenceClause(key);
                 if (tablePosition(all, key.references) <= position) {
                     lines = lines ++ .{" " ++ clause};
                 } else later = later ++ .{Object{ .kind = .foreign_key, .name = table.name ++ "(" ++ list(key.columns) ++ ")", .sql = "ALTER TABLE " ++ table.name ++ " ADD " ++ clause }};
+            };
+            if (form == .strict) {
+                for (checks ++ tableChecks(table)) |check| lines = lines ++ .{" CHECK(" ++ expression(.mysql, table, check) ++ ")"};
             }
-            for (checks ++ tableChecks(table)) |check| lines = lines ++ .{" CHECK(" ++ expression(.mysql, table, check) ++ ")"};
             result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = "CREATE TABLE " ++ table.name ++ "(\n" ++ joinLines(lines) ++
                 "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin" }};
         }
@@ -1947,29 +1990,31 @@ const store_meta_sql = sqliteMetaSeedSql();
 pub const store_id_bytes = 16;
 const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };
 
-fn createTable(comptime table: Table) []const u8 {
+fn createTable(comptime table: Table, comptime form: Form) []const u8 {
     if (!table.engines.on(.sqlite)) @compileError("schema: " ++ table.name ++ " is not on SQLite");
     var lines: []const []const u8 = &.{};
     for (table.columns) |column| {
         if (column.sqlite_added) {
             if (lines.len == 0) @compileError("schema: an added column must follow an existing column");
-            lines = lines[0 .. lines.len - 1] ++ .{lines[lines.len - 1] ++ "," ++ columnDefinition(table, column)};
-        } else lines = lines ++ .{columnDefinition(table, column)};
+            lines = lines[0 .. lines.len - 1] ++ .{lines[lines.len - 1] ++ "," ++ columnDefinition(table, column, form)};
+        } else lines = lines ++ .{columnDefinition(table, column, form)};
     }
     if (table.primary_key.len > 1) lines = lines ++ .{" PRIMARY KEY(" ++ list(table.primary_key) ++ ")"};
     for (table.uniques) |unique| {
         if (unique.len > 1) lines = lines ++ .{" UNIQUE(" ++ list(unique) ++ ")"};
     }
-    for (table.foreign_keys) |key| {
+    if (form == .strict) for (table.foreign_keys) |key| {
         if (key.columns.len > 1) lines = lines ++ .{" FOREIGN KEY(" ++ list(key.columns) ++ ") " ++ referenceClause(key)};
+    };
+    if (form == .strict) {
+        for (tableChecks(table)) |check| lines = lines ++ .{" CHECK(" ++ expression(.sqlite, table, check) ++ ")"};
     }
-    for (tableChecks(table)) |check| lines = lines ++ .{" CHECK(" ++ expression(.sqlite, table, check) ++ ")"};
     const body = joinLines(lines);
     checkIdentifier(table.name);
     return "CREATE TABLE " ++ table.name ++ "(\n" ++ body ++ "\n) STRICT" ++ (if (table.without_rowid) ", WITHOUT ROWID" else "");
 }
 
-fn columnDefinition(comptime table: Table, comptime column: Column) []const u8 {
+fn columnDefinition(comptime table: Table, comptime column: Column, comptime form: Form) []const u8 {
     checkIdentifier(column.name);
     const only = &[_][]const u8{column.name};
     const primary = eqlList(table.primary_key, only);
@@ -1985,10 +2030,12 @@ fn columnDefinition(comptime table: Table, comptime column: Column) []const u8 {
     for (table.uniques) |unique| {
         if (eqlList(unique, only)) text = text ++ " UNIQUE";
     }
-    for (table.foreign_keys) |key| {
+    if (form == .strict) for (table.foreign_keys) |key| {
         if (eqlList(key.columns, only)) text = text ++ " " ++ referenceClause(key);
+    };
+    if (form == .strict) {
+        if (columnCheck(column)) |check| text = text ++ " CHECK(" ++ expression(.sqlite, table, check) ++ ")";
     }
-    if (columnCheck(column)) |check| text = text ++ " CHECK(" ++ expression(.sqlite, table, check) ++ ")";
     return text;
 }
 
@@ -2260,7 +2307,7 @@ const mysql_test_label: Table = .{
 };
 
 test "MySQL types come from foreign keys, bounds and keys, and a key cycle closes after its tables" {
-    const rendered = comptime mysqlObjects(&[_]Table{ mysql_test_order, mysql_test_label }, &.{}).objects;
+    const rendered = comptime mysqlObjects(&[_]Table{ mysql_test_order, mysql_test_label }, &.{}, .strict).objects;
     try std.testing.expectEqual(3, rendered.len);
     try std.testing.expectEqualStrings(
         "CREATE TABLE turn(\n turn_id BIGINT NOT NULL,\n code VARCHAR(8) NOT NULL,\n live TINYINT NOT NULL DEFAULT 0,\n PRIMARY KEY(turn_id),\n" ++
@@ -2277,7 +2324,7 @@ test "MySQL types come from foreign keys, bounds and keys, and a key cycle close
     const unbounded = [_]Table{.{ .name = "content", .columns = &.{.{ .name = "label", .type = .{ .text = null } }}, .primary_key = &.{"label"} }};
     try std.testing.expectEqualStrings(
         "schema: content.label is in a key with no bound; MySQL keys only bounded values: give its type a .max",
-        comptime mysqlObjects(&unbounded, &.{}).refused,
+        comptime mysqlObjects(&unbounded, &.{}, .strict).refused,
     );
 }
 
@@ -2390,9 +2437,9 @@ test "a catalog line names each table, column, index, foreign key and CHECK coun
 
 test "a MySQL key wider than InnoDB keeps is refused" {
     const wide = [_]Table{.{ .name = "content", .columns = &.{.{ .name = "label", .type = .{ .text = .{ .max = 769 } } }}, .primary_key = &.{"label"} }};
-    try std.testing.expectEqualStrings("schema: the key content(label) is 3076 bytes on MySQL, past InnoDB's 3072", comptime mysqlObjects(&wide, &.{}).refused);
+    try std.testing.expectEqualStrings("schema: the key content(label) is 3076 bytes on MySQL, past InnoDB's 3072", comptime mysqlObjects(&wide, &.{}, .strict).refused);
     const fits = [_]Table{.{ .name = "content", .columns = &.{.{ .name = "label", .type = .{ .text = .{ .max = 768 } } }}, .primary_key = &.{"label"} }};
-    try std.testing.expectEqual(1, comptime mysqlObjects(&fits, &.{}).objects.len);
+    try std.testing.expectEqual(1, comptime mysqlObjects(&fits, &.{}, .strict).objects.len);
 }
 
 test "MySQL sessions read literals as rsql copies them, and strictly" {
@@ -3022,7 +3069,7 @@ test "schema 80 creator migration matches canonical SQLite and MySQL column cons
         unreachable;
     };
     try std.testing.expect(creator.nullable and creator.sqlite_added);
-    try std.testing.expectEqualStrings("ALTER TABLE session ADD COLUMN" ++ comptime columnDefinition(session, creator), step.sqlite[0]);
+    try std.testing.expectEqualStrings("ALTER TABLE session ADD COLUMN" ++ comptime columnDefinition(session, creator, .strict), step.sqlite[0]);
     try std.testing.expectEqualStrings("UPDATE session SET creator_ref=parent_ref", step.sqlite[1]);
     try std.testing.expectEqualStrings(step.sqlite[1], step.mysql[1]);
     const canonical_session_mysql = comptime blk: {
@@ -3417,4 +3464,59 @@ test "schema 89 migration leaves each saved tool record's remote name empty, its
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_table_info('tool_record') WHERE name='remote_name'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record WHERE remote_name<>''"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "INSERT INTO tool_record(tool_record_id,name,remote_name,owner,server,description_content_id,input_schema_content_id) SELECT 999999,'a__b','c d',owner,server,description_content_id,input_schema_content_id FROM tool_record LIMIT 1"));
+}
+
+test "SH-182 the plain form drops every CHECK and FOREIGN KEY and keeps each table, column, key and index on both engines" {
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const strict = comptime objectsIn(dialect, .strict);
+        const plain = comptime objectsIn(dialect, .plain);
+        for (plain) |object| {
+            try std.testing.expect(object.kind != .foreign_key);
+            for ([_][]const u8{ "CHECK", "FOREIGN KEY", "REFERENCES" }) |word| {
+                if (std.mem.indexOf(u8, object.sql, word) != null) std.debug.print("{s} holds {s}\n", .{ object.name, word });
+                try std.testing.expect(std.mem.indexOf(u8, object.sql, word) == null);
+            }
+        }
+        var kept: usize = 0;
+        for (strict) |object| {
+            if (object.kind == .foreign_key) continue;
+            if (object.kind == .table) for ([_][]const u8{ "PRIMARY KEY", "UNIQUE" }) |word| {
+                try std.testing.expectEqual(std.mem.count(u8, object.sql, word), std.mem.count(u8, plain[kept].sql, word));
+            };
+            try std.testing.expectEqualStrings(object.name, plain[kept].name);
+            try std.testing.expectEqual(object.kind, plain[kept].kind);
+            if (object.kind == .index) try std.testing.expectEqualStrings(object.sql, plain[kept].sql);
+            kept += 1;
+        }
+        try std.testing.expectEqual(plain.len, kept);
+        inline for (comptime onEngine(&tables, dialect)) |table| {
+            const sql = comptime plainTable(plain, table.name);
+            inline for (table.columns) |column| {
+                if (std.mem.indexOf(u8, sql, " " ++ column.name ++ " ") == null) std.debug.print("{s} lacks {s}\n", .{ table.name, column.name });
+                try std.testing.expect(std.mem.indexOf(u8, sql, " " ++ column.name ++ " ") != null);
+            }
+        }
+    }
+}
+
+fn plainTable(comptime objects_of: []const Object, comptime name: []const u8) []const u8 {
+    for (objects_of) |object| if (object.kind == .table and std.mem.eql(u8, object.name, name)) return object.sql;
+    @compileError("schema: no plain table " ++ name);
+}
+
+test "SH-182 a plain SQLite Store takes the rows its strict form refuses, and the strict form equals the stored DDL" {
+    try std.testing.expectEqualStrings(ddl(.sqlite), ddlIn(.sqlite, .strict));
+    const row = "INSERT INTO tool_set(tool_set_id,digest,member_count) VALUES(0,zeroblob(32),1000000)";
+    inline for (.{ Form.strict, Form.plain }) |form| {
+        var raw: ?*c.sqlite3 = null;
+        defer _ = c.sqlite3_close(raw);
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+        try sqlite.exec(raw.?, ddlIn(.sqlite, form));
+        if (form == .strict) {
+            try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(raw.?, row));
+        } else {
+            try sqlite.exec(raw.?, row);
+            try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw.?, "SELECT count(*) FROM tool_set WHERE tool_set_id=0"));
+        }
+    }
 }

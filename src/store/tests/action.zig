@@ -1,7 +1,6 @@
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
-const conversation_read = @import("../../conversation_read.zig");
 const wire_request = @import("../../wire_request.zig");
 const tool_defs = @import("../../tools.zig");
 const store_core = @import("../Store.zig");
@@ -352,13 +351,12 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, binding, "action-metadata");
 
-            var public_request = conversation_read.ConversationPage{};
-            try public_request.session.set(session.slice());
-            const proposed = try store_core.publicConversationPageForTesting(&storage, public_request);
+            const rows: protocol.ActivityPage.Kinds = .initMany(&.{ .user, .assistant, .tool_result, .hosted_call });
+            const proposed = try store_core.activityPageForTesting(&storage, .{ .session = session, .direction = .backward, .kinds = rows });
             try std.testing.expectEqual(@as(usize, 1), proposed.count);
-            try std.testing.expect(proposed.items[0].kind == .user);
+            try std.testing.expect(proposed.items[0].value == .user);
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{
-                .session = public_request.session,
+                .session = session,
                 .position = proposed.end,
             }));
 
@@ -392,7 +390,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             try deny.session.set(session.slice());
             const accepted = storage.decidePermission(&deny, .{});
             try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
-            try std.testing.expectEqual(@as(usize, 1), (try store_core.publicConversationPageForTesting(&storage, public_request)).count);
+            try std.testing.expectEqual(@as(usize, 1), (try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = rows })).count);
             try std.testing.expect(storage.decidePermission(&deny, .{}).accepted.replayed);
             deny.action_id += 1;
             try std.testing.expect(storage.decidePermission(&deny, .{}) == .conflict);
@@ -429,17 +427,19 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             const action_stop = storage.stopSession(&stop, .{});
             try std.testing.expect(action_stop == .accepted);
             try std.testing.expectEqual(protocol.SessionStopCompletion.completed, action_stop.accepted.completion);
-            const settled_page = try store_core.publicConversationPageForTesting(&storage, public_request);
+            const settled_page = try store_core.activityPageForTesting(&storage, .{ .session = session, .direction = .backward, .kinds = rows });
             try std.testing.expectEqual(@as(usize, 3), settled_page.count);
-            try std.testing.expect(settled_page.items[0].kind == .tool_result);
+            try std.testing.expect(settled_page.items[0].value == .tool_result);
             try std.testing.expectEqual(settled_page.items[0].position, settled_page.items[1].position);
             try std.testing.expectEqual(@as(u64, 2), settled_page.items[0].ordinal);
             try std.testing.expectEqual(@as(u64, 1), settled_page.items[1].ordinal);
-            try std.testing.expectEqualStrings("Run second command", settled_page.items[0].presentation.?.line.?.words.slice());
-            try std.testing.expectEqualStrings("Run first command", settled_page.items[1].presentation.?.line.?.words.slice());
-            try std.testing.expectEqual(protocol.ToolPresentation.Code.denied, settled_page.items[1].presentation.?.code);
-            for (settled_page.items[0..2]) |item| try std.testing.expectEqual(item.position, item.presentation.?.publication_position.?);
-            const activity = try store_core.activityPageForTesting(&storage, .{ .session = public_request.session, .direction = .backward });
+            const second_result = settled_page.items[0].value.tool_result.presentation;
+            const first_result = settled_page.items[1].value.tool_result.presentation;
+            try std.testing.expectEqualStrings("Run second command", second_result.line.?.words.slice());
+            try std.testing.expectEqualStrings("Run first command", first_result.line.?.words.slice());
+            try std.testing.expectEqual(protocol.ToolPresentation.Code.denied, first_result.code);
+            for ([_]protocol.ToolPresentation{ second_result, first_result }, settled_page.items[0..2]) |result, item| try std.testing.expectEqual(item.position, result.publication_position.?);
+            const activity = try store_core.activityPageForTesting(&storage, .{ .session = session, .direction = .backward });
             var results: usize = 0;
             for (activity.items[0..activity.count]) |item| if (item.value == .tool_result) {
                 const p = item.value.tool_result.presentation;
@@ -450,7 +450,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             try std.testing.expectEqual(@as(usize, 2), results);
             var result_reader: ContentReader = undefined;
             result_reader.open(try storage.openPublicConversationContent(&.{
-                .session = public_request.session,
+                .session = session,
                 .position = settled_page.items[0].position,
                 .ordinal = 2,
             }));
@@ -1380,15 +1380,6 @@ test "background final input joins the next Turn boundary without changing an in
                 try std.testing.expectEqual(@as(usize, 1), received);
                 const person = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.admission) });
                 for (person.items[0..person.count]) |item| try std.testing.expect(item.value.admission.origin == .person);
-                const public = try store_core.publicConversationPageForTesting(&storage, .{ .session = session });
-                var projected: usize = 0;
-                for (public.items[0..public.count]) |item| if (item.source_action) |source| {
-                    try std.testing.expectEqual(action, source);
-                    try std.testing.expect(item.sender == null);
-                    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &item.content.text.digest);
-                    projected += 1;
-                };
-                try std.testing.expectEqual(@as(usize, 1), projected);
                 try NativePromotion.finishModel(&storage, &tmp, next);
                 try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE source_action_id=?1", .{action}));
@@ -2489,31 +2480,6 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
                 try std.testing.expectEqual(@as(usize, 40), value_count);
             }
             _ = try storage.openActivityContent(&.{ .session = session, .position = value_user.?.position, .ordinal = value_user.?.ordinal });
-            var conversation: conversation_read.ConversationPage = .{ .session = session };
-            var person_count: usize = 0;
-            var peer_count: usize = 0;
-            var final_count: usize = 0;
-            var pages: usize = 0;
-            while (true) {
-                const page = try store_core.publicConversationPageForTesting(&storage, conversation);
-                pages += 1;
-                for (page.items[0..page.count]) |item| {
-                    try std.testing.expect(!std.mem.eql(u8, &item.content.identity().digest, &protocol.contentDigest("hidden value")));
-                    if (std.mem.eql(u8, &item.content.identity().digest, &protocol.contentDigest("visible person"))) person_count += 1;
-                    if (item.sender != null) peer_count += 1;
-                    if (item.source_action != null and item.source_action.? == action_id) final_count += 1;
-                }
-                if (!page.more) break;
-                try std.testing.expectEqual(@as(usize, 16), page.count);
-                conversation.end = page.end;
-                conversation.before_position = page.items[page.count - 1].position;
-                conversation.before_ordinal = page.items[page.count - 1].ordinal;
-            }
-            try std.testing.expect(pages > 1);
-            try std.testing.expectEqual(@as(usize, 20), person_count);
-            try std.testing.expectEqual(@as(usize, 1), peer_count);
-            try std.testing.expectEqual(@as(usize, 1), final_count);
-            try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, .{ .session = session, .end = conversation.end, .before_position = hidden_entry }));
             try NativePromotion.finishModel(&storage, &tmp, model);
         }
     }.run);

@@ -59,45 +59,25 @@ def main():
         assert item["ordinal"] == "0", item
         assert admitted_after <= int(user["admitted_at"]) <= int(time.time()), item
         for field in ("position", "ordinal"):
-            identity = {"position": item["position"], "ordinal": "0", "start": "0"}
+            identity = {"position": item["position"], "ordinal": "0"}
             identity[field] = str(2**64 - 1)
-            head, _ = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session, **identity)
+            head, _ = request(socket_path, store, "/v1/activity-content", "activity_content", page_session, **identity)
             assert head.startswith(b"HTTP/1.1 400 "), head
         domain = b"rui/content/v1"
         assert user["content"] == {
             "type": "text", "bytes": "10005", "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + payload.encode()).hexdigest(),
         }, item
-        chunks = []
-        start = 0
-        while start < len(payload.encode()):
-            head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session,
-                position=item["position"], ordinal="0", start=str(start))
-            assert head.startswith(b"HTTP/1.1 200 "), (head, data)
-            assert b"X-Rui-Content-Bytes: 10005\r\n" in head, head
-            next_offset = int(next(line.split(b": ", 1)[1] for line in head.split(b"\r\n") if line.startswith(b"X-Rui-Next-Offset:")))
-            assert len(data) <= 4096 and next_offset == start + len(data), (head, len(data))
-            chunks.append(data)
-            start = next_offset
-        assert b"".join(chunks) == payload.encode() and len(chunks) == 3
-        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session,
-            position=item["position"], ordinal="0", start="0", stream=True)
+        head, data = request(socket_path, store, "/v1/activity-content", "activity_content", page_session,
+            position=item["position"], ordinal="0")
         assert head.startswith(b"HTTP/1.1 200 ") and data == payload.encode(), (head, len(data))
-        assert b"Content-Length: 10005\r\n" in head and b"X-Rui-Next-Offset: 10005\r\n" in head, head
-        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session,
-            position=item["position"], ordinal="0", start=str(len(payload.encode())))
-        assert head.startswith(b"HTTP/1.1 200 ") and data == b"", (head, data)
-        assert b"X-Rui-Next-Offset: 10005\r\n" in head, head
-        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session,
-            position=item["position"], ordinal="0", start="1")
-        assert head.startswith(b"HTTP/1.1 200 ") and data == payload.encode()[1:4097]
-        for session, position, ordinal, start in (
-            (foreign_session, item["position"], "0", "0"),
-            (page_session, page["end"], "0", "0"),
-            (page_session, item["position"], "1", "0"),
-            (page_session, item["position"], "0", "10006"),
+        assert b"Content-Length: 10005\r\n" in head and b"X-Rui-Content-Bytes: 10005\r\n" in head and b"X-Rui-Next-Offset: 10005\r\n" in head, head
+        for session, position, ordinal in (
+            (foreign_session, item["position"], "0"),
+            (page_session, page["end"], "0"),
+            (page_session, item["position"], "1"),
         ):
-            head, _ = request(socket_path, store, "/v1/conversation-content", "conversation_content", session,
-                position=position, ordinal=ordinal, start=start)
+            head, _ = request(socket_path, store, "/v1/activity-content", "activity_content", session,
+                position=position, ordinal=ordinal)
             assert head.startswith(b"HTTP/1.1 409 "), head
         for index in range(8):
             message(state, store, f"queued-{index}", page_session, "q" * (256 * 1024))
@@ -105,9 +85,9 @@ def main():
         assert stop_session(state, store, "page-stop", page_session)["answer"]["status"] == "accepted"
         endpoint.release.set()
         wait_for(lambda: inspect_execution(store, page_session)["custody_occupied"] == "0", "physical cleanup")
-        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session,
-            position=item["position"], ordinal="0", start="10000")
-        assert head.startswith(b"HTTP/1.1 200 ") and data == payload.encode()[10000:]
+        head, data = request(socket_path, store, "/v1/activity-content", "activity_content", page_session,
+            position=item["position"], ordinal="0")
+        assert head.startswith(b"HTTP/1.1 200 ") and data == payload.encode()
         drained = host_resources(process.pid)
         print(f"conversation Host resource snapshots baseline={baseline} queued_2MiB={after} drained={drained} (RSS bytes, FDs; Linux only)")
     finally:
@@ -159,15 +139,15 @@ def projected_ranges():
         item = wait_for(completed_row, "public assistant projection")
         domain = b"rui/content/v1"
         assert item["value"]["assistant"]["content"]["sha256"] == hashlib.sha256(len(domain).to_bytes(8, "big") + domain + expected).hexdigest(), item
-        for start in (0, 4095, 4096, len(expected) - 1, len(expected), len(expected), 1):
-            head, data = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session,
-                position=item["position"], ordinal="0", start=str(start))
+        for _ in range(2):
+            head, data = request(fields["socket"], store, "/v1/activity-content", "activity_content", session,
+                position=item["position"], ordinal="0")
             assert head.startswith(b"HTTP/1.1 200 "), (head, data)
-            assert data == expected[start:start + 4096], (start, len(data))
+            assert data == expected, len(data)
             assert f"X-Rui-Content-Bytes: {len(expected)}\r\n".encode() in head, head
-            assert f"X-Rui-Next-Offset: {start + len(data)}\r\n".encode() in head, head
+            assert f"X-Rui-Next-Offset: {len(expected)}\r\n".encode() in head, head
         wait_for(lambda: inspect_execution(store, session)["custody_occupied"] == "0", "projected result cleanup")
-        print("multi-part Conversation ranges: exact escaped/multibyte bytes, healthy trailing empties and repeated EOF passed")
+        print("multi-part Conversation content: exact escaped/multibyte bytes and a repeated whole-stream read passed")
     finally:
         dispose_all(lambda: dispose_endpoint(process, endpoint, thread, 3),
                     lambda: shutil.rmtree(state))
@@ -223,7 +203,7 @@ def missing_assistant_entries():
                     HostDiagnostics(process)
                     assert f.read_result(store, "first") == b"Selected answer"
                     paths = {
-                        "exact": ("conversation-content", "conversation_content", dict(position=str(target[0]), ordinal="0", start="0")),
+                        "exact": ("activity-content", "activity_content", dict(position=str(target[0]), ordinal="0")),
                         "activity": ("activity-page", "activity_page", dict(end=None, position="0", ordinal=None, direction="forward", kinds=ACTIVITY_KINDS, limit="16")),
                         "full": ("inspect-session", "inspect_session", dict(profile="full")),
                     }

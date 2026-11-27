@@ -36,7 +36,7 @@ pub const Command = enum {
     session_pin,
     session_unpin,
     session_interrupt_model,
-    session_read_conversation,
+    session_read_content,
     session_list_parts,
     session_read_part,
     session_resume,
@@ -71,6 +71,7 @@ pub const Command = enum {
     auth_logout,
     auth_status,
     store_schema,
+    store_check,
 
     pub fn definition(self: Command) Definition {
         return switch (self) {
@@ -91,7 +92,7 @@ pub const Command = enum {
             .session_pin => .{ .resource = .session, .name = "pin", .description = "Pin a Session above unpinned Sessions. Repeated pinning preserves its position. Refused for archiving or archived Sessions.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
             .session_unpin => .{ .resource = .session, .name = "unpin", .description = "Unpin a Session without changing its work. An already unpinned Session is unchanged.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
             .session_interrupt_model => .{ .resource = .session, .name = "interrupt-model", .description = "Interrupt the exact model Operation after inspecting its Session and Turn.", .options = destination ++ session ++ capture ++ &[_]Option{ value("turn", "ID"), value("operation", "ID") }, .mutation = true, .requires = need_session ++ &[_][]const []const u8{ &.{"turn"}, &.{"operation"} } },
-            .session_read_conversation => .{ .resource = .session, .name = "read-conversation", .description = "Stream the exact saved public Conversation content at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
+            .session_read_content => .{ .resource = .session, .name = "read-content", .description = "Stream the exact saved content of the Activity row at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
             .session_list_parts => .{ .resource = .session, .name = "list-parts", .description = "List the certified parts of a Message's parts value as JSON.", .options = destination ++ session ++ &[_]Option{admission}, .requires = need_session ++ &[_][]const []const u8{&.{"admission"}} },
             .session_read_part => .{ .resource = .session, .name = "read-part", .description = "Stream the exact bytes of one Text or Image part of a Message.", .options = destination ++ session ++ &[_]Option{ admission, part }, .requires = need_session ++ &[_][]const []const u8{ &.{"admission"}, &.{"part"} } },
             .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host.", .options = destination ++ session, .positional = "ID", .positional_conflicts = &.{.{ .code = .session_selector_repeated, .option = "session" }}, .requires = &.{&.{ "", "session" }} },
@@ -123,6 +124,7 @@ pub const Command = enum {
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
             .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --permission-mode ask|bypass saves how new Sessions approve Bash commands; an explicit Session flag wins. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default uses the client product choice.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settingOption("reasoning_effort"), settingOption("permission_mode") }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }}, .requires = &.{&.{ "store", "store-hex", session_settings.cliName("provider"), session_settings.cliName("model"), "clear-model", "notifications", session_settings.cliName("reasoning_effort"), session_settings.cliName("permission_mode") }} },
             .store_schema => .{ .resource = .store, .name = "schema", .description = "Print this build's MySQL DDL for a new Store, or with --from N print every forward migration from format N to this build. The current format prints nothing. The Host never changes MySQL tables.", .options = &.{ value("engine", "mysql"), numeric("from", "N", 0, std.math.maxInt(u64), .count_malformed) }, .requires = &.{&.{"engine"}} },
+            .store_check => .{ .resource = .store, .name = "check", .description = "Count the rows of a SQLite Store that break a rule its schema holds: one line per broken column rule, cross-column rule or reference, with the number of rows. Reads the Store file without changing it, needs the Host stopped, and refuses a Store of another format. Exit 0 means no row breaks a rule. With --engine mysql no Store is opened and --store is ignored: it prints this build's check statements, one per rule and reference under a comment naming it, for a database team to run read-only through its own client.", .options = destination ++ &[_]Option{value("engine", "mysql")} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login chatgpt signs in with ChatGPT in your browser, so Rui uses your ChatGPT plan: it prints a link to open, and on a machine whose browser cannot reach back, you paste the address the browser ends on; add --device-code to sign in with a code instead (for SSH or machines without a browser); add --connection NAME to keep this sign-in as its own account under that name, in its own file, leaving the default sign-ins and the default for new Sessions alone; rui auth login openai saves an OpenAI API key read from stdin. Either ChatGPT sign-in replaces the other as the default for new Sessions; Sessions already open keep theirs. Ordinary peer calls never sign in or prompt.", .options = plan_fixture ++ &[_]Option{ flag("device-code"), value("connection", "NAME") }, .positional = "PROVIDER", .requires = &.{&.{""}} },
             .auth_logout => .{ .resource = .auth, .name = "logout", .description = "rui auth logout chatgpt ends both ChatGPT sign-ins: Rui asks ChatGPT to revoke the browser sign-in, then deletes its tokens, and deletes the tokens of one made with --device-code. If ChatGPT does not confirm the revocation, Rui says so and how to disconnect it there. It fails, saying which sign-in may remain, if a sign-in could not be ended. Rui keeps its app registration and host id, so the next rui auth login chatgpt reuses them. A running Host refuses new ChatGPT work until you sign in again. Add --connection NAME to end only the sign-in kept under that name; the default sign-ins stay.", .options = plan_fixture ++ &[_]Option{value("connection", "NAME")}, .positional = "PROVIDER", .requires = &.{&.{""}} },
             .auth_status => .{ .resource = .auth, .name = "status", .description = "Show each provider's local sign-in: whether it is signed in, and for ChatGPT the account's email and when its access token expires. Reads local files only; remote acceptance is not checked." },
@@ -651,8 +653,8 @@ test "numeric options reject malformed decimals and state their accepted range" 
         .{ .command = .action_inspect, .name = "action", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_interrupt_model, .name = "turn", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_interrupt_model, .name = "operation", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
-        .{ .command = .session_read_conversation, .name = "position", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
-        .{ .command = .session_read_conversation, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "9223372036854775807" },
+        .{ .command = .session_read_content, .name = "position", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
+        .{ .command = .session_read_content, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "9223372036854775807" },
         .{ .command = .session_inspect, .name = "attempt", .code = .count_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .request_wait, .name = "timeout-seconds", .code = .count_malformed, .low = "1", .high = "86400" },
         .{ .command = .host_pause, .name = "drain-seconds", .code = .count_malformed, .low = "1", .high = "86400" },
@@ -755,7 +757,7 @@ test "Session IDs in positional argv name the missing selector flag" {
     _ = try expectRefusal(.session_send, &.{ "--session", "k7m2qx", "v948er" }, .message_not_stdin, "v948er");
     _ = try expectRefusal(.session_send, &.{ "--record", "--session", "v948er" }, .session_id_needs_session, "v948er");
     _ = try expectRefusal(.session_send, &.{"message text"}, .message_not_stdin, "message text");
-    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny, Command.action_background, Command.action_stop }) |command| {
+    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin, Command.session_interrupt_model, Command.session_read_content, Command.action_allow, Command.action_deny, Command.action_background, Command.action_stop }) |command| {
         _ = try expectRefusal(command, &.{"v948er"}, .session_id_needs_session, "v948er");
     }
 }

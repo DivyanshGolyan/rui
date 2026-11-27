@@ -83,7 +83,7 @@ narrow: bool = false,
 session: status.Session = undefined,
 ready: bool = false,
 read_failed: bool = false,
-panel: Panel = .{ .title = "Chat", .action_gap = 1, .natural_height = true, .top_rule = false },
+panel: Panel = .{ .props = .{ .title = "Chat", .action_gap = 1, .natural_height = true, .top_rule = false } },
 fields: [rename_row]Panel.Field = undefined,
 actions: [3][]const u8 = undefined,
 failures: [row_count]?[]const u8 = @splat(null),
@@ -139,7 +139,7 @@ pub fn openStandaloneChoice(self: *Self, ctx: *vxfw.EventContext, row: Row) !voi
     self.standalone = .{ .row = row };
     const index: usize = if (row == .model) model_row else effort_row;
     self.bind();
-    self.panel.selected = index;
+    self.panel.select(index);
     try activate(self, ctx, index);
 }
 
@@ -192,7 +192,6 @@ pub fn cancelChoice(self: *Self) void {
         self.panel.closeChoice();
         self.tool_draft = null;
     }
-    self.panel.custom_choice = null;
 }
 
 fn cancelEdit(self: *Self) void {
@@ -200,7 +199,6 @@ fn cancelEdit(self: *Self) void {
     self.renaming = false;
     self.panel.closeChoice();
     self.model_choice.cancel();
-    self.panel.custom_choice = null;
     self.tool_draft = null;
     self.pasting = false;
 }
@@ -231,10 +229,6 @@ fn bind(self: *Self) void {
     const model_was_active = self.model_choice.active;
     if (!self.model_choice.validate() and model_was_active and self.standalone != null) self.closeStandaloneChoice();
     self.collectAccounts();
-    self.panel.userdata = self;
-    self.panel.on_activate = activate;
-    self.panel.on_pick = pick;
-    self.panel.title = self.title();
     self.fields = .{
         .{ .label = "Effort", .value = if (!self.ready) "unavailable" else setting_words.effort(if (self.session.effort_override) self.session.effort else null), .tail = self.failures[0] },
         .{ .label = "Permissions", .value = if (!self.ready) "unavailable" else setting_words.permission(self.session.permission), .tail = self.failures[1] },
@@ -247,25 +241,35 @@ fn bind(self: *Self) void {
     if (self.pending) |row| if (row < self.fields.len) {
         self.fields[row].tail = " · saving";
     };
-    self.panel.fields = &self.fields;
     self.actions = .{ "Rename", "Archive", if (self.backend.copied(self.backend.context)) "Copied          " else "Copy last answer" };
-    self.panel.actions = &self.actions;
     const caps = self.backend.caps(self.backend.context);
-    self.panel.unicode = caps.unicode;
+    const look: Panel.Style = .{
+        .ground = widget_style.of(caps, .{}),
+        .selection = widget_style.of(caps, .{ .background = .selection }),
+        .hover = widget_style.of(caps, .{ .background = .hover }),
+        .title = widget_style.of(caps, .{ .colour = .strong, .bold = true }),
+        .quiet = widget_style.of(caps, .{ .colour = .quiet }),
+        .rule = widget_style.line(caps, .horizontal),
+    };
     self.model_choice.unicode = caps.unicode;
-    self.panel.ground = widget_style.of(caps, .{});
-    self.panel.selection = widget_style.of(caps, .{ .background = .selection });
-    self.panel.hover_style = widget_style.of(caps, .{ .background = .hover });
-    self.panel.title_style = widget_style.of(caps, .{ .colour = .strong, .bold = true });
-    self.panel.quiet = widget_style.of(caps, .{ .colour = .quiet });
-    self.panel.rule = widget_style.line(caps, .horizontal);
     self.model_choice.show_more = self.standalone == null;
-    self.model_choice.ground = self.panel.ground;
-    self.model_choice.selection = self.panel.selection;
-    self.model_choice.hover_style = self.panel.hover_style;
-    self.model_choice.quiet = self.panel.quiet;
-    self.panel.title_widget = .{ .userdata = self, .drawFn = drawTitle };
-    self.panel.custom_choice = if (self.model_choice.active) self.model_choice.field(model_row) else null;
+    self.model_choice.ground = look.ground;
+    self.model_choice.selection = look.selection;
+    self.model_choice.hover_style = look.hover;
+    self.model_choice.quiet = look.quiet;
+    // Draw sets show_title, stacked_actions and action_gap; keep them, since event routing reads them between draws.
+    var next = self.panel.props;
+    next.title = self.title();
+    next.userdata = self;
+    next.on_activate = activate;
+    next.on_pick = pick;
+    next.fields = &self.fields;
+    next.actions = &self.actions;
+    next.unicode = caps.unicode;
+    next.style = look;
+    next.title_widget = .{ .userdata = self, .drawFn = drawTitle };
+    next.custom_choice = if (self.model_choice.active) self.model_choice.field(model_row) else null;
+    self.panel.present(next);
 }
 
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
@@ -381,7 +385,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize, choice: usize) !vo
             self.tool_draft.?.toggle(std.enums.values(tools.BuiltInTool)[choice]);
             self.updateTools();
             self.panel.openChoice(&self.tool_labels, null);
-            self.panel.choice.?.selected = choice;
+            self.panel.selectChoice(choice);
         },
         else => unreachable,
     }
@@ -427,7 +431,6 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.model_choice.active and !self.model_choice.validate()) {
         if (self.standalone != null) self.closeStandaloneChoice();
-        self.panel.custom_choice = null;
         ctx.consumeAndRedraw();
         return;
     }
@@ -503,8 +506,8 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         if (!self.hasChoice() and input == .key_press) {
             if (focusMove(input.key_press)) |move| {
                 const current: focus.Focus = @fromBackingInt(@intCast(self.panel.selected));
-                const next = focus.step(if (self.panel.stacked_actions) .stacked else .horizontal, self.accounts.len > 0, current, move);
-                self.panel.selected = @backingInt(next);
+                const next = focus.step(if (self.panel.props.stacked_actions) .stacked else .horizontal, self.accounts.len > 0, current, move);
+                self.panel.select(@backingInt(next));
                 ctx.consumeAndRedraw();
                 return;
             }
@@ -559,9 +562,9 @@ fn drawBodyMode(self: *Self, ctx: vxfw.DrawContext, show_title: bool) std.mem.Al
 fn folderValue(self: *const Self, ctx: vxfw.DrawContext, room: u16) ![]const u8 {
     const path = shortPath(self.home, self.session.workspace.slice());
     const shortened = try std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ path.prefix, path.rest });
-    const text = try Panel.displayText(ctx.arena, try safe(ctx.arena, shortened), self.panel.unicode);
+    const text = try Panel.displayText(ctx.arena, try safe(ctx.arena, shortened), self.panel.props.unicode);
     if (ctx.stringWidth(text) <= room) return text;
-    const ellipsis = if (self.panel.unicode) "…" else "...";
+    const ellipsis = if (self.panel.props.unicode) "…" else "...";
     const mark_width = ctx.stringWidth(ellipsis);
     if (mark_width > room) return "";
     for (text, 0..) |byte, at| {
@@ -587,8 +590,9 @@ fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return .empty(self.bodyWidget());
     const name = try safe(ctx.arena, self.title());
-    self.panel.title = if (show_title) name else "";
-    self.panel.show_title = show_title or self.renaming or self.failures[rename_row] != null or self.pending == rename_row;
+    var panel_props = self.panel.props;
+    panel_props.title = if (show_title) name else "";
+    panel_props.show_title = show_title or self.renaming or self.failures[rename_row] != null or self.pending == rename_row;
     var tool_text: std.Io.Writer.Allocating = .init(ctx.arena);
     if (self.ready) {
         var selected = self.session.tools.iterator();
@@ -598,7 +602,7 @@ fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.
         }
     }
     self.fields[2].value = if (!self.ready) "unavailable" else if (tool_text.written().len == 0) "no tools" else tool_text.written();
-    const tail = try Panel.displayText(ctx.arena, self.fields[2].tail orelse "", self.panel.unicode);
+    const tail = try Panel.displayText(ctx.arena, self.fields[2].tail orelse "", self.panel.props.unicode);
     const tool_room = Panel.valueWidth(size.width) -| @as(u16, @intCast(@min(ctx.stringWidth(tail), std.math.maxInt(u16))));
     self.fields[2].value = (try view.fitted(ctx.arena, self.backend.caps(self.backend.context), self.fields[2].value, tool_room, .head)).bytes;
     if (self.ready) {
@@ -615,7 +619,7 @@ fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.
     }
     const actions = try ctx.arena.alloc([]const u8, 3);
     var action_width: usize = 3 + 2 * 5;
-    for (self.panel.actions, rename_row..) |label, row| {
+    for (self.panel.props.actions, rename_row..) |label, row| {
         const message = if (row == rename_row) "" else self.failures[row] orelse if (self.pending == row) " · saving" else "";
         actions[row - rename_row] = if (message.len > 0)
             try std.fmt.allocPrint(ctx.arena, "{s}: {s}", .{ if (row == copy_row) "Copy" else label, message[" · ".len..] })
@@ -623,9 +627,10 @@ fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.
             label;
         action_width += ctx.stringWidth(actions[row - rename_row]);
     }
-    self.panel.actions = actions;
-    self.panel.stacked_actions = action_width > size.width;
-    self.panel.action_gap = 1;
+    panel_props.actions = actions;
+    panel_props.stacked_actions = action_width > size.width;
+    panel_props.action_gap = 1;
+    self.panel.present(panel_props);
     var surface = try self.panel.widget().draw(ctx);
     surface.widget = self.bodyWidget();
     return surface;
@@ -657,14 +662,14 @@ fn drawTitle(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
-    @memset(surface.buffer, .{ .style = self.panel.ground });
+    @memset(surface.buffer, .{ .style = self.panel.style().ground });
     if (size.width == 0 or size.height == 0) return surface;
-    const failure = try Panel.displayText(ctx.arena, self.failures[rename_row] orelse if (self.pending == rename_row) " · saving" else "", self.panel.unicode);
+    const failure = try Panel.displayText(ctx.arena, self.failures[rename_row] orelse if (self.pending == rename_row) " · saving" else "", self.panel.props.unicode);
     const tail_width: u16 = @intCast(@min(ctx.stringWidth(failure), size.width));
     const edit_width = size.width - tail_width;
-    const original = if (self.renaming) self.rename_editor.text() else self.panel.title;
-    const bytes = try Panel.displayText(ctx.arena, original, self.panel.unicode);
-    const cursor = if (self.renaming) (try Panel.displayText(ctx.arena, original[0..self.rename_editor.cursor()], self.panel.unicode)).len else 0;
+    const original = if (self.renaming) self.rename_editor.text() else self.panel.props.title;
+    const bytes = try Panel.displayText(ctx.arena, original, self.panel.props.unicode);
+    const cursor = if (self.renaming) (try Panel.displayText(ctx.arena, original[0..self.rename_editor.cursor()], self.panel.props.unicode)).len else 0;
     var start: usize = 0;
     var iter = ctx.graphemeIterator(bytes);
     while (ctx.stringWidth(bytes[start..cursor]) >= edit_width and start < cursor) {
@@ -672,10 +677,10 @@ fn drawTitle(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
         start += part.len;
     }
     const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
-    const text: vxfw.Text = .{ .text = bytes[start..], .style = self.panel.title_style, .softwrap = false, .width_basis = .parent };
+    const text: vxfw.Text = .{ .text = bytes[start..], .style = self.panel.style().title, .softwrap = false, .width_basis = .parent };
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try text.widget().draw(ctx.withConstraints(.{}, .{ .width = edit_width, .height = 1 })) };
     children[0].surface.widget = self.widget();
-    const tail: vxfw.Text = .{ .text = failure, .style = self.panel.quiet, .softwrap = false, .width_basis = .parent };
+    const tail: vxfw.Text = .{ .text = failure, .style = self.panel.style().quiet, .softwrap = false, .width_basis = .parent };
     children[1] = .{ .origin = .{ .row = 0, .col = edit_width }, .surface = try tail.widget().draw(ctx.withConstraints(.{}, .{ .width = tail_width, .height = 1 })) };
     children[1].surface.widget = self.widget();
     surface.children = children;
@@ -810,8 +815,8 @@ test "Chat info draws standalone ground and facts at 99 and 46 columns" {
         const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
         const panel = drawn.children[0].surface;
         try std.testing.expect(panel.readCell(1, 0).style.bold);
-        try std.testing.expectEqual(page.panel.selection.bg, panel.readCell(0, 1).style.bg);
-        try std.testing.expectEqual(page.panel.ground.bg, panel.readCell(0, 9).style.bg);
+        try std.testing.expectEqual(page.panel.style().selection.bg, panel.readCell(0, 1).style.bg);
+        try std.testing.expectEqual(page.panel.style().ground.bg, panel.readCell(0, 9).style.bg);
     }
     for (0..10) |width| for (0..8) |height| {
         _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
@@ -1237,7 +1242,7 @@ test "Chat info shared ASCII capability reaches tools model rename failures and 
             }
             const text = try dump(&page, arena.allocator(), width, 20);
             for (text) |byte| try std.testing.expect(byte < 0x80);
-            try std.testing.expect(!page.panel.unicode and !page.model_choice.unicode);
+            try std.testing.expect(!page.panel.props.unicode and !page.model_choice.unicode);
             try std.testing.expect(std.mem.indexOf(u8, text, "Fix retry deadline") != null);
             if (state == 2) try std.testing.expect(std.mem.indexOf(u8, text, "+ bash") != null);
             if (state >= 3) {
@@ -1443,14 +1448,14 @@ test "Chat info hidden Context preserves action IDs failures and the blank actio
         page.pending = 9;
         fixture.state_value = .pending;
         const text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 15);
-        try std.testing.expectEqual(@as(usize, 7), page.panel.fields.len);
+        try std.testing.expectEqual(@as(usize, 7), page.panel.props.fields.len);
         try std.testing.expectEqual(@as(?usize, 9), page.pending);
-        try std.testing.expectEqual(@as(u16, 1), page.panel.action_gap);
+        try std.testing.expectEqual(@as(u16, 1), page.panel.props.action_gap);
         try std.testing.expect(std.mem.indexOf(u8, text, "\n\n   Rename") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Archive: couldn't archive") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Copy: saving") != null);
         if (width == 46) {
-            try std.testing.expect(page.panel.stacked_actions);
+            try std.testing.expect(page.panel.props.stacked_actions);
             try std.testing.expect(std.mem.indexOf(u8, text, "\n   Archive: couldn't archive\n   Copy: saving\n") != null);
         }
         fixture.session.context_estimate = if (estimate == null) 18 else null;
@@ -1673,7 +1678,7 @@ test "Chat info natural body matches the mock grows by actual Model rows and shr
         page.failures[copy_row] = " · couldn't copy";
         const failed = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height + @as(u16, if (width == 46) 2 else 0), failed.size.height);
-        try std.testing.expectEqual(width == 46, page.panel.stacked_actions);
+        try std.testing.expectEqual(width == 46, page.panel.props.stacked_actions);
     };
 }
 
@@ -1698,14 +1703,14 @@ test "Chat info hover follows editable fields and action click regions without c
             try page.widget().handleEvent(&events, .{ .mouse = mouse });
             const drawn = try page.widget().draw(draw_ctx);
             try std.testing.expectEqual(selectable, page.panel.hover.pointing);
-            try std.testing.expectEqual(if (index == 0) page.panel.selection else if (selectable) page.panel.hover_style else page.panel.ground, drawn.children[0].surface.readCell(width - 1, @intCast(1 + shown)).style);
+            try std.testing.expectEqual(if (index == 0) page.panel.style().selection else if (selectable) page.panel.style().hover else page.panel.style().ground, drawn.children[0].surface.readCell(width - 1, @intCast(1 + shown)).style);
             try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
             try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
         }
         for ([_]u16{ 3, 14, 26 }) |col| {
             try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = 8, .button = .none, .type = .motion, .mods = .{} } });
             const drawn = try page.widget().draw(draw_ctx);
-            try std.testing.expectEqual(page.panel.hover_style, drawn.children[0].surface.readCell(col, 8).style);
+            try std.testing.expectEqual(page.panel.style().hover, drawn.children[0].surface.readCell(col, 8).style);
             try std.testing.expect(page.panel.hover.pointing);
             try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
         }
@@ -2058,8 +2063,8 @@ test "Chat info copy label follows successful short reply dismissal replacement 
         const copied = try dump(&page, arena.allocator(), width, 15);
         try std.testing.expect(std.mem.indexOf(u8, copied, "Rename     Archive     Copied") != null);
         try std.testing.expect(std.mem.indexOf(u8, copied, "Copy last answer") == null);
-        try std.testing.expect(!page.panel.stacked_actions);
-        try std.testing.expectEqual(@as(usize, "Copy last answer".len), page.panel.actions[2].len);
+        try std.testing.expect(!page.panel.props.stacked_actions);
+        try std.testing.expectEqual(@as(usize, "Copy last answer".len), page.panel.props.actions[2].len);
         fixture.copy_notice.dismiss();
         try press(&page, &ctx, vaxis.Key.left);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copy last answer") != null);
@@ -2115,7 +2120,7 @@ test "Chat info focus consumes drawn action layout across pending failures and C
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         _ = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 20);
-        const stacked = page.panel.stacked_actions;
+        const stacked = page.panel.props.stacked_actions;
         try std.testing.expectEqual(width == 46 and archive_failed, stacked);
         page.panel.selected = 7;
         try press(&page, &ctx, vaxis.Key.down);

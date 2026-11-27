@@ -324,6 +324,34 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
     return .{ .ready = try parseHostInfoFacts(body, store) };
 }
 
+/// A decimal the Host writes: 1 to 20 ASCII digits and no leading zero.
+fn canonicalDecimal(text: []const u8) bool {
+    if (text.len == 0 or text.len > 20 or (text.len > 1 and text[0] == '0')) return false;
+    for (text) |digit| if (!std.ascii.isDigit(digit)) return false;
+    return true;
+}
+
+/// The Host's `{d:.1}` form of a percent: a canonical whole part, a point and one digit.
+fn canonicalPercent(text: []const u8) bool {
+    if (text.len < 3 or text[text.len - 2] != '.' or !std.ascii.isDigit(text[text.len - 1])) return false;
+    return canonicalDecimal(text[0 .. text.len - 2]);
+}
+
+fn usageU64(text: []const u8) !u64 {
+    if (!canonicalDecimal(text)) return error.InvalidHostInfo;
+    return std.fmt.parseUnsigned(u64, text, 10) catch error.InvalidHostInfo;
+}
+
+fn usageWindow(wire: ?protocol.UsageWindowWire) !?protocol.UsageWindow {
+    const window = wire orelse return null;
+    if (!canonicalPercent(window.used_percent)) return error.InvalidHostInfo;
+    const percent = std.fmt.parseFloat(f64, window.used_percent) catch return error.InvalidHostInfo;
+    if (!std.math.isFinite(percent) or percent > protocol.max_usage_percent) return error.InvalidHostInfo;
+    const minutes = try usageU64(window.minutes);
+    const reset_at = if (window.reset_at) |text| try usageU64(text) else null;
+    return .{ .used_percent = percent, .minutes = minutes, .reset_at = reset_at };
+}
+
 fn connectionFacts(list: anytype) !protocol.Connections {
     if (list.len > provider_route.max_served) return error.InvalidHostInfo;
     var out: protocol.Connections = .{};
@@ -331,7 +359,12 @@ fn connectionFacts(list: anytype) !protocol.Connections {
         const name = connection.Name.parse(item.name) orelse return error.InvalidHostInfo;
         for (list[0..index]) |earlier| if (std.mem.eql(u8, earlier.name, item.name)) return error.InvalidHostInfo;
         const label = provider_route.Label.parse(item.label) orelse return error.InvalidHostInfo;
-        out.items[out.len] = .{ .name = name, .label = label, .route = item.route };
+        const usage: ?protocol.UsageReading = if (item.usage) |wire| .{
+            .observed_at = try usageU64(wire.observed_at),
+            .primary = try usageWindow(wire.primary),
+            .secondary = try usageWindow(wire.secondary),
+        } else null;
+        out.items[out.len] = .{ .name = name, .label = label, .route = item.route, .usage = usage };
         out.len += 1;
     }
     return out;
@@ -4732,5 +4765,94 @@ test "Archived window wire: a slim row reads back with its first Message and raw
             if (first.sender) |sender| try std.testing.expectEqualStrings(sender.session.slice(), read.sender.?.session.slice()) else try std.testing.expect(read.sender == null);
         } else try std.testing.expect(decoded.first == null);
         if (case.prefix) |prefix| try std.testing.expectEqualStrings(prefix, decoded.first_prefix.?.slice()) else try std.testing.expect(decoded.first_prefix == null);
+    }
+}
+
+test "CM-68 host info carries each connection's latest usage to the client's facts" {
+    const host_reply = @import("host_reply.zig");
+    const codex = connection.Name.parse("codex").?;
+    const work = connection.Name.parse("work").?;
+    var entries: [2]provider_route.Entry = undefined;
+    entries[0] = .{ .name = codex, .label = provider_route.Label.parse("ChatGPT (device code)").?, .route = .chatgpt_device, .codec = .@"openai-responses/2", .web_search = true };
+    entries[1] = .{ .name = work, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_plan, .codec = .@"openai-responses/3", .web_search = true };
+    const week: protocol.UsageWindow = .{ .used_percent = 25.5, .minutes = 10080, .reset_at = 1796350153 };
+    const readings = [_]?protocol.UsageReading{ .{ .observed_at = 1795745356, .primary = week, .secondary = .{ .used_percent = 100, .minutes = 300, .reset_at = null } }, null };
+    const info: host_reply.HostInfo = .{ .store = "/sqlite", .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .connections = &entries, .usage = &readings, .doublewrite = null, .settings_digest = null };
+    var response: protocol.ResponseBuffer = .{};
+    try response.render(host_reply.renderHostInfo, .{info});
+    const facts = (try parseHostInfo(response.slice(), "/sqlite")).ready;
+    const reported = facts.capabilities.connections.slice();
+    try std.testing.expectEqual(@as(u64, 1795745356), reported[0].usage.?.observed_at);
+    try std.testing.expectEqual(@as(f64, 25.5), reported[0].usage.?.primary.?.used_percent);
+    try std.testing.expectEqual(@as(u64, 10080), reported[0].usage.?.primary.?.minutes);
+    try std.testing.expectEqual(@as(?u64, 1796350153), reported[0].usage.?.primary.?.reset_at);
+    try std.testing.expectEqual(@as(?u64, null), reported[0].usage.?.secondary.?.reset_at);
+    try std.testing.expectEqual(@as(u64, 300), reported[0].usage.?.secondary.?.minutes);
+    // A connection nothing was read from reports no usage, and a Host keeping no readings reports none for any.
+    try std.testing.expectEqual(@as(?protocol.UsageReading, null), reported[1].usage);
+    var none = info;
+    none.usage = &.{};
+    response.len = 0;
+    try response.render(host_reply.renderHostInfo, .{none});
+    for ((try parseHostInfo(response.slice(), "/sqlite")).ready.capabilities.connections.slice()) |fact| try std.testing.expectEqual(@as(?protocol.UsageReading, null), fact.usage);
+}
+
+test "CM-68 a host info reply whose usage numbers are not in the Host's own form is refused" {
+    const host_reply = @import("host_reply.zig");
+    const codex = connection.Name.parse("codex").?;
+    var entries: [1]provider_route.Entry = undefined;
+    entries[0] = .{ .name = codex, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_device, .codec = .@"openai-responses/2", .web_search = true };
+    const readings = [_]?protocol.UsageReading{.{ .observed_at = 1795745356, .primary = .{ .used_percent = 25.5, .minutes = 10080, .reset_at = 1796350153 }, .secondary = null }};
+    const info: host_reply.HostInfo = .{ .store = "/sqlite", .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .connections = &entries, .usage = &readings, .doublewrite = null, .settings_digest = null };
+    var response: protocol.ResponseBuffer = .{};
+    try response.render(host_reply.renderHostInfo, .{info});
+    const good = response.slice();
+    _ = try parseHostInfo(good, "/sqlite");
+    const swaps = [_][2][]const u8{
+        .{ "\"1795745356\"", "\"+1795745356\"" },
+        .{ "\"1795745356\"", "\"01795745356\"" },
+        .{ "\"1795745356\"", "\"\"" },
+        .{ "\"10080\"", "\"-1\"" },
+        .{ "\"10080\"", "\"123456789012345678901\"" },
+        .{ "\"1796350153\"", "\"1e3\"" },
+        .{ "\"used_percent\":\"25.5\"", "\"used_percent\":\"1e3\"" },
+        .{ "\"used_percent\":\"25.5\"", "\"used_percent\":\"nan\"" },
+        .{ "\"used_percent\":\"25.5\"", "\"used_percent\":\"inf\"" },
+        .{ "\"used_percent\":\"25.5\"", "\"used_percent\":\"-1.0\"" },
+        .{ "\"used_percent\":\"25.5\"", "\"used_percent\":\"025.5\"" },
+        .{ "\"minutes\":\"10080\",", "" },
+    };
+    var scratch: [protocol.max_host_info_response_bytes]u8 = undefined;
+    for (swaps) |swap| {
+        const at = std.mem.indexOf(u8, good, swap[0]) orelse return error.TestUnexpectedResult;
+        const bad = std.fmt.bufPrint(&scratch, "{s}{s}{s}", .{ good[0..at], swap[1], good[at + swap[0].len ..] }) catch return error.TestUnexpectedResult;
+        if (parseHostInfo(bad, "/sqlite")) |_| return error.TestUnexpectedResult else |_| {}
+    }
+}
+
+test "CM-68 every used percent a Host admits is shown in a form its own client reads" {
+    const host_reply = @import("host_reply.zig");
+    const codex = connection.Name.parse("codex").?;
+    var entries: [1]provider_route.Entry = undefined;
+    entries[0] = .{ .name = codex, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_device, .codec = .@"openai-responses/2", .web_search = true };
+    const negative_zero = -@as(f64, 0);
+    const cases = [_]struct { used: f64, shown: f64 }{
+        .{ .used = 0, .shown = 0 },
+        .{ .used = negative_zero, .shown = 0 },
+        .{ .used = 0.04, .shown = 0 },
+        .{ .used = 25.55, .shown = 25.6 },
+        .{ .used = 99.95, .shown = 100 },
+        .{ .used = 100, .shown = 100 },
+        .{ .used = protocol.max_usage_percent, .shown = protocol.max_usage_percent },
+        .{ .used = 1e12, .shown = protocol.max_usage_percent },
+        .{ .used = std.math.floatMax(f64), .shown = protocol.max_usage_percent },
+    };
+    for (cases) |case| {
+        const readings = [_]?protocol.UsageReading{.{ .observed_at = 1, .primary = .{ .used_percent = case.used, .minutes = 60, .reset_at = null }, .secondary = null }};
+        const info: host_reply.HostInfo = .{ .store = "/sqlite", .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .connections = &entries, .usage = &readings, .doublewrite = null, .settings_digest = null };
+        var response: protocol.ResponseBuffer = .{};
+        try response.render(host_reply.renderHostInfo, .{info});
+        const facts = (try parseHostInfo(response.slice(), "/sqlite")).ready;
+        try std.testing.expectApproxEqAbs(case.shown, facts.capabilities.connections.slice()[0].usage.?.primary.?.used_percent, 0.05);
     }
 }

@@ -174,8 +174,7 @@ hint: reads.Hint = .unread,
 const rejection_suffix = session_notice.rejection_suffix;
 const too_large_advice = "\nUnset or shorten them in another shell, then run rui request recover there.";
 const failure_capacity = @max(
-    "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
-    session_notice.unserved_capacity + rejection_suffix.len,
+    session_notice.max_line_bytes,
     "! ".len + client.Environment.too_large_bytes + too_large_advice.len,
 );
 const notice_capacity = 2048;
@@ -1260,11 +1259,11 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         const key = self.submission.messageKey() orelse break :note null;
         for (screen.feed.entries[0..screen.feed.count]) |entry| {
             const entry_key = entry.message_key orelse continue;
-            if (entry.length == 0 and std.mem.eql(u8, &entry_key, &key)) break :note Say.quiet(note);
+            if (entry.length == 0 and std.mem.eql(u8, &entry_key, &key)) break :note note;
         }
         break :note null;
     } else null;
-    self.app_content.message_note = if (message_note) |note| .{ .key = self.submission.messageKey().?, .text = note } else null;
+    self.app_content.message_note = if (message_note) |note| .{ .key = self.submission.messageKey().?, .say = note } else null;
     self.app_document.style = normal;
     self.app_document.colours = colours;
     self.app_document.hover_style = hover;
@@ -1323,7 +1322,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .new_entries = self.new_below,
         .needs = send.needs,
         .needs_key = original_presentation.action_words,
-        .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
+        .progress = if (self.upgradePhase() == .reobserving) Say.quiet(session_upgrade.rereading) else send.progress,
         .stoppable = said.stoppable,
         .details = original_presentation.details,
         .repair_details = original_presentation.repair_details,
@@ -3189,19 +3188,19 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
                 try session_notice.writeUnserved(&writer, self.line.provider);
             } else {
                 var text: TerminalText = .{ .mode = .line };
-                try writer.writeAll(if (rejected.kind == .decision) "! Decision rejected: " else "! Input rejected: ");
+                try writer.writeAll(if (rejected.kind == .decision) "Decision rejected: " else "Input rejected: ");
                 try text.feed(&writer, rejected.code.slice());
                 try text.finish(&writer);
             }
             try writer.writeAll(rejection_suffix);
-            self.holdFailure(.{ .line = writer.buffered(), .key = .discard }, null);
+            self.holdFailure(.{ .say = .attention(writer.buffered()), .key = .discard }, null);
         },
         .failed => |failed| if (failed.err == error.EnvironmentTooLarge) {
             var writer = std.Io.Writer.fixed(&self.failure_buffer);
             try writer.writeAll("! ");
             try self.submission.environment.describeTooLarge(&writer);
             try writer.writeAll(too_large_advice);
-            self.holdFailure(.{ .line = session_notice.too_large, .key = .status }, writer.buffered());
+            self.holdFailure(.{ .say = session_notice.too_large, .key = .status }, writer.buffered());
         },
         .absent => {},
     }
@@ -5578,7 +5577,7 @@ test "SUI-4 late activity inspection cannot cover Settings Keys" {
             const shown = try text(held);
             errdefer std.debug.print("Keys frame:\n{s}\n", .{shown});
             try std.testing.expect(held.root.input.layer.settingsOpen());
-            try std.testing.expect(held.root.settings_page.keys_open);
+            try std.testing.expect(held.root.settings_page.reference_open);
             try std.testing.expect(!held.self.info_open);
             try std.testing.expect(std.mem.indexOf(u8, shown, "earlier message") != null);
             // The shared Keys row legitimately says "open chat · info actions".
@@ -6445,7 +6444,7 @@ test "reader failure provenance keeps transport loss separate from local copy fa
                 try reply(page, "application/json", body.buffered().len, "", body.buffered());
             }
             if (self.mode == .temporary) return;
-            const content = try self.request("/v1/conversation-content");
+            const content = try self.request("/v1/activity-content");
             defer content.close(std.testing.io);
             self.contents += 1;
             var extra: [128]u8 = undefined;
@@ -7164,7 +7163,7 @@ test "SessionFrontend Ctrl-X opening notice overrides progress until next key wi
         self.reading.opening = true;
         const opening = try fixture.rowsAtWidth(width);
         try std.testing.expectEqual(@as(?usize, 23), ChromeFixture.findEnding(&opening, "Opening…"));
-        try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+        try std.testing.expectEqualStrings("", self.chrome.status.bar.left.words);
         try fixture.press(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
         const stopped = try fixture.rowsAtWidth(width);
         try std.testing.expectEqual(@as(?usize, 23), ChromeFixture.findEnding(&stopped, "Session is opening."));
@@ -7301,7 +7300,7 @@ test "SessionFrontend attached rejection keeps its code until discard past a key
     try std.testing.expect(note != null);
     try std.testing.expect(note.? < 20);
     try std.testing.expect(std.mem.endsWith(u8, rejected[note.?], "/discard"));
-    try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+    try std.testing.expectEqualStrings("", self.chrome.status.bar.left.words);
     try std.testing.expectEqualStrings("", self.chrome.status.key.label);
     self.submission.key = @splat('L');
     const changed_key = try fixture.rows();
@@ -7367,7 +7366,7 @@ test "SessionFrontend submission presentation domain keeps Message notes separat
                 try std.testing.expect(std.mem.indexOf(u8, line, "Sending") == null);
             }
             try std.testing.expectEqual(@as(usize, 1), copies);
-            try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+            try std.testing.expectEqualStrings("", self.chrome.status.bar.left.words);
             try std.testing.expectEqualStrings("", self.chrome.status.key.label);
             if (expected) |prefix| {
                 const note_row = ChromeFixture.find(&shown, prefix);
@@ -7382,7 +7381,11 @@ test "SessionFrontend submission presentation domain keeps Message notes separat
                     found = true;
                 };
                 try std.testing.expect(found);
-                if (case.state != .submitting) try std.testing.expect(std.mem.startsWith(u8, self.chrome.status.bar.left, prefix));
+                if (case.state != .submitting) {
+                    var drawn: [session_notice.max_line_bytes + 2]u8 = undefined;
+                    const left = self.chrome.status.bar.left;
+                    try std.testing.expect(std.mem.startsWith(u8, try std.fmt.bufPrint(&drawn, "{s}{s}", .{ left.sign(), left.words }), prefix));
+                }
             }
         }
         if (case.environment) for (shown) |line| try std.testing.expect(std.mem.indexOf(u8, line, "ctrl+r") == null);
@@ -7452,7 +7455,7 @@ test "SessionFrontend actionable repair details remain drawn beside a folder at 
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "original model input"));
             try std.testing.expect(std.mem.indexOf(u8, shown, "Environment too large") != null);
             try std.testing.expect(std.mem.indexOf(u8, shown, "ctrl+r") == null);
-            try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+            try std.testing.expectEqualStrings("", self.chrome.status.bar.left.words);
         } else {
             try std.testing.expect(std.mem.indexOf(u8, shown, "Environment too large") != null);
         }
@@ -7519,7 +7522,7 @@ test "SessionFrontend keeps refused environment diagnosis attached and repair de
     const attached = try rowWith(held, "Environment too large");
     try std.testing.expect(attached != null);
     try std.testing.expectEqualStrings("   ! Environment too large; nothing sent · details", attached.?);
-    try std.testing.expectEqualStrings("", held.self.chrome.status.bar.left);
+    try std.testing.expectEqualStrings("", held.self.chrome.status.bar.left.words);
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "original model input") != null);
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "details") != null);
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "ctrl+r") == null);
@@ -7569,7 +7572,7 @@ test "App Session info opens while commands wait and refused originals keep thei
     try std.testing.expectEqual(Submission.State.rejected, self.submission.view().?.state);
     _ = self.input.takeCommand();
     self.submission.state = .not_started;
-    self.holdFailure(.{ .line = session_notice.too_large, .key = .status }, null);
+    self.holdFailure(.{ .say = session_notice.too_large, .key = .status }, null);
     self.files.details = try fixture.tmp.dir.createFile(std.testing.io, "repair-details", .{ .read = true });
     defer self.files.details.close(std.testing.io);
     try self.chrome.status.key.on_click(self.chrome.status.key.userdata, &fixture.ctx);
@@ -8437,7 +8440,7 @@ test "SessionFrontend feed opens full bottom aligned and page round trip is an i
         try std.testing.expectEqualStrings("keep", held.self.input.composition().bytes);
         try std.testing.expect(std.mem.indexOf(u8, scrolled, "↓") != null);
         try std.testing.expect(std.mem.indexOf(u8, scrolled, "Browsing") == null);
-        try std.testing.expectEqualStrings("", held.self.chrome.status.bar.left);
+        try std.testing.expectEqualStrings("", held.self.chrome.status.bar.left.words);
         try std.testing.expect(held.self.chrome.status.bar.notice == null);
         try std.testing.expect(std.mem.indexOf(u8, scrolled, "entry 115 line 7") == null);
         try std.testing.expectEqual(feed_height, held.screen.height);
@@ -8522,7 +8525,7 @@ test "SessionFrontend feed reload restores keyed Ctrl-O target and replaces a pr
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
     const held = fixture.held;
-    const target: View.Collapsed = .{ .source = .activity, .position = 40, .ordinal = 0, .content = .{ .text = .{ .length = 2000, .digest = @splat(7) } }, .row = false };
+    const target: View.Collapsed = .{ .position = 40, .ordinal = 0, .content = .{ .text = .{ .length = 2000, .digest = @splat(7) } }, .row = false };
     const summary = row_text.user_line ++ "preview\n  " ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n";
     try fixture.page(.opening, &.{ .{ .key = 40, .text = summary, .target = target }, .{ .key = 50, .text = "settled\n" } }, true, true);
     _ = try held.draw();
@@ -10209,7 +10212,7 @@ test "SessionFrontend summary bounds keep Ctrl-O and clicks exact across sixteen
     const Domain = struct {
         const line_length = "┄ item 00\n".len;
         fn target(key: u64, index: usize) View.Collapsed {
-            return .{ .source = if (index % 2 == 0) .activity else .conversation, .position = key * 1000 + index, .ordinal = index, .content = .{ .text = .{ .length = 100 + index, .digest = @splat(@intCast(index)) } }, .row = index % 2 != 0 };
+            return .{ .position = key * 1000 + index, .ordinal = index, .content = .{ .text = .{ .length = 100 + index, .digest = @splat(@intCast(index)) } }, .row = index % 2 != 0 };
         }
         fn page(fixture: FeedFixture, key: u64, aggregate: bool) !void {
             const frontend = &fixture.held.self;
@@ -10742,7 +10745,7 @@ test "repair details rewrite from byte zero on first repeated and changed held f
             self.submission.key = @splat(case.key);
             self.submission.state = case.state;
             self.submission.last_error = case.last_error;
-            if (case.replace_failure) self.holdFailure(.{ .line = "! Original needs repair · details", .key = .status }, case.page);
+            if (case.replace_failure) self.holdFailure(.{ .say = .attention("Original needs repair · details"), .key = .status }, case.page);
             const expected = try std.fmt.allocPrint(std.testing.allocator, "Original reserved request: {s}\n{s}\n{s}", .{ self.submission.key, case.body, case.error_line });
             defer std.testing.allocator.free(expected);
             const bytes = try std.testing.allocator.alloc(u8, expected.len);

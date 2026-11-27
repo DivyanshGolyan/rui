@@ -29,6 +29,10 @@ Fix its errors from first principles, holistically; never make a mechanical move
 - `module-cycle` and `tangle`: what is the intended layer of abstraction, and which module belongs at which layer?
 - `field-leak` and `shallow-module`: why do these fields or functions exist, and what are their patterns of use?
   Hide them behind a narrow interface, and fix a type's leaks together rather than one at a time.
+- `hand-set-flag`: which one place knows when this field must change?
+  Derive it from what was last drawn, or have the functions return what happened and let that place set it.
+- `scattered-transition`: where is the one decision table for this state?
+  Give the state's own type one transition function that takes what happened and returns the next state; the handlers call it.
 - Draw the structure before and after the proposed fix so the user can judge it.
 
 The allow file holds existing debt and only shrinks: delete an entry when its finding is fixed; CI's policy job (`tests/ci/deep_modules_allowance.py`) refuses growth past main's copy (entries per lint; members for `module-cycle` and `tangle`), so a new finding is fixed, not allowed. A rename keeps the counts and passes, and splitting a circle into smaller ones passes.

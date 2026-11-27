@@ -124,7 +124,7 @@ test "model resolution owner captures timings for success failure interruption s
                 if (phase != .live) {
                     const retry_before = storage.testing_content_work.rounds;
                     try storage.settleModelAttemptFailure(binding, if (observation == .response)
-                        .{ .correlated = .{ .code = "provider_temporary_http_503", .request_id = .{}, .report = "" } }
+                        .{ .correlated = .{ .code = "provider_temporary_http_503", .request_id = .{}, .report = .empty } }
                     else
                         .{ .uncorrelated = "provider_transport_failure" }, .{ .retryable = .{ .waits_ms = .{ 60_000, 60_000, 60_000 } } }, .{});
                     if (!case.rerun) try std.testing.expectEqual(@as(u32, 2), storage.testing_content_work.rounds - retry_before);

@@ -11,7 +11,6 @@ const tool_proposal = @import("../tool_proposal.zig");
 const workspace_path = @import("../workspace_path.zig");
 const store_path = @import("../store_path.zig");
 const provider_route = @import("../provider_route.zig");
-const outcome_code = @import("../outcome_code.zig");
 const content_string = @import("../content_string.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const model_capability = @import("../model_capability.zig");
@@ -38,6 +37,7 @@ const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
 const action_read_domain = @import("domain/action_read.zig");
 const reads_domain = @import("domain/reads.zig");
+const outcome_code = @import("../outcome_code.zig");
 const report_domain = @import("domain/report.zig");
 const session_list_read = @import("domain/session_list_read.zig");
 const session_report_read = @import("domain/session_report_read.zig");
@@ -82,7 +82,6 @@ const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 const PrefixSeal = historical_domain.PrefixSeal;
-const PublicConversationPage = reads_domain.PublicConversationPage;
 const SessionObservation = reads_domain.SessionObservation;
 const SessionStopReply = command_domain.SessionStopReply;
 const SessionArchiveReply = command_domain.SessionArchiveReply;
@@ -998,21 +997,6 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, reads_domain.inspectSession(&access, session_ref, out));
     }
 
-    pub fn publicConversationPage(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage, row_allocator: std.mem.Allocator) !void {
-        // Allocated before entry: a failed allocation must not fence the Store.
-        const reads = try row_allocator.create([PublicConversationPage.capacity]reads_domain.PublicRowRead);
-        defer row_allocator.destroy(reads);
-        return self.queue().run(publicConversationPageHeld, .{ self, request, out, reads });
-    }
-
-    fn publicConversationPageHeld(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage, reads: *[PublicConversationPage.capacity]reads_domain.PublicRowRead) !void {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.page, reads_domain.publicConversationPage(&access, request, out, reads));
-    }
-
     pub fn openPublicConversationContent(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
         return self.queue().run(openPublicConversationContentHeld, .{ self, request });
     }
@@ -1855,11 +1839,10 @@ pub const Store = struct {
         if (failure.diagnostic()) |detail| {
             std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
         }
-        const report = failure.report();
-        std.debug.assert(report.len <= outcome_code.max_report_bytes and std.unicode.utf8ValidateSlice(report));
         const entry = try enter(self, .fromControl(faults.control_trace));
         defer entry.release();
-        var settlement: model_settlement_domain.SettleFailure = .{ .input = .{ .entry = &entry, .floor = self.reportScratch(@import("domain/history_floor.zig").FloorSearch), .prepared = prepared, .io = self.io, .binding = binding, .failure = &failure, .disposition = &disposition } };
+        var report_line: [outcome_code.max_report_bytes]u8 = undefined;
+        var settlement: model_settlement_domain.SettleFailure = .{ .input = .{ .report_line = &report_line, .entry = &entry, .floor = self.reportScratch(@import("domain/history_floor.zig").FloorSearch), .prepared = prepared, .io = self.io, .binding = binding, .failure = &failure, .disposition = &disposition } };
         entry.finishTransaction(model_settlement_domain.SettleFailure.Ordinary, faults, transition.run(&entry, model_settlement_domain.SettleFailure, &settlement, faults)) catch |err| {
             if (err == error.FloorPreparationRequired) return false;
             return err;
@@ -2515,12 +2498,6 @@ pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentCon
 pub fn activityPageForTesting(self: *Store, request: activity_read.ActivityPage) !activity_facts.Page {
     var page: activity_facts.Page = undefined;
     try self.activityPage(&request, &page);
-    return page;
-}
-
-pub fn publicConversationPageForTesting(self: *Store, request: conversation_read.ConversationPage) !PublicConversationPage {
-    var page: PublicConversationPage = undefined;
-    try self.publicConversationPage(&request, &page, std.testing.allocator);
     return page;
 }
 

@@ -9,13 +9,12 @@ const part_text = @import("part_text.zig");
 const protocol_reply = @import("protocol_reply.zig");
 
 /// Where a text value was shown: the read that delivers its bytes.
-pub const At = struct { source: enum { activity, conversation }, position: u64, ordinal: u64 };
+pub const At = struct { position: u64, ordinal: u64 };
 
 pub const Display = struct {
     /// Exact length of the display bytes `stream` delivers.
     length: u64,
     reads: client.SessionReads,
-    selected_store: ?[]const u8,
     body: union(enum) {
         text: struct { at: At, reference: content_value.Reference },
         /// Borrows the scratch file `open` read the list into.
@@ -28,17 +27,17 @@ pub const Display = struct {
     /// into `scratch`, which every later `stream` re-reads, so it outlives the Display.
     /// `store` and `session` are borrowed for the Display's life.
     pub fn open(requests: client.Requests, store: []const u8, session: []const u8, at: At, value: content_value.Value, scratch: std.Io.File) !Opened {
-        return openUsing(client.SessionReads.selected(requests, store, session), store, at, value, scratch);
+        return openUsing(client.SessionReads.selected(requests, store, session), at, value, scratch);
     }
 
     /// A scan can open only an Activity value through its bound route.
     pub fn openActivity(reads: client.SessionReads, position: u64, ordinal: u64, value: content_value.Value, scratch: std.Io.File) !Opened {
-        return openUsing(reads, null, .{ .source = .activity, .position = position, .ordinal = ordinal }, value, scratch);
+        return openUsing(reads, .{ .position = position, .ordinal = ordinal }, value, scratch);
     }
 
-    fn openUsing(reads: client.SessionReads, selected_store: ?[]const u8, at: At, value: content_value.Value, scratch: std.Io.File) !Opened {
+    fn openUsing(reads: client.SessionReads, at: At, value: content_value.Value, scratch: std.Io.File) !Opened {
         const parts = switch (value) {
-            .text => |reference| return .{ .display = .{ .length = reference.length, .reads = reads, .selected_store = selected_store, .body = .{ .text = .{ .at = at, .reference = reference } } } },
+            .text => |reference| return .{ .display = .{ .length = reference.length, .reads = reads, .body = .{ .text = .{ .at = at, .reference = reference } } } },
             .parts => |parts| parts,
         };
         const list = switch (try readList(reads, parts, scratch)) {
@@ -47,31 +46,28 @@ pub const Display = struct {
         };
         var iterator: protocol_reply.PartIterator = undefined;
         try list.iterator(&iterator);
-        return .{ .display = .{ .length = try part_text.displayLength(&iterator, labels(parts.owner)), .reads = reads, .selected_store = selected_store, .body = .{ .parts = list } } };
+        return .{ .display = .{ .length = try part_text.displayLength(&iterator, labels(parts.owner)), .reads = reads, .body = .{ .parts = list } } };
     }
 
     /// Feeds exactly `length` display bytes into `sink`. Every Text part is read whole and
     /// must match its certified identity, or the read fails with `ContentBindingMismatch`.
     /// A sink with an `image(part)` method receives images instead of their placeholders.
     pub fn stream(self: *const Display, requests: client.Requests, sink: anytype) !?protocol_reply.ReadFailure {
-        return self.streamUsing(self.reads.withStandaloneRequests(requests), requests, sink);
+        return self.streamUsing(self.reads.withStandaloneRequests(requests), sink);
     }
 
     /// Streams a Display returned by openActivity with its original read context.
     /// A bound route is borrowed only until the originating worker completes;
     /// Displays returned by open use stream with the caller's read context.
     pub fn streamBound(self: *const Display, sink: anytype) !?protocol_reply.ReadFailure {
-        return self.streamUsing(self.reads, null, sink);
+        return self.streamUsing(self.reads, sink);
     }
 
-    fn streamUsing(self: *const Display, reads: client.SessionReads, standalone: ?client.Requests, sink: anytype) !?protocol_reply.ReadFailure {
+    fn streamUsing(self: *const Display, reads: client.SessionReads, sink: anytype) !?protocol_reply.ReadFailure {
         switch (self.body) {
             .text => |text| {
                 const expected: protocol_reply.CommandObservation.ContentReference = .{ .bytes = text.reference.length, .digest = text.reference.digest };
-                return switch (text.at.source) {
-                    .activity => reads.readActivityContent(text.at.position, text.at.ordinal, expected, sink),
-                    .conversation => if (reads.isBound()) error.InvalidTarget else if (standalone) |requests| requests.readConversationContent(self.selected_store orelse return error.InvalidTarget, reads.sessionId(), text.at.position, text.at.ordinal, expected, sink) else error.InvalidTarget,
-                };
+                return reads.readActivityContent(text.at.position, text.at.ordinal, expected, sink);
             },
             .parts => |*list| {
                 var source: PartSource = .{ .reads = reads, .list = list, .pass = if (list.value.owner == .message) .images else .stored };
@@ -240,7 +236,7 @@ pub const PartsHost = struct {
             const ordinal = try std.fmt.parseInt(u32, body.part, 10);
             if (self.served) |served| if (served.ordinal == ordinal) return fake_host.respondContent(fd, served.bytes);
             fake_host.respondContent(fd, self.texts[ordinal]);
-        } else if (request.is("/v1/activity-content") or request.is("/v1/conversation-content")) {
+        } else if (request.is("/v1/activity-content")) {
             self.text_reads += 1;
             fake_host.respondContent(fd, plain);
         }
@@ -270,11 +266,11 @@ test "SUI-60 parts values draw as text and image placeholders" {
             defer scratch.close(io);
             // A stale, longer list in the scratch never reaches a later read.
             try scratch.writePositionalAll(io, &@as([5000]u8, @splat('x')), 0);
-            const at: At = .{ .source = .activity, .position = 4, .ordinal = 0 };
+            const at: At = .{ .position = 4, .ordinal = 0 };
 
             // A text value is read from where it was shown, with no list request.
-            for ([_]@FieldType(At, "source"){ .activity, .conversation }) |source| {
-                const display = (try Display.open(requests, root, "k7m2qx", .{ .source = source, .position = 4, .ordinal = 1 }, PartsHost.plainValue(), scratch)).display;
+            {
+                const display = (try Display.open(requests, root, "k7m2qx", .{ .position = 4, .ordinal = 1 }, PartsHost.plainValue(), scratch)).display;
                 var out: Collect = .{};
                 try std.testing.expectEqual(@as(?protocol_reply.ReadFailure, null), try display.stream(requests, &out));
                 try std.testing.expectEqualStrings(PartsHost.plain, out.slice());
@@ -373,16 +369,7 @@ test "SUI-60 parts values draw as text and image placeholders" {
                     var other_origin: client.FailureOrigin = .local;
                     const replacement: client.Requests = .{ .io = io_, .cancellation = &stopped, .failure_origin = &other_origin };
                     try std.testing.expect(!@hasDecl(Display, "streamWith"));
-                    try std.testing.expect(!@hasDecl(client.SessionReads, "readConversationContent"));
                     try std.testing.expect(!@hasDecl(Display, "openWith"));
-                    // Public fields must not permit a forged conversation source to
-                    // replace the bound Store, even if both Hosts serve the same bytes.
-                    var forged = text_display;
-                    forged.body.text.at.source = .conversation;
-                    forged.selected_store = other_root;
-                    var forged_out: Collect = .{};
-                    try std.testing.expectError(error.InvalidTarget, forged.stream(original_requests, &forged_out));
-                    try std.testing.expectEqual(@as(usize, 0), other.text_reads);
                     var text_out: Collect = .{};
                     try std.testing.expectEqual(@as(?protocol_reply.ReadFailure, null), try text_display.stream(replacement, &text_out));
                     try std.testing.expectEqualStrings(PartsHost.plain, text_out.slice());
@@ -392,7 +379,7 @@ test "SUI-60 parts values draw as text and image placeholders" {
                     try std.testing.expectEqual(client.FailureOrigin.local, other_origin);
                     try std.testing.expectEqual(@as(usize, 0), other.text_reads + other.lists + other.part_reads);
                     // The legacy selected adapter still uses the supplied context.
-                    const selected = (try Display.open(original_requests, self.alias, "k7m2qx", .{ .source = .activity, .position = 4, .ordinal = 0 }, PartsHost.plainValue(), self.scratch)).display;
+                    const selected = (try Display.open(original_requests, self.alias, "k7m2qx", .{ .position = 4, .ordinal = 0 }, PartsHost.plainValue(), self.scratch)).display;
                     var stopped_out: Collect = .{};
                     try std.testing.expectError(error.Cancelled, selected.stream(replacement, &stopped_out));
                     var other_out: Collect = .{};
